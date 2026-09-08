@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/csv"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -115,16 +114,11 @@ func (c *CheckMisclassifiedWisps) Run(ctx *CheckContext) *CheckResult {
 // No heuristics — only the ephemeral flag matters.
 func (c *CheckMisclassifiedWisps) findMisplacedEphemeralsDolt(rigDir, rigName string) ([]misclassifiedWisp, int) {
 	issueQuery := `SELECT id, title FROM issues WHERE ephemeral = 1`
-	cmd := exec.Command("bd", "sql", "--csv", issueQuery) //nolint:gosec // G204: query is a constant
-	cmd.Dir = rigDir
-	issueOutput, err := cmd.CombinedOutput()
+	issueRecords, err := runBdSQLCSV(rigDir, issueQuery)
 	if err != nil {
 		return nil, 1 // DB unavailable for this rig
 	}
-
-	issueReader := csv.NewReader(strings.NewReader(string(issueOutput)))
-	issueRecords, err := issueReader.ReadAll()
-	if err != nil || len(issueRecords) < 2 {
+	if len(issueRecords) < 2 {
 		return nil, 0
 	}
 

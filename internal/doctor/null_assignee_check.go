@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/csv"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -145,16 +144,11 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 // queryNullAssigneeBeads returns in_progress beads with NULL/empty assignee for a rig.
 // Uses bd sql --csv (raw SQL passthrough, not affected by bd ORM deserialization).
 func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
-	cmd := exec.Command("bd", "sql", "--csv", nullAssigneeSelectQuery) //nolint:gosec // G204: args are constants
-	cmd.Dir = rigDir
-	output, err := cmd.CombinedOutput()
+	records, err := runBdSQLCSV(rigDir, nullAssigneeSelectQuery)
 	if err != nil {
-		return nil, fmt.Errorf("bd sql: %w", err)
+		return nil, err
 	}
-
-	r := csv.NewReader(strings.NewReader(string(output)))
-	records, err := r.ReadAll()
-	if err != nil || len(records) < 2 {
+	if len(records) < 2 {
 		return nil, nil // No results or empty table
 	}
 

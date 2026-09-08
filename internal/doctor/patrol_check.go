@@ -1,11 +1,9 @@
 package doctor
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -307,17 +305,9 @@ const stuckWispsQuery = `SELECT id, title, status, updated_at FROM issues WHERE 
 // checkStuckWispsDolt queries the Dolt database for stuck wisps using bd sql.
 // Returns an error if the query fails (caller should fall back to JSONL).
 func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string) ([]string, error) {
-	cmd := exec.Command("bd", "sql", "--csv", stuckWispsQuery) //nolint:gosec // G204: query is a constant
-	cmd.Dir = rigPath
-	output, err := cmd.CombinedOutput()
+	records, err := runBdSQLCSV(rigPath, stuckWispsQuery)
 	if err != nil {
-		return nil, fmt.Errorf("bd sql: %w", err)
-	}
-
-	r := csv.NewReader(strings.NewReader(string(output)))
-	records, err := r.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("csv parse: %w", err)
+		return nil, err
 	}
 	if len(records) < 2 {
 		return nil, nil // No results (header only or empty)
