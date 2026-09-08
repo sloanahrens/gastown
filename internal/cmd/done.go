@@ -954,7 +954,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// skip those stages to avoid repeating work or hitting errors.
 	checkpoints := map[DoneCheckpoint]string{}
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
+		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+		// legacy town fallback — gt-8we).
 		bd := beads.New(cwd).ForAgentBead()
 		setDoneIntentLabel(bd, agentBeadID, exitType)
 		checkpoints = readDoneCheckpoints(bd, agentBeadID)
@@ -1513,7 +1514,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write push checkpoint for resume (gt-aufru)
 		if agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
+			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+		// legacy town fallback — gt-8we).
 			cpBd := beads.New(cwd).ForAgentBead()
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, branch)
 		}
@@ -1879,9 +1881,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 
 			// Update agent bead with active_mr reference (for traceability).
-			// Agent beads live in HQ regardless of rig prefix — bypass routing
-			// via ForAgentBead() to avoid the "issue not found" warning that
-			// leaves active_mr null after every gt done (hq-e73z).
+			// ForAgentBead resolves the agent bead's database (rig-local first,
+			// legacy town fallback — gt-8we) to avoid the "issue not found"
+			// warning that leaves active_mr null after every gt done (hq-e73z).
 			if agentBeadID != "" {
 				if err := bd.ForAgentBead().UpdateAgentActiveMR(agentBeadID, mrID); err != nil {
 					style.PrintWarning("could not update agent bead with active_mr: %v", err)
@@ -1908,7 +1910,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write MR checkpoint for resume (gt-aufru)
 		if mrID != "" && agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
+			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+		// legacy town fallback — gt-8we).
 			cpBd := beads.New(cwd).ForAgentBead()
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
 		}
@@ -1944,7 +1947,8 @@ notifyWitness:
 	// longer processes routine completions from these fields.
 	fmt.Printf("\nNotifying Witness...\n")
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
+		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+		// legacy town fallback — gt-8we).
 		completionBd := beads.New(cwd).ForAgentBead()
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
@@ -1962,7 +1966,8 @@ notifyWitness:
 
 	// Write witness notification checkpoint for resume (gt-aufru)
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
+		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+		// legacy town fallback — gt-8we).
 		cpBd := beads.New(cwd).ForAgentBead()
 		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
 	}
@@ -2353,10 +2358,9 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
 	}
 	bd := beads.New(beadsPath)
-	// agentBd bypasses prefix routing — agent beads (gt:agent label) live in
-	// the town DB regardless of their ID prefix, but the rig-prefix routing
-	// would otherwise misroute them to the rig DB and silently fail with
-	// "issue not found". See beads.ForAgentBead docstring for details.
+	// agentBd resolves agent beads dual-scope: their canonical (rig-local)
+	// database first, with a town fallback for legacy beads created before
+	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
 	agentBd := bd.ForAgentBead()
 
 	// Find the hooked bead to close. Use issueID directly instead of reading

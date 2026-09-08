@@ -237,10 +237,12 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	var errs []error
 
 	// Fix global agents (Mayor, Deacon) in town beads.
-	// NewRigLocal pins each wrapper to its own database: CreateAgentBead on a
-	// routed wrapper re-targets the TOWN database via ForAgentBead, so a
-	// "rig-local" create would silently land in the town DB (where a duplicate
-	// usually exists already), succeed as an upsert, and fix nothing (gt-8po).
+	// NewRigLocal pins each wrapper to its own database. Spawn paths now
+	// create agent beads rig-local via canonical prefix routing (gt-8we),
+	// but doctor keeps the explicit pin: the fix must target a SPECIFIC
+	// database chosen from routes, independent of resolution heuristics
+	// (the historical bug: a routed wrapper re-targeted the town DB, the
+	// create succeeded as an upsert there, and fixed nothing — gt-8po).
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
 	townBd := beads.NewRigLocal(townBeadsPath)
 

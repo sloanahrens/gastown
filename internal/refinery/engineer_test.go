@@ -119,7 +119,10 @@ func TestEngineerFirstOpenBlockerUsesDependencySemantics(t *testing.T) {
 	}
 }
 
-func TestEngineerTerminalCloseClearsAgentActiveMRUsesTownBeadsDir(t *testing.T) {
+// TestEngineerTerminalCloseClearsAgentActiveMRUsesRigLocalBeadsDir verifies
+// that the refinery's active_mr cleanup resolves the agent bead in its
+// canonical RIG-LOCAL database (gt-8we dual-scope resolution).
+func TestEngineerTerminalCloseClearsAgentActiveMRUsesRigLocalBeadsDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
@@ -202,12 +205,12 @@ esac
 	}
 	logOutput := string(logBytes)
 	for _, line := range strings.Split(strings.TrimSpace(logOutput), "\n") {
-		if strings.Contains(line, "gt-gastown-polecat-rust") && strings.Contains(line, "env="+rigBeadsDir) {
-			t.Fatalf("refinery active_mr cleanup used rig BEADS_DIR; log:\n%s", logOutput)
+		if strings.Contains(line, "gt-gastown-polecat-rust") && strings.Contains(line, "env="+townBeadsDir) && strings.Contains(line, "args=update") {
+			t.Fatalf("refinery active_mr cleanup updated the town DB (agent beads are rig-local, gt-8we); log:\n%s", logOutput)
 		}
 	}
-	if !strings.Contains(logOutput, "env="+townBeadsDir+" args=show gt-gastown-polecat-rust") || !strings.Contains(logOutput, "env="+townBeadsDir+" args=update gt-gastown-polecat-rust") {
-		t.Fatalf("refinery active_mr cleanup did not use town BEADS_DIR; log:\n%s", logOutput)
+	if !strings.Contains(logOutput, "env="+rigBeadsDir+" args=show gt-gastown-polecat-rust") || !strings.Contains(logOutput, "env="+rigBeadsDir+" args=update gt-gastown-polecat-rust") {
+		t.Fatalf("refinery active_mr cleanup did not use the rig-local BEADS_DIR; log:\n%s", logOutput)
 	}
 }
 

@@ -2565,8 +2565,8 @@ func (m *Manager) Get(name string) (*Polecat, error) {
 // Valid states: "spawning", "working", "done", "stuck", "idle"
 func (m *Manager) SetAgentState(name string, state string) error {
 	agentID := m.agentBeadID(name)
-	// Agent beads live in the town DB — bypass prefix routing that would
-	// otherwise misroute "za-*" / "my-*" agent IDs to a rig DB.
+	// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+	// legacy town fallback — gt-8we).
 	return m.agentBeads().UpdateAgentState(agentID, state)
 }
 

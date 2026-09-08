@@ -217,11 +217,19 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 		return nil, fmt.Errorf("refusing to create agent bead: %w (got %q)", ErrFlagTitle, title)
 	}
 
-	target := b.agentBeadTarget()
+	// Creates always land in the canonical database: rig-local for
+	// rig-prefixed agents, town for hq- global agents (gt-8we).
+	target := b.agentBeadCreateTarget(id)
 	targetDir := target.getResolvedBeadsDir()
+	recordCreate := func() {
+		if townRoot := b.getTownRoot(); townRoot != "" && !b.noRoute {
+			cacheAgentBeadDir(townRoot, id, targetDir)
+		}
+	}
 
 	description := FormatAgentDescription(title, fields)
 	if issue, err := target.createAgentBeadViaStore(context.Background(), id, title, description); err == nil {
+		recordCreate()
 		return issue, nil
 	}
 
@@ -265,6 +273,7 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// Note: role slot no longer set - role definitions are config-based
 	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
 
+	recordCreate()
 	return &issue, nil
 }
 
@@ -329,7 +338,9 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	// Create failed - check if bead already exists (handles both open and closed states)
 	createErr := err
 
-	target := b.agentBeadTarget()
+	// Dual-scope: the bead may live in its canonical (rig-local) database or,
+	// for legacy agents, in the town database (gt-8we).
+	target := b.resolveAgentBead(id)
 
 	existing, showErr := target.Show(id)
 	if showErr != nil {
@@ -400,7 +411,9 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	target := b.agentBeadTarget()
+	// Dual-scope: rig-local (canonical) first, town fallback for legacy
+	// agent beads (gt-8we).
+	target := b.resolveAgentBead(id)
 
 	// Get current issue to preserve immutable fields (title, role_type, rig)
 	issue, err := target.Show(id)

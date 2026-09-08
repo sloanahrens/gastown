@@ -490,7 +490,12 @@ esac
 	t.Setenv("MOCK_BD_LOG", logPath)
 }
 
-func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
+// TestCreateAgentBead_CreatesRigLocalBead verifies that agent bead creation
+// lands in the bead's canonical database — the RIG-LOCAL database its prefix
+// routes to — not the town database. Spawn paths that re-rooted creates to the
+// town database made every newly added agent regress the doctor
+// agent-beads-exist check until the next doctor --fix (gt-8we).
+func TestCreateAgentBead_CreatesRigLocalBead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("path assertions are Unix-oriented")
 	}
@@ -498,10 +503,11 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 	// Resolve symlinks so path assertions match shell pwd output.
 	// On macOS, t.TempDir() returns /var/... but pwd resolves to /private/var/...
 	townRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	rigDir := filepath.Join(townRoot, "imported", "mayor", "rig")
 	for _, dir := range []string{
 		filepath.Join(townRoot, "mayor"),
 		filepath.Join(townRoot, ".beads"),
-		filepath.Join(townRoot, "imported", "mayor", "rig", ".beads"),
+		filepath.Join(rigDir, ".beads"),
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
@@ -517,8 +523,7 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 	logPath := filepath.Join(townRoot, "bd.log")
 	installMockBDCreateRecorder(t, logPath)
 
-	workerDir := filepath.Join(townRoot, "imported", "mayor", "rig")
-	bd := NewWithBeadsDir(workerDir, filepath.Join(workerDir, ".beads"))
+	bd := NewWithBeadsDir(rigDir, filepath.Join(rigDir, ".beads"))
 
 	issue, err := bd.CreateAgentBead("pt-imported-polecat-shiny", "shiny", &AgentFields{
 		RoleType:   "polecat",
@@ -538,17 +543,66 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 		t.Fatalf("read mock bd log: %v", err)
 	}
 	logOutput := string(logData)
-	if !strings.Contains(logOutput, "pwd="+townRoot) {
-		t.Fatalf("mock bd log missing town root cwd:\n%s", logOutput)
+	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(rigDir, ".beads")) {
+		t.Fatalf("mock bd log missing rig-local BEADS_DIR (create must land rig-local, gt-8we):\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")) {
-		t.Fatalf("mock bd log missing town-root BEADS_DIR:\n%s", logOutput)
+	if strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")+"\n") {
+		t.Fatalf("mock bd used town BEADS_DIR — create re-rooted to town database (gt-8we regression):\n%s", logOutput)
 	}
 	if !strings.Contains(logOutput, "create --json --id=pt-imported-polecat-shiny") {
 		t.Fatalf("mock bd log missing create call:\n%s", logOutput)
 	}
-	// Note: hook_bead slot is no longer set — bd slot removed in v0.62 (hq-l6mm5).
-	// Work bead status=hooked and assignee=<agent> is now the authoritative source.
+}
+
+// TestCreateAgentBead_CreatesTownBeadForTownPrefix verifies that hq-prefixed
+// global agents (mayor, deacon) are still created in the town database.
+func TestCreateAgentBead_CreatesTownBeadForTownPrefix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("path assertions are Unix-oriented")
+	}
+
+	townRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	rigDir := filepath.Join(townRoot, "imported", "mayor", "rig")
+	for _, dir := range []string{
+		filepath.Join(townRoot, "mayor"),
+		filepath.Join(townRoot, ".beads"),
+		filepath.Join(rigDir, ".beads"),
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	routes := "{\"prefix\":\"hq-\",\"path\":\".\"}\n{\"prefix\":\"pt-\",\"path\":\"imported/mayor/rig\"}\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	logPath := filepath.Join(townRoot, "bd.log")
+	installMockBDCreateRecorder(t, logPath)
+
+	// Created from a rig context, the hq- bead must still land in town.
+	bd := NewWithBeadsDir(rigDir, filepath.Join(rigDir, ".beads"))
+	if _, err := bd.CreateAgentBead("hq-mayor", "Mayor", &AgentFields{
+		RoleType:   "mayor",
+		AgentState: "idle",
+	}); err != nil {
+		t.Fatalf("CreateAgentBead: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock bd log: %v", err)
+	}
+	logOutput := string(logData)
+	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")) {
+		t.Fatalf("mock bd log missing town BEADS_DIR for hq- agent bead:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "beads_dir="+filepath.Join(rigDir, ".beads")) {
+		t.Fatalf("hq- agent bead create used rig BEADS_DIR:\n%s", logOutput)
+	}
 }
 
 func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
@@ -562,7 +616,13 @@ func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
 	}
 }
 
-func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
+// setupDualScopeTown creates a town fixture with one rig (gastown, prefix gt-)
+// and a mock bd whose "show" succeeds only when BEADS_DIR equals homeBeadsDir —
+// simulating an agent bead that exists in exactly one database. "create" always
+// fails with "already exists" so CreateOrReopenAgentBead takes the reopen path.
+// Returns townRoot, rig beads dir, town beads dir, and the bd invocation log.
+func setupDualScopeTown(t *testing.T, home func(rigBeadsDir, townBeadsDir string) string) (string, string, string, string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
@@ -582,15 +642,17 @@ func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
 	if err := WriteRoutes(townBeadsDir, []Route{{Prefix: "hq-", Path: "."}, {Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
-		t.Fatalf("write types sentinel: %v", err)
+	for _, dir := range []string{townBeadsDir, rigBeadsDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+			t.Fatalf("write types sentinel: %v", err)
+		}
 	}
 
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "bd.log")
 	script := fmt.Sprintf(`#!/bin/sh
 LOG=%q
-EXPECTED=%q
+HOME_DB=%q
 printf 'beads_dir=%%s args=%%s\n' "${BEADS_DIR:-<unset>}" "$*" >> "$LOG"
 cmd=""
 for arg in "$@"; do
@@ -599,10 +661,6 @@ for arg in "$@"; do
     *) cmd="$arg"; break ;;
   esac
 done
-if [ "$cmd" != "version" ] && [ "${BEADS_DIR:-}" != "$EXPECTED" ]; then
-  echo "wrong BEADS_DIR ${BEADS_DIR:-<unset>}" >&2
-  exit 9
-fi
 case "$cmd" in
   version|update|reopen)
     exit 0
@@ -612,20 +670,34 @@ case "$cmd" in
     exit 1
     ;;
   show)
-    printf '%%s\n' '[{"id":"gt-gastown-polecat-rust","title":"old","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: idle\nhook_bead: old"}]'
-    exit 0
+    if [ "${BEADS_DIR:-}" = "$HOME_DB" ]; then
+      printf '%%s\n' '[{"id":"gt-gastown-polecat-rust","title":"old","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: idle\nhook_bead: old"}]'
+      exit 0
+    fi
+    echo 'not found' >&2
+    exit 1
     ;;
   *)
     exit 0
     ;;
 esac
-`, logPath, townBeadsDir)
+`, logPath, home(rigBeadsDir, townBeadsDir))
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
 		t.Fatalf("write mock bd: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	bd := NewWithBeadsDir(rigDir, rigBeadsDir)
+	return townRoot, rigBeadsDir, townBeadsDir, logPath
+}
+
+// TestCreateOrReopenAgentBead_UpdatesRigLocalBead verifies that when the agent
+// bead exists in its canonical (rig-local) database, the reopen/update path
+// operates there (gt-8we).
+func TestCreateOrReopenAgentBead_UpdatesRigLocalBead(t *testing.T) {
+	_, rigBeadsDir, townBeadsDir, logPath := setupDualScopeTown(t,
+		func(rig, _ string) string { return rig })
+
+	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
 	if _, err := bd.CreateOrReopenAgentBead("gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -639,10 +711,97 @@ esac
 		t.Fatalf("read mock log: %v", err)
 	}
 	logOutput := string(logBytes)
-	if strings.Contains(logOutput, "beads_dir="+rigBeadsDir) {
-		t.Fatalf("CreateOrReopenAgentBead used rig BEADS_DIR; log:\n%s", logOutput)
+	if !strings.Contains(logOutput, "beads_dir="+rigBeadsDir+" args=update") {
+		t.Fatalf("CreateOrReopenAgentBead did not update the rig-local bead; log:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+townBeadsDir) || !strings.Contains(logOutput, "args=show") || !strings.Contains(logOutput, "args=update") {
-		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
+	if strings.Contains(logOutput, "beads_dir="+townBeadsDir+" args=update") {
+		t.Fatalf("CreateOrReopenAgentBead updated the town database despite a rig-local bead; log:\n%s", logOutput)
+	}
+}
+
+// TestCreateOrReopenAgentBead_FallsBackToLegacyTownBead verifies that when the
+// agent bead exists only in the town database (created before the rig-local
+// migration), the reopen/update path falls back to the town database instead
+// of silently missing it (gt-8we).
+func TestCreateOrReopenAgentBead_FallsBackToLegacyTownBead(t *testing.T) {
+	_, rigBeadsDir, townBeadsDir, logPath := setupDualScopeTown(t,
+		func(_, town string) string { return town })
+
+	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+	if _, err := bd.CreateOrReopenAgentBead("gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
+		RoleType:   "polecat",
+		Rig:        "gastown",
+		AgentState: "spawning",
+	}); err != nil {
+		t.Fatalf("CreateOrReopenAgentBead: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock log: %v", err)
+	}
+	logOutput := string(logBytes)
+	if !strings.Contains(logOutput, "beads_dir="+townBeadsDir+" args=update") {
+		t.Fatalf("CreateOrReopenAgentBead did not fall back to the legacy town bead; log:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "beads_dir="+rigBeadsDir+" args=update") {
+		t.Fatalf("CreateOrReopenAgentBead updated the rig database where no bead exists; log:\n%s", logOutput)
+	}
+}
+
+// TestGetAgentBead_DualScopeFindsLegacyTownBead verifies the read path: a
+// ForAgentBead wrapper finds an agent bead that exists only in the town
+// database (legacy), while preferring the rig-local database when both exist.
+func TestGetAgentBead_DualScopeFindsLegacyTownBead(t *testing.T) {
+	_, rigBeadsDir, townBeadsDir, logPath := setupDualScopeTown(t,
+		func(_, town string) string { return town })
+
+	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForAgentBead()
+	issue, fields, err := bd.GetAgentBead("gt-gastown-polecat-rust")
+	if err != nil {
+		t.Fatalf("GetAgentBead: %v", err)
+	}
+	if issue == nil || fields == nil {
+		t.Fatalf("GetAgentBead did not find legacy town bead (issue=%v fields=%v)", issue, fields)
+	}
+	if fields.RoleType != "polecat" {
+		t.Fatalf("fields.RoleType = %q, want polecat", fields.RoleType)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock log: %v", err)
+	}
+	logOutput := string(logBytes)
+	// The canonical (rig-local) database must be probed first.
+	rigProbe := strings.Index(logOutput, "beads_dir="+rigBeadsDir+" args=show")
+	townProbe := strings.Index(logOutput, "beads_dir="+townBeadsDir+" args=show")
+	if rigProbe == -1 || townProbe == -1 || rigProbe > townProbe {
+		t.Fatalf("expected rig-local probe before town fallback; log:\n%s", logOutput)
+	}
+}
+
+// TestGetAgentBead_DualScopePrefersRigLocal verifies that when the bead exists
+// rig-local, reads resolve there without needing the town fallback.
+func TestGetAgentBead_DualScopePrefersRigLocal(t *testing.T) {
+	_, rigBeadsDir, townBeadsDir, logPath := setupDualScopeTown(t,
+		func(rig, _ string) string { return rig })
+
+	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForAgentBead()
+	issue, fields, err := bd.GetAgentBead("gt-gastown-polecat-rust")
+	if err != nil {
+		t.Fatalf("GetAgentBead: %v", err)
+	}
+	if issue == nil || fields == nil {
+		t.Fatalf("GetAgentBead did not find rig-local bead (issue=%v fields=%v)", issue, fields)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock log: %v", err)
+	}
+	logOutput := string(logBytes)
+	if strings.Contains(logOutput, "beads_dir="+townBeadsDir+" args=show") {
+		t.Fatalf("GetAgentBead probed the town database despite a rig-local bead; log:\n%s", logOutput)
 	}
 }
