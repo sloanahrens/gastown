@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,5 +138,42 @@ func TestBeadsScopeHint_HQWarnsAgainstGlobal(t *testing.T) {
 func TestBeadsScopeHint_NonHQEmpty(t *testing.T) {
 	if hint := beadsScopeHint("gastown", "/custom/town"); hint != "" {
 		t.Fatalf("beadsScopeHint() = %q, want empty", hint)
+	}
+}
+
+func TestStatusDatabases_PrefersLiveList(t *testing.T) {
+	served := []string{"be", "gt", "hq", "om"}
+	cached := []string{"be", "gt", "hq", "om", "gastown"} // stale snapshot from server start
+
+	dbs, label := statusDatabases(served, nil, cached)
+
+	if strings.Join(dbs, ",") != strings.Join(served, ",") {
+		t.Fatalf("statusDatabases() = %v, want live list %v", dbs, served)
+	}
+	if !strings.Contains(label, "live") {
+		t.Fatalf("label %q should annotate the list as live", label)
+	}
+}
+
+func TestStatusDatabases_TrustsEmptyLiveList(t *testing.T) {
+	cached := []string{"gastown"}
+
+	dbs, _ := statusDatabases(nil, nil, cached)
+
+	if len(dbs) != 0 {
+		t.Fatalf("statusDatabases() = %v, want empty live list (not stale cache)", dbs)
+	}
+}
+
+func TestStatusDatabases_FallsBackToCachedOnQueryError(t *testing.T) {
+	cached := []string{"be", "gt"}
+
+	dbs, label := statusDatabases(nil, errors.New("connection refused"), cached)
+
+	if strings.Join(dbs, ",") != strings.Join(cached, ",") {
+		t.Fatalf("statusDatabases() = %v, want cached fallback %v", dbs, cached)
+	}
+	if !strings.Contains(label, "cached") {
+		t.Fatalf("label %q should annotate the list as cached", label)
 	}
 }
