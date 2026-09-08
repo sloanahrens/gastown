@@ -685,11 +685,21 @@ func findExistingCompactReport(dateStr string) (string, error) {
 	return "", nil
 }
 
-// findExistingWeeklyRollup checks if a weekly rollup already exists for the given week.
-// Returns the bead ID if found, empty string if not found.
-func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
-	expectedTitle := fmt.Sprintf("Weekly Compaction Rollup %s to %s", weekStart, weekEnd)
+// weeklyRollupTitle matches a rollup bead title and captures its window, e.g.
+// "Weekly Compaction Rollup 2026-09-01 to 2026-09-08".
+var weeklyRollupTitle = regexp.MustCompile(`^Weekly Compaction Rollup (\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})$`)
 
+// findExistingWeeklyRollup checks if a weekly rollup already covers the given
+// window. Returns the bead ID if found, empty string if not found.
+//
+// The window is a rolling (now-7d, now) pair recomputed on every invocation,
+// so an exact title match only catches a same-day re-run: a run one day
+// later shifts both dates by a day, produces a different title, and would
+// send a second rollup for effectively the same week (gt-sqk, follow-up to
+// gt-9t9). Instead, treat any existing rollup whose window overlaps the new
+// one as already covering it — dates are "YYYY-MM-DD" so lexicographic and
+// chronological comparison agree.
+func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
 	// The rollup audit bead is auto-closed at creation, and bd list defaults
 	// to open issues only — without --status=closed the prior rollup is
 	// invisible and a duplicate gets sent (gt-9t9).
@@ -713,7 +723,12 @@ func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
 	}
 
 	for _, evt := range events {
-		if evt.Title == expectedTitle {
+		m := weeklyRollupTitle.FindStringSubmatch(evt.Title)
+		if m == nil {
+			continue
+		}
+		existingStart, existingEnd := m[1], m[2]
+		if weekStart <= existingEnd && existingStart <= weekEnd {
 			return evt.ID, nil
 		}
 	}
