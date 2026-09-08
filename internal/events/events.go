@@ -56,9 +56,9 @@ const (
 	TypeMassDeath    = "mass_death"    // Multiple sessions died in short window
 
 	// Witness patrol events
-	TypePatrolStarted   = "patrol_started"
-	TypePolecatChecked  = "polecat_checked"
-	TypePolecatNudged   = "polecat_nudged"
+	TypePatrolStarted    = "patrol_started"
+	TypePolecatChecked   = "polecat_checked"
+	TypePolecatNudged    = "polecat_nudged"
 	TypeEscalationSent   = "escalation_sent"
 	TypeEscalationAcked  = "escalation_acked"
 	TypeEscalationClosed = "escalation_closed"
@@ -138,7 +138,12 @@ func write(event Event) error {
 	// production town root; resolving from cwd would append fixture events
 	// to the operator's live ~/gt/.events.jsonl (gt-x9o). Tests that want
 	// event output must pass an explicit town root via the *To variants.
-	if testing.Testing() {
+	//
+	// GT_TEST_HERMETIC covers gt subprocesses spawned by tests: they are not
+	// test binaries themselves, so testing.Testing() is false, but their cwd
+	// may still resolve to the operator's live town (gt-lwi). The hermetic
+	// test harness (internal/testutil) sets this variable.
+	if testing.Testing() || os.Getenv("GT_TEST_HERMETIC") == "1" {
 		return nil
 	}
 
