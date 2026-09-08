@@ -23,6 +23,7 @@ Available guards:
   bd-init            - Block bd init in wrong directories
   mol-patrol         - Block mol patrol from agent contexts
   dangerous-command  - Block rm -rf, force push, hard reset, git clean
+  formula-allowlist  - Constrain dog sessions to their formula's declared commands
 
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
@@ -115,6 +116,7 @@ func isGasTownAgentContext() bool {
 		"GT_REFINERY",
 		"GT_MAYOR",
 		"GT_DEACON",
+		"GT_DOG_NAME",
 	}
 	for _, env := range envVars {
 		if os.Getenv(env) != "" {
@@ -128,7 +130,7 @@ func isGasTownAgentContext() bool {
 		return false
 	}
 
-	agentPaths := []string{"/crew/", "/polecats/"}
+	agentPaths := []string{"/crew/", "/polecats/", "/deacon/dogs/"}
 	for _, path := range agentPaths {
 		if strings.Contains(cwd, path) {
 			return true

@@ -67,6 +67,12 @@ func (f *Formula) Validate() error {
 		return fmt.Errorf("invalid formula type %q (must be convoy, workflow, expansion, or aspect)", f.Type)
 	}
 
+	for _, entry := range f.CommandAllowlist {
+		if strings.TrimSpace(entry) == "" {
+			return fmt.Errorf("command_allowlist entries must be non-empty command prefixes")
+		}
+	}
+
 	// Type-specific validation
 	switch f.Type {
 	case TypeConvoy:
@@ -563,6 +569,9 @@ func resolveChain(formula *Formula, searchPaths []string, chain []string) (*Form
 		// Inherit steps (parent steps come first).
 		merged.Steps = append(merged.Steps, parent.Steps...)
 
+		// Inherit command allowlist entries (union with child's, added below).
+		merged.CommandAllowlist = mergeAllowlist(merged.CommandAllowlist, parent.CommandAllowlist)
+
 		// Use parent description as fallback.
 		if merged.Description == "" {
 			merged.Description = parent.Description
@@ -573,6 +582,8 @@ func resolveChain(formula *Formula, searchPaths []string, chain []string) (*Form
 	for name, v := range formula.Vars {
 		merged.Vars[name] = v
 	}
+	// Union child's own allowlist entries with inherited ones (gt-9iv).
+	merged.CommandAllowlist = mergeAllowlist(merged.CommandAllowlist, formula.CommandAllowlist)
 	// Append child's own steps after parent steps.
 	merged.Steps = append(merged.Steps, formula.Steps...)
 	// Child description takes priority.

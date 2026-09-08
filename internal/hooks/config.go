@@ -409,6 +409,23 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 		},
+		// Dogs: formula command-allowlist enforcement (gt-9iv).
+		// Formulas may declare command_allowlist in their TOML; the guard
+		// constrains a dog's Bash commands to the declared entries (plus a
+		// built-in lifecycle baseline). No-op for dogs whose assigned work
+		// is not a formula or whose formula declares no allowlist.
+		"dog": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			PreToolUse: []HookEntry{
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard formula-allowlist"),
+					}},
+				},
+			},
+		},
 		// Deacon roles: patrol-formula-guard (same as witness).
 		// Deacons also run patrols and must use wisps, not persistent molecules.
 		"deacon": {
@@ -582,6 +599,27 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 			Key:  "boot",
 			Role: "boot",
 		})
+	}
+
+	// Dog kennels — each dog has its own settings file in its kennel dir
+	// (deacon/dogs/<name>), all sharing the "dog" override key. Only dirs
+	// with a .dog.json state file are kennels; boot is handled above (gt-9iv).
+	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
+	if dogEntries, err := os.ReadDir(dogsDir); err == nil {
+		for _, entry := range dogEntries {
+			if !entry.IsDir() || entry.Name() == "boot" {
+				continue
+			}
+			kennelDir := filepath.Join(dogsDir, entry.Name())
+			if _, err := os.Stat(filepath.Join(kennelDir, ".dog.json")); err != nil {
+				continue
+			}
+			targets = append(targets, Target{
+				Path: filepath.Join(kennelDir, ".claude", "settings.json"),
+				Key:  "dog",
+				Role: "dog",
+			})
+		}
 	}
 
 	// Scan rigs

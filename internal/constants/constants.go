@@ -266,6 +266,9 @@ const (
 
 	// RoleBoot is the boot watchdog role (modeled as a deacon dog).
 	RoleBoot = "boot"
+
+	// RoleDog is the deacon dog role (town-level infrastructure worker).
+	RoleDog = "dog"
 )
 
 // Role emojis - centralized for easy customization.
