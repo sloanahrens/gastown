@@ -905,7 +905,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Post-init identity verification (gas-tc4): verify metadata.json points
 	// to the correct database. This catches identity mismatches caused by bd init
 	// writing the wrong database name, before the rig is considered ready.
-	if err := m.verifyRigIdentity(rigPath, opts.Name); err != nil {
+	if err := m.VerifyRigIdentity(rigPath, opts.Name, opts.BeadsPrefix); err != nil {
 		// Non-fatal but loud: the rig was created, but identity may be wrong.
 		// gt doctor --fix can repair this.
 		fmt.Fprintf(os.Stderr, "  ⚠ Identity verification warning: %v\n", err)
@@ -986,10 +986,16 @@ func removeRigPathIfOwned(rigPath, expectedStamp string) {
 		rigPath)
 }
 
-// verifyRigIdentity checks that metadata.json points to the correct Dolt database
+// VerifyRigIdentity checks that metadata.json points to the correct Dolt database
 // for this rig. This catches identity mismatches early — before polecats are spawned
 // and get stuck in retry loops. (gas-tc4)
-func (m *Manager) verifyRigIdentity(rigPath, rigName string) error {
+//
+// A matching database name alone is not proof of health: metadata.json can name
+// the rig database while the actual data lives in a prefix-derived orphan and
+// the named database is uninitialized (gt-79g). When prefix is non-empty, the
+// check therefore also round-trips through bd — the same read path agents use —
+// and requires the database to report the expected issue_prefix.
+func (m *Manager) VerifyRigIdentity(rigPath, rigName, prefix string) error {
 	resolvedBeadsDir := beads.ResolveBeadsDir(rigPath)
 	metadataPath := filepath.Join(resolvedBeadsDir, "metadata.json")
 
@@ -1026,6 +1032,35 @@ func (m *Manager) verifyRigIdentity(rigPath, rigName string) error {
 		fmt.Printf("   ✓ Repaired metadata.json identity (was %q, now %q)\n", metadata.DoltDatabase, rigName)
 	}
 
+	return m.verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefix)
+}
+
+// verifyBeadsRoundTrip confirms the database metadata.json points at actually
+// serves beads reads: `bd config get issue_prefix` must succeed and return the
+// expected prefix. The database name is deliberately NOT overridden via env —
+// bd resolves it from metadata.json exactly as agents will, so a wrong or
+// uninitialized target fails here instead of at first polecat spawn. (gt-79g)
+func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefix string) error {
+	if prefix == "" {
+		return nil // No expected prefix to verify against
+	}
+	if _, err := exec.LookPath("bd"); err != nil {
+		return nil // bd not installed — rig add already tolerates this elsewhere
+	}
+
+	cmd := exec.Command("bd", "config", "get", "issue_prefix")
+	cmd.Dir = rigPath
+	cmd.Env = bdSubprocessEnv(resolvedBeadsDir, "")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("round-trip verification failed: bd cannot read issue_prefix from database %q: %v (%s)",
+			rigName, err, strings.TrimSpace(string(output)))
+	}
+	got := strings.TrimSpace(string(output))
+	if got != prefix {
+		return fmt.Errorf("round-trip verification failed: database %q reports issue_prefix %q, expected %q",
+			rigName, got, prefix)
+	}
 	return nil
 }
 
