@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -652,6 +653,37 @@ func isReviewEvidenceText(text string) bool {
 	return false
 }
 
+// autoSaveSquashTitle builds the commit subject used when every commit on a
+// polecat branch is machine-generated (gt-3wf): a conventional-commit prefix
+// from the issue type, the issue title, and the issue id. Returns "" when
+// neither the issue nor its id is known, letting the squash fall back to a
+// generic subject.
+func autoSaveSquashTitle(issue *beads.Issue, issueID string) string {
+	title := ""
+	issueType := ""
+	if issue != nil {
+		title = strings.TrimSpace(issue.Title)
+		issueType = strings.ToLower(strings.TrimSpace(issue.Type))
+	}
+	if title == "" {
+		if issueID == "" {
+			return ""
+		}
+		return fmt.Sprintf("fix: implementation work for %s", issueID)
+	}
+	prefix := "feat"
+	switch issueType {
+	case "bug":
+		prefix = "fix"
+	case "chore":
+		prefix = "chore"
+	}
+	if issueID != "" {
+		return fmt.Sprintf("%s: %s (%s)", prefix, title, issueID)
+	}
+	return fmt.Sprintf("%s: %s", prefix, title)
+}
+
 func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
 	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
@@ -1166,6 +1198,28 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				aheadCount, _ = g.CommitsAhead(baseRef, "HEAD")
 			} else if skipReason != "" {
 				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
+			}
+		}
+
+		// Rewrite machine-generated commit messages before submission (gt-3wf).
+		// The gt-pvx safety net and checkpoint dog commit real work under
+		// generic subjects ("fix: auto-save uncommitted implementation work",
+		// "WIP: checkpoint (auto)"). Polecats are told to amend before gt done
+		// but observably never do, so main's merge history fills with
+		// meaningless messages. Squash the branch into one commit instead:
+		// non-generated subjects are preserved (first as title, rest in the
+		// body); when every commit is machine-generated, the source issue
+		// title becomes the subject. Skipped when the branch was already
+		// pushed (resume checkpoint, or the agent pushed manually — polecat
+		// branch names are session-unique, so an existing origin/<branch>
+		// means this session pushed it) — rewriting history then would break
+		// the later non-force push.
+		if _, revErr := g.Rev("origin/" + branch); checkpoints[CheckpointPushed] != branch && revErr != nil {
+			if squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(sourceIssueForNoMerge, issueID)); squashErr != nil {
+				style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
+			} else if squashed > 0 {
+				fmt.Printf("%s Squashed %d auto-save/WIP commit(s) into a single descriptive commit\n", style.Bold.Render("✓"), squashed)
+				aheadCount, _ = g.CommitsAhead(baseRef, "HEAD")
 			}
 		}
 

@@ -215,6 +215,122 @@ func TestSquashWIPCommits_Mixed(t *testing.T) {
 	}
 }
 
+func TestIsAutoSaveSubject(t *testing.T) {
+	cases := []struct {
+		subject string
+		want    bool
+	}{
+		{WIPCommitPrefix, true},
+		{"WIP: checkpoint (auto) 2026-09-08", true},
+		{"fix: auto-save uncommitted implementation work (gt-pvx safety net)", true},
+		{"fix: auto-save uncommitted implementation work (gt-wov, gt-pvx safety net)", true},
+		{"fix: real bug in auto-save handling", false},
+		{"implement feature", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := IsAutoSaveSubject(c.subject); got != c.want {
+			t.Errorf("IsAutoSaveSubject(%q) = %v, want %v", c.subject, got, c.want)
+		}
+	}
+}
+
+func TestSquashAutoSaveCommits_AllGenerated_UsesFallbackTitle(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	addCommit(t, dir, "b.go", "package b", "fix: auto-save uncommitted implementation work (gt-abc, gt-pvx safety net)")
+
+	count, err := SquashAutoSaveCommits(dir, "main", "fix: handle nil pointer in auth (gt-abc)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 squashed, got %d", count)
+	}
+
+	subjects := getCommitSubjects(t, dir)
+	if len(subjects) != 1 {
+		t.Fatalf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	}
+	if subjects[0] != "fix: handle nil pointer in auth (gt-abc)" {
+		t.Errorf("expected fallback title as subject, got %q", subjects[0])
+	}
+
+	for _, f := range []string{"a.go", "b.go"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("expected %s to exist after squash", f)
+		}
+	}
+}
+
+func TestSquashAutoSaveCommits_AllGenerated_EmptyFallback(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
+
+	count, err := SquashAutoSaveCommits(dir, "main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 squashed, got %d", count)
+	}
+	subjects := getCommitSubjects(t, dir)
+	if len(subjects) != 1 || subjects[0] != "squashed auto-save checkpoint commits" {
+		t.Errorf("expected generic subject, got %v", subjects)
+	}
+}
+
+func TestSquashAutoSaveCommits_Mixed_KeepsRealSubject(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "implement auth handler (gt-abc)")
+	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	addCommit(t, dir, "c.go", "package c", "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
+
+	count, err := SquashAutoSaveCommits(dir, "main", "fallback title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 squashed, got %d", count)
+	}
+
+	subjects := getCommitSubjects(t, dir)
+	if len(subjects) != 1 {
+		t.Fatalf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	}
+	if subjects[0] != "implement auth handler (gt-abc)" {
+		t.Errorf("expected real subject preserved as title, got %q", subjects[0])
+	}
+
+	for _, f := range []string{"a.go", "b.go", "c.go"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("expected %s to exist after squash", f)
+		}
+	}
+}
+
+func TestSquashAutoSaveCommits_NoGenerated_Untouched(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	addCommit(t, dir, "b.go", "package b", "add feature B")
+
+	count, err := SquashAutoSaveCommits(dir, "main", "fallback title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 squashed, got %d", count)
+	}
+	subjects := getCommitSubjects(t, dir)
+	if len(subjects) != 2 {
+		t.Errorf("expected history untouched (2 commits), got %v", subjects)
+	}
+}
+
 func TestSquashWIPCommits_NoCommits(t *testing.T) {
 	dir := initTestRepo(t)
 	createBranch(t, dir, "feature")
