@@ -148,6 +148,34 @@ title = "Maintainability Review"
 focus = "Code clarity and documentation"
 ```
 
+## Command Allowlists
+
+A formula may declare the only shell commands a session executing it can run
+(gt-9iv). Each entry is a whitespace-tokenized command prefix: `"gt reaper"`
+allows `gt reaper scan --json` but not `gt dolt cleanup`.
+
+```toml
+formula = "mol-dog-reaper"
+command_allowlist = [
+  "gt reaper",
+  "gt convoy check",
+  "gt escalate",
+]
+```
+
+Semantics:
+
+- Empty/absent means unconstrained.
+- Entries are inherited through `extends` (parent entries merge with the child's).
+- Enforcement is per-role. For dog sessions, the `gt tap guard
+  formula-allowlist` PreToolUse hook resolves the dog's assigned formula from
+  its kennel state and blocks any command with a shell segment outside the
+  declared entries plus a built-in lifecycle baseline (`gt dog done`,
+  `gt escalate`, `bd` basics, read-only utilities). Every segment of a
+  compound command (`&&`, `;`, pipes, `$(...)` substitutions) must match.
+- Matching is via `CheckCommandAllowed(command, entries)` — a guardrail
+  against scope drift, not a hardened sandbox.
+
 ## API Reference
 
 ### Parsing

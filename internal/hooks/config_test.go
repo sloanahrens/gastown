@@ -722,6 +722,43 @@ func TestComputeExpectedPatrolRolesDisableUserPromptMailCheck(t *testing.T) {
 	}
 }
 
+func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	dog, err := ComputeExpected("dog")
+	if err != nil {
+		t.Fatalf("ComputeExpected(dog): %v", err)
+	}
+
+	entry, ok := findPreToolUse(dog, "Bash")
+	if !ok {
+		t.Fatal("dog missing formula-allowlist guard on Bash matcher")
+	}
+	if len(entry.Hooks) != 1 {
+		t.Fatalf("dog Bash guard hooks = %d, want 1", len(entry.Hooks))
+	}
+	if !strings.Contains(entry.Hooks[0].Command, "tap guard formula-allowlist") {
+		t.Fatalf("dog Bash guard should run formula-allowlist, got: %s", entry.Hooks[0].Command)
+	}
+	if len(dog.UserPromptSubmit) != 0 {
+		t.Fatalf("dog should disable UserPromptSubmit mail-check, got %+v", dog.UserPromptSubmit)
+	}
+	// Base guards must still apply alongside the allowlist guard.
+	if _, ok := findPreToolUse(dog, "Bash(gh pr create*)"); !ok {
+		t.Fatal("dog should inherit pr-workflow guard from DefaultBase")
+	}
+
+	// Other roles must not receive the dog guard.
+	mayorCfg, err := ComputeExpected("mayor")
+	if err != nil {
+		t.Fatalf("ComputeExpected(mayor): %v", err)
+	}
+	if _, ok := findPreToolUse(mayorCfg, "Bash"); ok {
+		t.Fatal("mayor must not receive the dog formula-allowlist guard")
+	}
+}
+
 func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
@@ -1024,6 +1061,39 @@ func TestDiscoverTargets_BootIncluded(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected boot target when deacon/dogs/boot/ exists, not found")
+	}
+}
+
+func TestDiscoverTargets_DogKennelsIncluded(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "boot"), 0755)
+	// alpha is a real kennel (has .dog.json); scratch is not.
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "alpha"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "deacon", "dogs", "alpha", ".dog.json"), []byte(`{"name":"alpha","state":"idle"}`), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "scratch"), 0755)
+
+	targets, err := DiscoverTargets(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverTargets failed: %v", err)
+	}
+
+	var dogTargets []Target
+	for _, tgt := range targets {
+		if tgt.Key == "dog" {
+			dogTargets = append(dogTargets, tgt)
+		}
+	}
+	if len(dogTargets) != 1 {
+		t.Fatalf("expected exactly 1 dog target (alpha), got %d: %+v", len(dogTargets), dogTargets)
+	}
+	wantPath := filepath.Join(tmpDir, "deacon", "dogs", "alpha", ".claude", "settings.json")
+	if dogTargets[0].Path != wantPath {
+		t.Errorf("dog target Path = %q, want %q", dogTargets[0].Path, wantPath)
+	}
+	if dogTargets[0].Role != "dog" {
+		t.Errorf("dog target Role = %q, want %q", dogTargets[0].Role, "dog")
 	}
 }
 

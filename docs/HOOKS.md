@@ -56,6 +56,14 @@ Each rig generates settings in shared parent directories (not per-worktree):
 Town-level targets:
 - `mayor/.claude/settings.json` (key: `mayor`)
 - `deacon/.claude/settings.json` (key: `deacon`)
+- `deacon/dogs/boot/.claude/settings.json` (key: `boot`, when the boot dir exists)
+- `deacon/dogs/<name>/.claude/settings.json` (key: `dog`, one per kennel with a
+  `.dog.json`; all dogs share the `dog` override key)
+
+The `dog` override adds a PreToolUse guard on every Bash command
+(`gt tap guard formula-allowlist`, gt-9iv): when the dog's assigned formula
+declares a `command_allowlist` in its TOML, commands outside that list (plus a
+built-in lifecycle baseline) are blocked before they run.
 
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.

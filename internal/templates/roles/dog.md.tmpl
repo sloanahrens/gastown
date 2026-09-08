@@ -120,6 +120,12 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. Debug with: `BD_DEBUG_R
 All formula files live in the `gt` binary (compiled from `internal/formula/formulas/`).
 Each formula tells you exactly what CLI commands to run. Here is the quick reference:
 
+**Command allowlists are ENFORCED.** A formula that declares `command_allowlist`
+constrains your shell commands to exactly those listed (plus lifecycle basics:
+`gt hook/prime/dog done/nudge/escalate`, `bd` commands, read-only utilities).
+A blocked command is the designed stop — do NOT work around it. If you genuinely
+need a command outside the list, escalate (`gt escalate`) and move on.
+
 ### mol-dog-reaper — Wisp and issue cleanup
 
 **CLI**: `gt reaper <subcommand>` (no shell scripts — all Go CLI)

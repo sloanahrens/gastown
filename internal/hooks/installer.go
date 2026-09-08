@@ -51,11 +51,14 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	if provider == "claude" && role == "boot" && isSettingsFile(hooksFile) {
+	// Boot and dog kennels are managed through the JSON merge path so their
+	// role overrides (e.g. the dog formula-allowlist guard, gt-9iv) are
+	// applied and kept in sync rather than frozen at first install.
+	if provider == "claude" && (role == "boot" || role == "dog") && isSettingsFile(hooksFile) {
 		_, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
-			Key:      "boot",
-			Role:     "boot",
+			Key:      role,
+			Role:     role,
 			Provider: "claude",
 		}, false)
 		return err

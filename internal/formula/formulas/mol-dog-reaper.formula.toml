@@ -34,10 +34,13 @@ Reaping closes wisps — reversible (can reopen). Purging deletes rows — irrev
 but only targets already-closed wisps past retention. Auto-close only targets
 issues that are not P0/P1, not epics, and have no active dependencies.
 
-## Scope Boundary (gt-61x)
+## Scope Boundary (gt-61x, enforced at runtime since gt-9iv)
 
 This formula's writes are limited to wisp/issue/mail ROWS via the `gt reaper`
-and `gt convoy check` commands listed in the steps. Database-level operations
+and `gt convoy check` commands listed in the steps. The command_allowlist
+declared below is ENFORCED by the dog session's formula-allowlist guard:
+shell commands outside the allowlist (plus the standard dog lifecycle
+baseline) are blocked before they run. Database-level operations
 are OUT OF SCOPE for this formula:
 
 - NEVER run `gt dolt cleanup` (with or without --force)
@@ -64,7 +67,19 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 4
+version = 5
+
+# Enforced command allowlist (gt-9iv): dog sessions executing this formula may
+# only run these commands, plus the built-in dog lifecycle baseline
+# (gt hook/prime/dog done/nudge/escalate, bd basics, read-only utilities).
+# See the Scope Boundary section above; escalate instead of working around it.
+command_allowlist = [
+	"gt reaper",
+	"gt convoy check",
+	"gt convoy list",
+	"gt escalate",
+	"gt dog done",
+]
 
 [squash]
 trigger = "on_complete"

@@ -3,7 +3,7 @@ package hookutil
 import "testing"
 
 func TestIsAutonomousRole(t *testing.T) {
-	autonomous := []string{"polecat", "witness", "refinery", "deacon", "boot"}
+	autonomous := []string{"polecat", "witness", "refinery", "deacon", "boot", "dog"}
 	for _, role := range autonomous {
 		if !IsAutonomousRole(role) {
 			t.Errorf("IsAutonomousRole(%q) = false, want true", role)

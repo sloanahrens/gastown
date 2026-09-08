@@ -35,6 +35,15 @@ type Formula struct {
 	Agent       string      `toml:"agent"`       // Default agent for all legs (GH#2118)
 	ReviewOnly  bool        `toml:"review_only"` // If true, all legs are analysis-only — no code commits expected (gt-kvf)
 
+	// CommandAllowlist declares the only shell commands a session executing
+	// this formula may run. Each entry is a whitespace-tokenized command
+	// prefix: "gt reaper" allows "gt reaper scan --json" but not "gt dolt".
+	// Empty means unconstrained. Enforced for dog sessions by the
+	// formula-allowlist PreToolUse guard, alongside a built-in baseline of
+	// lifecycle commands (gt-9iv). Inherited through extends (parent entries
+	// are merged with the child's).
+	CommandAllowlist []string `toml:"command_allowlist"`
+
 	// Convoy-specific
 	Inputs    map[string]Input  `toml:"inputs"`
 	Prompts   map[string]string `toml:"prompts"`
