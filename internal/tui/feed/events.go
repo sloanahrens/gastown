@@ -264,8 +264,16 @@ func (s *GtEventsSource) tail(ctx context.Context) {
 	// regardless of the preload scanner's internal read-ahead buffer.
 	_, _ = s.file.Seek(0, 2)
 
-	// Now tail for new events
-	scanner := bufio.NewScanner(s.file)
+	// Now tail for new events, polling every 100ms using a fresh scanner
+	// each tick. bufio.Scanner latches an internal error (including
+	// io.EOF) the first time Scan() returns false and never returns true
+	// again on that instance - even after more data is appended to the
+	// file. Reusing a single scanner across ticks would hit that EOF on
+	// the very first tick (near-certain, since nothing has been appended
+	// yet) and then silently stop seeing every event appended afterward.
+	// os.File tracks the read offset independently of bufio.Scanner, so a
+	// new scanner each tick resumes exactly where the last one left off.
+	// Mirrors the --plain path in PrintGtEvents, which has the same fix.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -274,6 +282,7 @@ func (s *GtEventsSource) tail(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			scanner := bufio.NewScanner(s.file)
 			for scanner.Scan() {
 				line := scanner.Text()
 				if event := parseGtEventLine(line); event != nil {
