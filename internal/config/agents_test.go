@@ -331,6 +331,28 @@ func TestResolveProcessNames(t *testing.T) {
 			want:      []string{"my-binary"},
 		},
 		{
+			// gt-0sr: agents.claude.command pointed at a wrapper script
+			// (~/gt/bin/claude-trusted) that execs the real claude binary.
+			// The wrapper's name never exists as a process post-exec, so the
+			// named preset's process names must be included alongside it.
+			name:      "registered agent with unknown wrapper command unions preset names",
+			agentName: "claude",
+			command:   "claude-trusted",
+			want:      []string{"claude-trusted", "node", "claude"},
+		},
+		{
+			name:      "registered agent with path-resolved unknown wrapper command",
+			agentName: "claude",
+			command:   "/home/user/gt/bin/claude-trusted",
+			want:      []string{"claude-trusted", "node", "claude"},
+		},
+		{
+			name:      "union dedupes command basename already in preset names",
+			agentName: "claude",
+			command:   "node",
+			want:      []string{"node", "claude"},
+		},
+		{
 			name:      "empty agent name with command",
 			agentName: "",
 			command:   "opencode",
