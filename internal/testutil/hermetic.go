@@ -522,8 +522,12 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 }
 
 // builtinActorPrefixes are town-level actors that are always legitimate.
+// "unknown" is included because detectActor() (internal/cmd/sling_helpers.go)
+// legitimately returns it whenever GetRole() can't resolve an agent identity
+// (e.g. a scheduler tick or sling invoked outside an agent session) — it is a
+// real system fallback value, not a test fixture (gt-ro0).
 var builtinActorPrefixes = []string{
-	"mayor", "overseer", "deacon", "daemon", "convoy", "town", "gt", "boot", "human", "crew",
+	"mayor", "overseer", "deacon", "daemon", "convoy", "town", "gt", "boot", "human", "crew", "unknown",
 }
 
 func knownActorPrefixes(root string) map[string]bool {
