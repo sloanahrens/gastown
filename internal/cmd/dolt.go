@@ -277,9 +277,18 @@ renamed databases, or failed migrations.
 
 Use --dry-run to preview what would be removed without making changes.
 
+Guardrails (gt-61x):
+  - Databases referenced by an open hold bead (label "dolt-hold:<dbname>", or
+    a blanket "dolt-hold") are never removed, even with --force. Close the
+    hold bead to release the database.
+  - Agent actors (GT_ROLE/BD_ACTOR set) cannot use --force without recording
+    authorization via --authorized-by <bead-id>. The referenced bead must
+    exist; the forced removal is logged to it as a comment.
+
 Examples:
   gt dolt cleanup             # Remove all orphaned databases
-  gt dolt cleanup --dry-run   # Preview what would be removed`,
+  gt dolt cleanup --dry-run   # Preview what would be removed
+  gt dolt cleanup --force --authorized-by hq-xyz  # Agent with recorded authorization`,
 	RunE: runDoltCleanup,
 }
 
@@ -324,11 +333,12 @@ After migration, 'bd mol wisp list' will work and agent lifecycle
 }
 
 var (
-	doltLogLines     int
-	doltLogFollow    bool
-	doltMigrateDry   bool
-	doltCleanupDry   bool
-	doltCleanupForce bool
+	doltLogLines            int
+	doltLogFollow           bool
+	doltMigrateDry          bool
+	doltCleanupDry          bool
+	doltCleanupForce        bool
+	doltCleanupAuthorizedBy string
 
 	doltMigrateWispsDry bool
 	doltMigrateWispsDB  string
@@ -367,6 +377,7 @@ func init() {
 
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupDry, "dry-run", false, "Preview what would be removed without making changes")
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupForce, "force", false, "Remove databases even if they have user tables")
+	doltCleanupCmd.Flags().StringVar(&doltCleanupAuthorizedBy, "authorized-by", "", "Bead ID recording the authorization for a forced cleanup (required for --force when run by an agent)")
 	doltLogsCmd.Flags().IntVarP(&doltLogLines, "lines", "n", 50, "Number of lines to show")
 	doltLogsCmd.Flags().BoolVarP(&doltLogFollow, "follow", "f", false, "Follow log output")
 
@@ -1075,6 +1086,22 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	// GUARDRAIL (gt-61x): agents cannot force-remove databases without recorded
+	// authorization. A reaper dog once force-deleted DBs that a hold bead had
+	// explicitly parked for a human/mayor decision — the only trace was an
+	// ephemeral nudge. Forcing agents through --authorized-by leaves a durable
+	// audit trail on the authorizing bead.
+	if doltCleanupForce && !doltCleanupDry {
+		if actor := agentActor(); actor != "" {
+			if err := checkAgentForceAuthorization(actor, doltCleanupAuthorizedBy); err != nil {
+				return err
+			}
+			if _, err := beads.New(townRoot).Show(doltCleanupAuthorizedBy); err != nil {
+				return fmt.Errorf("--authorized-by bead %q not found: %w", doltCleanupAuthorizedBy, err)
+			}
+		}
+	}
+
 	orphans, err := doltserver.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		return fmt.Errorf("finding orphaned databases: %w", err)
@@ -1085,8 +1112,31 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// GUARDRAIL (gt-61x): databases referenced by an open hold bead are excluded
+	// from cleanup regardless of --force. Close the hold bead to release them.
+	holds, holdsErr := doltserver.FindDatabaseHolds(townRoot)
+	if holdsErr != nil {
+		if doltCleanupForce && !doltCleanupDry {
+			// Fail closed for forced cleanup: if we can't see the holds, we
+			// can't prove the removal is safe.
+			return fmt.Errorf("cannot verify database holds (refusing --force cleanup): %w", holdsErr)
+		}
+		fmt.Printf("%s Could not query database holds: %v\n", style.Bold.Render("!"), holdsErr)
+		fmt.Printf("  Continuing without hold protection — non-empty databases are still refused.\n\n")
+	}
+
+	var removable []doltserver.OrphanedDatabase
+	held := 0
 	fmt.Printf("Found %d orphaned database(s) in .dolt-data/:\n\n", len(orphans))
 	for _, o := range orphans {
+		if hold := doltserver.HoldFor(holds, o.Name); hold != nil {
+			held++
+			fmt.Printf("  %s %s (%s) — HELD by %s: %s\n", style.Bold.Render("⛔"), o.Name,
+				formatBytes(o.SizeBytes), hold.BeadID, hold.Title)
+			fmt.Printf("    %s\n", style.Dim.Render("excluded from cleanup; close the hold bead to release"))
+			continue
+		}
+		removable = append(removable, o)
 		fmt.Printf("  %s %s (%s)\n", style.Bold.Render("!"), o.Name, formatBytes(o.SizeBytes))
 		fmt.Printf("    %s\n", style.Dim.Render(o.Path))
 	}
@@ -1095,6 +1145,13 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nDry run: no changes made.")
 		return nil
 	}
+
+	if len(removable) == 0 {
+		fmt.Printf("\n%s All %d orphaned database(s) are held — nothing to remove.\n",
+			style.Bold.Render("!"), held)
+		return nil
+	}
+	orphans = removable
 
 	// BALK: If orphans are a large fraction of all databases, something is likely
 	// wrong with the orphan detection (e.g., metadata files not found). Refuse to
@@ -1132,6 +1189,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	removed := 0
+	var removedNames []string
 	for _, o := range orphans {
 		if err := doltserver.RemoveDatabase(townRoot, o.Name, doltCleanupForce); err != nil {
 			// If DROP caused read-only, stop immediately and recover (gt-r1cyd)
@@ -1150,6 +1208,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  %s Removed %s\n", style.Bold.Render("✓"), o.Name)
 		removed++
+		removedNames = append(removedNames, o.Name)
 
 		// Health check after each DROP to catch read-only early (gt-r1cyd)
 		if readOnly, _ := doltserver.CheckReadOnly(townRoot); readOnly {
@@ -1166,7 +1225,55 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Removed %d/%d orphaned database(s)\n",
 		style.Bold.Render("✓"), removed, len(orphans))
 
+	// Record the forced removal on the authorizing bead (audit trail, gt-61x).
+	if doltCleanupForce && doltCleanupAuthorizedBy != "" && removed > 0 {
+		comment := fmt.Sprintf("gt dolt cleanup --force by %s: removed %d database(s): %s",
+			cleanupActorLabel(), removed, strings.Join(removedNames, ", "))
+		if err := beads.New(townRoot).AddComment(doltCleanupAuthorizedBy, comment); err != nil {
+			fmt.Printf("%s Failed to record authorization on %s: %v\n",
+				style.Bold.Render("!"), doltCleanupAuthorizedBy, err)
+		} else {
+			fmt.Printf("Recorded on %s\n", style.Dim.Render(doltCleanupAuthorizedBy))
+		}
+	}
+
 	return nil
+}
+
+// agentActor returns the agent identity when this process runs as a Gas Town
+// agent (GT_ROLE or BD_ACTOR set), or "" for a human at a plain terminal.
+func agentActor() string {
+	if role := os.Getenv("GT_ROLE"); role != "" {
+		return role
+	}
+	if actor := os.Getenv("BD_ACTOR"); actor != "" {
+		return actor
+	}
+	return ""
+}
+
+// cleanupActorLabel names the actor for audit comments.
+func cleanupActorLabel() string {
+	if actor := agentActor(); actor != "" {
+		return actor
+	}
+	return "human operator"
+}
+
+// checkAgentForceAuthorization enforces the gt-61x guardrail: an agent actor
+// may only run a forced cleanup when it records authorization via a bead ID.
+func checkAgentForceAuthorization(actor, authorizedBy string) error {
+	if authorizedBy != "" {
+		return nil
+	}
+	return fmt.Errorf(`agent actor %q may not run 'gt dolt cleanup --force' without recorded authorization (gt-61x)
+
+Destructive database removal by agents requires an authorization bead:
+  1. Get explicit approval from the mayor/overseer (escalate if needed)
+  2. Reference the bead that records the decision:
+       gt dolt cleanup --force --authorized-by <bead-id>
+
+The removal will be logged as a comment on that bead`, actor)
 }
 
 func runDoltList(cmd *cobra.Command, args []string) error {
