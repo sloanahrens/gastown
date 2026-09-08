@@ -335,3 +335,107 @@ exit 0
 		t.Fatalf("CreateRigBead called bd create after config failure:\n%s", log)
 	}
 }
+
+// TestCreateRigBeadRecoversFromStaleTypeSentinel reproduces gt-8po's rig bead
+// failure: the .gt-types-configured sentinel claims custom types are
+// configured, but the database disagrees (older gt versions could write type
+// config to the wrong target before the GH#2637 verify step existed). The
+// database then rejects --type=rig with "invalid issue type". CreateRigBead
+// must invalidate the stale sentinel, re-configure types, and retry the
+// create once.
+func TestCreateRigBeadRecoversFromStaleTypeSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell fake bd")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	countPath := filepath.Join(t.TempDir(), "create.count")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$1:$2:$3" in
+  config:get:types.custom)
+    printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
+    exit 0
+    ;;
+  config:get:types.infra)
+    printf '%s\n' 'agent,role,message'
+    exit 0
+    ;;
+esac
+if [ "$1" = "config" ]; then
+  exit 0
+fi
+if [ "$1" = "create" ]; then
+  if [ ! -f "$CREATE_COUNT" ]; then
+    : > "$CREATE_COUNT"
+    printf '%s\n' 'Error: validation failed for issue be-rig-beads: invalid issue type: rig' >&2
+    exit 1
+  fi
+  printf '%s\n' '{"id":"be-rig-beads","title":"beads","issue_type":"rig","status":"open","priority":2,"created_at":"2026-07-07T00:00:00Z","updated_at":"2026-07-07T00:00:00Z","labels":["gt:rig"]}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", logPath)
+	t.Setenv("CREATE_COUNT", countPath)
+
+	workDir := t.TempDir()
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Stale sentinel: matches the current type fingerprint, so the initial
+	// EnsureCustomTypes fast-paths without touching the database.
+	sentinel := filepath.Join(beadsDir, ".gt-types-configured")
+	if err := os.WriteFile(sentinel, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ResetEnsuredDirs()
+
+	issue, err := NewIsolated(workDir).CreateRigBead("beads", &RigFields{Prefix: "be", State: RigStateActive})
+	if err != nil {
+		t.Fatalf("CreateRigBead should recover from stale type sentinel, got: %v", err)
+	}
+	if issue.ID != "be-rig-beads" {
+		t.Fatalf("created issue ID = %q, want be-rig-beads", issue.ID)
+	}
+
+	log := string(mustReadFile(t, logPath))
+	// The recovery path must re-configure types against the database…
+	if !strings.Contains(log, "config set types.custom") {
+		t.Fatalf("expected type re-configuration after invalid-type error, log:\n%s", log)
+	}
+	// …and retry the create (two create invocations total).
+	if got := strings.Count(log, "create --json"); got != 2 {
+		t.Fatalf("expected 2 create attempts (fail + retry), got %d, log:\n%s", got, log)
+	}
+}
+
+// TestInvalidateTypeConfigCache verifies both cache levels are dropped.
+func TestInvalidateTypeConfigCache(t *testing.T) {
+	beadsDir := t.TempDir()
+	sentinel := filepath.Join(beadsDir, ".gt-types-configured")
+	if err := os.WriteFile(sentinel, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ensuredMu.Lock()
+	ensuredDirs[beadsDir] = true
+	ensuredMu.Unlock()
+
+	InvalidateTypeConfigCache(beadsDir)
+
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Errorf("sentinel file should be removed, stat err: %v", err)
+	}
+	ensuredMu.Lock()
+	cached := ensuredDirs[beadsDir]
+	ensuredMu.Unlock()
+	if cached {
+		t.Error("in-memory cache entry should be removed")
+	}
+}

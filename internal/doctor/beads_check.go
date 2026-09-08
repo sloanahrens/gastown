@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // PrefixConflictCheck detects duplicate prefixes across rigs in routes.jsonl.
@@ -321,6 +323,9 @@ type DatabasePrefixCheck struct {
 	FixableCheck
 	mismatches   []databasePrefixMismatch
 	prefixGetter dbPrefixGetter
+	// prefixSetter persists issue_prefix for a rig database. Defaults to
+	// doltserver.SetRigIssuePrefix; injectable for tests.
+	prefixSetter func(townRoot, beadsDir, database, prefix string) error
 }
 
 type databasePrefixMismatch struct {
@@ -487,19 +492,33 @@ func (c *DatabasePrefixCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
+	// bd 1.2+ refuses `bd config set issue_prefix`, so write through the SDK
+	// store instead (gt-8po). Legacy databases (created before issue_prefix was
+	// mandatory) have it unset entirely, which blocks every bd create in that
+	// rig — including doctor's own agent/rig identity bead fixes.
+	setter := c.prefixSetter
+	if setter == nil {
+		setter = doltserver.SetRigIssuePrefix
+	}
+
+	var errs []error
 	for _, m := range c.mismatches {
 		// Safety: log what we're about to change so corruption is visible (GH#2455)
 		fmt.Fprintf(os.Stderr, "WARNING: database-prefix fix: %s: changing issue_prefix from %q to %q (per routes.jsonl)\n",
 			m.rigPath, m.dbPrefix, m.routesPrefix)
 
-		cmd := exec.Command("bd", "config", "set", "issue_prefix", m.routesPrefix)
-		cmd.Dir = filepath.Join(ctx.TownRoot, m.rigPath)
-		beadsDir := beads.ResolveBeadsDir(cmd.Dir)
-		cmd.Env = append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("updating %s: %s", m.rigPath, strings.TrimSpace(string(output)))
+		rigPath := filepath.Join(ctx.TownRoot, m.rigPath)
+		beadsDir := beads.ResolveBeadsDir(rigPath)
+		database := readBeadsDoltDatabase(beadsDir)
+		if database == "" {
+			// Fall back to the rig name (first path component); matches the
+			// database naming used by rig initialization.
+			database = strings.SplitN(m.rigPath, "/", 2)[0]
+		}
+		if err := setter(ctx.TownRoot, beadsDir, database, m.routesPrefix); err != nil {
+			errs = append(errs, fmt.Errorf("updating %s: %w", m.rigPath, err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }

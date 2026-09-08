@@ -4,6 +4,7 @@ package doctor
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/ui"
@@ -197,14 +198,16 @@ func (r *Report) PrintSummaryOnly(w io.Writer, verbose bool, slowThreshold time.
 	// Print warnings/errors section with fixes
 	r.printWarningsSection(w, warnings)
 
-	// Print details for non-OK checks in verbose mode
-	if verbose && len(warnings) > 0 {
-		for _, check := range warnings {
-			if len(check.Details) > 0 {
-				for _, detail := range check.Details {
-					_, _ = fmt.Fprintf(w, "     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(detail))
-				}
+	// Print details for non-OK checks. Full details are verbose-only, but
+	// "Fix failed:" details are ALWAYS shown — a failed fix that only surfaces
+	// under --verbose looks like a silent no-op and hides the real error
+	// (gt-8po: agent-bead creation failures were invisible in default output).
+	for _, check := range warnings {
+		for _, detail := range check.Details {
+			if !verbose && !strings.HasPrefix(detail, "Fix failed:") {
+				continue
 			}
+			_, _ = fmt.Fprintf(w, "     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(detail))
 		}
 	}
 }

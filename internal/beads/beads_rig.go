@@ -169,6 +169,17 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 	}
 
 	out, err := b.run(args...)
+	if err != nil && strings.Contains(err.Error(), "invalid issue type") {
+		// The database rejected type=rig even though EnsureCustomTypes reported
+		// types configured: a stale .gt-types-configured sentinel can cache a
+		// lie when an older gt wrote type config to the wrong target (gt-8po).
+		// Invalidate the cache, re-configure against the database, retry once.
+		InvalidateTypeConfigCache(b.getResolvedBeadsDir())
+		if typesErr := EnsureCustomTypes(b.getResolvedBeadsDir()); typesErr != nil {
+			return nil, fmt.Errorf("re-ensuring rig bead types after invalid-type error: %w (create error: %v)", typesErr, err)
+		}
+		out, err = b.run(args...)
+	}
 	if err != nil {
 		return nil, err
 	}
