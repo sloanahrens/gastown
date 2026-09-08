@@ -351,8 +351,10 @@ if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
   log ""
   log "Mass-death candidate threshold reached ($TOTAL_ISSUES); re-checking live health before escalation"
   confirm_polecat_outages
-  CRASHED=("${CONFIRMED_CRASHED[@]}")
-  STUCK=("${CONFIRMED_STUCK[@]}")
+  # `${arr[@]+"${arr[@]}"}`: bash 3.2 (macOS) treats "${arr[@]}" on an empty
+  # array as unbound under `set -u`, aborting the script mid-recheck (gt-6j9).
+  CRASHED=(${CONFIRMED_CRASHED[@]+"${CONFIRMED_CRASHED[@]}"})
+  STUCK=(${CONFIRMED_STUCK[@]+"${CONFIRMED_STUCK[@]}"})
   CONFIRMED_TOTAL=$(( ${#CRASHED[@]} + ${#STUCK[@]} ))
 
   if [ "$CONFIRMED_TOTAL" -ge "$MASS_DEATH_THRESHOLD" ]; then
