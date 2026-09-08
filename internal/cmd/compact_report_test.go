@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -547,6 +549,105 @@ func TestExtractBeadID(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// weeklyRollupIdempotencyBdStub writes a fake `bd` that mimics the real CLI's
+// default status filter: the closed weekly rollup audit bead is returned ONLY
+// when the list query filters by closed status (or asks for all statuses).
+// The rollup bead is auto-closed right after creation, so a lookup without a
+// status filter never sees it — the exact failure behind gt-9t9 (duplicate
+// weekly rollup sent same day).
+func weeklyRollupIdempotencyBdStub(t *testing.T, rollupID, rollupTitle string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
+
+	bdScript := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$BD_ARGS_LOG"
+case "$1" in
+  list)
+    case "$*" in
+      *--status=closed*|*--status=all*|*--all*)
+        printf '%%s\n' '[{"id":"%s","title":"%s","status":"closed"}]'
+        ;;
+      *)
+        printf '[]\n'
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 1
+    ;;
+esac
+`, rollupID, rollupTitle)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", argsLog)
+	return argsLog
+}
+
+func TestFindExistingWeeklyRollupFindsClosedRollup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	weeklyRollupIdempotencyBdStub(t, "hq-roll",
+		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
+
+	id, err := findExistingWeeklyRollup("2026-09-01", "2026-09-08")
+	if err != nil {
+		t.Fatalf("findExistingWeeklyRollup: %v", err)
+	}
+	if id != "hq-roll" {
+		t.Fatalf("id = %q, want %q (closed rollup bead must be visible to the idempotency check)", id, "hq-roll")
+	}
+}
+
+func TestRunWeeklyRollupSkipsWhenAlreadySentSameDay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	now := time.Now().UTC()
+	weekEnd := now.Format("2006-01-02")
+	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
+	title := fmt.Sprintf("Weekly Compaction Rollup %s to %s", weekStart, weekEnd)
+
+	argsLog := weeklyRollupIdempotencyBdStub(t, "hq-roll", title)
+
+	// A `gt` on PATH that records mail; the skip path must never send any.
+	binDir := t.TempDir()
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "mail" ]; then
+  echo "$*" >> "$MAIL_LOG"
+  exit 0
+fi
+echo "unexpected gt command: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MAIL_LOG", mailLog)
+	resetCompactReportFlags(t)
+
+	if err := runWeeklyRollup(); err != nil {
+		t.Fatalf("runWeeklyRollup: %v", err)
+	}
+
+	assertNoMailSent(t, mailLog)
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if strings.Contains(string(args), "create") {
+		t.Fatalf("bd create was called despite existing rollup: %s", string(args))
 	}
 }
 
