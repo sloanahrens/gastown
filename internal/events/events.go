@@ -70,6 +70,11 @@ const (
 	TypeMergeFailed  = "merge_failed"
 	TypeMergeSkipped = "merge_skipped"
 
+	// Destructive Dolt cleanup audit events (gt-87a). Intent is written before
+	// the first DROP so a crash mid-cleanup still leaves a durable record.
+	TypeDoltCleanupIntent = "dolt_cleanup_intent" // Forced cleanup about to remove databases
+	TypeDoltCleanupDone   = "dolt_cleanup_done"   // Forced cleanup finished (even if 0 removed)
+
 	// Scheduler events
 	TypeSchedulerEnqueue        = "scheduler_enqueue"         // Bead scheduled for deferred dispatch
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
