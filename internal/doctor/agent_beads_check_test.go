@@ -285,6 +285,182 @@ esac
 	}
 }
 
+// writeTownDuplicateBdScript installs a fake bd that reports rig-prefixed
+// agent beads as existing in the TOWN database only (list run from the town
+// .beads dir returns them; list run from the rig dir returns nothing). It
+// logs create/update calls to logFile. Used to reproduce gt-abj: a rig agent
+// bead that exists only in the town DB must still be treated as missing
+// rig-locally.
+func writeTownDuplicateBdScript(t *testing.T, tmpDir, logFile string) {
+	t.Helper()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+logfile="` + logFile + `"
+
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --allow-stale ]]; then
+    continue
+  fi
+  args+=("$arg")
+done
+
+cmd=""
+idx=0
+for i in "${!args[@]}"; do
+  if [[ "${args[$i]}" != -* ]]; then
+    cmd="${args[$i]}"
+    idx=$i
+    break
+  fi
+done
+
+if [[ -z "$cmd" ]]; then
+  exit 0
+fi
+
+rest=("${args[@]:$((idx + 1))}")
+
+case "$cmd" in
+  list)
+    # Town DB (workdir is the town .beads dir) holds duplicates of the
+    # rig-scoped agent beads; the rig DB has none.
+    if [[ "$PWD" == */.beads ]]; then
+      printf '[{"id":"gs-gastown-witness","title":"Witness","status":"open","labels":["gt:agent"]},{"id":"gs-gastown-refinery","title":"Refinery","status":"open","labels":["gt:agent"]},{"id":"hq-deacon","title":"Deacon","status":"open","labels":["gt:agent"]},{"id":"hq-mayor","title":"Mayor","status":"open","labels":["gt:agent"]}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  mol)
+    if [[ "${rest[0]:-}" == "wisp" && "${rest[1]:-}" == "list" ]]; then
+      printf '{"wisps":[]}\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  show)
+    exit 1
+    ;;
+  create)
+    id=""
+    title=""
+    for arg in "${rest[@]}"; do
+      case "$arg" in
+        --id=*) id="${arg#--id=}" ;;
+        --title=*) title="${arg#--title=}" ;;
+      esac
+    done
+    printf 'create %s\n' "$id" >> "$logfile"
+    printf '{"id":"%s","title":"%s","status":"open","labels":["gt:agent"]}\n' "$id" "$title"
+    ;;
+  update)
+    if [[ ${#rest[@]} -gt 0 ]]; then
+      printf 'update %s\n' "${rest[0]}" >> "$logfile"
+    fi
+    printf '{}\n'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+}
+
+// setupTownDuplicateFixture creates routes and rig dirs for the gt-abj
+// reproduction: one rig ("gastown", prefix gs-) whose agent beads exist only
+// in the town database.
+func setupTownDuplicateFixture(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gs-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return tmpDir
+}
+
+// TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing verifies that Run reports
+// a rig-scoped agent bead as missing when it exists only in the town database.
+// Patrol commands (gt agents resolve --rig) require rig-local agent beads, so
+// a town-level duplicate must not satisfy the existence check. See gt-abj.
+func TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing(t *testing.T) {
+	tmpDir := setupTownDuplicateFixture(t)
+	logFile := filepath.Join(tmpDir, "bd.log")
+	writeTownDuplicateBdScript(t, tmpDir, logFile)
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+
+	result := check.Run(ctx)
+
+	if result.Status == StatusOK {
+		t.Fatalf("expected town-only rig agent beads to be reported missing, got OK: %s", result.Message)
+	}
+	for _, want := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+		found := false
+		for _, detail := range result.Details {
+			if strings.HasPrefix(detail, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s in missing details, got: %v", want, result.Details)
+		}
+	}
+}
+
+// TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate verifies
+// that Fix creates the rig-local agent bead even when a town-level duplicate
+// exists. Before gt-abj, the merged town+rig map made fixAgentBead return
+// early on the town duplicate, so the rig-local bead was never created and
+// doctor --fix could not repair the patrol hard-block.
+func TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate(t *testing.T) {
+	tmpDir := setupTownDuplicateFixture(t)
+	logFile := filepath.Join(tmpDir, "bd.log")
+	writeTownDuplicateBdScript(t, tmpDir, logFile)
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading fake bd log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{"create gs-gastown-witness", "create gs-gastown-refinery"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("expected Fix() to create rig-local bead (%s) despite town duplicate, got log: %q", want, log)
+		}
+	}
+	// Town agents exist in the town DB — Fix must NOT recreate them.
+	for _, unwanted := range []string{"create hq-deacon", "create hq-mayor"} {
+		if strings.Contains(log, unwanted) {
+			t.Errorf("Fix() should not recreate existing town agent bead (%s), got log: %q", unwanted, log)
+		}
+	}
+}
+
 // TestListCrewWorkers_FiltersWorktrees verifies that listCrewWorkers skips
 // git worktrees (directories where .git is a file) and only returns canonical
 // crew workers (where .git is a directory). This is the fix for GH#2767.
