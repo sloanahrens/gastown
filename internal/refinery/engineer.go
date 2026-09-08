@@ -23,6 +23,8 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -271,7 +273,8 @@ type Engineer struct {
 	mergeSlotRelease      func(holder string) error
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
-	testAllowSyntheticMRs bool          // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
+	recoverDeadWorker     func(deadWorkerRecoveryRequest) bool
+	testAllowSyntheticMRs bool // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -287,7 +290,7 @@ func NewEngineer(r *rig.Rig) *Engineer {
 	}
 	beadsClient := beads.New(r.Path)
 
-	return &Engineer{
+	e := &Engineer{
 		rig:     r,
 		beads:   beadsClient,
 		git:     git.NewGit(gitDir),
@@ -307,6 +310,18 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotMaxRetries:   10,
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
+	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		sessionAlive := func(polecatName string) (bool, error) {
+			t := tmux.NewTmux()
+			return t.HasSession(session.PolecatSessionName(session.PrefixFor(r.Name), polecatName))
+		}
+		var send func(*mail.Message) error
+		if e.router != nil {
+			send = e.router.Send
+		}
+		return recoverRejectedMRDeadWorker(e.beads, sessionAlive, send, e.output, req)
+	}
+	return e
 }
 
 // SetOutput sets the output writer for user-facing messages.
@@ -1643,6 +1658,26 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	mayorCmd.Dir = e.workDir
 	if err := mayorCmd.Run(); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about merge failure: %v\n", err)
+	}
+
+	// gt-tc0: a transient polecat exits at gt done and its source bead is
+	// closed, so the nudge above lands nowhere when the session is gone —
+	// the MR would just re-queue and re-gate the unchanged branch forever.
+	// If the worker has no live session, hand the source bead to the deacon
+	// redispatch pipeline so the work actually resumes. Conflicts are
+	// excluded: they already get a dispatchable conflict-resolution task.
+	if !result.Conflict && e.recoverDeadWorker != nil {
+		e.recoverDeadWorker(deadWorkerRecoveryRequest{
+			MRID:          mr.ID,
+			Branch:        mr.Branch,
+			Target:        mr.Target,
+			SourceIssue:   mr.SourceIssue,
+			Worker:        mr.Worker,
+			RigName:       e.rig.Name,
+			FailureType:   failureType,
+			ErrorMsg:      result.Error,
+			AttemptNumber: mr.RetryCount + 1,
+		})
 	}
 
 	// If this was a conflict, create a conflict-resolution task for dispatch

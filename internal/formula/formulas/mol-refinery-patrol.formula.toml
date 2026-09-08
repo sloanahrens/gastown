@@ -565,13 +565,48 @@ If any check or test FAILED:
      Attempt-Number: <N>
      BODY
      ```
-   - **Update the bead** with failure details so they survive session death:
+   - **Update the bead** with failure details so they survive session death.
+     Use the exact "MERGE REJECTION" vocabulary and include the branch —
+     the polecat resume path (mol-polecat-work) greps notes for this marker
+     and the branch name to make a targeted fix on the surviving branch:
      ```bash
-     bd update <issue-id> --notes "Merge failure (attempt <N>): <failure-type> - <error summary>"
+     bd update <issue-id> --notes "MERGE REJECTION (attempt <N>): <failure-type> - <error summary>
+     Branch: <branch>
+     Target: <target-branch>
+     MR: <mr-bead-id>"
      ```
-   - **Do NOT close the MR bead** — the polecat will resubmit
-   - **Do NOT delete the branch** — the polecat needs it for the fix
-   - **Do NOT reopen the source issue** — the polecat is still working on it
+   - **Check whether the polecat is still alive** (gt-tc0 — transient
+     polecats exit at `gt done` and their source bead is closed, so
+     FIX_NEEDED mail to a dead polecat is never read and the MR would
+     re-queue forever while the fix never happens):
+     ```bash
+     gt session status <rig>/<polecat-name> --json   # check .running
+     ```
+     **If running is false (or the session does not exist):**
+     1. Reopen the source bead so it is dispatchable:
+        ```bash
+        bd update <issue-id> --status=open --assignee=
+        ```
+     2. Hand it to the deacon redispatch pipeline (cooldown + attempt
+        limits are enforced there):
+        ```bash
+        gt mail send deacon/ -s "RECOVERED_BEAD <issue-id>" -m "Merge rejection with no live worker (transient polecat).
+
+        Bead: <issue-id>
+        Polecat: <rig>/polecats/<polecat-name>
+        MR: <mr-bead-id>
+        Branch: <branch>
+        Failure-Type: <failure-type>
+
+        Source bead reopened with MERGE REJECTION notes. Please re-dispatch.
+        The branch survives on origin; the next polecat can resume it."
+        ```
+     The redispatched polecat reads the MERGE REJECTION note, checks out
+     the existing branch, and fixes forward.
+   - **Do NOT close the MR bead** — the fix will be resubmitted
+   - **Do NOT delete the branch** — the next session needs it for the fix
+   - **Do NOT reopen the source issue when the polecat is ALIVE** — it is
+     still working on it (reopen ONLY in the dead-polecat case above)
    - **Do NOT send MERGE_FAILED to witness** — FIX_NEEDED goes to polecat directly
    - Clean up temp branch and skip to loop-check:
      ```bash
@@ -593,7 +628,8 @@ If any check or test FAILED:
 
 **FIX_NEEDED CHECKLIST** (all required before skipping to loop-check):
 - [ ] FIX_NEEDED sent to polecat (with failure details)
-- [ ] Bead updated with failure notes
+- [ ] Bead updated with MERGE REJECTION notes (marker + branch)
+- [ ] Polecat liveness checked; if dead → bead reopened + RECOVERED_BEAD sent to deacon
 - [ ] Temp branch cleaned up (NOT the polecat branch!)
 - [ ] MERGE_READY message archived
 
