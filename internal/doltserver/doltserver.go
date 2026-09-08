@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -3702,9 +3703,16 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	// Merge routes.jsonl (routes) and rigs.json (prefixes); rigs.json wins on
 	// conflict. Rigs where db-name == rig-dir-name are not in this map and fall
 	// through to the default behavior (rigName = dbName).
+	//
+	// rigCanonical inverts the rigs.json prefix map (rig -> canonical DB name).
+	// rigs.json is authoritative: when both a stale alias (e.g. "beads") and
+	// the canonical database ("be") exist, candidate selection must converge on
+	// the canonical name rather than preserving the stale one. (gt-ddb)
 	dbToRig := buildDatabaseToRigMap(townRoot)
+	rigCanonical := make(map[string]string)
 	for k, v := range buildRigPrefixMap(townRoot) {
 		dbToRig[k] = v
+		rigCanonical[v] = k
 	}
 
 	// Group candidate database names by rig. When routes.jsonl and rigs.json
@@ -3726,11 +3734,17 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 
 	for rigName, candidates := range rigCandidates {
 		// When multiple databases map to the same rig, choose one effective
-		// DB name: prefer whatever is already in metadata.json (if it's among
-		// the valid candidates) to avoid spurious mismatch warnings. Fall back
-		// to the first candidate (alphabetical, from os.ReadDir ordering).
+		// DB name. Authority order:
+		//   1. The canonical name declared in rigs.json, when that database
+		//      exists — a stale alias left behind by a migration must not win
+		//      just because metadata.json still points at it. (gt-ddb)
+		//   2. Whatever is already in metadata.json (if it's among the valid
+		//      candidates), to avoid oscillating between aliases. (gas-ar0)
+		//   3. The first candidate (alphabetical, from os.ReadDir ordering).
 		dbName := candidates[0]
-		if len(candidates) > 1 {
+		if canonical, ok := rigCanonical[rigName]; ok && slices.Contains(candidates, canonical) {
+			dbName = canonical
+		} else if len(candidates) > 1 {
 			dbName = pickDBForRig(townRoot, rigName, candidates)
 		}
 		// Pass dbName explicitly so EnsureMetadata writes the correct
