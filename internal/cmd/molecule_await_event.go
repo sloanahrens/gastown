@@ -18,6 +18,7 @@ import (
 
 var (
 	awaitEventChannel              string
+	awaitEventRig                  string
 	awaitEventTimeout              string
 	awaitEventBackoffBase          string
 	awaitEventBackoffMult          int
@@ -44,8 +45,14 @@ Channels are single-consumer: only one process should watch a given channel
 at a time. If multiple consumers watch the same channel with --cleanup,
 events may be deleted before all consumers read them.
 
+Per-rig channels ("refinery", "witness") have one consumer per rig, so each
+rig watches its own subdirectory ~/gt/events/<channel>/<rig>/. The rig comes
+from --rig, the GT_RIG environment variable, or the rig containing the
+current directory; awaiting on a per-rig channel with no rig context is an
+error. Town-global channels (e.g. "mayor") ignore the rig.
+
 EVENT FORMAT:
-Events are JSON files in ~/gt/events/<channel>/*.event:
+Events are JSON files in ~/gt/events/<channel>[/<rig>]/*.event:
   {"type": "...", "channel": "...", "timestamp": "...", "payload": {...}}
 
 BEHAVIOR:
@@ -113,6 +120,8 @@ type EventFile struct {
 func init() {
 	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventChannel, "channel", "",
 		"Event channel name (required, e.g., 'refinery')")
+	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventRig, "rig", "",
+		"Rig scope for per-rig channels (default: GT_RIG or rig containing cwd)")
 	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventTimeout, "timeout", "60s",
 		"Maximum time to wait for event (e.g., 30s, 5m, 10m)")
 	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventBackoffBase, "backoff-base", "",
@@ -149,7 +158,19 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		home, _ := os.UserHomeDir()
 		townRoot = filepath.Join(home, "gt")
 	}
-	eventDir := filepath.Join(townRoot, "events", awaitEventChannel)
+
+	// Per-rig channels are watched at events/<channel>/<rig>/ so this
+	// consumer never sees (or deletes) another rig's wake events (gt-dsj).
+	rigName := resolveEventRig(townRoot, awaitEventRig)
+	if channelevents.IsPerRig(awaitEventChannel) {
+		if rigName == "" {
+			return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", awaitEventChannel)
+		}
+		if !validChannelName.MatchString(rigName) {
+			return fmt.Errorf("invalid rig name %q: must match [a-zA-Z0-9_-]", rigName)
+		}
+	}
+	eventDir := channelevents.Dir(townRoot, awaitEventChannel, rigName)
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return fmt.Errorf("creating event directory: %w", err)
 	}

@@ -342,7 +342,7 @@ func notifyRefineryMergeReady(workDir, rigName string, result *HandlerResult) {
 	townRoot, _ := workspace.Find(workDir)
 	// Emit file-based event so refinery's await-event unblocks instantly.
 	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "refinery", "MERGE_READY", []string{
+		_, _ = channelevents.EmitToTown(townRoot, "refinery", rigName, "MERGE_READY", []string{
 			"source=witness",
 			"rig=" + rigName,
 		})
@@ -890,7 +890,7 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	if exitType != string(ExitTypeCompleted) {
 		decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 		if !decision.Reusable {
-			_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
+			_, _ = channelevents.EmitToTown(townRoot, "mayor", "", "SLOT_BLOCKED", []string{
 				"source=witness",
 				"rig=" + rigName,
 				"polecat=" + polecatName,
@@ -906,7 +906,7 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	}
 	decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 	if !decision.Reusable {
-		_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
+		_, _ = channelevents.EmitToTown(townRoot, "mayor", "", "SLOT_BLOCKED", []string{
 			"source=witness",
 			"rig=" + rigName,
 			"polecat=" + polecatName,
@@ -933,7 +933,7 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	}
 
 	// Emit SLOT_OPEN channel event so Mayor's await-event unblocks instantly.
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_OPEN", []string{
+	_, _ = channelevents.EmitToTown(townRoot, "mayor", "", "SLOT_OPEN", []string{
 		"source=witness",
 		"rig=" + rigName,
 		"polecat=" + polecatName,
@@ -973,7 +973,7 @@ func schedulerStatusAfterSlot(result slotOpenSchedulerResult) slotOpenSchedulerS
 }
 
 func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SCHEDULER_OPEN", []string{
+	_, _ = channelevents.EmitToTown(townRoot, "mayor", "", "SCHEDULER_OPEN", []string{
 		"source=witness",
 		"rig=" + rigName,
 		"polecat=" + polecatName,

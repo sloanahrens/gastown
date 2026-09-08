@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cross-rig event theft on refinery/witness channels** (gt-dsj) — the
+  `refinery` and `witness` event channels were town-global directories
+  (`~/gt/events/<channel>/`) but every rig's agent consumed them with
+  `--cleanup`, so one rig's consumer could delete another rig's wake events
+  (observed: beads/refinery ate om's MQ_SUBMIT wake, stalling om's merge
+  queue until backoff cap). These channels are now per-rig: events live in
+  `~/gt/events/<channel>/<rig>/`, with the channel→scope mapping owned by
+  the `channelevents` package so emitters and `await-event` always agree.
+  `emit-event`/`await-event` gained a `--rig` flag (defaults to `GT_RIG` or
+  the rig containing the cwd); per-rig channels fail loudly when no rig
+  context can be resolved. The daemon's refinery spawn gate now checks only
+  the rig's own event directory. Town-global channels (e.g. `mayor`) are
+  unchanged.
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed

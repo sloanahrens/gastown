@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/channelevents"
 )
 
 func TestCalculateEventTimeout(t *testing.T) {
@@ -703,5 +705,173 @@ func TestEventFileStruct(t *testing.T) {
 	}
 	if parsed["type"] != "MQ_SUBMIT" {
 		t.Errorf("type = %v, want MQ_SUBMIT", parsed["type"])
+	}
+}
+
+// setupAwaitEventVars saves the await-event flag globals, installs the given
+// values, and restores the originals on cleanup.
+func setupAwaitEventVars(t *testing.T, channel, rig, timeout string, cleanup bool) {
+	t.Helper()
+	oldChannel := awaitEventChannel
+	oldRig := awaitEventRig
+	oldTimeout := awaitEventTimeout
+	oldBackoffBase := awaitEventBackoffBase
+	oldBackoffMax := awaitEventBackoffMax
+	oldQuiet := awaitEventQuiet
+	oldAgentBead := awaitEventAgentBead
+	oldCleanup := awaitEventCleanup
+	oldContextCheck := awaitEventContextCheckInterval
+	oldJSON := moleculeJSON
+	t.Cleanup(func() {
+		awaitEventChannel = oldChannel
+		awaitEventRig = oldRig
+		awaitEventTimeout = oldTimeout
+		awaitEventBackoffBase = oldBackoffBase
+		awaitEventBackoffMax = oldBackoffMax
+		awaitEventQuiet = oldQuiet
+		awaitEventAgentBead = oldAgentBead
+		awaitEventCleanup = oldCleanup
+		awaitEventContextCheckInterval = oldContextCheck
+		moleculeJSON = oldJSON
+	})
+	awaitEventChannel = channel
+	awaitEventRig = rig
+	awaitEventTimeout = timeout
+	awaitEventBackoffBase = ""
+	awaitEventBackoffMax = ""
+	awaitEventQuiet = true
+	awaitEventAgentBead = ""
+	awaitEventCleanup = cleanup
+	awaitEventContextCheckInterval = ""
+	moleculeJSON = false
+}
+
+// makeTestTownRoot creates a temp town root with the workspace marker and
+// chdirs into it.
+func makeTestTownRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	t.Chdir(root)
+	return root
+}
+
+func TestAwaitEventPerRigChannelConsumesOnlyOwnRig(t *testing.T) {
+	root := makeTestTownRoot(t)
+	t.Setenv("GT_RIG", "")
+
+	// Pre-populate events for two rigs on the per-rig refinery channel.
+	if _, err := channelevents.EmitToTown(root, "refinery", "riga", "MQ_SUBMIT", nil); err != nil {
+		t.Fatalf("emit riga: %v", err)
+	}
+	if _, err := channelevents.EmitToTown(root, "refinery", "rigb", "MERGE_READY", nil); err != nil {
+		t.Fatalf("emit rigb: %v", err)
+	}
+
+	setupAwaitEventVars(t, "refinery", "riga", "2s", true)
+	if err := runMoleculeAwaitEvent(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitEvent: %v", err)
+	}
+
+	// riga's event was consumed and cleaned up.
+	rigaEvents, err := filepath.Glob(filepath.Join(root, "events", "refinery", "riga", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rigaEvents) != 0 {
+		t.Errorf("expected riga events consumed, found %v", rigaEvents)
+	}
+
+	// rigb's event must be untouched — this is the cross-rig theft fix (gt-dsj).
+	rigbEvents, err := filepath.Glob(filepath.Join(root, "events", "refinery", "rigb", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rigbEvents) != 1 {
+		t.Errorf("expected rigb event untouched, found %d files", len(rigbEvents))
+	}
+}
+
+func TestAwaitEventPerRigChannelRequiresRigContext(t *testing.T) {
+	makeTestTownRoot(t)
+	t.Setenv("GT_RIG", "")
+
+	setupAwaitEventVars(t, "refinery", "", "100ms", false)
+	err := runMoleculeAwaitEvent(nil, nil)
+	if err == nil {
+		t.Fatal("expected error awaiting on per-rig channel without rig context")
+	}
+	if !strings.Contains(err.Error(), "per-rig") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestAwaitEventPerRigChannelUsesGTRigEnv(t *testing.T) {
+	root := makeTestTownRoot(t)
+	t.Setenv("GT_RIG", "envrig")
+
+	if _, err := channelevents.EmitToTown(root, "witness", "envrig", "POLECAT_DONE", nil); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	setupAwaitEventVars(t, "witness", "", "2s", true)
+	if err := runMoleculeAwaitEvent(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitEvent: %v", err)
+	}
+
+	events, err := filepath.Glob(filepath.Join(root, "events", "witness", "envrig", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected envrig event consumed via GT_RIG inference, found %v", events)
+	}
+}
+
+func TestResolveEventRig(t *testing.T) {
+	root := makeTestTownRoot(t)
+
+	t.Setenv("GT_RIG", "")
+	if got := resolveEventRig(root, "explicit"); got != "explicit" {
+		t.Errorf("explicit flag: got %q, want explicit", got)
+	}
+
+	t.Setenv("GT_RIG", "fromenv")
+	if got := resolveEventRig(root, ""); got != "fromenv" {
+		t.Errorf("GT_RIG env: got %q, want fromenv", got)
+	}
+	if got := resolveEventRig(root, "explicit"); got != "explicit" {
+		t.Errorf("flag beats env: got %q, want explicit", got)
+	}
+
+	// No flag, no env, cwd is the town root (no rig component) -> "".
+	t.Setenv("GT_RIG", "")
+	if got := resolveEventRig(root, ""); got != "" {
+		t.Errorf("town root cwd: got %q, want empty", got)
+	}
+
+	// cwd inside a registered rig resolves to that rig.
+	rigsJSON := `{"version":1,"rigs":{"myrig":{"git_url":"https://example.com/repo.git","added_at":"2026-01-01T00:00:00Z"}}}`
+	if err := os.WriteFile(filepath.Join(root, "mayor", "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(root, "myrig", "refinery")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(rigDir)
+	if got := resolveEventRig(root, ""); got != "myrig" {
+		t.Errorf("rig cwd: got %q, want myrig", got)
+	}
+
+	// cwd inside a town-level dir (not a registered rig) -> "".
+	t.Chdir(filepath.Join(root, "mayor"))
+	if got := resolveEventRig(root, ""); got != "" {
+		t.Errorf("non-rig cwd: got %q, want empty", got)
 	}
 }
