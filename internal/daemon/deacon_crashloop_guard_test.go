@@ -107,3 +107,45 @@ func TestCheckDeaconHeartbeat_RespectsCrashLoopGuard(t *testing.T) {
 		t.Fatalf("kill-session count = %d, want 0 while crash-loop guard is active", kills)
 	}
 }
+
+// Regression test for gt-ayx: a healthy Deacon (fresh heartbeat, advancing
+// cycles) must have its crash-loop flag auto-cleared instead of staying
+// flagged until a human runs 'gt daemon clear-backoff'.
+func TestCheckDeaconHeartbeat_AutoClearsOnSustainedRecovery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+	townRoot := t.TempDir()
+	fakeBinDir := t.TempDir()
+	writeFakeTmuxCrashLoop(t, fakeBinDir)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := deacon.WriteHeartbeat(townRoot, &deacon.Heartbeat{
+		Timestamp: time.Now(),
+		Cycle:     58,
+	}); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+
+	rt := NewRestartTracker(townRoot, RestartTrackerConfig{
+		CrashLoopRecoveryWindow: 10 * time.Minute,
+	})
+	rt.state.Agents["deacon"] = &AgentRestartInfo{
+		CrashLoopSince:    time.Now().Add(-30 * time.Minute),
+		RecoverySince:     time.Now().Add(-11 * time.Minute),
+		RecoveryLastCycle: 52,
+	}
+
+	d := &Daemon{
+		config:         &Config{TownRoot: townRoot},
+		logger:         log.New(io.Discard, "", 0),
+		tmux:           tmux.NewTmux(),
+		restartTracker: rt,
+	}
+
+	d.checkDeaconHeartbeat()
+
+	if rt.IsInCrashLoop("deacon") {
+		t.Fatal("crash loop was not auto-cleared after sustained recovery")
+	}
+}
