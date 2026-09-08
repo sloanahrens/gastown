@@ -2273,3 +2273,111 @@ esac
 		t.Errorf("bd init should NOT have --discard-remote without sync.remote; got:\n%s", cmds)
 	}
 }
+
+// setupIdentityRig creates a rig directory with a server-mode metadata.json
+// pointing at the rig-named database, matching the state gt rig add leaves
+// behind after EnsureMetadata.
+func setupIdentityRig(t *testing.T, rigName string) (*Manager, string) {
+	t.Helper()
+	root, rigsConfig := setupTestTown(t)
+	rigPath := filepath.Join(root, rigName)
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","dolt_database":%q}`, rigName)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	return NewManager(root, rigsConfig, git.NewGit(root)), rigPath
+}
+
+// TestVerifyRigIdentityRoundTrip covers gt-79g: metadata.json can name the
+// correct database while that database is uninitialized (issue_prefix missing)
+// or the data actually lives in a prefix-derived orphan. A name-only check
+// passes in that state, so verifyRigIdentity must round-trip through bd —
+// the same read path every agent uses — and confirm the expected prefix.
+func TestVerifyRigIdentityRoundTrip(t *testing.T) {
+	const rigName = "gastown"
+	const prefix = "gt"
+
+	t.Run("healthy database round-trips", func(t *testing.T) {
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"config\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"issue_prefix\" ]; then\n" +
+			"  echo \"gt\"\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"exit 0\n"
+		windowsScript := "@echo off\r\nif \"%1 %2 %3\"==\"config get issue_prefix\" (\r\n  echo gt\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+		binDir := writeFakeBD(t, script, windowsScript)
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
+			t.Errorf("verifyRigIdentity = %v, want nil", err)
+		}
+	})
+
+	t.Run("uninitialized database fails round-trip", func(t *testing.T) {
+		script := "#!/bin/sh\n" +
+			"echo \"Error: database not initialized: issue_prefix missing\" >&2\n" +
+			"exit 1\n"
+		windowsScript := "@echo off\r\necho Error: database not initialized: issue_prefix missing 1>&2\r\nexit /b 1\r\n"
+		binDir := writeFakeBD(t, script, windowsScript)
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		err := manager.VerifyRigIdentity(rigPath, rigName, prefix)
+		if err == nil {
+			t.Fatal("verifyRigIdentity = nil, want round-trip error for uninitialized database")
+		}
+		if !strings.Contains(err.Error(), "round-trip") {
+			t.Errorf("error %q should mention round-trip verification", err)
+		}
+		if !strings.Contains(err.Error(), "issue_prefix missing") {
+			t.Errorf("error %q should include bd's output for diagnosis", err)
+		}
+	})
+
+	t.Run("wrong prefix fails round-trip", func(t *testing.T) {
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"config\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"issue_prefix\" ]; then\n" +
+			"  echo \"other\"\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"exit 0\n"
+		windowsScript := "@echo off\r\nif \"%1 %2 %3\"==\"config get issue_prefix\" (\r\n  echo other\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+		binDir := writeFakeBD(t, script, windowsScript)
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		err := manager.VerifyRigIdentity(rigPath, rigName, prefix)
+		if err == nil {
+			t.Fatal("verifyRigIdentity = nil, want error for prefix mismatch")
+		}
+		if !strings.Contains(err.Error(), "other") || !strings.Contains(err.Error(), prefix) {
+			t.Errorf("error %q should name both the actual and expected prefix", err)
+		}
+	})
+
+	t.Run("missing bd skips round-trip", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
+			t.Errorf("verifyRigIdentity = %v, want nil when bd is not installed", err)
+		}
+	})
+
+	t.Run("empty prefix skips round-trip", func(t *testing.T) {
+		script := "#!/bin/sh\nexit 1\n"
+		windowsScript := "@echo off\r\nexit /b 1\r\n"
+		binDir := writeFakeBD(t, script, windowsScript)
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		if err := manager.VerifyRigIdentity(rigPath, rigName, ""); err != nil {
+			t.Errorf("verifyRigIdentity = %v, want nil when no prefix is expected", err)
+		}
+	})
+}

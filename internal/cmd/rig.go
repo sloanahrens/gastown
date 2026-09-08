@@ -1311,6 +1311,14 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	// Post-init identity verification (gt-79g): confirm metadata.json points to
+	// the rig database and that bd can actually read the expected issue_prefix
+	// from it, before identity/agent beads are created against a broken database.
+	if err := mgr.VerifyRigIdentity(rigPath, name, result.BeadsPrefix); err != nil {
+		fmt.Printf("  %s Identity verification warning: %v\n", style.Warning.Render("!"), err)
+		fmt.Printf("  Run 'gt doctor --fix' to repair if needed.\n")
+	}
+
 	// Create rig identity bead if prefix is set
 	if result.BeadsPrefix != "" {
 		mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
