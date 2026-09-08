@@ -573,8 +573,11 @@ func TestConvoyHandler_HTMXAutoRefresh(t *testing.T) {
 	if !strings.Contains(body, "hx-trigger") {
 		t.Error("Response should contain hx-trigger attribute for HTMX")
 	}
-	if !strings.Contains(body, "sse:dashboard-update") {
-		t.Error("Response should contain 'sse:dashboard-update' trigger for SSE")
+	if !strings.Contains(body, "gt:dashboard-update") {
+		t.Error("Response should contain 'gt:dashboard-update' trigger for SSE")
+	}
+	if strings.Contains(body, "sse:dashboard-update") {
+		t.Error("Response must not use 'sse:' prefix — reserved by htmx's SSE extension, breaks binding")
 	}
 	if !strings.Contains(body, "every 30s") {
 		t.Error("Response should contain 'every 30s' polling fallback")
@@ -743,7 +746,7 @@ func TestE2E_Server_FullDashboard(t *testing.T) {
 		{"PR repo", "roxas"},
 		{"Polecats section", "Polecats"},
 		{"Polecat name", "furiosa"},
-		{"HTMX SSE trigger", `hx-trigger="sse:dashboard-update`},
+		{"HTMX SSE trigger", `hx-trigger="gt:dashboard-update`},
 	}
 
 	for _, check := range checks {

@@ -251,6 +251,13 @@ func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 	if !strings.Contains(html, "every 30s") {
 		t.Error("Expected 'every 30s' trigger for auto-refresh")
 	}
+	if !strings.Contains(html, "gt:dashboard-update") {
+		t.Error("Expected 'gt:dashboard-update' SSE trigger for auto-refresh")
+	}
+	if strings.Contains(html, "sse:dashboard-update") {
+		t.Error("hx-trigger must not use 'sse:' prefix — reserved by htmx's SSE extension, " +
+			"binding silently fails without an sse-connect source and dashboard never live-updates")
+	}
 
 	// Verify htmx library is loaded
 	if !strings.Contains(html, "htmx.org") {
