@@ -3894,6 +3894,43 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// findBindingLine returns the bind-key line for key from list-keys output
+// for a single table, or "" if the key is not bound there.
+//
+// tmux 3.7 no longer honors the combined form "list-keys -T <table> <key>"
+// (it silently returns empty output with exit status 0), so callers list the
+// whole table and select the key's line here. This also works on older tmux
+// versions, giving one code path for all.
+//
+// Line format: "bind-key [-r] -T <table> <key> <command...>". Keys with
+// special characters appear backslash-escaped in the output (e.g. \" for "),
+// so both raw and escaped forms of key are matched.
+func findBindingLine(output, table, key string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+2 < len(fields); i++ {
+			if fields[i] != "-T" {
+				continue
+			}
+			if fields[i+1] == table && (fields[i+2] == key || fields[i+2] == `\`+key) {
+				return line
+			}
+			break
+		}
+	}
+	return ""
+}
+
+// lookupKeyBinding returns the raw bind-key line for the given key in the
+// specified key table, or "" if unbound or the query fails.
+func (t *Tmux) lookupKeyBinding(table, key string) string {
+	output, err := t.run("list-keys", "-T", table)
+	if err != nil {
+		return ""
+	}
+	return findBindingLine(output, table, key)
+}
+
 // isGTBinding checks if the given key already has a Gas Town binding.
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession /
 // EnsureBindingsOnSocket calls, preserving the user's original fallback.
@@ -3904,8 +3941,8 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 //  2. Unguarded form (set by EnsureBindingsOnSocket): direct run-shell
 //     invoking "gt agents menu" or "gt feed --window".
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	output := t.lookupKeyBinding(table, key)
+	if output == "" {
 		return false
 	}
 	// Guarded form: if-shell + "gt ".
@@ -3922,8 +3959,8 @@ func (t *Tmux) isGTBinding(table, key string) bool {
 // --client for multi-client support. Older GT bindings without --client cause
 // switch-client to target the wrong client when multiple clients are attached.
 func (t *Tmux) isGTBindingWithClient(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	output := t.lookupKeyBinding(table, key)
+	if output == "" {
 		return false
 	}
 	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") &&
@@ -3934,8 +3971,8 @@ func (t *Tmux) isGTBindingWithClient(table, key string) bool {
 // current prefix pattern. Returns false if the binding is stale (e.g., after
 // gt rig add introduces a new prefix not yet in the grep pattern).
 func (t *Tmux) isGTBindingCurrent(table, key, currentPattern string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	output := t.lookupKeyBinding(table, key)
+	if output == "" {
 		return false
 	}
 	return strings.Contains(output, currentPattern)
@@ -3953,16 +3990,16 @@ func (t *Tmux) isGTBindingCurrent(table, key, currentPattern string) bool {
 // the presence of both "if-shell" and "gt " in the output), it is treated as
 // no prior binding to avoid recursive wrapping on repeated calls.
 func (t *Tmux) getKeyBinding(table, key string) string {
-	// tmux list-keys -T <table> <key> outputs a line like:
+	// lookupKeyBinding returns a line like:
 	//   bind-key -T prefix g if-shell "..." "run-shell 'gt agents menu'" ":"
 	// We need to extract just the command portion.
 	//
-	// Assumed format (tested with tmux 3.3+):
+	// Assumed format (tested with tmux 3.3+ and 3.7):
 	//   bind-key [-r] -T <table> <key> <command...>
 	// If tmux changes this format, parsing fails safely (returns ""),
 	// which causes the caller to use its default fallback.
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	output := t.lookupKeyBinding(table, key)
+	if output == "" {
 		return ""
 	}
 

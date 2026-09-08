@@ -84,10 +84,9 @@ func TestSetCycleBindings_RefreshesStalePattern(t *testing.T) {
 
 	// Verify the binding was updated with the current pattern
 	currentPattern := sessionPrefixPattern()
-	output, err := tm.run("list-keys", "-T", "prefix", "n")
-	if err != nil {
-		t.Fatalf("listing keys: %v", err)
-	}
+	// (tmux 3.7 no longer honors "list-keys -T <table> <key>", so use the
+	// same lookup helper production code uses.)
+	output := tm.lookupKeyBinding("prefix", "n")
 	if !strings.Contains(output, currentPattern) {
 		t.Errorf("expected binding to contain current pattern %q, got: %s", currentPattern, output)
 	}
