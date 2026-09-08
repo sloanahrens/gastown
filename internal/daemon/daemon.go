@@ -1468,6 +1468,7 @@ func (d *Daemon) ensureDeaconRunning() {
 	if d.restartTracker != nil {
 		if d.restartTracker.IsInCrashLoop(agentID) {
 			d.logger.Printf("Deacon is in crash loop, skipping restart (use 'gt daemon clear-backoff deacon' to reset)")
+			d.escalateCrashLoopSkip(agentID, "daemon boot loop cannot restart Deacon")
 			return
 		}
 		if !d.restartTracker.CanRestart(agentID) {
@@ -1647,6 +1648,7 @@ func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 		if d.restartTracker.IsInCrashLoop(agentID) {
 			d.logger.Printf("Stuck-agent-dog: Deacon in crash loop, not restarting (use 'gt daemon clear-backoff deacon')")
 			d.notifySlack("admin", "critical", fmt.Sprintf("Deacon crash loop detected — manual intervention required. Reason: %s", reason))
+			d.escalateCrashLoopSkip(agentID, reason)
 			return
 		}
 		if !d.restartTracker.CanRestart(agentID) {

@@ -100,6 +100,12 @@ type AgentRestartInfo struct {
 	RestartCount   int       `json:"restart_count"`
 	BackoffUntil   time.Time `json:"backoff_until"`
 	CrashLoopSince time.Time `json:"crash_loop_since,omitempty"`
+
+	// LastCrashLoopEscalation is when the daemon last escalated this agent's
+	// crash-loop state to the mayor. Persisted so daemon restarts don't
+	// re-escalate immediately, and used to re-escalate on an interval while
+	// the crash loop persists (gt-e7h).
+	LastCrashLoopEscalation time.Time `json:"last_crash_loop_escalation,omitempty"`
 }
 
 // NewRestartTracker creates a new restart tracker with the given config.
@@ -182,6 +188,7 @@ func (rt *RestartTracker) RecordRestart(agentID string) {
 		// Reset backoff - agent was stable
 		info.RestartCount = 0
 		info.CrashLoopSince = time.Time{}
+		info.LastCrashLoopEscalation = time.Time{}
 	}
 
 	info.LastRestart = now
@@ -245,6 +252,7 @@ func (rt *RestartTracker) RecordSuccess(agentID string) {
 		info.RestartCount = 0
 		info.CrashLoopSince = time.Time{}
 		info.BackoffUntil = time.Time{}
+		info.LastCrashLoopEscalation = time.Time{}
 	}
 }
 
@@ -258,6 +266,28 @@ func (rt *RestartTracker) IsInCrashLoop(agentID string) bool {
 		return false
 	}
 	return !info.CrashLoopSince.IsZero()
+}
+
+// ShouldEscalateCrashLoop reports whether the agent's crash-loop state should
+// be escalated now, and if so records the escalation timestamp. Returns true
+// on the first check after the agent enters crash-loop state and again each
+// time the interval elapses while the state persists. Callers should Save()
+// after a true return so the timestamp survives daemon restarts.
+func (rt *RestartTracker) ShouldEscalateCrashLoop(agentID string, interval time.Duration) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	info, exists := rt.state.Agents[agentID]
+	if !exists || info.CrashLoopSince.IsZero() {
+		return false
+	}
+
+	now := time.Now()
+	if !info.LastCrashLoopEscalation.IsZero() && now.Sub(info.LastCrashLoopEscalation) < interval {
+		return false
+	}
+	info.LastCrashLoopEscalation = now
+	return true
 }
 
 // GetBackoffRemaining returns how long until the agent can be restarted.
@@ -287,6 +317,7 @@ func (rt *RestartTracker) ClearCrashLoop(agentID string) {
 		info.CrashLoopSince = time.Time{}
 		info.RestartCount = 0
 		info.BackoffUntil = time.Time{}
+		info.LastCrashLoopEscalation = time.Time{}
 	}
 }
 
