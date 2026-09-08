@@ -177,6 +177,13 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		return nil, fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry for the workdir so unattended
+	// sessions in fresh worktrees never stall on the trust dialog (gt-22r).
+	// Non-fatal: AcceptStartupDialogs remains the in-pane backstop.
+	if err := runtime.EnsureWorkspaceTrust(cfg.WorkDir, cfg.RuntimeConfigDir, runtimeConfig); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: seeding workspace trust for %s: %v\n", cfg.WorkDir, err)
+	}
+
 	// 3. Build startup command if not provided.
 	command := cfg.Command
 	if command == "" {
