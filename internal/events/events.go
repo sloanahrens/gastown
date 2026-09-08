@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -80,18 +81,18 @@ const (
 const EventsFile = ".events.jsonl"
 
 // Log writes an event to the events log.
-// The event is appended to ~/gt/.events.jsonl.
+// The event is appended to <town-root>/.events.jsonl, with the town root
+// resolved from the current working directory. Callers that already know
+// their town root (e.g., the daemon via its config) should use LogTo instead.
 // Returns nil if logging fails (events are best-effort).
 func Log(eventType, actor string, payload map[string]interface{}, visibility string) error {
-	event := Event{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Source:     "gt",
-		Type:       eventType,
-		Actor:      actor,
-		Payload:    payload,
-		Visibility: visibility,
-	}
-	return write(event)
+	return write(newEvent(eventType, actor, payload, visibility))
+}
+
+// LogTo is like Log but writes to an explicitly provided town root instead of
+// resolving one from the current working directory.
+func LogTo(townRoot, eventType, actor string, payload map[string]interface{}, visibility string) error {
+	return writeTo(townRoot, newEvent(eventType, actor, payload, visibility))
 }
 
 // LogFeed is a convenience wrapper for feed-visible events.
@@ -99,19 +100,56 @@ func LogFeed(eventType, actor string, payload map[string]interface{}) error {
 	return Log(eventType, actor, payload, VisibilityFeed)
 }
 
+// LogFeedTo is like LogFeed but writes to an explicitly provided town root.
+func LogFeedTo(townRoot, eventType, actor string, payload map[string]interface{}) error {
+	return LogTo(townRoot, eventType, actor, payload, VisibilityFeed)
+}
+
 // LogAudit is a convenience wrapper for audit-only events.
 func LogAudit(eventType, actor string, payload map[string]interface{}) error {
 	return Log(eventType, actor, payload, VisibilityAudit)
 }
 
-// write appends an event to the events file.
-// Uses flock for cross-process synchronization — sync.Mutex only protects
-// intra-process goroutines, but multiple gt processes write concurrently.
+// LogAuditTo is like LogAudit but writes to an explicitly provided town root.
+func LogAuditTo(townRoot, eventType, actor string, payload map[string]interface{}) error {
+	return LogTo(townRoot, eventType, actor, payload, VisibilityAudit)
+}
+
+func newEvent(eventType, actor string, payload map[string]interface{}, visibility string) Event {
+	return Event{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Source:     "gt",
+		Type:       eventType,
+		Actor:      actor,
+		Payload:    payload,
+		Visibility: visibility,
+	}
+}
+
+// write appends an event to the events file of the town root resolved from
+// the current working directory.
 func write(event Event) error {
-	// Find town root
+	// Test binaries often run with cwd inside a real checkout under the
+	// production town root; resolving from cwd would append fixture events
+	// to the operator's live ~/gt/.events.jsonl (gt-x9o). Tests that want
+	// event output must pass an explicit town root via the *To variants.
+	if testing.Testing() {
+		return nil
+	}
+
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
 		// Silently ignore - we're not in a Gas Town workspace
+		return nil
+	}
+	return writeTo(townRoot, event)
+}
+
+// writeTo appends an event to the events file under the given town root.
+// Uses flock for cross-process synchronization — sync.Mutex only protects
+// intra-process goroutines, but multiple gt processes write concurrently.
+func writeTo(townRoot string, event Event) error {
+	if townRoot == "" {
 		return nil
 	}
 

@@ -2739,7 +2739,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	d.recordSessionDeath(sessionName)
 
 	// Emit session_death event for audit trail / feed visibility
-	_ = events.LogFeed(events.TypeSessionDeath, sessionName,
+	_ = events.LogFeedTo(d.config.TownRoot, events.TypeSessionDeath, sessionName,
 		events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName, "crash detected by daemon health check", "daemon"))
 
 	// Notify witness — stuck-agent-dog plugin handles context-aware restart
@@ -2789,7 +2789,7 @@ func (d *Daemon) emitMassDeathEvent() {
 	d.logger.Printf("MASS DEATH DETECTED: %d sessions died in %s: %v", count, window, sessions)
 
 	// Emit feed event
-	_ = events.LogFeed(events.TypeMassDeath, "daemon",
+	_ = events.LogFeedTo(d.config.TownRoot, events.TypeMassDeath, "daemon",
 		events.MassDeathPayload(count, window, sessions, ""))
 
 	// Clear the deaths to avoid repeated alerts
@@ -3007,7 +3007,7 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 	d.logger.Printf("Reaped idle polecat %s/%s — session killed, API slot freed", rigName, polecatName)
 
 	// Emit feed event so the activity feed shows the reap
-	_ = events.LogFeed(events.TypeSessionDeath, fmt.Sprintf("%s/%s", rigName, polecatName),
+	_ = events.LogFeedTo(d.config.TownRoot, events.TypeSessionDeath, fmt.Sprintf("%s/%s", rigName, polecatName),
 		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
 			fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout),
 			"daemon"))

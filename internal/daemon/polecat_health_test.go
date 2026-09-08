@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -125,9 +126,10 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
+	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
+		config: &Config{TownRoot: townRoot},
 		logger: log.New(&logBuf, "", 0),
 		tmux:   tmux.NewTmux(),
 		bdPath: bdPath,
@@ -138,6 +140,16 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 	got := logBuf.String()
 	if !strings.Contains(got, "CRASH DETECTED") {
 		t.Errorf("expected CRASH DETECTED for working polecat with dead session, got: %q", got)
+	}
+
+	// The session_death event must land in the daemon's configured TownRoot,
+	// not in a town root resolved from the test process's cwd (gt-x9o).
+	eventsData, err := os.ReadFile(filepath.Join(townRoot, events.EventsFile))
+	if err != nil {
+		t.Fatalf("expected session_death event in configured TownRoot: %v", err)
+	}
+	if !strings.Contains(string(eventsData), events.TypeSessionDeath) {
+		t.Errorf("events file missing session_death event: %q", eventsData)
 	}
 }
 
