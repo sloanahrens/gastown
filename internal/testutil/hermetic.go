@@ -129,7 +129,12 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 
 	// Identify the live town BEFORE scrubbing env or redirecting anything.
+	// An outer harness (nested `go test` runs) may have set the forbidden
+	// root already, which blinds FindFromCwd to it — inherit it in that case
+	// so the guard and tripwire survive nesting.
 	if root, err := workspace.FindFromCwd(); err == nil && root != "" {
+		h.RealTownRoot = root
+	} else if root := os.Getenv(workspace.EnvForbiddenTownRoot); root != "" {
 		h.RealTownRoot = root
 	} else if root := os.Getenv("GT_TOWN_ROOT"); root != "" {
 		if ok, _ := workspace.IsWorkspace(root); ok {
@@ -182,6 +187,16 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 		"XDG_STATE_HOME":    filepath.Join(h.HomeDir, ".state"),
 		"GT_TOWN_ROOT":      h.TownRoot,
 		HermeticEnvVar:      "1",
+		// bd auto-starts a dolt sql-server when the configured port is
+		// unreachable; under the harness that would leak server processes
+		// (observed during gt-lwi verification). bd honors this variable.
+		"BEADS_DOLT_AUTO_START": "0",
+	}
+	if h.RealTownRoot != "" {
+		// Workspace resolution (workspace.Find and gt subprocesses) refuses
+		// to resolve to the live town, so cwd walk-up from a package dir
+		// inside it behaves as "no workspace" instead of touching production.
+		setenvs[workspace.EnvForbiddenTownRoot] = h.RealTownRoot
 	}
 	if !externalDolt {
 		setenvs["GT_DOLT_PORT"] = poisonDoltPort
@@ -368,13 +383,18 @@ func HermeticTest(t testing.TB) string {
 	}
 	preserveGoEnv()
 
-	for k, v := range map[string]string{
-		"HOME":              home,
-		"USERPROFILE":       home,
-		"CLAUDE_CONFIG_DIR": claudeDir,
-		"GT_TOWN_ROOT":      town,
-		HermeticEnvVar:      "1",
-	} {
+	testEnvs := map[string]string{
+		"HOME":                  home,
+		"USERPROFILE":           home,
+		"CLAUDE_CONFIG_DIR":     claudeDir,
+		"GT_TOWN_ROOT":          town,
+		HermeticEnvVar:          "1",
+		"BEADS_DOLT_AUTO_START": "0",
+	}
+	if realRoot, err := workspace.FindFromCwd(); err == nil && realRoot != "" {
+		testEnvs[workspace.EnvForbiddenTownRoot] = realRoot
+	}
+	for k, v := range testEnvs {
 		if err := os.Setenv(k, v); err != nil {
 			t.Fatalf("setting %s: %v", k, err)
 		}

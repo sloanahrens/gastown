@@ -6,12 +6,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
 
 // ErrNotFound indicates no workspace was found.
 var ErrNotFound = errors.New("not in a Gas Town workspace")
+
+// EnvForbiddenTownRoot names an environment variable set by the hermetic test
+// harness (internal/testutil) to the live town root the test process is
+// running inside. Workspace resolution refuses to resolve to that root (or
+// anything inside it): test code and gt subprocesses whose cwd walks up into
+// the operator's real town behave as if no workspace were found, instead of
+// mutating production state (gt-lwi). Fixture towns in temp directories are
+// unaffected.
+const EnvForbiddenTownRoot = "GT_TEST_FORBIDDEN_TOWN_ROOT"
+
+// isForbiddenRoot reports whether dir is the harness-forbidden town root or a
+// directory inside it.
+func isForbiddenRoot(dir string) bool {
+	forbidden := os.Getenv(EnvForbiddenTownRoot)
+	if forbidden == "" || dir == "" {
+		return false
+	}
+	if dir == forbidden {
+		return true
+	}
+	return strings.HasPrefix(dir, forbidden+string(filepath.Separator))
+}
 
 // Markers used to detect a Gas Town workspace.
 const (
@@ -54,6 +77,12 @@ func Find(startDir string) (string, error) {
 
 		parent := filepath.Dir(current)
 		if parent == current {
+			if isForbiddenRoot(primaryMatch) || isForbiddenRoot(secondaryMatch) {
+				// Hermetic test harness: the resolved root is (or is inside)
+				// the operator's live town — pretend no workspace was found
+				// rather than let test code mutate production state.
+				return "", nil
+			}
 			if primaryMatch != "" {
 				return primaryMatch, nil
 			}
@@ -143,6 +172,11 @@ func IsWorkspace(dir string) (bool, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return false, fmt.Errorf("resolving path: %w", err)
+	}
+
+	// Hermetic test harness: never acknowledge the operator's live town.
+	if isForbiddenRoot(absDir) {
+		return false, nil
 	}
 
 	// Check for primary marker (mayor/town.json)

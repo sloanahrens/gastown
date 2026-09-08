@@ -21,7 +21,11 @@ func CleanGTEnv(extraEnv ...string) []string {
 		if strings.HasPrefix(e, "GT_") &&
 			!strings.HasPrefix(e, "GT_DOLT_PORT=") &&
 			!strings.HasPrefix(e, "GT_DOLT_HOST=") &&
-			!strings.HasPrefix(e, "GT_TEST_EXTERNAL_DOLT=") {
+			!strings.HasPrefix(e, "GT_TEST_EXTERNAL_DOLT=") &&
+			// Hermetic harness markers must reach subprocesses: they suppress
+			// event writes and forbid resolving the live town root (gt-lwi).
+			!strings.HasPrefix(e, "GT_TEST_HERMETIC=") &&
+			!strings.HasPrefix(e, "GT_TEST_FORBIDDEN_TOWN_ROOT=") {
 			continue
 		}
 		if strings.HasPrefix(e, "BD_") {
