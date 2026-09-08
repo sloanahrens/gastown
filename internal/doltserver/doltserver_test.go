@@ -4940,6 +4940,59 @@ func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
 	}
 }
 
+// TestEnsureAllMetadata_CanonicalPrefixWinsOverStaleAlias verifies that when
+// both a stale alias database (e.g. "beads") and the canonical prefix database
+// ("be", declared in rigs.json) exist for the same rig, EnsureAllMetadata
+// corrects metadata.json to the canonical name instead of preserving the stale
+// alias. (gt-ddb)
+func TestEnsureAllMetadata_CanonicalPrefixWinsOverStaleAlias(t *testing.T) {
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+
+	// Both databases exist: "beads" is a stale leftover from before the rig's
+	// DB was migrated to the short prefix name "be".
+	setupDoltDB(t, dataDir, "be")
+	setupDoltDB(t, dataDir, "beads")
+
+	// rigs.json: the beads rig's canonical database name is "be"
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsData := `{"version":1,"rigs":{"beads":{"beads":{"prefix":"be"}}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// metadata.json still points at the stale alias
+	beadsDir := filepath.Join(townRoot, "beads", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"beads"}`
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metaPath, []byte(stale), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, errs := EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Fatalf("EnsureAllMetadata errors: %v", errs)
+	}
+
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("reading metadata.json: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("parsing metadata.json: %v", err)
+	}
+	if db, _ := meta["dolt_database"].(string); db != "be" {
+		t.Errorf("dolt_database = %q, want %q (canonical prefix from rigs.json must win over stale alias)", db, "be")
+	}
+}
+
 func TestCleanStaleSocket_RemovesStaleFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sockets not applicable on Windows")
