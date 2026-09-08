@@ -1525,16 +1525,33 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 // - Grace period only applies if heartbeat is from BEFORE we started Deacon
 // - If heartbeat is from AFTER start but stale, Deacon is stuck
 func (d *Daemon) checkDeaconHeartbeat() {
+	// Always read heartbeat first (PATCH-005)
+	hb := deacon.ReadHeartbeat(d.config.TownRoot)
+
 	// Respect crash-loop guard: if the restart tracker says Deacon is in a
 	// crash loop, do not kill the session — the guard is deliberately holding
 	// off restarts to break the cycle. (Fixes #2086)
+	//
+	// But don't just take the flag on faith: if the heartbeat has been
+	// continuously fresh with an advancing cycle count for the recovery
+	// window, the agent has clearly recovered on its own and the flag is
+	// stale (gt-ayx) — auto-clear it instead of waiting for a human to run
+	// 'gt daemon clear-backoff'.
 	if d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon") {
-		d.logger.Printf("Deacon is in crash-loop state, skipping heartbeat kill check")
+		var cycle int64
+		if hb != nil {
+			cycle = hb.Cycle
+		}
+		if d.restartTracker.ObserveHeartbeat("deacon", cycle, hb.IsFresh()) {
+			if err := d.restartTracker.Save(); err != nil {
+				d.logger.Printf("Warning: failed to save restart state after crash-loop auto-clear: %v", err)
+			}
+			d.logger.Printf("Deacon crash-loop auto-cleared: heartbeat fresh with advancing cycles for recovery window")
+		} else {
+			d.logger.Printf("Deacon is in crash-loop state, skipping heartbeat kill check")
+		}
 		return
 	}
-
-	// Always read heartbeat first (PATCH-005)
-	hb := deacon.ReadHeartbeat(d.config.TownRoot)
 
 	sessionName := d.getDeaconSessionName()
 

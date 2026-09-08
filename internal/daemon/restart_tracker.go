@@ -38,18 +38,25 @@ type RestartTrackerConfig struct {
 	// quota_dog patrol to rotate accounts (5m cadence), short enough to
 	// recover quickly when the limit resets.
 	PauseBackoff time.Duration `json:"pause_backoff,omitempty"`
+
+	// CrashLoopRecoveryWindow is how long an agent's heartbeat must be
+	// continuously fresh with an advancing cycle count before a crash-loop
+	// flag is auto-cleared (default 10m). Prevents stale flags from an
+	// earlier outage from pinning a now-healthy agent indefinitely (gt-ayx).
+	CrashLoopRecoveryWindow time.Duration `json:"crash_loop_recovery_window,omitempty"`
 }
 
 // DefaultRestartTrackerConfig returns the default restart tracker configuration.
 func DefaultRestartTrackerConfig() RestartTrackerConfig {
 	return RestartTrackerConfig{
-		InitialBackoff:    30 * time.Second,
-		MaxBackoff:        10 * time.Minute,
-		BackoffMultiplier: 2.0,
-		CrashLoopWindow:   15 * time.Minute,
-		CrashLoopCount:    5,
-		StabilityPeriod:   30 * time.Minute,
-		PauseBackoff:      60 * time.Second,
+		InitialBackoff:          30 * time.Second,
+		MaxBackoff:              10 * time.Minute,
+		BackoffMultiplier:       2.0,
+		CrashLoopWindow:         15 * time.Minute,
+		CrashLoopCount:          5,
+		StabilityPeriod:         30 * time.Minute,
+		PauseBackoff:            60 * time.Second,
+		CrashLoopRecoveryWindow: 10 * time.Minute,
 	}
 }
 
@@ -76,6 +83,9 @@ func (c RestartTrackerConfig) withDefaults() RestartTrackerConfig {
 	}
 	if c.PauseBackoff <= 0 {
 		c.PauseBackoff = d.PauseBackoff
+	}
+	if c.CrashLoopRecoveryWindow <= 0 {
+		c.CrashLoopRecoveryWindow = d.CrashLoopRecoveryWindow
 	}
 	return c
 }
@@ -106,6 +116,16 @@ type AgentRestartInfo struct {
 	// re-escalate immediately, and used to re-escalate on an interval while
 	// the crash loop persists (gt-e7h).
 	LastCrashLoopEscalation time.Time `json:"last_crash_loop_escalation,omitempty"`
+
+	// RecoverySince is when ObserveHeartbeat first saw this agent's heartbeat
+	// as fresh with an advancing cycle count while flagged as crash-looping.
+	// Reset to zero whenever the heartbeat goes stale or the cycle stops
+	// advancing, so recovery must be continuous, not just cumulative (gt-ayx).
+	RecoverySince time.Time `json:"recovery_since,omitempty"`
+
+	// RecoveryLastCycle is the last heartbeat cycle number observed by
+	// ObserveHeartbeat, used to detect whether the cycle is still advancing.
+	RecoveryLastCycle int64 `json:"recovery_last_cycle,omitempty"`
 }
 
 // NewRestartTracker creates a new restart tracker with the given config.
@@ -318,7 +338,62 @@ func (rt *RestartTracker) ClearCrashLoop(agentID string) {
 		info.RestartCount = 0
 		info.BackoffUntil = time.Time{}
 		info.LastCrashLoopEscalation = time.Time{}
+		info.RecoverySince = time.Time{}
+		info.RecoveryLastCycle = 0
 	}
+}
+
+// ObserveHeartbeat records a heartbeat sample for an agent that is currently
+// flagged as crash-looping, and auto-clears the flag once the heartbeat has
+// been continuously fresh with a strictly advancing cycle count for the
+// configured CrashLoopRecoveryWindow.
+//
+// This distinguishes a genuinely-recovered agent (fresh heartbeat, advancing
+// cycles) from a stale crash-loop flag left over from an earlier outage.
+// Without it, a healthy agent stays flagged until a human runs
+// 'gt daemon clear-backoff' — the daemon's own restart/heartbeat checks
+// short-circuit on IsInCrashLoop before they ever see the agent is fine
+// again (gt-ayx).
+//
+// A no-op if the agent isn't in crash-loop state. Returns true if the
+// crash-loop flag was cleared, in which case the caller should Save() so
+// the change survives a daemon restart.
+func (rt *RestartTracker) ObserveHeartbeat(agentID string, cycle int64, fresh bool) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	info, exists := rt.state.Agents[agentID]
+	if !exists || info.CrashLoopSince.IsZero() {
+		return false
+	}
+
+	if !fresh || cycle <= info.RecoveryLastCycle {
+		// Stale heartbeat, or the cycle didn't advance since last observed —
+		// recovery must be continuous, so restart the window.
+		info.RecoverySince = time.Time{}
+		info.RecoveryLastCycle = cycle
+		return false
+	}
+
+	now := time.Now()
+	if info.RecoverySince.IsZero() {
+		info.RecoverySince = now
+		info.RecoveryLastCycle = cycle
+		return false
+	}
+	info.RecoveryLastCycle = cycle
+
+	if now.Sub(info.RecoverySince) < rt.config.CrashLoopRecoveryWindow {
+		return false
+	}
+
+	info.CrashLoopSince = time.Time{}
+	info.RestartCount = 0
+	info.BackoffUntil = time.Time{}
+	info.LastCrashLoopEscalation = time.Time{}
+	info.RecoverySince = time.Time{}
+	info.RecoveryLastCycle = 0
+	return true
 }
 
 // ClearAgentBackoff clears the crash loop and backoff state for an agent on disk.
