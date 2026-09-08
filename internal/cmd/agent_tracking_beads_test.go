@@ -9,7 +9,12 @@ import (
 )
 
 func TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir(t *testing.T) {
-	tmp := t.TempDir()
+	// os.Getwd after Chdir returns the physical path, so a symlinked TempDir
+	// (macOS /var -> /private/var) would break path expectations built from it.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	townRoot := filepath.Join(tmp, "gt")
 	townBeads := filepath.Join(townRoot, ".beads")
 	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")
@@ -65,7 +70,12 @@ func TestRunAgentStateUsesCwdRigBeadsDirWhenBeadsDirPointsTown(t *testing.T) {
 		t.Skip("uses a POSIX shell fake bd")
 	}
 
-	tmp := t.TempDir()
+	// See TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir:
+	// canonicalize so Getwd-derived paths match expectations on macOS.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	townRoot := filepath.Join(tmp, "gt")
 	townBeads := filepath.Join(townRoot, ".beads")
 	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")

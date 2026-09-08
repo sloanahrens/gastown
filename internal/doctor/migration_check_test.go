@@ -99,6 +99,9 @@ func setupRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 }
 
 func TestGetServerAddr(t *testing.T) {
+	// GT_DOLT_PORT would override the DefaultPort fallback these cases expect;
+	// the hermetic harness (and agent sessions) set it, so clear it.
+	t.Setenv("GT_DOLT_PORT", "")
 	check := NewDoltServerReachableCheck()
 
 	tests := []struct {
@@ -188,6 +191,10 @@ func TestGetServerAddr_NoMetadata(t *testing.T) {
 }
 
 func TestGetServerAddr_UsesConfigYAMLPort(t *testing.T) {
+	// GT_DOLT_PORT takes precedence over config.yaml in ResolveDoltPort; the
+	// hermetic harness (and agent sessions) set it, so clear it — empty means
+	// unset to resolveDoltPortFromEnv — to test the config.yaml path.
+	t.Setenv("GT_DOLT_PORT", "")
 	check := NewDoltServerReachableCheck()
 	townRoot := t.TempDir()
 

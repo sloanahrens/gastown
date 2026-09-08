@@ -375,7 +375,13 @@ func TestGetRigNameForPrefix(t *testing.T) {
 }
 
 func TestGetRigDirForName(t *testing.T) {
-	tmpDir := t.TempDir()
+	// pathWithin resolves symlinks on the root but the rig dirs never exist,
+	// so a symlinked TempDir (macOS /var -> /private/var) would make every
+	// existing-root/nonexistent-path comparison fail. Canonicalize up front.
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
