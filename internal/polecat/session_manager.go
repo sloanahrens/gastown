@@ -317,6 +317,22 @@ func (m *SessionManager) polecatSlot(polecat string) int {
 }
 
 // Start creates and starts a new session for a polecat.
+// ensureRuntimeWorkspace prepares workDir for an unattended agent session:
+// runtime settings in the shared polecats parent directory (passed to Claude
+// Code via --settings flag) and Claude's folder-trust entry for the worktree.
+// Fresh polecat worktrees are never-before-trusted paths, and without the
+// pre-seeded trust entry the session stalls on the folder-trust dialog
+// (gt-22r, gt-yy9). Trust seeding is non-fatal — AcceptStartupDialogs remains
+// the in-pane backstop.
+func (m *SessionManager) ensureRuntimeWorkspace(workDir, runtimeConfigDir string, runtimeConfig *config.RuntimeConfig) error {
+	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
+	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, workDir, "polecat", runtimeConfig); err != nil {
+		return fmt.Errorf("ensuring runtime settings: %w", err)
+	}
+	runtime.SeedWorkspaceTrust(workDir, runtimeConfigDir, runtimeConfig)
+	return nil
+}
+
 func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if !m.hasPolecat(polecat) {
 		return fmt.Errorf("%w: %s", ErrPolecatNotFound, polecat)
@@ -386,11 +402,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
 	}
 
-	// Ensure runtime settings exist in the shared polecats parent directory.
-	// Settings are passed to Claude Code via --settings flag.
-	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, workDir, "polecat", runtimeConfig); err != nil {
-		return fmt.Errorf("ensuring runtime settings: %w", err)
+	// Prepare the workspace (settings, folder trust) before the session starts.
+	if err := m.ensureRuntimeWorkspace(workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
+		return err
 	}
 
 	// Get fallback info to determine beacon content based on agent capabilities.

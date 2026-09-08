@@ -181,6 +181,10 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry so a never-before-trusted witness
+	// dir doesn't stall on the trust dialog (gt-yy9).
+	runtime.SeedWorkspaceTrust(witnessDir, runtimeConfigDir, runtimeConfig)
+
 	// Ensure .gitignore has required Gas Town patterns
 	if err := rig.EnsureGitignorePatterns(witnessDir); err != nil {
 		style.PrintWarning("could not update witness .gitignore: %v", err)

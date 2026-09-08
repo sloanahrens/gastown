@@ -267,3 +267,35 @@ func TestEnsureWorkspaceTrust_PreservesFileMode(t *testing.T) {
 		t.Errorf("file mode = %o, want 0640", info.Mode().Perm())
 	}
 }
+
+func TestSeedWorkspaceTrust_SeedsNeverTrustedPath(t *testing.T) {
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+
+	SeedWorkspaceTrust(workDir, configDir, claudeRC())
+
+	cfg := readTrustConfig(t, filepath.Join(configDir, ".claude.json"))
+	if !trustAccepted(t, cfg, workDir) {
+		t.Errorf("expected trust entry for %s in %+v", workDir, cfg)
+	}
+}
+
+func TestSeedWorkspaceTrust_SwallowsErrors(t *testing.T) {
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+	path := filepath.Join(configDir, ".claude.json")
+	if err := os.WriteFile(path, []byte(`{not json`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must warn, not panic or overwrite: spawn paths call this best-effort.
+	SeedWorkspaceTrust(workDir, configDir, claudeRC())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{not json` {
+		t.Errorf("corrupt config was rewritten: %q", data)
+	}
+}

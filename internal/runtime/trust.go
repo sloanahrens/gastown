@@ -86,6 +86,18 @@ func EnsureWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig) e
 	return atomicfile.WriteJSONWithPerm(path, cfg, perm)
 }
 
+// SeedWorkspaceTrust calls EnsureWorkspaceTrust and downgrades any failure to
+// a stderr warning. Trust seeding is best-effort and must never block a spawn:
+// the tmux dialog auto-acceptance in AcceptStartupDialogs remains the in-pane
+// backstop. Every spawn path that creates an agent session directly (rather
+// than through session.StartSession) must call this before creating the tmux
+// session (gt-yy9).
+func SeedWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig) {
+	if err := EnsureWorkspaceTrust(workDir, configDir, rc); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: seeding workspace trust for %s: %v\n", workDir, err)
+	}
+}
+
 // seedTrust marks dir as trusted in the projects map, preserving any existing
 // per-project settings. Returns true if the map was modified.
 func seedTrust(projects map[string]any, dir string) bool {
