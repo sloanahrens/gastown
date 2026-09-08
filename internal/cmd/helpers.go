@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -35,6 +36,33 @@ func inferRigFromCwd(townRoot string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not infer rig from current directory")
+}
+
+// resolveEventRig determines the rig scope for channel-event commands
+// (emit-event / await-event). Precedence: explicit --rig flag, then the
+// GT_RIG environment variable, then the first path component of cwd
+// relative to the town root — but only when that component is a registered
+// rig (town-level dirs like mayor/ are not rig contexts). Returns "" when
+// no rig context can be established.
+func resolveEventRig(townRoot, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if rigEnv := os.Getenv("GT_RIG"); rigEnv != "" {
+		return rigEnv
+	}
+	inferred, err := inferRigFromCwd(townRoot)
+	if err != nil {
+		return ""
+	}
+	rigsCfg, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil || rigsCfg == nil {
+		return ""
+	}
+	if _, ok := rigsCfg.Rigs[inferred]; ok {
+		return inferred
+	}
+	return ""
 }
 
 // inferRigFromCrewName scans all rigs in the town root for a crew member

@@ -1,9 +1,18 @@
 // Package channelevents provides file-based event emission for named channels.
 //
-// Channel events are JSON files written to ~/gt/events/<channel>/*.event
-// and consumed by await-event subscribers (e.g., the refinery watching for
+// Channel events are JSON files written under ~/gt/events/<channel>/ and
+// consumed by await-event subscribers (e.g., the refinery watching for
 // MERGE_READY events). This is distinct from the activity feed events in
 // the events package (~/gt/.events.jsonl).
+//
+// Channel scoping (gt-dsj): channels are single-consumer, but some channel
+// names have one consumer PER RIG (every rig runs its own refinery and
+// witness). Those channels are per-rig: their events live in
+// events/<channel>/<rig>/ so one rig's consumer can never read or delete
+// another rig's wake events. Town-global channels with a single consumer
+// (e.g. "mayor") keep the flat events/<channel>/ layout. This package is
+// the single source of truth for which channels are per-rig, so emitters
+// and await-event always agree on the event directory.
 package channelevents
 
 import (
@@ -15,57 +24,67 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // ValidChannelName restricts channel names to safe characters (no path traversal).
+// Rig names in event paths are held to the same charset.
 var ValidChannelName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// perRigChannels lists channels whose consumer runs once per rig. Events on
+// these channels MUST be scoped to a rig; emitting or awaiting without a rig
+// is an error (a global event here would be stolen by whichever rig's
+// consumer polls first).
+var perRigChannels = map[string]bool{
+	"refinery": true,
+	"witness":  true,
+}
 
 // emitSeq is an atomic counter to ensure unique event filenames even when
 // time.Now().UnixNano() has low resolution.
 var emitSeq atomic.Uint64
 
-// Emit creates an event file in the channel directory, resolving the town
-// root from the current working directory.
-func Emit(channel, eventType string, payloadPairs []string) (string, error) {
-	if !ValidChannelName.MatchString(channel) {
-		return "", fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", channel)
-	}
-
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		home, _ := os.UserHomeDir()
-		townRoot = filepath.Join(home, "gt")
-	}
-	eventDir := filepath.Join(townRoot, "events", channel)
-	if err := os.MkdirAll(eventDir, 0755); err != nil {
-		return "", fmt.Errorf("creating event directory: %w", err)
-	}
-
-	return emitToDir(eventDir, channel, eventType, payloadPairs)
+// IsPerRig reports whether events on the channel are scoped per rig.
+func IsPerRig(channel string) bool {
+	return perRigChannels[channel]
 }
 
-// EmitToTown creates an event file using an explicit town root.
-// Used by internal callers that already know the town root.
-func EmitToTown(townRoot, channel, eventType string, payloadPairs []string) (string, error) {
+// Dir returns the directory holding pending events for a channel. Per-rig
+// channels resolve to events/<channel>/<rig>/; town-global channels ignore
+// rig and resolve to events/<channel>/.
+func Dir(townRoot, channel, rig string) string {
+	if IsPerRig(channel) {
+		return filepath.Join(townRoot, "events", channel, rig)
+	}
+	return filepath.Join(townRoot, "events", channel)
+}
+
+// EmitToTown creates an event file for the channel under the given town root.
+// rig scopes the event for per-rig channels and is required for them; it is
+// ignored for town-global channels.
+func EmitToTown(townRoot, channel, rig, eventType string, payloadPairs []string) (string, error) {
 	if !ValidChannelName.MatchString(channel) {
 		return "", fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", channel)
 	}
+	if IsPerRig(channel) {
+		if rig == "" {
+			return "", fmt.Errorf("channel %q is per-rig: a rig is required", channel)
+		}
+		if !ValidChannelName.MatchString(rig) {
+			return "", fmt.Errorf("invalid rig name %q: must match [a-zA-Z0-9_-]", rig)
+		}
+	} else {
+		rig = ""
+	}
 
-	eventDir := filepath.Join(townRoot, "events", channel)
+	eventDir := Dir(townRoot, channel, rig)
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return "", fmt.Errorf("creating event directory: %w", err)
 	}
-	return emitToDir(eventDir, channel, eventType, payloadPairs)
+	return emitToDir(eventDir, channel, rig, eventType, payloadPairs)
 }
 
 // emitToDir writes an event file to the given directory.
-func emitToDir(eventDir, channel, eventType string, payloadPairs []string) (string, error) {
-	if !ValidChannelName.MatchString(channel) {
-		return "", fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", channel)
-	}
-
+func emitToDir(eventDir, channel, rig, eventType string, payloadPairs []string) (string, error) {
 	payload := make(map[string]string)
 	for _, pair := range payloadPairs {
 		key, val, found := strings.Cut(pair, "=")
@@ -80,6 +99,9 @@ func emitToDir(eventDir, channel, eventType string, payloadPairs []string) (stri
 		"channel":   channel,
 		"timestamp": now.Format(time.RFC3339),
 		"payload":   payload,
+	}
+	if rig != "" {
+		event["rig"] = rig
 	}
 
 	data, err := json.MarshalIndent(event, "", "  ")

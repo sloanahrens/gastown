@@ -14,7 +14,7 @@ func TestEmitEvent(t *testing.T) {
 	t.Run("basic event creation", func(t *testing.T) {
 		townRoot := t.TempDir()
 
-		path, err := channelevents.EmitToTown(townRoot, "test-channel", "MERGE_READY", []string{"polecat=nux", "branch=feat/test"})
+		path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "MERGE_READY", []string{"polecat=nux", "branch=feat/test"})
 		if err != nil {
 			t.Fatalf("EmitEvent failed: %v", err)
 		}
@@ -56,7 +56,7 @@ func TestEmitEvent(t *testing.T) {
 
 	t.Run("empty payload", func(t *testing.T) {
 		townRoot := t.TempDir()
-		path, err := channelevents.EmitToTown(townRoot, "test-channel", "PATROL_WAKE", nil)
+		path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "PATROL_WAKE", nil)
 		if err != nil {
 			t.Fatalf("EmitEvent failed: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestEmitEvent(t *testing.T) {
 		townRoot := t.TempDir()
 		paths := make(map[string]bool)
 		for i := 0; i < 5; i++ {
-			path, err := channelevents.EmitToTown(townRoot, "test-channel", "TEST", nil)
+			path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "TEST", nil)
 			if err != nil {
 				t.Fatalf("EmitEvent failed on iteration %d: %v", i, err)
 			}
@@ -100,7 +100,7 @@ func TestEmitEvent(t *testing.T) {
 
 	t.Run("malformed payload pair ignored", func(t *testing.T) {
 		townRoot := t.TempDir()
-		path, err := channelevents.EmitToTown(townRoot, "test-channel", "TEST", []string{"valid=yes", "no-equals-sign"})
+		path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "TEST", []string{"valid=yes", "no-equals-sign"})
 		if err != nil {
 			t.Fatalf("EmitEvent failed: %v", err)
 		}
@@ -127,25 +127,25 @@ func TestEmitEventChannelValidation(t *testing.T) {
 	townRoot := t.TempDir()
 
 	// Valid channel name should succeed
-	_, err := channelevents.EmitToTown(townRoot, "valid-channel", "TEST", nil)
+	_, err := channelevents.EmitToTown(townRoot, "valid-channel", "", "TEST", nil)
 	if err != nil {
 		t.Errorf("valid channel name rejected: %v", err)
 	}
 
 	// Path traversal should be rejected
-	_, err = channelevents.EmitToTown(townRoot, "../etc", "TEST", nil)
+	_, err = channelevents.EmitToTown(townRoot, "../etc", "", "TEST", nil)
 	if err == nil {
 		t.Error("expected error for path traversal channel name, got nil")
 	}
 
 	// Slash in channel should be rejected
-	_, err = channelevents.EmitToTown(townRoot, "foo/bar", "TEST", nil)
+	_, err = channelevents.EmitToTown(townRoot, "foo/bar", "", "TEST", nil)
 	if err == nil {
 		t.Error("expected error for channel with slash, got nil")
 	}
 
 	// Empty channel should be rejected
-	_, err = channelevents.EmitToTown(townRoot, "", "TEST", nil)
+	_, err = channelevents.EmitToTown(townRoot, "", "", "TEST", nil)
 	if err == nil {
 		t.Error("expected error for empty channel name, got nil")
 	}
@@ -153,7 +153,7 @@ func TestEmitEventChannelValidation(t *testing.T) {
 
 func TestEmitEventPIDInFilename(t *testing.T) {
 	townRoot := t.TempDir()
-	path, err := channelevents.EmitToTown(townRoot, "test-channel", "TEST", nil)
+	path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "TEST", nil)
 	if err != nil {
 		t.Fatalf("emit failed: %v", err)
 	}

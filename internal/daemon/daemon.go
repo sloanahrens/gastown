@@ -23,6 +23,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
+	"github.com/steveyegge/gastown/internal/channelevents"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
@@ -1731,8 +1732,10 @@ func (d *Daemon) ensureWitnessesRunning() {
 // hasPendingEvents checks if there are pending .event files in the given channel directory.
 // Used to gate agent spawning: don't burn API credits starting a Claude session when
 // there's nothing to process. The agent's await-event handles the actual consumption.
-func (d *Daemon) hasPendingEvents(channel string) bool {
-	eventDir := filepath.Join(d.config.TownRoot, "events", channel)
+// rig scopes the check for per-rig channels (events/<channel>/<rig>/); it is
+// ignored for town-global channels.
+func (d *Daemon) hasPendingEvents(channel, rig string) bool {
+	eventDir := channelevents.Dir(d.config.TownRoot, channel, rig)
 	entries, err := os.ReadDir(eventDir)
 	if err != nil {
 		return false // Directory doesn't exist or unreadable = no pending events
@@ -1842,7 +1845,7 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	// If a refinery session is already running, Start() returns ErrAlreadyRunning (cheap).
 	// But spawning a NEW session with an empty queue burns API credits for nothing.
 	// The refinery formula uses await-event internally, so it will wake when events appear.
-	if !d.hasPendingEvents("refinery") {
+	if !d.hasPendingEvents("refinery", rigName) {
 		// Check if session already exists before skipping — let running sessions continue
 		r := &rig.Rig{
 			Name: rigName,

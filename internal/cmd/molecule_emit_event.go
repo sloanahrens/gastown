@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/channelevents"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
 	emitEventChannel string
+	emitEventRig     string
 	emitEventType    string
 	emitEventPayload []string
 )
@@ -23,17 +26,23 @@ var moleculeEmitEventCmd = &cobra.Command{
 This is the Go counterpart to emit-event.sh. Events are JSON files consumed
 by await-event subscribers (e.g., the refinery watching for MERGE_READY events).
 
+Per-rig channels ("refinery", "witness") have one consumer per rig, so their
+events are scoped to a rig and stored in ~/gt/events/<channel>/<rig>/. The rig
+comes from --rig, the GT_RIG environment variable, or the rig containing the
+current directory; emitting on a per-rig channel with no rig context is an
+error. Town-global channels (e.g. "mayor") ignore the rig.
+
 EVENT FORMAT:
-Creates a JSON file at ~/gt/events/<channel>/<timestamp>.event:
+Creates a JSON file at ~/gt/events/<channel>[/<rig>]/<timestamp>.event:
   {"type": "...", "channel": "...", "timestamp": "...", "payload": {...}}
 
 EXAMPLES:
-  # Emit a MERGE_READY event for the refinery
+  # Emit a MERGE_READY event for this rig's refinery
   gt mol step emit-event --channel refinery --type MERGE_READY \
     --payload polecat=nux --payload branch=polecat/nux/gt-iw7m
 
-  # Emit a PATROL_WAKE event
-  gt mol step emit-event --channel refinery --type PATROL_WAKE \
+  # Emit a PATROL_WAKE event for a specific rig's refinery
+  gt mol step emit-event --channel refinery --rig gastown --type PATROL_WAKE \
     --payload source=witness --payload queue_depth=3
 
   # Emit an MQ_SUBMIT event
@@ -46,12 +55,15 @@ EXAMPLES:
 type EmitEventResult struct {
 	Path    string `json:"path"`
 	Channel string `json:"channel"`
+	Rig     string `json:"rig,omitempty"`
 	Type    string `json:"type"`
 }
 
 func init() {
 	moleculeEmitEventCmd.Flags().StringVar(&emitEventChannel, "channel", "",
 		"Event channel name (required, e.g., 'refinery')")
+	moleculeEmitEventCmd.Flags().StringVar(&emitEventRig, "rig", "",
+		"Rig scope for per-rig channels (default: GT_RIG or rig containing cwd)")
 	moleculeEmitEventCmd.Flags().StringVar(&emitEventType, "type", "",
 		"Event type (required, e.g., 'MERGE_READY')")
 	moleculeEmitEventCmd.Flags().StringArrayVar(&emitEventPayload, "payload", nil,
@@ -65,7 +77,18 @@ func init() {
 }
 
 func runMoleculeEmitEvent(cmd *cobra.Command, args []string) error {
-	path, err := channelevents.Emit(emitEventChannel, emitEventType, emitEventPayload)
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		home, _ := os.UserHomeDir()
+		townRoot = filepath.Join(home, "gt")
+	}
+
+	rigName := resolveEventRig(townRoot, emitEventRig)
+	if channelevents.IsPerRig(emitEventChannel) && rigName == "" {
+		return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", emitEventChannel)
+	}
+
+	path, err := channelevents.EmitToTown(townRoot, emitEventChannel, rigName, emitEventType, emitEventPayload)
 	if err != nil {
 		return err
 	}
@@ -73,11 +96,15 @@ func runMoleculeEmitEvent(cmd *cobra.Command, args []string) error {
 	if moleculeJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(EmitEventResult{
+		result := EmitEventResult{
 			Path:    path,
 			Channel: emitEventChannel,
 			Type:    emitEventType,
-		})
+		}
+		if channelevents.IsPerRig(emitEventChannel) {
+			result.Rig = rigName
+		}
+		return enc.Encode(result)
 	}
 
 	fmt.Println(path)
