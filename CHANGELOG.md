@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hermetic test-isolation harness** (gt-lwi) — running `go test ./...` from
+  a worktree inside a live town can no longer mutate that town. A process-wide
+  harness (`testutil.HermeticMain` / `StartHermetic`) scrubs `GT_*`/`BD_*`/
+  `BEADS_*` from the environment, redirects `HOME`/`CLAUDE_CONFIG_DIR`/
+  `GT_TOWN_ROOT` into a throwaway sandbox town, poisons the Dolt port
+  variables so stray connections fail fast instead of reaching the production
+  server on `:3307`, disables bd's Dolt auto-start, and diffs the live town
+  before/after the run — failing it if tests leaked databases, files, or
+  events. Workspace resolution (`workspace.Find`) refuses to resolve the live
+  town root under the harness (`GT_TEST_FORBIDDEN_TOWN_ROOT`), and `gt`
+  subprocesses suppress cwd-resolved event writes (`GT_TEST_HERMETIC`). A
+  dependency-closure-based enforcement test requires every package whose tests
+  can reach Dolt, beads, or `gt`/`bd` subprocesses to run under the harness.
+
 ### Fixed
 
 - **Cross-rig event theft on refinery/witness channels** (gt-dsj) — the

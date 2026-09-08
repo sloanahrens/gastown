@@ -11,19 +11,25 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// TestMain runs this package's tests under the hermetic harness (gt-lwi):
+// GT_*/BD_* env scrubbed, HOME and town root redirected to a sandbox, and a
+// tripwire that fails the run if state leaks into a live town.
+//
+// WithDolt starts an ephemeral Dolt container for this package's tests.
+// convoy_manager_test.go calls setupTestStore which sets BEADS_TEST_MODE=1,
+// causing the beads SDK to create testdb_<hash> databases. By routing those
+// to an isolated container (via BEADS_DOLT_PORT), the databases are destroyed
+// when the container is terminated at cleanup — preventing orphan
+// accumulation in the shared production Dolt data dir.
+//
+// When Docker is unavailable, Dolt-needing tests self-skip via setupTestStore
+// → beadsdk.Open failure. Non-Dolt tests (e.g. boot_spawn_frequency_test.go)
+// still run. (fixes gt-kw4449)
 func TestMain(m *testing.M) {
-	// Start an ephemeral Dolt container for this package's tests.
-	// convoy_manager_test.go calls setupTestStore which sets BEADS_TEST_MODE=1,
-	// causing the beads SDK to create testdb_<hash> databases. By routing
-	// those to an isolated container (via BEADS_DOLT_PORT), the databases are
-	// destroyed when the container is terminated at cleanup —
-	// preventing orphan accumulation in the shared production Dolt data dir.
-	//
-	// When Docker is unavailable, Dolt-needing tests self-skip via
-	// setupTestStore → beadsdk.Open failure. Non-Dolt tests (e.g.
-	// boot_spawn_frequency_test.go) still run. (fixes gt-kw4449)
-	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon TestMain: Dolt container unavailable (%v), Dolt-dependent tests will skip\n", err)
+	h, err := testutil.StartHermetic(testutil.WithDolt())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon TestMain: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Isolate tmux sessions on a package-specific socket.
@@ -44,6 +50,5 @@ func TestMain(m *testing.M) {
 		socketPath := filepath.Join(tmux.SocketDir(), tmuxSocket)
 		_ = os.Remove(socketPath)
 	}
-	testutil.TerminateDoltContainer()
-	os.Exit(code)
+	os.Exit(h.Finish(code))
 }

@@ -168,6 +168,38 @@ go test ./internal/wisp/...
 go test ./cmd/gt/...
 ```
 
+### Hermetic Test Harness
+
+gastown's tests routinely run from a worktree *inside a live Gas Town* (every
+polecat runs `go test ./...` from its sandbox under `~/gt`). Tests must never
+touch the surrounding town: no databases on the production Dolt server
+(`:3307`), no events appended to the live `.events.jsonl`, no files under the
+town root (gt-lwi).
+
+The harness in `internal/testutil/hermetic.go` provides this isolation
+process-wide. Packages whose tests can reach live town state (the beads SDK,
+`internal/doltserver`, or `gt`/`bd` subprocesses) must run under it — the
+`TestHermeticHarnessEnforced` test in `internal/testutil` fails otherwise:
+
+```go
+func TestMain(m *testing.M) {
+	os.Exit(testutil.HermeticMain(m)) // add testutil.WithDolt() for an eager Dolt container
+}
+```
+
+The harness scrubs `GT_*`/`BD_*`/`BEADS_*` from the environment, redirects
+`HOME`, `CLAUDE_CONFIG_DIR`, and `GT_TOWN_ROOT` into a throwaway sandbox town,
+poisons the Dolt port variables so stray connections fail fast instead of
+reaching production, sets `GT_TEST_HERMETIC=1` (which makes `gt` subprocesses
+suppress cwd-resolved event writes), and — when running inside a live town —
+diffs the town before and after the tests, failing the run if anything leaked.
+
+Per-test helpers: `testutil.HermeticTest(t)` applies the same env treatment to
+a single test; `testutil.ScratchTown(t)` creates a temp town and chdirs into
+it for code that resolves the town root from the working directory. Packages
+needing setup around `m.Run()` use `testutil.StartHermetic` + `h.Finish(code)`
+directly (see `internal/daemon/testmain_test.go`).
+
 ### Integration Test Guards
 
 Integration tests (tagged `//go:build integration`) require external resources
