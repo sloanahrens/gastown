@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,7 +103,10 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	// Warning only - doesn't block execution.
 	// Skip warning when Build was set by a package manager (e.g. Homebrew sets
 	// Build to "Homebrew" via ldflags but doesn't set BuiltProperly).
-	if BuiltProperly == "" && Build == "dev" && runtime.GOOS == "darwin" {
+	// Also skip under `go test`: test binaries never carry the ldflags `make
+	// build` sets, so this would otherwise os.Exit(1) every test that calls
+	// persistentPreRun on a macOS agent shell (gt-2nu).
+	if BuiltProperly == "" && Build == "dev" && runtime.GOOS == "darwin" && !testing.Testing() {
 		fmt.Fprintln(os.Stderr, "ERROR: This binary was built with 'go build' directly.")
 		fmt.Fprintln(os.Stderr, "       macOS will SIGKILL unsigned binaries. Use 'make build' instead.")
 		if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {

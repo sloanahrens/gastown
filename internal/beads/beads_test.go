@@ -1439,7 +1439,12 @@ func TestBdSupportsAllowStale_TimeoutTreatsProbeAsUnsupported(t *testing.T) {
 }
 
 func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
-	if os.Getenv("GT_BEADS_LIST_CONCURRENCY_HELPER") == "1" {
+	// The helper subprocess re-execs this same test binary, which runs its
+	// own TestMain (the hermetic harness) before this body ever sees the
+	// env. That harness scrubs every GT_*/BD_*/BEADS_* variable from the
+	// process env, so the helper-mode signal below must avoid those
+	// prefixes or it gets wiped before it can be read (gt-2nu).
+	if os.Getenv("LISTCONC_HELPER") == "1" {
 		runBDListConcurrencyHelper(t)
 		return
 	}
@@ -1550,8 +1555,8 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 
 func runBDListConcurrencyHelper(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
-	workDir := os.Getenv("GT_BEADS_LIST_HELPER_WORKDIR")
-	status := os.Getenv("GT_BEADS_LIST_HELPER_STATUS")
+	workDir := os.Getenv("LISTCONC_WORKDIR")
+	status := os.Getenv("LISTCONC_STATUS")
 	if workDir == "" || status == "" {
 		t.Fatalf("missing helper environment: workdir=%q status=%q", workDir, status)
 	}
@@ -1563,10 +1568,10 @@ func runBDListConcurrencyHelper(t *testing.T) {
 func bdListConcurrencyHelperCommand(ctx context.Context, path, markerDir, workDir, status string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBDListSlowListDoesNotBlockUnrelatedList$")
 	cmd.Env = append(sanitizedBDListConcurrencyEnv(),
-		"GT_BEADS_LIST_CONCURRENCY_HELPER=1",
-		"GT_BEADS_LIST_MARKER_DIR="+markerDir,
-		"GT_BEADS_LIST_HELPER_WORKDIR="+workDir,
-		"GT_BEADS_LIST_HELPER_STATUS="+status,
+		"LISTCONC_HELPER=1",
+		"LISTCONC_MARKER_DIR="+markerDir,
+		"LISTCONC_WORKDIR="+workDir,
+		"LISTCONC_STATUS="+status,
 		"PATH="+path,
 	)
 	return cmd
@@ -1581,10 +1586,7 @@ func sanitizedBDListConcurrencyEnv() []string {
 			strings.HasPrefix(item, "BEADS_"),
 			strings.HasPrefix(item, "GT_ROOT="),
 			strings.HasPrefix(item, "HOME="),
-			strings.HasPrefix(item, "GT_BEADS_LIST_CONCURRENCY_HELPER="),
-			strings.HasPrefix(item, "GT_BEADS_LIST_MARKER_DIR="),
-			strings.HasPrefix(item, "GT_BEADS_LIST_HELPER_WORKDIR="),
-			strings.HasPrefix(item, "GT_BEADS_LIST_HELPER_STATUS="):
+			strings.HasPrefix(item, "LISTCONC_"):
 			continue
 		default:
 			env = append(env, item)
@@ -1639,9 +1641,9 @@ for arg in "$@"; do
 done
 
 if [ "$status" = "open" ]; then
-  : > "${GT_BEADS_LIST_MARKER_DIR}/slow-started"
+  : > "${LISTCONC_MARKER_DIR}/slow-started"
   i=0
-  while [ ! -e "${GT_BEADS_LIST_MARKER_DIR}/release-slow" ]; do
+  while [ ! -e "${LISTCONC_MARKER_DIR}/release-slow" ]; do
     i=$((i + 1))
     if [ "$i" -ge 1000 ]; then
       echo "timed out waiting for release-slow" >&2
@@ -2007,6 +2009,11 @@ func TestSearchOptions(t *testing.T) {
 func TestIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
+	}
+	if os.Getenv("GT_TEST_HERMETIC") == "1" {
+		// The hermetic harness deliberately poisons GT_DOLT_PORT so no test
+		// can reach a real Dolt server; this test needs one (gt-2nu).
+		t.Skip("hermetic harness poisons the Dolt port; no real bd to test against")
 	}
 
 	// Find a beads repo (use current directory if it has .beads)
