@@ -435,19 +435,32 @@ func validRepoAliasBeadsDir(townRoot, beadsDir string) bool {
 }
 
 func pathWithin(root, path string) bool {
-	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolvedRoot
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolvedPath
-	}
-	root = filepath.Clean(root)
-	path = filepath.Clean(path)
+	root = filepath.Clean(resolveSymlinksBestEffort(root))
+	path = filepath.Clean(resolveSymlinksBestEffort(path))
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+// resolveSymlinksBestEffort resolves symlinks in p, tolerating the case where
+// p (or a suffix of it) doesn't exist yet — e.g. a rig directory that hasn't
+// been created. It walks up to the nearest existing ancestor, resolves that,
+// and rejoins the non-existent suffix unchanged. Without this, comparing a
+// resolved existing root (e.g. "/private/var/...") against an unresolved
+// nonexistent path (e.g. "/var/...") would spuriously report the path as
+// outside the root any time the platform's temp dir is itself a symlink
+// (as on macOS), even though the two denote the same location.
+func resolveSymlinksBestEffort(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(p)
+	if dir == p {
+		return p
+	}
+	return filepath.Join(resolveSymlinksBestEffort(dir), filepath.Base(p))
 }
 
 // GetRigNameForPrefix returns the rig name that owns a given bead prefix.

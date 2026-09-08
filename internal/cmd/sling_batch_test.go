@@ -697,7 +697,10 @@ func TestCloseConvoyPinsTownDatabaseUnderStaleEnv(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	townRoot := t.TempDir()
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -861,6 +864,12 @@ func setupTownWithBdStub(t *testing.T, bdScript string) (townRoot, logPath strin
 	t.Helper()
 
 	townRoot = t.TempDir()
+	// os.Getwd() after the os.Chdir below returns the kernel-resolved path
+	// on macOS (where the temp dir is a /private symlink) — resolve upfront
+	// so callers' comparisons agree with what code under test actually sees.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}

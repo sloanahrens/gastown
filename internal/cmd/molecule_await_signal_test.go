@@ -315,7 +315,10 @@ func TestRunMoleculeAwaitSignalAgentBeadUsesCwdRigBeadsDirWhenBeadsDirPointsTown
 		t.Skip("uses a POSIX shell fake bd")
 	}
 
-	tmp := t.TempDir()
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	townRoot := filepath.Join(tmp, "gt")
 	townBeads := filepath.Join(townRoot, ".beads")
 	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")

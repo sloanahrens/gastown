@@ -11,7 +11,10 @@ import (
 )
 
 func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
-	townRoot := t.TempDir()
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}

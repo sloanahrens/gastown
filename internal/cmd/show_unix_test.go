@@ -17,6 +17,15 @@ func TestPrepareBdShowExecAnchorsRelativePathBeforeChdir(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	// os.Getwd() after os.Chdir returns the kernel-resolved path on macOS
+	// (where the temp dir is a /private symlink) — resolve upfront so
+	// comparisons below agree with what prepareBdShowExec actually sees.
+	if resolved, err := filepath.EvalSymlinks(startDir); err == nil {
+		startDir = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(targetDir); err == nil {
+		targetDir = resolved
+	}
 
 	originalDir, err := os.Getwd()
 	if err != nil {
@@ -40,7 +49,10 @@ func TestPrepareBdShowExecAnchorsRelativePathBeforeChdir(t *testing.T) {
 }
 
 func TestPrepareBdShowExecReturnsChdirError(t *testing.T) {
-	startDir := t.TempDir()
+	startDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	originalDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

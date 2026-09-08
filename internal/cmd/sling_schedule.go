@@ -325,18 +325,30 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 // beads as scheduled to prevent false stranded detection and duplicate
 // scheduling attempts.
 func areScheduled(beadIDs []string) map[string]bool {
+	return areScheduledForTown("", beadIDs)
+}
+
+// areScheduledForTown is areScheduled pinned to townRoot instead of
+// discovering the town ambiently from cwd. Callers that already hold an
+// explicit town root must pass it through — otherwise this falls back to
+// ambient/cwd discovery, which can silently diverge from the caller's town
+// under test isolation or multi-town use (gt-80o).
+func areScheduledForTown(townRoot string, beadIDs []string) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
 		return result
 	}
 
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		// Can't determine town root — fail closed (treat all as scheduled)
-		for _, id := range beadIDs {
-			result[id] = true
+	if townRoot == "" {
+		found, err := workspace.FindFromCwd()
+		if err != nil || found == "" {
+			// Can't determine town root — fail closed (treat all as scheduled)
+			for _, id := range beadIDs {
+				result[id] = true
+			}
+			return result
 		}
-		return result
+		townRoot = found
 	}
 
 	// Scan all rig beads dirs (sling contexts live in target rig's DB). (GH#3468)

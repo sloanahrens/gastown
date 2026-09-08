@@ -1648,7 +1648,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		for _, t := range tracked {
 			trackedIDs = append(trackedIDs, t.ID)
 		}
-		scheduledSet := areScheduled(trackedIDs)
+		scheduledSet := areScheduledForTown(townBeads, trackedIDs)
 
 		var readyIssues []string
 		for _, t := range tracked {
@@ -2475,7 +2475,9 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	}
 
 	// Fetch fresh issue details via bd show (uses prefix routing for cross-rig).
-	freshDetails := getIssueDetailsBatch(trackedIDs)
+	// Pinned to townBeads rather than ambient/cwd discovery so this agrees
+	// with the routing used above for trackedIDs (gt-80o).
+	freshDetails := getIssueDetailsBatchForTown(townBeads, trackedIDs)
 
 	// Build tracked dependency structs from fresh details. When fresh details
 	// are missing (cross-rig DB unreachable, missing, parked, or unroutable
@@ -2631,12 +2633,21 @@ func (d issueDetails) IsBlocked() bool {
 // getIssueDetailsBatch fetches details through the central routed beads lookup.
 // Returns a map from issue ID to details. Missing/invalid issues are omitted from the map.
 func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
+	return getIssueDetailsBatchForTown("", issueIDs)
+}
+
+// getIssueDetailsBatchForTown is getIssueDetailsBatch pinned to townRoot
+// instead of discovering the town ambiently from cwd. Callers that already
+// hold an explicit town root (e.g. getTrackedIssues) must pass it through —
+// otherwise routing falls back to the ambient/cwd town, which can silently
+// diverge from the caller's town under test isolation or multi-town use.
+func getIssueDetailsBatchForTown(townRoot string, issueIDs []string) map[string]*issueDetails {
 	result := make(map[string]*issueDetails, len(issueIDs))
 	if len(issueIDs) == 0 {
 		return result
 	}
 
-	client := convoyIssueClient()
+	client := convoyIssueClientForTown(townRoot)
 	if client == nil {
 		return result
 	}
@@ -2675,11 +2686,35 @@ func getIssueDetails(issueID string) *issueDetails {
 }
 
 func convoyIssueClient() *beads.Beads {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return convoyIssueClientForTown("")
+}
+
+// convoyIssueClientForTown returns a beads client pinned to townRoot, or
+// falls back to ambient/cwd town discovery when townRoot is empty.
+func convoyIssueClientForTown(townRoot string) *beads.Beads {
+	if townRoot != "" {
+		// Some callers (e.g. getTrackedIssues) pass a .beads directory rather
+		// than its parent — normalize the same way beads.ResolveBeadsDir does,
+		// since beads.Beads uses this as the process cwd for bd invocations,
+		// not just for computing the beads dir.
+		if filepath.Base(filepath.Clean(townRoot)) == ".beads" {
+			townRoot = filepath.Dir(filepath.Clean(townRoot))
+		}
+		// Ambient discovery below effectively resolves symlinks: os.Getwd()
+		// after os.Chdir returns the kernel-resolved path on macOS (where the
+		// temp dir is a /private symlink). Match that here so an explicit
+		// townRoot behaves identically to the ambient path bd subprocess env
+		// (e.g. BEADS_DIR) agrees with callers that resolved symlinks upfront.
+		if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+			townRoot = resolved
+		}
+		return beads.New(townRoot)
+	}
+	found, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return nil
 	}
-	return beads.New(townRoot)
+	return beads.New(found)
 }
 
 func getIssueDetailsWithClient(client *beads.Beads, issueID string) *issueDetails {

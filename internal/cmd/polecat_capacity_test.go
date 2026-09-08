@@ -29,7 +29,10 @@ func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
 
 func setupPolecatCapacityRig(t *testing.T, maxPolecats int) string {
 	t.Helper()
-	townRoot := t.TempDir()
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	configureScheduler(t, townRoot, maxPolecats, 1)
 	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "polecats"), 0755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)

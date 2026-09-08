@@ -415,18 +415,13 @@ func logCrashFeedEvent(townRoot, agent, session string, exitCode int) {
 		session = "unknown"
 	}
 
-	origDir, getwdErr := os.Getwd()
-	if err := os.Chdir(townRoot); err != nil {
-		return
-	}
-	if getwdErr == nil {
-		defer func() { _ = os.Chdir(origDir) }()
-	}
-
 	reason := fmt.Sprintf("crashed with exit code %d", exitCode)
 	payload := events.SessionDeathPayload(session, agent, reason, "gt log crash")
 	payload["exit_code"] = exitCode
-	_ = events.LogFeed(events.TypeSessionDeath, agent, payload)
+	// LogFeedTo (not the ambient LogFeed) since we already have townRoot: the
+	// ambient variant resolves from cwd and is a hard no-op under go test
+	// (events.write, gt-x9o/gt-lwi), regardless of any chdir here.
+	_ = events.LogFeedTo(townRoot, events.TypeSessionDeath, agent, payload)
 }
 
 // LogEvent is a helper that logs an event from anywhere in the codebase.

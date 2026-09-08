@@ -58,7 +58,7 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 	for _, c := range children {
 		childIDs = append(childIDs, c.ID)
 	}
-	scheduledSet := areScheduled(childIDs)
+	scheduledSet := areScheduledForTown(townRoot, childIDs)
 
 	for _, c := range children {
 		if c.Status == "closed" || c.Status == "tombstone" {

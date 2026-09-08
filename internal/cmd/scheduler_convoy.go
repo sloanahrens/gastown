@@ -57,7 +57,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	for _, t := range tracked {
 		beadIDs = append(beadIDs, t.ID)
 	}
-	scheduledSet := areScheduled(beadIDs)
+	scheduledSet := areScheduledForTown(townRoot, beadIDs)
 
 	for _, t := range tracked {
 		if t.Status == "closed" || t.Status == "tombstone" {

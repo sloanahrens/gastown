@@ -600,7 +600,10 @@ func TestBondFormulaDirectPinsTargetBeadsDir(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			townRoot := t.TempDir()
+			townRoot, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
 			townBeadsDir := filepath.Join(townRoot, ".beads")
 			rigBeadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
 			formulaWorkDir := filepath.Join(townRoot, "polecats", "radrat", "gastown")
