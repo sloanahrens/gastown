@@ -769,7 +769,7 @@
         });
     }
 
-    function showToast(type, title, message) {
+    function showToast(type, title, message, duration) {
         var toast = document.createElement('div');
         toast.className = 'toast ' + type;
         var icon = type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ';
@@ -783,7 +783,7 @@
 
         setTimeout(function() {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, 4000);
+        }, duration || 4000);
 
         toast.querySelector('.toast-close').onclick = function() {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
@@ -1112,8 +1112,11 @@
                             sessionBadge = '<span class="badge badge-muted">None</span>';
                         }
 
-                        // Build the attach command based on the crew member's role
-                        var attachCmd = 'gt crew at ' + member.name;
+                        // Build the attach command based on the crew member's role.
+                        // --rig is required here: crew names are only unique within a
+                        // rig, so 'gt crew at <name>' alone is ambiguous when the same
+                        // name exists in multiple rigs.
+                        var attachCmd = 'gt crew at ' + member.name + ' --rig ' + member.rig;
                         if (member.name === 'mayor') {
                             attachCmd = 'gt mayor attach';
                         } else if (member.name === 'deacon') {
@@ -1230,10 +1233,11 @@
         if (!cmd) return;
 
         navigator.clipboard.writeText(cmd).then(function() {
-            showToast('success', 'Copied', cmd);
+            // Longer duration: the copied command is worth reading before it vanishes.
+            showToast('success', 'Copied', cmd, 8000);
         }).catch(function() {
             // Fallback for older browsers
-            showToast('info', 'Run in terminal', cmd);
+            showToast('info', 'Run in terminal', cmd, 8000);
         });
     });
 
