@@ -607,6 +607,46 @@ func TestFindExistingWeeklyRollupFindsClosedRollup(t *testing.T) {
 	}
 }
 
+func TestFindExistingWeeklyRollupMatchesOverlappingLaterWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	// A rollup already sent for (now-7d, now). A re-run one day later
+	// computes a shifted rolling window — (now-6d, now+1d) relative to the
+	// original — which overlaps the prior window but has a different exact
+	// title. This must still be treated as a duplicate (gt-sqk).
+	weeklyRollupIdempotencyBdStub(t, "hq-roll",
+		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
+
+	id, err := findExistingWeeklyRollup("2026-09-02", "2026-09-09")
+	if err != nil {
+		t.Fatalf("findExistingWeeklyRollup: %v", err)
+	}
+	if id != "hq-roll" {
+		t.Fatalf("id = %q, want %q (a re-run one day later must still detect the overlapping prior rollup)", id, "hq-roll")
+	}
+}
+
+func TestFindExistingWeeklyRollupIgnoresNonOverlappingWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	// A rollup sent for the prior week should NOT block a rollup for a
+	// window that doesn't overlap it at all.
+	weeklyRollupIdempotencyBdStub(t, "hq-roll",
+		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
+
+	id, err := findExistingWeeklyRollup("2026-09-16", "2026-09-23")
+	if err != nil {
+		t.Fatalf("findExistingWeeklyRollup: %v", err)
+	}
+	if id != "" {
+		t.Fatalf("id = %q, want empty (non-overlapping window must not be treated as already sent)", id)
+	}
+}
+
 func TestRunWeeklyRollupSkipsWhenAlreadySentSameDay(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script command stubs not supported on Windows")
@@ -648,6 +688,54 @@ exit 1
 	}
 	if strings.Contains(string(args), "create") {
 		t.Fatalf("bd create was called despite existing rollup: %s", string(args))
+	}
+}
+
+func TestRunWeeklyRollupSkipsWhenSentOneDayEarlier(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	// Simulate a rollup already sent yesterday for yesterday's rolling
+	// window. Today's run computes a window shifted by one day, so an exact
+	// title match would miss it and re-send (gt-sqk) — the overlap check
+	// must catch it instead.
+	now := time.Now().UTC()
+	yesterday := now.AddDate(0, 0, -1)
+	priorWeekEnd := yesterday.Format("2006-01-02")
+	priorWeekStart := yesterday.AddDate(0, 0, -7).Format("2006-01-02")
+	title := fmt.Sprintf("Weekly Compaction Rollup %s to %s", priorWeekStart, priorWeekEnd)
+
+	argsLog := weeklyRollupIdempotencyBdStub(t, "hq-roll", title)
+
+	binDir := t.TempDir()
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "mail" ]; then
+  echo "$*" >> "$MAIL_LOG"
+  exit 0
+fi
+echo "unexpected gt command: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MAIL_LOG", mailLog)
+	resetCompactReportFlags(t)
+
+	if err := runWeeklyRollup(); err != nil {
+		t.Fatalf("runWeeklyRollup: %v", err)
+	}
+
+	assertNoMailSent(t, mailLog)
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if strings.Contains(string(args), "create") {
+		t.Fatalf("bd create was called despite an overlapping rollup sent yesterday: %s", string(args))
 	}
 }
 
