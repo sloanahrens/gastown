@@ -344,3 +344,103 @@ func TestDismissStartupDialogsBlind_InvalidSession(t *testing.T) {
 		t.Error("expected error for nonexistent session, got nil")
 	}
 }
+
+func TestContainsBlockingQuestionDialog(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		content      string
+		wantBlocked  bool
+		wantQuestion string
+	}{
+		{
+			name: "degenerate placeholder question with lettered options",
+			content: `Which approach should we take?
+❯ a. Option A
+  b. Option B
+
+Enter to select · Esc to cancel`,
+			wantBlocked:  true,
+			wantQuestion: "Which approach should we take?",
+		},
+		{
+			name: "numbered options",
+			content: `Proceed with deployment?
+1. Yes, deploy now
+2. No, cancel
+
+(Enter to confirm, Esc to cancel)`,
+			wantBlocked:  true,
+			wantQuestion: "Proceed with deployment?",
+		},
+		{
+			name:        "ready prompt, no dialog",
+			content:     "> ",
+			wantBlocked: false,
+		},
+		{
+			name: "hint text without an option list is not enough",
+			content: `I'll press Enter to select the next step, then Esc to cancel if needed.
+Continuing with the plan.`,
+			wantBlocked: false,
+		},
+		{
+			name: "option-list-shaped lines without the select hint",
+			content: `Here are two options:
+1. Refactor the module
+2. Leave it as-is
+`,
+			wantBlocked: false,
+		},
+		{
+			name: "rewind mode is handled separately, not as a question dialog",
+			content: `Rewind — browse conversation history
+❯ 1. Restore to here
+  2. Cancel
+
+Enter to select · Esc to cancel`,
+			wantBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotQuestion, gotBlocked := containsBlockingQuestionDialog(tt.content)
+			if gotBlocked != tt.wantBlocked {
+				t.Fatalf("blocked = %v, want %v", gotBlocked, tt.wantBlocked)
+			}
+			if tt.wantBlocked && gotQuestion != tt.wantQuestion {
+				t.Fatalf("question = %q, want %q", gotQuestion, tt.wantQuestion)
+			}
+		})
+	}
+}
+
+// TestDismissBlockingQuestionDialog_SendsEscape verifies that dismissing a
+// blocking question dialog sends a single Escape keystroke without polling
+// or screen-scraping (gt-z83).
+func TestDismissBlockingQuestionDialog_SendsEscape(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-question-dismiss-" + t.Name()
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.DismissBlockingQuestionDialog(sessionName); err != nil {
+		t.Fatalf("DismissBlockingQuestionDialog: %v", err)
+	}
+}
+
+// TestDismissBlockingQuestionDialog_InvalidSession verifies error handling
+// when the session doesn't exist.
+func TestDismissBlockingQuestionDialog_InvalidSession(t *testing.T) {
+	tm := newTestTmux(t)
+
+	err := tm.DismissBlockingQuestionDialog("gt-nonexistent-session-question-xyz")
+	if err == nil {
+		t.Error("expected error for nonexistent session, got nil")
+	}
+}

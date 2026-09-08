@@ -2220,8 +2220,8 @@ const SpawnGracePeriod = 5 * time.Minute
 // StalledResult represents a single stalled polecat detection.
 type StalledResult struct {
 	PolecatName   string // e.g., "alpha"
-	StallType     string // "startup-stall", "unknown-prompt"
-	Action        string // "auto-dismissed", "escalated"
+	StallType     string // "startup-stall", "dialog-blocked", "unknown-prompt"
+	Action        string // "auto-dismissed", "escalated", "auto-dismissed-and-escalated"
 	AgentState    string // Agent state from beads (e.g., "idle", "working")
 	HasHookedWork bool   // Whether this polecat has hooked work assigned
 	Error         error
@@ -2296,6 +2296,18 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 			continue // Dead agent — zombie detection handles this
 		}
 
+		// Dialog-blocked check (gt-z83): an interactive question/selection
+		// dialog (e.g. AskUserQuestion) can block an unattended session while
+		// tmux activity still looks fresh — the dialog redraw itself counts
+		// as activity. This must fire unconditionally on every live session,
+		// not gated on staleness like the checks below, otherwise the agent
+		// stalls silently forever.
+		if question, blocked, err := t.DetectBlockingQuestionDialog(sessionName); err == nil && blocked {
+			result.Stalled = append(result.Stalled,
+				recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question, t))
+			continue
+		}
+
 		// Heartbeat v2 check (gt-3vr5): if the agent has a fresh heartbeat,
 		// it's alive and making progress — skip stall detection entirely.
 		// This replaces tmux activity scraping for v2 agents.
@@ -2346,6 +2358,63 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 	}
 
 	return result
+}
+
+// recoverDialogBlockedPolecat implements the gt-z83 recovery sequence for a
+// polecat stuck behind an interactive question/selection dialog:
+//  1. Send Escape to cancel the blocking tool call — the tool returns
+//     "cancelled" so no fabricated answer enters the agent's context.
+//  2. Nudge the session to decide autonomously, or escalate itself if a
+//     human decision is genuinely required.
+//  3. Escalate MEDIUM to the mayor with the captured question text and
+//     session name, so a human can still answer through the normal channel
+//     (attach or reply) when it matters. Fingerprinted on the session name
+//     so repeated patrol passes on the same stuck session don't spam
+//     duplicate escalation beads.
+func recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question string, t *tmux.Tmux) StalledResult {
+	stalled := StalledResult{
+		PolecatName: polecatName,
+		StallType:   "dialog-blocked",
+	}
+
+	dismissErr := t.DismissBlockingQuestionDialog(sessionName)
+
+	nudgeMsg := "Unattended agent — a blocking interactive dialog was detected and cancelled. " +
+		"Decide autonomously and continue. If a human decision is genuinely required, " +
+		`run "gt escalate -s medium '<question>'" instead of waiting on interactive input.`
+	nudgeErr := t.NudgeSession(sessionName, nudgeMsg)
+
+	description := fmt.Sprintf("Dialog-blocked: %s/%s stuck on an interactive question", rigName, polecatName)
+	reason := fmt.Sprintf(
+		"Session: %s\nCaptured question: %s\n\n"+
+			"Auto-recovery: sent Escape to cancel the blocking tool call and nudged the "+
+			"agent to proceed autonomously. Attach to the session or reply to this "+
+			"escalation if it needs a human answer.",
+		sessionName, question)
+	escCmd := exec.Command("gt", "escalate", description,
+		"-s", "medium",
+		"--reason", reason,
+		"--source", "witness-patrol:dialog-blocked",
+		"--fingerprint", "dialog-blocked:"+sessionName,
+	)
+	escCmd.Dir = townRoot
+	escErr := escCmd.Run()
+
+	switch {
+	case dismissErr != nil:
+		stalled.Action = "escalated"
+		stalled.Error = fmt.Errorf("dismiss failed: %w", dismissErr)
+	case escErr != nil:
+		stalled.Action = "auto-dismissed"
+		stalled.Error = fmt.Errorf("escalate failed: %w", escErr)
+	default:
+		stalled.Action = "auto-dismissed-and-escalated"
+	}
+	if nudgeErr != nil && stalled.Error == nil {
+		stalled.Error = fmt.Errorf("nudge failed: %w", nudgeErr)
+	}
+
+	return stalled
 }
 
 // CompletionDiscovery represents a polecat completion discovered from agent bead

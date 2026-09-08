@@ -1520,6 +1520,111 @@ func (t *Tmux) dismissRewindMode(target string) {
 	time.Sleep(300 * time.Millisecond)
 }
 
+// optionMarkerPattern matches a rendered selection-list option: a leading
+// digit or lowercase letter marker followed by "." or ")" and option text
+// (e.g. "1. Yes", "2) No", "b. Skip"). Restricted to lowercase/digits to
+// avoid matching capitalized prose (e.g. "A. Smith wrote...").
+var optionMarkerPattern = regexp.MustCompile(`^[0-9a-z][.)]\s+\S`)
+
+// containsBlockingQuestionDialog detects an interactive question/selection
+// dialog blocking an unattended session — e.g. a tool call like
+// AskUserQuestion that renders a numbered/lettered option list and waits on
+// human input (see gt-z83). Unlike known startup dialogs (workspace trust,
+// bypass permissions), this class of dialog can appear at any point in a
+// session, not just at launch, so callers must poll for it throughout the
+// session's life rather than only during startup.
+//
+// Distinct from Rewind mode (containsRewindIndicators) even though both can
+// share "Enter to select" / "Esc to cancel" bottom-hint text — Rewind is
+// identified by the literal word "rewind" appearing in-frame and has its own
+// detector/recovery path (isInRewindMode / dismissRewindMode).
+//
+// Requires two corroborating signals to avoid false positives from
+// conversation text that merely mentions selecting or canceling something:
+// (1) a select-style bottom hint pairing an Enter action with an Esc action,
+// and (2) at least two lines that look like a rendered option list. Returns
+// the best-effort captured question text alongside the detection.
+func containsBlockingQuestionDialog(content string) (string, bool) {
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "rewind") {
+		return "", false // Rewind mode has its own detector/recovery path.
+	}
+
+	selectHintPairs := [][2]string{
+		{"enter to select", "esc to cancel"},
+		{"enter to confirm", "esc to cancel"},
+		{"enter to select", "esc to go back"},
+	}
+	hasSelectHint := false
+	for _, pair := range selectHintPairs {
+		if strings.Contains(lower, pair[0]) && strings.Contains(lower, pair[1]) {
+			hasSelectHint = true
+			break
+		}
+	}
+	if !hasSelectHint {
+		return "", false
+	}
+
+	if !hasOptionList(content) {
+		return "", false
+	}
+
+	return blockingQuestionText(content), true
+}
+
+// hasOptionList reports whether pane content contains at least two lines
+// that look like rendered selection options.
+func hasOptionList(content string) bool {
+	matches := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "❯"))
+		if optionMarkerPattern.MatchString(trimmed) {
+			matches++
+			if matches >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// blockingQuestionText extracts the best-effort question text above a
+// detected option list, for inclusion in escalations/nudges. Falls back to
+// a generic description if no clear question line is found.
+func blockingQuestionText(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" && strings.HasSuffix(trimmed, "?") {
+			return trimmed
+		}
+	}
+	return "(question text not captured — see session pane)"
+}
+
+// DetectBlockingQuestionDialog captures the current pane and checks for an
+// interactive question/selection dialog blocking the session (see gt-z83).
+// Returns the best-effort captured question text and whether one was found.
+func (t *Tmux) DetectBlockingQuestionDialog(session string) (string, bool, error) {
+	content, err := t.CapturePane(session, 40)
+	if err != nil {
+		return "", false, err
+	}
+	question, found := containsBlockingQuestionDialog(content)
+	return question, found, nil
+}
+
+// DismissBlockingQuestionDialog sends Escape to cancel a blocking
+// interactive tool call. Escape cancels the tool invocation cleanly
+// (the tool returns "cancelled") rather than fabricating an answer by
+// guessing a menu option — see gt-z83 design note (2).
+func (t *Tmux) DismissBlockingQuestionDialog(session string) error {
+	_, err := t.run("send-keys", "-t", session, "Escape")
+	return err
+}
+
 // sendEnterVerified sends Enter to a tmux target and verifies it was processed
 // by checking that the pane content changes. Under load, tmux may buffer
 // keystrokes, causing Enter to race with text delivery — Enter arrives while
