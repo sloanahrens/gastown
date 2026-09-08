@@ -34,7 +34,8 @@ The guard is a no-op (exit 0) when:
 Exit codes:
   0 - Operation allowed
   2 - Operation BLOCKED (command outside the formula's allowlist)`,
-	RunE: runTapGuardFormulaAllowlist,
+	SilenceUsage: true,
+	RunE:         runTapGuardFormulaAllowlist,
 }
 
 func init() {
