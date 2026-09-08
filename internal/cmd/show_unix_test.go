@@ -10,8 +10,20 @@ import (
 )
 
 func TestPrepareBdShowExecAnchorsRelativePathBeforeChdir(t *testing.T) {
-	startDir := filepath.Join(t.TempDir(), "start")
-	targetDir := filepath.Join(t.TempDir(), "target")
+	// Resolve symlinks so paths derived from os.Getwd()/filepath.Abs() below
+	// (which return the canonical path on macOS, where t.TempDir() lives
+	// under a /var/folders symlink to /private/var/folders) match the
+	// non-canonical strings built here. Same fix as gt-0i5.
+	tmp1, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	tmp2, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	startDir := filepath.Join(tmp1, "start")
+	targetDir := filepath.Join(tmp2, "target")
 	for _, dir := range []string{startDir, targetDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
@@ -40,7 +52,13 @@ func TestPrepareBdShowExecAnchorsRelativePathBeforeChdir(t *testing.T) {
 }
 
 func TestPrepareBdShowExecReturnsChdirError(t *testing.T) {
-	startDir := t.TempDir()
+	// Resolve symlinks so the canonical path os.Getwd() returns after
+	// chdir (macOS resolves /var/folders through its /private symlink)
+	// matches startDir. Same fix as gt-0i5.
+	startDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	originalDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

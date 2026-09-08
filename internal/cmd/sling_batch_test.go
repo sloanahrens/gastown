@@ -698,6 +698,14 @@ func TestCloseConvoyPinsTownDatabaseUnderStaleEnv(t *testing.T) {
 
 	binDir := t.TempDir()
 	townRoot := t.TempDir()
+	// Resolve symlinks so the mock bd's `$(pwd)` and the cwd this test
+	// chdirs into (a freshly spawned process / os.Getwd() report the
+	// canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) match townRoot as
+	// built here. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -861,6 +869,13 @@ func setupTownWithBdStub(t *testing.T, bdScript string) (townRoot, logPath strin
 	t.Helper()
 
 	townRoot = t.TempDir()
+	// Resolve symlinks so paths derived from os.Getwd() after chdir (which
+	// return the canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) match townRoot as
+	// returned to callers. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}

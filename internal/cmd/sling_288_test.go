@@ -601,6 +601,13 @@ func TestBondFormulaDirectPinsTargetBeadsDir(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			townRoot := t.TempDir()
+			// Resolve symlinks so the mock bd's `$(pwd)` (a freshly spawned
+			// process reports the canonical cwd on macOS, where t.TempDir()
+			// lives under a /var/folders symlink to /private/var/folders)
+			// matches formulaWorkDir as built here. Same fix as gt-0i5.
+			if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+				townRoot = resolved
+			}
 			townBeadsDir := filepath.Join(townRoot, ".beads")
 			rigBeadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
 			formulaWorkDir := filepath.Join(townRoot, "polecats", "radrat", "gastown")

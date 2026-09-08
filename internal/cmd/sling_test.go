@@ -622,6 +622,14 @@ func TestRoutedBeadReadUsesCanonicalShowWithoutUnsupportedAllowStale(t *testing.
 	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
 
 	townRoot := t.TempDir()
+	// Resolve symlinks so paths derived from os.Getwd() after chdir and
+	// from the mock bd's `$(pwd)` (both return the canonical path on
+	// macOS, where t.TempDir() lives under a /var/folders symlink to
+	// /private/var/folders) match rigBeadsDir as built here. Same fix as
+	// gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	beadID := "gt-new123"
 	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
@@ -1006,6 +1014,13 @@ exit /b 0
 
 func TestSlingRejectsBeadMissingFromTargetRigBeforeSpawn(t *testing.T) {
 	townRoot := t.TempDir()
+	// Resolve symlinks so BEADS_DIR as derived by runSling (which resolves
+	// the canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) matches TARGET_BEADS_DIR
+	// as built here. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
@@ -1142,6 +1157,13 @@ func TestTargetRigDatabaseAllowsRouteResolvedGtBead(t *testing.T) {
 	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
 
 	townRoot := t.TempDir()
+	// Resolve symlinks so the mock bd's `$(pwd)` (a freshly spawned process
+	// reports the canonical cwd on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) matches rigDir as built
+	// here. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
 	for _, dir := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "mayor", "rig"), filepath.Join(rigDir, ".beads")} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -1233,6 +1255,13 @@ func setupCrossDatabaseSlingGuardTest(t *testing.T) (townRoot, logPath string) {
 	t.Helper()
 
 	townRoot = t.TempDir()
+	// Resolve symlinks so BEADS_DIR as derived by the code under test (which
+	// resolves the canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) matches TARGET_BEADS_DIR
+	// as built below. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}

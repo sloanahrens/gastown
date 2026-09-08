@@ -438,9 +438,14 @@ func pathWithin(root, path string) bool {
 	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolvedRoot
 	}
-	if resolvedPath, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolvedPath
-	}
+	// path may not exist on disk yet (e.g. a rig dir derived from a route
+	// but not yet cloned). filepath.EvalSymlinks fails outright in that
+	// case, leaving path non-canonical while root above is canonical —
+	// on macOS (t.TempDir()/os.TempDir() live under a /var/folders
+	// symlink to /private/var/folders) that mismatch makes filepath.Rel
+	// see two unrelated trees. Resolve as much of path as actually
+	// exists and rejoin the missing suffix unresolved.
+	path = resolveExistingPrefix(path)
 	root = filepath.Clean(root)
 	path = filepath.Clean(path)
 	rel, err := filepath.Rel(root, path)
@@ -448,6 +453,19 @@ func pathWithin(root, path string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+// resolveExistingPrefix resolves symlinks in the longest existing ancestor
+// of path and rejoins the remaining (not-yet-existing) suffix unresolved.
+func resolveExistingPrefix(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path // reached filesystem root without finding an existing ancestor
+	}
+	return filepath.Join(resolveExistingPrefix(parent), filepath.Base(path))
 }
 
 // GetRigNameForPrefix returns the rig name that owns a given bead prefix.

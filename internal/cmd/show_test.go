@@ -141,6 +141,13 @@ func TestBdShowInvocationPinsRoutedMetadataDatabase(t *testing.T) {
 func setupShowInvocationTown(t *testing.T) string {
 	t.Helper()
 	townRoot := t.TempDir()
+	// Resolve symlinks so paths derived from os.Getwd() after chdir (which
+	// return the canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) match townRoot/rigDir
+	// as built here. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
 	for _, dir := range []string{
 		filepath.Join(townRoot, "mayor"),
