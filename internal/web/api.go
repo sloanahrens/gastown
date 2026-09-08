@@ -2203,7 +2203,11 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	// Send keepalive comment every 15 seconds to prevent connection timeouts
+	// Send heartbeat event every 15 seconds. This prevents connection
+	// timeouts AND gives the client a liveness signal: SSE comments are
+	// invisible to EventSource listeners, so a named event is required for
+	// the client's staleness watchdog to distinguish a healthy-but-quiet
+	// stream from a dead one.
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
 
@@ -2212,7 +2216,7 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-keepalive.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
+			fmt.Fprintf(w, "event: heartbeat\ndata: ping\n\n")
 			flusher.Flush()
 		case <-ticker.C:
 			hash := h.computeDashboardHash(ctx)

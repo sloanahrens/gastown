@@ -24,6 +24,24 @@
     var evtSource = null;
     var sseReconnectDelay = 1000;
     var sseMaxReconnectDelay = 30000;
+    // The server emits a heartbeat event every 15s, so a healthy connection
+    // never goes 45s without activity. Beyond that the connection is
+    // presumed dead (e.g. suspended by a background WKWebView) even though
+    // the EventSource still reports itself as open.
+    var SSE_STALE_MS = 45000;
+    var lastSseActivity = Date.now();
+
+    function markSseActivity() {
+        lastSseActivity = Date.now();
+    }
+
+    function refreshDashboard() {
+        if (window.pauseRefresh) return;
+        var dashboard = document.getElementById('dashboard-main');
+        if (dashboard && typeof htmx !== 'undefined') {
+            htmx.trigger(dashboard, 'sse:dashboard-update');
+        }
+    }
 
     function connectSSE() {
         if (evtSource) {
@@ -35,16 +53,17 @@
         evtSource.addEventListener('connected', function() {
             window.sseConnected = true;
             sseReconnectDelay = 1000;
+            markSseActivity();
             updateConnectionStatus('live');
         });
 
+        evtSource.addEventListener('heartbeat', function() {
+            markSseActivity();
+        });
+
         evtSource.addEventListener('dashboard-update', function(e) {
-            if (window.pauseRefresh) return;
-            // Trigger HTMX to re-fetch the dashboard
-            var dashboard = document.getElementById('dashboard-main');
-            if (dashboard && typeof htmx !== 'undefined') {
-                htmx.trigger(dashboard, 'sse:dashboard-update');
-            }
+            markSseActivity();
+            refreshDashboard();
         });
 
         evtSource.onerror = function() {
@@ -58,6 +77,33 @@
             }, sseReconnectDelay);
         };
     }
+
+    // Staleness watchdog: a connection can be open but silent (server-side
+    // event plumbing broken, or the webview suspended the stream). When no
+    // event has arrived within SSE_STALE_MS, drop sseConnected so the
+    // every-30s polling fallback takes over, and force a reconnect.
+    function checkSseStaleness() {
+        if (!window.sseConnected) return;
+        if (Date.now() - lastSseActivity <= SSE_STALE_MS) return;
+        window.sseConnected = false;
+        updateConnectionStatus('reconnecting');
+        markSseActivity(); // avoid re-triggering before the reconnect settles
+        connectSSE();
+        refreshDashboard();
+    }
+    setInterval(checkSseStaleness, 10000);
+
+    // Background catch-up: hidden webviews/tabs (cmux WKWebView, background
+    // browser tabs) throttle timers and may suspend the EventSource with no
+    // error fired. On return to foreground, refresh immediately and run the
+    // staleness check so a dead connection is replaced right away.
+    function onForeground() {
+        if (document.visibilityState === 'hidden') return;
+        checkSseStaleness();
+        refreshDashboard();
+    }
+    document.addEventListener('visibilitychange', onForeground);
+    window.addEventListener('focus', onForeground);
 
     function updateConnectionStatus(state) {
         var el = document.getElementById('connection-status');
