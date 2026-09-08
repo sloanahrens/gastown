@@ -2609,6 +2609,40 @@ func TestSessionPrefixPattern_AlwaysIncludesGTAndHQ(t *testing.T) {
 	}
 }
 
+func TestFindBindingLine(t *testing.T) {
+	// Representative list-keys -T prefix output (tmux 3.7c formatting:
+	// aligned columns, backslash-escaped special keys, -r repeat flags).
+	output := "bind-key    -T prefix Space   next-layout\n" +
+		"bind-key    -T prefix \\\"      split-window\n" +
+		"bind-key -r -T prefix n       next-window\n" +
+		"bind-key    -T prefix s       choose-tree -Zs\n" +
+		"bind-key    -T prefix g       if-shell \"true\" \"run-shell 'gt agents menu'\" \":\""
+
+	tests := []struct {
+		name  string
+		table string
+		key   string
+		want  string
+	}{
+		{"plain key", "prefix", "s", "bind-key    -T prefix s       choose-tree -Zs"},
+		{"repeat flag", "prefix", "n", "bind-key -r -T prefix n       next-window"},
+		{"escaped key", "prefix", `"`, "bind-key    -T prefix \\\"      split-window"},
+		{"named key", "prefix", "Space", "bind-key    -T prefix Space   next-layout"},
+		{"missing key", "prefix", "F12", ""},
+		{"wrong table", "root", "n", ""},
+		// "n" appears inside commands (next-layout, next-window) — must not match there.
+		{"no substring match", "prefix", "next-window", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findBindingLine(output, tt.table, tt.key)
+			if got != tt.want {
+				t.Errorf("findBindingLine(%q, %q) = %q, want %q", tt.table, tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetKeyBinding_NoExistingBinding(t *testing.T) {
 	tm := newTestTmux(t)
 	// Query a key that almost certainly has no binding
@@ -2742,8 +2776,10 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 		"run-shell 'gt feed --window'",
 		"display-message custom-user-cmd")
 
-	// Record the binding after first configuration
-	firstRaw, _ := tm.run("list-keys", "-T", "prefix", "F11")
+	// Record the binding after first configuration.
+	// (tmux 3.7 no longer honors "list-keys -T <table> <key>", so use the
+	// same lookup helper production code uses.)
+	firstRaw := tm.lookupKeyBinding("prefix", "F11")
 
 	// isGTBinding should return true, causing Set*Binding to skip
 	if !tm.isGTBinding("prefix", "F11") {
