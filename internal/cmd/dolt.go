@@ -15,6 +15,7 @@ import (
 	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1201,6 +1202,21 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("too many orphans (%d) for SQL cleanup — see instructions above", len(orphans))
 	}
 
+	// AUDIT (gt-87a): write-ahead intent record before the first DROP. A crash
+	// or kill mid-loop must still leave a durable record of who intended to
+	// remove what. Recording failure aborts the cleanup (fail closed).
+	var auditor *cleanupAuditor
+	if doltCleanupForce {
+		auditor = newCleanupAuditor(townRoot, cleanupActorLabel(), doltCleanupAuthorizedBy)
+		names := make([]string, len(orphans))
+		for i, o := range orphans {
+			names[i] = o.Name
+		}
+		if err := auditor.recordIntent(names); err != nil {
+			return err
+		}
+	}
+
 	fmt.Println()
 	removed := 0
 	var removedNames []string
@@ -1240,13 +1256,14 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		style.Bold.Render("✓"), removed, len(orphans))
 
 	// Record the forced removal on the authorizing bead (audit trail, gt-61x).
-	if doltCleanupForce && doltCleanupAuthorizedBy != "" && removed > 0 {
-		comment := fmt.Sprintf("gt dolt cleanup --force by %s: removed %d database(s): %s",
-			cleanupActorLabel(), removed, strings.Join(removedNames, ", "))
-		if err := beads.New(townRoot).AddComment(doltCleanupAuthorizedBy, comment); err != nil {
-			fmt.Printf("%s Failed to record authorization on %s: %v\n",
-				style.Bold.Render("!"), doltCleanupAuthorizedBy, err)
-		} else {
+	// Runs even when removed == 0 (a failed attempt is audit-worthy) and fails
+	// loud: a recording failure is a non-zero exit, not a warning (gt-87a).
+	if auditor != nil {
+		if err := auditor.recordCompletion(removed, len(orphans), removedNames); err != nil {
+			fmt.Printf("%s %v\n", style.Bold.Render("!"), err)
+			return err
+		}
+		if doltCleanupAuthorizedBy != "" {
 			fmt.Printf("Recorded on %s\n", style.Dim.Render(doltCleanupAuthorizedBy))
 		}
 	}
@@ -1297,6 +1314,77 @@ func cleanupActorLabel() string {
 		return actor
 	}
 	return "human operator"
+}
+
+// cleanupAuditor records the audit trail for forced cleanups (gt-87a).
+// The authorizing bead carries the durable trail: an INTENT comment before the
+// first DROP and a completion comment after, so a crash mid-cleanup cannot
+// leave destroyed databases with no record. The town event log additionally
+// covers every forced run, including human operators with no --authorized-by
+// bead.
+type cleanupAuditor struct {
+	actor      string
+	beadID     string // authorizing bead ("" = none; event log only)
+	addComment func(id, text string) error
+	logAudit   func(eventType string, payload map[string]interface{})
+}
+
+func newCleanupAuditor(townRoot, actor, beadID string) *cleanupAuditor {
+	return &cleanupAuditor{
+		actor:      actor,
+		beadID:     beadID,
+		addComment: beads.New(townRoot).AddComment,
+		logAudit: func(eventType string, payload map[string]interface{}) {
+			// Event log is best-effort by design; the bead comment is the
+			// fail-closed record.
+			_ = events.LogAuditTo(townRoot, eventType, actor, payload)
+		},
+	}
+}
+
+// recordIntent writes the write-ahead audit record before any database is
+// dropped. If the bead comment cannot be written, the cleanup must not
+// proceed: a forced destructive run may not outrun its audit trail (gt-87a).
+func (a *cleanupAuditor) recordIntent(names []string) error {
+	a.logAudit(events.TypeDoltCleanupIntent, map[string]interface{}{
+		"authorized_by": a.beadID,
+		"databases":     strings.Join(names, ","),
+	})
+	if a.beadID == "" {
+		return nil
+	}
+	comment := fmt.Sprintf("gt dolt cleanup --force INTENT by %s: removing %d database(s): %s",
+		a.actor, len(names), strings.Join(names, ", "))
+	if err := a.addComment(a.beadID, comment); err != nil {
+		return fmt.Errorf("cannot write intent record to %s — refusing destructive cleanup; the audit trail must precede removal (gt-87a): %w", a.beadID, err)
+	}
+	return nil
+}
+
+// recordCompletion writes the post-removal audit record. It runs even when
+// nothing was removed — a failed forced attempt is still audit-worthy. A
+// failure to record on the bead is returned so the caller exits non-zero
+// instead of completing a forced destructive run with no durable trail.
+func (a *cleanupAuditor) recordCompletion(removed, attempted int, names []string) error {
+	a.logAudit(events.TypeDoltCleanupDone, map[string]interface{}{
+		"authorized_by": a.beadID,
+		"removed":       removed,
+		"attempted":     attempted,
+		"databases":     strings.Join(names, ","),
+	})
+	if a.beadID == "" {
+		return nil
+	}
+	detail := "none"
+	if len(names) > 0 {
+		detail = strings.Join(names, ", ")
+	}
+	comment := fmt.Sprintf("gt dolt cleanup --force by %s: removed %d/%d database(s): %s",
+		a.actor, removed, attempted, detail)
+	if err := a.addComment(a.beadID, comment); err != nil {
+		return fmt.Errorf("removed %d database(s) but failed to record completion on %s — audit trail incomplete (gt-87a): %w", removed, a.beadID, err)
+	}
+	return nil
 }
 
 // checkAgentForceAuthorization enforces the gt-61x guardrail: an agent actor
