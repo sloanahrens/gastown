@@ -592,6 +592,20 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
+// NewRigLocal creates a Beads wrapper pinned to workDir's own database.
+// Both prefix routing and agent-bead re-rooting (ForAgentBead) are disabled:
+// creates, shows, and updates operate on this database even for IDs that
+// would normally route elsewhere.
+//
+// Use this when the target database is the point of the operation — e.g.
+// doctor fixes that must create rig-LOCAL agent beads (gt-abj). On a routed
+// wrapper, CreateAgentBead silently re-targets the town database via
+// agentBeadTarget/ForAgentBead, so the rig-local bead is never created and
+// the fix appears to succeed while fixing nothing (gt-8po).
+func NewRigLocal(workDir string) *Beads {
+	return &Beads{workDir: workDir, noRoute: true}
+}
+
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
 // Agent beads (labeled gt:agent) live in the TOWN database, but their IDs

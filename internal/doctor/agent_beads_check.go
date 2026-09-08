@@ -117,12 +117,12 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Patrol commands (gt agents resolve --rig) hard-require rig-local agent
 	// beads, so a town-level duplicate must not satisfy a rig check (gt-abj).
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townScope := loadAgentBeadScope(beads.New(townBeadsPath))
+	townScope := loadAgentBeadScope(beads.NewRigLocal(townBeadsPath))
 
 	rigScopes := make(map[string]agentBeadScope) // key: prefix
 	for prefix, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		rigScopes[prefix] = loadAgentBeadScope(beads.New(rigBeadsPath))
+		rigScopes[prefix] = loadAgentBeadScope(beads.NewRigLocal(rigBeadsPath))
 	}
 
 	// checkAgentBead verifies an agent bead exists in the database it is
@@ -236,9 +236,13 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// block fixes for all other rigs.
 	var errs []error
 
-	// Fix global agents (Mayor, Deacon) in town beads
+	// Fix global agents (Mayor, Deacon) in town beads.
+	// NewRigLocal pins each wrapper to its own database: CreateAgentBead on a
+	// routed wrapper re-targets the TOWN database via ForAgentBead, so a
+	// "rig-local" create would silently land in the town DB (where a duplicate
+	// usually exists already), succeed as an upsert, and fix nothing (gt-8po).
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townBd := beads.New(townBeadsPath)
+	townBd := beads.NewRigLocal(townBeadsPath)
 
 	// Pre-load known agent bead IDs for the town database (from both issues
 	// and wisps tables) so existence checks don't need per-bead Show() calls
@@ -295,7 +299,11 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 			return nil
 		}
 
-		// Not in issues or open wisps — check if it exists but is CLOSED
+		// Not in issues or open wisps — the bead may still exist in this
+		// database without the gt:agent label (scope.issues only sees labeled
+		// beads). Legacy 1.1.0-era identity beads are type=task with no
+		// gt:agent label, so they land here: repair them in place instead of
+		// falling through to a duplicate-ID create (gt-8po).
 		if issue, err := bd.Show(id); err == nil && issue != nil {
 			// Bead exists but is closed — REOPEN it instead of recreating
 			if issue.Status == "closed" {
@@ -303,12 +311,23 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 				if err := bd.Update(id, beads.UpdateOptions{Status: &openStatus}); err != nil {
 					return fmt.Errorf("reopening closed agent bead %s: %w", id, err)
 				}
-				// Also ensure it has the gt:agent label
-				if !beads.HasLabel(issue, "gt:agent") {
-					_ = bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
-				}
-				return nil
 			}
+			// Ensure it has the gt:agent label so existence checks can see it.
+			if !beads.HasLabel(issue, "gt:agent") {
+				err := bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
+				if err != nil {
+					if sqlErr := addLabelSQL(workDir, id, "gt:agent"); sqlErr != nil {
+						return fmt.Errorf("adding gt:agent label to legacy bead %s: bd update: %w; SQL fallback: %v", id, err, sqlErr)
+					}
+				} else if !verifyLabelAdded(workDir, id, "gt:agent") {
+					// bd update can exit 0 without modifying beads with
+					// unroutable legacy prefixes (GH#2127).
+					if sqlErr := addLabelSQL(workDir, id, "gt:agent"); sqlErr != nil {
+						return fmt.Errorf("adding gt:agent label to legacy bead %s: bd update was no-op, SQL fallback: %w", id, sqlErr)
+					}
+				}
+			}
+			return nil
 		}
 
 		// Bead truly missing — create it (CreateAgentBead handles ephemeral fallback)
