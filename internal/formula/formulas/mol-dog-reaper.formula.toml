@@ -34,6 +34,23 @@ Reaping closes wisps — reversible (can reopen). Purging deletes rows — irrev
 but only targets already-closed wisps past retention. Auto-close only targets
 issues that are not P0/P1, not epics, and have no active dependencies.
 
+## Scope Boundary (gt-61x)
+
+This formula's writes are limited to wisp/issue/mail ROWS via the `gt reaper`
+and `gt convoy check` commands listed in the steps. Database-level operations
+are OUT OF SCOPE for this formula:
+
+- NEVER run `gt dolt cleanup` (with or without --force)
+- NEVER drop, remove, or delete database directories by any means
+- NEVER bypass a refusal from a safety check (a refusal IS the designed stop)
+
+If orphan databases or other database-level problems surface during a run,
+report them and escalate to the mayor (`gt escalate`) — do not act on them.
+Forced cleanup by agents requires recorded authorization
+(`gt dolt cleanup --force --authorized-by <bead-id>`), and databases under an
+open hold bead (label `dolt-hold:<dbname>` or blanket `dolt-hold`) are
+excluded from cleanup regardless.
+
 ## Anomaly Detection
 
 The Dog should watch for and flag:
@@ -47,7 +64,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 3
+version = 4
 
 [squash]
 trigger = "on_complete"
