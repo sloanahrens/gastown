@@ -721,6 +721,10 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry so a never-before-trusted crew
+	// clone doesn't stall on the trust dialog (gt-yy9).
+	runtime.SeedWorkspaceTrust(worker.ClonePath, opts.ClaudeConfigDir, runtimeConfig)
+
 	// Compute environment variables BEFORE creating the session.
 	// These are passed via tmux -e flags so the initial shell inherits the correct
 	// env from the start, preventing parent env (e.g., GT_ROLE=mayor) from leaking

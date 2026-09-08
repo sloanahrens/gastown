@@ -239,6 +239,10 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry so a never-before-trusted refinery
+	// worktree doesn't stall on the trust dialog (gt-yy9).
+	runtime.SeedWorkspaceTrust(refineryRigDir, runtimeConfigDir, runtimeConfig)
+
 	// Ensure .gitignore has required Gas Town patterns
 	if err := rig.EnsureGitignorePatterns(refineryRigDir); err != nil {
 		style.PrintWarning("could not update refinery .gitignore: %v", err)

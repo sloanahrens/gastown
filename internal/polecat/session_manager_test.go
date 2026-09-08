@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1002,5 +1003,43 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 					c.currentBranch, c.issue, c.canonicalBranch, got, c.want)
 			}
 		})
+	}
+}
+
+// Regression test for gt-yy9: fresh polecat worktrees are never-before-trusted
+// paths, and the polecat spawn path (which creates its tmux session directly
+// rather than via session.StartSession) must pre-seed Claude's folder-trust
+// entry, or the session stalls on the folder-trust dialog.
+func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) {
+	rigPath := t.TempDir()
+	configDir := t.TempDir()
+	workDir := t.TempDir() // fresh worktree: no trust entry exists anywhere
+
+	r := &rig.Rig{
+		Name:     "gastown",
+		Path:     rigPath,
+		Polecats: []string{"Toast"},
+	}
+	m := NewSessionManager(tmux.NewTmux(), r)
+
+	rc := &config.RuntimeConfig{Command: "claude"}
+	if err := m.ensureRuntimeWorkspace(workDir, configDir, rc); err != nil {
+		t.Fatalf("ensureRuntimeWorkspace: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("reading seeded .claude.json: %v", err)
+	}
+	var cfg struct {
+		Projects map[string]struct {
+			HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parsing .claude.json: %v", err)
+	}
+	if !cfg.Projects[workDir].HasTrustDialogAccepted {
+		t.Errorf("expected trust entry for %s, got %s", workDir, data)
 	}
 }

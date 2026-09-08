@@ -131,6 +131,11 @@ func (m *Manager) Start(agentOverride string) error {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry so a never-before-trusted deacon
+	// dir doesn't stall on the trust dialog (gt-yy9). No config-dir override
+	// on this path — the session inherits CLAUDE_CONFIG_DIR from the env.
+	runtime.SeedWorkspaceTrust(deaconDir, "", runtimeConfig)
+
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
 		Recipient: "deacon",
 		Sender:    "daemon",

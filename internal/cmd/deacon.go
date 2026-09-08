@@ -523,6 +523,10 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
+	// Pre-seed Claude's folder-trust entry so a never-before-trusted deacon
+	// dir doesn't stall on the trust dialog (gt-yy9).
+	runtime.SeedWorkspaceTrust(deaconDir, runtimeConfigDir, runtimeConfig)
+
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
 		Recipient: "deacon",
 		Sender:    "daemon",
