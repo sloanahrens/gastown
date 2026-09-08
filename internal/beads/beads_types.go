@@ -171,6 +171,22 @@ func EnsureCustomTypes(beadsDir string) error {
 	return nil
 }
 
+// InvalidateTypeConfigCache drops the cached type-configuration state for a
+// beads directory — both the in-memory entry and the on-disk sentinel — so
+// the next EnsureCustomTypes call re-configures and re-verifies against the
+// database.
+//
+// Use this when the database rejects a custom type ("invalid issue type")
+// despite the sentinel claiming types are configured: sentinels written by
+// older gt versions (before the GH#2637 verify step) can cache a lie when
+// bd config set silently targeted the wrong database (gt-8po).
+func InvalidateTypeConfigCache(beadsDir string) {
+	ensuredMu.Lock()
+	defer ensuredMu.Unlock()
+	delete(ensuredDirs, beadsDir)
+	_ = os.Remove(filepath.Join(beadsDir, typesSentinel))
+}
+
 // TypeConfigSentinelValue returns the current type configuration fingerprint.
 // Tests in other packages use this to avoid duplicating the sentinel format.
 func TypeConfigSentinelValue() string {

@@ -390,7 +390,9 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// database, so town-level duplicates don't mask missing rig-local beads.
 	for prefix, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		bd := beads.New(rigBeadsPath)
+		// NewRigLocal: the create MUST land in this rig's database (see the
+		// townBd comment above); a routed wrapper would re-target the town DB.
+		bd := beads.NewRigLocal(rigBeadsPath)
 		rigName := info.name
 		rigScope := loadAgentBeadScope(bd)
 

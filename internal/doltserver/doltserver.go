@@ -2729,6 +2729,31 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 	return nil
 }
 
+// SetRigIssuePrefix persists config.issue_prefix for the rig database backing
+// beadsDir. database is the Dolt database name (usually from metadata.json's
+// dolt_database — it may differ from the rig name on upgraded towns, e.g. the
+// beads rig's database is named "beads" while its prefix is "be").
+//
+// bd 1.2+ refuses `bd config set issue_prefix` ("use bd rename-prefix"), but
+// legacy databases created before issue_prefix was mandatory have it unset
+// entirely, which blocks every `bd create` in that rig. The SDK store path is
+// the supported way to seed it (same as EnsureRigIssuePrefix at init time).
+func SetRigIssuePrefix(townRoot, beadsDir, database, prefix string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	store, err := openRigStoreFromConfig(ctx, townRoot, beadsDir, database)
+	if err != nil {
+		return fmt.Errorf("opening beads database: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		return fmt.Errorf("setting issue_prefix: %w", err)
+	}
+	return nil
+}
+
 var beadsOpenEnvMu sync.Mutex
 
 func openRigStoreFromConfig(ctx context.Context, townRoot, beadsDir, rigName string) (beadssdk.Storage, error) {

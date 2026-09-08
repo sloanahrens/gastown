@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -498,11 +497,12 @@ exit 1
 	}
 }
 
-func TestDatabasePrefixCheck_FixUsesMetadataDatabaseEnv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
-
+// TestDatabasePrefixCheck_FixUsesMetadataDatabase verifies Fix resolves the
+// Dolt database name from metadata.json (not the rig name or ambient env) and
+// hands it to the prefix setter. The setter (doltserver.SetRigIssuePrefix)
+// owns env scoping now that Fix no longer shells out to bd — bd 1.2+ refuses
+// `bd config set issue_prefix` (gt-8po).
+func TestDatabasePrefixCheck_FixUsesMetadataDatabase(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "gastown", "mayor", "rig")
 	beadsDir := filepath.Join(rigPath, ".beads")
@@ -512,37 +512,26 @@ func TestDatabasePrefixCheck_FixUsesMetadataDatabaseEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"server","dolt_database":"gastown"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	binDir := t.TempDir()
-	script := `#!/usr/bin/env bash
-printf 'args=%s db=%s beads=%s\n' "$*" "${BEADS_DOLT_SERVER_DATABASE:-<unset>}" "${BEADS_DIR:-<unset>}" >> "$BD_LOG"
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale")
 	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
 
+	var gotDatabase, gotBeadsDir string
 	check := NewDatabasePrefixCheck()
 	check.mismatches = []databasePrefixMismatch{{rigPath: "gastown/mayor/rig", routesPrefix: "gt", dbPrefix: "hq"}}
+	check.prefixSetter = func(_, beadsDir, database, _ string) error {
+		gotBeadsDir = beadsDir
+		gotDatabase = database
+		return nil
+	}
 	if err := check.Fix(&CheckContext{TownRoot: tmpDir}); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
 
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
+	if gotDatabase != "gastown" {
+		t.Fatalf("database = %q, want %q (from metadata.json, not env %q)", gotDatabase, "gastown", "stale")
 	}
-	log := string(logData)
-	if !strings.Contains(log, "args=config set issue_prefix gt") || !strings.Contains(log, "db=gastown") || !strings.Contains(log, "beads="+beadsDir) {
-		t.Fatalf("bd config set did not use metadata database env; log:\n%s", log)
-	}
-	if strings.Contains(log, "stale") || strings.Contains(log, filepath.Join(tmpDir, "wrong", ".beads")) {
-		t.Fatalf("stale beads env leaked into fix command; log:\n%s", log)
+	if gotBeadsDir != beadsDir {
+		t.Fatalf("beadsDir = %q, want %q (not ambient BEADS_DIR)", gotBeadsDir, beadsDir)
 	}
 }
 
@@ -650,5 +639,89 @@ func TestDatabasePrefixCheck_MixedOwnAndRedirect(t *testing.T) {
 	}
 	if check.mismatches[0].rigPath != "mission_manager" {
 		t.Errorf("expected mismatch for mission_manager, got %s", check.mismatches[0].rigPath)
+	}
+}
+
+// TestDatabasePrefixCheck_FixUsesStoreSetter verifies Fix persists the
+// routes.jsonl prefix through the injected setter (production: the SDK store —
+// bd 1.2+ refuses `bd config set issue_prefix`, and legacy databases with
+// issue_prefix unset block every bd create in that rig; gt-8po).
+func TestDatabasePrefixCheck_FixUsesStoreSetter(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// The beads rig on upgraded towns: DB named "beads", route prefix "be".
+	rigBeads := filepath.Join(tmpDir, "beads", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"backend":"dolt","dolt_database":"beads","dolt_mode":"server"}`
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	type call struct {
+		townRoot, beadsDir, database, prefix string
+	}
+	var calls []call
+
+	check := NewDatabasePrefixCheck()
+	check.mismatches = []databasePrefixMismatch{
+		{rigPath: "beads/mayor/rig", routesPrefix: "be", dbPrefix: "issue_prefix (not set)"},
+	}
+	check.prefixSetter = func(townRoot, beadsDir, database, prefix string) error {
+		calls = append(calls, call{townRoot, beadsDir, database, prefix})
+		return nil
+	}
+
+	ctx := &CheckContext{TownRoot: tmpDir}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 setter call, got %d: %+v", len(calls), calls)
+	}
+	got := calls[0]
+	if got.townRoot != tmpDir {
+		t.Errorf("townRoot = %q, want %q", got.townRoot, tmpDir)
+	}
+	if got.beadsDir != rigBeads {
+		t.Errorf("beadsDir = %q, want %q", got.beadsDir, rigBeads)
+	}
+	// Database name must come from metadata.json (dolt_database), NOT the rig
+	// name — they differ on upgraded towns.
+	if got.database != "beads" {
+		t.Errorf("database = %q, want %q (from metadata.json dolt_database)", got.database, "beads")
+	}
+	if got.prefix != "be" {
+		t.Errorf("prefix = %q, want %q", got.prefix, "be")
+	}
+}
+
+// TestDatabasePrefixCheck_FixFallsBackToRigNameDatabase verifies the database
+// name falls back to the rig path's first component when metadata.json is
+// absent.
+func TestDatabasePrefixCheck_FixFallsBackToRigNameDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigBeads := filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotDatabase string
+	check := NewDatabasePrefixCheck()
+	check.mismatches = []databasePrefixMismatch{
+		{rigPath: "gastown/mayor/rig", routesPrefix: "gt", dbPrefix: "wrong"},
+	}
+	check.prefixSetter = func(_, _, database, _ string) error {
+		gotDatabase = database
+		return nil
+	}
+
+	if err := check.Fix(&CheckContext{TownRoot: tmpDir}); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if gotDatabase != "gastown" {
+		t.Errorf("database = %q, want fallback %q", gotDatabase, "gastown")
 	}
 }

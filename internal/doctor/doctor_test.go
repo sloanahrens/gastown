@@ -423,3 +423,47 @@ func TestFixableCheck(t *testing.T) {
 		t.Error("FixableCheck.CanFix() should return true")
 	}
 }
+
+// TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible verifies that "Fix
+// failed:" details print even WITHOUT --verbose. Fix errors that only render
+// under --verbose make gt doctor --fix look like a silent no-op and hide the
+// real error (gt-8po).
+func TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible(t *testing.T) {
+	r := NewReport()
+	r.Add(&CheckResult{
+		Name:    "broken-check",
+		Status:  StatusError,
+		Message: "2 thing(s) missing",
+		Details: []string{
+			"thing-one",
+			"Fix failed: creating thing-one: database not initialized",
+		},
+	})
+
+	var buf bytes.Buffer
+	r.PrintSummaryOnly(&buf, false, 0)
+	out := buf.String()
+
+	if !bytes.Contains(buf.Bytes(), []byte("Fix failed: creating thing-one: database not initialized")) {
+		t.Errorf("non-verbose summary must show Fix failed details, got:\n%s", out)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("thing-one\n")) && !bytes.Contains(buf.Bytes(), []byte("Fix failed")) {
+		t.Errorf("unexpected output:\n%s", out)
+	}
+
+	// Ordinary details stay verbose-only.
+	if idx := bytes.Index(buf.Bytes(), []byte("thing-one")); idx >= 0 {
+		// "thing-one" appears inside the Fix failed line; ensure the bare
+		// detail line was not printed separately.
+		if bytes.Count(buf.Bytes(), []byte("thing-one")) != 1 {
+			t.Errorf("bare detail should be hidden without verbose, got:\n%s", out)
+		}
+	}
+
+	// Verbose shows both.
+	buf.Reset()
+	r.PrintSummaryOnly(&buf, true, 0)
+	if bytes.Count(buf.Bytes(), []byte("thing-one")) < 2 {
+		t.Errorf("verbose summary must show all details, got:\n%s", buf.String())
+	}
+}
