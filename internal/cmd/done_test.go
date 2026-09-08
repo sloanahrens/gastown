@@ -82,6 +82,61 @@ func TestDoneUsesResolveBeadsDir(t *testing.T) {
 	})
 }
 
+// TestAutoSaveSquashTitle verifies the descriptive subject built for squashed
+// auto-save/WIP commits (gt-3wf).
+func TestAutoSaveSquashTitle(t *testing.T) {
+	cases := []struct {
+		name    string
+		issue   *beads.Issue
+		issueID string
+		want    string
+	}{
+		{
+			name:    "bug issue gets fix prefix",
+			issue:   &beads.Issue{Title: "handle nil pointer in auth", Type: "bug"},
+			issueID: "gt-abc",
+			want:    "fix: handle nil pointer in auth (gt-abc)",
+		},
+		{
+			name:    "feature issue gets feat prefix",
+			issue:   &beads.Issue{Title: "add retry to mail send", Type: "feature"},
+			issueID: "gt-def",
+			want:    "feat: add retry to mail send (gt-def)",
+		},
+		{
+			name:    "chore issue gets chore prefix",
+			issue:   &beads.Issue{Title: "bump linter version", Type: "chore"},
+			issueID: "gt-ghi",
+			want:    "chore: bump linter version (gt-ghi)",
+		},
+		{
+			name:    "nil issue falls back to issue id",
+			issue:   nil,
+			issueID: "gt-jkl",
+			want:    "fix: implementation work for gt-jkl",
+		},
+		{
+			name:    "no issue at all yields empty",
+			issue:   nil,
+			issueID: "",
+			want:    "",
+		},
+		{
+			name:    "title without id omits parens",
+			issue:   &beads.Issue{Title: "add retry", Type: "task"},
+			issueID: "",
+			want:    "feat: add retry",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := autoSaveSquashTitle(c.issue, c.issueID); got != c.want {
+				t.Errorf("autoSaveSquashTitle() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestForceCloseIssueWithRetryClosesNoMergeIssue(t *testing.T) {
 	var gotReason string
 	var gotIDs []string

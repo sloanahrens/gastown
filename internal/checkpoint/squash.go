@@ -11,6 +11,16 @@ import (
 // WIPCommitPrefix is the commit message prefix used by checkpoint_dog auto-commits.
 const WIPCommitPrefix = "WIP: checkpoint (auto)"
 
+// AutoSaveCommitPrefix is the commit message prefix used by the gt done
+// safety-net auto-commit (gt-pvx).
+const AutoSaveCommitPrefix = "fix: auto-save uncommitted implementation work"
+
+// IsAutoSaveSubject reports whether a commit subject is machine-generated —
+// either a checkpoint_dog WIP commit or a gt-pvx safety-net auto-save.
+func IsAutoSaveSubject(subject string) bool {
+	return strings.HasPrefix(subject, WIPCommitPrefix) || strings.HasPrefix(subject, AutoSaveCommitPrefix)
+}
+
 // CountWIPCommits returns the number of WIP checkpoint commits between
 // the merge-base of baseRef and HEAD.
 func CountWIPCommits(workDir, baseRef string) (int, error) {
@@ -45,6 +55,28 @@ func CountWIPCommits(workDir, baseRef string) (int, error) {
 // This is safe because Refinery squash-merges polecat branches anyway —
 // individual commit history on polecat branches is not preserved.
 func SquashWIPCommits(workDir, baseRef string) (int, error) {
+	isWIP := func(subject string) bool { return strings.HasPrefix(subject, WIPCommitPrefix) }
+	return squashMatchingCommits(workDir, baseRef, isWIP, "squashed WIP checkpoint commits")
+}
+
+// SquashAutoSaveCommits collapses the branch into a single commit when any
+// machine-generated commit (checkpoint_dog WIP or gt-pvx auto-save) exists in
+// merge-base..HEAD (gt-3wf). Non-generated subjects are preserved: the first
+// becomes the squash title and the rest go in the body. When every commit is
+// machine-generated, fallbackTitle (typically derived from the source issue
+// title) becomes the subject so merge history stays descriptive. Returns the
+// number of machine-generated commits that were squashed.
+func SquashAutoSaveCommits(workDir, baseRef, fallbackTitle string) (int, error) {
+	if strings.TrimSpace(fallbackTitle) == "" {
+		fallbackTitle = "squashed auto-save checkpoint commits"
+	}
+	return squashMatchingCommits(workDir, baseRef, IsAutoSaveSubject, fallbackTitle)
+}
+
+// squashMatchingCommits soft-resets merge-base..HEAD into one commit when any
+// subject matches. Non-matching subjects are kept: first as title, rest as
+// body bullets. allMatchedTitle is used when every commit matched.
+func squashMatchingCommits(workDir, baseRef string, matches func(string) bool, allMatchedTitle string) (int, error) {
 	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, "HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("finding merge-base: %w", err)
@@ -62,11 +94,10 @@ func SquashWIPCommits(workDir, baseRef string) (int, error) {
 
 	subjects := strings.Split(logOut, "\n")
 
-	// Count WIP commits
 	wipCount := 0
 	var nonWIPSubjects []string
 	for _, subj := range subjects {
-		if strings.HasPrefix(subj, WIPCommitPrefix) {
+		if matches(subj) {
 			wipCount++
 		} else if subj != "" {
 			nonWIPSubjects = append(nonWIPSubjects, subj)
@@ -74,7 +105,7 @@ func SquashWIPCommits(workDir, baseRef string) (int, error) {
 	}
 
 	if wipCount == 0 {
-		return 0, nil // No WIP commits to squash
+		return 0, nil // Nothing to squash
 	}
 
 	// Soft-reset to merge-base (preserves all changes as staged)
@@ -95,8 +126,8 @@ func SquashWIPCommits(workDir, baseRef string) (int, error) {
 			}
 		}
 	} else {
-		// All commits were WIP — use a generic message
-		msg.WriteString("squashed WIP checkpoint commits")
+		// All commits matched — use the caller-supplied title
+		msg.WriteString(allMatchedTitle)
 	}
 
 	// Commit with combined message
