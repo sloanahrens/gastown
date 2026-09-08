@@ -1875,6 +1875,41 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	}
 }
 
+// Regression test for gt-cs0: messages beginning with a dash (e.g. "-r ...")
+// were parsed by tmux as send-keys flags, failing with "unknown flag -r" and
+// breaking the nudge path town-wide. The "--" terminator prevents this.
+func TestSendKeysLeadingDash_NotParsedAsFlags(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-dash-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// Literal send path (used by nudge delivery).
+	if err := tm.sendKeysLiteralWithRetry(sessionName, "-r leading dash", 5*time.Second); err != nil {
+		t.Errorf("sendKeysLiteralWithRetry with leading-dash text: %v", err)
+	}
+
+	// Chunked message path: a chunk boundary can land right before a dash,
+	// so non-first chunks must also survive leading dashes.
+	longMsg := strings.Repeat("x", sendKeysChunkSize) + "-r second chunk starts with dash"
+	if err := tm.sendMessageToTarget(sessionName, longMsg); err != nil {
+		t.Errorf("sendMessageToTarget with dash at chunk boundary: %v", err)
+	}
+
+	// Debounced send path.
+	if err := tm.SendKeysDebounced(sessionName, "-rf dash message", 0); err != nil {
+		t.Errorf("SendKeysDebounced with leading-dash text: %v", err)
+	}
+
+	// Raw key path.
+	if err := tm.SendKeysRaw(sessionName, "-r"); err != nil {
+		t.Errorf("SendKeysRaw with leading-dash keys: %v", err)
+	}
+}
+
 func TestNudgeSession_WithRetry(t *testing.T) {
 	tm := newTestTmux(t)
 	sessionName := "gt-test-nudge-retry-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)

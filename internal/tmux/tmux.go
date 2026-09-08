@@ -1276,8 +1276,9 @@ func (t *Tmux) SendKeys(session, keys string) error {
 // This prevents race conditions where Enter arrives before paste is processed.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr error) {
 	defer func() { telemetry.RecordPromptSend(context.Background(), session, keys, debounceMs, retErr) }()
-	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", session, "-l", keys); err != nil {
+	// Send text using literal mode (-l) to handle special chars. The "--"
+	// terminator stops tmux from parsing leading-dash text as flags (gt-cs0).
+	if _, err := t.run("send-keys", "-t", session, "-l", "--", keys); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1290,8 +1291,9 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr e
 }
 
 // SendKeysRaw sends keystrokes without adding Enter.
+// The "--" terminator prevents leading-dash keys from being parsed as flags (gt-cs0).
 func (t *Tmux) SendKeysRaw(session, keys string) error {
-	_, err := t.run("send-keys", "-t", session, keys)
+	_, err := t.run("send-keys", "-t", session, "--", keys)
 	return err
 }
 
@@ -1624,7 +1626,9 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 				return err
 			}
 		} else {
-			if _, err := t.run("send-keys", "-t", target, "-l", chunk); err != nil {
+			// "--" stops tmux from parsing a chunk that happens to start
+			// with a dash as flags (gt-cs0).
+			if _, err := t.run("send-keys", "-t", target, "-l", "--", chunk); err != nil {
 				return err
 			}
 		}
@@ -1655,7 +1659,8 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		// "--" stops tmux from parsing leading-dash message text as flags (gt-cs0).
+		_, err := t.run("send-keys", "-t", target, "-l", "--", text)
 		if err == nil {
 			return nil
 		}
