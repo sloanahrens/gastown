@@ -95,6 +95,27 @@ func TestTripwire_FlagsFixtureActorEvents(t *testing.T) {
 	}
 }
 
+func TestTripwire_ToleratesUnknownActor(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	f, err := os.OpenFile(filepath.Join(town, ".events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// detectActor() (internal/cmd/sling_helpers.go) legitimately logs actor
+	// "unknown" when GetRole() can't resolve an identity (e.g. a sling run
+	// outside an agent session). That must not trip the leak detector (gt-ro0).
+	_, _ = f.WriteString(`{"ts":"2026-09-08T00:01:00Z","source":"gt","type":"sling","actor":"unknown","visibility":"feed"}` + "\n")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if leaks := snap.diff(); len(leaks) != 0 {
+		t.Errorf("legitimate unknown-actor sling event flagged as leak: %v", leaks)
+	}
+}
+
 func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
 	t.Setenv("GT_ROLE", "gastown/polecats/flint")
 	t.Setenv("BD_ACTOR", "someone")
