@@ -630,16 +630,23 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			style.Bold.Render("running"),
 			pid)
 
+		// Query the live server for the authoritative database list. The
+		// state file's databases[] is a snapshot taken at server start and
+		// never updated, so DBs created/dropped since then would render
+		// stale (gt-cs6).
+		served, missing, verifyErr := doltserver.VerifyDatabases(townRoot)
+
 		// Load state for more details
 		state, err := doltserver.LoadState(townRoot)
 		if err == nil && !state.StartedAt.IsZero() {
 			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 			fmt.Printf("  Port: %d\n", state.Port)
 			fmt.Printf("  Data dir: %s\n", state.DataDir)
-			if len(state.Databases) > 0 {
+			databases, dbLabel := statusDatabases(served, verifyErr, state.Databases)
+			if len(databases) > 0 {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
-				fmt.Printf("  Databases:\n")
-				for _, db := range state.Databases {
+				fmt.Printf("  %s\n", dbLabel)
+				for _, db := range databases {
 					if owner, ok := owners[db]; ok {
 						fmt.Printf("    - %-20s (%s)\n", db, owner)
 					} else {
@@ -665,7 +672,6 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		// Verify all filesystem databases are actually served.
-		_, missing, verifyErr := doltserver.VerifyDatabases(townRoot)
 		if verifyErr != nil {
 			fmt.Printf("\n  %s Database verification failed: %v\n", style.Bold.Render("!"), verifyErr)
 		} else if len(missing) > 0 {
@@ -721,6 +727,18 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// statusDatabases picks the database list to display in `gt dolt status` and
+// a label annotating its source. The live SHOW DATABASES result is
+// authoritative — including when it's empty; the state-file snapshot (taken
+// at server start, never refreshed) is only a fallback when the live query
+// failed.
+func statusDatabases(served []string, verifyErr error, cached []string) ([]string, string) {
+	if verifyErr != nil {
+		return cached, "Databases (cached at server start; live query failed):"
+	}
+	return served, "Databases (live):"
 }
 
 type beadsRuntimeConfig struct {
