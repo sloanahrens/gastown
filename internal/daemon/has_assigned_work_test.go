@@ -13,7 +13,13 @@ func TestHasAssignedOpenWork_UsesPinnedBeadsDirInsteadOfRigOrRepoFlag(t *testing
 		t.Skip("test uses Unix shell script mocks")
 	}
 
-	townRoot := t.TempDir()
+	// GetRigDirForName's pathWithin resolves symlinks on the town root but the
+	// rig dir never exists here, so a symlinked TempDir (macOS /var ->
+	// /private/var) would make it return "" and skip the pinned BEADS_DIR path.
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
 		t.Fatalf("mkdir town beads: %v", err)
 	}
