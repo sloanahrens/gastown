@@ -401,6 +401,15 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("closing escalation: %w", err)
 	}
 
+	// The escalation's routed mail notification(s) share its thread but are
+	// separate beads (see mail.Router.buildLabels) — closing the escalation
+	// wisp doesn't close them. Left open, they accumulate as phantom P1/P2s
+	// on the dashboard and pollute `bd ready`. Close them too, best-effort.
+	closedDeliveries, err := closeEscalationDeliveryBeads(bd, escalationID, closedBy)
+	if err != nil {
+		style.PrintWarning("failed to close escalation delivery bead(s): %v", err)
+	}
+
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationClosed, closedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -410,7 +419,39 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Escalation closed: %s\n", style.Bold.Render("✓"), escalationID)
 	fmt.Printf("  Reason: %s\n", escalateCloseReason)
+	if closedDeliveries > 0 {
+		fmt.Printf("  Delivery beads closed: %d\n", closedDeliveries)
+	}
 	return nil
+}
+
+// closeEscalationDeliveryBeads closes the open mail-delivery beads routed for
+// an escalation (identified by thread:<escalationID>), so they don't linger
+// as phantom open escalations on the dashboard or in `bd ready`. Returns the
+// number closed.
+func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
+	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--json")
+	if err != nil {
+		return 0, fmt.Errorf("listing delivery beads: %w", err)
+	}
+
+	var issues []*beads.Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return 0, fmt.Errorf("parsing delivery beads: %w", err)
+	}
+	if len(issues) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	reason := fmt.Sprintf("escalation %s closed by %s", escalationID, closedBy)
+	if err := bd.CloseWithReason(reason, ids...); err != nil {
+		return 0, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
+	}
+	return len(ids), nil
 }
 
 func runEscalateStale(cmd *cobra.Command, args []string) error {

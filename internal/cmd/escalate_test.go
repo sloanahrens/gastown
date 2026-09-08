@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -594,6 +595,109 @@ func TestFormatEscalationMailBodyNeutralSubjectStillCarriesStructuredBody(t *tes
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q: %s", want, body)
 		}
+	}
+}
+
+// TestCloseEscalationDeliveryBeads verifies that closing an escalation's
+// mail-delivery beads queries for open beads on the escalation's thread and
+// closes exactly those.
+//
+// Regression test for gt-kl7: `gt escalate close` closed the escalation wisp
+// but left its routed mail-delivery bead(s) open, so resolved incidents kept
+// showing up as unacked P1/P2s on the dashboard and polluted `bd ready`.
+func TestCloseEscalationDeliveryBeads(t *testing.T) {
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "calls.log")
+
+	stubScript := `#!/bin/sh
+{
+  for a in "$@"; do printf '%s\t' "$a"; done
+  printf '\n'
+} >> "` + logPath + `"
+
+case "$1" in
+  --allow-stale)
+    exit 1
+    ;;
+  list)
+    echo '[{"id":"hq-885m","title":"[HIGH] test","status":"open","labels":["gt:message","gt:escalation","thread:hq-kl7"]}]'
+    exit 0
+    ;;
+  close)
+    exit 0
+    ;;
+  *)
+    echo '{}'
+    exit 0
+    ;;
+esac
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	beads.ResetBdAllowStaleCacheForTest()
+
+	bd := beads.New(t.TempDir())
+	n, err := closeEscalationDeliveryBeads(bd, "hq-kl7", "gastown/witness")
+	if err != nil {
+		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("closed count = %d, want 1", n)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	callLog := string(logData)
+
+	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--json"} {
+		if !strings.Contains(callLog, want) {
+			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
+		}
+	}
+	if !strings.Contains(callLog, "close\thq-885m") {
+		t.Errorf("expected close call for hq-885m, got log:\n%s", callLog)
+	}
+}
+
+// TestCloseEscalationDeliveryBeadsNoneOpen verifies the no-op path when no
+// delivery beads are open on the escalation's thread.
+func TestCloseEscalationDeliveryBeadsNoneOpen(t *testing.T) {
+	stubDir := t.TempDir()
+
+	stubScript := `#!/bin/sh
+case "$1" in
+  --allow-stale)
+    exit 1
+    ;;
+  list)
+    echo '[]'
+    exit 0
+    ;;
+  *)
+    echo '{}'
+    exit 0
+    ;;
+esac
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	beads.ResetBdAllowStaleCacheForTest()
+
+	bd := beads.New(t.TempDir())
+	n, err := closeEscalationDeliveryBeads(bd, "hq-kl7", "gastown/witness")
+	if err != nil {
+		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("closed count = %d, want 0", n)
 	}
 }
 

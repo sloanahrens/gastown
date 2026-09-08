@@ -1330,6 +1330,21 @@ func (f *LiveConvoyFetcher) FetchEscalations() ([]EscalationRow, error) {
 
 	var rows []EscalationRow
 	for _, issue := range issues {
+		// Escalation mail-delivery beads carry the same gt:escalation label
+		// (see mail.Router.buildLabels) so the routed notification can be
+		// found by ack/close, but they aren't escalation wisps themselves —
+		// skip them so the dashboard counts open escalations, not deliveries.
+		isDelivery := false
+		for _, label := range issue.Labels {
+			if label == "gt:message" {
+				isDelivery = true
+				break
+			}
+		}
+		if isDelivery {
+			continue
+		}
+
 		row := EscalationRow{
 			ID:          issue.ID,
 			Title:       issue.Title,

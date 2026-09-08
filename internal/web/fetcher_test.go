@@ -576,6 +576,47 @@ esac
 	})
 }
 
+// TestFetchEscalations_SkipsMailDeliveryBeads verifies that escalation
+// mail-delivery beads (labeled gt:message, routed by mail.Router alongside
+// the escalation wisp — see mail.Router.buildLabels) are excluded from the
+// dashboard's escalation count, matching the beads-package filtering already
+// applied by filterEscalationRecords for `gt escalate list`.
+//
+// Regression test for gt-kl7: the dashboard's `bd list --label=gt:escalation`
+// query returned both the escalation wisp and its routed mail-delivery
+// bead(s), which don't get closed by `gt escalate close`, so resolved
+// incidents kept inflating the dashboard's open/unacked P1-P2 count.
+func TestFetchEscalations_SkipsMailDeliveryBeads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+echo '[
+  {"id":"hq-wisp1","title":"Real escalation","created_at":"2026-09-08T00:00:00Z","created_by":"gastown/witness","labels":["gt:escalation","severity:high"]},
+  {"id":"hq-885m","title":"[HIGH] Real escalation","created_at":"2026-09-08T00:00:00Z","created_by":"gastown/witness","labels":["gt:escalation","gt:message","msg-type:escalation","thread:hq-wisp1"]}
+]'
+exit 0
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	f := &LiveConvoyFetcher{cmdTimeout: 5 * time.Second, bdBin: bdPath, townRoot: t.TempDir()}
+	rows, err := f.FetchEscalations()
+	if err != nil {
+		t.Fatalf("FetchEscalations: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("FetchEscalations returned %d rows, want 1 (mail-delivery bead should be skipped): %#v", len(rows), rows)
+	}
+	if rows[0].ID != "hq-wisp1" {
+		t.Fatalf("FetchEscalations returned %q, want the escalation wisp hq-wisp1", rows[0].ID)
+	}
+}
+
 func TestFetchConvoysBreakerBacksOffAfterBdFailures(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based command test")
