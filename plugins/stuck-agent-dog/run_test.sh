@@ -272,14 +272,27 @@ SH
   chmod +x "$bin_dir/ps"
 }
 
+# The fake commands are written once and shared by every test case. They read
+# all per-test state through $TEST_STATE, so per-case bin dirs are unnecessary
+# — and each freshly written executable risks a rare macOS exec stall on first
+# run (see run_script), so we keep the number of new script files minimal.
+FAKE_BIN_DIR=""
+
+ensure_fake_commands() {
+  if [ -z "$FAKE_BIN_DIR" ]; then
+    FAKE_BIN_DIR=$(mktemp -d)
+    CLEANUP_DIRS+=("$FAKE_BIN_DIR")
+    write_fake_commands "$FAKE_BIN_DIR"
+  fi
+}
+
 setup_case() {
   TEST_TMP=$(mktemp -d)
   CLEANUP_DIRS+=("$TEST_TMP")
   export TEST_STATE="$TEST_TMP/state"
   export GT_TOWN_ROOT="$TEST_TMP/town"
-  local bin_dir="$TEST_TMP/bin"
 
-  mkdir -p "$TEST_STATE/health" "$TEST_STATE/hook_fail" "$TEST_STATE/hook_status" "$TEST_STATE/nohook" "$TEST_STATE/sessions" "$TEST_STATE/status" "$bin_dir"
+  mkdir -p "$TEST_STATE/health" "$TEST_STATE/hook_fail" "$TEST_STATE/hook_status" "$TEST_STATE/nohook" "$TEST_STATE/sessions" "$TEST_STATE/status"
   mkdir -p "$GT_TOWN_ROOT/gastown/polecats" "$GT_TOWN_ROOT/deacon"
   printf '{"rigs":{"gastown":{"beads":{"prefix":"gt"}}}}\n' > "$GT_TOWN_ROOT/rigs.json"
   : > "$TEST_STATE/mail.log"
@@ -290,8 +303,8 @@ setup_case() {
   : > "$TEST_STATE/bd.log"
   touch "$TEST_STATE/sessions/hq-deacon"
 
-  write_fake_commands "$bin_dir"
-  export PATH="$bin_dir:$ORIGINAL_PATH"
+  ensure_fake_commands
+  export PATH="$FAKE_BIN_DIR:$ORIGINAL_PATH"
   export GT_STUCK_AGENT_DOG_MAX_INACTIVITY=0s
   unset GT_STUCK_AGENT_DOG_MASS_DEATH_THRESHOLD
 }
@@ -315,8 +328,54 @@ add_polecat_in_rig() {
   printf '%s\n' "$status" > "$TEST_STATE/health/$session"
 }
 
+# One run.sh invocation with a stall watchdog. Normal runs finish in ~2s; on
+# this host a freshly spawned script very occasionally wedges in exec before
+# bash ever runs it (environmental, not a run.sh bug — gt-nxc), which would
+# otherwise hang the suite forever.
+RUN_SCRIPT_TIMEOUT_SECONDS=30
+RUN_SCRIPT_ATTEMPTS=3
+
+run_script_once() {
+  local pid="" waited=0
+
+  bash "$SCRIPT" > "$TEST_STATE/output.log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$RUN_SCRIPT_TIMEOUT_SECONDS" ]; then
+      printf 'NOTICE: run.sh stalled >%ss; killing pid %s\n' "$RUN_SCRIPT_TIMEOUT_SECONDS" "$pid" >&2
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
+# The same environmental flake can also make a spawned command inside run.sh
+# fail spuriously, aborting run.sh under its `set -e`. Retry on a restored
+# state snapshot: the fake gt rotates multi-line health/hook fixture files as
+# they are read, so a rerun without restoring would see the wrong fixtures.
+# A deterministic run.sh failure still fails every attempt and the suite.
 run_script() {
-  bash "$SCRIPT" > "$TEST_STATE/output.log" 2>&1
+  local attempt=1 rc=0
+
+  while [ "$attempt" -le "$RUN_SCRIPT_ATTEMPTS" ]; do
+    rm -rf "$TEST_TMP/state.snapshot"
+    cp -R "$TEST_STATE" "$TEST_TMP/state.snapshot"
+    rc=0
+    run_script_once || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -rf "$TEST_TMP/state.snapshot"
+      return 0
+    fi
+    printf 'NOTICE: run.sh attempt %s/%s exited rc=%s\n' "$attempt" "$RUN_SCRIPT_ATTEMPTS" "$rc" >&2
+    rm -rf "$TEST_STATE"
+    mv "$TEST_TMP/state.snapshot" "$TEST_STATE"
+    attempt=$((attempt + 1))
+  done
+  return "$rc"
 }
 
 test_healthy_runtime() {
