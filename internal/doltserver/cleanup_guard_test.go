@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -56,4 +57,60 @@ func TestHoldFor(t *testing.T) {
 	if h := HoldFor(nil, "anything"); h != nil {
 		t.Errorf("expected no hold with empty hold list, got %+v", h)
 	}
+}
+
+func TestValidateForceAuthorization(t *testing.T) {
+	valid := func() *beads.Issue {
+		return &beads.Issue{
+			ID:        "hq-auth1",
+			Title:     "Authorize forced cleanup of testdb_*",
+			Status:    "open",
+			CreatedBy: "mayor",
+			Labels:    []string{ForceAuthLabel},
+		}
+	}
+
+	t.Run("nil issue refused", func(t *testing.T) {
+		if err := ValidateForceAuthorization(nil, "gastown/polecats/onyx"); err == nil {
+			t.Fatal("expected error for nil issue")
+		}
+	})
+
+	t.Run("valid authorization bead passes", func(t *testing.T) {
+		if err := ValidateForceAuthorization(valid(), "gastown/polecats/onyx"); err != nil {
+			t.Fatalf("expected valid authorization to pass, got: %v", err)
+		}
+	})
+
+	t.Run("missing label refused", func(t *testing.T) {
+		issue := valid()
+		issue.Labels = []string{"gt:task"}
+		err := ValidateForceAuthorization(issue, "gastown/polecats/onyx")
+		if err == nil {
+			t.Fatal("expected refusal for bead without the authorization label")
+		}
+		if !strings.Contains(err.Error(), ForceAuthLabel) {
+			t.Errorf("error should name the required label, got: %v", err)
+		}
+	})
+
+	t.Run("closed bead refused", func(t *testing.T) {
+		issue := valid()
+		issue.Status = "closed"
+		if err := ValidateForceAuthorization(issue, "gastown/polecats/onyx"); err == nil {
+			t.Fatal("expected refusal for closed authorization bead")
+		}
+	})
+
+	t.Run("self-created bead refused", func(t *testing.T) {
+		issue := valid()
+		issue.CreatedBy = "gastown/polecats/onyx"
+		err := ValidateForceAuthorization(issue, "gastown/polecats/onyx")
+		if err == nil {
+			t.Fatal("expected refusal when the requesting agent created the bead itself")
+		}
+		if !strings.Contains(err.Error(), "self") {
+			t.Errorf("error should call out self-authorization, got: %v", err)
+		}
+	})
 }

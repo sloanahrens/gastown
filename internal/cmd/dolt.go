@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -277,13 +278,17 @@ renamed databases, or failed migrations.
 
 Use --dry-run to preview what would be removed without making changes.
 
-Guardrails (gt-61x):
+Guardrails (gt-61x, hardened by gt-2oy):
   - Databases referenced by an open hold bead (label "dolt-hold:<dbname>", or
     a blanket "dolt-hold") are never removed, even with --force. Close the
     hold bead to release the database.
-  - Agent actors (GT_ROLE/BD_ACTOR set) cannot use --force without recording
-    authorization via --authorized-by <bead-id>. The referenced bead must
-    exist; the forced removal is logged to it as a comment.
+  - If the holds query fails, every destructive run is refused (fail closed);
+    only --dry-run continues without hold information.
+  - Agent actors cannot use --force without recording authorization via
+    --authorized-by <bead-id>. Unset GT_ROLE/BD_ACTOR off-terminal still
+    counts as an agent. The bead must carry the "dolt-force-auth" label, be
+    open, and not be created by the requesting agent itself; the forced
+    removal is logged to it as a comment.
 
 Examples:
   gt dolt cleanup             # Remove all orphaned databases
@@ -1092,12 +1097,20 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	// ephemeral nudge. Forcing agents through --authorized-by leaves a durable
 	// audit trail on the authorizing bead.
 	if doltCleanupForce && !doltCleanupDry {
-		if actor := agentActor(); actor != "" {
+		// Identity is corroborated, not just read from env: unset GT_ROLE/BD_ACTOR
+		// off-terminal is treated as an agent, so agents cannot pose as human
+		// operators by unsetting their env (gt-2oy).
+		if actor, isAgent := resolveDestructiveActor(agentActor(), ui.IsTerminal()); isAgent {
 			if err := checkAgentForceAuthorization(actor, doltCleanupAuthorizedBy); err != nil {
 				return err
 			}
-			if _, err := beads.New(townRoot).Show(doltCleanupAuthorizedBy); err != nil {
+			issue, err := beads.New(townRoot).Show(doltCleanupAuthorizedBy)
+			if err != nil {
 				return fmt.Errorf("--authorized-by bead %q not found: %w", doltCleanupAuthorizedBy, err)
+			}
+			// The bead must be a genuine authorization record, not just any bead (gt-2oy).
+			if err := doltserver.ValidateForceAuthorization(issue, actor); err != nil {
+				return err
 			}
 		}
 	}
@@ -1115,14 +1128,15 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	// GUARDRAIL (gt-61x): databases referenced by an open hold bead are excluded
 	// from cleanup regardless of --force. Close the hold bead to release them.
 	holds, holdsErr := doltserver.FindDatabaseHolds(townRoot)
+	// Fail closed for ALL destructive runs, not just --force: if we can't see
+	// the holds, we can't prove any removal is safe (gt-2oy). Dry runs may
+	// continue — they remove nothing.
+	if err := holdsGateError(holdsErr, doltCleanupDry); err != nil {
+		return err
+	}
 	if holdsErr != nil {
-		if doltCleanupForce && !doltCleanupDry {
-			// Fail closed for forced cleanup: if we can't see the holds, we
-			// can't prove the removal is safe.
-			return fmt.Errorf("cannot verify database holds (refusing --force cleanup): %w", holdsErr)
-		}
 		fmt.Printf("%s Could not query database holds: %v\n", style.Bold.Render("!"), holdsErr)
-		fmt.Printf("  Continuing without hold protection — non-empty databases are still refused.\n\n")
+		fmt.Printf("  Dry run continues without hold information.\n\n")
 	}
 
 	var removable []doltserver.OrphanedDatabase
@@ -1238,6 +1252,31 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveDestructiveActor decides who is running a destructive cleanup.
+// Env identity (GT_ROLE/BD_ACTOR) alone is spoofable: an agent can run
+// 'env -u GT_ROLE -u BD_ACTOR gt dolt cleanup --force' to pose as a human
+// operator (gt-2oy). So unset identity only counts as human when stdout is an
+// interactive terminal; off-terminal, unset identity is agent-by-default.
+func resolveDestructiveActor(envActor string, stdoutIsTTY bool) (actor string, isAgent bool) {
+	if envActor != "" {
+		return envActor, true
+	}
+	if stdoutIsTTY {
+		return "", false
+	}
+	return "unidentified agent (GT_ROLE/BD_ACTOR unset, not an interactive terminal)", true
+}
+
+// holdsGateError decides whether cleanup may continue after a failed holds
+// query. Destructive runs fail closed: if we cannot see the holds, we cannot
+// prove any removal is safe (gt-2oy). Only a dry run may continue.
+func holdsGateError(holdsErr error, dryRun bool) error {
+	if holdsErr == nil || dryRun {
+		return nil
+	}
+	return fmt.Errorf("cannot verify database holds (refusing destructive cleanup; retry when beads is reachable, or use --dry-run to inspect): %w", holdsErr)
 }
 
 // agentActor returns the agent identity when this process runs as a Gas Town
