@@ -1,8 +1,71 @@
 package events
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// TestLogFeedTo_WritesToExplicitTownRoot verifies that the *To variants write
+// to the provided town root rather than resolving one from cwd (gt-x9o).
+func TestLogFeedTo_WritesToExplicitTownRoot(t *testing.T) {
+	townRoot := t.TempDir()
+
+	if err := LogFeedTo(townRoot, TypeSessionDeath, "myr/mycat",
+		SessionDeathPayload("gt-mycat", "myr/polecats/mycat", "test", "daemon")); err != nil {
+		t.Fatalf("LogFeedTo: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(townRoot, EventsFile))
+	if err != nil {
+		t.Fatalf("reading events file: %v", err)
+	}
+
+	var event Event
+	if err := json.Unmarshal(data, &event); err != nil {
+		t.Fatalf("unmarshaling event: %v", err)
+	}
+	if event.Type != TypeSessionDeath {
+		t.Errorf("type = %q, want %q", event.Type, TypeSessionDeath)
+	}
+	if event.Actor != "myr/mycat" {
+		t.Errorf("actor = %q, want myr/mycat", event.Actor)
+	}
+	if event.Visibility != VisibilityFeed {
+		t.Errorf("visibility = %q, want %q", event.Visibility, VisibilityFeed)
+	}
+}
+
+// TestLogTo_EmptyTownRootIsNoop verifies LogTo silently ignores an empty root
+// instead of writing to the filesystem root or erroring.
+func TestLogTo_EmptyTownRootIsNoop(t *testing.T) {
+	if err := LogTo("", TypeSling, "tester", nil, VisibilityAudit); err != nil {
+		t.Fatalf("LogTo with empty root: %v", err)
+	}
+}
+
+// TestLog_NoopUnderGoTest verifies the cwd-resolving path never writes from a
+// test binary, even when cwd is inside a real Gas Town workspace. This is the
+// guard against fixture events polluting production ~/gt/.events.jsonl (gt-x9o).
+func TestLog_NoopUnderGoTest(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("creating mayor dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("writing town.json: %v", err)
+	}
+	t.Chdir(townRoot)
+
+	if err := LogFeed(TypeSessionDeath, "tester", nil); err != nil {
+		t.Fatalf("LogFeed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(townRoot, EventsFile)); !os.IsNotExist(err) {
+		t.Errorf("expected no events file under go test, stat err = %v", err)
+	}
+}
 
 func TestSlingPayload(t *testing.T) {
 	p := SlingPayload("gt-123", "gastown")
