@@ -928,7 +928,10 @@ func extractWrappedBinary(wrapper string, args []string) string {
 //     as a fallback) for the real binary and resolve to its preset's ProcessNames.
 //  3. Otherwise, find a built-in preset whose Command matches the actual command
 //     and use its ProcessNames (custom agent using a known launcher).
-//  4. Fallback: [command] (fully custom binary).
+//  4. If the command is unknown but agentName is a registered preset, return
+//     the command basename unioned with the preset's ProcessNames (custom
+//     wrapper script around a known agent, e.g. a script that execs claude).
+//  5. Fallback: [command] (fully custom binary).
 func ResolveProcessNames(agentName, command string, args ...string) []string {
 	registryMu.Lock()
 	initRegistryLocked()
@@ -991,6 +994,23 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 				(strings.HasPrefix(cmdBase, "gt-") && filepath.Base(info.Command) == unwrappedCmdBase) {
 				return info.ProcessNames
 			}
+		}
+		// Unknown command but known agent name — the operator pointed a
+		// registered agent at an unrecognized binary (e.g.,
+		// agents.claude.command = ~/gt/bin/claude-trusted, a wrapper script
+		// that execs the real claude). Post-exec no process carries the
+		// wrapper's name, so liveness detection must also accept the named
+		// preset's process names. Union covers both exec-style wrappers
+		// (matches preset names) and wrappers that stay resident (matches
+		// the basename).
+		if infoOK && len(info.ProcessNames) > 0 {
+			names := []string{cmdBase}
+			for _, n := range info.ProcessNames {
+				if n != cmdBase {
+					names = append(names, n)
+				}
+			}
+			return names
 		}
 		// Unknown command — use the binary basename itself
 		return []string{cmdBase}
