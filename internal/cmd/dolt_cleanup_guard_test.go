@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,56 @@ func TestCheckAgentForceAuthorization(t *testing.T) {
 	t.Run("allows with authorization bead", func(t *testing.T) {
 		if err := checkAgentForceAuthorization("deacon/dogs/alpha", "hq-abc"); err != nil {
 			t.Errorf("expected authorization to pass, got: %v", err)
+		}
+	})
+}
+
+func TestHoldsGateError(t *testing.T) {
+	t.Run("no error passes", func(t *testing.T) {
+		if err := holdsGateError(nil, false); err != nil {
+			t.Errorf("expected nil for successful holds query, got: %v", err)
+		}
+	})
+
+	t.Run("dry run continues despite holds failure", func(t *testing.T) {
+		if err := holdsGateError(errors.New("dolt down"), true); err != nil {
+			t.Errorf("dry run is non-destructive and should continue, got: %v", err)
+		}
+	})
+
+	t.Run("destructive run fails closed on holds failure", func(t *testing.T) {
+		err := holdsGateError(errors.New("dolt down"), false)
+		if err == nil {
+			t.Fatal("expected fail-closed error when holds cannot be verified for a destructive run")
+		}
+		if !strings.Contains(err.Error(), "holds") {
+			t.Errorf("error should mention holds, got: %v", err)
+		}
+	})
+}
+
+func TestResolveDestructiveActor(t *testing.T) {
+	t.Run("env identity is an agent", func(t *testing.T) {
+		actor, isAgent := resolveDestructiveActor("gastown/polecats/onyx", true)
+		if !isAgent || actor != "gastown/polecats/onyx" {
+			t.Errorf("expected agent with env identity, got actor=%q isAgent=%v", actor, isAgent)
+		}
+	})
+
+	t.Run("no identity at a terminal is a human", func(t *testing.T) {
+		actor, isAgent := resolveDestructiveActor("", true)
+		if isAgent || actor != "" {
+			t.Errorf("expected human operator, got actor=%q isAgent=%v", actor, isAgent)
+		}
+	})
+
+	t.Run("no identity without a terminal is agent-by-default", func(t *testing.T) {
+		actor, isAgent := resolveDestructiveActor("", false)
+		if !isAgent {
+			t.Error("unset identity off-terminal must be treated as an agent (spoofing guard, gt-2oy)")
+		}
+		if actor == "" {
+			t.Error("agent-by-default actor should carry a descriptive label")
 		}
 	})
 }
