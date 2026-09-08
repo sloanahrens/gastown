@@ -99,6 +99,9 @@ func setupRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 }
 
 func TestGetServerAddr(t *testing.T) {
+	// GT_DOLT_PORT would override the DefaultPort fallback these cases expect;
+	// the hermetic harness (and agent sessions) set it, so clear it.
+	t.Setenv("GT_DOLT_PORT", "")
 	check := NewDoltServerReachableCheck()
 
 	tests := []struct {
