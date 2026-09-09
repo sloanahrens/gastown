@@ -30,6 +30,34 @@ it, and the loop repeated every 1-2 minutes.
 
 The Deacon evaluates this before dispatch. If gate closed, skip.
 
+## Drift Escalation
+
+Every skip path below (dirty repo, wrong branch, diverged local main, an
+unreadable staleness check, "not safe to rebuild") is a normal, expected
+outcome on its own — but any one of them can persist for hours while the
+binary quietly falls behind `origin/main`, and none of the individual skip
+checks would ever notice that on their own.
+
+Before any pre-flight check runs, check drift directly and escalate on the
+outcome that matters — commits behind `origin/main` — rather than on which
+skip reason fired:
+
+```bash
+gt stale --json   # commits_behind is meaningful regardless of RIG_ROOT's
+                   # working-tree state — it only inspects git history
+```
+
+If `commits_behind` exceeds a threshold (default 20, override with
+`REBUILD_GT_MAX_COMMITS_BEHIND`), escalate with a stable fingerprint so
+repeated runs don't spam duplicate escalations while the condition persists:
+
+```bash
+gt escalate "rebuild-gt: binary is $N commits behind origin/main and has not been rebuilt" \
+  -s medium \
+  --source "plugin:rebuild-gt" \
+  --fingerprint "rebuild-gt:drift" >/dev/null 2>&1 || true
+```
+
 ## Detection
 
 Check binary staleness:

@@ -21,6 +21,35 @@ if [ ! -d "$RIG_ROOT" ]; then
   exit 0
 fi
 
+# --- Drift escalation ---------------------------------------------------------
+#
+# Every bail below (dirty repo, wrong branch, diverged local main, an
+# unreadable staleness check, "not safe to rebuild") exits 0 and records a
+# healthy-looking "skipped" receipt. None of them escalate, so any one of
+# them can persist for hours — or indefinitely — with nothing in the system
+# ever raising an alarm (gt-bce). This check runs unconditionally, before any
+# of those bails, and is keyed to the OUTCOME THAT MATTERS — the binary
+# drifting from origin/main — rather than to an enumeration of bail reasons.
+# Enumerating failure modes is the same brittleness this town has hit
+# repeatedly (gt-r8o, gt-50k); this catches every bail path above, including
+# ones not yet written, because it doesn't ask why the rebuild didn't happen.
+#
+# 'gt stale --json' refreshes its own origin/main remote-tracking ref and
+# only inspects git history, never RIG_ROOT's working-tree state, so it is
+# meaningful here even though the checks below may bail on that same
+# worktree being dirty or on the wrong branch.
+MAX_COMMITS_BEHIND=${REBUILD_GT_MAX_COMMITS_BEHIND:-20}
+if DRIFT_JSON=$(gt stale --json 2>/dev/null); then
+  DRIFT_BEHIND=$(echo "$DRIFT_JSON" | python3 -c "import json,sys; print(int(json.load(sys.stdin).get('commits_behind') or 0))" 2>/dev/null || echo 0)
+  if [ "$DRIFT_BEHIND" -gt "$MAX_COMMITS_BEHIND" ]; then
+    log "Binary is $DRIFT_BEHIND commits behind origin/main (over threshold $MAX_COMMITS_BEHIND). Escalating."
+    gt escalate "rebuild-gt: binary is $DRIFT_BEHIND commits behind origin/main and has not been rebuilt" \
+      -s medium \
+      --source "plugin:rebuild-gt" \
+      --fingerprint "rebuild-gt:drift" 2>/dev/null || true
+  fi
+fi
+
 # Only TRACKED modifications outside .beads/ can change what 'make build'
 # produces. Untracked entries (.agents/, .codex/, .worktrees/) and bd's own
 # rewriting of .beads/config.yaml must not trip this guard: a plain
