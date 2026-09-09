@@ -316,6 +316,13 @@ func TestRunMoleculeAwaitSignalAgentBeadUsesCwdRigBeadsDirWhenBeadsDirPointsTown
 	}
 
 	tmp := t.TempDir()
+	// Resolve symlinks so paths the code under test derives via chdir/redirect
+	// resolution (which return the canonical path on macOS, where
+	// t.TempDir() lives under a /var/folders symlink to /private/var/folders)
+	// match rigBeads/townBeads as built here. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
 	townRoot := filepath.Join(tmp, "gt")
 	townBeads := filepath.Join(townRoot, ".beads")
 	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")

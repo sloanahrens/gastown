@@ -19,8 +19,14 @@ func setupPrimeExternalToolTest(t *testing.T, bdScript, gtScript string) string 
 
 	oldTimeout := primeExternalToolTimeout
 	oldWaitDelay := primeExternalToolWaitDelay
-	primeExternalToolTimeout = 100 * time.Millisecond
-	primeExternalToolWaitDelay = 10 * time.Millisecond
+	// The first subprocess spawned by a test binary pays a one-time cold-start
+	// cost (shell/dyld cache warm-up) that can exceed 100ms in a sandboxed
+	// environment, killing it before the mock script ever runs. 400ms clears
+	// that noise floor while staying far below the 1s ceiling the "bounds
+	// slow" tests assert on, so their kill-the-slow-command behavior is still
+	// exercised.
+	primeExternalToolTimeout = 400 * time.Millisecond
+	primeExternalToolWaitDelay = 50 * time.Millisecond
 	t.Cleanup(func() {
 		primeExternalToolTimeout = oldTimeout
 		primeExternalToolWaitDelay = oldWaitDelay
