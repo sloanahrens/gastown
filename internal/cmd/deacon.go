@@ -586,6 +586,7 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 	runtimeCfg := config.ResolveRoleAgentConfig("deacon", deaconTownRoot, "")
 	_ = runtime.RunStartupFallback(t, sessionName, "deacon", runtimeCfg)
 	startDeaconNudgePoller(townRoot, sessionName)
+	startDeaconHeartbeatPoller(townRoot, sessionName)
 
 	return nil
 }
@@ -606,6 +607,26 @@ func stopDeaconNudgePoller(sessionName string) {
 	}
 }
 
+// startDeaconHeartbeatPoller launches the background heartbeat poller
+// (gt-x8y) so liveness is decoupled from step duration: a long stretch of
+// bd/git/grep investigation between gt commands still keeps the heartbeat
+// fresh, closing the gap left by gt-13z's gt-command-only refresh.
+func startDeaconHeartbeatPoller(townRoot, sessionName string) {
+	if _, pollerErr := deacon.StartHeartbeatPoller(townRoot, sessionName); pollerErr != nil {
+		style.PrintWarning("could not start heartbeat poller for %s: %v", sessionName, pollerErr)
+	}
+}
+
+func stopDeaconHeartbeatPoller(sessionName string) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return
+	}
+	if pollerErr := deacon.StopHeartbeatPoller(townRoot, sessionName); pollerErr != nil {
+		style.PrintWarning("could not stop heartbeat poller for %s: %v", sessionName, pollerErr)
+	}
+}
+
 func runDeaconStop(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 
@@ -622,6 +643,7 @@ func runDeaconStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Stopping Deacon session...")
 	stopDeaconNudgePoller(sessionName)
+	stopDeaconHeartbeatPoller(sessionName)
 
 	// Try graceful shutdown first (best-effort interrupt)
 	_ = t.SendKeysRaw(sessionName, "C-c")
@@ -810,6 +832,7 @@ func runDeaconRestart(cmd *cobra.Command, args []string) error {
 
 	if running {
 		stopDeaconNudgePoller(sessionName)
+		stopDeaconHeartbeatPoller(sessionName)
 
 		// Kill existing session.
 		// Use KillSessionWithProcesses to ensure all descendant processes are killed.

@@ -147,6 +147,18 @@ func Touch(townRoot string) error {
 	})
 }
 
+// TouchIfActive touches the heartbeat unless the Deacon is paused (or its
+// pause state can't be read). A paused Deacon should not appear to have a
+// fresh heartbeat. Shared by touchDeaconHeartbeat (refreshed on every gt
+// command) and the background heartbeat poller (refreshed on a fixed
+// interval, independent of gt commands — see StartHeartbeatPoller).
+func TouchIfActive(townRoot string) error {
+	if paused, _, err := IsPaused(townRoot); err != nil || paused {
+		return nil
+	}
+	return Touch(townRoot)
+}
+
 // TouchWithAction writes a heartbeat with an action description.
 func TouchWithAction(townRoot, action string, healthy, unhealthy int) error {
 	existing := ReadHeartbeat(townRoot)

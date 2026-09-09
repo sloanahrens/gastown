@@ -349,6 +349,77 @@ func TestWriteHeartbeat_TouchesLegacyFile(t *testing.T) {
 	}
 }
 
+func TestTouchIfActive_TouchesWhenNotPaused(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	if err := TouchIfActive(tmpDir); err != nil {
+		t.Fatalf("TouchIfActive error: %v", err)
+	}
+
+	hb := ReadHeartbeat(tmpDir)
+	if hb == nil {
+		t.Fatal("expected heartbeat after TouchIfActive")
+	}
+}
+
+func TestTouchIfActive_SkipsWhenPaused(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	if err := Pause(tmpDir, "maintenance", "test"); err != nil {
+		t.Fatalf("Pause error: %v", err)
+	}
+
+	if err := TouchIfActive(tmpDir); err != nil {
+		t.Fatalf("TouchIfActive error: %v", err)
+	}
+
+	if hb := ReadHeartbeat(tmpDir); hb != nil {
+		t.Fatalf("expected no heartbeat while paused, got %+v", hb)
+	}
+}
+
+// TestTouchIfActive_RepeatedTicksAdvanceCycleWithoutAnyGtCommand simulates the
+// gt-x8y scenario directly: a long investigative stretch that never invokes a
+// `gt` command (so touchDeaconHeartbeat in root.go's persistentPreRun never
+// runs) still needs the heartbeat to advance. This is exactly what the
+// background heartbeat poller calls on every tick — proving repeated calls
+// keep bumping the cycle counter is the load-bearing assertion for the fix
+// (a count assertion, not merely "a heartbeat file exists").
+func TestTouchIfActive_RepeatedTicksAdvanceCycleWithoutAnyGtCommand(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	const ticks = 5
+	var lastCycle int64
+	for i := 0; i < ticks; i++ {
+		if err := TouchIfActive(tmpDir); err != nil {
+			t.Fatalf("tick %d: TouchIfActive error: %v", i, err)
+		}
+		hb := ReadHeartbeat(tmpDir)
+		if hb == nil {
+			t.Fatalf("tick %d: expected heartbeat", i)
+		}
+		if hb.Cycle <= lastCycle {
+			t.Fatalf("tick %d: Cycle = %d, did not advance past %d", i, hb.Cycle, lastCycle)
+		}
+		lastCycle = hb.Cycle
+	}
+	if lastCycle != ticks {
+		t.Fatalf("final Cycle = %d, want %d after %d ticks", lastCycle, ticks, ticks)
+	}
+}
+
 func TestWriteHeartbeat_SetsTimestamp(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
 	if err != nil {

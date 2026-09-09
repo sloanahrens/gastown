@@ -287,11 +287,7 @@ func touchDeaconHeartbeat() {
 		return
 	}
 
-	if paused, _, err := deacon.IsPaused(townRoot); err != nil || paused {
-		return
-	}
-
-	_ = deacon.Touch(townRoot)
+	_ = deacon.TouchIfActive(townRoot)
 }
 
 // warnIfTownRootOffMain prints a warning if the town root is not on main branch.
