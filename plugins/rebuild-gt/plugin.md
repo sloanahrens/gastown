@@ -64,6 +64,24 @@ git branch --show-current  # Must be "main"
 
 If either check fails, skip the rebuild and record a wisp.
 
+## Sync with origin/main
+
+The rig checkout has no self-serve pull otherwise: without this step the
+build uses whatever commit a human last checked out, and `make safe-install`
+fails its `check-up-to-date` gate against `origin/main` on every run until a
+human pulls manually.
+
+```bash
+cd ~/gt/gastown/mayor/rig
+git fetch origin --quiet
+git merge --ff-only origin/main --quiet
+```
+
+`--ff-only` is load-bearing: if local `main` has diverged from
+`origin/main`, the merge fails and the plugin must skip the rebuild and
+record a skip wisp with reason "local main diverged from origin/main" —
+**never** `git reset --hard` to force it.
+
 ## Action
 
 Rebuild from source (the mayor/rig directory is the canonical source):

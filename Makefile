@@ -10,8 +10,20 @@ E2E_RUN_FLAGS ?= --rm
 E2E_BUILD_RETRIES ?= 1
 E2E_RUN_RETRIES ?= 1
 
-# Get version info for ldflags
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Get version info for ldflags.
+# Dirty detection is aligned with the rebuild-gt plugin's guard (excludes
+# .beads/, whose config.yaml churns from bd's own writes and isn't part of
+# what 'make build' produces) — otherwise every build stamps '-dirty' even
+# when the tree the guard considers clean. See plugins/rebuild-gt/run.sh.
+GIT_DESCRIBE := $(shell git describe --tags --always 2>/dev/null)
+GIT_DIRTY := $(shell git status --porcelain --untracked-files=no -- . ':(exclude).beads' 2>/dev/null)
+ifeq ($(GIT_DESCRIBE),)
+VERSION := dev
+else ifeq ($(strip $(GIT_DIRTY)),)
+VERSION := $(GIT_DESCRIBE)
+else
+VERSION := $(GIT_DESCRIBE)-dirty
+endif
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 

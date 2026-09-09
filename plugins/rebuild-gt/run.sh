@@ -69,6 +69,20 @@ if [ "$BRANCH" != "main" ]; then
   exit 0
 fi
 
+# RIG_ROOT has no self-serve pull otherwise: without this, the build uses
+# whatever commit a human last checked out, and 'make safe-install' fails its
+# check-up-to-date gate against origin/main on every run until a human pulls
+# (gt-4g1m). ff-only only: a real divergence must never be reset --hard away.
+log "Syncing $RIG_ROOT with origin/main..."
+git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
+if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
+  log "Local main diverged from origin/main, skipping rebuild."
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped]" \
+    --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
+  exit 0
+fi
+
 # --- Build -------------------------------------------------------------------
 
 OLD_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
