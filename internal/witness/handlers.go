@@ -2619,6 +2619,21 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 	}
 
 	if hasMR {
+		// Idempotency check (gt-mf5q): completion discovery is not atomic with
+		// the metadata clear that follows it, so the same completion can be
+		// rediscovered — by a concurrent patrol scan, or by a later cycle if
+		// the clear failed to persist. A polecat can legitimately hold open
+		// cleanup wisps for OTHER issues (dispatch reuse), so the check is
+		// scoped to this exact (issue, branch) pair rather than the polecat
+		// name alone.
+		if existing := findCleanupWispsForCompletion(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch); len(existing) > 0 {
+			sort.Strings(existing)
+			discovery.WispCreated = existing[0]
+			discovery.Action = fmt.Sprintf("already-tracked (MR=%s, wisp=%s)", payload.MRID, existing[0])
+			notifyMayorSlotOpen(workDir, rigName, payload.PolecatName, payload.Exit)
+			return
+		}
+
 		wispID, err := createCleanupWisp(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch)
 		if err != nil {
 			discovery.Error = fmt.Errorf("creating cleanup wisp: %w", err)
@@ -2626,19 +2641,42 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 		}
 		discovery.WispCreated = wispID
 
+		// Dedup (same create-then-dedup pattern as gt-7vs1's zombie restart
+		// path): re-check immediately after creating to catch a concurrent
+		// scan that passed the idempotency check above at the same moment.
+		// Deterministic winner selection (lowest wisp ID) ensures exactly one
+		// scan proceeds to update state and nudge the refinery.
+		if dups := findCleanupWispsForCompletion(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch); len(dups) > 1 {
+			sort.Strings(dups)
+			if wispID != dups[0] {
+				_, _ = bd.Exec(workDir, "close", wispID, "--reason=duplicate: concurrent patrol race (gt-mf5q)")
+				discovery.WispCreated = dups[0]
+				discovery.Action = fmt.Sprintf("already-tracked (MR=%s, wisp=%s, closed-dup=%s)", payload.MRID, dups[0], wispID)
+				notifyMayorSlotOpen(workDir, rigName, payload.PolecatName, payload.Exit)
+				return
+			}
+			for _, w := range dups[1:] {
+				_, _ = bd.Exec(workDir, "close", w, "--reason=duplicate: concurrent patrol race (gt-mf5q)")
+			}
+		}
+
 		if err := UpdateCleanupWispState(bd, workDir, wispID, "merge-requested"); err != nil {
 			discovery.Error = fmt.Errorf("updating wisp state: %w", err)
 		}
 
-		// Nudge refinery to check merge queue (no permanent mail needed).
+		// Nudge refinery to check merge queue (no permanent mail needed). A
+		// nudge failure is non-fatal and must NOT block clearing completion
+		// metadata below (gt-mf5q case 2): the wisp is already created and
+		// tracked, so leaving metadata set would only cause this completion
+		// to be rediscovered — and re-idempotency-checked into a no-op — on
+		// the next cycle, not retry the nudge. Recorded in Action, not
+		// discovery.Error, so it never gates the caller's metadata clear.
 		townRoot, _ := workspace.Find(workDir)
 		if nudgeErr := nudgeRefinery(townRoot, rigName); nudgeErr != nil {
-			if discovery.Error == nil {
-				discovery.Error = fmt.Errorf("nudging refinery: %w (non-fatal)", nudgeErr)
-			}
+			discovery.Action = fmt.Sprintf("merge-ready-nudge-failed (MR=%s, wisp=%s, err=%v)", payload.MRID, wispID, nudgeErr)
+		} else {
+			discovery.Action = fmt.Sprintf("merge-ready-nudged (MR=%s, wisp=%s)", payload.MRID, wispID)
 		}
-
-		discovery.Action = fmt.Sprintf("merge-ready-nudged (MR=%s, wisp=%s)", payload.MRID, wispID)
 
 		// Notify Mayor that a slot is open even with pending MR — polecat is idle. (GH#2727)
 		notifyMayorSlotOpen(workDir, rigName, payload.PolecatName, payload.Exit)
@@ -3377,6 +3415,56 @@ func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
 		ids[i] = item.ID
 	}
 	return ids
+}
+
+// findCleanupWispsForCompletion returns open cleanup wisp IDs for a polecat
+// that match a specific (issueID, branch) completion. Unlike
+// findAnyCleanupWisp/findAllCleanupWisps, which key on polecat name alone,
+// this scopes the match to the exact completion being processed — a polecat
+// can legitimately hold open cleanup wisps for OTHER issues at the same time
+// (dispatch reuse), so matching on name alone would misclassify those as
+// duplicates. Used to make completion discovery idempotent (gt-mf5q).
+func findCleanupWispsForCompletion(bd *BdCli, workDir, polecatName, issueID, branch string) []string {
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
+	// the issues table and never sees them, regardless of flags. Use "bd
+	// query" instead, same fix as findMRBeadForBranch (GH#2446).
+	output, err := bd.Exec(workDir, "query",
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
+		"--json",
+	)
+	if err != nil || output == "" || output == "[]" || output == "null" {
+		return nil
+	}
+	var items []struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(output), &items); err != nil {
+		return nil
+	}
+	var matches []string
+	for _, item := range items {
+		descIssue, descBranch := parseCleanupWispDescription(item.Description)
+		if descIssue == issueID && descBranch == branch {
+			matches = append(matches, item.ID)
+		}
+	}
+	return matches
+}
+
+// parseCleanupWispDescription extracts the "Issue: " and "Branch: " lines
+// createCleanupWisp writes into a cleanup wisp's description, so completion
+// discovery can match an existing wisp to a specific (issue, branch) pair.
+func parseCleanupWispDescription(description string) (issueID, branch string) {
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "Issue: "); ok {
+			issueID = v
+		} else if v, ok := strings.CutPrefix(line, "Branch: "); ok {
+			branch = v
+		}
+	}
+	return issueID, branch
 }
 
 // hasPendingMR checks if a polecat has work waiting in the refinery merge queue.
