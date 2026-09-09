@@ -545,9 +545,23 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 //
 // "mayor", "deacon", "witness", "refinery", "polecat", "crew", "dog",
 // "unknown" are the bare (no-rig) actor strings for their respective Roles.
-// "deacon-boot" is RoleBoot's actor string — RoleInfo.ActorString() returns
-// "deacon-boot", never bare "boot"; the cross-check test caught that the old
-// literal "boot" entry never matched anything real.
+//
+// gt-jna (CRITICAL regression in gt-9pn): RoleBoot has TWO independent,
+// both-legitimate actor-construction paths that gt-9pn wrongly assumed were
+// one and the same:
+//   - RoleInfo.ActorString() (internal/cmd/role.go) returns "deacon-boot" —
+//     the beads-attribution form, matches BD_ACTOR for Boot's `bd` calls.
+//   - getAgentIdentity() (internal/cmd/prime.go), used by emitSessionEvent
+//     to set the actor on every session_start event Boot's `gt prime` emits,
+//     returns bare "boot" — the hook/agent-identity form, matches GT_ROLE's
+//     compound "deacon/boot" root and Boot's session/hook identity elsewhere.
+//   - gt-9pn's TestDetectActorOutputsToleratedByTripwire only cross-checks
+//     ActorString(), so it never saw getAgentIdentity()'s "boot" and the fix
+//     dropped a live, high-volume (~90s cadence) actor value — reproducing
+//     exactly the kind of false positive it was built to eliminate. Both
+//     "boot" and "deacon-boot" must stay tolerated; see
+//     TestGetAgentIdentityOutputsToleratedByTripwire (role_actor_tripwire_test.go)
+//     for the cross-check covering this second construction path.
 //
 // The remaining four are not derivable from internal/cmd.Role because they
 // come from other construction paths, verified directly against source:
@@ -564,15 +578,15 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 //     is exactly the kind of dynamically-built actor a plain string search
 //     for "convoy" as a whole value misses.
 //
-// "town" and "human" were removed (gt-9pn): neither a repo-wide search for
-// them as a literal actor value nor for a "<prefix>/"+id-style builder (the
-// pattern that caught "convoy" above) found a code path that ever writes
-// them as an event actor. If one is ever needed, the tripwire's leak report
-// will name the exact actor to add back — that is the point of deriving
-// this list instead of guessing at it.
+// "town" and "human" remain removed (gt-9pn, re-verified gt-jna): neither a
+// repo-wide search for them as a literal actor value nor for a "<prefix>/"+
+// id-style builder (the pattern that caught "convoy" above) found a code
+// path that ever writes them as an event actor. If one is ever needed, the
+// tripwire's leak report will name the exact actor to add back — that is the
+// point of deriving this list instead of guessing at it.
 var builtinActorPrefixes = []string{
-	"mayor", "deacon", "deacon-boot", "witness", "refinery", "polecat", "crew",
-	"dog", "unknown", "overseer", "gt", "daemon", "convoy",
+	"mayor", "deacon", "boot", "deacon-boot", "witness", "refinery", "polecat",
+	"crew", "dog", "unknown", "overseer", "gt", "daemon", "convoy",
 }
 
 // BuiltinActorPrefixes returns a copy of the always-legitimate town-level
