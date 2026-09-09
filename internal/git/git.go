@@ -128,6 +128,13 @@ func (g *Git) run(args ...string) (string, error) {
 // (e.g. GitLab) is unreachable or slow.
 const pushTimeout = 60 * time.Second
 
+// remoteQueryTimeout bounds read-only network queries against a remote (e.g.
+// ls-remote). Without this, a slow or unreachable remote hangs callers
+// indefinitely — including patrol-loop code paths (witness zombie/completion
+// detection call this once per polecat with an active MR) where a single
+// stuck call blocks the entire scan (gt-ftt).
+const remoteQueryTimeout = 30 * time.Second
+
 // runWithTimeout executes a git command with a deadline. If the command does
 // not finish within the timeout, the process is killed and an error is returned.
 func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _ error) { //nolint:unparam // string return kept for consistency with Run()
@@ -1787,7 +1794,7 @@ type RemoteRef struct {
 // The prefix filters refs (e.g., "refs/heads/polecat/" for all polecat branches).
 // Returns full ref names like "refs/heads/polecat/furiosa-abc123".
 func (g *Git) ListRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, error) {
-	out, err := g.run("ls-remote", "--refs", remote, prefix+"*")
+	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--refs", remote, prefix+"*")
 	if err != nil {
 		return nil, err
 	}
@@ -1826,7 +1833,7 @@ func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
 // includes tags so callers can distinguish a truly empty repo from a non-empty
 // repo with no branch refs or a broken remote HEAD.
 func (g *Git) RemoteHasRefs(remote string) (bool, error) {
-	out, err := g.run("ls-remote", "--refs", remote)
+	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--refs", remote)
 	if err != nil {
 		return false, err
 	}
@@ -2033,7 +2040,7 @@ func (g *Git) IsEmpty() (bool, error) {
 // NOTE: For named remotes with a separate pushurl, this checks the fetch URL.
 // Use PushRemoteBranchExists to verify branches that were pushed.
 func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
-	out, err := g.run("ls-remote", "--heads", remote, branch)
+	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return false, err
 	}
@@ -2043,7 +2050,7 @@ func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
 // RemoteBranchTip returns the SHA at refs/heads/<branch> on the remote.
 // An empty SHA with nil error means the branch is missing.
 func (g *Git) RemoteBranchTip(remote, branch string) (string, error) {
-	out, err := g.run("ls-remote", "--heads", remote, branch)
+	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return "", err
 	}
@@ -2060,7 +2067,7 @@ func (g *Git) PushRemoteBranchExists(remote, branch string) (bool, error) {
 	if pushTarget == remote {
 		return g.RemoteBranchExists(remote, branch)
 	}
-	out, err := g.run("ls-remote", "--heads", pushTarget, branch)
+	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--heads", pushTarget, branch)
 	if err != nil {
 		return false, err
 	}
