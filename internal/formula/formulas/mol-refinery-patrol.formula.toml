@@ -82,6 +82,13 @@ resolve that placeholder with this rule:
 - FORBIDDEN: Landing integration branches to the default branch via raw git commands (`git merge`, `git push`).
   Integration branches may ONLY be landed via `gt mq integration land <epic-id>`.
   This applies regardless of `auto_land` configuration. The pre-push hook enforces this.
+- FORBIDDEN: Reviewing (self-review or `om review`) a raw `origin/<polecat-branch>`
+  against `origin/<merge-target>` with a two-dot diff or a bare `--base <target>
+  --head <branch>` invocation before rehearsal. If the branch forked behind a
+  target that has since moved, that comparison shows the target's own later
+  merges as deletions authored by the polecat — a false "this reverts X"
+  verdict (gt-oh41). Always review the rehearsed `temp` branch produced by
+  process-branch, or an explicit three-dot diff / `om review --branch`.
 
 ## Step Execution Order
 
@@ -108,7 +115,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 19
+version = 20
 
 [vars]
 [vars.wisp_type]
@@ -370,6 +377,14 @@ git checkout -b temp origin/<polecat-branch>
 git merge --no-ff --no-edit origin/<merge-target>
 ```
 
+**Step 1 note (REBASE-BEFORE-REVIEW, gt-oh41):** This rehearsal exists to
+make `temp` safe to review, not only to test the merge. Once it succeeds,
+`temp`'s merge-base with `origin/<merge-target>` IS `origin/<merge-target>`'s
+current tip, so a three-dot diff and a plain diff against `temp` agree by
+construction. The raw `origin/<polecat-branch>` — before this rehearsal —
+is NOT safe to review directly: see quality-review's precondition check
+before handing any diff (self-review or `om review`) to a reviewer.
+
 **Step 2: Check merge rehearsal result**
 
 The merge exits with:
@@ -441,6 +456,16 @@ description = """
 
 If run_tests is "false": STOP HERE. Skip everything below and proceed to the next step.
 
+**0. Gate load check (mayor standing rule):** Before starting — or retrying —
+a full-suite gate, check 1-minute load average:
+```bash
+sysctl -n vm.loadavg 2>/dev/null || uptime   # macOS vs Linux fallback
+```
+Do NOT start or retry a full-suite gate while 1-min loadavg > 60. If a gate
+is killed or times out under load, the result is INCONCLUSIVE — never count
+it as a failure against the branch. Wait for load to drop and retry, or
+escalate if it stays high.
+
 **1. Run quality checks (skip any that are not configured):**
 
 If setup_command is set: `{{setup_command}}`
@@ -468,6 +493,14 @@ Proceed to handle-failures step. Track which specific check failed
 {{test_command}}            # Run tests (configured per-rig)
 ```
 
+**Never substitute a bare `go test ./...` for the configured
+`{{test_command}}` (gt-885g).** This rig's Makefile exports
+CGO_CPPFLAGS/CGO_LDFLAGS for keg-only icu4c; bare `go test` fails to build
+go-icu-regex with "unicode/regex.h file not found", producing ~21 packages
+"[build failed]" that reads as broken code rather than a missing env. Always
+run the exact configured test_command (e.g. `make test`), never your own
+substitute.
+
 Track results: pass count, fail count, specific failures."""
 
 [[steps]]
@@ -481,6 +514,25 @@ description = """
 Review the merge diff for quality issues. This step is measurement-only (Phase 1):
 reviews are recorded but do NOT gate merges.
 
+**⚠ REBASE-BEFORE-REVIEW (mandatory precondition, gt-oh41):** Review ONLY
+the rehearsed `temp` branch process-branch already built. NEVER review the
+raw `origin/<polecat-branch>` against `origin/<merge-target>` with a
+two-dot diff, and never invoke `om review --base <merge-target> --head
+<polecat-branch>` against the un-rehearsed tips. If the branch forked
+behind a target that has since moved (e.g. other MRs merged while it
+queued), that comparison presents the target's own later merges as
+DELETIONS authored by the polecat — a false, specific, technically-worded
+"this reverts X" verdict with no tell that it's wrong. This happened on
+gt-wisp-bakv: a two-dot review reported two refinery merges the branch
+never touched as deleted guards.
+
+Cheap check for staleness, if you ever need to reason about the raw branch
+directly (e.g. before rehearsal exists):
+```bash
+git rev-list --count origin/<polecat-branch>..origin/<merge-target>
+```
+Nonzero = the branch is behind = a two-dot review of it is contaminated.
+
 **Step 1: Check if quality review is enabled**
 
 If judgment_enabled is not "true", skip this step entirely and proceed to
@@ -488,9 +540,24 @@ handle-failures. Log: "Quality review skipped (judgment_enabled=false)"
 
 **Step 2: Get the merge diff**
 
+Resolve `<merge-target>` via the **Target Resolution Rule** above — do not
+hardcode `main`.
+
 ```bash
-git diff origin/main...temp
+git diff origin/<merge-target>...temp
 ```
+
+If using `om review` instead of (or alongside) self-review, invoke it
+against the rehearsed branch, never the raw one:
+```bash
+om review --base <merge-target> --head temp
+```
+
+**Fallback (no rehearsal available):** review forms that are immune to
+target drift by construction — `om review --branch <polecat-branch>`
+(reviews since the merge-base, same as three-dot) or an explicit
+`git diff origin/<merge-target>...origin/<polecat-branch>`. Never a bare
+`--base <target> --head <branch>` two-dot comparison of un-rehearsed tips.
 
 If the diff is empty, skip with: "No diff to review"
 
