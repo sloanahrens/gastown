@@ -440,8 +440,10 @@ func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Plugin source not found (skipping drift check)",
+			Status:  StatusWarning,
+			Message: "cannot verify plugin drift",
+			Details: []string{err.Error()},
+			FixHint: "Verify the gastown rig checkout exists at <town>/gastown/mayor/rig, or run 'gt plugin sync --source <dir>'",
 		}
 	}
 	c.sourceDir = sourceDir

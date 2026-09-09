@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // SyncResult records the outcome of a plugin sync operation.
@@ -179,8 +181,11 @@ func copyFile(src, dst string) error {
 // FindGastownSource locates the gastown source repo's plugins directory.
 // Search order:
 //  1. Walk up from CWD for a gastown go.mod with plugins/
-//  2. <townRoot>/gastown/crew/den/plugins/
-//  3. <townRoot>/gastown/plugins/
+//  2. <gastown rig checkout>/mayor/rig/plugins/ — the canonical checkout
+//     maintained by the mayor, resolved via mayor/rigs.json (honoring a
+//     LocalRepo override) and falling back to <townRoot>/gastown
+//  3. Legacy layouts, kept for towns predating the mayor/rig convention:
+//     <townRoot>/gastown/crew/den/plugins/, <townRoot>/gastown/plugins/
 func FindGastownSource(townRoot string) (string, error) {
 	if cwd, err := os.Getwd(); err == nil {
 		if src := findSourceFromDir(cwd); src != "" {
@@ -188,9 +193,11 @@ func FindGastownSource(townRoot string) (string, error) {
 		}
 	}
 
+	gastownRoot := rigCheckoutRoot(townRoot, "gastown")
 	candidates := []string{
-		filepath.Join(townRoot, "gastown", "crew", "den", "plugins"),
-		filepath.Join(townRoot, "gastown", "plugins"),
+		filepath.Join(gastownRoot, "mayor", "rig", "plugins"),
+		filepath.Join(gastownRoot, "crew", "den", "plugins"),
+		filepath.Join(gastownRoot, "plugins"),
 	}
 	for _, candidate := range candidates {
 		if hasPlugins(candidate) {
@@ -199,6 +206,20 @@ func FindGastownSource(townRoot string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not locate gastown plugin source; use --source to specify")
+}
+
+// rigCheckoutRoot resolves the on-disk root of a registered rig's checkout.
+// It honors an explicit LocalRepo override in mayor/rigs.json, falling back
+// to the conventional <townRoot>/<rigName> layout when rigs.json is absent
+// or has no override for rigName.
+func rigCheckoutRoot(townRoot, rigName string) string {
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	if cfg, err := config.LoadRigsConfig(rigsPath); err == nil {
+		if entry, ok := cfg.Rigs[rigName]; ok && entry.LocalRepo != "" {
+			return entry.LocalRepo
+		}
+	}
+	return filepath.Join(townRoot, rigName)
 }
 
 func findSourceFromDir(dir string) string {

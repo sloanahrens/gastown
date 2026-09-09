@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -254,5 +255,91 @@ func TestDetectDrift_ExtraInTarget(t *testing.T) {
 	// Extra plugins are not drift (no HasDrift), but are reported
 	if len(report.Extra) != 1 || report.Extra[0] != "orphan" {
 		t.Errorf("expected orphan in extra, got %v", report.Extra)
+	}
+}
+
+// writeRigsJSON writes a minimal mayor/rigs.json with a single rig entry.
+func writeRigsJSON(t *testing.T, townRoot, rigName, localRepo string) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"version":1,"rigs":{%q:{"git_url":"https://example.com/%s.git","local_repo":%q,"added_at":"2026-01-01T00:00:00Z"}}}`,
+		rigName, rigName, localRepo)
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRigCheckoutRoot_UsesLocalRepoOverride(t *testing.T) {
+	townRoot := t.TempDir()
+	override := filepath.Join(t.TempDir(), "elsewhere", "gastown-checkout")
+	writeRigsJSON(t, townRoot, "gastown", override)
+
+	got := rigCheckoutRoot(townRoot, "gastown")
+	if got != override {
+		t.Errorf("rigCheckoutRoot() = %q, want LocalRepo override %q", got, override)
+	}
+}
+
+func TestRigCheckoutRoot_DefaultsToTownRootRigName(t *testing.T) {
+	townRoot := t.TempDir()
+	// No rigs.json at all.
+	got := rigCheckoutRoot(townRoot, "gastown")
+	want := filepath.Join(townRoot, "gastown")
+	if got != want {
+		t.Errorf("rigCheckoutRoot() = %q, want default %q", got, want)
+	}
+}
+
+func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
+	// Isolate from this test process's own repo checkout: without this, the
+	// CWD-walk-up branch in FindGastownSource would find this repo's own
+	// go.mod/plugins/ before ever consulting townRoot.
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir()
+	pluginsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, pluginsDir, "some-plugin", "+++\nname = \"some-plugin\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got != pluginsDir {
+		t.Errorf("FindGastownSource() = %q, want %q", got, pluginsDir)
+	}
+}
+
+func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir()
+	// No mayor/rig/plugins — only the legacy crew/den/plugins layout exists.
+	legacyDir := filepath.Join(townRoot, "gastown", "crew", "den", "plugins")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, legacyDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got != legacyDir {
+		t.Errorf("FindGastownSource() = %q, want legacy path %q", got, legacyDir)
+	}
+}
+
+func TestFindGastownSource_NoneFoundReturnsError(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir() // Empty: no gastown checkout anywhere.
+	if _, err := FindGastownSource(townRoot); err == nil {
+		t.Error("FindGastownSource() error = nil, want error when no source exists")
 	}
 }
