@@ -656,9 +656,23 @@ func (b *Beads) agentBeadTarget() *Beads {
 // directory, preserving isolation/port settings. The in-process store is NOT
 // carried over: it is bound to the database it was opened on, which may not
 // be the pinned target.
+//
+// The subprocess cwd only needs to exist — BEADS_DIR is always passed
+// explicitly to bd (see getResolvedBeadsDir), so the cwd never determines
+// which database bd operates on. beadsDir's parent is a routed rig
+// directory that need not exist (e.g. an aliased rig never checked out
+// locally); chdir-ing into a missing directory fails the whole exec with an
+// opaque "fork/exec: no such file or directory" (gt-3vh2). Fall back to
+// townRoot, which always exists, when the natural cwd is missing.
 func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
+	workDir := filepath.Dir(beadsDir)
+	if _, err := os.Stat(workDir); err != nil {
+		if townRoot := b.getTownRoot(); townRoot != "" {
+			workDir = townRoot
+		}
+	}
 	return &Beads{
-		workDir:    filepath.Dir(beadsDir),
+		workDir:    workDir,
 		beadsDir:   beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
