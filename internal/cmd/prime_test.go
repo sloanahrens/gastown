@@ -1443,3 +1443,36 @@ func TestErrHookUnresolvable_IsErrors(t *testing.T) {
 		t.Fatalf("errors.Is should report wrapped err matches ErrHookUnresolvable")
 	}
 }
+
+// TestShouldSkipStartupMailInject is a pure unit test of the patrol-role
+// skip decision, deliberately independent of subprocess spawning so it
+// can never flake under host contention (gt-0nk):
+// TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles exercises the same
+// decision through a full subprocess-based harness, which is a much better
+// integration check but ties pass/fail to a fixed spawn-timeout deadline —
+// this test proves the actual routing logic deterministically.
+func TestShouldSkipStartupMailInject(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{string(RoleWitness), true},
+		{string(RoleRefinery), true},
+		{string(RoleDeacon), true},
+		{string(RoleBoot), true},
+		{string(RolePolecat), false},
+		{string(RoleCrew), false},
+		{string(RoleMayor), false},
+		{string(RoleDog), false},
+		{string(RoleUnknown), false},
+		{"", false},
+		{"WITNESS", true}, // role comparison is case-insensitive
+	}
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			if got := shouldSkipStartupMailInject(tt.role); got != tt.want {
+				t.Errorf("shouldSkipStartupMailInject(%q) = %v, want %v", tt.role, got, tt.want)
+			}
+		})
+	}
+}

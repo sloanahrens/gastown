@@ -19,13 +19,19 @@ func setupPrimeExternalToolTest(t *testing.T, bdScript, gtScript string) string 
 
 	oldTimeout := primeExternalToolTimeout
 	oldWaitDelay := primeExternalToolWaitDelay
-	// 500ms/50ms rather than a tighter bound: under host contention (many
+	// 1.5s/150ms rather than a tighter bound: under host contention (many
 	// concurrent agent subprocesses) even a trivial script can take >100ms
-	// to spawn, which previously made these tests flake on a loaded box
-	// (gt-80o). Dependent tests below scale their slow-path durations and
-	// assertElapsedUnder bounds to match.
-	primeExternalToolTimeout = 500 * time.Millisecond
-	primeExternalToolWaitDelay = 50 * time.Millisecond
+	// to spawn. This was previously tuned to 500ms/50ms (gt-80o), but that
+	// still wasn't generous enough: reproduced under stress (`-count=200`
+	// on a loaded dev box) as calls.log never being created at all because
+	// the subprocess spawn itself didn't complete before the context
+	// deadline (gt-0nk) — not, as first suspected, tests reading live-town
+	// mail state. Dependent tests below use hardcoded 2s slow-path
+	// sleeps/assertElapsedUnder bounds that assume
+	// primeExternalToolTimeout+primeExternalToolWaitDelay stays under 2s;
+	// keep headroom against that if tuning further.
+	primeExternalToolTimeout = 1500 * time.Millisecond
+	primeExternalToolWaitDelay = 150 * time.Millisecond
 	t.Cleanup(func() {
 		primeExternalToolTimeout = oldTimeout
 		primeExternalToolWaitDelay = oldWaitDelay
