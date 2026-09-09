@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 18
+version = 19
 
 [vars]
 [vars.wisp_type]
@@ -187,16 +187,24 @@ default = "gt"
 id = "inbox-check"
 title = "Check refinery mail"
 description = """
-First, clean up wisps from previous cycles (closed wisps + abandoned wisps):
+First, clean up CLOSED wisps from previous cycles:
 ```bash
 bd mol wisp gc --closed --force --exclude-type chore
-bd mol wisp gc --age 1h --force
 ```
 
 > **Warning (gt-0ok):** `--exclude-type chore` is REQUIRED on the closed-wisp
 > pass. Plugin-run receipts are ephemeral `chore`-type beads closed
 > immediately after creation — unscoped `--closed --force` deletes every
 > receipt town-wide each cycle, permanently opening all cooldown gates.
+
+> **Warning (gt-xciy):** Do not run unscoped age-based wisp GC (`bd mol wisp
+> gc --age ...`) from inside this patrol. It has no hook-awareness — it
+> reaps any non-closed wisp older than the age threshold regardless of
+> who owns it, including this molecule's own currently-hooked patrol wisp
+> and every other agent's in-progress work wisps. A dry run found 403
+> wisps at risk, 100% foreign `mol-polecat-work` step wisps and 0%
+> refinery-owned. Use closed-only cleanup here — stale open-wisp cleanup
+> belongs outside active patrol molecules (reaper Dog).
 
 Then check mail for MERGE_READY submissions, escalations, and messages.
 

@@ -293,6 +293,48 @@ func TestWitnessPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
 	}
 }
 
+// TestRefineryPatrolDoesNotRunAgeBasedWispGC verifies that the Refinery
+// patrol does not reap other agents' active work wisps via unscoped
+// age-based wisp GC.
+//
+// Regression test for gt-xciy: gt-0ok fixed the closed-wisp pass
+// (--exclude-type chore) but left the age-based pass
+// (`bd mol wisp gc --age 1h --force`) untouched in the same inbox-check
+// step. That pass has no hook-awareness — a dry run found 403 wisps at
+// risk, 100% foreign `mol-polecat-work` step wisps and 0%
+// refinery-owned, including wisps only 1h old. mol-refinery-patrol was
+// the last patrol formula still carrying it after mol-deacon-patrol
+// (hq-3pp) and mol-witness-patrol (gt-5bg) were fixed.
+func TestRefineryPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-refinery-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading refinery patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing refinery patrol formula: %v", err)
+	}
+
+	var inboxDesc string
+	for _, step := range f.Steps {
+		if step.ID == "inbox-check" {
+			inboxDesc = step.Description
+			break
+		}
+	}
+	if inboxDesc == "" {
+		t.Fatal("refinery patrol formula: inbox-check step not found or has empty description")
+	}
+
+	if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force") {
+		t.Fatal("refinery inbox-check must keep closed-wisp cleanup")
+	}
+	if strings.Contains(inboxDesc, "bd mol wisp gc --age") {
+		t.Fatal("refinery inbox-check must not run age-based wisp GC inside the active patrol")
+	}
+}
+
 // TestPatrolFormulasUseDynamicBeadResolution verifies that patrol formulas
 // resolve their agent bead ID dynamically at runtime via `gt agents resolve`,
 // rather than hardcoding a prefix like `gt-<rig>-refinery`.
