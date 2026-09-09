@@ -139,6 +139,31 @@ Examples:
 	RunE: runFormulaRun,
 }
 
+var formulaSyncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync on-disk formulas with the formulas embedded in this gt binary",
+	Long: `Sync updates the town's on-disk formulas ($GT_ROOT/.beads/formulas/) to
+match the formulas embedded in this gt binary.
+
+Installing or rebuilding gt does NOT update on-disk formulas — the binary
+only carries the new formula content, and nothing copies it out until
+something calls sync. Formula fixes merged to origin/main sit undelivered
+until a sync runs.
+
+Sync is idempotent and version-aware:
+  - Formulas the user has customized (locally modified) are never overwritten.
+  - Formulas that are outdated, untracked, or missing are updated/reinstalled.
+  - Formulas already matching the embedded version are left alone.
+
+Run this by hand after a rebuild, or rely on the rebuild-gt plugin, which
+runs it automatically after every successful install.
+
+Examples:
+  gt formula sync            # Sync $GT_ROOT/.beads/formulas from the current binary`,
+	Args: cobra.NoArgs,
+	RunE: runFormulaSync,
+}
+
 var formulaCreateCmd = &cobra.Command{
 	Use:   "create <name>",
 	Short: "Create a new formula template",
@@ -182,6 +207,7 @@ func init() {
 	formulaCmd.AddCommand(formulaListCmd)
 	formulaCmd.AddCommand(formulaShowCmd)
 	formulaCmd.AddCommand(formulaRunCmd)
+	formulaCmd.AddCommand(formulaSyncCmd)
 	formulaCmd.AddCommand(formulaCreateCmd)
 
 	rootCmd.AddCommand(formulaCmd)
@@ -303,6 +329,38 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  4. Sling to rig:   gt sling <mol-id> %s\n", targetRig)
 		return nil
 	}
+}
+
+// runFormulaSync syncs the town's on-disk formulas with the embedded set.
+func runFormulaSync(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	msg, err := formulaSyncMessage(townRoot)
+	if err != nil {
+		return fmt.Errorf("syncing formulas: %w", err)
+	}
+	fmt.Println(msg)
+	return nil
+}
+
+// formulaSyncMessage runs formula.UpdateFormulas against townRoot and
+// formats a human-readable summary of the result. Split out from
+// runFormulaSync so the summary logic is testable without a real workspace.
+func formulaSyncMessage(townRoot string) (string, error) {
+	updated, skipped, reinstalled, err := formula.UpdateFormulas(townRoot)
+	if err != nil {
+		return "", err
+	}
+
+	if updated == 0 && skipped == 0 && reinstalled == 0 {
+		return fmt.Sprintf("%s Formulas already up to date.", style.Bold.Render("✓")), nil
+	}
+
+	return fmt.Sprintf("%s Synced formulas: %d updated, %d reinstalled, %d skipped (locally modified)",
+		style.Bold.Render("✓"), updated, reinstalled, skipped), nil
 }
 
 // dryRunFormula shows what would happen without executing

@@ -91,6 +91,17 @@ log "Rebuilding gt from $RIG_ROOT..."
 if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
   NEW_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
   log "Rebuilt: $OLD_VER -> $NEW_VER"
+
+  # A binary install only carries new formula content — nothing copies it
+  # out to $GT_ROOT/.beads/formulas/ on its own (gt-n6c). Sync delivers it.
+  # Non-fatal: formulas are convenience content, not required for the binary
+  # to work, so a sync failure must not fail the whole rebuild.
+  if SYNC_OUT=$(gt formula sync 2>&1); then
+    log "$SYNC_OUT"
+  else
+    log "formula sync failed (non-fatal): $SYNC_OUT"
+  fi
+
   gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
     --title "rebuild-gt: $OLD_VER -> $NEW_VER" >/dev/null 2>&1 || true
 else

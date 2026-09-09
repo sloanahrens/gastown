@@ -131,6 +131,31 @@ func TestAutoInferRig(t *testing.T) {
 	})
 }
 
+// TestFormulaSyncMessage verifies 'gt formula sync' delivers embedded
+// formulas to a fresh town root and is idempotent on a second run — the
+// behavior gt-n6c requires so rebuilds can deliver formula fixes without a
+// hand-copy.
+func TestFormulaSyncMessage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	msg, err := formulaSyncMessage(root)
+	if err != nil {
+		t.Fatalf("formulaSyncMessage: %v", err)
+	}
+	if !strings.Contains(msg, "Synced formulas") {
+		t.Errorf("first sync on fresh town root: expected a sync summary, got: %q", msg)
+	}
+
+	msg2, err := formulaSyncMessage(root)
+	if err != nil {
+		t.Fatalf("formulaSyncMessage (second run): %v", err)
+	}
+	if !strings.Contains(msg2, "up to date") {
+		t.Errorf("second sync should be a no-op, got: %q", msg2)
+	}
+}
+
 func TestBuildConvoyLegSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 	t.Parallel()
 
