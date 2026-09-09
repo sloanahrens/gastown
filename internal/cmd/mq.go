@@ -539,7 +539,11 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Reason: %s\n", mqRejectReason)
 
 	if result.IssueID != "" {
-		fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("(not closed - work not done)"))
+		statusNote := "status unknown"
+		if result.SourceIssueStatus != "" {
+			statusNote = "status: " + result.SourceIssueStatus
+		}
+		fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("("+statusNote+")"))
 	}
 
 	if mqRejectNotify {

@@ -131,23 +131,67 @@ func parseRecoveredSubject(subject string) (string, bool) {
 	return id, id != ""
 }
 
-func TestRecoverRejectedMRDeadWorker_WorkerAlive_NoAction(t *testing.T) {
+// TestRecoverRejectedMRDeadWorker_ClosedSourceIssue_AliveSession_StillRecovers
+// is the direct gt-2usm regression test: a persistent polecat that already
+// ran gt done (closing its source bead) keeps a reusable, live-but-inert
+// tmux session. Session liveness must NOT gate recovery here — the bead's
+// own closed status is what proves the worker no longer holds it.
+func TestRecoverRejectedMRDeadWorker_ClosedSourceIssue_AliveSession_StillRecovers(t *testing.T) {
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
-		t.Fatal("mail should not be sent when worker is alive")
+		sent = append(sent, m)
+		return nil
+	}
+
+	if !recoverRejectedMRDeadWorker(bd, liveSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected recovery for a closed source issue even with a live session")
+	}
+	if len(bd.updates) != 1 {
+		t.Fatalf("expected bead reopened, got %d updates", len(bd.updates))
+	}
+	if bd.updates[0].Status == nil || *bd.updates[0].Status != "open" {
+		t.Errorf("expected status reset to open, got %+v", bd.updates[0].Status)
+	}
+	if bd.updates[0].Assignee == nil || *bd.updates[0].Assignee != "" {
+		t.Errorf("expected assignee cleared, got %+v", bd.updates[0].Assignee)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected RECOVERED_BEAD mail, got %d", len(sent))
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_OpenAndStillAssigned_AliveSession_NoAction
+// covers the genuinely-still-working case: the source bead is open and this
+// same worker still holds it, and its session is confirmed alive. Session
+// liveness is the correct tiebreaker only here.
+func TestRecoverRejectedMRDeadWorker_OpenAndStillAssigned_AliveSession_NoAction(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:       "gt-src1",
+		Status:   "hooked",
+		Assignee: "testrig/polecats/nux",
+	}}
+	sendMail := func(m *mail.Message) error {
+		t.Fatal("mail should not be sent when the worker still holds the assignment and is alive")
 		return nil
 	}
 
 	if recoverRejectedMRDeadWorker(bd, liveSession, sendMail, nil, deadWorkerReq()) {
-		t.Fatal("expected no recovery for a live worker")
+		t.Fatal("expected no recovery for a live worker who still holds the assignment")
 	}
 	if len(bd.updates) != 0 || len(bd.runCalls) != 0 {
-		t.Fatal("expected no bead mutations for a live worker")
+		t.Fatal("expected no bead mutations for a live, still-assigned worker")
 	}
 }
 
 func TestRecoverRejectedMRDeadWorker_LivenessError_NoAction(t *testing.T) {
-	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	// Ambiguous case only: open bead, still assigned to this worker, but we
+	// can't tell if it's alive. Liveness only gates this specific case.
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:       "gt-src1",
+		Status:   "hooked",
+		Assignee: "testrig/polecats/nux",
+	}}
 	flaky := func(string) (bool, error) { return false, errors.New("tmux exploded") }
 	var out bytes.Buffer
 

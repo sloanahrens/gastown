@@ -612,6 +612,10 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 		t.Fatalf("set active_mr: %v", err)
 	}
 
+	// This test is about active_mr clearing, not dead-worker recovery —
+	// stub it out so RejectMR doesn't reach for real tmux/mail.
+	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool { return false }
+
 	result, err := mgr.RejectMR(mrIssue.ID, "policy failed", false)
 	if err != nil {
 		t.Fatalf("RejectMR() error: %v", err)
@@ -623,6 +627,130 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 	assertAgentActiveMR(t, b, agentIssue.ID, "")
 	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusOpen))
 	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonRejected))
+}
+
+// TestManager_RejectMR_CallsDeadWorkerRecovery is the gt-2usm regression test
+// for the CLI reject path: `gt mq reject` calls Manager.RejectMR directly,
+// and RejectMR used to close the MR bead and never touch the source issue at
+// all — the recovery seam below did not exist on this path. Deleting the
+// recoverDeadWorker call in RejectMR (or gating it wrong) makes this fail.
+func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	// Simulate the real-world orphan scenario from gt-2usm: the polecat
+	// already ran `gt done`, which closed its source bead, before the
+	// refinery got around to rejecting the MR.
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	if err := b.Close(srcIssue.ID); err != nil {
+		t.Fatalf("close source issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	var gotReq *deadWorkerRecoveryRequest
+	mgr.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		gotReq = &req
+		return true
+	}
+
+	if _, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false); err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	if gotReq == nil {
+		t.Fatal("expected RejectMR to invoke dead-worker recovery — CLI reject path is bypassing it (gt-2usm)")
+	}
+	if gotReq.SourceIssue != srcIssue.ID {
+		t.Errorf("SourceIssue = %q, want %q", gotReq.SourceIssue, srcIssue.ID)
+	}
+	if gotReq.Worker != "nux" {
+		t.Errorf("Worker = %q, want nux", gotReq.Worker)
+	}
+	if gotReq.MRID != mrIssue.ID {
+		t.Errorf("MRID = %q, want %q", gotReq.MRID, mrIssue.ID)
+	}
+}
+
+// TestManager_RejectMR_SourceIssueStatusIsReadBack asserts RejectMR reports
+// the source issue's actual status rather than a hardcoded claim (gt-2usm:
+// the CLI used to print an unconditional "(not closed - work not done)"
+// that was false whenever the bead was already closed).
+func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	if err := b.Close(srcIssue.ID); err != nil {
+		t.Fatalf("close source issue: %v", err)
+	}
+	closedIssue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s) after close: %v", srcIssue.ID, err)
+	}
+	if closedIssue.ClosedAt == "" {
+		t.Fatalf("expected closed_at set after Close(), fixture is not realistic")
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	// Recovery reopens the bead; the returned status must reflect that
+	// write, not the pre-recovery snapshot.
+	result, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false)
+	if err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	issue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", srcIssue.ID, err)
+	}
+	if result.SourceIssueStatus != issue.Status {
+		t.Errorf("RejectMR() SourceIssueStatus = %q, want read-back status %q", result.SourceIssueStatus, issue.Status)
+	}
+	if result.SourceIssueStatus == string(beads.StatusClosed) {
+		t.Errorf("SourceIssueStatus = closed — recovery should have reopened it")
+	}
+	if issue.ClosedAt != "" {
+		t.Errorf("closed_at = %q, want cleared by the reopen", issue.ClosedAt)
+	}
+	if issue.Assignee != "" {
+		t.Errorf("assignee = %q, want cleared by the reopen", issue.Assignee)
+	}
+	if issue.UpdatedAt == closedIssue.UpdatedAt {
+		t.Errorf("updated_at did not move — reopen did not actually write (still %q)", issue.UpdatedAt)
+	}
+	if !strings.Contains(issue.Notes, MergeRejectionNoteMarker) {
+		t.Errorf("notes missing rejection marker: %q", issue.Notes)
+	}
 }
 
 func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
@@ -802,6 +930,10 @@ func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create MR issue: %v", err)
 	}
+
+	// This test is about active_mr clearing, not dead-worker recovery —
+	// stub it out so RejectMR doesn't reach for real tmux/mail.
+	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool { return false }
 
 	if _, err := mgr.RejectMR(mrIssue.ID, "policy failed", false); err != nil {
 		t.Fatalf("RejectMR() error: %v", err)

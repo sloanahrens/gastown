@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -63,9 +64,11 @@ func NewForkRigError(rigName, upstreamURL string) error {
 
 // Manager handles refinery lifecycle and queue operations.
 type Manager struct {
-	rig     *rig.Rig
-	workDir string
-	output  io.Writer // Output destination for user-facing messages
+	rig               *rig.Rig
+	workDir           string
+	output            io.Writer    // Output destination for user-facing messages
+	router            *mail.Router // Mail router for RECOVERED_BEAD notices on manual reject (gt-2usm)
+	recoverDeadWorker func(deadWorkerRecoveryRequest) bool
 }
 
 type scoredIssue struct {
@@ -75,11 +78,14 @@ type scoredIssue struct {
 
 // NewManager creates a new refinery manager for a rig.
 func NewManager(r *rig.Rig) *Manager {
-	return &Manager{
+	m := &Manager{
 		rig:     r,
 		workDir: r.Path,
 		output:  os.Stdout,
+		router:  mail.NewRouter(r.Path),
 	}
+	m.recoverDeadWorker = newDeadWorkerRecoverer(r, m.router, m.output)
+	return m
 }
 
 // SetOutput sets the output writer for user-facing messages.
@@ -730,6 +736,39 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*Merg
 	// Optionally notify worker
 	if notify && !closeResult.AlreadyTerminal {
 		m.notifyWorkerRejected(mr, reason)
+	}
+
+	// gt-2usm: RejectMR used to close the MR bead and stop — never touching
+	// the source issue at all, unlike PostMerge which closes it on the
+	// success path. That asymmetry orphaned every rejection of a polecat
+	// that had already run gt done: work rejected, unmerged, tracked by no
+	// open bead. Route rejection through the same dead-worker recovery the
+	// Engineer's automatic build/test-failure path already uses, so a
+	// worker that can no longer act on this (bead already closed, or
+	// reassigned elsewhere) hands the source bead back to the deacon
+	// instead of leaving it stranded.
+	if !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" && m.recoverDeadWorker != nil {
+		m.recoverDeadWorker(deadWorkerRecoveryRequest{
+			MRID:          mr.ID,
+			Branch:        mr.Branch,
+			Target:        mr.TargetBranch,
+			SourceIssue:   mr.IssueID,
+			Worker:        mr.Worker,
+			RigName:       m.rig.Name,
+			FailureType:   "editorial",
+			ErrorMsg:      reason,
+			AttemptNumber: 1,
+		})
+	}
+
+	// Read the source issue's actual status back from the bead instead of
+	// asserting one: a stale hardcoded claim is exactly how "(not closed -
+	// work not done)" went false while the recovery above (or a prior one)
+	// had already reopened it.
+	if strings.TrimSpace(mr.IssueID) != "" {
+		if issue, showErr := b.Show(mr.IssueID); showErr == nil && issue != nil {
+			mr.SourceIssueStatus = strings.TrimSpace(issue.Status)
+		}
 	}
 
 	return mr, nil

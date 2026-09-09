@@ -54,6 +54,11 @@ type MergeRequest struct {
 
 	// Error contains error details if the MR failed.
 	Error string `json:"error,omitempty"`
+
+	// SourceIssueStatus is the source issue's actual status, read back from
+	// the bead after a reject (gt-2usm). Populated by RejectMR so callers
+	// report what the bead really is rather than asserting a fixed claim.
+	SourceIssueStatus string `json:"source_issue_status,omitempty"`
 }
 
 // MRStatus represents the status of a merge request.

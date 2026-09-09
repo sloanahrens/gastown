@@ -23,8 +23,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -311,15 +309,10 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
 	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
-		sessionAlive := func(polecatName string) (bool, error) {
-			t := tmux.NewTmux()
-			return t.HasSession(session.PolecatSessionName(session.PrefixFor(r.Name), polecatName))
-		}
-		var send func(*mail.Message) error
-		if e.router != nil {
-			send = e.router.Send
-		}
-		return recoverRejectedMRDeadWorker(e.beads, sessionAlive, send, e.output, req)
+		// Read e.router/e.output fresh on each call (SetOutput may run after
+		// construction), matching newDeadWorkerRecoverer's shared wiring
+		// used by the Manager's manual `gt mq reject` path (gt-2usm).
+		return newDeadWorkerRecoverer(r, e.router, e.output)(req)
 	}
 	return e
 }

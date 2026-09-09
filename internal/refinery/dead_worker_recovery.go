@@ -7,6 +7,9 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // MergeRejectionNoteMarker is the canonical vocabulary written into source-bead
@@ -56,12 +59,12 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 }
 
 // recoverRejectedMRDeadWorker routes a rejected MR into the deacon redispatch
-// pipeline when the assignee polecat has no live session (gt-tc0).
+// pipeline when the assignee polecat can no longer act on it (gt-tc0, gt-2usm).
 //
 // A transient polecat exits at gt done and its source bead is closed, so the
 // FIX_NEEDED nudge/mail sent on rejection lands nowhere: the MR re-queues and
 // the refinery re-gates the unchanged branch until thrash control gives up,
-// while the fix never happens. When the worker is dead this function:
+// while the fix never happens. When the worker can no longer act this function:
 //
 //  1. persists the rejection into the source bead notes using the
 //     MergeRejectionNoteMarker vocabulary the polecat resume path greps for,
@@ -72,6 +75,16 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 //
 // The redispatched polecat finds the note plus the surviving remote branch and
 // makes a targeted fix instead of starting over.
+//
+// Session liveness alone is the wrong signal for "can this worker still fix
+// it" (gt-2usm): a persistent polecat that already ran gt done keeps a
+// reusable, live-but-inert tmux session and will never act on a nudge. The
+// real signal is whether the worker still HOLDS the assignment: the source
+// bead's own status/assignee. Recovery proceeds whenever the bead shows the
+// worker no longer holds it — closed (gt done already ran), unassigned, or
+// assigned to someone else who turns out to also be gone — and is skipped
+// only when a *different* worker plainly owns it now, or when this same
+// worker still holds an open bead and its session is confirmed alive.
 //
 // Returns true when the bead was handed to the deacon for redispatch.
 func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polecatName string) (bool, error), sendMail func(*mail.Message) error, out io.Writer, req deadWorkerRecoveryRequest) bool {
@@ -85,18 +98,7 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	if polecatName == "" || strings.TrimSpace(req.SourceIssue) == "" {
 		return false
 	}
-	if bd == nil || sessionAlive == nil {
-		return false
-	}
-
-	alive, err := sessionAlive(polecatName)
-	if err != nil {
-		// Can't determine liveness — assume the nudge reached the worker
-		// rather than risk a spawn storm on flaky tmux state.
-		logf("[Engineer] Warning: could not check session for %s: %v (skipping dead-worker recovery)\n", polecatName, err)
-		return false
-	}
-	if alive {
+	if bd == nil {
 		return false
 	}
 
@@ -108,12 +110,33 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 
 	status := beads.IssueStatus(strings.TrimSpace(issue.Status))
 	assignee := strings.TrimSpace(issue.Assignee)
+	stillAssignedHere := assignee == polecatName || strings.HasSuffix(assignee, "/"+polecatName)
+
 	// If a live reassignment already happened (another polecat owns the bead),
 	// leave it alone — the deacon or a fresh worker is already on it.
-	if !status.IsTerminal() && assignee != "" &&
-		assignee != polecatName && !strings.HasSuffix(assignee, "/"+polecatName) {
+	if !status.IsTerminal() && assignee != "" && !stillAssignedHere {
 		logf("[Engineer] Source bead %s already reassigned to %s — skipping dead-worker recovery\n", req.SourceIssue, assignee)
 		return false
+	}
+
+	// The bead is still open and THIS worker still holds it. That alone
+	// doesn't mean recovery is unnecessary (the worker may be genuinely
+	// dead, not merely idle) — session liveness is the tiebreaker for this
+	// one ambiguous case only.
+	if !status.IsTerminal() && stillAssignedHere {
+		if sessionAlive == nil {
+			return false
+		}
+		alive, err := sessionAlive(polecatName)
+		if err != nil {
+			// Can't determine liveness — assume the nudge reached the worker
+			// rather than risk a spawn storm on flaky tmux state.
+			logf("[Engineer] Warning: could not check session for %s: %v (skipping dead-worker recovery)\n", polecatName, err)
+			return false
+		}
+		if alive {
+			return false
+		}
 	}
 
 	// Persist the rejection so it survives into the next session. Notes are
@@ -174,4 +197,24 @@ can check it out and make a targeted fix instead of starting over.`,
 	}
 	logf("[Engineer] Sent RECOVERED_BEAD %s to deacon for redispatch\n", req.SourceIssue)
 	return true
+}
+
+// newDeadWorkerRecoverer builds the standard (tmux + mail) wiring for
+// recoverRejectedMRDeadWorker, shared by every reject path — the Engineer's
+// automatic build/test-failure poller and the Manager's manual `gt mq
+// reject` CLI path — so both routes maintain source-issue state identically
+// (gt-2usm: the CLI path used to bypass recovery entirely).
+func newDeadWorkerRecoverer(r *rig.Rig, router *mail.Router, out io.Writer) func(deadWorkerRecoveryRequest) bool {
+	beadsClient := beads.New(r.BeadsPath())
+	return func(req deadWorkerRecoveryRequest) bool {
+		sessionAlive := func(polecatName string) (bool, error) {
+			t := tmux.NewTmux()
+			return t.HasSession(session.PolecatSessionName(session.PrefixFor(r.Name), polecatName))
+		}
+		var send func(*mail.Message) error
+		if router != nil {
+			send = router.Send
+		}
+		return recoverRejectedMRDeadWorker(beadsClient, sessionAlive, send, out, req)
+	}
 }
