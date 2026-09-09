@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -1960,7 +1962,48 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		purgeClosedEphemeralBeads(beads.New(r.Path))
 	}
 
+	// gt-7kr: destruction left no audit trail — nuke never emitted a feed
+	// event. Best-effort: never fail the nuke over telemetry.
+	reason := "nuked"
+	if opts.Force {
+		reason = "nuked --force"
+	}
+	_ = events.LogFeed(events.TypeKill, nukeActorIdentity(), events.KillPayload(rigName, polecatName, reason))
+
 	return nil
+}
+
+// nukeActorIdentity returns a best-effort identity string for the agent or
+// operator performing a nuke, for feed-event attribution. Falls back to
+// "unknown" rather than failing the nuke over an identity lookup.
+func nukeActorIdentity() string {
+	roleInfo, err := GetRole()
+	if err != nil {
+		return "unknown"
+	}
+	return formatActorIdentity(roleInfo)
+}
+
+// formatActorIdentity renders a RoleInfo as a feed-attribution actor string.
+// Pulled out of nukeActorIdentity so the formatting itself is testable
+// without a real Gas Town workspace on disk.
+func formatActorIdentity(roleInfo RoleInfo) string {
+	switch roleInfo.Role {
+	case RoleMayor:
+		return constants.RoleMayor
+	case RoleCrew:
+		return fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
+	case RolePolecat:
+		return fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
+	case RoleWitness:
+		return fmt.Sprintf("%s/witness", roleInfo.Rig)
+	case RoleRefinery:
+		return fmt.Sprintf("%s/refinery", roleInfo.Rig)
+	case RoleDeacon:
+		return constants.RoleDeacon
+	default:
+		return string(roleInfo.Role)
+	}
 }
 
 type activeMRRemovalChecker interface {

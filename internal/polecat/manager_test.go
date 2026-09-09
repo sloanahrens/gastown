@@ -222,6 +222,65 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// installMockBdMissingCleanupStatus behaves like installMockBd but omits
+// cleanup_status from the agent bead description entirely, simulating a
+// polecat whose cleanup_status was never (or not yet) reported — the exact
+// condition gt-7kr's fail-closed fix must refuse to treat as safe.
+func installMockBdMissingCleanupStatus(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) cmd="$arg"; break ;;
+  esac
+done
+case "$cmd" in
+  init|config|update|slot|reopen|migrate)
+    exit 0
+    ;;
+  create)
+    bead_id="mock-1"
+    for arg in "$@"; do
+      case "$arg" in
+        --id=*) bead_id="${arg#--id=}" ;;
+      esac
+    done
+    echo "{\"id\":\"$bead_id\",\"status\":\"open\",\"created_at\":\"2025-01-01T00:00:00Z\"}"
+    exit 0
+    ;;
+  show)
+    id=""
+    seen_show=0
+    for arg in "$@"; do
+      if [ "$seen_show" = 0 ]; then
+        [ "$arg" = "show" ] && seen_show=1
+        continue
+      fi
+      case "$arg" in --*) continue ;; esac
+      id="$arg"
+      break
+    done
+    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: idle\\nhook_bead: null\\nactive_mr: null\\nbranch: polecat/toast/gt-work@abc123"}]\n' "$id"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func setupCanonicalBranchManagerTest(t *testing.T) (*Manager, string) {
 	t.Helper()
 	installMockBd(t)
@@ -1634,6 +1693,38 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 		return "echo dirty> " + marker + " & exit /b 7"
 	}
 	return "printf dirty > " + marker + "; exit 7"
+}
+
+// TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed is the
+// regression test for gt-7kr: check-recovery returned SAFE_TO_NUKE for a
+// polecat whose cleanup_status was missing, because a narrow local git check
+// (no uncommitted changes, no stash, no unpushed commits) was treated as
+// sufficient proof the missing status could be silently promoted to "clean".
+// That local check says nothing about a live session or a still-hooked bead,
+// so it must never authorize destruction on its own — missing/unknown
+// cleanup_status has to fail closed to NEEDS_RECOVERY.
+func TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	_ = git.NewGit(p.ClonePath).CleanForce()
+
+	// Swap to a mock bd that omits cleanup_status entirely while everything
+	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
+	// worktree itself is locally clean — exactly the pre-fix promotion path.
+	installMockBdMissingCleanupStatus(t)
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+	if d.Verdict != WorkstateVerdictNeedsRecovery {
+		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — missing cleanup_status must fail closed even when local git looks clean",
+			d.Verdict, d.Reason, d.Blockers, WorkstateVerdictNeedsRecovery)
+	}
+	if d.Reusable || d.SafeToNuke {
+		t.Fatalf("WorkstateDispositionForPolecat() Reusable=%v SafeToNuke=%v, want both false", d.Reusable, d.SafeToNuke)
+	}
 }
 
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
