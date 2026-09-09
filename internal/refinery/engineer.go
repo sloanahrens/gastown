@@ -232,8 +232,8 @@ type MRInfo struct {
 	// Raw data for agent-side queue health analysis (ZFC: agent decides, Go transports)
 	UpdatedAt          time.Time // When the MR was last updated
 	Assignee           string    // Who claimed this MR (empty = unclaimed)
-	BranchExistsLocal  bool      // Whether the MR branch exists locally
-	BranchExistsRemote bool      // Whether the MR branch exists in remote tracking refs
+	BranchExistsLocal  bool      // Whether the MR branch exists locally (this repo's refs/heads)
+	BranchExistsRemote bool      // Whether the MR branch exists on origin (live ls-remote, not cached tracking refs)
 }
 
 // MRAnomaly represents an MR queue health problem that can stall processing.
@@ -2307,9 +2307,15 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 
 		mr := issueToMRInfo(issue, fields)
 
-		// Check branch existence (local + remote tracking refs)
+		// Check branch existence. Local uses this repo's refs/heads, which only
+		// covers branches checked out in a worktree of this same repo clone —
+		// agents with their own separate clone (e.g. mayor/rig) won't show up
+		// here even though their branch is real. Remote must therefore be a
+		// live ls-remote query, not the local refs/remotes/origin/* cache,
+		// which goes stale whenever nothing has fetched since the branch was
+		// pushed (gt-7v66).
 		mr.BranchExistsLocal, _ = e.git.BranchExists(fields.Branch)
-		mr.BranchExistsRemote, _ = e.git.RemoteTrackingBranchExists("origin", fields.Branch)
+		mr.BranchExistsRemote, _ = e.git.RemoteBranchExists("origin", fields.Branch)
 		mr.BlockedBy = e.firstOpenBlocker(issue)
 
 		mrs = append(mrs, mr)
@@ -2346,11 +2352,15 @@ func (e *Engineer) ListQueueAnomalies(now time.Time) ([]*MRAnomaly, error) {
 		if err != nil {
 			return false, false, err
 		}
-		remoteTrackingExists, err := e.git.RemoteTrackingBranchExists("origin", branch)
+		// Live ls-remote, not the local refs/remotes/origin/* cache: this feeds
+		// orphaned-branch detection, which the witness patrol acts on by closing
+		// the MR. A stale cache turns a merge-ready branch into a false orphan
+		// and discards the work (gt-7v66).
+		remoteExists, err := e.git.RemoteBranchExists("origin", branch)
 		if err != nil {
 			return false, false, err
 		}
-		return localExists, remoteTrackingExists, nil
+		return localExists, remoteExists, nil
 	}), nil
 }
 
@@ -2358,7 +2368,7 @@ func detectQueueAnomalies(
 	issues []*beads.Issue,
 	now time.Time,
 	warningAfter time.Duration,
-	branchExistsFn func(branch string) (localExists bool, remoteTrackingExists bool, err error),
+	branchExistsFn func(branch string) (localExists bool, remoteExists bool, err error),
 ) []*MRAnomaly {
 	var anomalies []*MRAnomaly
 
@@ -2391,13 +2401,13 @@ func detectQueueAnomalies(
 
 		// 2) Orphaned branch detection.
 		// ZFC: report raw anomaly data. Agent decides severity.
-		localExists, remoteTrackingExists, err := branchExistsFn(fields.Branch)
-		if err == nil && !localExists && !remoteTrackingExists {
+		localExists, remoteExists, err := branchExistsFn(fields.Branch)
+		if err == nil && !localExists && !remoteExists {
 			anomalies = append(anomalies, &MRAnomaly{
 				ID:     issue.ID,
 				Branch: fields.Branch,
 				Type:   "orphaned-branch",
-				Detail: "MR branch is missing locally and in origin/* tracking refs",
+				Detail: "MR branch is missing locally and on origin",
 			})
 		}
 	}
