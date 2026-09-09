@@ -346,6 +346,178 @@ func TestCheckStaleBinary_BinaryCommitMissingSkips(t *testing.T) {
 	}
 }
 
+// newBareRemote creates an empty bare repo to stand in for a real "origin"
+// remote (a local filesystem path, so pushes/fetches need no network).
+func newBareRemote(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-q", "--bare")
+	return dir
+}
+
+// TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain is the gt-cq0
+// regression. CheckStaleBinary trusts repoDir's cached refs/remotes/origin/main
+// exactly as of its last "git fetch" — in the reported incident that was
+// mayor/rig, a checkout nobody guarantees to keep fetched. If the binary
+// happens to match that stale cache, the check reports "fresh" even though
+// the real origin/main has since moved on. CheckStaleBinaryFresh must
+// refresh the ref first and catch the discrepancy.
+func TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain(t *testing.T) {
+	remoteDir := newBareRemote(t)
+
+	// cloneA is the "mayor/rig"-style worktree under test: on main, but its
+	// local branch pointer lags behind the commit the binary was built from.
+	cloneA := newGitRepo(t)
+	gitRun(t, cloneA, "remote", "add", "origin", remoteDir)
+	gitCommit(t, cloneA, "a.go", "1")
+	gitRun(t, cloneA, "branch", "-M", "main")
+	gitRun(t, cloneA, "push", "-q", "origin", "main")
+
+	// cloneB simulates a different checkout landing more commits on the
+	// remote — the routine way origin/main moves in this town.
+	cloneB := t.TempDir()
+	gitRun(t, cloneB, "init", "-q")
+	gitRun(t, cloneB, "remote", "add", "origin", remoteDir)
+	gitRun(t, cloneB, "fetch", "-q", "origin", "main")
+	gitRun(t, cloneB, "checkout", "-q", "-b", "main", "origin/main")
+	midTip := gitCommit(t, cloneB, "b.go", "2")
+	gitRun(t, cloneB, "push", "-q", "origin", "main")
+
+	// cloneA fetches once, catching its cached origin/main up to midTip —
+	// its own local "main" branch pointer stays at oldTip (fetch never
+	// moves it). The binary was built from midTip.
+	gitRun(t, cloneA, "fetch", "-q", "origin")
+	setBinaryCommit(t, midTip)
+
+	// A further commit lands on the remote after cloneA's last fetch —
+	// nobody re-fetched mayor/rig, exactly the gt-cq0 scenario.
+	newTip := gitCommit(t, cloneB, "c.go", "3")
+	gitRun(t, cloneB, "push", "-q", "origin", "main")
+
+	// Sanity check on the bug itself: without a refresh, the cached
+	// origin/main (midTip) still matches the binary, so the unrefreshed
+	// check reports the dangerous false "fresh".
+	stale := CheckStaleBinary(cloneA)
+	if stale.Error != nil {
+		t.Fatalf("unexpected error: %v", stale.Error)
+	}
+	if stale.IsStale {
+		t.Fatalf("setup invariant broken: expected CheckStaleBinary to (wrongly) report fresh against the stale cache")
+	}
+
+	fresh := CheckStaleBinaryFresh(cloneA)
+	if fresh.Error != nil {
+		t.Fatalf("unexpected error: %v", fresh.Error)
+	}
+	if fresh.Skipped {
+		t.Fatalf("expected a definite stale verdict, not a skip: %s", fresh.SkipReason)
+	}
+	if !fresh.IsStale {
+		t.Fatalf("CheckStaleBinaryFresh must detect staleness after refreshing origin/main to %s (binary built from %s)",
+			ShortCommit(newTip), ShortCommit(midTip))
+	}
+	if fresh.CompareRef != "origin/main" {
+		t.Errorf("CompareRef = %q, want \"origin/main\"", fresh.CompareRef)
+	}
+	if fresh.RepoCommit != newTip {
+		t.Errorf("RepoCommit = %q, want refreshed origin/main tip %q", fresh.RepoCommit, newTip)
+	}
+}
+
+// TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh reuses the
+// TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin fixture (a
+// fabricated refs/remotes/origin/main with no real "origin" remote
+// configured to verify it against). CheckStaleBinary trusts the cache and
+// reports fresh; CheckStaleBinaryFresh has no remote to confirm that ref
+// against, so per gt-cq0 it must fail closed to Skipped instead of repeating
+// an unverified "fresh" claim.
+func TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh(t *testing.T) {
+	dir := newGitRepo(t)
+	staleTip := gitCommit(t, dir, "a.go", "1")
+	freshTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "branch", "-M", "main")
+	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
+	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
+	setBinaryCommit(t, freshTip)
+
+	info := CheckStaleBinaryFresh(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if info.IsStale {
+		t.Errorf("must not claim IsStale from an unverifiable ref either — Skipped is the correct fail-closed state")
+	}
+	if !info.Skipped {
+		t.Fatalf("expected fail-closed Skipped when no real origin remote exists to confirm origin/main; got a trusted verdict instead")
+	}
+	if !strings.Contains(info.SkipReason, "origin/main") {
+		t.Errorf("SkipReason = %q, want it to name origin/main", info.SkipReason)
+	}
+}
+
+// TestCheckStaleBinaryFresh_ConfirmedFreshIsNotSkipped proves the fail-closed
+// path added for gt-cq0 doesn't over-block: when a real, reachable remote
+// confirms the binary is genuinely at the tip, the result must be a clean
+// "not stale" — not a skip.
+func TestCheckStaleBinaryFresh_ConfirmedFreshIsNotSkipped(t *testing.T) {
+	remoteDir := newBareRemote(t)
+
+	dir := newGitRepo(t)
+	gitRun(t, dir, "remote", "add", "origin", remoteDir)
+	staleTip := gitCommit(t, dir, "a.go", "1")
+	freshTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "branch", "-M", "main")
+	// Local main pointer lags (same shape as the "stale local ref" fixture
+	// above), but here origin is a real, reachable remote genuinely at
+	// freshTip — dir has not fetched it yet, so CheckStaleBinaryFresh must
+	// fetch it to find that out.
+	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
+	gitRun(t, dir, "push", "-q", "origin", freshTip+":refs/heads/main")
+	setBinaryCommit(t, freshTip)
+
+	info := CheckStaleBinaryFresh(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if info.Skipped {
+		t.Fatalf("must not fail closed when the live remote confirms the binary is genuinely fresh: %s", info.SkipReason)
+	}
+	if info.IsStale {
+		t.Errorf("binary at the confirmed remote tip must not be reported stale")
+	}
+	if info.CompareRef != "origin/main" {
+		t.Errorf("CompareRef = %q, want \"origin/main\"", info.CompareRef)
+	}
+}
+
+// TestCheckStaleBinaryFresh_UnreachableRemoteFailsClosed: origin is
+// configured but unreachable (bad path, nothing to fetch from). The stale
+// local cache says "fresh"; CheckStaleBinaryFresh must not trust it.
+func TestCheckStaleBinaryFresh_UnreachableRemoteFailsClosed(t *testing.T) {
+	dir := newGitRepo(t)
+	gitRun(t, dir, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+	staleTip := gitCommit(t, dir, "a.go", "1")
+	freshTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "branch", "-M", "main")
+	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
+	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
+	setBinaryCommit(t, freshTip)
+
+	info := CheckStaleBinaryFresh(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.Skipped {
+		t.Fatalf("expected fail-closed Skipped when origin is configured but unreachable; got a trusted verdict instead")
+	}
+	if info.IsStale {
+		t.Errorf("must not claim IsStale from an unverifiable ref either — Skipped is the correct fail-closed state")
+	}
+}
+
 func TestResolveBuildBranchRef(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

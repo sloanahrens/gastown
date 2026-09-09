@@ -36,7 +36,10 @@ func (c *StaleBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	return staleResult(c.Name(), version.CheckStaleBinary(repoRoot))
+	// CheckStaleBinaryFresh refreshes origin/upstream remote-tracking refs
+	// before comparing, so a lagging local cache can't report a stale
+	// binary as up to date (gt-cq0).
+	return staleResult(c.Name(), version.CheckStaleBinaryFresh(repoRoot))
 }
 
 // staleResult maps a completed staleness check to a doctor CheckResult.

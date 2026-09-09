@@ -2,11 +2,13 @@
 package version
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -205,6 +207,108 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	}
 
 	return info
+}
+
+// remoteFetchTimeout bounds each live-refresh fetch CheckStaleBinaryFresh
+// performs before reading a remote-tracking ref, so an unreachable remote
+// can't hang gt stale / gt doctor.
+const remoteFetchTimeout = 5 * time.Second
+
+// CheckStaleBinaryFresh is CheckStaleBinary, but first refreshes the
+// origin/upstream remote-tracking refs it may compare against instead of
+// trusting however current repoDir's last "git fetch" happened to leave
+// them.
+//
+// repoDir is normally $GT_ROOT/gastown/mayor/rig — a shared worktree nobody
+// guarantees to keep fetched — so refs/remotes/origin/main there can lag the
+// true tip. CheckStaleBinary compared against it as-is: if the binary
+// happened to match that stale cached ref, it reported "fresh" even though
+// the real origin/main had moved on (gt-cq0). A false "stale" is just noisy;
+// a false "fresh" silently permits running an outdated binary, so when the
+// live refresh can't confirm the ref it landed on, this fails closed to
+// Skipped rather than trusting an unverified "fresh".
+//
+// Callers on the interactive hot path (the per-command startup warning)
+// should keep using CheckStaleBinary directly — this is for the explicit,
+// occasional checks (gt stale, gt doctor) where a network round trip is
+// acceptable.
+func CheckStaleBinaryFresh(repoDir string) *StaleBinaryInfo {
+	refreshed := refreshRemoteTrackingRefs(repoDir)
+	info := CheckStaleBinary(repoDir)
+
+	if !info.IsStale && !info.Skipped && info.Error == nil && isRemoteTrackingRef(info.CompareRef) && !refreshed[info.CompareRef] {
+		info.Skipped = true
+		info.SkipReason = fmt.Sprintf(
+			"could not confirm %s is current (remote unreachable or not configured); refusing to report fresh from a possibly-stale cached ref",
+			info.CompareRef)
+	}
+
+	return info
+}
+
+// isRemoteTrackingRef reports whether compareRef is one of the
+// origin/upstream main/master refs refreshRemoteTrackingRefs attempts to
+// keep current.
+func isRemoteTrackingRef(compareRef string) bool {
+	switch compareRef {
+	case "origin/main", "origin/master", "upstream/main", "upstream/master":
+		return true
+	default:
+		return false
+	}
+}
+
+// refreshRemoteTrackingRefs best-effort fetches main and master from any of
+// "origin"/"upstream" that are configured as real remotes in repoDir,
+// updating the local refs/remotes/<remote>/<branch> pointers in place. It
+// returns which "<remote>/<branch>" refs were successfully refreshed.
+//
+// A remote that isn't configured, or a fetch that fails or times out (no
+// network), is silently skipped — callers fall back to whatever is already
+// cached locally, same as before this existed.
+func refreshRemoteTrackingRefs(repoDir string) map[string]bool {
+	refreshed := map[string]bool{}
+	remotes := configuredRemotes(repoDir)
+	for _, remote := range []string{"origin", "upstream"} {
+		if !remotes[remote] {
+			continue
+		}
+		for _, branch := range []string{"main", "master"} {
+			if fetchRemoteBranch(repoDir, remote, branch) {
+				refreshed[remote+"/"+branch] = true
+			}
+		}
+	}
+	return refreshed
+}
+
+// configuredRemotes returns the set of remote names configured in repoDir.
+func configuredRemotes(repoDir string) map[string]bool {
+	cmd := exec.Command("git", "remote")
+	cmd.Dir = repoDir
+	util.SetDetachedProcessGroup(cmd)
+	remotes := map[string]bool{}
+	out, err := cmd.Output()
+	if err != nil {
+		return remotes
+	}
+	for _, name := range strings.Fields(string(out)) {
+		remotes[name] = true
+	}
+	return remotes
+}
+
+// fetchRemoteBranch fetches branch from remote into repoDir's
+// refs/remotes/<remote>/<branch>, bounded by remoteFetchTimeout. Returns
+// false on any failure (unreachable remote, missing branch, timeout).
+func fetchRemoteBranch(repoDir, remote, branch string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteFetchTimeout)
+	defer cancel()
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "--quiet", "--no-tags", remote, refspec)
+	cmd.Dir = repoDir
+	util.SetDetachedProcessGroup(cmd)
+	return cmd.Run() == nil
 }
 
 // resolveBuildBranchRef finds a build-branch ref to compare the binary against

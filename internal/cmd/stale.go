@@ -68,8 +68,10 @@ func runStale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot find gastown repo: %w", err)
 	}
 
-	// Check staleness
-	info := version.CheckStaleBinary(repoRoot)
+	// Check staleness against a freshly-refreshed remote-tracking ref
+	// (gt-cq0): repoRoot's cached origin/main can lag if nobody has fetched
+	// it recently, which would otherwise report a stale binary as "fresh".
+	info := version.CheckStaleBinaryFresh(repoRoot)
 
 	// Handle errors
 	if info.Error != nil {
