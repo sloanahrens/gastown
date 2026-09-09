@@ -985,6 +985,101 @@ esac
 	}
 }
 
+// TestSSEDashboardPollSkipsWhenNoClients is a regression test for gt-c9rl:
+// pollDashboardHash used to shell out to gt (status/hooks/mail, one process
+// per town agent identity inside "status --json") on every tick FOREVER once
+// started, even after every SSE client disconnected. A dashboard opened once
+// and closed in every tab therefore kept polling at full rate indefinitely —
+// ~80 CPU-equivalents of subprocess load with zero browsers attached. The
+// poller must skip computeDashboardHash while dashboardClients is zero, and
+// resume as soon as a client reconnects.
+func TestSSEDashboardPollSkipsWhenNoClients(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "status --json") printf '{"agents":[]}\n' ;;
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	// Same rationale as TestSSEDashboardPollIsSharedAcrossConnections: a
+	// short, test-local interval decouples the assertions from real
+	// wall-clock scheduling.
+	const pollInterval = 20 * time.Millisecond
+	h := &APIHandler{
+		gtPath:                gtPath,
+		workDir:               t.TempDir(),
+		defaultRunTimeout:     5 * time.Second,
+		maxRunTimeout:         10 * time.Second,
+		cmdSem:                make(chan struct{}, maxConcurrentCommands),
+		dashboardPollInterval: pollInterval,
+	}
+
+	countCalls := func() int {
+		data, err := os.ReadFile(callLog)
+		if err != nil {
+			return 0
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return 0
+		}
+		return len(strings.Split(trimmed, "\n"))
+	}
+
+	connectOnce := func(dur time.Duration) {
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+		ctx, cancel := context.WithTimeout(req.Context(), dur)
+		defer cancel()
+		req = req.WithContext(ctx)
+		h.handleSSE(httptest.NewRecorder(), req)
+	}
+
+	// First connection starts the shared poller and lets it tick at least
+	// once, then disconnects — dropping dashboardClients back to zero.
+	connectOnce(100 * time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for countCalls() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the poller to have run at least once while a client was connected")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := h.dashboardClients.Load(); got != 0 {
+		t.Fatalf("dashboardClients = %d after disconnect, want 0", got)
+	}
+	callsAfterDisconnect := countCalls()
+
+	// No clients connected: several poll intervals' worth of ticks should
+	// all be skipped, so the call count must not grow.
+	time.Sleep(10 * pollInterval)
+	if got := countCalls(); got != callsAfterDisconnect {
+		t.Errorf("gt was invoked %d more time(s) with zero SSE clients connected (total %d, want %d) — pollDashboardHash must skip ticks while dashboardClients is zero",
+			got-callsAfterDisconnect, got, callsAfterDisconnect)
+	}
+
+	// Reconnecting must resume polling.
+	connectOnce(100 * time.Millisecond)
+	deadline = time.Now().Add(5 * time.Second)
+	for countCalls() <= callsAfterDisconnect {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the poller to resume after a client reconnected (still at %d calls)", countCalls())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestOptionsCacheConcurrentAccess verifies that concurrent cache reads and
 // writes don't race. The read lock is held through serialization so a
 // concurrent writer can't replace the cached pointer mid-encode.
