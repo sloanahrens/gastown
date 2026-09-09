@@ -16,6 +16,31 @@ import (
 	"golang.org/x/text/language"
 )
 
+// patrolAssignee returns the canonical assignee address for a patrol role.
+// This is the single source of truth for how patrol wisps are addressed —
+// it MUST match the address form gt hook queries via resolveSelfTarget /
+// canonicalAssigneeAddress (sling_target.go): town-level roles (deacon) use
+// a trailing slash, rig-scoped roles (witness, refinery) do not.
+//
+// Previously this logic was duplicated inline across patrol_report.go,
+// patrol_new.go, and prime_molecule.go, and the deacon case drifted out of
+// sync with resolveSelfTarget's "deacon/" convention — patrol wisps were
+// written with assignee "deacon" (no slash), making them invisible to
+// `gt hook`'s "deacon/" query (gt-cut). Route all patrol-config construction
+// through this one function so the address form can't drift again.
+func patrolAssignee(roleName, rig string) string {
+	switch roleName {
+	case "deacon":
+		return "deacon/"
+	case "witness":
+		return rig + "/witness"
+	case "refinery":
+		return rig + "/refinery"
+	default:
+		return roleName
+	}
+}
+
 // PatrolConfig holds role-specific patrol configuration.
 type PatrolConfig struct {
 	RoleName      string       // "deacon", "witness", "refinery"
