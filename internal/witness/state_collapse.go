@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -147,6 +150,220 @@ force — reopen it and re-route the MR.`, f.IssueID, f.MRID, f.MRStatus, f.Bran
 	}
 	if err := router.Send(msg); err != nil {
 		fmt.Fprintf(os.Stderr, "witness: failed to mail state-collapse finding for %s: %v, attempting nudge fallback\n", f.IssueID, err)
+		t := tmux.NewTmux()
+		nudgeMsg := fmt.Sprintf("%s — mail send failed, see bead comments on %s", subject, f.IssueID)
+		if nudgeErr := t.NudgeSession(session.MayorSessionName(), nudgeMsg); nudgeErr != nil {
+			fmt.Fprintf(os.Stderr, "witness: nudge fallback to mayor also failed for %s: %v\n", f.IssueID, nudgeErr)
+		}
+	}
+}
+
+// BranchStrandFinding is the state-collapse signature DetectStateCollapse
+// cannot see (gt-3ii): a polecat branch exists on the rig's remote for an
+// issue that is now CLOSED, but the fix never reached the target branch and
+// no MR bead was ever created to land it. This is strictly worse than the
+// gt-zzd case DetectStateCollapse catches: there, an open MR sits in the
+// queue as a reminder; here nothing in the system will ever merge the
+// branch and there is no queue entry pointing at it.
+type BranchStrandFinding struct {
+	IssueID     string // The closed source issue
+	Branch      string // The polecat branch name (e.g. "polecat/pyrite/gt-hsg+mttuo7sf")
+	CloseReason string // The bead's recorded close reason, if any
+}
+
+// DetectStrandedBranchesResult holds the aggregate result of a stranded-branch scan.
+type DetectStrandedBranchesResult struct {
+	Checked  int // number of closed-issue polecat branches examined
+	Findings []BranchStrandFinding
+	Errors   []error
+}
+
+// BranchRefSource abstracts the git remote queries DetectStrandedBranches
+// needs, so the scan is unit-testable without a live git remote. Production
+// code uses DefaultBranchRefSource; tests provide a fake.
+type BranchRefSource struct {
+	// ListPolecatBranches returns polecat branch names present on the rig's
+	// remote (e.g. "polecat/pyrite/gt-hsg+mttuo7sf", without the
+	// "refs/heads/" prefix).
+	ListPolecatBranches func() ([]string, error)
+	// TargetHasCommitReferencing reports whether any commit reachable from
+	// the target branch's remote-tracking ref mentions issueID in its
+	// message.
+	TargetHasCommitReferencing func(target, issueID string) (bool, error)
+}
+
+// DefaultBranchRefSource returns a BranchRefSource backed by a real git
+// remote, rooted at repoPath (the rig's canonical clone, e.g.
+// "<rig>/mayor/rig").
+func DefaultBranchRefSource(repoPath string) *BranchRefSource {
+	g := git.NewGit(repoPath)
+	return &BranchRefSource{
+		ListPolecatBranches: func() ([]string, error) {
+			refs, err := g.ListRemoteRefsWithHashes("origin", "refs/heads/polecat/")
+			if err != nil {
+				return nil, err
+			}
+			names := make([]string, 0, len(refs))
+			for _, r := range refs {
+				names = append(names, strings.TrimPrefix(r.Name, "refs/heads/"))
+			}
+			return names, nil
+		},
+		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
+			return g.LogGrep("origin/"+target, issueID)
+		},
+	}
+}
+
+// DetectStrandedBranches finds issues closed while the branch that was
+// supposed to carry their fix never reached the target branch and no
+// merge-request bead was ever created for it — the state DetectStateCollapse
+// cannot see, because it only iterates the open MR queue and this state has
+// no MR at all (gt-3ii). It reasons from git branch state rather than queue
+// membership: for every polecat branch on the remote whose issue bead is
+// CLOSED, it checks whether the fix actually reached the target.
+//
+// Two false-positive classes were measured against the live gastown branch
+// set before shipping this (see gt-3ii comment history: the first proposed
+// shape flagged 12/12 unmerged branches, 12/12 of them false) and are
+// filtered explicitly rather than inferred from ancestry:
+//
+//   - Squash merges: this rig squash-merges, so a branch tip is NEVER an
+//     ancestor of the target branch even when the work landed cleanly.
+//     TargetHasCommitReferencing (git log --grep, matching the issue id the
+//     rig convention embeds in every squash commit subject) is the
+//     primitive that still answers "did this land" — IsAncestor cannot.
+//   - Deliberate discards: a polecat that independently finds its fix
+//     already landed under a different issue legitimately closes with
+//     "no-changes: ..." (the documented polecat convention) and abandons
+//     its branch rather than pushing a duplicate MR. That leaves the same
+//     on-disk signature as a genuine strand, so the close reason must be
+//     read, not just the status.
+func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, targetBranch string, router *mail.Router) *DetectStrandedBranchesResult {
+	result := &DetectStrandedBranchesResult{}
+	if bd == nil || refs == nil || refs.ListPolecatBranches == nil || refs.TargetHasCommitReferencing == nil {
+		return result
+	}
+	if targetBranch == "" {
+		targetBranch = "main"
+	}
+
+	branches, err := refs.ListPolecatBranches()
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("listing polecat branches: %w", err))
+		return result
+	}
+
+	for _, branch := range branches {
+		meta, ok := polecat.ParseBranchName(branch)
+		if !ok || meta.Issue == "" {
+			continue // no issue encoded in the branch name — nothing to check
+		}
+
+		status, closeReason, found := getBeadStatusAndCloseReason(bd, workDir, meta.Issue)
+		if !found || status != string(beads.StatusClosed) {
+			continue // bead unreachable, or not closed — no collapse to report
+		}
+		result.Checked++
+
+		if isDeliberateDiscard(closeReason) {
+			continue // closed with an explicit "no-changes:" abandonment, not a strand
+		}
+
+		landed, err := refs.TargetHasCommitReferencing(targetBranch, meta.Issue)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("checking %s against origin/%s: %w", meta.Issue, targetBranch, err))
+			continue
+		}
+		if landed {
+			continue // reached the target (commonly via squash) — the branch tip just isn't an ancestor
+		}
+
+		finding := BranchStrandFinding{
+			IssueID:     meta.Issue,
+			Branch:      branch,
+			CloseReason: closeReason,
+		}
+		result.Findings = append(result.Findings, finding)
+		reportBranchStrand(bd, workDir, rigName, targetBranch, finding, router)
+	}
+
+	return result
+}
+
+// isDeliberateDiscard reports whether a bead close reason declares that no
+// code changes are landing — the town-wide polecat convention
+// (`bd close <id> --reason="no-changes: <explanation>"`), used when a
+// polecat finds its fix already covered elsewhere and abandons its branch
+// rather than pushing a duplicate/conflicting MR (gt-3ii, verified against
+// gt-g6b).
+func isDeliberateDiscard(closeReason string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(closeReason)), "no-changes:")
+}
+
+// getBeadStatusAndCloseReason returns a bead's status and close reason, and
+// true if the lookup succeeded. Mirrors getBeadStatus but also surfaces
+// close_reason, needed to distinguish a genuine strand from a deliberate
+// discard (gt-3ii).
+func getBeadStatusAndCloseReason(bd *BdCli, workDir, beadID string) (status, closeReason string, ok bool) {
+	if beadID == "" {
+		return "", "", false
+	}
+	output, err := bd.Exec(workDir, "show", beadID, "--json")
+	if err != nil || output == "" {
+		return "", "", false
+	}
+	var issues []struct {
+		Status      string `json:"status"`
+		CloseReason string `json:"close_reason"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+		// Valid response but no results — bead was reaped/deleted.
+		return "", "", true
+	}
+	return issues[0].Status, issues[0].CloseReason, true
+}
+
+// reportBranchStrand persists a branch-strand finding to the source issue
+// (bead comment) and escalates it to the rig's mayor by mail, falling back
+// to a tmux nudge if mail delivery fails. Mirrors reportStateCollapse.
+func reportBranchStrand(bd *BdCli, workDir, rigName, targetBranch string, f BranchStrandFinding, router *mail.Router) {
+	comment := fmt.Sprintf(
+		"STATE-COLLAPSE (stranded branch): this issue is closed but branch %q was never merged into origin/%s "+
+			"and no merge-request bead was ever created for it. The fix is recorded as done but may not be in "+
+			"force — verify at source (git fetch + git log origin/%s --grep=%s -F) before trusting this close.",
+		f.Branch, targetBranch, targetBranch, f.IssueID,
+	)
+	if err := bd.Run(workDir, "comments", "add", f.IssueID, comment); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: failed to comment branch-strand on %s: %v\n", f.IssueID, err)
+	}
+
+	if router == nil {
+		return
+	}
+
+	subject := fmt.Sprintf("STATE_COLLAPSE %s closed, branch %s never merged", f.IssueID, f.Branch)
+	body := fmt.Sprintf(`Issue %s is CLOSED but its branch %s was never merged into origin/%s — no commit there
+references it, and no merge-request bead exists for it either.
+
+This is the gt-3ii branch-driven state-collapse pattern: strictly worse than
+the MR-driven case (gt-zzd), because there is no queue entry to catch it — if
+this is a genuine strand, nothing in the system will ever land the fix.
+Confirm at source before trusting the close:
+  git fetch origin && git log origin/%s --grep=%s -F
+
+If nothing is found, the issue was closed with the fix NOT in force — reopen
+it and re-dispatch.`, f.IssueID, f.Branch, targetBranch, targetBranch, f.IssueID)
+
+	msg := &mail.Message{
+		From:     fmt.Sprintf("%s/witness", rigName),
+		To:       "mayor/",
+		Subject:  subject,
+		Priority: mail.PriorityUrgent,
+		Body:     body,
+	}
+	if err := router.Send(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: failed to mail branch-strand finding for %s: %v, attempting nudge fallback\n", f.IssueID, err)
 		t := tmux.NewTmux()
 		nudgeMsg := fmt.Sprintf("%s — mail send failed, see bead comments on %s", subject, f.IssueID)
 		if nudgeErr := t.NudgeSession(session.MayorSessionName(), nudgeMsg); nudgeErr != nil {

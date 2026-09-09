@@ -173,3 +173,212 @@ var errFakeListFailure = &fakeError{"simulated bd list failure"}
 type fakeError struct{ msg string }
 
 func (e *fakeError) Error() string { return e.msg }
+
+// fakeBranchRefSource builds a BranchRefSource from static test fixtures:
+// branches on the remote, and which issue ids have a referencing commit on
+// the target branch.
+func fakeBranchRefSource(branches []string, referenced map[string]bool) *BranchRefSource {
+	return &BranchRefSource{
+		ListPolecatBranches: func() ([]string, error) {
+			return branches, nil
+		},
+		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
+			return referenced[issueID], nil
+		},
+	}
+}
+
+func TestDetectStrandedBranches_NilArgs(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(func(args []string) (string, error) { return "[]", nil }, func(args []string) error { return nil })
+
+	if r := DetectStrandedBranches(nil, fakeBranchRefSource(nil, nil), "/work", "gastown", "main", nil); r.Checked != 0 || len(r.Findings) != 0 {
+		t.Errorf("nil bd: got %+v, want empty", r)
+	}
+	if r := DetectStrandedBranches(bd, nil, "/work", "gastown", "main", nil); r.Checked != 0 || len(r.Findings) != 0 {
+		t.Errorf("nil refs: got %+v, want empty", r)
+	}
+}
+
+// TestDetectStrandedBranches_GenuineStrand is the core regression case
+// (gt-3ii/gt-hsg): a bead is closed, its branch was pushed, no commit on the
+// target branch references it, and the close reason is not a deliberate
+// discard. This must be flagged — the detector exists to catch exactly this.
+func TestDetectStrandedBranches_GenuineStrand(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/pyrite/gt-hsg+mttuo7sf"
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-hsg" {
+				return `[{"status":"closed","close_reason":"fixed the fail-open destruction gate"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil) // no issue referenced anywhere on target
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+	f := result.Findings[0]
+	if f.IssueID != "gt-hsg" {
+		t.Errorf("IssueID = %q, want gt-hsg", f.IssueID)
+	}
+	if f.Branch != branch {
+		t.Errorf("Branch = %q, want %q", f.Branch, branch)
+	}
+
+	logStr := strings.Join(mock.calls, "\n")
+	if !strings.Contains(logStr, "comments add gt-hsg") {
+		t.Errorf("expected a bead comment on gt-hsg recording the strand; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStrandedBranches_SquashMergedNotFlagged is the false-positive
+// class that killed the first proposed detector shape (gt-3ii comment
+// history: ancestry flagged 12/12 unmerged branches, 12/12 of them squash
+// merges that had actually landed). A closed bead whose issue id shows up in
+// a target-branch commit message must NOT be flagged even though the branch
+// tip is not (and never will be) an ancestor.
+func TestDetectStrandedBranches_SquashMergedNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/topaz/gt-wdr+abc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr" {
+				return `[{"status":"closed","close_reason":"merged via refinery"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, map[string]bool{"gt-wdr": true})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings for a squash-merged branch, got %+v", result.Findings)
+	}
+}
+
+// TestDetectStrandedBranches_DeliberateDiscardNotFlagged is the second
+// false-positive class (gt-3ii, gt-g6b): a polecat that finds its fix
+// already landed under a different issue closes with the documented
+// "no-changes:" convention and abandons its branch rather than pushing a
+// duplicate MR. That leaves the same on-disk signature as a genuine strand
+// and must not be flagged.
+func TestDetectStrandedBranches_DeliberateDiscardNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/basalt/gt-g6b+xyz"
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-g6b" {
+				return `[{"status":"closed","close_reason":"no-changes: already fixed upstream by gt-80o, discarding this branch"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil) // no referencing commit either — same shape as a strand
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings for a deliberate discard, got %+v", result.Findings)
+	}
+	// The closed-issue branch was still examined (Checked counts examination,
+	// not candidacy) — it's the discard filter that keeps it out of Findings.
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "comments add gt-g6b") {
+		t.Errorf("should not comment on a deliberately discarded issue; log:\n%s", logStr)
+	}
+}
+
+func TestDetectStrandedBranches_OpenIssueNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/jade/gt-open+abc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-open" {
+				return `[{"status":"in_progress"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.Checked != 0 || len(result.Findings) != 0 {
+		t.Errorf("expected an in-progress issue's branch to be skipped entirely, got %+v", result)
+	}
+}
+
+func TestDetectStrandedBranches_SkipsBranchesWithoutIssueID(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{"polecat/jade-adhoc"}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.Checked != 0 || len(result.Findings) != 0 {
+		t.Errorf("expected a branch with no encoded issue id to be skipped, got %+v", result)
+	}
+}
+
+func TestDetectStrandedBranches_ListError(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(func(args []string) (string, error) { return "[]", nil }, func(args []string) error { return nil })
+	refs := &BranchRefSource{
+		ListPolecatBranches: func() ([]string, error) { return nil, errFakeListFailure },
+		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
+			return false, nil
+		},
+	}
+
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1", len(result.Errors))
+	}
+	if result.Checked != 0 || len(result.Findings) != 0 {
+		t.Errorf("expected no findings on list error, got %+v", result)
+	}
+}
+
+func TestIsDeliberateDiscard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		reason string
+		want   bool
+	}{
+		{"no-changes: already fixed upstream", true},
+		{"  No-Changes: case-insensitive and padded", true},
+		{"merged cleanly", false},
+		{"", false},
+		{"fixed by rewriting the no-changes detector", false}, // must not match mid-string
+	}
+	for _, c := range cases {
+		if got := isDeliberateDiscard(c.reason); got != c.want {
+			t.Errorf("isDeliberateDiscard(%q) = %v, want %v", c.reason, got, c.want)
+		}
+	}
+}

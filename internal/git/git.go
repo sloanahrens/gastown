@@ -2270,6 +2270,20 @@ func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	return true, nil
 }
 
+// LogGrep reports whether any commit reachable from ref has a message
+// containing pattern as a literal substring (git log --grep -F). Unlike
+// IsAncestor, this survives a squash merge: a squash rewrites the branch
+// tip into a new commit on the target, so ancestry can never confirm the
+// work landed, but the target's squash commit message still carries the
+// original text (e.g. an issue id) by convention.
+func (g *Git) LogGrep(ref, pattern string) (bool, error) {
+	out, err := g.run("log", ref, "--grep="+pattern, "-F", "-1", "--oneline")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // Cherry runs `git cherry <upstream> <head>` to list commits on head that are
 // not yet on upstream, comparing by patch-id. Each output line is prefixed with
 // "+ " (patch not on upstream) or "- " (patch already applied upstream, e.g.

@@ -626,6 +626,42 @@ func TestRev(t *testing.T) {
 	}
 }
 
+func TestLogGrep_FindsMatchingCommit(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	testFile := filepath.Join(dir, "fix.txt")
+	if err := os.WriteFile(testFile, []byte("fix\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	cmd = exec.Command("git", "commit", "-m", "fix: squash-merged change (gt-hsg)")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	found, err := g.LogGrep("HEAD", "gt-hsg")
+	if err != nil {
+		t.Fatalf("LogGrep: %v", err)
+	}
+	if !found {
+		t.Error("LogGrep(\"HEAD\", \"gt-hsg\") = false, want true")
+	}
+
+	found, err = g.LogGrep("HEAD", "gt-nonexistent")
+	if err != nil {
+		t.Fatalf("LogGrep: %v", err)
+	}
+	if found {
+		t.Error("LogGrep(\"HEAD\", \"gt-nonexistent\") = true, want false")
+	}
+}
+
 func TestFetchBranch(t *testing.T) {
 	// Create a "remote" repo
 	remoteDir := t.TempDir()
