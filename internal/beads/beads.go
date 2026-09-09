@@ -933,7 +933,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// Handle bd exit code 0 bug: when issue not found,
 	// bd may exit 0 but write error to stderr with empty stdout.
 	// Detect this case and treat as error to avoid JSON parse failures.
-	if stdout.Len() == 0 && stderr.Len() > 0 {
+	if stdout.Len() == 0 && stderr.Len() > 0 && bdEmptyOutputIsError(stderr.String()) {
 		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
 	}
 
@@ -973,7 +973,7 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 		return nil, b.wrapError(err, stderr.String(), args)
 	}
 
-	if stdout.Len() == 0 && stderr.Len() > 0 {
+	if stdout.Len() == 0 && stderr.Len() > 0 && bdEmptyOutputIsError(stderr.String()) {
 		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
 	}
 
@@ -1326,6 +1326,44 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 
 func quoteBDQueryValue(value string) string {
 	return strconv.Quote(value)
+}
+
+// bdFirstRunMetricsNoticeStart and bdFirstRunMetricsNoticeEnd bound bd's
+// one-time anonymous-metrics consent banner, which bd prints to stderr
+// whenever it cannot find a persisted record that the notice was already
+// shown. In isolated mode, filterBeadsEnv strips HOME so bd has nowhere to
+// persist that record, and reprints this banner on every single invocation
+// (gt-iksp) — even under --quiet, and even when the command succeeds.
+const (
+	bdFirstRunMetricsNoticeStart = "Thanks for using bd!"
+	bdFirstRunMetricsNoticeEnd   = "no restart needed)"
+)
+
+// stripFirstRunMetricsNotice removes bd's one-time metrics consent banner
+// (see bdFirstRunMetricsNoticeStart) from stderr text, if present.
+func stripFirstRunMetricsNotice(stderr string) string {
+	start := strings.Index(stderr, bdFirstRunMetricsNoticeStart)
+	if start == -1 {
+		return stderr
+	}
+	end := strings.Index(stderr[start:], bdFirstRunMetricsNoticeEnd)
+	if end == -1 {
+		return stderr
+	}
+	end = start + end + len(bdFirstRunMetricsNoticeEnd)
+	return stderr[:start] + stderr[end:]
+}
+
+// bdEmptyOutputIsError reports whether an exit-0 bd invocation with empty
+// stdout and non-empty stderr should be treated as an error. This heuristic
+// exists to catch a genuine bd bug where a lookup that finds nothing exits 0
+// with an error message on stderr and nothing on stdout. It must not fire on
+// bd's benign first-run metrics-consent banner (see
+// stripFirstRunMetricsNotice) — a --quiet command like `bd init` legitimately
+// produces empty stdout on success, and in isolated mode the banner alone can
+// fill stderr with no real error present.
+func bdEmptyOutputIsError(stderr string) bool {
+	return strings.TrimSpace(stripFirstRunMetricsNotice(stderr)) != ""
 }
 
 // stripStdoutWarnings removes warning/diagnostic lines that bd may emit to stdout.

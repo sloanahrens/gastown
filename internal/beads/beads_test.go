@@ -5099,6 +5099,89 @@ func TestStripEnvPrefixes_CaseInsensitiveKeys(t *testing.T) {
 	}
 }
 
+// bdFirstRunMetricsNoticeText is a verbatim capture of bd's one-time
+// anonymous-metrics consent banner (bd 1.2.2), reproduced from a real
+// `bd init --quiet` run with HOME stripped (gt-iksp).
+const bdFirstRunMetricsNoticeText = "Thanks for using bd! Quick heads-up: bd shares anonymous usage metrics —\n" +
+	"   just which commands get run (plus the bd version and OS platform), never your\n" +
+	"   issues, paths, remotes, identity, or anything you type. Seeing how people use\n" +
+	"   bd is how we decide what to improve next, so it genuinely makes bd better for\n" +
+	"   everyone.\n" +
+	"      Curious what's sent?   bd metrics example\n" +
+	"      Prefer to opt out?     bd metrics off    (one command, no restart needed)\n\n"
+
+func TestStripFirstRunMetricsNotice(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{
+			// The banner's own leading/trailing blank lines are left in place;
+			// callers (bdEmptyOutputIsError) trim whitespace before deciding.
+			name:   "banner only, exactly as bd emits it",
+			stderr: bdFirstRunMetricsNoticeText,
+			want:   "\n\n",
+		},
+		{
+			name:   "banner surrounded by real error text is preserved",
+			stderr: bdFirstRunMetricsNoticeText + "Error: issue gt-nope not found\n",
+			want:   "\n\nError: issue gt-nope not found\n",
+		},
+		{
+			name:   "no banner present",
+			stderr: "Error: something else went wrong\n",
+			want:   "Error: something else went wrong\n",
+		},
+		{
+			name:   "empty stderr",
+			stderr: "",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripFirstRunMetricsNotice(tt.stderr)
+			if got != tt.want {
+				t.Errorf("stripFirstRunMetricsNotice() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBdEmptyOutputIsError(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{
+			name:   "banner-only stderr from a successful --quiet command is not an error",
+			stderr: bdFirstRunMetricsNoticeText,
+			want:   false,
+		},
+		{
+			name:   "genuine issue-not-found stderr is still an error",
+			stderr: "Error: issue gt-nope not found\n",
+			want:   true,
+		},
+		{
+			name:   "banner followed by a genuine error is still an error",
+			stderr: bdFirstRunMetricsNoticeText + "Error: issue gt-nope not found\n",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdEmptyOutputIsError(tt.stderr); got != tt.want {
+				t.Errorf("bdEmptyOutputIsError(%q) = %v, want %v", tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests — verify env behavior with real os.Environ()
 // ---------------------------------------------------------------------------
