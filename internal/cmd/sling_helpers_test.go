@@ -389,3 +389,86 @@ func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadRigCommandVarsPrecedence verifies the three-tier merge order
+// mandated by gt-e50d's narrowed fix: rig root config.json is the floor,
+// the repo-committed .gastown/settings.json overrides it, and rig-local
+// settings/config.json has the final say. Each tier sets a distinct command
+// so the test fails if rootMQ and repoMQ are ever collapsed into a single
+// "floor" or their precedence is flipped.
+func TestLoadRigCommandVarsPrecedence(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	repoRoot := filepath.Join(rigDir, "mayor", "rig")
+	gastownDir := filepath.Join(repoRoot, ".gastown")
+	settingsDir := filepath.Join(rigDir, "settings")
+	for _, dir := range []string{gastownDir, settingsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// Floor: rig root config.json sets all three commands.
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "default_branch": "main",
+  "beads": {"prefix": "gt"},
+  "merge_queue": {
+    "build_command": "make build-root",
+    "test_command": "make test-root",
+    "lint_command": "make lint-root"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	// Repo-committed settings override the floor for build and test, but
+	// leave lint unset so it must fall through to the rig-root floor.
+	repoSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "build_command": "make build-repo",
+    "test_command": "make test-repo"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings.json: %v", err)
+	}
+
+	// Rig-local operator override has the final say, but only touches build.
+	localSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "build_command": "make build-local"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(localSettings), 0o644); err != nil {
+		t.Fatalf("write settings/config.json: %v", err)
+	}
+
+	vars := loadRigCommandVars(townRoot, "gastown")
+
+	got := make(map[string]string, len(vars))
+	for _, v := range vars {
+		if eq := strings.Index(v, "="); eq > 0 {
+			got[v[:eq]] = v[eq+1:]
+		}
+	}
+
+	want := map[string]string{
+		"build_command": "make build-local", // rig-local wins over both repo and root
+		"test_command":  "make test-repo",   // repo wins over root floor
+		"lint_command":  "make lint-root",   // neither repo nor local set it — falls to root floor
+	}
+	for key, wantVal := range want {
+		if gotVal, ok := got[key]; !ok || gotVal != wantVal {
+			t.Errorf("loadRigCommandVars() var %q = %q, want %q (vars: %v)", key, gotVal, wantVal, vars)
+		}
+	}
+}

@@ -1380,10 +1380,11 @@ func isSlingConfigError(err error) bool {
 // for all configured build pipeline commands (setup, typecheck, lint, test, build)
 // and the default branch (base_branch). Only non-empty values are included.
 //
-// Settings are resolved in priority order:
-//  1. Repository defaults: <rig>/mayor/rig/.gastown/settings.json (committed to git)
-//  2. Rig-local overrides: <rig>/settings/config.json (operator tuning)
-//  3. User --var flags (handled by caller, not here)
+// Settings are resolved in priority order (lowest to highest):
+//  1. Rig root config.json merge_queue (floor — operator-set at onboarding, gt-me9t)
+//  2. Repository defaults: <rig>/mayor/rig/.gastown/settings.json (committed to git)
+//  3. Rig-local overrides: <rig>/settings/config.json (operator tuning, final override)
+//  4. User --var flags (handled by caller, not here)
 func loadRigCommandVars(townRoot, rig string) []string {
 	if townRoot == "" || rig == "" {
 		return nil
@@ -1397,7 +1398,7 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		vars = append(vars, fmt.Sprintf("base_branch=%s", rigCfg.DefaultBranch))
 	}
 
-	// Load repo-sourced settings (floor — committed to git, always present after clone)
+	// Load repo-sourced settings (committed to git, wins over the rig-root floor below)
 	var repoMQ *config.MergeQueueConfig
 	repoRoot := filepath.Join(townRoot, rig, "mayor", "rig")
 	repoSettings, _ := config.LoadRepoSettings(repoRoot)
@@ -1413,15 +1414,16 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		localMQ = localSettings.MergeQueue
 	}
 
-	// Rig root config.json (operator-set at onboarding time, see docs/onboard-repo;
+	// Rig root config.json (floor — operator-set at onboarding time, see docs/onboard-repo;
 	// this is where merge_queue.build/test/lint_command actually live in practice — gt-me9t)
 	var rigRootMQ *config.MergeQueueConfig
 	if rigCfg != nil {
 		rigRootMQ = rigCfg.MergeQueue
 	}
 
-	// Merge: repo defaults (floor) -> rig root config.json -> rig-local settings (final override)
-	mq := config.MergeSettingsCommand(repoMQ, rigRootMQ)
+	// Merge: rig root config.json (floor) -> repo defaults (committed, wins over floor) ->
+	// rig-local settings (operator override, final say)
+	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
 	mq = config.MergeSettingsCommand(mq, localMQ)
 	if mq == nil {
 		return vars
