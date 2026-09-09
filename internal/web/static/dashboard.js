@@ -18,6 +18,94 @@
     };
 
     // ============================================
+    // PANEL FETCH RESILIENCE
+    // ============================================
+    // Crew/Mail/Ready each poll a JSON endpoint. Without this, a single
+    // timed-out or failed fetch (e.g. connection-budget exhaustion, see the
+    // SSE section below) left the panel showing "Failed to load X" forever -
+    // nothing ever retried it. This gives every panel its own retry-with-
+    // backoff loop, plus a hook so a full SSE reconnect (real connectivity
+    // recovery) can force an immediate refresh of everything instead of
+    // waiting out each panel's individual backoff.
+    var PANEL_FETCH_TIMEOUT_MS = 8000;
+    var PANEL_RETRY_BASE_MS = 2000;
+    var PANEL_RETRY_MAX_MS = 30000;
+    var panelRetryState = {};
+    var panelLoaders = {};
+
+    function fetchPanelJSON(url) {
+        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var timedOut = false;
+        var timeoutId = controller && setTimeout(function() {
+            timedOut = true;
+            controller.abort();
+        }, PANEL_FETCH_TIMEOUT_MS);
+
+        return fetch(url, controller ? { signal: controller.signal } : {})
+            .then(function(r) {
+                clearTimeout(timeoutId);
+                if (!r.ok) {
+                    var httpErr = new Error('HTTP ' + r.status);
+                    httpErr.kind = 'http';
+                    httpErr.status = r.status;
+                    throw httpErr;
+                }
+                return r.json();
+            })
+            .catch(function(err) {
+                clearTimeout(timeoutId);
+                if (err.kind) throw err;
+                if (timedOut || err.name === 'AbortError') {
+                    var timeoutErr = new Error('Request timed out');
+                    timeoutErr.kind = 'timeout';
+                    throw timeoutErr;
+                }
+                err.kind = 'network';
+                throw err;
+            });
+    }
+
+    function describePanelError(err) {
+        if (!err) return 'unknown error';
+        if (err.kind === 'timeout') return 'timed out';
+        if (err.kind === 'http') return 'server error ' + err.status;
+        if (err.kind === 'network') return 'network error';
+        return err.message || 'unknown error';
+    }
+
+    // Registers a panel's load function so refreshAllPanels() (triggered on
+    // SSE reconnect, see below) can refresh it alongside the others.
+    function registerPanelLoader(name, loadFn) {
+        panelLoaders[name] = loadFn;
+    }
+
+    function schedulePanelRetry(name, loadFn) {
+        var state = panelRetryState[name] || { timer: null, delay: PANEL_RETRY_BASE_MS };
+        if (state.timer) clearTimeout(state.timer);
+        state.timer = setTimeout(function() {
+            state.timer = null;
+            loadFn();
+        }, state.delay);
+        state.delay = Math.min(state.delay * 2, PANEL_RETRY_MAX_MS);
+        panelRetryState[name] = state;
+    }
+
+    function resetPanelRetry(name) {
+        var state = panelRetryState[name];
+        if (state && state.timer) clearTimeout(state.timer);
+        panelRetryState[name] = { timer: null, delay: PANEL_RETRY_BASE_MS };
+    }
+
+    // Called when SSE recovers from a real outage (not the initial page-load
+    // connect) so panels that died mid-outage come back immediately instead
+    // of waiting out their own backoff timer.
+    function refreshAllPanels() {
+        Object.keys(panelLoaders).forEach(function(name) {
+            panelLoaders[name]();
+        });
+    }
+
+    // ============================================
     // SSE (Server-Sent Events) CONNECTION
     // ============================================
     window.sseConnected = false;
@@ -30,6 +118,10 @@
     // the EventSource still reports itself as open.
     var SSE_STALE_MS = 45000;
     var lastSseActivity = Date.now();
+    // Distinguishes the initial page-load connect (panels already just
+    // loaded themselves) from a genuine reconnect after an outage (where
+    // refreshAllPanels() should run).
+    var hasConnectedBefore = false;
 
     function markSseActivity() {
         lastSseActivity = Date.now();
@@ -51,14 +143,32 @@
         evtSource = new EventSource('/api/events');
 
         evtSource.addEventListener('connected', function() {
+            var isRecovery = !window.sseConnected && hasConnectedBefore;
             window.sseConnected = true;
+            hasConnectedBefore = true;
             sseReconnectDelay = 1000;
             markSseActivity();
             updateConnectionStatus('live');
+            // Real recovery (not the initial page-load connect): panels may
+            // have died mid-outage, so refresh everything now rather than
+            // waiting for each one's own retry timer.
+            if (isRecovery) refreshAllPanels();
         });
 
         evtSource.addEventListener('heartbeat', function() {
             markSseActivity();
+            // Heartbeats only flow over a live connection. If we're still
+            // marked disconnected (e.g. the 'connected' event raced with an
+            // onerror, or was missed entirely), a heartbeat proves the
+            // connection is actually fine - recover instead of leaving the
+            // status stuck on "Reconnecting..." forever.
+            if (!window.sseConnected) {
+                var isRecovery = hasConnectedBefore;
+                window.sseConnected = true;
+                sseReconnectDelay = 1000;
+                updateConnectionStatus('live');
+                if (isRecovery) refreshAllPanels();
+            }
         });
 
         evtSource.addEventListener('dashboard-update', function(e) {
@@ -194,6 +304,7 @@
         // Reload dynamic panels after swap (handled via window functions)
         if (window.refreshCrewPanel) window.refreshCrewPanel();
         if (window.refreshReadyPanel) window.refreshReadyPanel();
+        if (window.refreshMailPanel) window.refreshMailPanel();
         // Update connection status indicator after morph
         updateConnectionStatus(window.sseConnected ? 'live' : 'reconnecting');
     });
@@ -941,9 +1052,9 @@
 
         if (!loading || !threadsContainer) return;
 
-        fetch('/api/mail/threads')
-            .then(function(r) { return r.json(); })
+        fetchPanelJSON('/api/mail/threads')
             .then(function(data) {
+                resetPanelRetry('mail');
                 loading.style.display = 'none';
 
                 if (data.threads && data.threads.length > 0) {
@@ -1029,8 +1140,10 @@
                 }
             })
             .catch(function(err) {
-                loading.textContent = 'Failed to load mail';
+                loading.style.display = '';
+                loading.textContent = 'Failed to load mail: ' + describePanelError(err);
                 console.error('Mail load error:', err);
+                schedulePanelRetry('mail', loadMailInbox);
             });
     }
 
@@ -1064,6 +1177,9 @@
 
     // Load mail on page load
     loadMailInbox();
+    // Expose for refresh after HTMX swaps and SSE-reconnect recovery
+    window.refreshMailPanel = loadMailInbox;
+    registerPanelLoader('mail', loadMailInbox);
 
     // ============================================
     // CREW PANEL
@@ -1077,9 +1193,9 @@
 
         if (!loading || !table || !tbody) return;
 
-        fetch('/api/crew')
-            .then(function(r) { return r.json(); })
+        fetchPanelJSON('/api/crew')
             .then(function(data) {
+                resetPanelRetry('crew');
                 loading.style.display = 'none';
 
                 if (data.crew && data.crew.length > 0) {
@@ -1144,8 +1260,10 @@
                 }
             })
             .catch(function(err) {
-                loading.textContent = 'Failed to load crew';
+                loading.style.display = '';
+                loading.textContent = 'Failed to load crew: ' + describePanelError(err);
                 console.error('Crew load error:', err);
+                schedulePanelRetry('crew', loadCrew);
             });
     }
 
@@ -1157,6 +1275,7 @@
     loadCrew();
     // Expose for refresh after HTMX swaps
     window.refreshCrewPanel = loadCrew;
+    registerPanelLoader('crew', loadCrew);
 
     // Crew notification system - check for state changes
     function checkCrewNotifications(crewList) {
@@ -1556,9 +1675,9 @@
 
         if (!loading || !table || !tbody) return;
 
-        fetch('/api/ready')
-            .then(function(r) { return r.json(); })
+        fetchPanelJSON('/api/ready')
             .then(function(data) {
+                resetPanelRetry('ready');
                 loading.style.display = 'none';
 
                 if (data.items && data.items.length > 0) {
@@ -1598,8 +1717,10 @@
                 }
             })
             .catch(function(err) {
-                loading.textContent = 'Failed to load ready work';
+                loading.style.display = '';
+                loading.textContent = 'Failed to load ready work: ' + describePanelError(err);
                 console.error('Ready work load error:', err);
+                schedulePanelRetry('ready', loadReady);
             });
     }
 
@@ -1607,6 +1728,7 @@
     loadReady();
     // Expose for refresh after HTMX swaps
     window.refreshReadyPanel = loadReady;
+    registerPanelLoader('ready', loadReady);
 
     // ============================================
     // CONVOY PANEL INTERACTIONS
