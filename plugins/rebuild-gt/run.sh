@@ -109,6 +109,15 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
     log "formula sync failed (non-fatal): $SYNC_OUT"
   fi
 
+  # Same problem, one directory over: $TOWN_ROOT/plugins is a deployed copy
+  # of $RIG_ROOT/plugins, and nothing else keeps it current after a merge
+  # (gt-reek). Non-fatal for the same reason as formula sync above.
+  if PLUGIN_SYNC_OUT=$(gt plugin sync 2>&1); then
+    log "$PLUGIN_SYNC_OUT"
+  else
+    log "plugin sync failed (non-fatal): $PLUGIN_SYNC_OUT"
+  fi
+
   gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
     --title "rebuild-gt: $OLD_VER -> $NEW_VER" >/dev/null 2>&1 || true
 else

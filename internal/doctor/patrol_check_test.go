@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -376,3 +377,85 @@ func TestPatrolNotStuckCheck_Run_DoltFailureReportsError(t *testing.T) {
 
 // Suppress unused import warning for fmt (used in test output formatting).
 var _ = fmt.Sprintf
+
+// writePluginFixture creates a minimal plugin directory (dir/name/plugin.md)
+// with the given content, so it is recognized as a plugin by hasPlugins/
+// DetectDrift.
+func writePluginFixture(t *testing.T, dir, name, content string) {
+	t.Helper()
+	pluginDir := filepath.Join(dir, name)
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", pluginDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), []byte(content), 0644); err != nil {
+		t.Fatalf("write plugin.md: %v", err)
+	}
+}
+
+func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T) {
+	// Isolate from this test process's own repo checkout — otherwise
+	// FindGastownSource's CWD-walk-up would find this repo's real plugins/
+	// directory before ever consulting ctx.TownRoot.
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir() // No gastown checkout anywhere under here.
+
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Errorf("Status = %v, want StatusWarning when source cannot be located (must never be OK/skip)", result.Status)
+	}
+	if result.Message != "cannot verify plugin drift" {
+		t.Errorf("Message = %q, want %q", result.Message, "cannot verify plugin drift")
+	}
+}
+
+func TestPatrolPluginDriftCheck_DriftedPlugin_WarningNamesFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir()
+	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	targetDir := filepath.Join(townRoot, "plugins")
+
+	writePluginFixture(t, sourceDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nnew body")
+	writePluginFixture(t, targetDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nold stale body")
+
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning for drifted plugin", result.Status)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "my-plugin") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want an entry naming the drifted plugin %q", result.Details, "my-plugin")
+	}
+}
+
+func TestPatrolPluginDriftCheck_InSync_ReturnsOK(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	townRoot := t.TempDir()
+	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	targetDir := filepath.Join(townRoot, "plugins")
+
+	content := "+++\nname = \"stable\"\n+++\nsame body"
+	writePluginFixture(t, sourceDir, "stable", content)
+	writePluginFixture(t, targetDir, "stable", content)
+
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK when runtime matches source", result.Status)
+	}
+}
