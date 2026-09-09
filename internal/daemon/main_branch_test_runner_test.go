@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -224,6 +225,113 @@ func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	}
 	if config.Patrols.MainBranchTest.TimeoutStr != "10m" {
 		t.Errorf("expected timeout '10m', got %q", config.Patrols.MainBranchTest.TimeoutStr)
+	}
+}
+
+func TestComputeCPUIdlePercent(t *testing.T) {
+	cases := []struct {
+		name     string
+		load1    float64
+		numCPU   int
+		wantIdle float64
+	}{
+		{"fully idle", 0, 4, 100},
+		{"fully saturated", 4, 4, 0},
+		{"half loaded", 2, 4, 50},
+		{"over-saturated clamps to 0", 8, 4, 0},
+		{"negative load clamps to 100", -1, 4, 100},
+		{"zero cores never blocks", 5, 0, 100},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := computeCPUIdlePercent(c.load1, c.numCPU); got != c.wantIdle {
+				t.Errorf("computeCPUIdlePercent(%v, %v) = %v, want %v", c.load1, c.numCPU, got, c.wantIdle)
+			}
+		})
+	}
+}
+
+func TestFilterTestFailureOutput(t *testing.T) {
+	t.Run("extracts FAIL lines and their assertion line, dropping ok noise", func(t *testing.T) {
+		output := strings.Join([]string{
+			"ok  	github.com/foo/bar	0.010s",
+			"=== RUN   TestBaz",
+			"--- FAIL: TestBaz (0.00s)",
+			"    baz_test.go:42: expected 1, got 2",
+			"ok  	github.com/foo/quux	0.020s",
+			"FAIL",
+			"FAIL	github.com/foo/bar	0.123s",
+		}, "\n")
+
+		got := filterTestFailureOutput(output)
+
+		if strings.Contains(got, "0.010s") || strings.Contains(got, "0.020s") {
+			t.Errorf("expected passing 'ok' lines to be filtered out, got:\n%s", got)
+		}
+		if !strings.Contains(got, "--- FAIL: TestBaz") {
+			t.Errorf("expected --- FAIL line preserved, got:\n%s", got)
+		}
+		if !strings.Contains(got, "baz_test.go:42: expected 1, got 2") {
+			t.Errorf("expected assertion line following --- FAIL preserved, got:\n%s", got)
+		}
+		if !strings.Contains(got, "FAIL\nFAIL\tgithub.com/foo/bar\t0.123s") {
+			t.Errorf("expected FAIL summary lines preserved, got:\n%s", got)
+		}
+	})
+
+	t.Run("falls back to full output when no FAIL markers found", func(t *testing.T) {
+		output := "make: *** [build] Error 2\nsome compiler error"
+		got := filterTestFailureOutput(output)
+		if got != output {
+			t.Errorf("expected fallback to unfiltered output, got:\n%s", got)
+		}
+	})
+
+	t.Run("caps filtered output at maxEscalationOutputLines", func(t *testing.T) {
+		var lines []string
+		for i := 0; i < maxEscalationOutputLines+50; i++ {
+			lines = append(lines, "--- FAIL: TestN")
+		}
+		got := filterTestFailureOutput(strings.Join(lines, "\n"))
+		gotLines := strings.Split(got, "\n")
+		if len(gotLines) != maxEscalationOutputLines {
+			t.Errorf("expected %d lines after cap, got %d", maxEscalationOutputLines, len(gotLines))
+		}
+	})
+}
+
+func TestPersistMainBranchTestLog(t *testing.T) {
+	townRoot := t.TempDir()
+	output := "full test output\nline two\nline three"
+
+	logPath, err := persistMainBranchTestLog(townRoot, "gastown", "abc123", output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantPath := filepath.Join(townRoot, "logs", "main_branch_test", "gastown-abc123.log")
+	if logPath != wantPath {
+		t.Errorf("expected log path %q, got %q", wantPath, logPath)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected log file to exist: %v", err)
+	}
+	if string(data) != output {
+		t.Errorf("expected full output persisted, got %q", string(data))
+	}
+}
+
+func TestPersistMainBranchTestLogUnknownSha(t *testing.T) {
+	townRoot := t.TempDir()
+	logPath, err := persistMainBranchTestLog(townRoot, "gastown", "", "output")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantPath := filepath.Join(townRoot, "logs", "main_branch_test", "gastown-unknown.log")
+	if logPath != wantPath {
+		t.Errorf("expected log path %q, got %q", wantPath, logPath)
 	}
 }
 

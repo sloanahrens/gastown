@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,6 +18,18 @@ import (
 const (
 	defaultMainBranchTestInterval = 30 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
+
+	// minCPUIdlePercentForMainBranchTest is the minimum estimated CPU idle
+	// percentage required before running main_branch_test gates. Below this,
+	// the host is too busy to trust a red result — the cycle is skipped and
+	// reported as "skipped: host busy" rather than a false FAILED, mirroring
+	// the load-based pressure gate refineries use before spawning agents
+	// (see checkPressure in pressure.go).
+	minCPUIdlePercentForMainBranchTest = 25.0
+
+	// maxEscalationOutputLines caps the filtered test output included in an
+	// escalation body. The full output is always persisted to disk first.
+	maxEscalationOutputLines = 200
 )
 
 // MainBranchTestConfig holds configuration for the main_branch_test patrol.
@@ -143,6 +156,11 @@ func (d *Daemon) runMainBranchTests() {
 
 	d.logger.Printf("main_branch_test: starting patrol cycle")
 
+	if idle := cpuIdlePercent(); idle < minCPUIdlePercentForMainBranchTest {
+		d.logger.Printf("main_branch_test: skipped: host busy (CPU idle %.1f%% < %.0f%%)", idle, minCPUIdlePercentForMainBranchTest)
+		return
+	}
+
 	rigNames := d.getKnownRigs()
 	if len(rigNames) == 0 {
 		d.logger.Printf("main_branch_test: no rigs found")
@@ -245,18 +263,38 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		}
 	}()
 
+	// Determine the tested HEAD sha so the verdict can be matched to a head
+	// and the evidence log can be named for it.
+	sha, err := gitRevParseHead(ctx, worktreePath)
+	if err != nil {
+		d.logger.Printf("main_branch_test: %s: warning: could not determine tested HEAD sha: %v", rigName, err)
+		sha = "unknown"
+	}
+
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
-		return d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
+		return d.runGatesOnWorktree(ctx, rigName, worktreePath, sha, gateCfg.Gates)
 	}
-	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand, sha)
+}
+
+// gitRevParseHead returns the current HEAD sha of the git worktree at workDir.
+func gitRevParseHead(ctx context.Context, workDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	util.SetDetachedProcessGroup(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
-func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]string) error {
+func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir, sha string, gates map[string]string) error {
 	var failures []string
 	for name, cmd := range gates {
-		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, cmd); err != nil {
+		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, cmd, sha); err != nil {
 			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
 		}
 	}
@@ -267,25 +305,112 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string
 }
 
 // runCommandOnWorktree runs a single shell command in the given worktree directory.
-func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command string) error {
-	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
+// sha is the tested HEAD sha, recorded in the log line and in the persisted
+// evidence log's filename so a verdict can be matched to a head.
+func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command, sha string) error {
+	d.logger.Printf("main_branch_test: %s: running %s on %s: %s", rigName, label, sha, command)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
 	util.SetDetachedProcessGroup(cmd)
 
+	idleStart := cpuIdlePercent()
 	output, err := cmd.CombinedOutput()
+	idleEnd := cpuIdlePercent()
 	if err != nil {
-		// Truncate output to last 50 lines for the error message
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		tail := lines
-		if len(tail) > 50 {
-			tail = tail[len(tail)-50:]
+		// Persist the FULL output before any truncation/filtering — this is
+		// the evidence a later investigator needs to tell a real regression
+		// from contention, since the temporary worktree is removed after the
+		// run.
+		logPath, logErr := persistMainBranchTestLog(d.config.TownRoot, rigName, sha, string(output))
+		if logErr != nil {
+			d.logger.Printf("main_branch_test: %s: warning: failed to persist evidence log: %v", rigName, logErr)
+			logPath = fmt.Sprintf("(not persisted: %v)", logErr)
 		}
-		return fmt.Errorf("%s failed: %v\n%s", label, err, strings.Join(tail, "\n"))
+		body := filterTestFailureOutput(string(output))
+		return fmt.Errorf(
+			"%s failed: %v\nsha: %s\nlog: %s\nCPU idle (start->end): %.1f%% -> %.1f%%\n%s",
+			label, err, sha, logPath, idleStart, idleEnd, body,
+		)
 	}
 	return nil
+}
+
+// persistMainBranchTestLog writes the full combined command output to
+// <townRoot>/logs/main_branch_test/<rig>-<sha>.log, returning the log path.
+func persistMainBranchTestLog(townRoot, rigName, sha, output string) (string, error) {
+	logDir := filepath.Join(townRoot, "logs", "main_branch_test")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return "", fmt.Errorf("creating log dir: %w", err)
+	}
+	shaLabel := sha
+	if shaLabel == "" {
+		shaLabel = "unknown"
+	}
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log", rigName, shaLabel))
+	if err := os.WriteFile(logPath, []byte(output), 0644); err != nil {
+		return "", fmt.Errorf("writing log file: %w", err)
+	}
+	return logPath, nil
+}
+
+// filterTestFailureOutput extracts the diagnostically relevant lines from a
+// test run's combined output: every "--- FAIL" line together with its
+// following assertion line, plus "FAIL" summary lines. This replaces a naive
+// tail, which after a long suite is mostly "ok" lines and drops the actual
+// failing test names off the end. Capped at maxEscalationOutputLines after
+// filtering.
+func filterTestFailureOutput(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	var filtered []string
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "--- FAIL"):
+			filtered = append(filtered, line)
+			if i+1 < len(lines) {
+				filtered = append(filtered, lines[i+1])
+			}
+		case strings.HasPrefix(trimmed, "FAIL"):
+			filtered = append(filtered, line)
+		}
+	}
+
+	if len(filtered) == 0 {
+		// No recognizable test-failure markers (e.g. a build or lint
+		// failure) — fall back to the tail so the escalation still carries
+		// something rather than nothing.
+		filtered = lines
+	}
+
+	if len(filtered) > maxEscalationOutputLines {
+		filtered = filtered[len(filtered)-maxEscalationOutputLines:]
+	}
+	return strings.Join(filtered, "\n")
+}
+
+// cpuIdlePercent estimates the current CPU idle percentage from the
+// 1-minute load average and core count. Returns 100 (fully idle) when load
+// data is unavailable, so an inability to read load average never blocks a
+// run.
+func cpuIdlePercent() float64 {
+	return computeCPUIdlePercent(loadAverage1(), runtime.NumCPU())
+}
+
+func computeCPUIdlePercent(load1 float64, numCPU int) float64 {
+	if numCPU <= 0 {
+		return 100
+	}
+	idle := 100 * (1 - load1/float64(numCPU))
+	if idle < 0 {
+		return 0
+	}
+	if idle > 100 {
+		return 100
+	}
+	return idle
 }
 
 // contains checks if a string slice contains a value.
