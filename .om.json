@@ -1,7 +1,9 @@
 {
   "backend": [
     "claude",
-    "-p"
+    "-p",
+    "--model",
+    "opus"
   ],
   "threshold": 0.6,
   "depth": "standard",
