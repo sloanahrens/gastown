@@ -38,7 +38,7 @@ func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
 	setupWitnessSquashPreservedRepoAt(t, repo, filepath.Join(t.TempDir(), "remote.git"))
 	runWitnessGit(t, repo, "push", "origin", "integration/test:main")
 
-	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
 	}
@@ -49,12 +49,80 @@ func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
 	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
 	runWitnessGit(t, repo, "add", "feature.txt")
 	runWitnessGit(t, repo, "commit", "-m", "extra local work")
-	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged after extra work: %v", err)
 	}
 	if merged {
 		t.Fatal("new local work after squash preservation should not be treated as already merged")
+	}
+}
+
+// TestVerifyBranchAlreadyMerged_RejectsStaleBranchFromSupersededAssignment
+// covers gt-skwt: a polecat's session can die while its worktree still has a
+// PREVIOUS assignment's (now-merged) branch checked out, then get
+// force-reassigned to a new, different hookBead before ever checking out a
+// branch for it. The stale on-disk branch being merged says nothing about
+// the new hookBead's (unstarted) work, and must not be reported as such —
+// otherwise handleZombieRestart archives/nukes a polecat that never touched
+// its actual assignment.
+func TestVerifyBranchAlreadyMerged_RejectsStaleBranchFromSupersededAssignment(t *testing.T) {
+	townRoot, workDir := setupSlotOpenTestTown(t)
+	repo := filepath.Join(townRoot, "gastown", "polecats", "rust", "gastown")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+
+	runWitnessGit(t, filepath.Dir(remote), "init", "--bare", remote)
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runWitnessGit(t, repo, "init")
+	runWitnessGit(t, repo, "config", "user.email", "test@example.com")
+	runWitnessGit(t, repo, "config", "user.name", "Test User")
+	witnessWriteFile(t, filepath.Join(repo, "README.md"), "base\n")
+	runWitnessGit(t, repo, "add", "README.md")
+	runWitnessGit(t, repo, "commit", "-m", "base")
+	runWitnessGit(t, repo, "branch", "-M", "main")
+	runWitnessGit(t, repo, "remote", "add", "origin", remote)
+	runWitnessGit(t, repo, "push", "-u", "origin", "main")
+
+	// Old assignment's branch: its work landed on main.
+	oldBranch := "polecat/rust/be-dxx+aaa111"
+	runWitnessGit(t, repo, "switch", "-c", oldBranch)
+	witnessWriteFile(t, filepath.Join(repo, "old.txt"), "old work\n")
+	runWitnessGit(t, repo, "add", "old.txt")
+	runWitnessGit(t, repo, "commit", "-m", "old work")
+	runWitnessGit(t, repo, "switch", "main")
+	runWitnessGit(t, repo, "merge", "--ff-only", oldBranch)
+	runWitnessGit(t, repo, "push", "origin", "main")
+	// Session died before checking out a branch for the new assignment — the
+	// worktree is still sitting on the old (now-merged) branch.
+	runWitnessGit(t, repo, "switch", oldBranch)
+
+	// Unknown hookBead: preserve the old (pre-gt-skwt) behavior.
+	if merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "rust", ""); err != nil || !merged {
+		t.Fatalf("merged=%v err=%v, want merged=true when hookBead is unknown", merged, err)
+	}
+
+	// Current hookBead differs from the branch's embedded issue (be-4c2 was
+	// force-reassigned to this polecat after be-dxx merged): must NOT report
+	// merged, or handleZombieRestart will archive/nuke the polecat for work
+	// on be-4c2 it never started.
+	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-4c2")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
+	}
+	if merged {
+		t.Fatal("stale branch from a superseded assignment must not count as the current hookBead's work being merged")
+	}
+
+	// The branch DOES match the current hookBead: genuine merged-work
+	// detection (aa-apw) must still fire.
+	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-dxx")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
+	}
+	if !merged {
+		t.Fatal("branch matching the current hookBead should still be detected as merged")
 	}
 }
 
@@ -2794,7 +2862,7 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 // Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
 func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return true, nil
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
@@ -2823,7 +2891,7 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 // Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
 func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return false, nil
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })

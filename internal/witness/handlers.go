@@ -1445,29 +1445,27 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 //     checkpoint work, patch-equivalent work, and advanced default branches are
 //     classified the same way as check-recovery and reuse.
 //
+// gt-skwt: the on-disk branch can belong to a PREVIOUS assignment that
+// finished and merged before this polecat was force-reassigned to a new
+// hookBead — its session died before it ever checked out a branch for the
+// new work. Its merge status says nothing about the CURRENT hookBead's
+// (unstarted) work, so both paths above are skipped unless the checked-out
+// branch's embedded issue ID actually matches hookBead.
+//
 // Returns:
 //   - true, nil: work on this branch is already on default branch (skip restart,
 //     safe to archive)
-//   - false, nil: work has NOT fully landed — continue with restart
+//   - false, nil: work has NOT fully landed, or the on-disk branch belongs to
+//     a different (superseded) assignment — continue with restart
 //   - false, error: couldn't verify — caller should treat as unsafe and restart
 //
 // Package-level var so tests can override.
 var verifyBranchAlreadyMerged = _verifyBranchAlreadyMerged
 
-func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, error) {
-	// Fast path: reuse existing ancestor check.
-	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-		return true, nil
-	}
-
+func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) (bool, error) {
 	townRoot, err := workspace.Find(workDir)
 	if err != nil || townRoot == "" {
 		return false, fmt.Errorf("finding town root: %v", err)
-	}
-
-	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
 	}
 
 	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
@@ -1477,15 +1475,33 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, err
 
 	g := git.NewGit(polecatPath)
 
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return false, err
+	}
+
+	// gt-skwt: reject a stale branch left over from a superseded assignment.
+	if hookBead != "" {
+		if meta, ok := polecat.ParseBranchName(branch); ok && meta.Issue != "" && meta.Issue != hookBead {
+			return false, nil
+		}
+	}
+
+	// Fast path: reuse existing ancestor check.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		return true, nil
+	}
+
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+
 	remotes, err := g.Remotes()
 	if err != nil || len(remotes) == 0 {
 		remotes = []string{"origin"}
 	}
 
-	branch, err := g.CurrentBranch()
-	if err != nil {
-		return false, err
-	}
 	for _, remote := range remotes {
 		upstream := remote + "/" + defaultBranch
 		status, err := g.BranchTargetStatus(branch, remote, []string{upstream})
@@ -2096,7 +2112,7 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// ancestor check), do NOT restart. Restarting would let the polecat push its
 	// pre-squash HEAD and create a duplicate MR for work already in main.
 	// Instead archive the polecat — its work is done.
-	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName); err == nil && merged {
+	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
 		zombie.Action = "archived-work-already-merged (aa-apw)"
 		if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
 			zombie.Error = fmt.Errorf("archive: %w", nukeErr)

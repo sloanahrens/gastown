@@ -1492,6 +1492,40 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 	}
 }
 
+// clearReassignedPolecatState clears agent_state and hook_bead on a polecat's
+// agent bead after its work was force-reassigned to a different agent (gt-skwt).
+//
+// The LIFECYCLE:Shutdown mail sent alongside the reassignment has no Go-side
+// dispatcher — it is only ever acted on by an AI witness reading its inbox by
+// hand, on whatever cadence that happens. Relying on it alone leaves
+// agent_state=working and hook_bead=<old bead> on the outgoing polecat
+// indefinitely. Every later `gt patrol scan` then reads that stale state,
+// sees a dead session paired with an "active" agent state, and misclassifies
+// the polecat as a permanent session-dead-active zombie — one that never
+// self-clears because nothing else touches these fields. Clearing them here,
+// synchronously, on the one code path guaranteed to run, closes that gap.
+func clearReassignedPolecatState(townRoot, assignee string) {
+	if townRoot == "" {
+		return
+	}
+	agentBeadID := agentIDToBeadID(assignee, townRoot)
+	if agentBeadID == "" {
+		return
+	}
+
+	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, townRoot)
+	bd := beads.New(agentWorkDir)
+
+	emptyHook := ""
+	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
+	}
+	idle := string(beads.AgentStateIdle)
+	if err := bd.UpdateAgentState(agentBeadID, idle); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't clear agent_state on %s: %v\n", agentBeadID, err)
+	}
+}
+
 // lookupPriorAttempt checks if there are existing open MRs for the given issue.
 // If found, returns formula variables with the prior branch name so the new
 // polecat can cherry-pick or reference prior work instead of starting from scratch.

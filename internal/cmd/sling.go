@@ -828,6 +828,11 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 						fmt.Printf("%s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
 					}
 				}
+
+				// gt-skwt: clear the outgoing polecat's agent-bead state now,
+				// synchronously — don't rely on the shutdown mail alone (see
+				// clearReassignedPolecatState).
+				clearReassignedPolecatState(townRoot, info.Assignee)
 			}
 
 			// Unhook the bead from old owner (set status back to open)

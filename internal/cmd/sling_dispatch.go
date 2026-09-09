@@ -201,6 +201,11 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 				}
 				router.WaitPendingNotifications()
 			}
+
+			// gt-skwt: clear the outgoing polecat's agent-bead state now,
+			// synchronously — don't rely on the shutdown mail alone (see
+			// clearReassignedPolecatState).
+			clearReassignedPolecatState(townRoot, info.Assignee)
 		}
 	}
 
