@@ -33,7 +33,6 @@ internal/events/*/
 config.toml
 !config.example.toml
 !internal/hooks/templates/vibe/config.toml
-gt
 
 # Runtime state (ignore contents, but allow setup-hooks to be tracked)
 state.json
