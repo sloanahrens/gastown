@@ -154,6 +154,7 @@ func upgradeDoctor(townRoot string) upgradeResult {
 	// Previously omitted from upgrade, leaving identity gaps that gt doctor --fix
 	// could repair but gt upgrade would not.
 	d.Register(doctor.NewAgentBeadsCheck())
+	d.Register(doctor.NewAgentBeadsShadowCheck())
 	d.Register(doctor.NewRigBeadsCheck())
 	d.Register(doctor.NewRoleBeadsCheck())
 
