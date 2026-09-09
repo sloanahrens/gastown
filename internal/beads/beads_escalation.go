@@ -300,8 +300,13 @@ func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) 
 }
 
 // ListEscalations returns all open escalation beads.
+//
+// Escalations are created as ephemeral wisps (gt-fcsf), which `bd list`
+// hides by default. Without --include-infra this silently returned zero
+// results while escalations sat open and unseen — the same bug class as
+// gt-4mnd.
 func (b *Beads) ListEscalations() ([]*Issue, error) {
-	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--json")
+	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +328,7 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 		"--label=gt:escalation",
 		"--label="+fingerprintLabel,
 		"--status=open",
+		"--include-infra",
 		"--json",
 	)
 	if err != nil {
@@ -343,6 +349,7 @@ func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
 		"--label=gt:escalation",
 		"--label=severity:"+severity,
 		"--status=open",
+		"--include-infra",
 		"--json",
 	)
 	if err != nil {

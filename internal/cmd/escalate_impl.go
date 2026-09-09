@@ -279,7 +279,7 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 	var issues []*beads.Issue
 	if escalateListAll {
 		// List all (open and closed)
-		out, err := bd.Run("list", "--label=gt:escalation", "--status=all", "--json")
+		out, err := bd.Run("list", "--label=gt:escalation", "--status=all", "--include-infra", "--json")
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}
@@ -430,7 +430,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 // as phantom open escalations on the dashboard or in `bd ready`. Returns the
 // number closed.
 func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
-	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--json")
+	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--json")
 	if err != nil {
 		return 0, fmt.Errorf("listing delivery beads: %w", err)
 	}
