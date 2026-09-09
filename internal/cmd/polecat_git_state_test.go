@@ -12,6 +12,14 @@ func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
 	repo := filepath.Join(dir, "repo")
 	worktree := filepath.Join(dir, "other")
 
+	// A real polecat clone always has an origin remote with its branch
+	// pushed. Without one, BranchPreservationStatus has no comparison ref to
+	// resolve at all and (correctly, post-gt-14a) reports the unpushed-commit
+	// check as failed rather than silently assuming clean — set up a remote
+	// here so this fixture matches production and the test stays focused on
+	// shared-vs-branch stash counting.
+	remote := filepath.Join(dir, "remote.git")
+	runGitCmd(t, "", "init", "--bare", remote)
 	runGitCmd(t, "", "init", repo)
 	runGitCmd(t, repo, "config", "user.email", "test@example.com")
 	runGitCmd(t, repo, "config", "user.name", "Test User")
@@ -19,7 +27,10 @@ func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
 	runGitCmd(t, repo, "add", "file.txt")
 	runGitCmd(t, repo, "commit", "-m", "base")
 	runGitCmd(t, repo, "branch", "-M", "main")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "push", "-u", "origin", "main")
 	runGitCmd(t, repo, "checkout", "-b", "other")
+	runGitCmd(t, repo, "push", "-u", "origin", "other")
 	runGitCmd(t, repo, "checkout", "main")
 	runGitCmd(t, repo, "worktree", "add", worktree, "other")
 
@@ -118,6 +129,38 @@ func TestGetGitStateTreatsPushedSourceBranchAsClean(t *testing.T) {
 	}
 	if state.UnpushedCommits != 0 {
 		t.Fatalf("UnpushedCommits = %d, want 0", state.UnpushedCommits)
+	}
+}
+
+// TestGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable is a
+// regression test for gt-14a: a repo with a local commit and no remote at
+// all cannot prove there are zero unpushed commits — BranchPreservationStatus
+// has no comparison ref to check against. Before this fix,
+// getGitStateWithTargets silently swallowed that error and left the worktree
+// looking clean (UnpushedCommits stayed 0, Clean stayed true), which is
+// exactly the gitSafe-implies-clean promotion gt-7kr removed from the
+// decision layer but that survived in this CLI-only git-state builder.
+func TestGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "file.txt"), "base\n")
+	runGitCmd(t, repo, "add", "file.txt")
+	runGitCmd(t, repo, "commit", "-m", "base")
+	// Deliberately no remote, no upstream, no targets: nothing for
+	// BranchPreservationStatus to compare against.
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.Clean {
+		t.Fatalf("unresolvable preservation check must not be reported as clean: %+v", state)
+	}
+	if !state.PreservationCheckFailed {
+		t.Fatalf("PreservationCheckFailed = false, want true when the unpushed-commit check cannot be resolved: %+v", state)
 	}
 }
 

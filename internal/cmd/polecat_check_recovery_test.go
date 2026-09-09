@@ -522,6 +522,177 @@ func TestHookBeadSafeForCleanup(t *testing.T) {
 	}
 }
 
+// TestRecoveryHookBeadFallsBackToCanonicalIssue is the regression test for
+// gt-14a (P0 successor to gt-7kr): a live, working polecat whose agent bead
+// never had its legacy hook_bead field populated (the direct-tracking
+// model, hq-l6mm5, does not require it) must still be recognized as hooked
+// by check-recovery's input-building layer. Before this fix, agentHookBead
+// alone would return "" here and the hook-bead safety signal would never
+// fire, regardless of cleanup_status.
+func TestRecoveryHookBeadFallsBackToCanonicalIssue(t *testing.T) {
+	tests := []struct {
+		name       string
+		agentIssue *beads.Issue
+		fields     *beads.AgentFields
+		p          *polecat.Polecat
+		want       string
+	}{
+		{
+			name:   "legacy hook_bead field populated is used as-is",
+			fields: &beads.AgentFields{HookBead: "gt-legacy"},
+			p:      &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"},
+			want:   "gt-legacy",
+		},
+		{
+			name:   "empty legacy field falls back to canonically hooked issue while working",
+			fields: &beads.AgentFields{},
+			p:      &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"},
+			want:   "gt-x8y",
+		},
+		{
+			name:   "no agent bead at all still falls back while working",
+			fields: nil,
+			p:      &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"},
+			want:   "gt-x8y",
+		},
+		{
+			name:   "idle polecat with no legacy field yields no hook bead",
+			fields: &beads.AgentFields{},
+			p:      &polecat.Polecat{State: polecat.StateIdle, Issue: ""},
+			want:   "",
+		},
+		{
+			name:   "working but no canonical issue yields no hook bead",
+			fields: &beads.AgentFields{},
+			p:      &polecat.Polecat{State: polecat.StateWorking, Issue: ""},
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := recoveryHookBead(tt.agentIssue, tt.fields, tt.p); got != tt.want {
+				t.Fatalf("recoveryHookBead() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckRecoveryNeverClearsAHookedWorkingPolecatWithEmptyCleanupStatus
+// drives the actual decision the live CLI makes end-to-end: given the exact
+// fixture the witness captured for gastown/amber (gt-14a) — a polecat
+// mgr.Get() correctly classifies as StateWorking with an assigned issue,
+// legacy agent-bead hook_bead unset, and cleanup_status empty (the state
+// that produces the bug, per the refinery's pre-registered acceptance
+// criterion) — check-recovery's own input-building must still refuse to
+// clear it. A regression here means the CLI, not just the decision-layer
+// unit tests, would tell an operator or sweep this polecat is safe to nuke
+// while it is actively working.
+func TestCheckRecoveryNeverClearsAHookedWorkingPolecatWithEmptyCleanupStatus(t *testing.T) {
+	p := &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"}
+	fields := &beads.AgentFields{} // legacy hook_bead unset, cleanup_status empty — the amber fixture
+
+	hookBead := recoveryHookBead(nil, fields, p)
+	if hookBead != "gt-x8y" {
+		t.Fatalf("recoveryHookBead() = %q, want gt-x8y — hook-bead signal must not depend on the legacy field alone", hookBead)
+	}
+
+	input := polecat.WorkstateInput{
+		State:         p.State,
+		CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus), // "" — empty, as in the fixture
+		HookBead:      hookBead,
+	}
+	d := polecat.DecideWorkstate(input)
+	if d.SafeToNuke || d.Verdict == polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE for a hooked, actively working polecat", d)
+	}
+}
+
+// TestCheckRecoveryHookBeadBlocksIndependentlyOfState covers the refinery's
+// pre-registered "each signal blocks independently" requirement for the
+// hooked-bead signal specifically: even if mgr.Get's own State read is
+// StateIdle (whether that is genuinely correct, or itself stale/wrong — the
+// scenario the witness's continuous sampling could not rule out for amber),
+// a still-open hook bead must independently force NEEDS_RECOVERY. cleanup_status
+// is left empty, matching the refinery's second requirement.
+func TestCheckRecoveryHookBeadBlocksIndependentlyOfState(t *testing.T) {
+	input := polecat.WorkstateInput{
+		State:         polecat.StateIdle,
+		CleanupStatus: "", // empty — the state that produces the bug
+		HookBead:      "gt-x8y",
+	}
+	d := polecat.DecideWorkstate(input)
+	if d.SafeToNuke || d.Verdict == polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE when HookBead is set, regardless of State", d)
+	}
+}
+
+// TestCheckRecoveryActiveMRBlocksIndependentlyWithEmptyCleanupStatus covers
+// the refinery's third signal: the witness's corpus showed an active MR
+// present at 04:57:17 with cleanup_status still empty and the verdict still
+// SAFE_TO_NUKE. An active-MR blocker must be sufficient on its own to keep a
+// polecat off SAFE_TO_NUKE even with no other blocker present.
+func TestCheckRecoveryActiveMRBlocksIndependentlyWithEmptyCleanupStatus(t *testing.T) {
+	input := polecat.WorkstateInput{
+		State:           polecat.StateIdle,
+		CleanupStatus:   "", // empty — the state that produces the bug
+		ActiveMRBlocker: "active_mr=gt-wisp-rxnx status=pending",
+	}
+	d := polecat.DecideWorkstate(input)
+	if d.SafeToNuke || d.Verdict == polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE when an active MR is pending, regardless of cleanup_status", d)
+	}
+}
+
+// TestCheckRecoveryRealisticCleanPolecatStillClears is the standing
+// adversarial control the refinery required alongside the three blocking
+// signals above: a genuinely clean, done polecat — real work, merged,
+// closed out, cleanup_status=clean, no live session, no unmerged commits —
+// must still report SAFE_TO_NUKE through the same code path. Without this,
+// a blanket NEEDS_RECOVERY would satisfy every test above while stranding
+// the rig at its polecat cap.
+func TestCheckRecoveryRealisticCleanPolecatStillClears(t *testing.T) {
+	p := &polecat.Polecat{State: polecat.StateIdle}
+	fields := &beads.AgentFields{CleanupStatus: string(polecat.CleanupClean)}
+
+	hookBead := recoveryHookBead(nil, fields, p)
+	if hookBead != "" {
+		t.Fatalf("recoveryHookBead() = %q, want empty for a done, unhooked polecat", hookBead)
+	}
+
+	input := polecat.WorkstateInput{
+		State:         p.State,
+		CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus),
+		HookBead:      hookBead,
+	}
+	d := polecat.DecideWorkstate(input)
+	if !d.SafeToNuke || d.Verdict != polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate() = %+v, want SAFE_TO_NUKE for a realistic clean, done polecat", d)
+	}
+}
+
+// TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure is
+// the input-building-layer regression test for gt-14a: when the agent bead
+// can't be read, runPolecatCheckRecovery falls back to a live git check via
+// applyGitStateToWorkstateInput. If the unpushed-commit comparison itself
+// can't be resolved, that must block recovery (GitCheckFailed), not silently
+// pass through as clean the way the pre-fix "no agent bead" branch did.
+func TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure(t *testing.T) {
+	input := polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown}
+	gitState := &GitState{Clean: false, PreservationCheckFailed: true, PreservationCheckFailure: "no target/custody refs resolved"}
+
+	applyGitStateToWorkstateInput(&input, "/tmp/polecat", gitState, nil)
+
+	if !input.GitCheckFailed {
+		t.Fatalf("input.GitCheckFailed = false, want true when the unpushed-commit check could not be resolved")
+	}
+
+	d := polecat.DecideWorkstate(input)
+	if d.SafeToNuke || d.Verdict == polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE when the unpushed-commit check failed", d)
+	}
+}
+
 func TestPartialSpawnWithoutDurableHook(t *testing.T) {
 	assignee := "gastown/polecats/nitro"
 	tests := []struct {

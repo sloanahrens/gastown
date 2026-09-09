@@ -878,13 +878,15 @@ func formatActivityTime(t time.Time) string {
 
 // GitState represents the git state of a polecat's worktree.
 type GitState struct {
-	Clean                 bool     `json:"clean"`
-	UncommittedFiles      []string `json:"uncommitted_files"`
-	UnpushedCommits       int      `json:"unpushed_commits"`
-	ComparisonBase        string   `json:"comparison_base,omitempty"`
-	UnpreservedPatchCount int      `json:"unpreserved_patch_count"`
-	StashCount            int      `json:"stash_count"`                  // Current-branch stashes: per-polecat risk.
-	SharedStashCount      int      `json:"shared_stash_count,omitempty"` // Other branch stashes visible through the shared repo.
+	Clean                    bool     `json:"clean"`
+	UncommittedFiles         []string `json:"uncommitted_files"`
+	UnpushedCommits          int      `json:"unpushed_commits"`
+	ComparisonBase           string   `json:"comparison_base,omitempty"`
+	UnpreservedPatchCount    int      `json:"unpreserved_patch_count"`
+	StashCount               int      `json:"stash_count"`                  // Current-branch stashes: per-polecat risk.
+	SharedStashCount         int      `json:"shared_stash_count,omitempty"` // Other branch stashes visible through the shared repo.
+	PreservationCheckFailed  bool     `json:"preservation_check_failed,omitempty"`
+	PreservationCheckFailure string   `json:"preservation_check_failure,omitempty"`
 }
 
 func runPolecatGitState(cmd *cobra.Command, args []string) error {
@@ -997,6 +999,16 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 			state.UnpushedCommits = preservation.UnpreservedPatchCount
 			state.Clean = false
 		}
+	} else {
+		// gt-14a: an error here means we could not prove there are zero
+		// unpushed commits — not that there are zero. Silently leaving
+		// UnpushedCommits at 0 and state.Clean untouched previously let a
+		// transient/unresolvable comparison-ref failure masquerade as a
+		// clean worktree, reproducing the fail-open gt-7kr already fixed
+		// in manager.go's workstateInputForPolecat. Fail closed instead.
+		state.Clean = false
+		state.PreservationCheckFailed = true
+		state.PreservationCheckFailure = preserveErr.Error()
 	}
 
 	// Check for stashes using Git.StashCount() which filters by current branch.
@@ -1078,31 +1090,34 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	if err != nil || fields == nil {
-		// No agent bead or no cleanup_status - fall back to git check.
+		// No agent bead reachable - fall back to a live git check.
+		//
+		// gt-14a: this branch used to derive a confident CleanupClean straight
+		// from a narrow local git check ("no dirty files, no stash, no
+		// unpushed commits" => clean) whenever the agent bead couldn't be
+		// read. That is exactly the gitSafe-implies-clean promotion gt-7kr
+		// (d32b9f5) removed from workstateInputForPolecat in manager.go — but
+		// that fix never touched this CLI-only duplicate. An unreadable agent
+		// bead means hook_bead, active_mr and push/mr failure flags are all
+		// unverifiable here, not that they're absent; treating that as
+		// "clean" reintroduced the fail-open for this code path specifically.
+		// input.CleanupStatus already defaults to CleanupUnknown, which
+		// DecideWorkstate correctly fails closed on, so leave it there and
+		// only use live git facts as supplementary evidence, same as the
+		// agent-bead-found branch below does via applyGitStateToWorkstateInput.
+		//
+		// Still honor mgr.Get's canonical hooked-issue detection even without
+		// an agent bead to read hook_bead from — a missing agent bead must
+		// not silently drop the hook-bead safety signal either.
+		input.HookBead = recoveryHookBead(nil, nil, p)
 		loadGitState()
-		if gitErr != nil {
-			input.CleanupStatus = polecat.CleanupUnknown
-			input.GitCheckFailed = true
-			input.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: %v", p.ClonePath, gitErr)
-		} else if gitState.Clean {
-			input.CleanupStatus = polecat.CleanupClean
-		} else if gitState.UnpushedCommits > 0 {
-			input.CleanupStatus = polecat.CleanupUnpushed
-			input.UnpushedCommits = gitState.UnpushedCommits
-		} else if gitState.StashCount > 0 {
-			input.CleanupStatus = polecat.CleanupStash
-			input.StashCount = gitState.StashCount
-		} else {
-			input.CleanupStatus = polecat.CleanupUncommitted
-			input.GitDirty = true
-			input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
-		}
+		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
 		input.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
 		input.ActiveMR = fields.ActiveMR
-		hookBead := agentHookBead(agentIssue, fields)
+		hookBead := recoveryHookBead(agentIssue, fields, p)
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
@@ -1242,6 +1257,11 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 		input.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
 		return
 	}
+	if gitState != nil && gitState.PreservationCheckFailed {
+		input.GitCheckFailed = true
+		input.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: unpushed-commit check failed: %s", worktreePath, gitState.PreservationCheckFailure)
+		return
+	}
 	if gitState == nil || gitState.Clean {
 		return
 	}
@@ -1323,6 +1343,27 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 	}
 	if fields != nil {
 		return fields.HookBead
+	}
+	return ""
+}
+
+// recoveryHookBead resolves the hook-bead safety signal for check-recovery.
+//
+// gt-14a: agentHookBead only reads the legacy agent-bead hook_bead field,
+// which the direct-tracking model (hq-l6mm5, see loadFromBeads in
+// manager.go) no longer keeps populated for every polecat. Relying on it
+// alone let a genuinely hooked, actively working polecat (status=hooked
+// work bead, live session) read as unhooked here while mgr.Get's primary
+// tier still saw it correctly — the hook-bead safety signal must not depend
+// on a field that can be legitimately empty under the current dispatch
+// model. Fall back to the polecat's own canonically-detected issue whenever
+// mgr.Get classified it as actively working.
+func recoveryHookBead(agentIssue *beads.Issue, fields *beads.AgentFields, p *polecat.Polecat) string {
+	if hookBead := agentHookBead(agentIssue, fields); hookBead != "" {
+		return hookBead
+	}
+	if p != nil && p.State == polecat.StateWorking && p.Issue != "" {
+		return p.Issue
 	}
 	return ""
 }
@@ -1486,7 +1527,7 @@ func hasSubmittableWorkForRecovery(worktreePath string, targetRefs []string, git
 			return true
 		}
 	}
-	return gitErr != nil || (gitState != nil && gitState.UnpushedCommits > 0)
+	return gitErr != nil || (gitState != nil && (gitState.UnpushedCommits > 0 || gitState.PreservationCheckFailed))
 }
 
 func isRecoveryBaseBranch(branch string) bool {
