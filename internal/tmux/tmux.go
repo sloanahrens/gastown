@@ -3383,23 +3383,41 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	return strings.HasPrefix(trimmed, normalizedPrefix) || (prefix != "" && trimmed == prefix)
 }
 
-// busyIndicators is the single source of truth for the substrings an agent TUI
-// renders in its status bar while actively generating. Detection of "is the
-// agent working?" scrapes the pane for any of these (see hasBusyIndicator), and
-// that signal underpins IsIdle, WaitForIdle, and the nudge Escape-suppression in
-// shouldSendEscape. Claude Code, Codex, and Gemini all surface "esc to
-// interrupt"; if an agent uses different wording, add it here — that is the only
-// place that needs to change.
+// busyIndicators is the single source of truth for the literal substrings an
+// agent TUI renders in its status bar while actively generating. Detection of
+// "is the agent working?" scrapes the pane for any of these or the structural
+// pattern in busyTokenSpinnerPattern (see hasBusyIndicator), and that signal
+// underpins IsIdle, WaitForIdle, and the nudge Escape-suppression in
+// shouldSendEscape. If an agent uses different wording, add it here — that is
+// the only place that needs to change.
+//
+// "esc to interrupt" is the legacy marker (pre-2026-09 Claude Code, still used
+// by Codex/Gemini as of this writing). "to run in background" is the hint the
+// current Claude Code TUI shows beneath a long-running tool call while busy —
+// verified live 2026-09-09 (gastownhall/gastown#4240): e.g. "(ctrl+b ctrl+b
+// (twice) to run in background)".
 //
 // FRAGILITY (gastownhall/gastown#4240): this couples to upstream TUI status
 // text. Scraping the status bar cannot detect a silent upstream rename on its
 // own — a truly structural readiness signal would, but none is available across
 // all agents today. Centralizing the markers here keeps any required update to a
-// single reviewable line, and TestBusyIndicators pins the known marker so a
+// single reviewable line, and TestBusyIndicators pins the known markers so a
 // change is intentional rather than accidental. The idle side is already
 // centralized via the agent presets' ReadyPromptPrefix; this is its busy-side
 // counterpart.
-var busyIndicators = []string{"esc to interrupt"}
+var busyIndicators = []string{"esc to interrupt", "to run in background"}
+
+// busyTokenSpinnerPattern matches the token-count readout Claude Code renders
+// on its generation spinner line, e.g. "✽ Leavening… (3m 17s · ↓ 14.1k
+// tokens)" or a running subagent's "◯ Explore ... 48s · ↓ 38.0k tokens". The
+// spinner's verb word rotates unpredictably (Leavening, Gesticulating,
+// Skedaddling, ...) so it cannot be matched as a literal, but the down-arrow
+// token count is stable across verbs and was confirmed live across multiple
+// concurrently-running Claude Code sessions on 2026-09-09
+// (gastownhall/gastown#4240). This is a structural supplement to
+// busyIndicators, not a replacement — it still couples to Claude Code's token
+// readout, but survives verb churn that a literal list cannot.
+var busyTokenSpinnerPattern = regexp.MustCompile(`↓\s*[0-9][0-9,.]*\s*[kKmM]?\s*tokens\b`)
 
 func hasBusyIndicator(line string) bool {
 	trimmed := strings.TrimSpace(line)
@@ -3415,24 +3433,37 @@ func hasBusyIndicator(line string) bool {
 			return true
 		}
 	}
-	return false
+	return busyTokenSpinnerPattern.MatchString(trimmed)
 }
+
+// busyCaptureLines is how many trailing pane lines to scan for a busy
+// indicator. The footer alone (input rule, prompt, model/context, cwd,
+// [branch], permissions) runs 5-7 lines, and the spinner / tool-status lines
+// that actually carry the busy marker sit one or more blank-line-separated
+// blocks above that footer — confirmed live 2026-09-09 across multiple
+// concurrently-running Claude Code panes (gastownhall/gastown#4240), where a
+// 5-line capture landed entirely inside the footer and never saw the spinner.
+// 20 lines comfortably covers the deepest observed busy block (tool-status
+// line + "run in background" hint + spinner + tip + footer).
+const busyCaptureLines = 20
 
 // shouldSendEscapeForLines reports whether the vim-mode Escape keystroke
 // (nudge delivery step 5) is safe to send, given a snapshot of pane lines.
 //
 // The Escape exists to exit a vim-mode composer's INSERT mode so the following
 // Enter submits the line (GH#307). But in Claude Code — and Codex/Gemini —
-// Escape also cancels in-flight generation; the status bar literally reads
-// "esc to interrupt" while the agent is working. Sending Escape in that state
-// would interrupt the agent's current turn (e.g. the Mayor). Returns false when
-// any line shows the busy indicator so the caller suppresses the Escape.
+// Escape also cancels in-flight generation; the status bar shows a busy
+// indicator (see hasBusyIndicator) while the agent is working. Sending Escape
+// in that state would interrupt the agent's current turn (e.g. the Mayor).
+// Returns false when any line shows the busy indicator so the caller
+// suppresses the Escape.
 //
-// FRAGILITY: this depends on the agent TUI rendering the literal substring
-// "esc to interrupt" while generating (via hasBusyIndicator — the same
-// assumption IsIdle/WaitForIdle already make). If that upstream status text
-// changes, the gate fails open and silently: the Escape is sent again and
-// nudges can resume interrupting the agent. Tracked in gastownhall/gastown#4240.
+// FRAGILITY: this depends on the agent TUI rendering one of the known busy
+// markers (via hasBusyIndicator — the same assumption IsIdle/WaitForIdle
+// already make). If upstream status text changes again without a matching
+// marker added here, the gate fails open and silently: the Escape is sent
+// again and nudges can resume interrupting the agent. Tracked in
+// gastownhall/gastown#4240.
 func shouldSendEscapeForLines(lines []string) bool {
 	for _, line := range lines {
 		if hasBusyIndicator(line) {
@@ -3450,7 +3481,7 @@ func shouldSendEscapeForLines(lines []string) bool {
 // interrupting an active agent and is harmless for the common (non-vim) case
 // where Enter alone submits.
 func (t *Tmux) shouldSendEscape(target string) bool {
-	lines, err := t.CapturePaneLines(target, 5)
+	lines, err := t.CapturePaneLines(target, busyCaptureLines)
 	if err != nil {
 		return false
 	}
@@ -3530,7 +3561,7 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		lines, err := t.CapturePaneLines(session, 5)
+		lines, err := t.CapturePaneLines(session, busyCaptureLines)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -3543,9 +3574,10 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 			continue
 		}
 
-		// Busy indicator check: if "esc to interrupt" is visible anywhere in
-		// the recent pane output, the agent is actively working — NOT idle,
-		// regardless of whether the prompt prefix is also visible.
+		// Busy indicator check: if a busy marker (see hasBusyIndicator) is
+		// visible anywhere in the recent pane output, the agent is actively
+		// working — NOT idle, regardless of whether the prompt prefix is
+		// also visible.
 		statusBarBusy := false
 		for _, line := range lines {
 			if hasBusyIndicator(line) {
@@ -3615,11 +3647,11 @@ func (t *Tmux) IsAtPrompt(session string, rc *config.RuntimeConfig) bool {
 // Returns true if idle, false if the agent is busy or the check fails.
 // This is a point-in-time snapshot, not a poll.
 //
-// Detection strategy: check the Claude Code status bar (bottom line of the
-// pane starting with ⏵⏵). When the agent is actively working, the status
-// bar contains "esc to interrupt". When idle, it does not.
+// Detection strategy: scan the trailing pane lines for a busy marker (see
+// hasBusyIndicator). When the agent is actively working, one of those markers
+// is present. When idle, none is.
 func (t *Tmux) IsIdle(session string) bool {
-	lines, err := t.CapturePaneLines(session, 5)
+	lines, err := t.CapturePaneLines(session, busyCaptureLines)
 	if err != nil {
 		return false
 	}

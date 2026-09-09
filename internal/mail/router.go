@@ -1654,9 +1654,9 @@ func (r *Router) notifyRecipient(msg *Message) error {
 
 		// Wait-idle-first delivery: try direct nudge if the agent is idle,
 		// fall back to cooperative queue if busy. WaitForIdle requires 2
-		// consecutive idle polls (prompt visible + no "esc to interrupt"
-		// in the status bar) to distinguish genuine idle from brief
-		// inter-tool-call gaps. See: https://github.com/steveyegge/gastown/issues/2032
+		// consecutive idle polls (prompt visible + no busy indicator in the
+		// status bar, see hasBusyIndicator) to distinguish genuine idle from
+		// brief inter-tool-call gaps. See: https://github.com/steveyegge/gastown/issues/2032
 		waitErr := r.tmux.WaitForIdle(sessionID, timeout)
 		if waitErr == nil {
 			// Agent is idle — deliver directly for immediate wakeup.

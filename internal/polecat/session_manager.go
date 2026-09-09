@@ -915,7 +915,7 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 // before Claude Code is ready, causing the polecat to sit idle.
 //
 // Uses IsIdle (not IsAtPrompt) to distinguish "idle at prompt" from "busy
-// processing". IsIdle checks for the "esc to interrupt" busy indicator in
+// processing". IsIdle checks for a busy indicator (see hasBusyIndicator) in
 // Claude's status bar — if present, the agent is actively working even though
 // the ❯ prompt may still be visible in the pane. This prevents the false-
 // positive retries that interrupted Claude mid-processing (GH#3031).

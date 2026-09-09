@@ -2318,9 +2318,20 @@ func TestHasBusyIndicator(t *testing.T) {
 		line string
 		want bool
 	}{
-		{"claude status busy", "⏵⏵ bypass permissions on ... · esc to interrupt", true},
+		{"claude status busy (legacy marker)", "⏵⏵ bypass permissions on ... · esc to interrupt", true},
 		{"codex status busy", "• Working (2m 18s • esc to interrupt)", true},
+		// Current Claude Code TUI (verified live 2026-09-09, gastownhall/gastown#4240):
+		// the spinner verb rotates ("Leavening", "Gesticulating", "Skedaddling", ...) so
+		// these fixtures use several distinct verbs captured from real running panes to
+		// prove detection does not depend on any one of them.
+		{"claude spinner busy - Leavening", "✽ Leavening… (3m 17s · ↓ 14.1k tokens)", true},
+		{"claude spinner busy - Gesticulating", "✱ Gesticulating... (4m 26s · ↓ 1.6k tokens)", true},
+		{"claude spinner busy - no k suffix", "· Processing… (2s · ↓ 129 tokens)", true},
+		{"claude subagent busy", "◯ Explore  Grepping runEscalate and BdCli definitions   48s · ↓ 38.0k tokens", true},
+		{"claude tool-running hint busy", "  (ctrl+b ctrl+b (twice) to run in background)", true},
+		{"claude idle done line", "✻ Cooked for 4m 23s · done 10:29 PM", false},
 		{"idle line", "› Review ready notification", false},
+		{"idle footer with context pct, no arrow", "  Sonnet 5 | Context: 21%", false},
 		{"blank", "", false},
 	}
 
@@ -2359,6 +2370,66 @@ func TestShouldSendEscapeForLines(t *testing.T) {
 			name:  "busy indicator among multiple lines - suppress escape",
 			lines: []string{"tool output", "more output", "⏵⏵ bypass permissions on · esc to interrupt"},
 			want:  false,
+		},
+		{
+			// Reproduces the exact shape of the second, independent defect in
+			// gt-8bh: the spinner line sits several lines above the footer, with
+			// the busy marker nowhere near the bottom of the captured window.
+			// Captured live 2026-09-09 from a real running Claude Code pane
+			// (gastownhall/gastown#4240).
+			name: "current claude code TUI - spinner above footer - suppress escape",
+			lines: []string{
+				"⏺ Running 1 shell command…",
+				"",
+				"✳ Skedaddling… (1m 12s · ↓ 4.2k tokens)",
+				"  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's",
+				"     current work",
+				"",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"❯ ",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"  Sonnet 5 | Context: 9%                                                   /rc",
+				"  /Users/sloan/gt/gastown/polecats/jasper/gastown",
+				"  [polecat/jasper/gt-ftt+mttjg5m4]",
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+			},
+			want: false,
+		},
+		{
+			// Same shape, but busy on a long-running tool call rather than pure
+			// generation: the "run in background" hint replaces the token-count
+			// spinner as the visible marker. Captured live 2026-09-09.
+			name: "current claude code TUI - tool running with background hint - suppress escape",
+			lines: []string{
+				"⏺ Executing dolt-archive plugin script · 4s",
+				"  ⎿  $ cd /Users/sloan/gt/plugins/dolt-archive && bash run.sh (4s · 20 lines)",
+				"     (ctrl+b ctrl+b (twice) to run in background)",
+				"",
+				"✶ Nebulizing… (31s · ↓ 732 tokens)",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"❯ ",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"  Haiku 4.5 | Context: 24%                                                 /rc",
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+			},
+			want: false,
+		},
+		{
+			// The dead-marker regression itself: only footer lines, no busy
+			// marker anywhere, no "esc to interrupt" — this is what every busy
+			// Claude Code pane looked like once the TUI stopped rendering the
+			// old marker. Must NOT suppress a genuinely idle agent.
+			name: "current claude code TUI - idle, footer only - allow escape",
+			lines: []string{
+				"────────────────────────────────────────────────────────────────────────────────",
+				"❯ ",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"  Sonnet 5 | Context: 13%                                                  /rc",
+				"  /Users/sloan/gt/gastown/polecats/quartz/gastown",
+				"  [polecat/quartz/gt-8bh+mttjdaf5]",
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+			},
+			want: true,
 		},
 		{
 			name:  "idle ready prompt - allow escape",
@@ -2425,6 +2496,50 @@ func TestShouldSendEscape_LivePane(t *testing.T) {
 	}
 }
 
+// TestShouldSendEscape_LivePane_CurrentTUIMarker is the live-pane counterpart
+// to TestShouldSendEscape_LivePane for the CURRENT Claude Code TUI. gt-8bh was
+// exactly this: the old marker ("esc to interrupt") stopped being rendered and
+// only a fixture-only test (pinning that same dead string) covered the gate, so
+// every nudge sent Escape into a real generating agent and nobody noticed until
+// production impact. This test exercises a REAL tmux pane against the marker
+// verified live on 2026-09-09 (gastownhall/gastown#4240), so a future rename
+// that this repo's own fixtures have not been updated for still has one path to
+// catch it: rerun this test against a real captured pane and see it fail.
+func TestShouldSendEscape_LivePane_CurrentTUIMarker(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-should-escape-current-" + t.Name()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+
+	// Idle shell prompt: no busy indicator → Escape is safe to send.
+	if !tm.shouldSendEscape(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("shouldSendEscape on idle pane = false, want true; pane:\n%s", out)
+	}
+
+	// Render the CURRENT Claude Code busy spinner (verified live 2026-09-09)
+	// into the pane, padded with filler lines above the footer-equivalent
+	// prompt so the test also exercises the widened capture window rather
+	// than relying on the marker sitting in the last line.
+	if err := tm.SendKeys(session, "printf 'filler line 1\\nfiller line 2\\n✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	// Poll until the gate flips to suppressed (the shell may be slow to render).
+	deadline := time.Now().Add(5 * time.Second)
+	for tm.shouldSendEscape(session) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("shouldSendEscape did not detect current busy marker within timeout; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func TestShouldSendEscape_CaptureErrorSuppressesEscape(t *testing.T) {
 	tm := newTestTmux(t)
 
@@ -2443,17 +2558,21 @@ func TestBusyIndicators(t *testing.T) {
 		t.Fatal("busyIndicators must not be empty — busy/idle detection would silently break")
 	}
 
-	// "esc to interrupt" is the marker Claude Code / Codex / Gemini render while
-	// generating. If this assertion fails, the change must be deliberate.
-	found := false
-	for _, m := range busyIndicators {
-		if m == "esc to interrupt" {
-			found = true
-			break
+	// "esc to interrupt" is the legacy marker (Codex/Gemini as of this writing).
+	// "to run in background" is the current Claude Code hint. If either
+	// assertion fails, the change must be deliberate.
+	wantMarkers := []string{"esc to interrupt", "to run in background"}
+	for _, want := range wantMarkers {
+		found := false
+		for _, m := range busyIndicators {
+			if m == want {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Errorf("busyIndicators = %q, want it to contain the known \"esc to interrupt\" marker", busyIndicators)
+		if !found {
+			t.Errorf("busyIndicators = %q, want it to contain the known %q marker", busyIndicators, want)
+		}
 	}
 
 	// Every marker must be matched by hasBusyIndicator (guards against an empty
@@ -2464,6 +2583,33 @@ func TestBusyIndicators(t *testing.T) {
 		}
 		if !hasBusyIndicator("⏵⏵ status · " + m) {
 			t.Errorf("hasBusyIndicator did not match a registered busy indicator %q", m)
+		}
+	}
+
+	// The structural token-spinner pattern must match the current Claude Code
+	// busy line regardless of which verb word is spinning (verified live
+	// 2026-09-09, gastownhall/gastown#4240) and must not match plain idle text.
+	spinnerCases := []string{
+		"✽ Leavening… (3m 17s · ↓ 14.1k tokens)",
+		"✱ Gesticulating... (4m 26s · ↓ 1.6k tokens)",
+		"◯ Explore  Grepping runEscalate and BdCli definitions   48s · ↓ 38.0k tokens",
+	}
+	for _, line := range spinnerCases {
+		if !busyTokenSpinnerPattern.MatchString(line) {
+			t.Errorf("busyTokenSpinnerPattern did not match live spinner line %q", line)
+		}
+		if !hasBusyIndicator(line) {
+			t.Errorf("hasBusyIndicator did not match live spinner line %q", line)
+		}
+	}
+	idleCases := []string{
+		"  Sonnet 5 | Context: 21%",
+		"✻ Cooked for 4m 23s · done 10:29 PM",
+		"❯ ",
+	}
+	for _, line := range idleCases {
+		if hasBusyIndicator(line) {
+			t.Errorf("hasBusyIndicator incorrectly matched idle line %q", line)
 		}
 	}
 }
