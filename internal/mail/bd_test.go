@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -401,7 +400,13 @@ func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	}
 	workDir := filepath.Dir(beadsDir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use the same deadline production callers get via bdReadCtx (60s), not an
+	// arbitrary tighter one: under real town load (many concurrent agent
+	// subprocesses competing for CPU/fork), even this trivial shell stub can
+	// take longer than a few seconds to spawn, which previously made this
+	// test flake with "signal: killed" on a loaded box (gt-911, same family
+	// as gt-0nk).
+	ctx, cancel := bdReadCtx()
 	defer cancel()
 	if _, err := runBdCommand(ctx, []string{"list", "--json"}, workDir, beadsDir, "BD_IDENTITY=gastown/chrome", "BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"); err != nil {
 		t.Fatalf("run read bd command: %v", err)
@@ -450,6 +455,39 @@ func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
 	}
 	if !envContains(got, "BEADS_DOLT_SERVER_HOST=127.0.0.2") || !envContains(got, "BEADS_DOLT_SERVER_PORT=5507") || !envContains(got, "BEADS_DOLT_PORT=5507") {
 		t.Fatalf("expected GT_DOLT host/port fallback for routed command, got %v", got)
+	}
+}
+
+// TestBdSubprocessEnvPinnedReadAndWritePolicy is a pure, subprocess-free unit
+// test of the exact env-policy decision TestRunBdCommandUsesCentralEnvPolicy
+// exercises end-to-end. That integration test is a much better check that the
+// policy is actually wired into the real subprocess, but it ties pass/fail to
+// a spawn timeout, so it can flake under host contention (gt-911, same family
+// as gt-0nk). This test proves the policy itself deterministically.
+func TestBdSubprocessEnvPinnedReadAndWritePolicy(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"maildb"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	readEnv := bdSubprocessEnv(nil, beadsDir, true, []string{"BD_IDENTITY=gastown/chrome", "BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"})
+	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+		if !envContains(readEnv, want) {
+			t.Fatalf("read env missing %q:\n%v", want, readEnv)
+		}
+	}
+
+	writeEnv := bdSubprocessEnv(nil, beadsDir, false, []string{"BD_IDENTITY=gastown/chrome", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"})
+	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+		if !envContains(writeEnv, want) {
+			t.Fatalf("write env missing %q:\n%v", want, writeEnv)
+		}
+	}
+	if value, ok := envLastValue(writeEnv, "BD_READONLY"); ok && value != "" {
+		t.Fatalf("expected BD_READONLY unset/empty for write env, got %q", value)
 	}
 }
 
