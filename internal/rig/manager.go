@@ -106,6 +106,12 @@ type RigConfig struct {
 	CreatedAt     time.Time    `json:"created_at"`               // when rig was created
 	Beads         *BeadsConfig `json:"beads,omitempty"`
 
+	// MergeQueue holds build/test/lint gate commands when an operator has
+	// configured them directly in rig root config.json instead of
+	// settings/config.json. Treated as the lowest-priority floor by
+	// loadRigCommandVars — settings/config.json (repo or local) overrides it.
+	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
+
 	// Persistent polecat pool configuration.
 	// PolecatPoolSize is the number of persistent polecats to create with pool init.
 	// PolecatNames optionally specifies fixed names (overrides theme-based naming).

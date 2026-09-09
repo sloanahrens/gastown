@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -337,5 +338,92 @@ exit 1
 	}
 	if got := strings.TrimSpace(string(countBytes)); got != "1" {
 		t.Fatalf("bd update invoked %s times, want 1", got)
+	}
+}
+
+// TestLoadRigCommandVarsReadsRootConfigMergeQueue is the regression test for
+// gt-e50d: a rig whose only merge_queue block lives in rig root config.json
+// (no .gastown/settings.json, no settings/config.json) must still dispatch
+// non-empty gate command vars.
+func TestLoadRigCommandVarsReadsRootConfigMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigRoot := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
+	}
+
+	rootConfig := `{
+		"type": "rig",
+		"version": 1,
+		"name": "gastown",
+		"default_branch": "main",
+		"merge_queue": {
+			"build_command": "make build",
+			"test_command": "make test",
+			"lint_command": "make lint"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(rigRoot, "config.json"), []byte(rootConfig), 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	got := loadRigCommandVars(townRoot, "gastown")
+
+	want := []string{
+		"base_branch=main",
+		"lint_command=make lint",
+		"test_command=make test",
+		"build_command=make build",
+	}
+	for _, w := range want {
+		if !slices.Contains(got, w) {
+			t.Errorf("loadRigCommandVars() = %v, want to contain %q", got, w)
+		}
+	}
+}
+
+// TestLoadRigCommandVarsLocalSettingsOverrideRootConfig verifies that
+// settings/config.json still wins over a merge_queue block in rig root
+// config.json, preserving existing override semantics (gt-e50d).
+func TestLoadRigCommandVarsLocalSettingsOverrideRootConfig(t *testing.T) {
+	townRoot := t.TempDir()
+	rigRoot := filepath.Join(townRoot, "gastown")
+	settingsDir := filepath.Join(rigRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+
+	rootConfig := `{
+		"type": "rig",
+		"version": 1,
+		"name": "gastown",
+		"default_branch": "main",
+		"merge_queue": {
+			"build_command": "make build-old",
+			"test_command": "make test-old"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(rigRoot, "config.json"), []byte(rootConfig), 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	localSettings := `{
+		"type": "rig-settings",
+		"version": 1,
+		"merge_queue": {
+			"build_command": "make build-new"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(localSettings), 0o644); err != nil {
+		t.Fatalf("write settings/config.json: %v", err)
+	}
+
+	got := loadRigCommandVars(townRoot, "gastown")
+
+	if !slices.Contains(got, "build_command=make build-new") {
+		t.Errorf("loadRigCommandVars() = %v, want local override build_command=make build-new", got)
+	}
+	if !slices.Contains(got, "test_command=make test-old") {
+		t.Errorf("loadRigCommandVars() = %v, want root config.json floor test_command=make test-old", got)
 	}
 }

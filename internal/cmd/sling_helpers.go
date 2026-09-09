@@ -1381,9 +1381,11 @@ func isSlingConfigError(err error) bool {
 // and the default branch (base_branch). Only non-empty values are included.
 //
 // Settings are resolved in priority order:
-//  1. Repository defaults: <rig>/mayor/rig/.gastown/settings.json (committed to git)
-//  2. Rig-local overrides: <rig>/settings/config.json (operator tuning)
-//  3. User --var flags (handled by caller, not here)
+//  1. Rig root config.json merge_queue (floor — some rigs have gate commands
+//     configured here instead of settings/config.json; gt-e50d)
+//  2. Repository defaults: <rig>/mayor/rig/.gastown/settings.json (committed to git)
+//  3. Rig-local overrides: <rig>/settings/config.json (operator tuning)
+//  4. User --var flags (handled by caller, not here)
 func loadRigCommandVars(townRoot, rig string) []string {
 	if townRoot == "" || rig == "" {
 		return nil
@@ -1397,7 +1399,13 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		vars = append(vars, fmt.Sprintf("base_branch=%s", rigCfg.DefaultBranch))
 	}
 
-	// Load repo-sourced settings (floor — committed to git, always present after clone)
+	// Rig root config.json merge_queue (floor — lowest priority; gt-e50d)
+	var rootMQ *config.MergeQueueConfig
+	if rigCfg != nil {
+		rootMQ = rigCfg.MergeQueue
+	}
+
+	// Load repo-sourced settings (overrides root config.json; committed to git, always present after clone)
 	var repoMQ *config.MergeQueueConfig
 	repoRoot := filepath.Join(townRoot, rig, "mayor", "rig")
 	repoSettings, _ := config.LoadRepoSettings(repoRoot)
@@ -1413,8 +1421,8 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		localMQ = localSettings.MergeQueue
 	}
 
-	// Merge: repo defaults + local overrides
-	mq := config.MergeSettingsCommand(repoMQ, localMQ)
+	// Merge: root config.json floor + repo defaults + local overrides
+	mq := config.MergeSettingsCommand(config.MergeSettingsCommand(rootMQ, repoMQ), localMQ)
 	if mq == nil {
 		return vars
 	}
