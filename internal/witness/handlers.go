@@ -472,7 +472,7 @@ func HandleMerged(bd *BdCli, workDir, rigName string, msg *mail.Message) *Handle
 		return result
 	}
 
-	cleanupStatus := getCleanupStatus(bd, workDir, rigName, payload.PolecatName)
+	cleanupStatus := getCleanupStatus(workDir, rigName, payload.PolecatName)
 	handleMergedCleanupStatus(workDir, rigName, payload.PolecatName, cleanupStatus, wispID, result)
 	return result
 }
@@ -645,18 +645,13 @@ func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
 	return "", nil
 }
 
-// agentBeadResponse is used to parse the bd show --json response for agent beads.
-type agentBeadResponse struct {
-	Description string `json:"description"`
-}
-
 // getCleanupStatus retrieves the cleanup_status from a polecat's agent bead.
 // Returns the status string: "clean", "has_uncommitted", "has_stash", "has_unpushed"
 // Returns empty string if agent bead doesn't exist or has no cleanup_status.
 //
 // ZFC #10: This enables the Witness to verify it's safe to nuke before proceeding.
 // The polecat self-reports its git state when running `gt done`, and we trust that report.
-func getCleanupStatus(bd *BdCli, workDir, rigName, polecatName string) string {
+func getCleanupStatus(workDir, rigName, polecatName string) string {
 	// Construct agent bead ID using the rig's configured prefix
 	// This supports non-gt prefixes like "bd-" for the beads rig
 	townRoot, err := workspace.Find(workDir)
@@ -667,24 +662,11 @@ func getCleanupStatus(bd *BdCli, workDir, rigName, polecatName string) string {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil {
-		// Agent bead doesn't exist or bd failed - return empty (unknown status)
+	_, fields, err := beads.New(workDir).ForAgentBead().GetAgentBead(agentBeadID)
+	if err != nil || fields == nil {
+		// Agent bead doesn't exist or lookup failed - return empty (unknown status)
 		return ""
 	}
-
-	if output == "" {
-		return ""
-	}
-
-	// Parse the JSON response — bd show --json returns an array
-	var issues []agentBeadResponse
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return ""
-	}
-
-	// Use structured field parser instead of ad-hoc string parsing
-	fields := beads.ParseAgentFields(issues[0].Description)
 	return fields.CleanupStatus
 }
 
@@ -1662,7 +1644,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 
 		// gt-2gra: Fetch agent bead data once per polecat instead of 3-5 times
 		// across helper functions. The snapshot is passed to sub-functions.
-		snap := fetchAgentBeadSnapshot(bd, workDir, agentBeadID)
+		snap := fetchAgentBeadSnapshot(workDir, agentBeadID)
 
 		var labels []string
 		if snap != nil {
@@ -2508,7 +2490,7 @@ func DiscoverCompletions(bd *BdCli, workDir, rigName string, router *mail.Router
 			agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 
 			// Get full agent fields including completion metadata
-			fields := getAgentBeadFields(bd, workDir, agentBeadID)
+			fields := getAgentBeadFields(workDir, agentBeadID)
 			if fields == nil || fields.ExitType == "" || fields.CompletionTime == "" {
 				mu.Lock()
 				result.Checked++
@@ -2551,7 +2533,7 @@ func DiscoverCompletions(bd *BdCli, workDir, rigName string, router *mail.Router
 			// wisp creation/update failed, leave metadata for the next patrol retry.
 			var clearErr error
 			if discovery.Error == nil {
-				if err := clearCompletionMetadata(bd, workDir, agentBeadID); err != nil {
+				if err := clearCompletionMetadata(workDir, agentBeadID); err != nil {
 					clearErr = fmt.Errorf("clearing completion metadata for %s: %w", polecatName, err)
 				}
 			}
@@ -2668,31 +2650,19 @@ type agentBeadSnapshot struct {
 
 // fetchAgentBeadSnapshot fetches all agent bead data in a single bd show call.
 // Returns nil if the bead doesn't exist or can't be queried.
-func fetchAgentBeadSnapshot(bd *BdCli, workDir, agentBeadID string) *agentBeadSnapshot {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return nil
-	}
-
-	var issues []struct {
-		AgentState  string   `json:"agent_state"`
-		HookBead    string   `json:"hook_bead"`
-		Labels      []string `json:"labels"`
-		UpdatedAt   string   `json:"updated_at"`
-		ActiveMR    string   `json:"active_mr"`
-		Description string   `json:"description"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+func fetchAgentBeadSnapshot(workDir, agentBeadID string) *agentBeadSnapshot {
+	issue, fields, err := beads.New(workDir).ForAgentBead().GetAgentBead(agentBeadID)
+	if err != nil || issue == nil || fields == nil {
 		return nil
 	}
 
 	return &agentBeadSnapshot{
-		AgentState: beads.ResolveAgentState(issues[0].Description, issues[0].AgentState),
-		HookBead:   issues[0].HookBead,
-		Labels:     issues[0].Labels,
-		UpdatedAt:  issues[0].UpdatedAt,
-		ActiveMR:   issues[0].ActiveMR,
-		Fields:     beads.ParseAgentFields(issues[0].Description),
+		AgentState: fields.AgentState,
+		HookBead:   issue.HookBead,
+		Labels:     issue.Labels,
+		UpdatedAt:  issue.UpdatedAt,
+		ActiveMR:   fields.ActiveMR,
+		Fields:     fields,
 	}
 }
 
@@ -2724,103 +2694,39 @@ func (s *agentBeadSnapshot) cleanupStatus() string {
 // getAgentBeadFields reads the full agent description fields from an agent bead,
 // including completion metadata (exit_type, mr_id, branch, mr_failed, completion_time).
 // Returns nil if the bead doesn't exist or can't be parsed.
-func getAgentBeadFields(bd *BdCli, workDir, agentBeadID string) *beads.AgentFields {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
+func getAgentBeadFields(workDir, agentBeadID string) *beads.AgentFields {
+	_, fields, err := beads.New(workDir).ForAgentBead().GetAgentBead(agentBeadID)
+	if err != nil {
 		return nil
 	}
-
-	var issues []struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return nil
-	}
-
-	return beads.ParseAgentFields(issues[0].Description)
+	return fields
 }
 
-// clearCompletionMetadata removes completion metadata fields from an agent bead
-// by reading the current description, clearing the fields, and writing back.
-// This prevents the same completion from being re-processed on the next patrol cycle.
-func clearCompletionMetadata(bd *BdCli, workDir, agentBeadID string) error {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
+// clearCompletionMetadata removes completion metadata fields from an agent
+// bead so the same completion is not re-processed on the next patrol cycle.
+// It goes through the agent-scoped wrapper (never shell `bd update`): a
+// cwd-routed update from the town root landed on the legacy town row and
+// left the canonical rig row stale (gt-a6g).
+func clearCompletionMetadata(workDir, agentBeadID string) error {
+	bd := beads.New(workDir).ForAgentBead()
+	issue, fields, err := bd.GetAgentBead(agentBeadID)
+	if err != nil {
 		return fmt.Errorf("reading agent bead %s: %w", agentBeadID, err)
 	}
-
-	var issues []struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return fmt.Errorf("parsing agent bead JSON for %s: %w", agentBeadID, err)
+	if issue == nil || fields == nil {
+		return fmt.Errorf("reading agent bead %s: %w", agentBeadID, beads.ErrNotFound)
 	}
 
-	fields := beads.ParseAgentFields(issues[0].Description)
-	if fields == nil {
-		return nil
+	empty := ""
+	updates := beads.AgentFieldUpdates{
+		ExitType:       &empty,
+		MRID:           &empty,
+		CompletionTime: &empty,
 	}
-
-	// Clear completion metadata fields
-	fields.ExitType = ""
-	fields.MRID = ""
 	if !fields.MRFailed && !fields.PushFailed {
-		fields.Branch = ""
+		updates.Branch = &empty
 	}
-	fields.CompletionTime = ""
-
-	newDesc := beads.FormatAgentDescription(issues[0].Title, fields)
-	return bd.Run(workDir, "update", agentBeadID, "--description", newDesc)
-}
-
-// getAgentBeadState reads agent_state and hook_bead from an agent bead.
-// Returns the agent_state string and hook_bead ID.
-func getAgentBeadState(bd *BdCli, workDir, agentBeadID string) (agentState, hookBead string) {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return "", ""
-	}
-
-	// Parse JSON response — bd show --json returns an array
-	var issues []struct {
-		AgentState  string `json:"agent_state"`
-		HookBead    string `json:"hook_bead"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return "", ""
-	}
-
-	return beads.ResolveAgentState(issues[0].Description, issues[0].AgentState), issues[0].HookBead
-}
-
-// getAgentBeadAge returns the time since the agent bead was last updated.
-// Used to determine how long a polecat has been in its current state (e.g.,
-// spawning). Returns a large duration if the bead can't be queried, so callers
-// don't accidentally skip zombie detection on query failure. See GH#2036.
-func getAgentBeadAge(bd *BdCli, workDir, agentBeadID string) time.Duration {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return 24 * time.Hour // Fail open: treat as old so zombie detection proceeds
-	}
-
-	var issues []struct {
-		UpdatedAt string `json:"updated_at"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return 24 * time.Hour
-	}
-
-	updatedAt, err := time.Parse(time.RFC3339, issues[0].UpdatedAt)
-	if err != nil {
-		// Try common alternative formats
-		updatedAt, err = time.Parse("2006-01-02 15:04:05", issues[0].UpdatedAt)
-		if err != nil {
-			return 24 * time.Hour
-		}
-	}
-	return time.Since(updatedAt)
+	return bd.UpdateAgentDescriptionFields(agentBeadID, updates)
 }
 
 // getBeadStatus returns the status of a bead (e.g., "open", "closed", "hooked").
@@ -3383,23 +3289,6 @@ func extractDoneIntent(labels []string) *DoneIntent {
 	return nil
 }
 
-// getAgentBeadLabels reads the labels from an agent bead.
-func getAgentBeadLabels(bd *BdCli, workDir, agentBeadID string) []string {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return nil
-	}
-
-	var issues []struct {
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return nil
-	}
-
-	return issues[0].Labels
-}
-
 // sessionRecreated checks whether a tmux session was (re)created after the
 // given timestamp. Returns true if the session exists and was created after
 // detectedAt, indicating a new session replaced the dead one (TOCTOU guard).
@@ -3486,7 +3375,7 @@ func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) 
 	}
 
 	// Check 2: active_mr on agent bead (set by gt done when MR is created)
-	activeMR, sourceHint := getAgentMRContext(bd, workDir, agentBeadID)
+	activeMR, sourceHint := getAgentMRContext(workDir, agentBeadID)
 	assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: activeMRGitSafe(workDir, rigName, polecatName)})
 	return assessment.Pending
 }
@@ -3608,38 +3497,19 @@ func terminalSafeDoneSnapshot(bd *BdCli, workDir, rigName, polecatName string, s
 }
 
 // getAgentMRContext retrieves active_mr and durable source context from an agent bead.
-func getAgentMRContext(bd *BdCli, workDir, agentBeadID string) (string, string) {
-	if bd == nil || bd.Exec == nil {
+func getAgentMRContext(workDir, agentBeadID string) (string, string) {
+	issue, fields, err := beads.New(workDir).ForAgentBead().GetAgentBead(agentBeadID)
+	if err != nil || issue == nil || fields == nil {
 		return "", ""
 	}
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return "", ""
+	sourceHint := fields.LastSourceIssue
+	if sourceHint == "" {
+		sourceHint = fields.HookBead
 	}
-	var issues []struct {
-		ActiveMR    string `json:"active_mr"`
-		HookBead    string `json:"hook_bead"`
-		Description string `json:"description"`
+	if sourceHint == "" {
+		sourceHint = issue.HookBead
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return "", ""
-	}
-	fields := beads.ParseAgentFields(issues[0].Description)
-	activeMR := issues[0].ActiveMR
-	if activeMR == "" && fields != nil {
-		activeMR = fields.ActiveMR
-	}
-	sourceHint := issues[0].HookBead
-	if fields != nil {
-		sourceHint = fields.LastSourceIssue
-		if sourceHint == "" {
-			sourceHint = fields.HookBead
-		}
-		if sourceHint == "" {
-			sourceHint = issues[0].HookBead
-		}
-	}
-	return activeMR, sourceHint
+	return fields.ActiveMR, sourceHint
 }
 
 type beadCLIShower struct {

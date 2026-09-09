@@ -1251,7 +1251,7 @@ func updateAgentBeadState(townRoot, agent, state, _ string) { // reason unused b
 		return
 	}
 
-	_ = beads.New(townRoot).UpdateAgentState(beadID, state) // Best effort
+	_ = beads.New(townRoot).ForAgentBead().UpdateAgentState(beadID, state) // Best effort
 }
 
 // runDeaconStaleHooks finds and unhooks stale hooked beads.
@@ -1376,7 +1376,7 @@ func runDeaconPause(cmd *cobra.Command, args []string) error {
 	// Write agent_state=paused to the Deacon bead so the stuck-agent-dog plugin
 	// (and other ZFC readers) see authoritative pause state without inferring
 	// from heartbeat mtime. hq-sa8de Phase A.
-	if err := beads.New(townRoot).UpdateAgentState(beads.DeaconBeadIDTown(), string(beads.AgentStatePaused)); err != nil {
+	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(beads.DeaconBeadIDTown(), string(beads.AgentStatePaused)); err != nil {
 		style.PrintWarning("could not sync agent_state=paused to Deacon bead: %v", err)
 	}
 
@@ -1416,7 +1416,7 @@ func runDeaconResume(cmd *cobra.Command, args []string) error {
 
 	// Write agent_state=idle to the Deacon bead. The Deacon will transition to
 	// patrolling on its next cycle. hq-sa8de Phase A.
-	if err := beads.New(townRoot).UpdateAgentState(beads.DeaconBeadIDTown(), string(beads.AgentStateIdle)); err != nil {
+	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(beads.DeaconBeadIDTown(), string(beads.AgentStateIdle)); err != nil {
 		style.PrintWarning("could not sync agent_state=idle to Deacon bead: %v", err)
 	}
 

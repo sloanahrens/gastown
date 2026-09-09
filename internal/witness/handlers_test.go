@@ -688,20 +688,6 @@ func TestDetectZombiePolecats_EmptyPolecatsDir(t *testing.T) {
 	}
 }
 
-func TestGetAgentBeadState_EmptyOutput(t *testing.T) {
-	t.Parallel()
-	// getAgentBeadState with invalid bead ID should return empty strings
-	// (it calls bd which won't exist in test, so it returns empty)
-	state, hook := getAgentBeadState(DefaultBdCli(), "/nonexistent", "nonexistent-bead")
-
-	if state != "" {
-		t.Errorf("state = %q, want empty for missing bead", state)
-	}
-	if hook != "" {
-		t.Errorf("hook = %q, want empty for missing bead", hook)
-	}
-}
-
 func TestSessionRecreated_NoSession(t *testing.T) {
 	t.Parallel()
 	// When the session doesn't exist, sessionRecreated should return false
@@ -1420,15 +1406,6 @@ func TestDetectZombie_AgentDeadInLiveSession(t *testing.T) {
 	shouldSkip := sessionAlive && doneIntent == nil && agentAlive
 	if !shouldSkip {
 		t.Error("expected skip for live session with alive agent")
-	}
-}
-
-func TestGetAgentBeadLabels_NoBdAvailable(t *testing.T) {
-	t.Parallel()
-	// When bd is not available, should return nil without panicking
-	labels := getAgentBeadLabels(DefaultBdCli(), "/nonexistent", "nonexistent-bead")
-	if labels != nil {
-		t.Errorf("getAgentBeadLabels = %v, want nil when bd unavailable", labels)
 	}
 }
 
@@ -2404,27 +2381,20 @@ func TestProcessDiscoveredCompletion_EscalatedNoMR(t *testing.T) {
 
 func TestGetAgentBeadFields_NoAgentBead(t *testing.T) {
 	t.Parallel()
-	// When bd fails, should return nil
-	bd, _ := mockBd(
-		func(args []string) (string, error) { return "", fmt.Errorf("bd: not found") },
-		func(args []string) error { return fmt.Errorf("bd: not found") },
-	)
-	fields := getAgentBeadFields(bd, "/tmp", "gt-fake-agent")
+	// A workDir with no beads database: GetAgentBead's Show fails, so fields is nil.
+	fields := getAgentBeadFields(t.TempDir(), "gt-fake-agent")
 	if fields != nil {
-		t.Error("expected nil fields when bd unavailable")
+		t.Error("expected nil fields when no beads database is reachable")
 	}
 }
 
-func TestClearCompletionMetadata_NoBd(t *testing.T) {
+func TestClearCompletionMetadata_NoBeadsDir(t *testing.T) {
 	t.Parallel()
-	// When bd fails, should return error
-	bd, _ := mockBd(
-		func(args []string) (string, error) { return "", fmt.Errorf("bd: not found") },
-		func(args []string) error { return fmt.Errorf("bd: not found") },
-	)
-	err := clearCompletionMetadata(bd, "/tmp", "gt-fake-agent")
+	// A workDir with no beads database: the wrapper's Show fails and the
+	// function must surface that as an error, not silently succeed.
+	err := clearCompletionMetadata(t.TempDir(), "gt-fake-agent")
 	if err == nil {
-		t.Error("expected error when bd unavailable")
+		t.Error("expected error when no beads database is reachable")
 	}
 }
 
