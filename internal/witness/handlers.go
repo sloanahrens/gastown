@@ -1005,21 +1005,17 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	rigBeads := beads.New(workDir)
 	_, fields, err := rigBeads.ForAgentBead().GetAgentBead(agentID)
-	input := polecat.SlotReuseInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, GitCheckFailed: err != nil || fields == nil}
+	input := polecat.SlotReuseInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, HookBeadSafe: true, GitCheckFailed: err != nil || fields == nil}
 	issueID := ""
-	hookSafe := true
-	hookTerminal := false
 	if fields != nil {
 		issueID = fields.LastSourceIssue
 		if issueID == "" {
 			issueID = fields.HookBead
 		}
 		if fields.HookBead != "" {
-			hookTerminal = witnessIssueTerminal(rigBeads, fields.HookBead)
-			hookSafe = hookTerminal
-			if !hookSafe {
-				input.HookBead = fields.HookBead
-			}
+			input.HookBead = fields.HookBead
+			input.HookBeadTerminal = witnessIssueTerminal(rigBeads, fields.HookBead)
+			input.HookBeadSafe = input.HookBeadTerminal
 		}
 		input.PushFailed = fields.PushFailed
 		input.MRFailed = fields.MRFailed
@@ -1054,9 +1050,12 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	} else {
 		input.GitCheckFailed = true
 	}
+	// gt-hsg: gitSafe is passed straight into AssessActiveMR below and
+	// nowhere else — DecideSlotReuse re-derives it, and IgnoreCleanupStatus,
+	// from these same raw facts via NewWorkstateInput. Resolving it here too
+	// would be exactly the duplicated promotion-policy copy the unification
+	// requirement exists to prevent.
 	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
-	activeMRSafe := true
-	sourceTerminal := fields != nil && issueID != "" && witnessIssueTerminal(rigBeads, issueID)
 	if fields != nil && fields.ActiveMR != "" {
 		sourceHint := fields.LastSourceIssue
 		if sourceHint == "" {
@@ -1066,17 +1065,13 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
-		activeMRSafe = !assessment.Pending
 		if assessment.SourceTerminal {
-			sourceTerminal = true
+			input.ActiveMRSourceTerminal = true
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
 	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, targetRefs)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
-	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
-		input.IgnoreCleanupStatus = true
-	}
 	input.MQNotRequired = witnessMQNotRequiredSource(rigBeads, issueID)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
 		mr, err := rigBeads.FindMRForBranchAny(input.Branch)
