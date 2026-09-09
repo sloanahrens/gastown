@@ -3476,6 +3476,85 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 	}
 }
 
+// TestVerifyPushedCommitReachableFromPushTargetAllowsContentPreservedRebase
+// reproduces gt-3fq: a sequential merge queue rebases each MR onto the moved
+// target before merging, so the SHA that lands is never the submitted
+// commit_sha even though the change is identical. The proof check must treat
+// that as verified, not as an unverified push.
+func TestVerifyPushedCommitReachableFromPushTargetAllowsContentPreservedRebase(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.CreateBranch("feature"); err != nil {
+		t.Fatalf("CreateBranch feature: %v", err)
+	}
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write feature.txt: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add feature.txt: %v", err)
+	}
+	if err := g.Commit("feat: add feature"); err != nil {
+		t.Fatalf("Commit feature: %v", err)
+	}
+	submitted, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev submitted: %v", err)
+	}
+
+	// Simulate another MR landing on the target ahead of this one, moving main.
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "other.txt"), []byte("other\n"), 0644); err != nil {
+		t.Fatalf("write other.txt: %v", err)
+	}
+	if err := g.Add("other.txt"); err != nil {
+		t.Fatalf("Add other.txt: %v", err)
+	}
+	if err := g.Commit("other: unrelated MR landed first"); err != nil {
+		t.Fatalf("Commit other: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push main: %v", err)
+	}
+
+	// Rebase the submitted branch onto the moved target — same patch, new SHA.
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature for rebase: %v", err)
+	}
+	if err := g.Rebase(mainBranch); err != nil {
+		t.Fatalf("Rebase feature onto main: %v", err)
+	}
+	rebased, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev rebased: %v", err)
+	}
+	if rebased == submitted {
+		t.Fatal("rebase should have rewritten the commit SHA")
+	}
+
+	// Land the rebased commit on main, as the refinery would.
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main for landing: %v", err)
+	}
+	if err := g.MergeFFOnly("feature"); err != nil {
+		t.Fatalf("MergeFFOnly feature: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push landed main: %v", err)
+	}
+
+	// The originally-submitted SHA never appears on the target, but its
+	// content did — the proof check must succeed.
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, submitted); err != nil {
+		t.Fatalf("Verify should succeed for content-preserved rebase: %v", err)
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)

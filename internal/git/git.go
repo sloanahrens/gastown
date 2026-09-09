@@ -2110,9 +2110,18 @@ func (g *Git) VerifyPushedCommit(remote, branch, commit string) error {
 	return nil
 }
 
-// VerifyPushedCommitReachableFromPushTarget verifies that commit is reachable
-// from the push target branch. Use this only for shared target branches where a
-// later fast-forward push by another actor may legitimately advance the tip.
+// VerifyPushedCommitReachableFromPushTarget verifies that commit landed on the
+// push target branch, either literally (exact tip or ancestor) or by content
+// (same patch replayed on a moved base). Use this only for shared target
+// branches where a later fast-forward push by another actor may legitimately
+// advance the tip.
+//
+// A sequential merge queue rebases each MR onto the moved target before
+// merging, which rewrites the submitted commit's SHA even though its content
+// landed unchanged — a strict ancestor check alone would fail for every MR
+// that required a rebase. Falling back to content-preservation (same
+// technique as branch-preservation checks elsewhere, see aa-apw) recognizes
+// that case instead of misreporting it as an unverified push.
 func (g *Git) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
@@ -2137,10 +2146,13 @@ func (g *Git) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit s
 	if err != nil {
 		return fmt.Errorf("verified_push_failed: unable to verify commit %s on %s/%s: %w", shortSHA(commit), remote, branch, err)
 	}
-	if !reachable {
-		return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", shortSHA(commit), remote, branch, shortSHA(tip))
+	if reachable {
+		return nil
 	}
-	return nil
+	if status, statusErr := g.preservationOfRefAgainstRef(commit, "FETCH_HEAD"); statusErr == nil && status.Preserved {
+		return nil
+	}
+	return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", shortSHA(commit), remote, branch, shortSHA(tip))
 }
 
 func parseLSRemoteTip(out, branch string) string {
