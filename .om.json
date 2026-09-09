@@ -10,22 +10,22 @@
     {
       "name": "correctness",
       "weight": 3,
-      "description": "Logic errors, unhandled edge cases, and broken invariants outrank all else."
+      "guidance": "Logic errors, unhandled edge cases, and broken invariants outrank all else."
     },
     {
       "name": "regression-safety",
       "weight": 3,
-      "description": "This is a large, heavily-tested codebase run in production by its own agents. Weight hermetic tests, behavior preservation, and blast radius: a fix that unmasks or breaks distant tests, leaks live-environment state into tests, or changes shared plumbing without coverage is a finding even when the local change looks correct."
+      "guidance": "This is a large, heavily-tested codebase run in production by its own agents. Weight hermetic tests, behavior preservation, and blast radius: a fix that unmasks or breaks distant tests, leaks live-environment state into tests, or changes shared plumbing without coverage is a finding even when the local change looks correct."
     },
     {
       "name": "upstream-mergeability",
       "weight": 2,
-      "description": "This is a fork of gastownhall/gastown that may contribute patches upstream. Flag gratuitous divergence: unrelated reformatting, renames of upstream identifiers, fork-local conventions leaking into shared code, or changes that could be expressed as smaller upstream-friendly diffs."
+      "guidance": "This is a fork of gastownhall/gastown that may contribute patches upstream. Flag gratuitous divergence: unrelated reformatting, renames of upstream identifiers, fork-local conventions leaking into shared code, or changes that could be expressed as smaller upstream-friendly diffs."
     },
     {
       "name": "tests",
       "weight": 2,
-      "description": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes."
+      "guidance": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes."
     }
   ]
 }
