@@ -2442,6 +2442,18 @@ type DiscoverCompletionsResult struct {
 	Errors     []error               // Transient errors
 }
 
+// discoverCompletionsConcurrency bounds how many polecats are inspected in
+// parallel by DiscoverCompletions. Each polecat may trigger a `bd show` call
+// and, when an active MR is present, a network-bound `git ls-remote` (capped
+// per-call at remoteQueryTimeout by internal/git). Before parallelization this
+// loop was strictly serial, so the whole completion-discovery phase cost
+// scaled as O(polecat_count × per_call_time) — on rigs with 17-30 polecats
+// this blew past the deacon patrol's completion-discovery timeout entirely
+// (gt-ftt). A bounded worker pool caps the phase cost at roughly
+// O(per_call_time × ceil(polecat_count / discoverCompletionsConcurrency))
+// instead, without unbounded fan-out of subprocesses/network calls.
+const discoverCompletionsConcurrency = 8
+
 // DiscoverCompletions scans all polecat agent beads for completion metadata
 // written by gt done. With self-managed completion (gt-1qlg), this is now a
 // SAFETY NET — polecats transition to idle directly and nudge refinery themselves.
@@ -2459,6 +2471,9 @@ type DiscoverCompletionsResult struct {
 //
 // This implements 'Discover Don't Track' (PRIMING.md principle #4): the witness
 // observes completion state from beads each cycle rather than relying on mail.
+//
+// Polecats are inspected concurrently (bounded by discoverCompletionsConcurrency)
+// so one polecat with a slow or unreachable git remote can't gate the whole scan.
 func DiscoverCompletions(bd *BdCli, workDir, rigName string, router *mail.Router) *DiscoverCompletionsResult {
 	result := &DiscoverCompletionsResult{}
 
@@ -2474,64 +2489,89 @@ func DiscoverCompletions(bd *BdCli, workDir, rigName string, router *mail.Router
 		return result
 	}
 
+	var polecatNames []string
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-
-		polecatName := entry.Name()
-		prefix := beads.GetPrefixForRig(townRoot, rigName)
-		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-		result.Checked++
-
-		// Get full agent fields including completion metadata
-		fields := getAgentBeadFields(bd, workDir, agentBeadID)
-		if fields == nil || fields.ExitType == "" || fields.CompletionTime == "" {
-			continue // No completion metadata — skip
-		}
-
-		sourceIssue := fields.LastSourceIssue
-		if sourceIssue == "" {
-			sourceIssue = fields.HookBead
-		}
-
-		discovery := CompletionDiscovery{
-			PolecatName:    polecatName,
-			AgentBeadID:    agentBeadID,
-			ExitType:       fields.ExitType,
-			IssueID:        sourceIssue,
-			MRID:           fields.MRID,
-			Branch:         fields.Branch,
-			MRFailed:       fields.MRFailed,
-			PushFailed:     fields.PushFailed,
-			CompletionTime: fields.CompletionTime,
-		}
-
-		// Build a payload compatible with the existing routing logic
-		payload := &PolecatDonePayload{
-			PolecatName: polecatName,
-			Exit:        fields.ExitType,
-			IssueID:     sourceIssue,
-			MRID:        fields.MRID,
-			Branch:      fields.Branch,
-			MRFailed:    fields.MRFailed,
-			PushFailed:  fields.PushFailed,
-		}
-
-		// Route based on exit type and MR presence
-		processDiscoveredCompletion(bd, workDir, rigName, payload, &discovery)
-
-		// Clear completion metadata only after successful processing. If cleanup
-		// wisp creation/update failed, leave metadata for the next patrol retry.
-		if discovery.Error == nil {
-			if err := clearCompletionMetadata(bd, workDir, agentBeadID); err != nil {
-				result.Errors = append(result.Errors,
-					fmt.Errorf("clearing completion metadata for %s: %w", polecatName, err))
-			}
-		}
-
-		result.Discovered = append(result.Discovered, discovery)
+		polecatNames = append(polecatNames, entry.Name())
 	}
+
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, discoverCompletionsConcurrency)
+
+	for _, polecatName := range polecatNames {
+		wg.Add(1)
+		go func(polecatName string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+
+			// Get full agent fields including completion metadata
+			fields := getAgentBeadFields(bd, workDir, agentBeadID)
+			if fields == nil || fields.ExitType == "" || fields.CompletionTime == "" {
+				mu.Lock()
+				result.Checked++
+				mu.Unlock()
+				return // No completion metadata — skip
+			}
+
+			sourceIssue := fields.LastSourceIssue
+			if sourceIssue == "" {
+				sourceIssue = fields.HookBead
+			}
+
+			discovery := CompletionDiscovery{
+				PolecatName:    polecatName,
+				AgentBeadID:    agentBeadID,
+				ExitType:       fields.ExitType,
+				IssueID:        sourceIssue,
+				MRID:           fields.MRID,
+				Branch:         fields.Branch,
+				MRFailed:       fields.MRFailed,
+				PushFailed:     fields.PushFailed,
+				CompletionTime: fields.CompletionTime,
+			}
+
+			// Build a payload compatible with the existing routing logic
+			payload := &PolecatDonePayload{
+				PolecatName: polecatName,
+				Exit:        fields.ExitType,
+				IssueID:     sourceIssue,
+				MRID:        fields.MRID,
+				Branch:      fields.Branch,
+				MRFailed:    fields.MRFailed,
+				PushFailed:  fields.PushFailed,
+			}
+
+			// Route based on exit type and MR presence
+			processDiscoveredCompletion(bd, workDir, rigName, payload, &discovery)
+
+			// Clear completion metadata only after successful processing. If cleanup
+			// wisp creation/update failed, leave metadata for the next patrol retry.
+			var clearErr error
+			if discovery.Error == nil {
+				if err := clearCompletionMetadata(bd, workDir, agentBeadID); err != nil {
+					clearErr = fmt.Errorf("clearing completion metadata for %s: %w", polecatName, err)
+				}
+			}
+
+			mu.Lock()
+			result.Checked++
+			result.Discovered = append(result.Discovered, discovery)
+			if clearErr != nil {
+				result.Errors = append(result.Errors, clearErr)
+			}
+			mu.Unlock()
+		}(polecatName)
+	}
+
+	wg.Wait()
 
 	return result
 }
