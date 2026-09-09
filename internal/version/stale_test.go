@@ -263,6 +263,42 @@ func TestCheckStaleBinary_OnMainBehind(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin: on main, but
+// the local branch pointer was never fast-forwarded past a commit that
+// predates the binary (e.g. refinery merged to origin without updating this
+// checkout). The stale local ref must not be treated as ground truth when a
+// fresher build-branch ref (origin/main) already contains the binary commit
+// (gt-ugo).
+func TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin(t *testing.T) {
+	dir := newGitRepo(t)
+	staleTip := gitCommit(t, dir, "a.go", "1")
+	freshTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "branch", "-M", "main")
+	// Simulate a local main pointer that lags its remote: the branch ref
+	// points at staleTip even though HEAD's history already produced
+	// freshTip, which is now only reachable via origin/main.
+	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
+	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
+	setBinaryCommit(t, freshTip)
+
+	info := CheckStaleBinary(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.OnMainBranch {
+		t.Fatalf("OnMainBranch should be true on main")
+	}
+	if info.CompareRef != "origin/main" {
+		t.Errorf("CompareRef = %q, want \"origin/main\" (stale local main must not win)", info.CompareRef)
+	}
+	if info.RepoCommit != freshTip {
+		t.Errorf("RepoCommit = %q, want origin/main tip %q", info.RepoCommit, freshTip)
+	}
+	if info.IsStale {
+		t.Errorf("binary at origin/main tip must not be reported stale")
+	}
+}
+
 // TestCheckStaleBinary_NoBuildBranchSkips: feature branch, no main/master/
 // carry/remote — the check must skip rather than diff against feature HEAD.
 func TestCheckStaleBinary_NoBuildBranchSkips(t *testing.T) {

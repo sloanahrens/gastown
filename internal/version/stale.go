@@ -141,12 +141,25 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	// relative to a *build branch*.
 	var compareCommit string
 	if info.OnMainBranch {
-		// Already on a build branch — its HEAD is the build branch.
+		// Already on a build branch — its HEAD is normally the build branch.
 		info.CompareRef = branch
 		compareCommit, err = resolveGitCommit(repoDir, "HEAD")
 		if err != nil {
 			info.Error = fmt.Errorf("cannot resolve build branch HEAD: %w", err)
 			return info
+		}
+
+		// Local main/master can lag its remote (e.g. the refinery merges to
+		// origin without fast-forwarding this checkout's branch pointer). If
+		// the local tip doesn't even contain the binary commit, it predates
+		// the binary and is not a meaningful staleness reference — fall
+		// through to the freshest build-branch ref that does contain it
+		// (origin/main preferred; see resolveBuildBranchRef) (gt-ugo).
+		if !isAncestor(repoDir, binaryCommit, compareCommit) {
+			if ref, ok := resolveBuildBranchRef(repoDir, binaryCommit); ok {
+				info.CompareRef = ref.display
+				compareCommit = ref.commit
+			}
 		}
 	} else {
 		// Resolve a real build-branch ref instead of the feature HEAD.
