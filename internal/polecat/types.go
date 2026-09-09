@@ -38,9 +38,12 @@ const (
 	StateIdle State = "idle"
 
 	// StateDone means the polecat has completed its assigned work and called
-	// 'gt done'. This is normally a transient state - the session should exit
-	// immediately after. If a polecat remains in StateDone, it's a "zombie":
-	// the cleanup failed and the session is stuck.
+	// 'gt done'; its session has exited. No code path promotes done to idle
+	// today (gt-iljx) — done + no session + clean tree is the normal resting
+	// state a completed polecat sits in, not a transient one (see
+	// IsReuseEligible below). That is not, by itself, a "zombie" — zombie
+	// detection is a separate, session/state-mismatch condition (see
+	// isZombieState in internal/witness).
 	StateDone State = "done"
 
 	// StateReviewNeeded means a tmux session is still live but no current hooked
@@ -85,10 +88,11 @@ func (s State) IsIdle() bool {
 
 // IsReuseEligible reports whether a polecat in this state may be considered
 // for slot reuse, subject to the workstate predicates (DecideWorkstate).
-// StateDone is included because it is observed before the polecat's own idle
-// transition lands; the allocator (FindIdlePolecat) and the reporting path
-// must apply the same set or 'gt polecat list' advertises a reusable pool
-// that 'gt sling' can never allocate from (gt-uu6).
+// StateDone is included because it IS a normal resting state, not a
+// transient one — there is no code path that promotes it to StateIdle
+// (gt-iljx); the allocator (FindIdlePolecat) and the reporting path must
+// apply the same set or 'gt polecat list' advertises a reusable pool that
+// 'gt sling' can never allocate from (gt-uu6).
 func (s State) IsReuseEligible() bool {
 	return s == StateIdle || s == StateDone
 }

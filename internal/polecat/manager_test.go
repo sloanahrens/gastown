@@ -1636,6 +1636,75 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 	}
 }
 
+// TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle is a regression test
+// for gt-uu6 exercised through the real allocator entrypoint (not just the
+// IsReuseEligible predicate in isolation, see TestStateIsReuseEligible).
+// No code path promotes a completed polecat from done to idle (gt-iljx) — a
+// clean done polecat with no session IS the normal resting state. FindIdlePolecat
+// must be able to hand it out, or every rig freezes at its polecat directory
+// cap the moment agent_state=done accumulates and nothing is ever idle.
+func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	_ = git.NewGit(p.ClonePath).CleanForce()
+
+	// Override the bd stub installed by setupCanonicalBranchManagerTest so
+	// 'show' reports agent_state=done instead of idle — same clean facts
+	// (no hook, no active MR) otherwise. Prepending to the current PATH
+	// keeps it ahead of the earlier idle-reporting mock.
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+cmd=""
+for arg in "$@"; do
+  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
+done
+case "$cmd" in
+  show)
+    id=""
+    seen_show=0
+    for arg in "$@"; do
+      if [ "$seen_show" = 0 ]; then
+        [ "$arg" = "show" ] && seen_show=1
+        continue
+      fi
+      case "$arg" in --*) continue ;; esac
+      id="$arg"
+      break
+    done
+    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: done\\nhook_bead: null\\ncleanup_status: clean\\nactive_mr: null"}]\n' "$id"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	found, err := mgr.FindIdlePolecat()
+	if err != nil {
+		t.Fatalf("FindIdlePolecat: %v", err)
+	}
+	if found == nil {
+		t.Fatal("FindIdlePolecat returned nil with a clean StateDone candidate and zero idle polecats — gt-uu6 regressed")
+	}
+	if found.Name != "toast" {
+		t.Fatalf("found.Name = %q, want toast", found.Name)
+	}
+	if found.State != StateDone {
+		t.Fatalf("found.State = %q, want %q", found.State, StateDone)
+	}
+}
+
 func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
