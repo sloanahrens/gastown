@@ -1927,8 +1927,62 @@ func (e *Engineer) recordConflictTaskOnMR(mr *MRInfo, taskID string, retryCount 
 	mrFields.ConflictTaskID = taskID
 	mrFields.RetryCount = retryCount
 	mrFields.LastConflictSHA = conflictSHA
+	// A conflict means the target has diverged since any prior pre-verification
+	// run. Clear it so a future fast-path never skips gates against a base that
+	// no longer reflects reality (gt-nao: pre_verified was left stale here).
+	mrFields.PreVerified = false
+	mrFields.PreVerifiedAt = ""
+	mrFields.PreVerifiedBase = ""
 	newDesc := beads.SetMRFields(mrBead, mrFields)
 	return e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc})
+}
+
+// RecordConflict is the CLI-facing entry point for recording a merge conflict
+// against an MR bead: it creates a dispatchable conflict-resolution task,
+// blocks the MR on that task, and writes conflict_task_id/last_conflict_sha/
+// retry_count (and clears stale pre_verified metadata) onto the MR wisp.
+//
+// This mirrors the Conflict branch of HandleMRInfoFailure but is reachable
+// independently of the fully-mechanized merge path, so the mol-refinery-patrol
+// formula (which drives conflict handling today) can call it via
+// `gt mq record-conflict` instead of hand-rolling `bd create` and leaving the
+// MR wisp's conflict/pre-verification fields out of sync (gt-nao).
+//
+// Returns the created task ID, or "" with a nil error if the merge slot was
+// busy and creation was deferred to a later cycle (not a failure).
+func (e *Engineer) RecordConflict(mrID string) (string, error) {
+	mrBead, err := e.beads.Show(mrID)
+	if err != nil {
+		return "", fmt.Errorf("show MR %s: %w", mrID, err)
+	}
+	fields := beads.ParseMRFields(mrBead)
+	if fields == nil {
+		return "", fmt.Errorf("MR %s has no parsable MR fields", mrID)
+	}
+	mr := issueToMRInfo(mrBead, fields)
+
+	taskID, err := e.createConflictResolutionTaskForMR(mr, ProcessResult{Conflict: true})
+	if err != nil {
+		return "", fmt.Errorf("create conflict resolution task for %s: %w", mrID, err)
+	}
+	if taskID == "" {
+		// Merge slot was busy — deferred, not an error. MR stays in queue.
+		return "", nil
+	}
+
+	if err := e.beads.AddDependency(mr.ID, taskID); err != nil {
+		return taskID, fmt.Errorf("block MR %s on task %s: %w", mrID, taskID, err)
+	}
+
+	conflictSHA, revErr := e.git.Rev("origin/" + mr.Target)
+	if revErr != nil {
+		conflictSHA = "unknown-sha"
+	}
+	if err := e.recordConflictTaskOnMR(mr, taskID, mr.RetryCount+1, conflictSHA); err != nil {
+		return taskID, fmt.Errorf("record conflict metadata on %s: %w", mrID, err)
+	}
+
+	return taskID, nil
 }
 
 // closeSupersededConflictArtifacts closes conflict-resolution tasks made moot

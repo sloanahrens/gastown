@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 16
+version = 17
 
 [vars]
 [vars.wisp_type]
@@ -381,38 +381,30 @@ If merge rehearsal FAILED with conflicts:
 git merge --abort
 ```
 
-2. **Record conflict metadata**:
+2. **Record the conflict on the MR wisp (REQUIRED — single command)**:
 ```bash
-# Capture target SHA for reference
-TARGET_SHA=$(git rev-parse origin/<merge-target>)
-BRANCH_SHA=$(git rev-parse origin/<polecat-branch>)
+gt mq record-conflict <rig> <mr-bead-id>
 ```
 
-3. **Create conflict-resolution task**:
-```bash
-bd create --type=task --priority=1 \
-  --title="Resolve merge conflicts: <original-issue-title>" \
-  --description="## Conflict Resolution Required
+This single command handles everything: it creates the dispatchable
+conflict-resolution task, blocks the MR on that task (it re-enters the queue
+once the task closes), and writes `conflict_task_id`, `last_conflict_sha`,
+and `retry_count` onto the MR bead. It also clears any `pre_verified` metadata
+on the MR — a conflict means the target has moved, so a prior pre-verification
+is stale and must not let a later fast-path skip gates.
 
-Original MR: <mr-bead-id>
-Branch: <polecat-branch>
-Original Issue: <issue-id>
-Conflict with target <merge-target> at: ${TARGET_SHA}
-Branch SHA: ${BRANCH_SHA}
+**Do NOT** recreate this bookkeeping by hand with a raw `bd create` — that
+leaves `conflict_task_id`/`last_conflict_sha` null and `pre_verified` stale on
+the MR wisp (gt-nao), silently breaking the conflict audit trail.
 
-## Instructions
-1. Clone/checkout the branch
-2. Merge target without rewriting branch history: git merge --no-ff origin/<merge-target>
-3. Resolve conflicts
-4. Push: git push origin <branch>
-5. Close this task when done
+If the command reports the conflict was deferred (merge slot busy), no task
+was created — the MR simply stays in queue and will be retried on a future
+patrol cycle. This is not a failure.
 
-The MR will be re-queued for processing after conflicts are resolved."
-```
-
-4. **Skip this MR** (do NOT delete branch or close MR bead):
+3. **Skip this MR** (do NOT delete branch or close MR bead):
 - Leave branch intact for conflict resolution
-- Leave MR bead open (will be re-processed after resolution)
+- Leave MR bead open (will be re-processed after the conflict task closes,
+  or retried next cycle if the conflict was deferred)
 - Continue to loop-check for next branch
 
 **CRITICAL**: Never delete a branch that has conflicts. The branch contains

@@ -214,6 +214,27 @@ type mqPostMergeBranchCleanup struct {
 	LocalDeleted  bool
 }
 
+var mqConflictCmd = &cobra.Command{
+	Use:   "record-conflict <rig> <mr-id>",
+	Short: "Record a merge conflict against an MR and file a resolution task",
+	Long: `Record a merge conflict against a merge request.
+
+This command consolidates conflict-handling into a single atomic operation:
+	 1. Create a dispatchable conflict-resolution task
+	 2. Block the MR on that task (it re-enters the queue once the task closes)
+	 3. Record conflict_task_id, last_conflict_sha, and retry_count on the MR
+	 4. Clear any pre_verified metadata, which is now stale (the target moved)
+
+Designed for use by the refinery formula immediately after aborting a
+conflicted merge rehearsal, so the MR wisp's bookkeeping stays in sync with
+the conflict-resolution task it depends on.
+
+Examples:
+  gt mq record-conflict gastown gt-mr-abc123`,
+	Args: cobra.ExactArgs(2),
+	RunE: runMQConflict,
+}
+
 var mqStatusCmd = &cobra.Command{
 	Use:   "status <id>",
 	Short: "Show detailed merge request status",
@@ -368,6 +389,7 @@ func init() {
 	mqCmd.AddCommand(mqRejectCmd)
 	mqCmd.AddCommand(mqStatusCmd)
 	mqCmd.AddCommand(mqPostMergeCmd)
+	mqCmd.AddCommand(mqConflictCmd)
 
 	// Integration branch subcommands
 	mqIntegrationCreateCmd.Flags().StringVar(&mqIntegrationCreateBranch, "branch", "", "Override branch name template (supports {title}, {epic}, {prefix}, {user})")
@@ -524,6 +546,32 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s\n", style.Dim.Render("Worker notified via mail"))
 	}
 
+	return nil
+}
+
+func runMQConflict(_ *cobra.Command, args []string) error {
+	rigName := args[0]
+	mrID := args[1]
+
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return err
+	}
+
+	eng := refinery.NewEngineer(r)
+	taskID, err := eng.RecordConflict(mrID)
+	if err != nil {
+		return fmt.Errorf("recording conflict for %s: %w", mrID, err)
+	}
+
+	if taskID == "" {
+		fmt.Printf("%s Conflict resolution deferred for %s (merge slot busy, will retry)\n", style.Dim.Render("○"), mrID)
+		return nil
+	}
+
+	fmt.Printf("%s Recorded conflict for %s\n", style.Bold.Render("✓"), mrID)
+	fmt.Printf("  Conflict task: %s\n", taskID)
+	fmt.Printf("  %s\n", style.Dim.Render("MR blocked until the task closes"))
 	return nil
 }
 
