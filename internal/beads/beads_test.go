@@ -1438,6 +1438,36 @@ func TestBdSupportsAllowStale_TimeoutTreatsProbeAsUnsupported(t *testing.T) {
 	}
 }
 
+// TestResolveBdAllowStaleProbeTimeout locks in lazy, per-call resolution:
+// setting the override var after package init must still take effect. A
+// var resolved once at package-init time (the shape this replaces) could
+// never pass this test, since the value would already be fixed before the
+// test body runs.
+func TestResolveBdAllowStaleProbeTimeout(t *testing.T) {
+	bdAllowStaleMu.Lock()
+	prevTimeout := bdAllowStaleProbeTimeout
+	bdAllowStaleMu.Unlock()
+	t.Cleanup(func() {
+		bdAllowStaleMu.Lock()
+		bdAllowStaleProbeTimeout = prevTimeout
+		bdAllowStaleMu.Unlock()
+	})
+
+	bdAllowStaleMu.Lock()
+	bdAllowStaleProbeTimeout = 0
+	bdAllowStaleMu.Unlock()
+	if got := resolveBdAllowStaleProbeTimeout(); got != defaultBdAllowStaleProbeTimeout {
+		t.Fatalf("expected default %v when unset, got %v", defaultBdAllowStaleProbeTimeout, got)
+	}
+
+	bdAllowStaleMu.Lock()
+	bdAllowStaleProbeTimeout = 42 * time.Millisecond
+	bdAllowStaleMu.Unlock()
+	if got := resolveBdAllowStaleProbeTimeout(); got != 42*time.Millisecond {
+		t.Fatalf("expected override 42ms after set, got %v", got)
+	}
+}
+
 func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 	// The helper subprocess re-execs this same test binary, which runs its
 	// own TestMain (the hermetic harness) before this body ever sees the

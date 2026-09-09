@@ -37,10 +37,38 @@ var (
 	bdAllowStaleMu     sync.Mutex
 	bdAllowStalePath   string
 	bdAllowStaleResult bool
-	// bdAllowStaleProbeTimeout bounds the capability probe so a wedged bd
-	// binary cannot hang higher-level commands such as gt status.
-	bdAllowStaleProbeTimeout = 2 * time.Second
+	// bdAllowStaleProbeTimeout, when non-zero, overrides the capability-probe
+	// timeout. Zero (the default) means "use defaultBdAllowStaleProbeTimeout".
+	// Tests set this directly to exercise timeout handling without waiting for
+	// the production default; it must stay a plain var read lazily inside the
+	// probe (never resolved once at package-init time), otherwise a value
+	// baked in before a test's hermetic env setup runs would leak ambient
+	// state into the probe the same way this package's bd subprocess calls
+	// must not (see gt-ele).
+	bdAllowStaleProbeTimeout time.Duration
 )
+
+// defaultBdAllowStaleProbeTimeout bounds the capability probe so a wedged bd
+// binary cannot hang higher-level commands such as gt status. This is
+// intentionally much shorter than bdSubprocessTimeout: the probe is a fast
+// fail-closed capability check (timeout means "treat as unsupported"), not a
+// real command whose failure needs to surface to the caller. The prior 2s
+// bound was too tight under full-suite CPU contention, where even a trivial
+// subprocess spawn can exceed it — see gt-ele.
+const defaultBdAllowStaleProbeTimeout = 10 * time.Second
+
+// resolveBdAllowStaleProbeTimeout returns the effective probe timeout. It is
+// called fresh on every probe rather than cached in a var initializer, so
+// tests that set bdAllowStaleProbeTimeout ahead of a call are always honored.
+func resolveBdAllowStaleProbeTimeout() time.Duration {
+	bdAllowStaleMu.Lock()
+	override := bdAllowStaleProbeTimeout
+	bdAllowStaleMu.Unlock()
+	if override > 0 {
+		return override
+	}
+	return defaultBdAllowStaleProbeTimeout
+}
 
 // ResetBdAllowStaleCacheForTest clears the cached bd --allow-stale capability.
 // It exists for tests that swap bd binaries on PATH within a single process.
@@ -73,7 +101,7 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 		return cachedResult
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), bdAllowStaleProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bdPath, "--allow-stale", "version") //nolint:gosec // G204: bd is a trusted internal tool
