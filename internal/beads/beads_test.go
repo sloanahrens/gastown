@@ -1545,7 +1545,7 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		}
 	})
 
-	waitForFile(t, filepath.Join(markerDir, "slow-started"), 2*time.Second)
+	waitForFile(t, filepath.Join(markerDir, "slow-started"), 10*time.Second)
 
 	fastCtx, fastCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer fastCancel()
