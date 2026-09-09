@@ -83,6 +83,16 @@ func (s State) IsIdle() bool {
 	return s == StateIdle
 }
 
+// IsReuseEligible reports whether a polecat in this state may be considered
+// for slot reuse, subject to the workstate predicates (DecideWorkstate).
+// StateDone is included because it is observed before the polecat's own idle
+// transition lands; the allocator (FindIdlePolecat) and the reporting path
+// must apply the same set or 'gt polecat list' advertises a reusable pool
+// that 'gt sling' can never allocate from (gt-uu6).
+func (s State) IsReuseEligible() bool {
+	return s == StateIdle || s == StateDone
+}
+
 // Polecat represents a worker agent in a rig.
 type Polecat struct {
 	// Name is the polecat identifier.
