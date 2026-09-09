@@ -35,13 +35,13 @@ func (b *Beads) Store() beadsdk.Storage {
 // The store is used for direct SDK calls, bypassing bd subprocess spawning.
 // Callers are responsible for closing the store when done.
 func NewWithStore(workDir string, store beadsdk.Storage) *Beads {
-	return &Beads{workDir: workDir, store: store}
+	return newBeads(beadsFields{workDir: workDir, store: store})
 }
 
 // NewWithBeadsDirAndStore creates a Beads wrapper with an explicit BEADS_DIR
 // and an in-process store. Used for cross-database access from polecat worktrees.
 func NewWithBeadsDirAndStore(workDir, beadsDir string, store beadsdk.Storage) *Beads {
-	return &Beads{workDir: workDir, beadsDir: beadsDir, store: store}
+	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir, store: store})
 }
 
 // OpenStore opens a beadsdk.Storage for the resolved beads directory.

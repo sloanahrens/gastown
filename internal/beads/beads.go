@@ -600,16 +600,48 @@ type Beads struct {
 	agentScope bool
 }
 
+// beadsFields holds every constructor-settable field of Beads. It exists so
+// exactly one composite literal builds *Beads (newBeads, below) instead of
+// each constructor hand-rolling its own — see TestNoBeadsLiteralsOutsideConstructor.
+// That guard test is what makes a copy #N+1 of gt-9i6z (forIssueID
+// hand-rolling pinnedToBeadsDir's workDir:filepath.Dir(...) pattern without
+// its existence check) impossible rather than merely absent, mirroring the
+// workstate/CleanupStatus precedent (gt-hsg).
+type beadsFields struct {
+	workDir    string
+	beadsDir   string
+	isolated   bool
+	serverPort int
+	store      beadsdk.Storage
+	townRoot   string
+	noRoute    bool
+	agentScope bool
+}
+
+// newBeads is the single composite-literal construction point for *Beads.
+func newBeads(f beadsFields) *Beads {
+	return &Beads{
+		workDir:    f.workDir,
+		beadsDir:   f.beadsDir,
+		isolated:   f.isolated,
+		serverPort: f.serverPort,
+		store:      f.store,
+		townRoot:   f.townRoot,
+		noRoute:    f.noRoute,
+		agentScope: f.agentScope,
+	}
+}
+
 // New creates a new Beads wrapper for the given directory.
 func New(workDir string) *Beads {
-	return &Beads{workDir: workDir}
+	return newBeads(beadsFields{workDir: workDir})
 }
 
 // NewIsolated creates a Beads wrapper for test isolation.
 // This suppresses inherited beads env vars (BD_ACTOR, BEADS_DB) to prevent
 // tests from accidentally routing to production databases.
 func NewIsolated(workDir string) *Beads {
-	return &Beads{workDir: workDir, isolated: true}
+	return newBeads(beadsFields{workDir: workDir, isolated: true})
 }
 
 // NewIsolatedWithPort creates a Beads wrapper for test isolation that targets
@@ -617,13 +649,13 @@ func NewIsolated(workDir string) *Beads {
 // commands get GT_DOLT_PORT in their environment. This prevents tests from
 // creating databases on the production Dolt server (port 3307).
 func NewIsolatedWithPort(workDir string, serverPort int) *Beads {
-	return &Beads{workDir: workDir, isolated: true, serverPort: serverPort}
+	return newBeads(beadsFields{workDir: workDir, isolated: true, serverPort: serverPort})
 }
 
 // NewWithBeadsDir creates a Beads wrapper with an explicit BEADS_DIR.
 // This is needed when running from a polecat worktree but accessing town-level beads.
 func NewWithBeadsDir(workDir, beadsDir string) *Beads {
-	return &Beads{workDir: workDir, beadsDir: beadsDir}
+	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir})
 }
 
 // NewRigLocal creates a Beads wrapper pinned to workDir's own database.
@@ -636,7 +668,7 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 // (gt-abj, gt-8po), regardless of what routing or dual-scope resolution
 // would pick.
 func NewRigLocal(workDir string) *Beads {
-	return &Beads{workDir: workDir, noRoute: true}
+	return newBeads(beadsFields{workDir: workDir, noRoute: true})
 }
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
@@ -658,7 +690,7 @@ func (b *Beads) ForAgentBead() *Beads {
 	if b.noRoute || b.agentScope {
 		return b
 	}
-	return &Beads{
+	return newBeads(beadsFields{
 		workDir:    b.workDir,
 		beadsDir:   b.beadsDir,
 		isolated:   b.isolated,
@@ -666,7 +698,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		store:      b.store,
 		townRoot:   b.getTownRoot(),
 		agentScope: true,
-	}
+	})
 }
 
 // agentBeadTarget returns the wrapper agent-bead helpers should delegate to.
@@ -680,33 +712,45 @@ func (b *Beads) agentBeadTarget() *Beads {
 	return b.ForAgentBead()
 }
 
-// pinnedToBeadsDir returns a copy of b pinned (noRoute) to the given beads
-// directory, preserving isolation/port settings. The in-process store is NOT
-// carried over: it is bound to the database it was opened on, which may not
-// be the pinned target.
+// safeWorkDirForBeadsDir returns a subprocess cwd for beadsDir: its parent
+// directory when that exists locally, otherwise the enclosing Gas Town root
+// (which always exists).
 //
 // The subprocess cwd only needs to exist — BEADS_DIR is always passed
 // explicitly to bd (see getResolvedBeadsDir), so the cwd never determines
 // which database bd operates on. beadsDir's parent is a routed rig
 // directory that need not exist (e.g. an aliased rig never checked out
 // locally); chdir-ing into a missing directory fails the whole exec with an
-// opaque "fork/exec: no such file or directory" (gt-3vh2). Fall back to
-// townRoot, which always exists, when the natural cwd is missing.
-func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
+// opaque "fork/exec: no such file or directory" (gt-3vh2).
+//
+// Every wrapper pinned to a routed beadsDir (pinnedToBeadsDir, forIssueID)
+// must go through this shared helper rather than re-deriving workDir with
+// its own filepath.Dir(beadsDir) — that hand-rolled-copy pattern is exactly
+// how gt-3vh2's fix (in pinnedToBeadsDir) left forIssueID's identical bug
+// unfixed as gt-9i6z.
+func (b *Beads) safeWorkDirForBeadsDir(beadsDir string) string {
 	workDir := filepath.Dir(beadsDir)
 	if _, err := os.Stat(workDir); err != nil {
 		if townRoot := b.getTownRoot(); townRoot != "" {
 			workDir = townRoot
 		}
 	}
-	return &Beads{
-		workDir:    workDir,
+	return workDir
+}
+
+// pinnedToBeadsDir returns a copy of b pinned (noRoute) to the given beads
+// directory, preserving isolation/port settings. The in-process store is NOT
+// carried over: it is bound to the database it was opened on, which may not
+// be the pinned target.
+func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
+	return newBeads(beadsFields{
+		workDir:    b.safeWorkDirForBeadsDir(beadsDir),
 		beadsDir:   beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
 		townRoot:   b.getTownRoot(),
 		noRoute:    true,
-	}
+	})
 }
 
 // agentBeadCanonicalDir returns the beads directory where an agent bead with
@@ -829,14 +873,14 @@ func (b *Beads) forIssueID(id string) *Beads {
 	if resolved == "" || resolved == b.getResolvedBeadsDir() {
 		return b
 	}
-	return &Beads{
-		workDir:    filepath.Dir(resolved),
+	return newBeads(beadsFields{
+		workDir:    b.safeWorkDirForBeadsDir(resolved),
 		beadsDir:   resolved,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
 		townRoot:   b.townRoot,
 		noRoute:    true,
-	}
+	})
 }
 
 // Init initializes a new beads database in the working directory.
@@ -1885,12 +1929,12 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return nil, err
 	}
 	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
-		bdForCreate := &Beads{
+		bdForCreate := newBeads(beadsFields{
 			workDir:    b.workDir,
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
-		}
+		})
 		return bdForCreate.Create(opts)
 	}
 
@@ -1960,12 +2004,12 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 		return nil, err
 	}
 	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
-		bdForCreate := &Beads{
+		bdForCreate := newBeads(beadsFields{
 			workDir:    b.workDir,
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
-		}
+		})
 		return bdForCreate.CreateWithID(id, opts)
 	}
 
