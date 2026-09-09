@@ -52,6 +52,119 @@ func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
 	}
 }
 
+func TestEnsureGitRepoInitialized_CreatesMissingRepo(t *testing.T) {
+	gitRepo := filepath.Join(t.TempDir(), "nested", "git")
+
+	if _, err := os.Stat(gitRepo); !os.IsNotExist(err) {
+		t.Fatalf("expected %s not to exist yet", gitRepo)
+	}
+
+	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+		t.Fatalf("ensureGitRepoInitialized: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
+		t.Fatalf("expected %s/.git to exist after init: %v", gitRepo, err)
+	}
+}
+
+func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	head, err := exec.Command("git", "-C", gitRepo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+
+	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+		t.Fatalf("ensureGitRepoInitialized on existing repo: %v", err)
+	}
+
+	headAfter, err := exec.Command("git", "-C", gitRepo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD after: %v", err)
+	}
+	if string(head) != string(headAfter) {
+		t.Errorf("existing repo history changed: before %q, after %q", head, headAfter)
+	}
+}
+
+func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
+	// Regression for gt-kme: a JSONL backup repo with commits but no configured
+	// remote used to be reported as a silent success ("skipping push"), even
+	// though the data never left the machine. It must now be a hard error so
+	// the daemon's consecutive-failure escalation fires.
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	dbDir := filepath.Join(gitRepo, "testdb")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 5)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil)
+	if err == nil {
+		t.Fatal("expected an error when no remote is configured, got nil")
+	}
+	if !contains(err.Error(), "remote") {
+		t.Errorf("expected error to mention the missing remote, got: %v", err)
+	}
+
+	// The commit itself should still have happened locally.
+	out, cerr := exec.Command("git", "-C", gitRepo, "log", "-1", "--format=%s").Output()
+	if cerr != nil {
+		t.Fatalf("git log: %v", cerr)
+	}
+	if !contains(string(out), "backup") {
+		t.Errorf("expected a local backup commit despite the push failure, got log: %q", out)
+	}
+}
+
+func TestDiscoverJsonlBackupDatabases(t *testing.T) {
+	dataDir := t.TempDir()
+
+	makeDbDir := func(name string) {
+		if err := os.MkdirAll(filepath.Join(dataDir, name, ".dolt"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDbDir("gt")
+	makeDbDir("hq")
+	makeDbDir("testdb_scratch") // excluded: test prefix
+	makeDbDir("doctest_foo")    // excluded: test prefix
+	if err := os.MkdirAll(filepath.Join(dataDir, ".doltcfg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "not-a-db"), 0755); err != nil {
+		t.Fatal(err) // no .dolt subdir — should be excluded
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := discoverJsonlBackupDatabases(dataDir)
+	want := []string{"gt", "hq"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+func TestDiscoverJsonlBackupDatabases_MissingDataDir(t *testing.T) {
+	got := discoverJsonlBackupDatabases(filepath.Join(t.TempDir(), "does-not-exist"))
+	if got != nil {
+		t.Errorf("expected nil for missing data dir, got %v", got)
+	}
+}
+
 func envMap(env []string) map[string]string {
 	m := make(map[string]string, len(env))
 	for _, kv := range env {

@@ -109,41 +109,49 @@ GIT_PUSHED=false
 # Check if we have a git backup repo configured
 BACKUP_REPO="$HOME/gt/.dolt-archive/git"
 
-if [ -d "$BACKUP_REPO/.git" ]; then
-  cd "$BACKUP_REPO"
+if [ ! -d "$BACKUP_REPO/.git" ]; then
+  # Initialize on first run instead of silently no-op'ing forever (gt-kme).
+  mkdir -p "$BACKUP_REPO"
+  git init -b main "$BACKUP_REPO"
+  echo "Initialized backup repo at $BACKUP_REPO"
+fi
 
-  # Copy latest JSONL files
-  for DB in "${PROD_DBS[@]}"; do
-    LATEST="$JSONL_EXPORT_DIR/${DB}-latest.jsonl"
-    if [ -f "$LATEST" ]; then
-      cp "$(readlink "$LATEST" || echo "$LATEST")" "$BACKUP_REPO/${DB}.jsonl"
-    fi
-  done
+cd "$BACKUP_REPO"
 
-  # Check for changes
-  if git diff --quiet && git diff --staged --quiet; then
-    echo "No changes to commit"
-  else
-    git add *.jsonl
-    git commit -m "Archive snapshot $(date +%Y-%m-%d-%H%M)" \
-      --author="Gas Town Archive <archive@gastown.local>" 2>/dev/null
-
-    # Check if remote exists before pushing
-    if git remote get-url origin > /dev/null 2>&1; then
-      if git push origin main 2>/dev/null; then
-        GIT_PUSHED=true
-        echo "Pushed to GitHub"
-      else
-        echo "WARN: Git push to remote failed (check GitHub credentials/permissions)"
-      fi
-    else
-      echo "WARN: No git remote configured for backup repo"
-      echo "  To set up: cd $BACKUP_REPO && git remote add origin <github-url>"
-    fi
+# Copy latest JSONL files
+for DB in "${PROD_DBS[@]}"; do
+  LATEST="$JSONL_EXPORT_DIR/${DB}-latest.jsonl"
+  if [ -f "$LATEST" ]; then
+    cp "$(readlink "$LATEST" || echo "$LATEST")" "$BACKUP_REPO/${DB}.jsonl"
   fi
+done
+
+# Stage BEFORE checking for changes — `git diff` (unstaged) never sees
+# untracked files, so checking it first missed every brand-new *.jsonl file,
+# including on the very first run when everything is untracked (gt-kme).
+git add *.jsonl
+
+if git diff --staged --quiet; then
+  echo "No changes to commit"
 else
-  echo "No git backup repo at $BACKUP_REPO — skipping git push"
-  echo "  To set up: git init $BACKUP_REPO && cd $BACKUP_REPO && git remote add origin <url>"
+  git commit -m "Archive snapshot $(date +%Y-%m-%d-%H%M)" \
+    --author="Gas Town Archive <archive@gastown.local>" 2>/dev/null
+
+  # Check if remote exists before pushing
+  if git remote get-url origin > /dev/null 2>&1; then
+    if git push origin main 2>/dev/null; then
+      GIT_PUSHED=true
+      echo "Pushed to GitHub"
+    else
+      echo "WARN: Git push to remote failed (check GitHub credentials/permissions)"
+      # This is the offsite layer — a failed push here is a critical
+      # precondition gap, not a benign skip. Escalate (see Record Result).
+    fi
+  else
+    echo "WARN: No git remote configured for backup repo"
+    echo "  To set up: cd $BACKUP_REPO && git remote add origin <github-url>"
+    # Same: no remote means nothing is actually offsite. Escalate.
+  fi
 fi
 ```
 

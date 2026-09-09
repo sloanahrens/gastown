@@ -294,9 +294,12 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 	}
 
 	// JSONL git backup freshness.
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		gitRepo := filepath.Join(homeDir, ".dolt-archive", "git")
+	// Uses townRoot (matches the actual export location and the daemon's
+	// default GitRepo path), not homeDir — those diverge on this machine
+	// ($HOME vs $HOME/gt) and the mismatch was why this check always read
+	// "not available" (gt-kme).
+	{
+		gitRepo := filepath.Join(townRoot, ".dolt-archive", "git")
 		if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()

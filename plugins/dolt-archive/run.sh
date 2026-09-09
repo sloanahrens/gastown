@@ -129,46 +129,66 @@ log "JSONL export: $EXPORTED succeeded, $EXPORT_FAILED failed"
 # --- Step 2: Git commit and push ---------------------------------------------
 
 GIT_PUSHED=false
+GIT_PRECONDITION_FAILED=""
 
-if ! $SKIP_GIT && [[ -d "$BACKUP_REPO/.git" ]]; then
+if ! $SKIP_GIT; then
   log ""
   log "=== Git Push ==="
 
-  # Copy latest JSONL files to git repo
-  for DB in "${PROD_DBS[@]}"; do
-    LATEST="$JSONL_EXPORT_DIR/${DB}-latest.jsonl"
-    if [[ -L "$LATEST" ]]; then
-      REAL_FILE="$JSONL_EXPORT_DIR/$(readlink "$LATEST")"
-      if [[ -f "$REAL_FILE" ]]; then
-        cp "$REAL_FILE" "$BACKUP_REPO/${DB}.jsonl"
-      fi
-    elif [[ -f "$LATEST" ]]; then
-      cp "$LATEST" "$BACKUP_REPO/${DB}.jsonl"
-    fi
-  done
-
-  cd "$BACKUP_REPO"
-
-  if git diff --quiet && git diff --staged --quiet; then
-    log "No changes to commit"
-  else
-    git add *.jsonl 2>/dev/null || true
-    git commit -m "Archive snapshot $(date +%Y-%m-%d-%H%M)" \
-      --author="Gas Town Archive <archive@gastown.local>" 2>/dev/null || true
-
-    if git remote get-url origin > /dev/null 2>&1; then
-      if git push origin main 2>/dev/null; then
-        GIT_PUSHED=true
-        log "Pushed to GitHub"
-      else
-        log "WARN: Git push to remote failed"
-      fi
+  # Initialize the backup repo on first run instead of silently no-op'ing
+  # forever when it doesn't exist yet (gt-kme).
+  if [[ ! -d "$BACKUP_REPO/.git" ]]; then
+    mkdir -p "$BACKUP_REPO"
+    if git init -b main "$BACKUP_REPO" >/dev/null 2>>"$LOGFILE"; then
+      log "Initialized backup repo at $BACKUP_REPO"
     else
-      log "WARN: No git remote configured for backup repo"
+      log "ERROR: could not initialize backup repo at $BACKUP_REPO"
+      GIT_PRECONDITION_FAILED="init failed for $BACKUP_REPO"
     fi
   fi
-elif ! $SKIP_GIT; then
-  log "No git backup repo at $BACKUP_REPO — skipping git push"
+
+  if [[ -z "$GIT_PRECONDITION_FAILED" ]]; then
+    # Copy latest JSONL files to git repo
+    for DB in "${PROD_DBS[@]}"; do
+      LATEST="$JSONL_EXPORT_DIR/${DB}-latest.jsonl"
+      if [[ -L "$LATEST" ]]; then
+        REAL_FILE="$JSONL_EXPORT_DIR/$(readlink "$LATEST")"
+        if [[ -f "$REAL_FILE" ]]; then
+          cp "$REAL_FILE" "$BACKUP_REPO/${DB}.jsonl"
+        fi
+      elif [[ -f "$LATEST" ]]; then
+        cp "$LATEST" "$BACKUP_REPO/${DB}.jsonl"
+      fi
+    done
+
+    cd "$BACKUP_REPO"
+
+    # Stage BEFORE checking for changes — `git diff` (unstaged) never sees
+    # untracked files, so on every prior run (including the very first,
+    # where every *.jsonl file is untracked) this reported "No changes to
+    # commit" and silently threw away real exported data (gt-kme).
+    git add *.jsonl 2>/dev/null || true
+
+    if git diff --staged --quiet; then
+      log "No changes to commit"
+    else
+      git commit -m "Archive snapshot $(date +%Y-%m-%d-%H%M)" \
+        --author="Gas Town Archive <archive@gastown.local>" 2>/dev/null || true
+
+      if git remote get-url origin > /dev/null 2>&1; then
+        if git push origin main 2>/dev/null; then
+          GIT_PUSHED=true
+          log "Pushed to GitHub"
+        else
+          log "WARN: Git push to remote failed"
+          GIT_PRECONDITION_FAILED="git push to origin failed"
+        fi
+      else
+        log "WARN: No git remote configured for backup repo"
+        GIT_PRECONDITION_FAILED="no git remote configured for $BACKUP_REPO"
+      fi
+    fi
+  fi
 fi
 
 # --- Step 3: Dolt native push ------------------------------------------------
@@ -220,7 +240,7 @@ SUMMARY="Archive: jsonl=$EXPORTED/$((EXPORTED + EXPORT_FAILED)), git=${GIT_PUSHE
 log "$SUMMARY"
 
 RESULT="success"
-if [[ "$EXPORT_FAILED" -gt 0 ]] || [[ "$DOLT_PUSH_FAILED" -gt 0 ]]; then
+if [[ "$EXPORT_FAILED" -gt 0 ]] || [[ "$DOLT_PUSH_FAILED" -gt 0 ]] || [[ -n "$GIT_PRECONDITION_FAILED" ]]; then
   RESULT="warning"
 fi
 
@@ -231,6 +251,16 @@ if [[ "$EXPORT_FAILED" -gt 0 ]]; then
   gt escalate "dolt-archive: JSONL export failed for $EXPORT_FAILED databases ($EXPORT_ERRORS)" \
     -s critical \
     --reason "JSONL is our last-resort recovery layer. Failed databases: $EXPORT_ERRORS" 2>/dev/null || true
+fi
+
+# The offsite git layer is severity:critical (plugin.md) — a missing
+# precondition here must escalate, not silently no-op, or this patrol goes
+# back to "0 successes, all silent" the moment the remote or repo drifts
+# (gt-kme).
+if [[ -n "$GIT_PRECONDITION_FAILED" ]]; then
+  gt escalate "dolt-archive: offsite git backup not landing ($GIT_PRECONDITION_FAILED)" \
+    -s critical \
+    --reason "Git push is the offsite recovery layer. $GIT_PRECONDITION_FAILED" 2>/dev/null || true
 fi
 
 log "Done."

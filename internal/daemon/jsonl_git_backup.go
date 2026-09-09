@@ -92,20 +92,24 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	config := d.patrolConfig.Patrols.JsonlGitBackup
 
-	// Resolve git repo path.
+	// Resolve git repo path. Default lives under TownRoot (matches vitals.go's
+	// display path and where JSONL exports actually land) — NOT $HOME, which
+	// silently diverges from TownRoot whenever the town isn't rooted at
+	// $HOME/gt directly, leaving this patrol permanently unable to find its
+	// own target directory (gt-kme).
 	gitRepo := config.GitRepo
 	if gitRepo == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			d.logger.Printf("jsonl_git_backup: cannot determine home dir: %v", err)
-			return
-		}
-		gitRepo = filepath.Join(homeDir, ".dolt-archive", "git")
+		gitRepo = filepath.Join(d.config.TownRoot, ".dolt-archive", "git")
 	}
 
-	// Verify git repo exists.
-	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); os.IsNotExist(err) {
-		d.logger.Printf("jsonl_git_backup: git repo %s does not exist, skipping", gitRepo)
+	// Ensure the backup repo exists, initializing it on first run instead of
+	// silently no-op'ing forever. A missing repo used to mean this patrol
+	// never ran a single cycle (0 successes across every dispatch) with no
+	// signal anywhere that offsite backup was dead (gt-kme).
+	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+		d.logger.Printf("jsonl_git_backup: cannot initialize git repo %s: %v", gitRepo, err)
+		mol.failStep("export", "git repo init failed: "+err.Error())
+		d.escalate("jsonl_git_backup", fmt.Sprintf("cannot initialize offsite backup repo %s: %v", gitRepo, err))
 		return
 	}
 
@@ -113,13 +117,6 @@ func (d *Daemon) syncJsonlGitBackup() {
 	scrub := true
 	if config.Scrub != nil {
 		scrub = *config.Scrub
-	}
-
-	// Get database list.
-	databases := config.Databases
-	if len(databases) == 0 {
-		d.logger.Printf("jsonl_git_backup: no databases configured, skipping")
-		return
 	}
 
 	// Resolve Dolt data dir for auto-discovery of running server.
@@ -131,6 +128,22 @@ func (d *Daemon) syncJsonlGitBackup() {
 	}
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		d.logger.Printf("jsonl_git_backup: data dir %s does not exist, skipping", dataDir)
+		return
+	}
+
+	// Get database list. The shipped default config has no explicit Databases
+	// list (see mayor/daemon.json), so falling through to a bare skip here
+	// meant this patrol did nothing on every single tick regardless of the
+	// git-repo fix above — the documented "auto-discovers from dolt server"
+	// behavior (types.go) was never implemented (gt-kme).
+	databases := config.Databases
+	if len(databases) == 0 {
+		databases = discoverJsonlBackupDatabases(dataDir)
+	}
+	if len(databases) == 0 {
+		d.logger.Printf("jsonl_git_backup: no databases found (configured or auto-discovered) under %s, skipping", dataDir)
+		mol.failStep("export", "no databases found")
+		d.escalate("jsonl_git_backup", fmt.Sprintf("no databases found under %s — offsite backup has nothing to export", dataDir))
 		return
 	}
 
@@ -397,21 +410,91 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// Successful commit — clear any spike baseline since HEAD is now up to date.
 	removeSpikeBaseline(gitRepo)
 
-	// Push — only if a remote is configured. Skip gracefully if not.
-	if d.hasGitRemote(gitRepo, "origin") {
-		// Detect current branch name for push (master vs main).
-		branch := d.currentGitBranch(gitRepo)
-		if branch == "" {
-			branch = "main" // fallback
+	// Push requires a remote. This is the OFFSITE layer — a repo with commits
+	// but no remote is data sitting on the same disk it started on, which is
+	// exactly the failure this patrol exists to prevent. Treat it as a hard
+	// error (not a graceful skip) so it surfaces through the same
+	// consecutive-failure escalation as a real push failure, instead of
+	// silently "succeeding" forever (gt-kme).
+	if !d.hasGitRemote(gitRepo, "origin") {
+		return fmt.Errorf("committed locally but no 'origin' remote configured — backup is not offsite")
+	}
+
+	// Detect current branch name for push (master vs main).
+	branch := d.currentGitBranch(gitRepo)
+	if branch == "" {
+		branch = "main" // fallback
+	}
+	if err := d.runGitCmd(gitRepo, gitPushTimeout, "push", "origin", branch); err != nil {
+		return fmt.Errorf("git push: %w", err)
+	}
+	d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
+	return nil
+}
+
+// ensureGitRepoInitialized makes sure gitRepo exists and is a git repository,
+// initializing it (mkdir + git init) on first use instead of silently
+// skipping forever when the directory doesn't exist yet. A remote is NOT
+// configured here — that still requires an explicit `git remote add origin`
+// — but at least the local half stops being permanently inert (gt-kme).
+func ensureGitRepoInitialized(gitRepo string) error {
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err == nil {
+		return nil // already a git repo
+	}
+
+	if err := os.MkdirAll(gitRepo, 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", gitRepo, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "init", "-b", "main")
+	cmd.Env = gitChildEnv()
+	util.SetDetachedProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return fmt.Errorf("git init: %s", errMsg)
 		}
-		if err := d.runGitCmd(gitRepo, gitPushTimeout, "push", "origin", branch); err != nil {
-			return fmt.Errorf("git push: %w", err)
-		}
-		d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
-	} else {
-		d.logger.Printf("jsonl_git_backup: committed (no remote configured, skipping push): %s", msg)
+		return fmt.Errorf("git init: %w", err)
 	}
 	return nil
+}
+
+// discoverJsonlBackupDatabases lists production database directories under
+// dataDir, for use when JsonlGitBackupConfig.Databases is empty. Mirrors
+// dolt-archive/run.sh's auto-discovery exclusions (test/scratch DB prefixes)
+// and additionally requires a real `.dolt` subdirectory so stray non-database
+// entries in dataDir (config files, dropped-database housekeeping dirs) are
+// never mistaken for a production database.
+func discoverJsonlBackupDatabases(dataDir string) []string {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil
+	}
+
+	var databases []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.HasPrefix(name, "testdb_") || strings.HasPrefix(name, "beads_t") ||
+			strings.HasPrefix(name, "beads_pt") || strings.HasPrefix(name, "doctest_") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, name, ".dolt")); err != nil {
+			continue // not a dolt database directory
+		}
+		databases = append(databases, name)
+	}
+	sort.Strings(databases)
+	return databases
 }
 
 // gitChildEnv returns os.Environ() augmented with HOME/USER/LOGNAME/SSH_AUTH_SOCK
