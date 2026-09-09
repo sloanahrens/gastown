@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -500,18 +501,55 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 	return nil
 }
 
-// escalate sends an escalation message to the mayor via gt escalate.
+// maxEscalationTitleLen bounds the escalation title's length. bd 1.0.3+
+// rejects newline-containing flag values (see beads_escalation.go), so a
+// multiline message (e.g. full go-test output) must never reach --title
+// verbatim — only its first line, truncated, is used for the title. The
+// full message is still delivered via --stdin/--reason.
+const maxEscalationTitleLen = 200
+
+// escalationTitle builds a single-line "source: summary" title safe to pass
+// as `bd create --title=...`, collapsing a possibly-multiline message down
+// to its first line.
+func escalationTitle(source, message string) string {
+	summary := message
+	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+		summary = summary[:idx]
+	}
+	summary = strings.TrimSpace(summary)
+	title := fmt.Sprintf("%s: %s", source, summary)
+	if runes := []rune(title); len(runes) > maxEscalationTitleLen {
+		title = string(runes[:maxEscalationTitleLen-1]) + "…"
+	}
+	return title
+}
+
+// escalate sends an escalation message to the mayor via gt escalate. message
+// may be multiline (e.g. full go-test output); it is passed as the
+// escalation reason via --stdin rather than embedded in the title, since
+// `gt escalate` forwards the title straight to `bd create --title=...`,
+// which rejects newlines and would otherwise drop the alert silently.
 func (d *Daemon) escalate(source, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH",
-		fmt.Sprintf("%s: %s", source, message))
+	title := escalationTitle(source, message)
+	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--stdin", title)
+	cmd.Stdin = strings.NewReader(message)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
 	util.SetDetachedProcessGroup(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("jsonl_git_backup: escalation failed: %v (%s)", err, strings.TrimSpace(string(output)))
+		d.logger.Printf("escalate(%s): gt escalate failed: %v (%s) — dropped message: %s",
+			source, err, strings.TrimSpace(string(output)), message)
+		// An escalation path that fails silently is itself the bug this guards
+		// against (gt-qna) — leave a feed-visible trace even when nobody is
+		// tailing the daemon log.
+		_ = events.LogFeedTo(d.config.TownRoot, events.TypeEscalationDropped, "daemon", map[string]interface{}{
+			"source": source,
+			"error":  err.Error(),
+			"title":  title,
+		})
 	}
 }
 

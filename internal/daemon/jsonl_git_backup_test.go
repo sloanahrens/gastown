@@ -641,3 +641,38 @@ func writeNLines(t *testing.T, path string, n int) {
 func itoa(i int) string {
 	return strconv.Itoa(i)
 }
+
+func TestEscalationTitle_SingleLineUnchanged(t *testing.T) {
+	got := escalationTitle("jsonl_git_backup", "git push failed 3 consecutive times")
+	want := "jsonl_git_backup: git push failed 3 consecutive times"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestEscalationTitle_MultilineCollapsedToFirstLine(t *testing.T) {
+	// This is the gt-qna failure mode: the daemon hands escalate() the full
+	// go-test failure output (many lines). The title must never contain a
+	// newline — bd 1.0.3+ rejects newline-containing flag values, which was
+	// silently dropping every one of these escalations.
+	message := "main branch test failures:\ngastown: gate \"test\": exit status 1\n--- FAIL: TestFoo (0.01s)\n    foo_test.go:42: assertion failed"
+	got := escalationTitle("main_branch_test", message)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("title must not contain a newline, got %q", got)
+	}
+	want := "main_branch_test: main branch test failures:"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestEscalationTitle_TruncatedToMaxLen(t *testing.T) {
+	longLine := strings.Repeat("x", maxEscalationTitleLen*2)
+	got := escalationTitle("source", longLine)
+	if n := len([]rune(got)); n > maxEscalationTitleLen {
+		t.Fatalf("title length %d exceeds max %d", n, maxEscalationTitleLen)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated title should end with ellipsis, got %q", got)
+	}
+}

@@ -59,10 +59,11 @@ const (
 	TypePatrolStarted    = "patrol_started"
 	TypePolecatChecked   = "polecat_checked"
 	TypePolecatNudged    = "polecat_nudged"
-	TypeEscalationSent   = "escalation_sent"
-	TypeEscalationAcked  = "escalation_acked"
-	TypeEscalationClosed = "escalation_closed"
-	TypePatrolComplete   = "patrol_complete"
+	TypeEscalationSent    = "escalation_sent"
+	TypeEscalationAcked   = "escalation_acked"
+	TypeEscalationClosed  = "escalation_closed"
+	TypeEscalationDropped = "escalation_dropped" // gt escalate call itself failed — the alert never reached a bead
+	TypePatrolComplete    = "patrol_complete"
 
 	// Merge queue events (emitted by refinery)
 	TypeMergeStarted = "merge_started"
