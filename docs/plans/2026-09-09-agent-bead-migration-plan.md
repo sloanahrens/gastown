@@ -725,7 +725,7 @@ bd comments add <bead> "commit: $(git rev-parse --short HEAD) — agent-beads-sh
 - Consumes: `beads.NewRigLocal`, `(*Beads).GetAgentBead`, `(*Beads).Show`, `(*Beads).UpdateAgentDescriptionFields`, `beads.ResolveBeadsDirForID(townBeadsDir, id) string`, `beads.GetTownBeadsPath(townRoot)`, `beads.FindTownRoot(dir)`, `polecatBeadIDForRig(r, rigName, name)` and `getRig(name)` from `internal/cmd/polecat_identity.go`.
 - Produces:
   - `type ReconcileRow struct { Field, Rig, Town, Winner string }`
-  - `func MergeLegacyAgentBead(rig, town *Issue, beadExists func(id string) bool) (AgentFieldUpdates, []ReconcileRow)` — per differing field, the row with the newer `UpdatedAt` wins; `active_mr`/`hook_bead` values whose bead does not exist are cleared (`Winner: "clear"`).
+  - `func MergeLegacyAgentBead(rig, town *Issue, beadExists func(id string) bool) (AgentFieldUpdates, []ReconcileRow)` — per differing field, the row with the newer `UpdatedAt` wins; `active_mr`/`hook_bead` values whose bead does not exist are cleared (`Winner: "clear"`); **`cleanup_status` reconciles by severity, never by recency** (blocking > unknown > clean; refinery review hq-wisp-j0g — this field is behind four fail-open P0s).
   - `func (b *Beads) DeleteLegacyAgentBead(id string) error` — refuses unless `b.noRoute` and the row is an agent bead; runs `bd delete <id> --force`.
   - CLI: `gt polecat identity reconcile <rig>/<name>` (dry-run) and `--apply`.
 
@@ -779,6 +779,41 @@ func TestMergeLegacyAgentBead_GhostReferencesAreClearedNeverCopied(t *testing.T)
 	}
 	if len(rows) != 1 || rows[0].Field != "active_mr" || rows[0].Winner != "clear" {
 		t.Fatalf("rows = %+v, want one active_mr row with winner=clear", rows)
+	}
+}
+
+// cleanup_status is the field behind four consecutive fail-open P0s (gt-7kr,
+// gt-14a, gt-hsg, gt-ido). Recency must never promote a blocking value to a
+// clearing one; severity decides.
+func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *testing.T) {
+	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
+	exists := func(string) bool { return true }
+
+	// newer 'clean' must NOT overwrite older blocking 'has_unpushed'
+	rig := agentIssue("cleanup_status: has_unpushed\n", older)
+	town := agentIssue("cleanup_status: clean\n", newer)
+	updates, rows := MergeLegacyAgentBead(rig, town, exists)
+	if updates.CleanupStatus != nil {
+		t.Fatalf("newer 'clean' must not overwrite blocking 'has_unpushed'; got update %q", *updates.CleanupStatus)
+	}
+	if len(rows) != 1 || rows[0].Field != "cleanup_status" || rows[0].Winner != "rig (severity)" {
+		t.Fatalf("rows = %+v, want one cleanup_status row won by rig on severity", rows)
+	}
+
+	// newer unknown ('' / null) DOES beat older 'clean': unknown fails closed
+	rig2 := agentIssue("cleanup_status: clean\n", older)
+	town2 := agentIssue("cleanup_status: null\n", newer)
+	updates2, _ := MergeLegacyAgentBead(rig2, town2, exists)
+	if updates2.CleanupStatus == nil || *updates2.CleanupStatus != "" {
+		t.Fatalf("unknown must beat clean (fail closed); got %v", updates2.CleanupStatus)
+	}
+
+	// older blocking on the TOWN side also wins over newer rig 'clean'
+	rig3 := agentIssue("cleanup_status: clean\n", newer)
+	town3 := agentIssue("cleanup_status: has_stash\n", older)
+	updates3, _ := MergeLegacyAgentBead(rig3, town3, exists)
+	if updates3.CleanupStatus == nil || *updates3.CleanupStatus != "has_stash" {
+		t.Fatalf("blocking town value must win over newer rig 'clean'; got %v", updates3.CleanupStatus)
 	}
 }
 
@@ -849,7 +884,19 @@ func MergeLegacyAgentBead(rig, town *Issue, beadExists func(id string) bool) (Ag
 
 	pick("agent_state", r.AgentState, t.AgentState, &updates.AgentState, false)
 	pick("hook_bead", r.HookBead, t.HookBead, &updates.HookBead, true)
-	pick("cleanup_status", r.CleanupStatus, t.CleanupStatus, &updates.CleanupStatus, false)
+	// cleanup_status reconciles by SEVERITY, never by recency (refinery
+	// review hq-wisp-j0g): it is the field behind four fail-open P0s. A
+	// blocking value beats unknown beats clean regardless of updated_at, so
+	// a stale 'clean' can never manufacture a clearance.
+	if r.CleanupStatus != t.CleanupStatus {
+		winner := "rig"
+		if cleanupSeverity(t.CleanupStatus) > cleanupSeverity(r.CleanupStatus) {
+			winner = "town"
+			v := t.CleanupStatus
+			updates.CleanupStatus = &v
+		}
+		rows = append(rows, ReconcileRow{Field: "cleanup_status", Rig: r.CleanupStatus, Town: t.CleanupStatus, Winner: winner + " (severity)"})
+	}
 	pick("active_mr", r.ActiveMR, t.ActiveMR, &updates.ActiveMR, true)
 	pick("exit_type", r.ExitType, t.ExitType, &updates.ExitType, false)
 	pick("mr_id", r.MRID, t.MRID, &updates.MRID, false)
@@ -857,6 +904,20 @@ func MergeLegacyAgentBead(rig, town *Issue, beadExists func(id string) bool) (Ag
 	pick("last_source_issue", r.LastSourceIssue, t.LastSourceIssue, &updates.LastSourceIssue, false)
 	pick("completion_time", r.CompletionTime, t.CompletionTime, &updates.CompletionTime, false)
 	return updates, rows
+}
+
+// cleanupSeverity orders cleanup_status values for reconciliation:
+// blocking (has_uncommitted, has_stash, has_unpushed, anything unrecognised)
+// > unknown ('' or null, which fails closed) > clean. Only 'clean' clears.
+func cleanupSeverity(v string) int {
+	switch v {
+	case "clean":
+		return 0
+	case "", "null":
+		return 1
+	default:
+		return 2
+	}
 }
 ```
 
