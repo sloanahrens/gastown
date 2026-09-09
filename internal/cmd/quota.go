@@ -375,6 +375,11 @@ The rotation process:
   4. Restarts blocked sessions via respawn-pane
   5. Sends /resume to recover conversation context
 
+Rate-limited sessions with no available account to rotate to (or whose
+limit is session-scoped, e.g. "You've hit your session limit · resets
+5pm") are instead nudged to resume once their own announced reset time
+has passed — rotation can't fix that class of limit, only waiting can.
+
 Examples:
   gt quota rotate                    # Rotate all blocked sessions
   gt quota rotate --from work        # Preemptively rotate sessions on 'work' account
@@ -427,6 +432,11 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	// sessions that actually need it. Account state is updated only after
 	// successful rotation execution (LastUsed in executeKeychainRotation).
 
+	// gt-omg1: sessions getting a fresh account this cycle don't need a
+	// separate resume nudge — rotation itself unblocks them. Everyone else
+	// whose own announced reset has passed does (see PlanResume).
+	resumeCandidates := excludeAssignedSessions(quota.PlanResume(plan.LimitedSessions, time.Now()), plan.Assignments)
+
 	if len(plan.LimitedSessions) == 0 {
 		if quotaJSON {
 			return json.NewEncoder(os.Stdout).Encode([]quota.RotateResult{})
@@ -440,8 +450,11 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(plan.Assignments) == 0 {
+		resumeResults := runResumeNudges(t, resumeCandidates, rotateDryRun)
 		if quotaJSON {
-			return json.NewEncoder(os.Stdout).Encode([]quota.RotateResult{})
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(resumeResults)
 		}
 		if rotateFrom != "" {
 			fmt.Printf(" %s %d session(s) on %q but no available accounts to rotate to\n",
@@ -456,6 +469,7 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 				fmt.Printf(" %s Skipped %s — %s\n", style.WarningPrefix, handle, reason)
 			}
 		}
+		printResumeResults(resumeResults, rotateDryRun)
 		return nil
 	}
 
@@ -489,10 +503,14 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if len(plan.Assignments) == 0 {
+			resumeResults := runResumeNudges(t, resumeCandidates, rotateDryRun)
 			if quotaJSON {
-				return json.NewEncoder(os.Stdout).Encode([]quota.RotateResult{})
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(resumeResults)
 			}
 			fmt.Printf("\n %s No idle sessions to rotate\n", style.WarningPrefix)
+			printResumeResults(resumeResults, rotateDryRun)
 			return nil
 		}
 	}
@@ -541,12 +559,15 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	if rotateDryRun {
+		resumeResults := runResumeNudges(t, resumeCandidates, true)
 		if quotaJSON {
-			// Return plan as JSON for machine consumers
+			// Return plan as JSON for machine consumers, plus what the
+			// resume pass would do (gt-omg1: sessions no rotation reaches).
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(plan)
+			return enc.Encode(dryRunOutput{RotatePlan: plan, Resume: resumeResults})
 		}
+		printResumeResults(resumeResults, true)
 		fmt.Println()
 		fmt.Println(style.Dim.Render(" (dry run — no changes made)"))
 		return nil
@@ -581,6 +602,14 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// gt-omg1: sessions rotation didn't reach (no assignment) but whose own
+	// reset has passed still get a resume nudge.
+	resumeResults := runResumeNudges(t, resumeCandidates, false)
+	results = append(results, resumeResults...)
+	if !quotaJSON {
+		printResumeResults(resumeResults, false)
+	}
+
 	if quotaJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -588,6 +617,75 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// sessionLimitResumeMessage is sent to a session once its own announced
+// Claude Code session-usage-limit reset time has passed (gt-omg1). Account
+// rotation, the rest of this file, fixes an account-level rate limit by
+// moving a session to fresh credentials — it can't fix a session-scoped
+// usage limit, which every account on the session shares alike and which
+// clears on its own once the reset time passes. This just tells the agent
+// to pick its work back up instead of sitting idle at the banner forever.
+const sessionLimitResumeMessage = "Your Claude session usage limit has reset. Resume your assigned work."
+
+// dryRunOutput is the --json --dry-run report: the rotation plan plus what
+// the resume pass (see runResumeNudges) would additionally do.
+type dryRunOutput struct {
+	*quota.RotatePlan
+	Resume []quota.RotateResult `json:"resume,omitempty"`
+}
+
+// excludeAssignedSessions drops resume candidates that are getting a fresh
+// account this cycle — rotation itself already unblocks those, so nudging
+// them too would be redundant.
+func excludeAssignedSessions(candidates []quota.ResumeCandidate, assignments map[string]string) []quota.ResumeCandidate {
+	if len(assignments) == 0 {
+		return candidates
+	}
+	var filtered []quota.ResumeCandidate
+	for _, c := range candidates {
+		if _, ok := assignments[c.Session]; ok {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return filtered
+}
+
+// runResumeNudges nudges each candidate session to resume now that its own
+// announced session-limit reset has passed. In dry-run mode it reports what
+// would happen without touching tmux.
+func runResumeNudges(t *ttmux.Tmux, candidates []quota.ResumeCandidate, dryRun bool) []quota.RotateResult {
+	var results []quota.RotateResult
+	for _, c := range candidates {
+		r := quota.RotateResult{Session: c.Session, Resumed: true}
+		if !dryRun {
+			if err := t.NudgeSession(c.Session, sessionLimitResumeMessage); err != nil {
+				r.Error = err.Error()
+			}
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+// printResumeResults renders resume-nudge outcomes for text output.
+func printResumeResults(results []quota.RotateResult, dryRun bool) {
+	if len(results) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println(style.Bold.Render("Resume (session-limit reset already passed, no rotation needed)"))
+	for _, r := range results {
+		switch {
+		case r.Error != "":
+			fmt.Printf(" %s %s: resume nudge failed: %s\n", style.ErrorPrefix, r.Session, r.Error)
+		case dryRun:
+			fmt.Printf(" %s %-25s %s\n", style.ArrowPrefix, r.Session, style.Dim.Render("would nudge to resume"))
+		default:
+			fmt.Printf(" %s %-25s %s\n", style.SuccessPrefix, r.Session, style.Dim.Render("nudged to resume"))
+		}
+	}
 }
 
 var quotaClearCmd = &cobra.Command{

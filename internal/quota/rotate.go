@@ -15,7 +15,8 @@ type RotateResult struct {
 	Rotated        bool   `json:"rotated"`                  // whether rotation occurred
 	ResumedSession string `json:"resumed_session,omitempty"` // session ID that was resumed (empty if fresh start)
 	KeychainSwap   bool   `json:"keychain_swap,omitempty"`   // whether keychain was swapped
-	Error          string `json:"error,omitempty"`          // error message if rotation failed
+	Resumed        bool   `json:"resumed,omitempty"`        // whether a resume nudge was sent (see PlanResume)
+	Error          string `json:"error,omitempty"`          // error message if rotation/resume failed
 }
 
 // RotatePlan describes what the rotator will do.
