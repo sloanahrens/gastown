@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func setupNudgeTestRegistry(t *testing.T) {
@@ -629,5 +631,153 @@ func TestQueueLen(t *testing.T) {
 	_, _ = nudge.Drain(tmpDir, "test-session")
 	if got := nudge.QueueLen(tmpDir, "test-session"); got != 0 {
 		t.Errorf("QueueLen after drain = %d, want 0", got)
+	}
+}
+
+// TestDeliverNudge_ImmediateMode_RefusesBusyTarget guards gt-cyyg:
+// --mode=immediate must not send straight into a busy target. It reproduces
+// the shape of the incident (gastown/refinery interrupted mid a long-running
+// tool call) by rendering the Claude Code busy spinner into a real pane, then
+// asserts the nudge is queued for wait-idle delivery instead of typed
+// directly into the busy composer.
+func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tm := tmux.NewTmux()
+	sessionName := "gt-test-nudge-immediate-busy-refusal"
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+
+	if err := tm.SetEnvironment(sessionName, "GT_AGENT", "claude"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+
+	// Render the busy spinner into the pane and leave it displayed — no
+	// further shell output pushes it out of the capture window, so the pane
+	// stays "busy" for the life of the test (same technique as
+	// tmux.TestIsBusy_LivePane).
+	if err := tm.SendKeys(sessionName, "printf '✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !tm.IsBusy(sessionName) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(sessionName, 20)
+			t.Fatalf("target pane never went busy; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// deliverNudge resolves townRoot via workspace.FindFromCwd(), so the
+	// refusal's wait-idle fallback needs a real (fake) workspace on disk.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	// Shorten the wait-idle/queue-watcher timeouts so the refusal's fallback
+	// path (which polls for idle before giving up and leaving the message
+	// queued) doesn't hang the test — the pane stays busy throughout.
+	origWaitIdle, origIdleTimeout, origIdleInterval := waitIdleTimeout, idleWatcherTimeout, idleWatcherPollInterval
+	waitIdleTimeout = 300 * time.Millisecond
+	idleWatcherTimeout = 300 * time.Millisecond
+	idleWatcherPollInterval = 50 * time.Millisecond
+	t.Cleanup(func() {
+		waitIdleTimeout, idleWatcherTimeout, idleWatcherPollInterval = origWaitIdle, origIdleTimeout, origIdleInterval
+	})
+
+	origMode, origForce := nudgeModeFlag, nudgeForceFlag
+	nudgeModeFlag = NudgeModeImmediate
+	nudgeForceFlag = false
+	t.Cleanup(func() { nudgeModeFlag, nudgeForceFlag = origMode, origForce })
+
+	const message = "should-not-be-typed-into-the-busy-pane"
+	if err := deliverNudge(tm, sessionName, message, "tester"); err != nil {
+		t.Fatalf("deliverNudge: %v", err)
+	}
+
+	// Refused and queued, not sent: the message must be waiting in the
+	// nudge queue rather than having been typed into the busy pane.
+	if got := nudge.QueueLen(townRoot, sessionName); got != 1 {
+		t.Errorf("QueueLen after immediate-mode busy refusal = %d, want 1 (message should be queued, not sent)", got)
+	}
+
+	out, err := tm.CapturePane(sessionName, 40)
+	if err != nil {
+		t.Fatalf("CapturePane: %v", err)
+	}
+	if strings.Contains(out, message) {
+		t.Fatalf("busy pane received the nudge text directly — immediate mode should have refused and queued it instead:\n%s", out)
+	}
+}
+
+// TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal guards the
+// escape-hatch half of gt-cyyg: --force must still deliver immediately even
+// when the target is busy, since --mode=immediate --force is the documented
+// way to break through a stuck agent.
+func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tm := tmux.NewTmux()
+	sessionName := "gt-test-nudge-immediate-force-busy"
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+
+	if err := tm.SendKeys(sessionName, "printf '✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !tm.IsBusy(sessionName) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(sessionName, 20)
+			t.Fatalf("target pane never went busy; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	origMode, origForce := nudgeModeFlag, nudgeForceFlag
+	nudgeModeFlag = NudgeModeImmediate
+	nudgeForceFlag = true
+	t.Cleanup(func() { nudgeModeFlag, nudgeForceFlag = origMode, origForce })
+
+	const message = "should-be-typed-into-the-pane-because-forced"
+	if err := deliverNudge(tm, sessionName, message, "tester"); err != nil {
+		t.Fatalf("deliverNudge: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		out, err := tm.CapturePane(sessionName, 40)
+		if err != nil {
+			t.Fatalf("CapturePane: %v", err)
+		}
+		if strings.Contains(out, message) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("--force did not deliver to the busy pane within timeout; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

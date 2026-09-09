@@ -62,7 +62,7 @@ const (
 func init() {
 	rootCmd.AddCommand(nudgeCmd)
 	nudgeCmd.Flags().StringVarP(&nudgeMessageFlag, "message", "m", "", "Message to send")
-	nudgeCmd.Flags().BoolVarP(&nudgeForceFlag, "force", "f", false, "Send even if target has DND enabled")
+	nudgeCmd.Flags().BoolVarP(&nudgeForceFlag, "force", "f", false, "Send even if target has DND enabled, or --mode=immediate target is busy")
 	nudgeCmd.Flags().BoolVar(&nudgeStdinFlag, "stdin", false, "Read message from stdin (avoids shell quoting issues)")
 	nudgeCmd.Flags().BoolVar(&nudgeIfFreshFlag, "if-fresh", false, "Only send if caller's tmux session is <60s old (suppresses compaction nudges)")
 	nudgeCmd.Flags().StringVar(&nudgeModeFlag, "mode", NudgeModeWaitIdle, "Delivery mode: wait-idle (default), queue, or immediate")
@@ -86,9 +86,10 @@ Delivery modes (--mode):
              This is the default — it avoids interrupting active tool calls.
   queue      Write to a file queue; agent picks up via hook at next turn
              boundary. Zero interruption. Use for non-urgent coordination.
-  immediate  Send directly via tmux send-keys. Interrupts in-flight work
-             but guarantees immediate delivery. Use only when you need to
-             break through (e.g., stuck agent, emergency).
+  immediate  Send directly via tmux send-keys. Refuses to interrupt a busy
+             target — falls back to wait-idle/queue delivery instead — unless
+             --force is given. Use only when you need to break through
+             (e.g., stuck agent, emergency).
 
 Queue and wait-idle modes require a drain mechanism. Claude agents drain
 via UserPromptSubmit hook; other agents use a background nudge-poller
@@ -196,113 +197,134 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		})
 
 	case NudgeModeWaitIdle:
-		if townRoot == "" {
-			// wait-idle needs workspace for queue fallback — fail explicitly
-			// rather than silently degrading to immediate (destructive) delivery.
-			return fmt.Errorf("--mode=wait-idle requires a Gas Town workspace")
-		}
-		// Check if the target agent supports prompt-based idle detection.
-		// WaitForIdle uses Claude Code's prompt pattern (❯) and status bar (⏵⏵).
-		// Non-Claude agents (Gemini, Codex, etc.) have no ReadyPromptPrefix,
-		// so WaitForIdle produces false positives — it sees no busy indicator
-		// and matches stale prompt characters in the pane buffer. (GH#gt-5ey3)
-		// Degrade to queue mode for agents without prompt-based detection.
-		if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
-			preset := config.GetAgentPresetByName(agentName)
-			if preset != nil && preset.ReadyPromptPrefix == "" {
-				fmt.Fprintf(os.Stderr, "wait-idle: %s agent %q has no prompt detection, using queue mode\n", sessionName, agentName)
-				if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-					Sender:   sender,
-					Message:  message,
-					Priority: nudgePriorityFlag,
-				}); qErr != nil {
-					formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-						Sender:   sender,
-						Message:  message,
-						Priority: nudgePriorityFlag,
-					}})
-					return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
-				}
-				// Ensure a nudge-poller is running so the queue actually drains.
-				// The poller is normally started by gt crew start, but if the
-				// session was started manually (or the poller crashed), queued
-				// nudges sit undelivered forever. StartPoller is idempotent —
-				// it no-ops if a poller is already alive for this session.
-				if _, pollerErr := nudge.StartPoller(townRoot, sessionName); pollerErr != nil {
-					fmt.Fprintf(os.Stderr, "wait-idle: could not start nudge poller for %s: %v\n", sessionName, pollerErr)
-				}
-				return nil
+		return deliverWaitIdle(t, townRoot, sessionName, message, sender)
+
+	default: // NudgeModeImmediate
+		// NudgeSessionWithOpts itself skips the Escape keystroke for agents
+		// where Escape cancels in-flight generation (Gemini CLI, Copilot CLI,
+		// Claude Code — see EscapeCancelsRequest / effectiveSkipEscape), so no
+		// per-agent opt-in is needed here. (GH#gt-wasn, gt-cyyg)
+		opts := tmux.NudgeOpts{TownRoot: townRoot}
+
+		// Refuse to interrupt a busy target: immediate mode used to send
+		// straight into whatever the pane was doing, and the only guard
+		// against that (a busy-indicator scrape) can miss a real busy window
+		// — the exact failure that turned a routine nudge into an apparent
+		// operator interrupt for gastown/refinery mid a 150s `go test` run
+		// (gt-cyyg). --force overrides for the genuine "break through a stuck
+		// agent" case the mode exists for.
+		if !nudgeForceFlag && t.IsBusy(sessionName) {
+			fmt.Fprintf(os.Stderr, "immediate: %s is busy, refusing to interrupt (use --force to override); falling back to wait-idle\n", sessionName)
+			if townRoot == "" {
+				return fmt.Errorf("--mode=immediate refused: %s is busy, and wait-idle fallback requires a Gas Town workspace; use --force to override", sessionName)
 			}
+			return deliverWaitIdle(t, townRoot, sessionName, message, sender)
 		}
-		// Try to wait for idle
-		err := t.WaitForIdle(sessionName, waitIdleTimeout)
-		if err == nil {
-			// Agent is idle — deliver directly. Format as system-reminder
-			// so the agent processes it as a background notification rather
-			// than a user interruption/correction.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}})
-			deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
-			if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
-				return deliverErr
-			}
-			fmt.Fprintf(os.Stderr, "wait-idle: %v; queueing for %s\n", deliverErr, sessionName)
+
+		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
+	}
+}
+
+// deliverWaitIdle waits for the target to become idle (prompt visible), then
+// delivers directly. Falls back to queue on timeout or unverified submit. If
+// both idle-wait and queue fail, falls back to immediate delivery as a last
+// resort. Shared by NudgeModeWaitIdle and the busy-refusal fallback in
+// NudgeModeImmediate (gt-cyyg).
+func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string) error {
+	if townRoot == "" {
+		// wait-idle needs workspace for queue fallback — fail explicitly
+		// rather than silently degrading to immediate (destructive) delivery.
+		return fmt.Errorf("--mode=wait-idle requires a Gas Town workspace")
+	}
+	// Check if the target agent supports prompt-based idle detection.
+	// WaitForIdle uses Claude Code's prompt pattern (❯) and status bar (⏵⏵).
+	// Non-Claude agents (Gemini, Codex, etc.) have no ReadyPromptPrefix,
+	// so WaitForIdle produces false positives — it sees no busy indicator
+	// and matches stale prompt characters in the pane buffer. (GH#gt-5ey3)
+	// Degrade to queue mode for agents without prompt-based detection.
+	if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
+		preset := config.GetAgentPresetByName(agentName)
+		if preset != nil && preset.ReadyPromptPrefix == "" {
+			fmt.Fprintf(os.Stderr, "wait-idle: %s agent %q has no prompt detection, using queue mode\n", sessionName, agentName)
 			if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
 				Sender:   sender,
 				Message:  message,
 				Priority: nudgePriorityFlag,
 			}); qErr != nil {
-				return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, deliverErr)
+				formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+					Sender:   sender,
+					Message:  message,
+					Priority: nudgePriorityFlag,
+				}})
+				return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+			}
+			// Ensure a nudge-poller is running so the queue actually drains.
+			// The poller is normally started by gt crew start, but if the
+			// session was started manually (or the poller crashed), queued
+			// nudges sit undelivered forever. StartPoller is idempotent —
+			// it no-ops if a poller is already alive for this session.
+			if _, pollerErr := nudge.StartPoller(townRoot, sessionName); pollerErr != nil {
+				fmt.Fprintf(os.Stderr, "wait-idle: could not start nudge poller for %s: %v\n", sessionName, pollerErr)
 			}
 			return nil
 		}
-		// Terminal errors (session gone, no server) — propagate, don't queue.
-		// Queueing a nudge for a dead session means it will never be delivered.
-		if errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrNoServer) {
-			return fmt.Errorf("wait-idle: %w", err)
+	}
+	// Try to wait for idle
+	err := t.WaitForIdle(sessionName, waitIdleTimeout)
+	if err == nil {
+		// Agent is idle — deliver directly. Format as system-reminder
+		// so the agent processes it as a background notification rather
+		// than a user interruption/correction.
+		formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+			Sender:   sender,
+			Message:  message,
+			Priority: nudgePriorityFlag,
+		}})
+		deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+		if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
+			return deliverErr
 		}
-		// Timeout (agent busy) — queue instead
+		fmt.Fprintf(os.Stderr, "wait-idle: %v; queueing for %s\n", deliverErr, sessionName)
 		if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
 			Sender:   sender,
 			Message:  message,
 			Priority: nudgePriorityFlag,
 		}); qErr != nil {
-			// Queue failed — fall back to immediate as last resort.
-			// Better to interrupt than lose the message entirely.
-			fmt.Fprintf(os.Stderr, "Warning: queue fallback failed (%v), delivering immediately\n", qErr)
-			// Still use FormatForInjection so the agent sees a consistent
-			// <system-reminder> format regardless of delivery path.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}})
-			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+			return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, deliverErr)
 		}
-		// Run watcher synchronously: polls for idle over a longer window.
-		// The UserPromptSubmit hook drains the queue on agent input, but an
-		// idle agent receives no input — so queued nudges are lost without
-		// this watcher. It exits on: delivery, session death, or timeout.
-		// Must be synchronous (not a goroutine) because gt nudge is a CLI
-		// command — the process exits after return, killing any goroutines.
-		watchAndDeliver(t, townRoot, sessionName)
 		return nil
-
-	default: // NudgeModeImmediate
-		opts := tmux.NudgeOpts{TownRoot: townRoot}
-		// Check if the target agent uses Escape as cancel (e.g., Gemini CLI).
-		// For these agents, skip the Escape keystroke to avoid canceling
-		// in-flight generation. (GH#gt-wasn)
-		if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
-			if preset := config.GetAgentPresetByName(agentName); preset != nil && preset.EscapeCancelsRequest {
-				opts.SkipEscape = true
-			}
-		}
-		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
 	}
+	// Terminal errors (session gone, no server) — propagate, don't queue.
+	// Queueing a nudge for a dead session means it will never be delivered.
+	if errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrNoServer) {
+		return fmt.Errorf("wait-idle: %w", err)
+	}
+	// Timeout (agent busy) — queue instead
+	if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+		Sender:   sender,
+		Message:  message,
+		Priority: nudgePriorityFlag,
+	}); qErr != nil {
+		// Queue failed — fall back to immediate as last resort.
+		// Better to interrupt than lose the message entirely.
+		fmt.Fprintf(os.Stderr, "Warning: queue fallback failed (%v), delivering immediately\n", qErr)
+		// Still use FormatForInjection so the agent sees a consistent
+		// <system-reminder> format regardless of delivery path.
+		formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+			Sender:   sender,
+			Message:  message,
+			Priority: nudgePriorityFlag,
+		}})
+		return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+	}
+	// Run watcher synchronously: polls for idle over a longer window.
+	// The UserPromptSubmit hook drains the queue on agent input, but an
+	// idle agent receives no input — so queued nudges are lost without
+	// this watcher. It exits on: delivery, session death, or timeout.
+	// Must be synchronous (not a goroutine) because gt nudge is a CLI
+	// command — the process exits after return, killing any goroutines.
+	watchAndDeliver(t, townRoot, sessionName)
+	return nil
 }
 
 // watchAndDeliver polls a session for idle state over idleWatcherTimeout.

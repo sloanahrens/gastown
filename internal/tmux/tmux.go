@@ -1882,6 +1882,26 @@ func isTmuxIndex(value string) bool {
 	return err == nil && n >= 0
 }
 
+// effectiveSkipEscape reports whether the Escape keystroke (nudge delivery
+// step 5) must be skipped for the given GT_AGENT value, independent of the
+// live busy-indicator scrape (shouldSendEscape). Copilot CLI and Gemini CLI
+// cancel in-flight generation on Escape (hq-isz, GH#gt-wasn); Claude Code
+// treats a mid-tool-call Escape as an operator interrupt (gt-cyyg). For these
+// agents the keystroke is unconditionally unsafe, so it is never sent —
+// unlike the busy scrape, this does not depend on catching the busy window at
+// the exact moment of the pre-send snapshot.
+func effectiveSkipEscape(agentType string) bool {
+	// Copilot has no dedicated preset flag for this yet; keep the historical
+	// hardcoded check (hq-isz) alongside the preset-driven one below.
+	if agentType == "copilot" {
+		return true
+	}
+	if preset := config.GetAgentPresetByName(agentType); preset != nil && preset.EscapeCancelsRequest {
+		return true
+	}
+	return false
+}
+
 // NudgeSessionWithOpts is like NudgeSession but accepts delivery options.
 // See NudgeOpts for available options.
 func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) error {
@@ -1931,13 +1951,8 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	sanitized := sanitizeNudgeMessage(message)
 
 	if !opts.SkipEscape {
-		// Auto-skip Escape for Copilot CLI sessions. Escape cancels in-flight
-		// generation in Copilot CLI (like Gemini), leaving the nudge text
-		// stranded in the input field without Enter being processed. (hq-isz)
 		agentType, _ := t.GetEnvironment(session, "GT_AGENT")
-		if agentType == "copilot" {
-			opts.SkipEscape = true
-		}
+		opts.SkipEscape = effectiveSkipEscape(agentType)
 	}
 	// Snapshot before typing the nudge so the message text itself cannot look
 	// like the agent's busy indicator.
@@ -3672,6 +3687,30 @@ func (t *Tmux) IsIdle(session string) bool {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.Contains(trimmed, "⏵⏵") || strings.Contains(trimmed, "\u23F5\u23F5") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsBusy reports whether the target currently shows a busy indicator (active
+// generation, or a running tool call's status line — see hasBusyIndicator) in
+// its recent pane output. Point-in-time snapshot, not a poll.
+//
+// Used to gate --mode=immediate nudge delivery: rather than sending straight
+// into a target that is mid-tool-call, the caller refuses and falls back to
+// wait-idle/queue delivery (gt-cyyg).
+//
+// On capture failure, returns true (fail safe): when the pane can't be
+// observed, treat it as busy so callers refuse rather than risk interrupting
+// a session in an unknown state.
+func (t *Tmux) IsBusy(target string) bool {
+	lines, err := t.CapturePaneLines(target, busyCaptureLines)
+	if err != nil {
+		return true
+	}
+	for _, line := range lines {
+		if hasBusyIndicator(line) {
 			return true
 		}
 	}

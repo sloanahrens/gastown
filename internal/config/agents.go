@@ -166,6 +166,15 @@ type AgentPresetInfo struct {
 	// destructive for agents where Escape aborts the active request. When true,
 	// NudgeSessionWithOpts skips the Escape
 	// keystroke and the 600ms readline timeout that follows it.
+	//
+	// Claude Code sets this too (gt-cyyg): a busy-indicator scrape
+	// (shouldSendEscape) is the only other gate on the Escape keystroke, and it
+	// couples to upstream TUI status text that can silently change or miss a
+	// narrow busy window (e.g. mid-tool-call during a long-running command). A
+	// missed busy window sends Escape into a working agent, which Claude Code
+	// reports back as "[Request interrupted by user for tool use]" —
+	// indistinguishable from a real operator stop. Never sending Escape to
+	// Claude Code at all removes that failure mode instead of chasing it.
 	EscapeCancelsRequest bool `json:"escape_cancels_request,omitempty"`
 
 	// ACP is the configuration for ACP (Agent Communication Protocol) support.
@@ -253,6 +262,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		InstructionsFile:       "CLAUDE.md",
 		EmitsPermissionWarning: true,
 		HasTurnBoundaryDrain:   true,
+		EscapeCancelsRequest:   true, // Escape mid-tool-call reads as an interrupt, not vim-mode exit (gt-cyyg)
 	},
 	AgentGemini: {
 		Name:                AgentGemini,

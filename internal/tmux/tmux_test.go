@@ -2548,6 +2548,84 @@ func TestShouldSendEscape_CaptureErrorSuppressesEscape(t *testing.T) {
 	}
 }
 
+// TestEffectiveSkipEscape guards gt-cyyg: Claude Code (and Copilot, Gemini)
+// must never receive the vim-mode Escape keystroke regardless of the live
+// busy-indicator scrape, because that scrape can miss a real busy window
+// (e.g. a long-running tool call whose status text falls outside the
+// captured lines) and a missed window sends Escape straight into an agent
+// mid-tool-call — which Claude Code reports back as an operator interrupt.
+// Unlike shouldSendEscape, this check depends only on agent identity, not on
+// a pane snapshot, so it can't race a busy window.
+func TestEffectiveSkipEscape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agentType string
+		want      bool
+	}{
+		{"claude - always skip", "claude", true},
+		{"gemini - always skip (EscapeCancelsRequest)", "gemini", true},
+		{"copilot - always skip (legacy hardcode)", "copilot", true},
+		{"codex - busy-scrape gate still applies, no unconditional skip", "codex", false},
+		{"empty agent type - no unconditional skip", "", false},
+		{"unknown agent type - no unconditional skip", "not-a-real-agent", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveSkipEscape(tt.agentType); got != tt.want {
+				t.Errorf("effectiveSkipEscape(%q) = %v, want %v", tt.agentType, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsBusy_LivePane verifies the exported busy check used to gate
+// --mode=immediate nudge delivery (gt-cyyg): idle panes report not-busy,
+// and a pane showing the current Claude Code TUI's busy spinner reports busy.
+func TestIsBusy_LivePane(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-" + t.Name()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+
+	if tm.IsBusy(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("IsBusy on idle pane = true, want false; pane:\n%s", out)
+	}
+
+	if err := tm.SendKeys(session, "printf 'filler\\n✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !tm.IsBusy(session) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("IsBusy did not detect busy marker within timeout; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestIsBusy_CaptureErrorFailsSafeBusy mirrors
+// TestShouldSendEscape_CaptureErrorSuppressesEscape's fail-safe direction but
+// inverted: IsBusy must report busy (not "unknown") when the target can't be
+// observed, so --mode=immediate refuses rather than sending into a session it
+// cannot see.
+func TestIsBusy_CaptureErrorFailsSafeBusy(t *testing.T) {
+	tm := newTestTmux(t)
+
+	if !tm.IsBusy("missing-session-for-busy-check") {
+		t.Fatal("IsBusy on missing target = false, want true (fail safe)")
+	}
+}
+
 // TestBusyIndicators pins the centralized busy-indicator source of truth so a
 // change to the upstream-coupled status string is intentional and reviewed
 // rather than accidental (gastownhall/gastown#4240).
