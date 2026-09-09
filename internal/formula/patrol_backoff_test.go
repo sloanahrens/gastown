@@ -205,6 +205,45 @@ func TestDeaconPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
 	}
 }
 
+// TestWitnessPatrolDoesNotRunAgeBasedWispGC verifies that the Witness patrol
+// does not reap its own currently-hooked patrol wisp via unscoped age-based
+// wisp GC.
+//
+// Regression test for gt-5bg: age-based GC (`bd mol wisp gc --age 1h --force`)
+// deleted the executing witness's own hooked patrol wisp whenever it was
+// older than the age threshold when inbox-check ran (e.g. after a
+// context-exit respawn that skipped `gt patrol report`), breaking the
+// report -> next-cycle chain (observed: hq-wisp-vkx / hq-wisp-essh6).
+func TestWitnessPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	var inboxDesc string
+	for _, step := range f.Steps {
+		if step.ID == "inbox-check" {
+			inboxDesc = step.Description
+			break
+		}
+	}
+	if inboxDesc == "" {
+		t.Fatal("witness patrol formula: inbox-check step not found or has empty description")
+	}
+
+	if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force") {
+		t.Fatal("witness inbox-check must keep closed-wisp cleanup")
+	}
+	if strings.Contains(inboxDesc, "bd mol wisp gc --age") {
+		t.Fatal("witness inbox-check must not run age-based wisp GC inside the active patrol")
+	}
+}
+
 // TestPatrolFormulasUseDynamicBeadResolution verifies that patrol formulas
 // resolve their agent bead ID dynamically at runtime via `gt agents resolve`,
 // rather than hardcoding a prefix like `gt-<rig>-refinery`.
