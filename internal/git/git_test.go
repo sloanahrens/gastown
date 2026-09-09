@@ -201,8 +201,8 @@ func TestNestedWorkDirResolvingToTownRootGitIsBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw git top-level: %v", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != root {
-		t.Fatalf("raw git top-level = %q, want %q", got, root)
+	if got, want := strings.TrimSpace(string(out)), resolveExistingSymlinkAncestors(root); got != want {
+		t.Fatalf("raw git top-level = %q, want %q", got, want)
 	}
 
 	before := snapshotTownRootSafety(t, root)
