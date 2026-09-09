@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -83,6 +84,11 @@ type APIHandler struct {
 	// shorter interval so poll-sharing assertions don't race the real
 	// production cadence under host load (gt-axh).
 	dashboardPollInterval time.Duration
+	// dashboardClients counts currently-open SSE connections. pollDashboardHash
+	// skips computeDashboardHash while this is zero, so the gt subprocess
+	// fan-out stops entirely once the last dashboard tab disconnects instead
+	// of running forever in the background (gt-c9rl).
+	dashboardClients int32
 }
 
 const optionsCacheTTL = 30 * time.Second
@@ -2230,6 +2236,11 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Track connections so pollDashboardHash can stop shelling out once the
+	// last dashboard tab disconnects (gt-c9rl).
+	atomic.AddInt32(&h.dashboardClients, 1)
+	defer atomic.AddInt32(&h.dashboardClients, -1)
+
 	// Send initial connection event
 	fmt.Fprintf(w, "event: connected\ndata: ok\n\n")
 	flusher.Flush()
@@ -2286,7 +2297,9 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 // every 2 seconds and broadcasting changes to every connected SSE client by
 // closing dashboardHashCh. This keeps the underlying gt subprocess load at a
 // constant O(1) regardless of how many dashboard tabs or SSE reconnects are
-// open — see handleSSE.
+// open — see handleSSE. It skips the actual gt subprocess fan-out entirely
+// while dashboardClients is zero, so a dashboard opened once and then closed
+// does not keep polling forever in the background (gt-c9rl).
 func (h *APIHandler) pollDashboardHash() {
 	interval := h.dashboardPollInterval
 	if interval <= 0 {
@@ -2296,6 +2309,9 @@ func (h *APIHandler) pollDashboardHash() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		if atomic.LoadInt32(&h.dashboardClients) == 0 {
+			continue
+		}
 		hash := h.computeDashboardHash(context.Background())
 		if hash == "" {
 			continue
@@ -2329,10 +2345,15 @@ func (h *APIHandler) computeDashboardHash(ctx context.Context) string {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
-	// Check worker/polecat state
+	// Check worker/polecat state. --fast skips gt status's per-agent mail
+	// lookups (one bd/mail subprocess per town identity, ~3 queries each):
+	// this hash only needs to detect *that* something changed, not the
+	// per-agent unread counts, and full mode was found fanning out to
+	// O(identities) bd processes on every 2s tick regardless of whether any
+	// dashboard client was even connected (gt-c9rl).
 	go func() {
 		defer wg.Done()
-		if out, err := h.runGtCommand(ctx, 3*time.Second, []string{"status", "--json"}); err == nil {
+		if out, err := h.runGtCommand(ctx, 3*time.Second, []string{"status", "--json", "--fast"}); err == nil {
 			mu.Lock()
 			parts = append(parts, "status:"+out)
 			mu.Unlock()

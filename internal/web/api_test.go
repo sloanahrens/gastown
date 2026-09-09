@@ -899,7 +899,7 @@ func TestSSEDashboardPollIsSharedAcrossConnections(t *testing.T) {
 set -eu
 echo "$*" >> ` + callLog + `
 case "$*" in
-  "status --json") printf '{"agents":[]}\n' ;;
+  "status --json --fast") printf '{"agents":[]}\n' ;;
   "hooks list") printf '\n' ;;
   "mail inbox") printf '\n' ;;
   *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
