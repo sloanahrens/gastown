@@ -909,22 +909,35 @@ esac
 		t.Fatalf("write fake gt: %v", err)
 	}
 
+	// A short, test-local poll interval rather than the production 2s
+	// default: with the 2s production cadence, the test's connections had
+	// to stay open long enough for the FIRST tick to land, leaving only
+	// ~500ms of margin against the connection deadline — not enough
+	// headroom under host contention for even one tick to fire and
+	// complete (gt-axh, same subprocess-spawn-under-load family as
+	// gt-0nk/gt-911). A short interval decouples the test from real
+	// wall-clock scheduling entirely: many ticks land well within the
+	// connection lifetime regardless of host load.
+	const pollInterval = 20 * time.Millisecond
 	h := &APIHandler{
-		gtPath:            gtPath,
-		workDir:           t.TempDir(),
-		defaultRunTimeout: 5 * time.Second,
-		maxRunTimeout:     10 * time.Second,
-		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		gtPath:                gtPath,
+		workDir:               t.TempDir(),
+		defaultRunTimeout:     5 * time.Second,
+		maxRunTimeout:         10 * time.Second,
+		cmdSem:                make(chan struct{}, maxConcurrentCommands),
+		dashboardPollInterval: pollInterval,
 	}
 
 	const numConnections = 4
+	const connDuration = 300 * time.Millisecond
+	start := time.Now()
 	var wg sync.WaitGroup
 	wg.Add(numConnections)
 	for i := 0; i < numConnections; i++ {
 		go func() {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
-			ctx, cancel := context.WithTimeout(req.Context(), 2500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(req.Context(), connDuration)
 			defer cancel()
 			req = req.WithContext(ctx)
 			h.handleSSE(httptest.NewRecorder(), req)
@@ -932,25 +945,43 @@ esac
 	}
 	wg.Wait()
 
-	data, err := os.ReadFile(callLog)
-	if err != nil {
-		t.Fatalf("expected the shared poller to have run at least once: %v", err)
+	// The poller runs on a shared background goroutine independent of any
+	// single connection's lifetime, so poll for calls.log with a generous
+	// deadline instead of asserting immediately against it (same pattern as
+	// gt-0nk) — this doesn't depend on a tick having already landed by the
+	// time wg.Wait() returns.
+	var data []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var err error
+		data, err = os.ReadFile(callLog)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the shared poller to have run at least once: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	elapsed := time.Since(start)
+
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	numCalls := len(lines)
 
-	// One poll tick shells out exactly 3 times (status, hooks, mail). With
-	// numConnections independent pollers this would be numCalls >= 3*numConnections
-	// per tick; with a single shared poller it stays at 3 per tick regardless
-	// of how many SSE clients are connected. Allow up to 2 ticks of slack for
-	// timing jitter around the 2s poll interval and 2.5s connection lifetime.
-	maxExpected := 3 * 2
+	// One poll tick shells out exactly 3 times (status, hooks, mail). A
+	// single shared poller produces roughly elapsed/pollInterval ticks
+	// regardless of how many SSE clients are connected; a regression back
+	// to a per-connection poller would multiply that by numConnections. Use
+	// a generous slack on the tick estimate — derived from measured elapsed
+	// time rather than a hardcoded tick count — so scheduler jitter can't
+	// flake this, while still leaving a wide margin below the
+	// per-connection blowup this test guards against.
+	const tickSlack = 5
+	maxTicks := int(elapsed/pollInterval) + tickSlack
+	maxExpected := 3 * maxTicks
 	if numCalls > maxExpected {
-		t.Errorf("gt was invoked %d times across %d concurrent SSE connections (calls: %v); want <= %d — the dashboard poll must be shared, not per-connection",
-			numCalls, numConnections, lines, maxExpected)
-	}
-	if numCalls == 0 {
-		t.Error("gt was never invoked — the shared poller did not run")
+		t.Errorf("gt was invoked %d times across %d concurrent SSE connections in %v (calls: %v); want <= %d — the dashboard poll must be shared, not per-connection",
+			numCalls, numConnections, elapsed, lines, maxExpected)
 	}
 }
 
@@ -1053,6 +1084,59 @@ func TestParseRigListJSON(t *testing.T) {
 			for i := range got {
 				if got[i] != tt.want[i] {
 					t.Errorf("parseRigListJSON(%q)[%d] = %q, want %q", tt.json, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseAgentsFromStatus is a pure, subprocess-free unit test of the
+// "gt status --json" parsing logic that TestHandleOptionsUsesRigListJSON
+// also exercises end-to-end through a fake subprocess. That end-to-end path
+// ties pass/fail to the handleOptions fetch timeout, which can flake under
+// host contention (gt-axh, same family as gt-0nk/gt-911); this test proves
+// the parsing/state-derivation logic deterministically, independent of any
+// subprocess timing.
+func TestParseAgentsFromStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want []OptionItem
+	}{
+		{
+			name: "empty agents list",
+			json: `{"agents":[]}`,
+			want: nil,
+		},
+		{
+			name: "invalid JSON",
+			json: `{not valid`,
+			want: nil,
+		},
+		{
+			name: "explicit state is preserved",
+			json: `{"agents":[{"name":"alpha","running":true,"state":"working"}]}`,
+			want: []OptionItem{{Name: "alpha", Status: "working", Running: true}},
+		},
+		{
+			name: "missing state falls back to running/stopped",
+			json: `{"agents":[{"name":"alpha","running":true},{"name":"beta","running":false}]}`,
+			want: []OptionItem{
+				{Name: "alpha", Status: "running", Running: true},
+				{Name: "beta", Status: "stopped", Running: false},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseAgentsFromStatus(tt.json)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseAgentsFromStatus(%q) = %v, want %v", tt.json, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseAgentsFromStatus(%q)[%d] = %+v, want %+v", tt.json, i, got[i], tt.want[i])
 				}
 			}
 		})

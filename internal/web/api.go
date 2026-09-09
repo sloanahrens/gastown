@@ -77,9 +77,30 @@ type APIHandler struct {
 	// time dashboardHash changes, broadcasting the update to every SSE
 	// connection currently blocked waiting on it.
 	dashboardHashCh chan struct{}
+	// dashboardPollInterval overrides the pollDashboardHash tick interval.
+	// Zero (the default for both NewAPIHandler and struct-literal test
+	// handlers) means "use dashboardPollIntervalDefault". Tests use a much
+	// shorter interval so poll-sharing assertions don't race the real
+	// production cadence under host load (gt-axh).
+	dashboardPollInterval time.Duration
 }
 
 const optionsCacheTTL = 30 * time.Second
+
+// optionsFetchTimeout bounds each individual gt/bd subprocess fetch inside
+// handleOptions (and the rig list it shares with loadRigOptions). It bounds
+// both the cmdSem wait and the command execution (see runGtCommand), so
+// under host contention a short per-fetch timeout can trip well before the
+// subprocess itself is slow. Previously these were ad hoc 3s/5s literals;
+// the 5s "status --json" fetch in particular was observed exceeding its
+// budget under full-town load (gt-axh, same bdReadTimeout-centralization
+// pattern as gt-911). One generous, centrally-defined timeout for all of
+// them removes that per-call guesswork.
+const optionsFetchTimeout = 10 * time.Second
+
+// dashboardPollIntervalDefault is the production cadence for
+// pollDashboardHash when dashboardPollInterval is unset.
+const dashboardPollIntervalDefault = 2 * time.Second
 
 // maxConcurrentCommands limits how many gt subprocesses can run at once.
 // handleOptions alone spawns 7; allow headroom for other concurrent handlers.
@@ -760,7 +781,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch polecats
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"polecat", "list", "--all", "--json"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), optionsFetchTimeout, []string{"polecat", "list", "--all", "--json"}); err == nil {
 			mu.Lock()
 			resp.Polecats = parseJSONPaths(output)
 			mu.Unlock()
@@ -772,7 +793,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch convoys
 	go func() {
 		defer wg.Done()
-		if output, err := h.runBdCommand(r.Context(), 3*time.Second, []string{"list", "--json", "--limit=0"}); err == nil {
+		if output, err := h.runBdCommand(r.Context(), optionsFetchTimeout, []string{"list", "--json", "--limit=0"}); err == nil {
 			mu.Lock()
 			resp.Convoys = parseConvoyListJSON(output)
 			mu.Unlock()
@@ -784,7 +805,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch hooks
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"hooks", "list"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), optionsFetchTimeout, []string{"hooks", "list"}); err == nil {
 			mu.Lock()
 			resp.Hooks = parseHooksListOutput(output)
 			mu.Unlock()
@@ -796,7 +817,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch mail messages
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"mail", "inbox"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), optionsFetchTimeout, []string{"mail", "inbox"}); err == nil {
 			mu.Lock()
 			resp.Messages = parseMailInboxOutput(output)
 			mu.Unlock()
@@ -808,7 +829,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch crew members
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"crew", "list", "--all"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), optionsFetchTimeout, []string{"crew", "list", "--all"}); err == nil {
 			mu.Lock()
 			resp.Crew = parseCrewListOutput(output)
 			mu.Unlock()
@@ -817,10 +838,10 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Fetch agents - shorter timeout, skip if slow
+	// Fetch agents - skip if slow (best-effort, same as the other fetches above)
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 5*time.Second, []string{"status", "--json"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), optionsFetchTimeout, []string{"status", "--json"}); err == nil {
 			mu.Lock()
 			resp.Agents = parseAgentsFromStatus(output)
 			mu.Unlock()
@@ -847,13 +868,13 @@ func (h *APIHandler) loadRigOptions(ctx context.Context) []string {
 		return rigs
 	}
 
-	if output, err := h.runGtCommand(ctx, 3*time.Second, []string{"rig", "list", "--json"}); err == nil {
+	if output, err := h.runGtCommand(ctx, optionsFetchTimeout, []string{"rig", "list", "--json"}); err == nil {
 		return parseRigListJSON(output)
 	} else {
 		log.Printf("warning: handleOptions: rig list --json: %v", err)
 	}
 
-	if output, err := h.runGtCommand(ctx, 3*time.Second, []string{"rig", "list"}); err == nil {
+	if output, err := h.runGtCommand(ctx, optionsFetchTimeout, []string{"rig", "list"}); err == nil {
 		return parseRigListOutput(output)
 	} else {
 		log.Printf("warning: handleOptions: rig list fallback: %v", err)
@@ -2267,7 +2288,11 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 // constant O(1) regardless of how many dashboard tabs or SSE reconnects are
 // open — see handleSSE.
 func (h *APIHandler) pollDashboardHash() {
-	ticker := time.NewTicker(2 * time.Second)
+	interval := h.dashboardPollInterval
+	if interval <= 0 {
+		interval = dashboardPollIntervalDefault
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for range ticker.C {
