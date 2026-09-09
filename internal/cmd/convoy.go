@@ -2651,7 +2651,22 @@ func getIssueDetailsBatchInTown(townRoot string, issueIDs []string) map[string]*
 	if townRoot == "" {
 		return getIssueDetailsBatch(issueIDs)
 	}
-	return getIssueDetailsBatchWithClient(beads.New(townRoot), issueIDs)
+	return getIssueDetailsBatchWithClient(beads.New(normalizeTownRootArg(townRoot)), issueIDs)
+}
+
+// normalizeTownRootArg prepares a town/rig root argument for beads.New,
+// whose workDir becomes both the routing base and the literal cwd bd
+// subprocesses run from. Callers of getTrackedIssues disagree on whether
+// their "townBeads" parameter is the root itself or its .beads directory
+// (gt-g6b); accept either by stripping a trailing .beads, then canonicalize
+// so it matches the cwd-derived paths bd subprocesses report back
+// (os.Getwd() after chdir resolves symlinks on macOS, same as
+// doneCanonicalPath's other callers).
+func normalizeTownRootArg(root string) string {
+	if filepath.Base(root) == ".beads" {
+		root = filepath.Dir(root)
+	}
+	return doneCanonicalPath(root)
 }
 
 func getIssueDetailsBatchWithClient(client *beads.Beads, issueIDs []string) map[string]*issueDetails {

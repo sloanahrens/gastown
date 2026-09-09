@@ -349,6 +349,7 @@ func areScheduledInTown(townRoot string, beadIDs []string) map[string]bool {
 		// Can't determine town root — fail closed (treat all as scheduled)
 		return failClosedScheduled(beadIDs)
 	}
+	townRoot = normalizeTownRootArg(townRoot)
 
 	// Scan all rig beads dirs (sling contexts live in target rig's DB). (GH#3468)
 	contexts, err := listAllSlingContexts(townRoot)
