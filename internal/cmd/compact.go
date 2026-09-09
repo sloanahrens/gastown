@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -66,8 +67,14 @@ TTLs by wisp type:
   recovery, error, escalation:  7d
   default (untyped):            24h
 
+By default, compaction sweeps the current directory's database plus every
+rig registered in the workspace, so a single "gt compact" run (e.g. from a
+deacon patrol) reaches rig-local wisps even when invoked outside any rig.
+Pass --rig to scope a run to one specific rig instead.
+
 Examples:
-  gt compact              # Run compaction
+  gt compact              # Run compaction (current dir + all registered rigs)
+  gt compact --rig gastown # Run compaction against just the gastown rig
   gt compact --dry-run    # Preview what would happen
   gt compact --verbose    # Show each wisp decision
   gt compact --json       # Machine-readable output`,
@@ -78,7 +85,7 @@ func init() {
 	compactCmd.Flags().BoolVar(&compactDryRun, "dry-run", false, "Preview compaction without making changes")
 	compactCmd.Flags().BoolVarP(&compactVerbose, "verbose", "v", false, "Show each wisp decision")
 	compactCmd.Flags().BoolVar(&compactJSON, "json", false, "Output results as JSON")
-	compactCmd.Flags().StringVar(&compactRig, "rig", "", "Compact a specific rig (default: current rig)")
+	compactCmd.Flags().StringVar(&compactRig, "rig", "", "Compact only this rig (default: current dir + every registered rig)")
 
 	rootCmd.AddCommand(compactCmd)
 }
@@ -173,6 +180,75 @@ type compactIssue struct {
 	WispType     string `json:"wisp_type,omitempty"`
 }
 
+// compactTarget identifies one beads database for `gt compact` to sweep.
+type compactTarget struct {
+	workDir string // passed to beads.New as the bd subprocess's working directory
+	rigName string // used for TTL config lookups; "" for the ambient/cwd target
+	label   string // short human-readable name for output
+}
+
+// resolveCompactTargets decides which beads databases `gt compact` sweeps.
+//
+// With an explicit --rig, only that rig's database is targeted.
+//
+// Otherwise, the ambient (cwd-resolved) database is always included, and
+// every registered rig is added on top of it. This matters because the
+// deacon patrol runs `gt compact` from ~/gt/deacon, which resolves to the
+// town-level database only — rig-local wisps (e.g. polecat molecule step
+// wisps) were structurally unreachable by compaction (gt-vee: gastown rig
+// sat at 484 open step wisps, 0 ever closed by a compaction pass). Targets
+// that resolve to the same underlying beads dir (e.g. cwd is already inside
+// one of the registered rigs) are only compacted once.
+func resolveCompactTargets(townRoot, workDir, explicitRig string) ([]compactTarget, error) {
+	if explicitRig != "" {
+		rigPath, err := resolveRigPath(townRoot, explicitRig)
+		if err != nil {
+			return nil, err
+		}
+		return []compactTarget{{workDir: rigPath, rigName: explicitRig, label: explicitRig}}, nil
+	}
+
+	targets := []compactTarget{{workDir: workDir, rigName: os.Getenv("GT_RIG"), label: "current"}}
+	seen := map[string]bool{filepath.Clean(beads.ResolveBeadsDir(workDir)): true}
+
+	if townRoot == "" {
+		return targets, nil
+	}
+
+	rigs, err := discoverRigsForTownRoot(townRoot)
+	if err != nil {
+		// Best effort: still compact the ambient target even if rig discovery fails.
+		return targets, nil
+	}
+
+	for _, r := range rigs {
+		resolved := filepath.Clean(beads.ResolveBeadsDir(r.Path))
+		if seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+		targets = append(targets, compactTarget{workDir: r.Path, rigName: r.Name, label: r.Name})
+	}
+	return targets, nil
+}
+
+// resolveRigPath returns the filesystem path for a registered rig by name.
+func resolveRigPath(townRoot, rigName string) (string, error) {
+	if townRoot == "" {
+		return "", fmt.Errorf("cannot resolve rig %q: not in a Gas Town workspace", rigName)
+	}
+	rigs, err := discoverRigsForTownRoot(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("discovering rigs: %w", err)
+	}
+	for _, r := range rigs {
+		if r.Name == rigName {
+			return r.Path, nil
+		}
+	}
+	return "", fmt.Errorf("rig %q not found", rigName)
+}
+
 func runCompact(cmd *cobra.Command, args []string) error {
 	now := time.Now().UTC()
 
@@ -183,27 +259,58 @@ func runCompact(cmd *cobra.Command, args []string) error {
 	}
 
 	townRoot := beads.FindTownRoot(workDir)
-	rigName := compactRig
-	if rigName == "" {
-		rigName = os.Getenv("GT_RIG")
-	}
 
-	// Load TTL config
-	ttls := loadTTLConfig(townRoot, rigName)
-
-	// Query all ephemeral (wisp) issues via bd list
-	bd := beads.New(workDir)
-	allWisps, err := listWisps(bd)
+	targets, err := resolveCompactTargets(townRoot, workDir, compactRig)
 	if err != nil {
-		return fmt.Errorf("listing wisps: %w", err)
-	}
-
-	if !compactJSON && !compactDryRun {
-		fmt.Printf("Compacting %d wisps...\n", len(allWisps))
+		return err
 	}
 
 	result := &compactResult{}
 
+	for _, target := range targets {
+		ttls := loadTTLConfig(townRoot, target.rigName)
+		bd := beads.New(target.workDir)
+
+		allWisps, err := listWisps(bd)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: listing wisps: %v", target.label, err))
+			continue
+		}
+
+		if !compactJSON && !compactDryRun {
+			if len(targets) > 1 {
+				fmt.Printf("Compacting %d wisps in %s...\n", len(allWisps), target.label)
+			} else {
+				fmt.Printf("Compacting %d wisps...\n", len(allWisps))
+			}
+		}
+
+		compactWisps(bd, allWisps, ttls, now, result)
+
+		// Clean up orphaned wisp_dependencies left behind by deleted wisps.
+		// When bd delete removes a wisp, it doesn't cascade-delete dependency
+		// records in wisp_dependencies that reference the deleted wisp. Over
+		// many compaction cycles these accumulate as dangling refs. We sweep
+		// them here.
+		if !compactDryRun {
+			cleanOrphanedWispDeps(bd, result)
+		}
+	}
+
+	// Output results
+	if compactJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	printCompactSummary(result)
+	return nil
+}
+
+// compactWisps applies the TTL-based compaction policy to one database's
+// batch of wisps, accumulating outcomes into result.
+func compactWisps(bd *beads.Beads, allWisps []*compactIssue, ttls map[string]time.Duration, now time.Time, result *compactResult) {
 	for _, w := range allWisps {
 		age, err := wispAge(w, now)
 		if err != nil {
@@ -256,24 +363,6 @@ func runCompact(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-
-	// Clean up orphaned wisp_dependencies left behind by deleted wisps.
-	// When bd delete removes a wisp, it doesn't cascade-delete dependency
-	// records in wisp_dependencies that reference the deleted wisp. Over many
-	// compaction cycles these accumulate as dangling refs. We sweep them here.
-	if !compactDryRun {
-		cleanOrphanedWispDeps(bd, result)
-	}
-
-	// Output results
-	if compactJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
-	}
-
-	printCompactSummary(result)
-	return nil
 }
 
 // cleanOrphanedWispDeps removes wisp_dependencies rows where either side no

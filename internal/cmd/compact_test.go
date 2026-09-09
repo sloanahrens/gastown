@@ -1,13 +1,40 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+// writeTestRigsConfig sets up a fake town root at dir with mayor/rigs.json
+// registering the given rig names, plus a directory for each rig.
+func writeTestRigsConfig(t *testing.T, townRoot string, rigNames ...string) {
+	t.Helper()
+
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+
+	var entries []string
+	for _, name := range rigNames {
+		rigDir := filepath.Join(townRoot, name)
+		if err := os.MkdirAll(rigDir, 0755); err != nil {
+			t.Fatalf("mkdir rig %s: %v", name, err)
+		}
+		entries = append(entries, fmt.Sprintf(`"%s": {"git_url": "https://example.com/%s.git", "beads": {"prefix": "%s"}}`, name, name, name[:2]))
+	}
+
+	rigsJSON := fmt.Sprintf(`{"version": 1, "rigs": {%s}}`, strings.Join(entries, ","))
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatalf("write rigs.json: %v", err)
+	}
+}
 
 func TestGetTTL(t *testing.T) {
 	ttls := defaultTTLs
@@ -301,4 +328,114 @@ func compactSourceBetween(t *testing.T, source, startMarker, endMarker string) s
 		t.Fatalf("could not find %q after %q", endMarker, startMarker)
 	}
 	return source[start : start+end]
+}
+
+// TestResolveCompactTargetsReachesAllRegisteredRigs is the regression test
+// for gt-vee: a bare "gt compact" run from a directory that resolves to the
+// town-level database (e.g. the deacon's ~/gt/deacon) must still reach every
+// registered rig's database, not just the ambient one.
+func TestResolveCompactTargetsReachesAllRegisteredRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "gastown", "beads")
+
+	// Simulate the deacon: cwd is inside the town root but not any rig.
+	deaconDir := filepath.Join(townRoot, "deacon")
+	if err := os.MkdirAll(deaconDir, 0755); err != nil {
+		t.Fatalf("mkdir deacon: %v", err)
+	}
+
+	targets, err := resolveCompactTargets(townRoot, deaconDir, "")
+	if err != nil {
+		t.Fatalf("resolveCompactTargets: %v", err)
+	}
+
+	labels := make(map[string]string) // label -> workDir
+	for _, tgt := range targets {
+		labels[tgt.label] = tgt.workDir
+	}
+
+	if labels["current"] != deaconDir {
+		t.Errorf("expected ambient target %q, got %q", deaconDir, labels["current"])
+	}
+	if got, want := labels["gastown"], filepath.Join(townRoot, "gastown"); got != want {
+		t.Errorf("expected gastown rig target %q, got %q", want, got)
+	}
+	if got, want := labels["beads"], filepath.Join(townRoot, "beads"); got != want {
+		t.Errorf("expected beads rig target %q, got %q", want, got)
+	}
+	if len(targets) != 3 {
+		t.Errorf("expected 3 targets (current + 2 rigs), got %d: %+v", len(targets), targets)
+	}
+}
+
+// TestResolveCompactTargetsDedupesAmbientRig ensures that running "gt
+// compact" from inside a registered rig's own directory doesn't compact
+// that rig's database twice.
+func TestResolveCompactTargetsDedupesAmbientRig(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "gastown", "beads")
+
+	gastownDir := filepath.Join(townRoot, "gastown")
+
+	targets, err := resolveCompactTargets(townRoot, gastownDir, "")
+	if err != nil {
+		t.Fatalf("resolveCompactTargets: %v", err)
+	}
+
+	count := 0
+	for _, tgt := range targets {
+		if filepath.Clean(tgt.workDir) == filepath.Clean(gastownDir) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected gastown's database to appear exactly once, appeared %d times: %+v", count, targets)
+	}
+	if len(targets) != 2 {
+		t.Errorf("expected 2 targets (gastown + beads), got %d: %+v", len(targets), targets)
+	}
+}
+
+// TestResolveCompactTargetsExplicitRig ensures --rig scopes to only that rig.
+func TestResolveCompactTargetsExplicitRig(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "gastown", "beads")
+
+	targets, err := resolveCompactTargets(townRoot, townRoot, "beads")
+	if err != nil {
+		t.Fatalf("resolveCompactTargets: %v", err)
+	}
+
+	if len(targets) != 1 {
+		t.Fatalf("expected exactly 1 target, got %d: %+v", len(targets), targets)
+	}
+	if targets[0].label != "beads" || targets[0].workDir != filepath.Join(townRoot, "beads") {
+		t.Errorf("unexpected target: %+v", targets[0])
+	}
+}
+
+// TestResolveCompactTargetsNoTownRoot falls back to just the ambient target.
+func TestResolveCompactTargetsNoTownRoot(t *testing.T) {
+	targets, err := resolveCompactTargets("", "/some/dir", "")
+	if err != nil {
+		t.Fatalf("resolveCompactTargets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].workDir != "/some/dir" {
+		t.Fatalf("expected single ambient target, got %+v", targets)
+	}
+}
+
+func TestResolveRigPathNotFound(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "gastown")
+
+	if _, err := resolveRigPath(townRoot, "nonexistent"); err == nil {
+		t.Error("expected error for unregistered rig, got nil")
+	}
+}
+
+func TestResolveRigPathNoTownRoot(t *testing.T) {
+	if _, err := resolveRigPath("", "gastown"); err == nil {
+		t.Error("expected error when town root is unknown, got nil")
+	}
 }
