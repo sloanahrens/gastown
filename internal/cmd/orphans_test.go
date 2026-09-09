@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -220,6 +221,75 @@ func TestFindOrphanPolecatBranches_OnMain(t *testing.T) {
 	}
 }
 
+// TestFindOrphanPolecatBranches_RebaseMerged verifies that a branch whose
+// commit was rebased onto main (landing under a new SHA) is not reported as
+// an orphan, even though the polecat's own branch ref still points at the
+// pre-rebase commit. The refinery merges by rebase + push, which rewrites
+// SHAs, so a SHA-ancestry check (rev-list) would treat this as permanently
+// unmerged forever. Patch-equivalence (git cherry) recognizes the content
+// already landed. See gt-r8o.
+func TestFindOrphanPolecatBranches_RebaseMerged(t *testing.T) {
+	rigDir := t.TempDir()
+	rigName := "testrig"
+	polecatsDir := filepath.Join(rigDir, "polecats")
+
+	originDir := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(originDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, originDir, "git", "init", "--bare")
+
+	polecatName := "echo"
+	worktreePath := filepath.Join(polecatsDir, polecatName)
+	if err := os.MkdirAll(worktreePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, worktreePath, "git", "init")
+	run(t, worktreePath, "git", "remote", "add", "origin", originDir)
+
+	writeFile(t, filepath.Join(worktreePath, "README.md"), "# test\n")
+	run(t, worktreePath, "git", "add", ".")
+	run(t, worktreePath, "git", "commit", "-m", "initial commit")
+	run(t, worktreePath, "git", "branch", "-M", "main")
+	run(t, worktreePath, "git", "push", "-u", "origin", "main")
+
+	run(t, worktreePath, "git", "checkout", "-b", "polecat/echo-work")
+	writeFile(t, filepath.Join(worktreePath, "feature.go"), "package feature\n")
+	run(t, worktreePath, "git", "add", ".")
+	run(t, worktreePath, "git", "commit", "-m", "feat: echo work")
+
+	// Simulate the refinery's rebase + push merge: reapply the same patch on
+	// main as a brand-new commit, push it, then leave the polecat branch ref
+	// parked on the original pre-rebase commit. Cherry-pick alone can
+	// reproduce the exact same committer timestamp as the original commit
+	// (same parent/tree/author, sub-second test execution), which would
+	// silently produce an IDENTICAL SHA and fail to exercise the SHA-rewrite
+	// case this test targets — so force a distinct committer date to
+	// guarantee the merged commit gets a genuinely different SHA.
+	run(t, worktreePath, "git", "checkout", "main")
+	runEnv(t, worktreePath, []string{"GIT_COMMITTER_DATE=2030-01-01T00:00:00"}, "git", "cherry-pick", "polecat/echo-work")
+	run(t, worktreePath, "git", "push", "origin", "main")
+	run(t, worktreePath, "git", "checkout", "polecat/echo-work")
+
+	mergedSHA := strings.TrimSpace(runOutput(t, worktreePath, "git", "rev-parse", "main"))
+	originalSHA := strings.TrimSpace(runOutput(t, worktreePath, "git", "rev-parse", "polecat/echo-work"))
+	if mergedSHA == originalSHA {
+		t.Fatalf("test setup broken: merged commit on main has the same SHA as the original branch commit (%s) — cherry-pick did not rewrite it", mergedSHA)
+	}
+
+	branches, skipped, err := findOrphanPolecatBranches(rigDir, rigName, "main")
+	if err != nil {
+		t.Fatalf("findOrphanPolecatBranches: %v", err)
+	}
+	if len(skipped) > 0 {
+		t.Errorf("unexpected skipped polecats: %v", skipped)
+	}
+	if len(branches) != 0 {
+		t.Errorf("expected 0 orphan branches for rebase-merged content, got %d: %+v", len(branches), branches)
+	}
+}
+
 // TestFindOrphanPolecatBranches_NoPolecatsDir verifies graceful handling when
 // there is no polecats directory.
 func TestFindOrphanPolecatBranches_NoPolecatsDir(t *testing.T) {
@@ -252,6 +322,36 @@ func run(t *testing.T, dir string, name string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
 	}
+}
+
+// runEnv is like run but adds extra environment variables to the command,
+// e.g. to force a specific GIT_COMMITTER_DATE.
+func runEnv(t *testing.T, dir string, extraEnv []string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+	), extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+	}
+}
+
+// runOutput is like run but returns stdout instead of discarding it.
+func runOutput(t *testing.T, dir string, name string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s %v failed: %v", name, args, err)
+	}
+	return string(out)
 }
 
 func writeFile(t *testing.T, path, content string) {

@@ -372,22 +372,24 @@ func findOrphanPolecatBranches(rigPath, rigName, defaultBranch string) ([]Orphan
 			continue // On default branch or detached HEAD — nothing unmerged
 		}
 
-		// Count commits ahead of default branch (try local ref, then origin/)
+		// Count commits ahead of default branch by patch-equivalence (git
+		// cherry), not SHA-ancestry (rev-list). The refinery merges by
+		// rebase + push, which rewrites commit SHAs, so a rev-list ancestry
+		// check treats every rebase-merged branch as permanently unmerged
+		// even though its content already landed. See gt-r8o.
 		baseRef := defaultBranch
-		revListCmd := exec.Command("git", "-C", worktreePath, "rev-list", "--count", baseRef+"..HEAD")
-		countOut, err := revListCmd.Output()
+		cherryOut, err := g.Cherry(baseRef, "HEAD")
 		if err != nil {
 			baseRef = "origin/" + defaultBranch
-			revListCmd = exec.Command("git", "-C", worktreePath, "rev-list", "--count", baseRef+"..HEAD")
-			countOut, err = revListCmd.Output()
+			cherryOut, err = g.Cherry(baseRef, "HEAD")
 			if err != nil {
-				skipped = append(skipped, skippedPolecat{polecatName, fmt.Sprintf("rev-list failed: %v", err)})
+				skipped = append(skipped, skippedPolecat{polecatName, fmt.Sprintf("cherry failed: %v", err)})
 				continue
 			}
 		}
-		count, err := strconv.Atoi(strings.TrimSpace(string(countOut)))
-		if err != nil || count == 0 {
-			continue // No commits ahead
+		count := gitpkg.CountCherryUnmergedCommits(cherryOut)
+		if count == 0 {
+			continue // No commits ahead (patch already upstream, or none)
 		}
 
 		// Get the latest commit subject
