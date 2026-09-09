@@ -684,10 +684,12 @@ func runDeaconAttach(cmd *cobra.Command, args []string) error {
 
 // DeaconStatusOutput is the JSON-serializable status of the Deacon.
 type DeaconStatusOutput struct {
-	Running   bool             `json:"running"`
-	Paused    bool             `json:"paused"`
-	Session   string           `json:"session"`
-	Heartbeat *HeartbeatStatus `json:"heartbeat,omitempty"`
+	Running       bool             `json:"running"`
+	Paused        bool             `json:"paused"`
+	Session       string           `json:"session"`
+	Heartbeat     *HeartbeatStatus `json:"heartbeat,omitempty"`
+	PollerRunning bool             `json:"heartbeat_poller_running"`
+	PollerPID     int              `json:"heartbeat_poller_pid,omitempty"`
 }
 
 // HeartbeatStatus is the JSON-serializable heartbeat info.
@@ -739,13 +741,19 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Poller status (gt-nrl: previously no command reported whether the
+	// background heartbeat poller was actually armed).
+	pollerPID, pollerRunning := deacon.HeartbeatPollerStatus(townRoot, sessionName)
+
 	// JSON output
 	if deaconStatusJSON {
 		out := DeaconStatusOutput{
-			Running:   running,
-			Paused:    paused,
-			Session:   sessionName,
-			Heartbeat: hbStatus,
+			Running:       running,
+			Paused:        paused,
+			Session:       sessionName,
+			Heartbeat:     hbStatus,
+			PollerRunning: pollerRunning,
+			PollerPID:     pollerPID,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -809,6 +817,12 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 	} else if townRoot != "" {
 		fmt.Println()
 		fmt.Printf("  Heartbeat: %s\n", style.Dim.Render("no heartbeat file"))
+	}
+
+	if pollerRunning {
+		fmt.Printf("  Heartbeat poller: %s (pid %d)\n", style.Bold.Render("running"), pollerPID)
+	} else {
+		fmt.Printf("  Heartbeat poller: %s\n", style.Dim.Render("not running"))
 	}
 
 	if running {

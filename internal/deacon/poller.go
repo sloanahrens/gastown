@@ -133,6 +133,15 @@ func StopHeartbeatPoller(townRoot, session string) error {
 	return nil
 }
 
+// HeartbeatPollerStatus reports whether a heartbeat poller is currently
+// running for the given session, and its PID if so. Exposed for `gt deacon
+// status` and similar diagnostics (gt-nrl: no command previously reported
+// poller liveness, so confirming the gt-x8y protection was armed required
+// reading source, grepping ps, and instrumenting heartbeat.json by hand).
+func HeartbeatPollerStatus(townRoot, session string) (pid int, alive bool) {
+	return heartbeatPollerAlive(townRoot, session)
+}
+
 // heartbeatPollerAlive checks if a poller is running for the given session.
 // Returns the PID and whether the process is alive.
 func heartbeatPollerAlive(townRoot, session string) (int, bool) {

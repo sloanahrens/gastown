@@ -288,6 +288,20 @@ func touchDeaconHeartbeat() {
 	}
 
 	_ = deacon.TouchIfActive(townRoot)
+
+	// Self-heal the background heartbeat poller (gt-nrl). Previously the
+	// poller was only armed once, at the tail of `gt deacon start` — a
+	// session that predates the poller's install, or one recreated outside
+	// that path (e.g. a town-wide tmux restart), ran unprotected for its
+	// whole life with nothing to re-arm it. StartHeartbeatPoller is
+	// idempotent (no-ops if a poller is already alive for this session), so
+	// calling it here — a path every deacon gt command hits — mirrors how
+	// nudge.StartPoller self-heals from gt nudge's wait-idle path.
+	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+		if _, err := deacon.StartHeartbeatPoller(townRoot, sessionName); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to arm deacon heartbeat poller: %v\n", err)
+		}
+	}
 }
 
 // warnIfTownRootOffMain prints a warning if the town root is not on main branch.
