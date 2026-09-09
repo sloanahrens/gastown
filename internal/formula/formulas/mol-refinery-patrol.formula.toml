@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 17
+version = 18
 
 [vars]
 [vars.wisp_type]
@@ -189,9 +189,14 @@ title = "Check refinery mail"
 description = """
 First, clean up wisps from previous cycles (closed wisps + abandoned wisps):
 ```bash
-bd mol wisp gc --closed --force
+bd mol wisp gc --closed --force --exclude-type chore
 bd mol wisp gc --age 1h --force
 ```
+
+> **Warning (gt-0ok):** `--exclude-type chore` is REQUIRED on the closed-wisp
+> pass. Plugin-run receipts are ephemeral `chore`-type beads closed
+> immediately after creation — unscoped `--closed --force` deletes every
+> receipt town-wide each cycle, permanently opening all cooldown gates.
 
 Then check mail for MERGE_READY submissions, escalations, and messages.
 

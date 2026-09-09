@@ -171,6 +171,55 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 	}
 }
 
+// TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC verifies that
+// the closed-wisp cleanup in every patrol's inbox-check step excludes
+// chore-type wisps, so it cannot delete plugin-run receipts.
+//
+// Regression test for gt-0ok: plugin-run receipts
+// (internal/plugin/recording.go RecordRun) are ephemeral `chore`-type beads
+// closed immediately after creation, making them closed wisps. Unscoped
+// `bd mol wisp gc --closed --force` deleted every receipt town-wide each
+// patrol cycle, so cooldown gates (which query closed receipts) never saw a
+// prior run and read permanently open.
+func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
+	patrolFormulas := []string{
+		"mol-witness-patrol.formula.toml",
+		"mol-deacon-patrol.formula.toml",
+		"mol-refinery-patrol.formula.toml",
+	}
+
+	for _, name := range patrolFormulas {
+		t.Run(name, func(t *testing.T) {
+			content, err := formulasFS.ReadFile("formulas/" + name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+
+			f, err := Parse(content)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", name, err)
+			}
+
+			var inboxDesc string
+			for _, step := range f.Steps {
+				if step.ID == "inbox-check" {
+					inboxDesc = step.Description
+					break
+				}
+			}
+			if inboxDesc == "" {
+				t.Fatalf("%s: inbox-check step not found or has empty description", name)
+			}
+
+			if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force --exclude-type chore") {
+				t.Errorf("%s inbox-check step's closed-wisp GC must exclude chore-type wisps\n"+
+					"(--exclude-type chore) to protect plugin-run receipts. See gt-0ok.",
+					name)
+			}
+		})
+	}
+}
+
 // TestDeaconPatrolDoesNotRunAgeBasedWispGC verifies that the Deacon patrol
 // does not reap open step wisps from its own active patrol molecule.
 //

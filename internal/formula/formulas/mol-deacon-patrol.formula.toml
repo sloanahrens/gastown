@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -107,7 +107,7 @@ needs = ["heartbeat"]
 description = """
 First, clean up CLOSED wisps from previous cycles:
 ```bash
-bd mol wisp gc --closed --force
+bd mol wisp gc --closed --force --exclude-type chore
 ```
 
 > **Warning (hq-3pp):** Do not run unscoped age-based wisp GC from inside
@@ -115,6 +115,14 @@ bd mol wisp gc --closed --force
 > age cleanup can reap this molecule's open steps and make the patrol appear
 > complete early. Use closed-only cleanup here; stale open-wisp cleanup belongs
 > outside active patrol molecules.
+
+> **Warning (gt-0ok):** `--exclude-type chore` is REQUIRED. Plugin-run
+> receipts (internal/plugin/recording.go RecordRun) are ephemeral `chore`-type
+> beads that are closed immediately after creation — they ARE closed wisps.
+> Unscoped `--closed --force` deletes every receipt town-wide each cycle,
+> so cooldown gates (which query closed receipts via CountRunsSince) never
+> see a prior run and read permanently open. Receipts must outlive the
+> longest gate duration (24h today); do not drop this flag.
 
 Then handle callbacks from agents.
 
