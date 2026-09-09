@@ -225,12 +225,143 @@ func TestResolveIgnoreCleanupStatusPartialSpawnStillGated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveIgnoreCleanupStatus(tt.status, tt.allowPartial, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
+			got := ResolveIgnoreCleanupStatus(tt.status, tt.allowPartial, false, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
 			if got != tt.want {
 				t.Fatalf("ResolveIgnoreCleanupStatus() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+// TestResolveIgnoreCleanupStatusGoneWorktreeStillGated is the gt-2h6
+// regression test. A polecat whose worktree directory has been structurally
+// verified gone can never self-report a fresh CleanupStatus again — there is
+// nothing left to check — so a missing/unknown status there must not
+// permanently veto reclaiming the slot. allowMissingForGoneWorktree grants
+// that waiver WITHOUT requiring gitSafe (a live git check is impossible
+// against a nonexistent directory, so requiring it would make the waiver
+// unreachable), but still requires the same hook/active-MR safety facts as
+// every other exception — it must never bypass those.
+func TestResolveIgnoreCleanupStatusGoneWorktreeStillGated(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       CleanupStatus
+		allowGone    bool
+		hookSafe     bool
+		activeMRSafe bool
+		gitSafe      bool
+		want         bool
+	}{
+		{
+			name:         "gone worktree with missing status and safe hook/MR may ignore, gitSafe false",
+			status:       "",
+			allowGone:    true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      false,
+			want:         true,
+		},
+		{
+			name:         "gone worktree with unknown status and safe hook/MR may ignore",
+			status:       CleanupUnknown,
+			allowGone:    true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      false,
+			want:         true,
+		},
+		{
+			name:         "gone worktree does NOT waive a still-open hook bead",
+			status:       "",
+			allowGone:    true,
+			hookSafe:     false,
+			activeMRSafe: true,
+			want:         false,
+		},
+		{
+			name:         "gone worktree does NOT waive a pending active MR",
+			status:       "",
+			allowGone:    true,
+			hookSafe:     true,
+			activeMRSafe: false,
+			want:         false,
+		},
+		{
+			name:         "gone worktree does NOT waive a recorded dirty status",
+			status:       CleanupUncommitted,
+			allowGone:    true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			want:         false,
+		},
+		{
+			name:         "missing status without allowGone still fails closed",
+			status:       "",
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveIgnoreCleanupStatus(tt.status, false, tt.allowGone, false, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
+			if got != tt.want {
+				t.Fatalf("ResolveIgnoreCleanupStatus() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewWorkstateInputGoneWorktreeReclaimableOnlyWhenNoOtherRisk exercises
+// the full NewWorkstateInput/DecideWorkstate path for the gt-2h6 scenario: a
+// structurally gone worktree (GitCheckFailed=true, CleanupStatus missing)
+// must resolve to disposition Reason="git-check-failed" with exactly the
+// blocker "git_state=unknown" — the shape brokenIdleReclaimDispositionBlocker
+// treats as reclaimable — as long as nothing else is at risk. A hooked bead
+// or a pending active MR must still block, proving the new exception does
+// not blanket-waive real risk signals.
+func TestNewWorkstateInputGoneWorktreeReclaimableOnlyWhenNoOtherRisk(t *testing.T) {
+	base := WorkstateFacts{
+		State:                       StateIdle,
+		CleanupStatus:               "",
+		HookBeadSafe:                true,
+		WorktreeStructurallyMissing: true,
+		GitCheckFailed:              true,
+	}
+
+	t.Run("no other risk resolves to git-check-failed only", func(t *testing.T) {
+		d := DecideWorkstate(NewWorkstateInput(base))
+		if d.Reason != "git-check-failed" {
+			t.Fatalf("Reason = %q, want git-check-failed (got disposition %+v)", d.Reason, d)
+		}
+		if len(d.Blockers) != 1 || d.Blockers[0] != "git_state=unknown" {
+			t.Fatalf("Blockers = %v, want exactly [git_state=unknown]", d.Blockers)
+		}
+		if brokenIdleReclaimDispositionBlocker(d) != "" {
+			t.Fatalf("brokenIdleReclaimDispositionBlocker() = %q, want empty (reclaimable)", brokenIdleReclaimDispositionBlocker(d))
+		}
+	})
+
+	t.Run("hooked bead still blocks despite gone worktree", func(t *testing.T) {
+		f := base
+		f.HookBead = "gt-x8y"
+		f.HookBeadSafe = false
+		d := DecideWorkstate(NewWorkstateInput(f))
+		if brokenIdleReclaimDispositionBlocker(d) == "" {
+			t.Fatalf("expected hooked bead to block reclaim, got disposition %+v", d)
+		}
+	})
+
+	t.Run("pending active MR still blocks despite gone worktree", func(t *testing.T) {
+		f := base
+		f.ActiveMRBlocker = "active_mr=gt-wisp-rxnx status=open"
+		d := DecideWorkstate(NewWorkstateInput(f))
+		if brokenIdleReclaimDispositionBlocker(d) == "" {
+			t.Fatalf("expected pending active MR to block reclaim, got disposition %+v", d)
+		}
+	})
 }
 
 // TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupStatus
@@ -300,10 +431,10 @@ func TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupSta
 // test above while stranding the rig at its polecat cap.
 func TestNewWorkstateInputRealisticCleanPolecatStillClears(t *testing.T) {
 	facts := WorkstateFacts{
-		State:          StateDone,
-		CleanupStatus:  CleanupClean,
-		HookBeadSafe:   true,
-		Branch:         "main",
+		State:           StateDone,
+		CleanupStatus:   CleanupClean,
+		HookBeadSafe:    true,
+		Branch:          "main",
 		MQCheckRequired: false,
 	}
 	d := DecideWorkstate(NewWorkstateInput(facts))

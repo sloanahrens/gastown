@@ -1386,7 +1386,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 	if agentIssue == nil || fields == nil {
 		return fmt.Errorf("not safe to reclaim: agent_bead=%s missing", agentID)
 	}
-	if blocker := brokenIdleReclaimAgentBlocker(fields); blocker != "" {
+	if blocker := brokenIdleReclaimAgentBlocker(fields, true); blocker != "" {
 		return fmt.Errorf("not safe to reclaim: %s", blocker)
 	}
 	if blocker := m.brokenIdleReclaimSessionBlocker(name); blocker != "" {
@@ -2349,6 +2349,10 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		}
 	}
 	clonePath := m.clonePath(name)
+	// gt-2h6: a structurally gone worktree can never self-report a fresh
+	// CleanupStatus again, so a missing/unknown status must not permanently
+	// veto reclaiming this slot. See ResolveIgnoreCleanupStatus.
+	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(VerifyWorktreeExists(clonePath))
 	g := git.NewGit(clonePath)
 	branch, branchErr := g.CurrentBranch()
 	if branchErr != nil {

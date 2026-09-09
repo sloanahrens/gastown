@@ -100,6 +100,24 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", err
 	}
 
+	// A missing workDir makes exec.Cmd fail its internal chdir during
+	// fork/exec, and Go folds that failure into a PathError blamed on the
+	// git binary itself: "fork/exec /opt/homebrew/bin/git: no such file or
+	// directory". That reads as a broken git install when the real problem
+	// is a gone working directory (e.g. a polecat whose worktree was
+	// removed) — check for it up front so the error says what actually
+	// happened.
+	if g.workDir != "" {
+		if info, statErr := os.Stat(g.workDir); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return "", g.wrapError(fmt.Errorf("working directory does not exist: %s", g.workDir), "", "", args)
+			}
+			return "", g.wrapError(fmt.Errorf("checking working directory %s: %w", g.workDir, statErr), "", "", args)
+		} else if !info.IsDir() {
+			return "", g.wrapError(fmt.Errorf("working directory is not a directory: %s", g.workDir), "", "", args)
+		}
+	}
+
 	// If gitDir is set (bare repo), prepend --git-dir flag
 	if g.gitDir != "" {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)

@@ -100,7 +100,64 @@ func TestBrokenIdleReclaimAgentBlocker(t *testing.T) {
 			if tt.mutate != nil {
 				fields = tt.mutate(fields)
 			}
-			if got := brokenIdleReclaimAgentBlocker(fields); got != tt.want {
+			if got := brokenIdleReclaimAgentBlocker(fields, false); got != tt.want {
+				t.Fatalf("brokenIdleReclaimAgentBlocker() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBrokenIdleReclaimAgentBlockerGoneWorktree is the gt-2h6 regression
+// test: a polecat whose worktree has been structurally verified gone can
+// never self-report a fresh cleanup_status again, so a missing/unknown
+// status must not block reclaim once the caller has proven the worktree is
+// gone. A RECORDED dirty status (e.g. has_uncommitted) is real historical
+// evidence, not an unknown, and must still block even with the worktree
+// gone — that data existed and is now unrecoverable.
+func TestBrokenIdleReclaimAgentBlockerGoneWorktree(t *testing.T) {
+	base := func() *beads.AgentFields {
+		return &beads.AgentFields{
+			AgentState:    string(beads.AgentStateIdle),
+			CleanupStatus: "",
+			Branch:        "polecat/toast/gt-work@abc123",
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*beads.AgentFields) *beads.AgentFields
+		want   string
+	}{
+		{name: "missing cleanup no longer blocks once worktree is proven gone", want: ""},
+		{
+			name:   "unknown cleanup no longer blocks once worktree is proven gone",
+			mutate: func(f *beads.AgentFields) *beads.AgentFields { f.CleanupStatus = string(CleanupUnknown); return f },
+			want:   "",
+		},
+		{
+			name:   "recorded dirty cleanup still blocks despite gone worktree",
+			mutate: func(f *beads.AgentFields) *beads.AgentFields { f.CleanupStatus = string(CleanupUncommitted); return f },
+			want:   "cleanup_status=has_uncommitted",
+		},
+		{
+			name:   "hook still blocks despite gone worktree",
+			mutate: func(f *beads.AgentFields) *beads.AgentFields { f.HookBead = "gt-work"; return f },
+			want:   "hook_bead=gt-work",
+		},
+		{
+			name:   "active mr still blocks despite gone worktree",
+			mutate: func(f *beads.AgentFields) *beads.AgentFields { f.ActiveMR = "gt-mr"; return f },
+			want:   "active_mr=gt-mr",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := base()
+			if tt.mutate != nil {
+				fields = tt.mutate(fields)
+			}
+			if got := brokenIdleReclaimAgentBlocker(fields, true); got != tt.want {
 				t.Fatalf("brokenIdleReclaimAgentBlocker() = %q, want %q", got, tt.want)
 			}
 		})

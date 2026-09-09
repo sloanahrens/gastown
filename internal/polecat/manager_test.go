@@ -2350,6 +2350,43 @@ func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
 	}
 }
 
+// TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable is the gt-2h6
+// regression test. A polecat whose worktree directory is gone (not merely
+// its .git file) can never self-report cleanup_status again — there is
+// nothing left to check — so a missing status must not permanently strand
+// the slot the way it did for peridot: "Reclaiming broken idle polecat
+// peridot before allocation... was not safe to reclaim: cleanup_status=".
+func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr.tmux = tmux.NewTmux()
+	if !mgr.tmux.IsAvailable() {
+		t.Skip("tmux is required to prove no live polecat session")
+	}
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	// Remove the whole worktree directory, not just .git — peridot's
+	// worktree directory itself was gone, which is what leaves
+	// cleanup_status permanently unobservable.
+	if err := os.RemoveAll(p.ClonePath); err != nil {
+		t.Fatalf("remove worktree: %v", err)
+	}
+
+	// Swap to a mock bd that omits cleanup_status entirely, matching a
+	// polecat that never ran a fresh cleanup check against the (now gone)
+	// worktree.
+	installMockBdMissingCleanupStatus(t)
+
+	if err := mgr.ReclaimBrokenIdlePolecat("toast"); err != nil {
+		t.Fatalf("ReclaimBrokenIdlePolecat: %v, want success — a gone worktree with no branch/MR/active work at risk must be reclaimable despite a missing cleanup_status", err)
+	}
+	if _, err := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(err) {
+		t.Fatalf("polecat dir still exists after reclaim, stat err=%v", err)
+	}
+}
+
 func TestReclaimBrokenIdlePolecatFailsClosedWithoutSessionEvidence(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 

@@ -18,7 +18,19 @@ func brokenIdleReclaimDispositionBlocker(d WorkstateDisposition) string {
 	return ""
 }
 
-func brokenIdleReclaimAgentBlocker(fields *beads.AgentFields) string {
+// brokenIdleReclaimAgentBlocker checks the agent bead fields for a reason
+// the broken-idle polecat named by fields is not safe to reclaim.
+//
+// worktreeStructurallyMissing must be the caller's own
+// IsStructuralWorktreeError(VerifyWorktreeExists(...)) proof for this same
+// polecat, obtained before calling here (ReclaimBrokenIdlePolecat gathers it
+// as its entry gate). gt-2h6: once that structural absence is proven, a
+// missing/unknown cleanup_status can never become anything else — there is
+// no worktree left to report on — so it must not block reclaim by itself.
+// A RECORDED dirty status (has_uncommitted/has_stash/has_unpushed) still
+// blocks unconditionally: that is real, historical evidence of work that is
+// now unrecoverable, not an unresolvable unknown.
+func brokenIdleReclaimAgentBlocker(fields *beads.AgentFields, worktreeStructurallyMissing bool) string {
 	if fields == nil {
 		return "agent_fields=<missing>"
 	}
@@ -29,10 +41,13 @@ func brokenIdleReclaimAgentBlocker(fields *beads.AgentFields) string {
 		return "agent_state=" + string(state)
 	}
 	if status := CleanupStatus(fields.CleanupStatus); status != CleanupClean {
-		if status == "" {
-			return "cleanup_status=<missing>"
+		missing := status == "" || status == CleanupUnknown
+		if !(worktreeStructurallyMissing && missing) {
+			if status == "" {
+				return "cleanup_status=<missing>"
+			}
+			return "cleanup_status=" + string(status)
 		}
-		return "cleanup_status=" + string(status)
 	}
 	if strings.TrimSpace(fields.HookBead) != "" {
 		return "hook_bead=" + fields.HookBead

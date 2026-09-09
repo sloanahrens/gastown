@@ -1092,7 +1092,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	var targetRefLookupFailed bool
 	var mrForBranch *beads.Issue
 	var mrForBranchErr error
-	facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true}
+	// gt-2h6: a worktree directory that is structurally gone (not merely a
+	// git command that failed) can never self-report a fresh CleanupStatus,
+	// so a missing/unknown status here must not permanently veto recovery.
+	// See ResolveIgnoreCleanupStatus for the full gating rationale.
+	worktreeStructurallyMissing := polecat.IsStructuralWorktreeError(polecat.VerifyWorktreeExists(p.ClonePath))
+	facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true, WorktreeStructurallyMissing: worktreeStructurallyMissing}
 	var gitState *GitState
 	var gitErr error
 	gitStateLoaded := false
@@ -1197,8 +1202,8 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 		directGitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
-		if !facts.CleanupStatus.IsSafe() && polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe) {
-			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn))
+		if !facts.CleanupStatus.IsSafe() && polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe) {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing))
 		}
 	}
 	input := polecat.NewWorkstateInput(facts)

@@ -435,6 +435,30 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+func TestStatusOnMissingWorkDirReportsMissingDirectoryNotGitBinary(t *testing.T) {
+	dir := t.TempDir()
+	goneDir := filepath.Join(dir, "gone")
+	// Never create goneDir: this reproduces a polecat whose worktree
+	// directory was removed out from under it (gt-2h6).
+
+	g := NewGit(goneDir)
+	_, err := g.Status()
+	if err == nil {
+		t.Fatal("expected an error for a missing working directory, got nil")
+	}
+
+	msg := err.Error()
+	if strings.Contains(msg, "fork/exec") {
+		t.Errorf("error should not surface the raw fork/exec failure, got: %s", msg)
+	}
+	if !strings.Contains(msg, "working directory does not exist") {
+		t.Errorf("error should say the working directory is missing, got: %s", msg)
+	}
+	if !strings.Contains(msg, goneDir) {
+		t.Errorf("error should name the missing path %s, got: %s", goneDir, msg)
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)

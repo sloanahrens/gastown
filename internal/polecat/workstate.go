@@ -219,12 +219,23 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 // ResolveIgnoreCleanupStatus is the single fail-closed gate for whether a
 // non-safe CleanupStatus may be ignored when assembling a WorkstateInput.
 //
-// It wraps CanIgnoreStaleCleanupStatus with one narrow extension: a polecat
-// that never durably picked up work (allowMissingForPartialSpawn — its
-// hook_bead points at a bead it no longer owns, or never owned) may also
-// ignore a missing/unknown CleanupStatus, which CanIgnoreStaleCleanupStatus
-// always refuses. Even then this is gated by the SAME hook/active-MR/git
-// safety facts required for every other case — never granted unconditionally.
+// It wraps CanIgnoreStaleCleanupStatus with two narrow extensions, each
+// gated by the SAME hook/active-MR safety facts required for every other
+// case — never granted unconditionally:
+//
+//  1. allowMissingForPartialSpawn: a polecat that never durably picked up
+//     work (its hook_bead points at a bead it no longer owns, or never
+//     owned) may ignore a missing/unknown CleanupStatus. Also requires
+//     gitSafe, since the worktree is present and a live check is possible.
+//  2. allowMissingForGoneWorktree (gt-2h6): a polecat whose worktree
+//     directory has been structurally verified gone (see
+//     IsStructuralWorktreeError/VerifyWorktreeExists) can never produce a
+//     fresh CleanupStatus by self-report — there is no worktree left to
+//     check. A missing/unknown status here means "never observable", not
+//     "unknown risk", so it does not require gitSafe: gitSafe is derived
+//     from a live git check that is impossible against a nonexistent
+//     directory, and requiring it would permanently veto reclaiming the
+//     slot. The structural proof of absence stands in for it instead.
 //
 // gt-hsg: a prior version of this check (in cmd/polecat.go's check-recovery
 // handler) set IgnoreCleanupStatus=true for the partial-spawn case without
@@ -232,9 +243,14 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 // exactly the shape gt-7kr removed from workstateInputForPolecat, just
 // reintroduced via a different precondition in a second, undiscovered copy
 // of this policy. Route every caller through this one function instead.
-func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpawn, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
-	if allowMissingForPartialSpawn && (status == "" || status == CleanupUnknown) {
-		return hookSafe && activeMRSafe && gitSafe
+func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpawn, allowMissingForGoneWorktree, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if status == "" || status == CleanupUnknown {
+		if allowMissingForPartialSpawn && hookSafe && activeMRSafe && gitSafe {
+			return true
+		}
+		if allowMissingForGoneWorktree && hookSafe && activeMRSafe {
+			return true
+		}
 	}
 	return CanIgnoreStaleCleanupStatus(status, workTerminal, hookSafe, activeMRSafe, gitSafe)
 }
@@ -254,6 +270,7 @@ type WorkstateFacts struct {
 	HookBeadSafe                   bool
 	HookBeadTerminal               bool
 	PartialSpawnWithoutDurableHook bool
+	WorktreeStructurallyMissing    bool
 	CleanupStatus                  CleanupStatus
 	PushFailed                     bool
 	MRFailed                       bool
@@ -315,7 +332,7 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		input.HookBead = f.HookBead
 	}
 	if !input.CleanupStatus.IsSafe() {
-		input.IgnoreCleanupStatus = ResolveIgnoreCleanupStatus(f.CleanupStatus, f.PartialSpawnWithoutDurableHook, workTerminal, f.HookBeadSafe, activeMRSafe, gitSafe)
+		input.IgnoreCleanupStatus = ResolveIgnoreCleanupStatus(f.CleanupStatus, f.PartialSpawnWithoutDurableHook, f.WorktreeStructurallyMissing, workTerminal, f.HookBeadSafe, activeMRSafe, gitSafe)
 	}
 	return input
 }
