@@ -12,6 +12,13 @@ import (
 
 func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
 	townRoot := t.TempDir()
+	// Resolve symlinks so paths derived from os.Getwd() after chdir (which
+	// return the canonical path on macOS, where t.TempDir() lives under a
+	// /var/folders symlink to /private/var/folders) match townRoot as used
+	// below to read back what runLogCrash wrote. Same fix as gt-0i5.
+	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+		townRoot = resolved
+	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}

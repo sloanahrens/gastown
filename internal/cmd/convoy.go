@@ -1648,7 +1648,8 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		for _, t := range tracked {
 			trackedIDs = append(trackedIDs, t.ID)
 		}
-		scheduledSet := areScheduled(trackedIDs)
+		// Resolved against townBeads, not the process cwd (gt-g6b).
+		scheduledSet := areScheduledInTown(townBeads, trackedIDs)
 
 		var readyIssues []string
 		for _, t := range tracked {
@@ -2475,7 +2476,8 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	}
 
 	// Fetch fresh issue details via bd show (uses prefix routing for cross-rig).
-	freshDetails := getIssueDetailsBatch(trackedIDs)
+	// Resolved against the caller's townBeads, not the process cwd (gt-g6b).
+	freshDetails := getIssueDetailsBatchInTown(townBeads, trackedIDs)
 
 	// Build tracked dependency structs from fresh details. When fresh details
 	// are missing (cross-rig DB unreachable, missing, parked, or unroutable
@@ -2628,16 +2630,33 @@ func (d issueDetails) IsBlocked() bool {
 	return false
 }
 
-// getIssueDetailsBatch fetches details through the central routed beads lookup.
+// getIssueDetailsBatch fetches details through the central routed beads lookup,
+// resolving the town root from the current working directory.
 // Returns a map from issue ID to details. Missing/invalid issues are omitted from the map.
 func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
-	result := make(map[string]*issueDetails, len(issueIDs))
-	if len(issueIDs) == 0 {
-		return result
-	}
-
 	client := convoyIssueClient()
 	if client == nil {
+		return make(map[string]*issueDetails)
+	}
+	return getIssueDetailsBatchWithClient(client, issueIDs)
+}
+
+// getIssueDetailsBatchInTown is like getIssueDetailsBatch but resolves against
+// an explicit town root instead of the current working directory. Callers that
+// already have a town root in hand (e.g. getTrackedIssues, threaded through
+// from their own townBeads parameter) must use this so their lookups aren't
+// silently redirected to whatever town the process cwd happens to resolve to
+// (gt-g6b).
+func getIssueDetailsBatchInTown(townRoot string, issueIDs []string) map[string]*issueDetails {
+	if townRoot == "" {
+		return getIssueDetailsBatch(issueIDs)
+	}
+	return getIssueDetailsBatchWithClient(beads.New(townRoot), issueIDs)
+}
+
+func getIssueDetailsBatchWithClient(client *beads.Beads, issueIDs []string) map[string]*issueDetails {
+	result := make(map[string]*issueDetails, len(issueIDs))
+	if len(issueIDs) == 0 {
 		return result
 	}
 

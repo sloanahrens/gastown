@@ -324,28 +324,36 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 // rig's beads dir (GH#3468). On error, fails closed: treats ALL requested
 // beads as scheduled to prevent false stranded detection and duplicate
 // scheduling attempts.
+//
+// Resolves the town root from the current working directory. Callers that
+// already have a town root in hand must use areScheduledInTown instead, so
+// their lookups aren't silently redirected to whatever town the process cwd
+// happens to resolve to (gt-g6b).
 func areScheduled(beadIDs []string) map[string]bool {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return failClosedScheduled(beadIDs)
+	}
+	return areScheduledInTown(townRoot, beadIDs)
+}
+
+// areScheduledInTown is like areScheduled but resolves against an explicit
+// town root instead of the current working directory (gt-g6b).
+func areScheduledInTown(townRoot string, beadIDs []string) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
 		return result
 	}
 
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
+	if townRoot == "" {
 		// Can't determine town root — fail closed (treat all as scheduled)
-		for _, id := range beadIDs {
-			result[id] = true
-		}
-		return result
+		return failClosedScheduled(beadIDs)
 	}
 
 	// Scan all rig beads dirs (sling contexts live in target rig's DB). (GH#3468)
 	contexts, err := listAllSlingContexts(townRoot)
 	if err != nil {
-		for _, id := range beadIDs {
-			result[id] = true
-		}
-		return result
+		return failClosedScheduled(beadIDs)
 	}
 
 	// Build lookup of work bead IDs from open contexts. Cleanup owns stale-state
@@ -363,6 +371,17 @@ func areScheduled(beadIDs []string) map[string]bool {
 		if scheduledWorkBeads[id] {
 			result[id] = true
 		}
+	}
+	return result
+}
+
+// failClosedScheduled treats every requested bead as scheduled. Used when the
+// town root or sling contexts can't be determined, to prevent false stranded
+// detection and duplicate scheduling attempts.
+func failClosedScheduled(beadIDs []string) map[string]bool {
+	result := make(map[string]bool, len(beadIDs))
+	for _, id := range beadIDs {
+		result[id] = true
 	}
 	return result
 }
