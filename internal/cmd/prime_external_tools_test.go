@@ -182,7 +182,7 @@ esac
 func TestCheckPendingEscalations_BoundsSlowBdList(t *testing.T) {
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
-	  "list --status=open --tag=escalation --json --flat") sleep 2; exit 0 ;;
+	  "list --status=open --label=gt:escalation --include-infra --json --flat") sleep 2; exit 0 ;;
 esac
 `, `
 `)
@@ -192,9 +192,68 @@ esac
 		checkPendingEscalations(RoleContext{Role: RoleMayor, WorkDir: workDir})
 	})
 	assertElapsedUnder(t, time.Since(start), 2*time.Second)
-	assertPrimeToolCalled(t, "bd:list --status=open --tag=escalation --json --flat")
+	assertPrimeToolCalled(t, "bd:list --status=open --label=gt:escalation --include-infra --json --flat")
 
 	if strings.Contains(output, "PENDING ESCALATIONS") {
 		t.Fatalf("timed-out escalation output should not be emitted: %q", output)
+	}
+}
+
+// TestCheckPendingEscalations_SurfacesOpenEphemeralEscalation proves the
+// mayor-startup check actually displays an open escalation end to end.
+// Regression test for gt-fcsf: the original query used a nonexistent
+// `--tag=escalation` flag, which made `bd list` error on every invocation
+// (silently, by design, since the check is best-effort) — this had never
+// once surfaced a real escalation. The fixed query uses --label=gt:escalation
+// --include-infra, since escalations are ephemeral wisps that bd list hides
+// by default.
+func TestCheckPendingEscalations_SurfacesOpenEphemeralEscalation(t *testing.T) {
+	workDir := setupPrimeExternalToolTest(t, `
+case "$*" in
+  "list --status=open --label=gt:escalation --include-infra --json --flat")
+    printf '%s\n' '[{"id":"hq-wisp1","title":"Dolt unreachable","priority":0,"labels":["gt:escalation"]}]'
+    exit 0
+    ;;
+esac
+`, `
+`)
+
+	output := captureStdout(t, func() {
+		checkPendingEscalations(RoleContext{Role: RoleMayor, WorkDir: workDir})
+	})
+	assertPrimeToolCalled(t, "bd:list --status=open --label=gt:escalation --include-infra --json --flat")
+
+	if !strings.Contains(output, "PENDING ESCALATIONS") {
+		t.Fatalf("expected escalation banner in output, got: %q", output)
+	}
+	if !strings.Contains(output, "hq-wisp1") && !strings.Contains(output, "1 escalation") {
+		t.Fatalf("expected output to reflect the open escalation, got: %q", output)
+	}
+}
+
+// TestCheckPendingEscalations_SkipsMailDeliveryBeads mirrors the dashboard
+// fetcher's filtering (gt-kl7): escalation mail-delivery beads carry the same
+// gt:escalation label so ack/close can find them, but they aren't escalation
+// wisps themselves and must not inflate the startup count.
+func TestCheckPendingEscalations_SkipsMailDeliveryBeads(t *testing.T) {
+	workDir := setupPrimeExternalToolTest(t, `
+case "$*" in
+  "list --status=open --label=gt:escalation --include-infra --json --flat")
+    printf '%s\n' '[{"id":"hq-wisp1","title":"Real escalation","priority":0,"labels":["gt:escalation"]},{"id":"hq-885m","title":"[HIGH] Real escalation","priority":0,"labels":["gt:escalation","gt:message"]}]'
+    exit 0
+    ;;
+esac
+`, `
+`)
+
+	output := captureStdout(t, func() {
+		checkPendingEscalations(RoleContext{Role: RoleMayor, WorkDir: workDir})
+	})
+
+	if !strings.Contains(output, "1 escalation") {
+		t.Fatalf("expected count to exclude the mail-delivery bead, got: %q", output)
+	}
+	if strings.Contains(output, "hq-885m") {
+		t.Fatalf("mail-delivery bead should not appear in output: %q", output)
 	}
 }

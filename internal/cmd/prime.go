@@ -1409,9 +1409,14 @@ func setTmuxWorkContext(workRig, workBead, workMol string) {
 
 // checkPendingEscalations queries for open escalation beads and displays them prominently.
 // This is called on Mayor startup to surface issues needing human attention.
+//
+// Escalations are created as ephemeral wisps labeled gt:escalation (gt-fcsf).
+// `--tag=escalation` is not a real bd flag — it errored on every invocation,
+// so this check silently no-op'd since the day it was written. --include-infra
+// is also required or ephemeral escalation wisps are hidden from bd list.
 func checkPendingEscalations(ctx RoleContext) {
-	// Query for open escalations using bd list with tag filter
-	stdout, _, err := runPrimeExternalCommand(ctx.WorkDir, "bd", "list", "--status=open", "--tag=escalation", "--json")
+	// Query for open escalations using bd list with label filter
+	stdout, _, err := runPrimeExternalCommand(ctx.WorkDir, "bd", "list", "--status=open", "--label=gt:escalation", "--include-infra", "--json")
 	if err != nil {
 		// Silently skip - escalation check is best-effort
 		return
@@ -1419,15 +1424,38 @@ func checkPendingEscalations(ctx RoleContext) {
 
 	// Parse JSON output
 	var escalations []struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Priority    int    `json:"priority"`
-		Description string `json:"description"`
-		Created     string `json:"created"`
+		ID          string   `json:"id"`
+		Title       string   `json:"title"`
+		Priority    int      `json:"priority"`
+		Description string   `json:"description"`
+		Created     string   `json:"created"`
+		Labels      []string `json:"labels"`
 	}
 
 	if err := json.Unmarshal(stdout.Bytes(), &escalations); err != nil || len(escalations) == 0 {
 		// No escalations or parse error
+		return
+	}
+
+	// Mail-delivery beads carry the same gt:escalation label so ack/close can
+	// find the routed notification (see mail.Router.buildLabels), but they
+	// aren't escalation wisps themselves — skip them so the count reflects
+	// open escalations, not deliveries.
+	filtered := escalations[:0]
+	for _, e := range escalations {
+		isDelivery := false
+		for _, label := range e.Labels {
+			if label == "gt:message" {
+				isDelivery = true
+				break
+			}
+		}
+		if !isDelivery {
+			filtered = append(filtered, e)
+		}
+	}
+	escalations = filtered
+	if len(escalations) == 0 {
 		return
 	}
 
@@ -1483,7 +1511,7 @@ func checkPendingEscalations(ctx RoleContext) {
 	}
 	fmt.Println()
 
-	fmt.Println("**Action required:** Review escalations with `bd list --tag=escalation`")
+	fmt.Println("**Action required:** Review escalations with `gt escalate list`")
 	fmt.Println("Close resolved ones with `bd close <id> --reason \"resolution\"`")
 	fmt.Println()
 }

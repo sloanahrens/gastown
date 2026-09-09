@@ -617,6 +617,48 @@ exit 0
 	}
 }
 
+// TestFetchEscalations_IncludesInfraBeads proves the dashboard's escalation
+// query surfaces an open escalation. Escalations are ephemeral wisps
+// (--ephemeral --wisp-type=escalation, gt-fcsf), which `bd list` hides
+// unless --include-infra is passed; the stub below only returns the
+// escalation when that flag is present, so a regression that drops it fails
+// this test the way it failed in production (an empty dashboard), not just
+// an argv grep.
+func TestFetchEscalations_IncludesInfraBeads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+case "$*" in
+  *--include-infra*)
+    echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","created_at":"2026-09-08T00:00:00Z","created_by":"gastown/witness","labels":["gt:escalation","severity:critical"]}]'
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	f := &LiveConvoyFetcher{cmdTimeout: 5 * time.Second, bdBin: bdPath, townRoot: t.TempDir()}
+	rows, err := f.FetchEscalations()
+	if err != nil {
+		t.Fatalf("FetchEscalations: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("FetchEscalations returned %d rows, want 1 (the open ephemeral escalation): %#v", len(rows), rows)
+	}
+	if rows[0].ID != "hq-wisp1" {
+		t.Fatalf("FetchEscalations returned %q, want hq-wisp1", rows[0].ID)
+	}
+}
+
 func TestFetchConvoysBreakerBacksOffAfterBdFailures(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based command test")

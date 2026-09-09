@@ -346,7 +346,14 @@ func TestFilterEscalationRecordsSkipsMailMessages(t *testing.T) {
 // reported "No escalations found" while 11 escalations sat open and
 // unacknowledged for hours — the same bug class as gt-4mnd (ephemeral wisps
 // invisible to bd list).
-func TestListEscalationsPassesIncludeInfra(t *testing.T) {
+// TestListEscalationsReturnsOpenEphemeralEscalations proves ListEscalations
+// actually surfaces an open escalation, not merely that it invokes bd with
+// the right flag. Escalations are created as ephemeral wisps (gt-fcsf),
+// which `bd list` hides unless --include-infra is passed; the stub below
+// only returns the escalation when that flag is present, so a regression
+// that drops the flag fails this test the same way it fails in production
+// (an empty result), rather than only being caught by an argv grep.
+func TestListEscalationsReturnsOpenEphemeralEscalations(t *testing.T) {
 	stubDir := t.TempDir()
 	argsPath := filepath.Join(stubDir, "args.txt")
 
@@ -354,7 +361,14 @@ func TestListEscalationsPassesIncludeInfra(t *testing.T) {
 for a in "$@"; do
   printf '%s\n' "$a" >> "` + argsPath + `"
 done
-echo '[]'
+case "$*" in
+  *--include-infra*)
+    echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation","severity:critical"],"ephemeral":true,"wisp_type":"escalation"}]'
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
 exit 0
 `
 	stubPath := filepath.Join(stubDir, "bd")
@@ -365,8 +379,15 @@ exit 0
 	ResetBdAllowStaleCacheForTest()
 
 	b := New(t.TempDir())
-	if _, err := b.ListEscalations(); err != nil {
+	escalations, err := b.ListEscalations()
+	if err != nil {
 		t.Fatalf("ListEscalations: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("ListEscalations returned %d escalations, want 1 (the open ephemeral wisp): %#v", len(escalations), escalations)
+	}
+	if escalations[0].ID != "hq-wisp1" {
+		t.Fatalf("ListEscalations returned %q, want hq-wisp1", escalations[0].ID)
 	}
 
 	argsData, err := os.ReadFile(argsPath)

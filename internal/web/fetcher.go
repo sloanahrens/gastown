@@ -1334,9 +1334,13 @@ func (f *LiveConvoyFetcher) FetchDogs() ([]DogRow, error) {
 }
 
 // FetchEscalations returns open escalations needing attention.
+//
+// Escalations are created as ephemeral wisps (gt-fcsf), which bd list hides
+// by default — without --include-infra this silently returned zero rows
+// while open escalations sat invisible on the dashboard.
 func (f *LiveConvoyFetcher) FetchEscalations() ([]EscalationRow, error) {
 	// List open escalations
-	stdout, err := f.runBdCmd(f.townRoot, "list", "--label=gt:escalation", "--status=open", "--json")
+	stdout, err := f.runBdCmd(f.townRoot, "list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
 	if err != nil {
 		return nil, nil // No escalations or bd not available
 	}
