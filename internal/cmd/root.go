@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -158,6 +159,16 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	// determine liveness without PID signal probing.
 	touchPolecatHeartbeat()
 
+	// Touch Deacon heartbeat on every gt command (gt-13z).
+	// Previously the Deacon's 20-minute liveness heartbeat only refreshed at a
+	// handful of explicit "gt deacon heartbeat" checkpoints embedded in patrol
+	// formula prose. A step that genuinely investigates (running many gt/bd
+	// commands without hitting the next checkpoint) could exceed the daemon's
+	// kill threshold before checking in again, killing a healthy Deacon mid-step.
+	// Decoupling liveness from step duration: any gt command counts as evidence
+	// of life.
+	touchDeaconHeartbeat()
+
 	// Skip beads check for exempt commands
 	if beadsExempt || isRoleCommand(cmd) {
 		return nil
@@ -244,6 +255,43 @@ func touchPolecatHeartbeat() {
 	}
 
 	polecat.TouchSessionHeartbeat(townRoot, sessionName)
+}
+
+// touchDeaconHeartbeat refreshes the Deacon's local liveness heartbeat
+// (deacon/heartbeat.json) on every gt command. Called from persistentPreRun.
+//
+// The daemon's stuck-agent-dog kills the Deacon when this file goes stale
+// for >20 minutes (deacon.HeartbeatVeryStaleThreshold). Before this, the file
+// was only refreshed by explicit "gt deacon heartbeat" calls written into
+// patrol formula prose at a few checkpoints — decoupled from how much actual
+// work happened between them. A step that runs many gt/bd commands during
+// genuine investigation, but never reaches the next checkpoint, could trip
+// the threshold and get killed mid-work even though the Deacon was actively
+// working the whole time (gt-13z).
+//
+// Deliberately cheap: unlike syncDeaconHeartbeatStores (used by the explicit
+// `gt deacon heartbeat` command), this skips the agent-bead Dolt sync — that's
+// a bd subprocess round-trip and too expensive to run on every gt invocation.
+// The local heartbeat.json write is plain file I/O and is the only store the
+// daemon's kill check reads (deacon.ReadHeartbeat).
+//
+// Best-effort: errors are silently ignored, and a pause is respected (a
+// paused Deacon should not appear to have a fresh heartbeat).
+func touchDeaconHeartbeat() {
+	if os.Getenv("GT_ROLE") != "deacon" {
+		return
+	}
+
+	townRoot := detectTownRootFromCwd()
+	if townRoot == "" {
+		return
+	}
+
+	if paused, _, err := deacon.IsPaused(townRoot); err != nil || paused {
+		return
+	}
+
+	_ = deacon.Touch(townRoot)
 }
 
 // warnIfTownRootOffMain prints a warning if the town root is not on main branch.
