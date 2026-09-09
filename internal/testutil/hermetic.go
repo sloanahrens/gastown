@@ -456,16 +456,16 @@ func snapshotTown(root string) *townSnapshot {
 }
 
 // diff re-snapshots the town and returns a description of every leak: new
-// non-lock entries, and appended events not attributable to the town's known
-// actors (concurrent legitimate agents keep writing events while tests run,
-// so growth alone is not a failure).
+// non-lock, non-atomic-write-temp entries, and appended events not
+// attributable to the town's known actors (concurrent legitimate agents keep
+// writing events while tests run, so growth alone is not a failure).
 func (s *townSnapshot) diff() []string {
 	var leaks []string
 
 	after := snapshotTown(s.root)
 	var added []string
 	for name := range after.entries {
-		if !s.entries[name] && !strings.HasSuffix(name, ".lock") {
+		if !s.entries[name] && !strings.HasSuffix(name, ".lock") && !isAtomicWriteTemp(name) {
 			added = append(added, name)
 		}
 	}
@@ -479,6 +479,16 @@ func (s *townSnapshot) diff() []string {
 	}
 
 	return leaks
+}
+
+// isAtomicWriteTemp reports whether name is a transient atomic-write temp
+// file, e.g. bd's JSONL export at .beads/.~issues.jsonl.<random>. bd (and
+// other town tooling) writes via write-temp-then-rename, so any concurrent
+// bd invocation by any agent during a test window creates and then deletes
+// one of these — indistinguishable from the .lock churn already tolerated
+// below (gt-wdr, the file-entry analogue of gt-ro0's event-actor exemption).
+func isAtomicWriteTemp(name string) bool {
+	return strings.HasPrefix(filepath.Base(name), ".~")
 }
 
 // suspiciousAppendedEvents reads .events.jsonl from offset and flags events

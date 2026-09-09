@@ -70,6 +70,29 @@ func TestTripwire_DetectsNewFilesAndDatabases(t *testing.T) {
 	}
 }
 
+func TestTripwire_ToleratesBdAtomicWriteTemp(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	// bd's JSONL export atomic-write temp file (gt-wdr): write-temp-then-rename
+	// churn from any concurrent bd invocation, same class as .lock churn.
+	writeFile(t, filepath.Join(town, ".beads", ".~issues.jsonl.2867150252"), "")
+	// A real leak in the same directory must still be caught.
+	writeFile(t, filepath.Join(town, ".beads", "scratch.jsonl"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.jsonl") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, ".~issues.jsonl") {
+		t.Errorf("bd atomic-write temp flagged as leak: %v", leaks)
+	}
+}
+
 func TestTripwire_FlagsFixtureActorEvents(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
