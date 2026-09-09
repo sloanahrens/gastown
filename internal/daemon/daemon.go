@@ -87,6 +87,12 @@ type Daemon struct {
 	gtPath string
 	bdPath string
 
+	// wispConfigMissingWarned tracks rigs we've already logged a missing-wisp-config
+	// notice for, so isRigOperational logs it at most once per rig per process
+	// lifetime instead of on every patrol-candidate evaluation (gt-k07).
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	wispConfigMissingWarned map[string]bool
+
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
@@ -2215,9 +2221,18 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
 
-	// Warn if wisp config is missing - parked/docked state may have been lost
+	// A rig that has never been parked or docked legitimately has no wisp
+	// config - that's the default state, not data loss. Log it once per rig
+	// per process (not on every patrol-candidate evaluation) so it stays
+	// available for debugging without drowning the log (gt-k07).
 	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
-		d.logger.Printf("Warning: no wisp config for %s - parked state may have been lost", rigName)
+		if !d.wispConfigMissingWarned[rigName] {
+			if d.wispConfigMissingWarned == nil {
+				d.wispConfigMissingWarned = make(map[string]bool)
+			}
+			d.wispConfigMissingWarned[rigName] = true
+			d.logger.Printf("no wisp config for %s (rig has never been parked or docked)", rigName)
+		}
 	}
 
 	// Check wisp layer first (local/ephemeral overrides)
