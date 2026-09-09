@@ -297,28 +297,40 @@ done
 
 **4. Dead dog worktrees**
 
-If a dog's tmux session is dead but worktree dirs remain, prune them.
+Prune worktree dirs left behind by dogs that no longer exist in the pool.
+
+A pooled dog is normally **idle with no live tmux session** between
+dispatches — that's expected, not evidence of death. Tmux session absence
+is NOT a valid disposability signal (and even if it were, the session
+name is `hq-dog-<name>`, not `dog-<name>` — see
+`internal/dog/session_manager.go:70-72`). The source of truth is dog
+*registration*: `gt dog status <name>` fails once a dog has been removed
+from the pool via `gt dog remove`. Only a directory whose dog is gone
+from the registry is an orphan; a registered dog's worktree — idle or
+working — must never be touched here (stuck/zombie dogs are handled by
+the dedicated `dog-health-check` step, not this one).
 
 ```bash
 # For each dog directory
 for dogdir in ~/gt/deacon/dogs/*/; do
   DOG=$(basename "$dogdir")
-  # Check if dog has a live tmux session
-  if ! tmux has-session -t "dog-$DOG" 2>/dev/null; then
-    # Dog session is dead - check for leftover worktree dirs
-    for rigrepo in "$dogdir"*/; do
-      [ -d "$rigrepo/.git" ] || continue
-      # Worktree exists but session is dead - prune it
-      git -C "$rigrepo" worktree list 2>/dev/null
-      echo "Dead dog worktree: $DOG/$(basename "$rigrepo") (session dead)"
-      # Use git worktree remove to clean up properly
-      MAIN_REPO=$(git -C "$rigrepo" rev-parse --git-common-dir 2>/dev/null)
-      if [ -n "$MAIN_REPO" ]; then
-        git worktree remove --force "$rigrepo" 2>/dev/null && \
-          echo "Pruned worktree: $rigrepo"
-      fi
-    done
+  # Registered (idle or working) - this is a live pooled dog, skip it.
+  if gt dog status "$DOG" --json >/dev/null 2>&1; then
+    continue
   fi
+  # Dog is no longer registered - any worktree left under its dir is orphaned.
+  for rigrepo in "$dogdir"*/; do
+    [ -d "$rigrepo/.git" ] || continue
+    git -C "$rigrepo" worktree list 2>/dev/null
+    echo "Orphaned dog worktree: $DOG/$(basename "$rigrepo") (dog no longer registered)"
+    MAIN_REPO=$(git -C "$rigrepo" rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$MAIN_REPO" ]; then
+      # No --force: a clean worktree removes cleanly; one with in-flight
+      # changes refuses instead of silently destroying work.
+      git worktree remove "$rigrepo" 2>/dev/null && \
+        echo "Pruned worktree: $rigrepo"
+    fi
+  done
 done
 ```
 
