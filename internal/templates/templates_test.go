@@ -482,6 +482,92 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 	}
 }
 
+// TestRenderRole_NoBDCreateRepoFlag verifies that no role template instructs
+// agents to use `bd create --repo <rig>`. That flag silently loses writes
+// (be-6mk) — the correct pattern is to cd into the target rig's beads
+// directory first, then run a bare `bd create`.
+func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	const customTownRoot3 = "/custom/test/instance"
+
+	roles := []struct {
+		role string
+		data RoleData
+	}{
+		{
+			role: "polecat",
+			data: RoleData{
+				Role: "polecat", RigName: "myrig", Polecat: "TestCat",
+				TownRoot: customTownRoot3, TownName: "instance",
+				WorkDir:       customTownRoot3 + "/myrig/polecats/TestCat",
+				DefaultBranch: "main",
+				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+			},
+		},
+		{
+			role: "mayor",
+			data: RoleData{
+				Role: "mayor", TownRoot: customTownRoot3, TownName: "instance",
+				WorkDir:       customTownRoot3,
+				DefaultBranch: "main",
+				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+			},
+		},
+		{
+			role: "crew",
+			data: RoleData{
+				Role: "crew", RigName: "myrig", Polecat: "TestCrew",
+				TownRoot: customTownRoot3, TownName: "instance",
+				WorkDir:       customTownRoot3 + "/myrig/crew/TestCrew",
+				DefaultBranch: "main",
+				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+			},
+		},
+		{
+			role: "deacon",
+			data: RoleData{
+				Role: "deacon", TownRoot: customTownRoot3, TownName: "instance",
+				WorkDir:       customTownRoot3,
+				DefaultBranch: "main",
+				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+			},
+		},
+		{
+			role: "dog",
+			data: RoleData{
+				Role: "dog", DogName: "Rover",
+				TownRoot: customTownRoot3, TownName: "instance",
+				WorkDir:       customTownRoot3 + "/deacon/dogs/Rover",
+				DefaultBranch: "main",
+				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+			},
+		},
+	}
+
+	for _, tc := range roles {
+		t.Run(tc.role, func(t *testing.T) {
+			output, err := tmpl.RenderRole(tc.role, tc.data)
+			if err != nil {
+				t.Fatalf("RenderRole(%q) error = %v", tc.role, err)
+			}
+			if strings.Contains(output, "create --repo") {
+				var offending []string
+				for i, line := range strings.Split(output, "\n") {
+					if strings.Contains(line, "create --repo") {
+						offending = append(offending, fmt.Sprintf("  line %d: %s", i+1, strings.TrimSpace(line)))
+					}
+				}
+				t.Errorf("rendered %q template still instructs 'bd create --repo' (be-6mk):\n%s",
+					tc.role, strings.Join(offending, "\n"))
+			}
+		})
+	}
+}
+
 // TestRenderRole_TownRootInOutput verifies that the actual TownRoot value
 // appears in the rendered output for roles that reference it in path instructions.
 func TestRenderRole_TownRootInOutput(t *testing.T) {

@@ -205,9 +205,14 @@ go here by default. But if you discover bugs/issues in OTHER projects:
 | Issue is about... | File in | Command |
 |-------------------|---------|---------|
 | This rig's code ({{ .RigName }}) | Here (default) | `bd create "..."` |
-| `bd` CLI (beads tool) | **beads** | `bd create --repo beads "..."` |
-| `gt` CLI (gas town tool) | **gastown** | `bd create --repo gastown "..."` |
-| Cross-rig coordination | **HQ** | `bd create --repo hq "..."` |
+| `bd` CLI (beads tool) | **beads** | `cd {{ .TownRoot }}/beads/mayor/rig && bd create "..."` |
+| `gt` CLI (gas town tool) | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
+| Cross-rig coordination | **HQ** | `cd {{ .TownRoot }} && bd create "..."` |
+
+**Do NOT pass `--repo <rig>` to `bd create`** (be-6mk) — it silently loses writes.
+`cd` into the target rig's `mayor/rig` directory (or the town root for HQ)
+first, then run `bd create`. Verify with `bd show <id>` from that same
+directory.
 
 **The test**: "Which repo would the fix be committed to?"
 

@@ -160,11 +160,15 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. `{{ cmd }} rig add` aut
 
 | Issue is about... | File in | Command |
 |-------------------|---------|---------|
-| `bd` CLI (beads tool) | **beads** | `bd create --repo beads "..."` |
-| `gt` CLI (gas town tool) | **gastown** | `bd create --repo gastown "..."` |
-| Polecat/witness/refinery/convoy code | **gastown** | `bd create --repo gastown "..."` |
-| Wyvern game features | **wyvern** | `bd create --repo wyvern "..."` |
+| `bd` CLI (beads tool) | **beads** | `cd {{ .TownRoot }}/beads/mayor/rig && bd create "..."` |
+| `gt` CLI (gas town tool) | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
+| Polecat/witness/refinery/convoy code | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
+| Wyvern game features | **wyvern** | `cd {{ .TownRoot }}/wyvern/mayor/rig && bd create "..."` |
 | Cross-rig coordination, convoys, mail | **HQ** | `bd create "..."` (default) |
+
+**Do NOT pass `--repo <rig>` to `bd create`** (be-6mk) — it silently loses writes.
+`cd` into the target rig's `mayor/rig` directory first, then run
+`bd create`. Verify with `bd show <id>` from that same directory.
 
 **IMPORTANT:** Issues are created with `bd create`, not `gt` commands.
 
@@ -297,7 +301,7 @@ solutions — these belong in the code, not in memory.
 When creating PRs, default to `--repo` with the origin remote:
 
 ```bash
-gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\.git/\1/')
+gh --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\.git/\1/') pr create
 ```
 
 ## ⚡ Command Quick-Reference
