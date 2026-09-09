@@ -928,6 +928,18 @@ func (g *Git) FetchBranch(remote, branch string) error {
 	return err
 }
 
+// FetchDefaultBranchWithTimeout fetches only the remote's default branch
+// (origin/main, origin/master, ...), bounded by timeout. Use this instead of
+// Fetch/FetchBranch in patrol/doctor-style scan loops that need a fresh
+// comparison base (e.g. before git.BranchTargetStatus) but must never hang
+// on an unreachable remote — see remoteQueryTimeout's doc comment for the
+// gt-ftt incident this pattern exists to avoid.
+func (g *Git) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
+	branch := g.RemoteDefaultBranch()
+	_, err := g.runWithTimeout(timeout, "fetch", remote, branch)
+	return err
+}
+
 // FetchBranchShallow fetches a single branch with --depth 1 and creates the
 // remote tracking ref (e.g. origin/<branch>). Use this on shallow single-branch
 // clones to add a branch that wasn't included in the initial clone.
