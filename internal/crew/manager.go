@@ -299,10 +299,13 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		style.PrintWarning("could not run setup hooks: %v", err)
 	}
 
-	// Ensure .gitignore has required Gas Town patterns
-	if err := rig.EnsureGitignorePatterns(crewPath); err != nil {
+	// Ensure Gas Town patterns are ignored via the worktree-local git exclude
+	// file rather than the tracked .gitignore, so the worktree stays clean
+	// (a tracked-.gitignore edit shows up as a permanent unstaged change that
+	// blocks `git rebase`).
+	if err := rig.EnsureLocalExcludePatterns(crewPath); err != nil {
 		// Non-fatal - log warning but continue
-		style.PrintWarning("could not update .gitignore: %v", err)
+		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
 	// Install runtime settings in the shared crew parent directory.
