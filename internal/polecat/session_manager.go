@@ -706,19 +706,7 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 	info.Windows = tmuxInfo.Windows
 
 	if tmuxInfo.Created != "" {
-		formats := []string{
-			"2006-01-02 15:04:05",
-			"Mon Jan 2 15:04:05 2006",
-			"Mon Jan _2 15:04:05 2006",
-			time.ANSIC,
-			time.UnixDate,
-		}
-		for _, format := range formats {
-			if t, err := time.Parse(format, tmuxInfo.Created); err == nil {
-				info.Created = t
-				break
-			}
-		}
+		info.Created = parseSessionCreatedTime(tmuxInfo.Created)
 	}
 
 	if tmuxInfo.Activity != "" {
@@ -729,6 +717,28 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 	}
 
 	return info, nil
+}
+
+// parseSessionCreatedTime parses a tmux session-created timestamp as produced by
+// Tmux.GetSessionInfo. That string is built from a Unix timestamp via
+// time.Unix(...).Format(...), which renders in the Local zone but drops the zone
+// info from the string. It MUST be parsed back with time.ParseInLocation against
+// time.Local (not time.Parse, which defaults to UTC) or the recovered instant is
+// off by the machine's UTC offset — see gt-jy5.
+func parseSessionCreatedTime(created string) time.Time {
+	formats := []string{
+		"2006-01-02 15:04:05",
+		"Mon Jan 2 15:04:05 2006",
+		"Mon Jan _2 15:04:05 2006",
+		time.ANSIC,
+		time.UnixDate,
+	}
+	for _, format := range formats {
+		if t, err := time.ParseInLocation(format, created, time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // List returns information about all sessions for this rig.

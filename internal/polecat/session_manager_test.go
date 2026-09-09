@@ -95,6 +95,34 @@ func TestSessionName(t *testing.T) {
 	}
 }
 
+// TestParseSessionCreatedTime_NonUTCLocal is a regression test for gt-jy5:
+// session uptime was miscomputed as now_UTC minus created_local, inflating
+// reported uptime by exactly the machine's UTC offset (e.g. 5h under CDT)
+// and causing freshly-dispatched, live polecats to be reported stalled/dead.
+func TestParseSessionCreatedTime_NonUTCLocal(t *testing.T) {
+	origLocal := time.Local
+	t.Cleanup(func() { time.Local = origLocal })
+	// Simulate a non-UTC machine (e.g. CDT, UTC-5) without depending on the
+	// system zoneinfo database being installed.
+	time.Local = time.FixedZone("TEST-5", -5*60*60)
+
+	// Mirror Tmux.GetSessionInfo's production path: a Unix instant formatted
+	// via time.Unix(...).Format(layout) in the Local zone, with no zone
+	// indicator retained in the resulting string.
+	created := time.Now().In(time.Local).Add(-1 * time.Minute)
+	str := created.Format("2006-01-02 15:04:05")
+
+	got := parseSessionCreatedTime(str)
+	if got.IsZero() {
+		t.Fatalf("parseSessionCreatedTime(%q) returned zero time", str)
+	}
+
+	uptime := time.Since(got)
+	if uptime < 0 || uptime > 5*time.Minute {
+		t.Errorf("uptime = %v, want ~1m (the pre-fix bug reports ~5h1m under a UTC-5 Local zone)", uptime)
+	}
+}
+
 func TestSessionManagerPolecatDir(t *testing.T) {
 	r := &rig.Rig{
 		Name:     "gastown",
