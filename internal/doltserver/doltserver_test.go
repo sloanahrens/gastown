@@ -870,6 +870,23 @@ func TestFindRigBeadsDir(t *testing.T) {
 	if dir := FindRigBeadsDir(townRoot, neitherRig); dir != expectedRigRoot {
 		t.Errorf("newrig (neither exists) beads dir = %q, want %q (rig-root path)", dir, expectedRigRoot)
 	}
+
+	// Test rig-root .beads that only contains a redirect to mayor/rig/.beads
+	// (mayor/rig/.beads missing, e.g. mid-rebuild). The redirect target must
+	// win over the redirect directory itself, otherwise callers resolve to a
+	// directory that only exists to point elsewhere. (gt-3sck)
+	redirRig := "redirrig"
+	redirBeads := filepath.Join(townRoot, redirRig, ".beads")
+	if err := os.MkdirAll(redirBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	expectedRedirTarget := filepath.Join(townRoot, redirRig, "mayor", "rig", ".beads")
+	if dir := FindRigBeadsDir(townRoot, redirRig); dir != expectedRedirTarget {
+		t.Errorf("redirrig beads dir = %q, want redirect target %q", dir, expectedRedirTarget)
+	}
 }
 
 func TestFindOrCreateRigBeadsDir(t *testing.T) {
@@ -952,6 +969,41 @@ func TestFindOrCreateRigBeadsDir(t *testing.T) {
 		mayorBeads := filepath.Join(townRoot, "newrig", "mayor", "rig", ".beads")
 		if _, err := os.Stat(mayorBeads); err == nil {
 			t.Error("mayor/rig/.beads should NOT be created for untracked repos")
+		}
+	})
+
+	t.Run("redirect at rig-root is honored over the redirect directory", func(t *testing.T) {
+		// Reproduces gt-3sck: rig-root .beads exists only to hold a redirect
+		// to mayor/rig/.beads. If mayor/rig/.beads's own Stat check fails
+		// (e.g. transient race during a rebuild), the resolver must still
+		// follow the redirect rather than treating the redirect directory as
+		// the write target — writing metadata.json there would shadow the
+		// redirect and break every subsequent bd call from this directory.
+		townRoot := t.TempDir()
+		redirBeads := filepath.Join(townRoot, "gastown", ".beads")
+		if err := os.MkdirAll(redirBeads, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(redirBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dir, err := FindOrCreateRigBeadsDir(townRoot, "gastown")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
+		if dir != expected {
+			t.Errorf("gastown beads dir = %q, want redirect target %q", dir, expected)
+		}
+		// The redirect target must have been created so callers can write into it.
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			t.Error("redirect target directory was not created")
+		}
+		// The redirect file itself must be untouched — no metadata.json written
+		// alongside it.
+		if _, err := os.Stat(filepath.Join(redirBeads, "metadata.json")); !os.IsNotExist(err) {
+			t.Error("metadata.json should not be created in the redirect directory")
 		}
 	})
 

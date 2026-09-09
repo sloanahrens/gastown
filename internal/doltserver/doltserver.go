@@ -3806,8 +3806,10 @@ func buildDatabaseToRigMap(townRoot string) map[string]string {
 // FindRigBeadsDir returns the .beads directory path for a rig (read-only lookup).
 // For "hq", returns <townRoot>/.beads.
 // For other rigs, returns <townRoot>/<rigName>/mayor/rig/.beads if it exists,
-// otherwise <townRoot>/<rigName>/.beads if it exists,
-// otherwise <townRoot>/<rigName>/mayor/rig/.beads (for creation by caller).
+// otherwise <townRoot>/<rigName>/.beads if it exists (following a redirect
+// file if one is present, rather than returning the redirect directory
+// itself — see gt-3sck),
+// otherwise <townRoot>/<rigName>/.beads (for creation by caller).
 //
 // WARNING: This function has a TOCTOU race — the returned directory may change
 // state between the Stat check and the caller's operation. For write operations
@@ -3830,6 +3832,13 @@ func FindRigBeadsDir(townRoot, rigName string) string {
 	// Fall back to rig-root .beads
 	rigBeads := filepath.Join(townRoot, rigName, ".beads")
 	if _, err := os.Stat(rigBeads); err == nil {
+		// If rig-root .beads is itself a redirect (e.g. to mayor/rig/.beads
+		// that failed its Stat check above due to a transient race), honor
+		// it: the redirect target is authoritative, not the directory that
+		// merely points to it. (gt-3sck)
+		if resolved := beads.ResolveBeadsDir(filepath.Join(townRoot, rigName)); resolved != rigBeads {
+			return resolved
+		}
 		return rigBeads
 	}
 
@@ -3875,6 +3884,17 @@ func FindOrCreateRigBeadsDir(townRoot, rigName string) (string, error) {
 	// Check rig-root .beads
 	rigBeads := filepath.Join(townRoot, rigName, ".beads")
 	if _, err := os.Stat(rigBeads); err == nil {
+		// If rig-root .beads redirects elsewhere, honor the redirect instead
+		// of writing/creating files (like metadata.json) directly in the
+		// redirect directory — doing so would shadow the redirect and cause
+		// PROJECT IDENTITY MISMATCH errors for every subsequent bd call from
+		// this directory. (gt-3sck)
+		if resolved := beads.ResolveBeadsDir(filepath.Join(townRoot, rigName)); resolved != rigBeads {
+			if err := os.MkdirAll(resolved, 0755); err != nil {
+				return "", fmt.Errorf("ensuring redirect target beads dir: %w", err)
+			}
+			return resolved, nil
+		}
 		if err := os.MkdirAll(rigBeads, 0755); err != nil {
 			return "", fmt.Errorf("ensuring rig beads dir: %w", err)
 		}
