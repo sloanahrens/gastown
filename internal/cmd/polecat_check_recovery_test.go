@@ -529,9 +529,23 @@ func TestHookBeadSafeForCleanup(t *testing.T) {
 // by check-recovery's input-building layer. Before this fix, agentHookBead
 // alone would return "" here and the hook-bead safety signal would never
 // fire, regardless of cleanup_status.
+// fakeAssignedIssueLookup stubs the direct-tracking-model query
+// (status=hooked/open/in_progress, assignee=<polecat>) that manager.go's
+// loadFromBeads treats as the primary source of truth for active work.
+type fakeAssignedIssueLookup struct {
+	issue *beads.Issue
+	err   error
+}
+
+func (f fakeAssignedIssueLookup) GetAssignedIssue(assignee string) (*beads.Issue, error) {
+	return f.issue, f.err
+}
+
 func TestRecoveryHookBeadFallsBackToCanonicalIssue(t *testing.T) {
 	tests := []struct {
 		name       string
+		bd         assignedIssueLookup
+		assignee   string
 		agentIssue *beads.Issue
 		fields     *beads.AgentFields
 		p          *polecat.Polecat
@@ -556,22 +570,39 @@ func TestRecoveryHookBeadFallsBackToCanonicalIssue(t *testing.T) {
 			want:   "gt-x8y",
 		},
 		{
-			name:   "idle polecat with no legacy field yields no hook bead",
-			fields: &beads.AgentFields{},
-			p:      &polecat.Polecat{State: polecat.StateIdle, Issue: ""},
-			want:   "",
+			name:     "idle polecat with no legacy field and no assigned issue yields no hook bead",
+			bd:       fakeAssignedIssueLookup{},
+			assignee: "gastown/polecats/amber",
+			fields:   &beads.AgentFields{},
+			p:        &polecat.Polecat{State: polecat.StateIdle, Issue: ""},
+			want:     "",
 		},
 		{
-			name:   "working but no canonical issue yields no hook bead",
-			fields: &beads.AgentFields{},
-			p:      &polecat.Polecat{State: polecat.StateWorking, Issue: ""},
-			want:   "",
+			name:     "working but no canonical issue and no assigned issue yields no hook bead",
+			bd:       fakeAssignedIssueLookup{},
+			assignee: "gastown/polecats/amber",
+			fields:   &beads.AgentFields{},
+			p:        &polecat.Polecat{State: polecat.StateWorking, Issue: ""},
+			want:     "",
+		},
+		{
+			// gt-ido: mgr.Get's own State/Issue read (p) can itself be the
+			// stale signal — an idle-per-manager, empty-legacy-field polecat
+			// that is genuinely still holding a hooked/open/in_progress bead
+			// (the direct-tracking source of truth) must not read as unhooked
+			// just because both of the other signals bottom out at p.
+			name:     "idle polecat with no legacy field but a real assigned issue is still hooked",
+			bd:       fakeAssignedIssueLookup{issue: &beads.Issue{ID: "gt-ido", Status: beads.StatusHooked}},
+			assignee: "gastown/polecats/amber",
+			fields:   &beads.AgentFields{},
+			p:        &polecat.Polecat{State: polecat.StateIdle, Issue: ""},
+			want:     "gt-ido",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := recoveryHookBead(tt.agentIssue, tt.fields, tt.p); got != tt.want {
+			if got := recoveryHookBead(tt.bd, tt.assignee, tt.agentIssue, tt.fields, tt.p); got != tt.want {
 				t.Fatalf("recoveryHookBead() = %q, want %q", got, tt.want)
 			}
 		})
@@ -592,7 +623,7 @@ func TestCheckRecoveryNeverClearsAHookedWorkingPolecatWithEmptyCleanupStatus(t *
 	p := &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"}
 	fields := &beads.AgentFields{} // legacy hook_bead unset, cleanup_status empty — the amber fixture
 
-	hookBead := recoveryHookBead(nil, fields, p)
+	hookBead := recoveryHookBead(nil, "", nil, fields, p)
 	if hookBead != "gt-x8y" {
 		t.Fatalf("recoveryHookBead() = %q, want gt-x8y — hook-bead signal must not depend on the legacy field alone", hookBead)
 	}
@@ -655,7 +686,7 @@ func TestCheckRecoveryRealisticCleanPolecatStillClears(t *testing.T) {
 	p := &polecat.Polecat{State: polecat.StateIdle}
 	fields := &beads.AgentFields{CleanupStatus: string(polecat.CleanupClean)}
 
-	hookBead := recoveryHookBead(nil, fields, p)
+	hookBead := recoveryHookBead(fakeAssignedIssueLookup{}, "gastown/polecats/amber", nil, fields, p)
 	if hookBead != "" {
 		t.Fatalf("recoveryHookBead() = %q, want empty for a done, unhooked polecat", hookBead)
 	}
@@ -668,6 +699,108 @@ func TestCheckRecoveryRealisticCleanPolecatStillClears(t *testing.T) {
 	d := polecat.DecideWorkstate(input)
 	if !d.SafeToNuke || d.Verdict != polecat.WorkstateVerdictSafeToNuke {
 		t.Fatalf("DecideWorkstate() = %+v, want SAFE_TO_NUKE for a realistic clean, done polecat", d)
+	}
+}
+
+// fakeRecoveryBackend satisfies both issueShower and assignedIssueLookup so a
+// single stub can stand in for bd across every check-recovery fact-gathering
+// call in TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription.
+type fakeRecoveryBackend struct {
+	showIssue     *beads.Issue
+	showErr       error
+	assignedIssue *beads.Issue
+	assignedErr   error
+}
+
+func (f fakeRecoveryBackend) Show(issueID string) (*beads.Issue, error) {
+	return f.showIssue, f.showErr
+}
+
+func (f fakeRecoveryBackend) GetAssignedIssue(assignee string) (*beads.Issue, error) {
+	return f.assignedIssue, f.assignedErr
+}
+
+// TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription is the
+// gt-ido acceptance test: it must not start from a hand-built WorkstateInput
+// or WorkstateFacts literal — that shortcut is exactly how gt-7kr, gt-14a,
+// and gt-hsg each passed their own regression tests while the live CLI still
+// produced SAFE_TO_NUKE. Instead it decodes a REAL agent-bead description
+// (the same "key: value" text FormatAgentDescription writes and bd would
+// actually store, cleanup_status and hook_bead both literally "null") via
+// beads.ParseAgentFields, then drives runPolecatCheckRecovery's own
+// else-branch fact-gathering sequence — recoveryHookBead,
+// hookBeadSafeForCleanup, partialSpawnWithoutDurableHook,
+// applyGitStateToWorkstateFacts — before handing the result to
+// polecat.NewWorkstateInput/DecideWorkstate.
+//
+// Both cases model mgr.Get's p as stale: State=Idle, Issue="", even though
+// the polecat is genuinely still holding an open, non-terminal bead that
+// only the direct-tracking assignee query (fakeRecoveryBackend.assignedIssue)
+// can see — the legacy hook_bead field and p agree on "no hook" while both
+// are wrong. Case one additionally sets cleanup_status=clean, isolating the
+// hook-bead signal as the ONLY thing standing between this fixture and a
+// false SAFE_TO_NUKE.
+func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.T) {
+	const assignee = "gastown/polecats/amethyst"
+	hookedIssue := &beads.Issue{ID: "gt-ido", Status: beads.StatusHooked, Assignee: assignee}
+	bd := fakeRecoveryBackend{showIssue: hookedIssue, assignedIssue: hookedIssue}
+
+	tests := []struct {
+		name        string
+		description string
+	}{
+		{
+			name: "clean cleanup_status alone must not clear a polecat only the direct-tracking query still sees as hooked",
+			description: "role_type: polecat\nrig: gastown\nagent_state: idle\n" +
+				"hook_bead: null\ncleanup_status: clean\nactive_mr: null\n",
+		},
+		{
+			name: "null cleanup_status compounds with the same undetected hook",
+			description: "role_type: polecat\nrig: gastown\nagent_state: idle\n" +
+				"hook_bead: null\ncleanup_status: null\nactive_mr: null\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := beads.ParseAgentFields(tt.description)
+			agentIssue := &beads.Issue{ID: beads.PolecatBeadIDWithPrefix("gt", "gastown", "amethyst")}
+			p := &polecat.Polecat{State: polecat.StateIdle, Issue: ""}
+
+			facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true}
+			status := RecoveryStatus{Branch: p.Branch, Issue: p.Issue}
+			beadTerminal := isAssignedBeadTerminal(nil, status.Issue)
+			workTerminal := beadTerminal
+
+			facts.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
+			status.ActiveMR = fields.ActiveMR
+			facts.ActiveMR = fields.ActiveMR
+			hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
+			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
+			workTerminal = beadTerminal || hookTerminal
+			sourceHint := agentSourceIssueHint(status.Issue, fields)
+			if status.Issue == "" && sourceHint != "" {
+				status.Issue = sourceHint
+			}
+			if !beadTerminal && sourceHint != "" {
+				beadTerminal = isAssignedBeadTerminal(nil, sourceHint)
+				workTerminal = beadTerminal || hookTerminal
+			}
+			facts.HookBead = hookBead
+			facts.HookBeadSafe = hookSafe
+			facts.PushFailed = fields.PushFailed
+			facts.MRFailed = fields.MRFailed
+			partialSpawn, _ := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
+			facts.PartialSpawnWithoutDurableHook = partialSpawn
+			facts.AssignedBeadTerminal = workTerminal
+			applyGitStateToWorkstateFacts(&facts, p.ClonePath, &GitState{Clean: true}, nil)
+
+			input := polecat.NewWorkstateInput(facts)
+			disposition := polecat.DecideWorkstate(input)
+			if disposition.SafeToNuke || disposition.Verdict == polecat.WorkstateVerdictSafeToNuke {
+				t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE for a polecat the direct-tracking query still shows hooked to %s", disposition, hookedIssue.ID)
+			}
+		})
 	}
 }
 

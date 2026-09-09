@@ -1070,6 +1070,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	rigPath := r.Path
 	bd := beads.New(rigPath)
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
+	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
 
 	status := RecoveryStatus{
@@ -1119,7 +1120,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		// already unreadable, so a bd lookup used to decide "safe" would be
 		// trusting the same unreliable data source this branch exists to
 		// distrust.
-		if hookBead := recoveryHookBead(nil, nil, p); hookBead != "" {
+		if hookBead := recoveryHookBead(bd, assignee, nil, nil, p); hookBead != "" {
 			facts.HookBead = hookBead
 			facts.HookBeadSafe = false
 		}
@@ -1130,7 +1131,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		facts.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
 		facts.ActiveMR = fields.ActiveMR
-		hookBead := recoveryHookBead(agentIssue, fields, p)
+		hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
 		hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
@@ -1146,7 +1147,6 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		facts.HookBeadSafe = hookSafe
 		facts.PushFailed = fields.PushFailed
 		facts.MRFailed = fields.MRFailed
-		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 		if diagnostic != "" {
 			status.Diagnostics = append(status.Diagnostics, diagnostic)
@@ -1363,6 +1363,14 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 	return ""
 }
 
+// assignedIssueLookup is the direct-tracking-model query (status=hooked,
+// assignee=<polecat>, plus the open/in_progress statuses it also covers)
+// that manager.go's loadFromBeads treats as the primary source of truth for
+// whether a polecat is actively holding work.
+type assignedIssueLookup interface {
+	GetAssignedIssue(assignee string) (*beads.Issue, error)
+}
+
 // recoveryHookBead resolves the hook-bead safety signal for check-recovery.
 //
 // gt-14a: agentHookBead only reads the legacy agent-bead hook_bead field,
@@ -1374,12 +1382,25 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 // on a field that can be legitimately empty under the current dispatch
 // model. Fall back to the polecat's own canonically-detected issue whenever
 // mgr.Get classified it as actively working.
-func recoveryHookBead(agentIssue *beads.Issue, fields *beads.AgentFields, p *polecat.Polecat) string {
+//
+// gt-ido: those two signals both bottom out empty exactly when mgr.Get's own
+// State/Issue read (p) is itself the thing that's stale or racing the
+// direct-tracking bead update — the legacy field and the "trust p" fallback
+// can agree on "" while a bead assigned to this polecat is still open/hooked.
+// Re-derive the same direct-tracking fact manager.go's primary tier uses,
+// independently, as a last-resort check before concluding there is truly no
+// hook: it is the one signal here that isn't sourced from p.
+func recoveryHookBead(bd assignedIssueLookup, assignee string, agentIssue *beads.Issue, fields *beads.AgentFields, p *polecat.Polecat) string {
 	if hookBead := agentHookBead(agentIssue, fields); hookBead != "" {
 		return hookBead
 	}
 	if p != nil && p.State == polecat.StateWorking && p.Issue != "" {
 		return p.Issue
+	}
+	if bd != nil && assignee != "" {
+		if issue, err := bd.GetAssignedIssue(assignee); err == nil && issue != nil {
+			return issue.ID
+		}
 	}
 	return ""
 }
