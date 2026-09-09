@@ -38,8 +38,14 @@ var (
 	bdAllowStalePath   string
 	bdAllowStaleResult bool
 	// bdAllowStaleProbeTimeout bounds the capability probe so a wedged bd
-	// binary cannot hang higher-level commands such as gt status.
-	bdAllowStaleProbeTimeout = 2 * time.Second
+	// binary cannot hang higher-level commands such as gt status. Defaults to
+	// the same GT_BD_TIMEOUT_SEC-tunable policy every other bd subprocess call
+	// uses (bdSubprocessTimeout) rather than a bespoke short bound: a fixed 2s
+	// flaked under full-suite CPU contention, where even a trivial subprocess
+	// spawn (e.g. a test's shell stub) can take longer than that to schedule —
+	// the doltserver half of gt-ele, same family as gt-911's mail flake. Tests
+	// override this var directly to force a fast timeout.
+	bdAllowStaleProbeTimeout = resolveBdSubprocessTimeout()
 )
 
 // ResetBdAllowStaleCacheForTest clears the cached bd --allow-stale capability.
