@@ -683,6 +683,46 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 	return fields.NotificationLevel, nil
 }
 
+// GetAgentBeadInStoreOnly retrieves an agent bead by ID, but ONLY if it is
+// physically present in THIS wrapper's own database — never resolving via
+// bd's per-ID prefix routing (routes.jsonl). `bd show <id>` and `bd delete
+// <id>` fall back to routes.jsonl whenever the ID isn't found in the local
+// store, silently substituting a DIFFERENT database's row for the same ID
+// (gt-1361: this deleted a live rig agent bead when a legacy town copy had
+// already been removed). `bd list --id <id>` has no such fallback — it only
+// ever returns rows physically in the database bd resolves for this
+// wrapper — so it is the only per-ID lookup safe to use where the wrapper's
+// own database is the point (e.g. reconciling a legacy town row against its
+// rig row, where operating on the wrong database is unrecoverable).
+//
+// Returns nil, nil if absent from THIS database, regardless of whether some
+// other database has a row under the same ID.
+func (b *Beads) GetAgentBeadInStoreOnly(id string) (*Issue, *AgentFields, error) {
+	out, err := b.run("list", "--id", id, "--include-infra", "--all", "--json", "--flat", "--no-pager")
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(out) == 0 || !isJSONBytes(out) {
+		return nil, nil, nil
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, nil, fmt.Errorf("parsing bd list output: %w", err)
+	}
+	for _, issue := range issues {
+		if issue.ID != id {
+			continue
+		}
+		if !IsAgentBead(issue) {
+			return nil, nil, fmt.Errorf("issue %s is not an agent bead (type=%s)", id, issue.Type)
+		}
+		fields := ParseAgentFields(issue.Description)
+		fields.AgentState = ResolveAgentState(issue.Description, issue.AgentState)
+		return issue, fields, nil
+	}
+	return nil, nil, nil
+}
+
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
@@ -841,16 +881,26 @@ func (b *Beads) ListWispIDs() (map[string]bool, error) {
 // database this wrapper is PINNED to. It exists for the gt-a6g reconcile
 // command only: the wrapper must be pinned (NewRigLocal) so the caller has
 // chosen the database explicitly, and the row must be an agent bead.
+//
+// The existence check MUST use GetAgentBeadInStoreOnly, never Show: `bd
+// show`/`bd delete` fall back to routes.jsonl prefix routing when the ID
+// isn't found in the local store, so a plain Show here would silently
+// confirm presence via a DIFFERENT (routed) database, and the `bd delete`
+// that followed would then delete THAT database's row instead of refusing
+// (gt-1361 — this is how a live rig agent bead got deleted for real: the
+// town copy of the same ID had already been removed by an earlier partial
+// run, and `bd delete <id>` from the town directory silently routed to,
+// and deleted, the canonical rig row).
 func (b *Beads) DeleteLegacyAgentBead(id string) error {
 	if !b.noRoute {
 		return fmt.Errorf("DeleteLegacyAgentBead requires a pinned wrapper (beads.NewRigLocal)")
 	}
-	issue, err := b.Show(id)
+	issue, _, err := b.GetAgentBeadInStoreOnly(id)
 	if err != nil {
 		return err
 	}
-	if !IsAgentBead(issue) {
-		return fmt.Errorf("refusing to delete %s: not an agent bead (type=%s)", id, issue.Type)
+	if issue == nil {
+		return fmt.Errorf("refusing to delete %s: not present in this database (bd delete would silently reroute via routes.jsonl and delete the wrong row)", id)
 	}
 	return b.deleteBead(id)
 }

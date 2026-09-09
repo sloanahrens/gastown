@@ -832,3 +832,113 @@ func TestGetAgentBead_DualScopePrefersRigLocal(t *testing.T) {
 		t.Fatalf("GetAgentBead probed the town database despite a rig-local bead; log:\n%s", logOutput)
 	}
 }
+
+// installMockRoutingBD simulates bd's real behavior once an ID is no longer
+// present in the local store: `show`/`delete` fall back to routes.jsonl
+// prefix routing and silently return/mutate a DIFFERENT database's row for
+// the same ID, while `list --id` never does (gt-1361 — this rerouting is
+// what deleted a live rig agent bead for real, once the legacy town copy
+// under the same ID had already been removed). reroutedJSON is what a
+// rerouting `show`/`delete` would find instead of "not found"; the ID is
+// never present in this store's own `list` results.
+func installMockRoutingBD(t *testing.T, reroutedJSON string) (logPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	binDir := t.TempDir()
+	logPath = filepath.Join(binDir, "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+LOG=%q
+REROUTED='%s'
+printf '%%s\n' "$*" >> "$LOG"
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    --*) continue ;;
+  esac
+  cmd="$arg"
+  break
+done
+case "$cmd" in
+  version)
+    exit 0
+    ;;
+  show)
+    # Simulates routes.jsonl fallback: not found locally, routed elsewhere.
+    printf '%%s\n' "$REROUTED"
+    exit 0
+    ;;
+  delete)
+    # A real rerouting bd would delete the routed (wrong) row here. The
+    # fixed code must never reach this for an ID absent from the local
+    # store, so any invocation is itself a test failure signal via the log.
+    exit 0
+    ;;
+  list)
+    printf '%%s\n' '[]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, logPath, reroutedJSON)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func TestGetAgentBeadInStoreOnly_IgnoresReroutedShowResult(t *testing.T) {
+	rerouted := map[string]any{
+		"id":          "gt-gastown-polecat-garnet",
+		"title":       "polecat garnet",
+		"issue_type":  "task",
+		"status":      "open",
+		"labels":      []string{"gt:agent"},
+		"description": "polecat garnet\n\nrole_type: polecat\nrig: gastown\nagent_state: done\n",
+	}
+	b, err := json.Marshal([]any{rerouted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installMockRoutingBD(t, string(b))
+
+	store := NewRigLocal(t.TempDir())
+	issue, fields, err := store.GetAgentBeadInStoreOnly("gt-gastown-polecat-garnet")
+	if err != nil {
+		t.Fatalf("GetAgentBeadInStoreOnly: %v", err)
+	}
+	if issue != nil || fields != nil {
+		t.Fatalf("expected nil (absent from this store), got issue=%v fields=%v — a rerouted `show` result leaked through", issue, fields)
+	}
+}
+
+func TestDeleteLegacyAgentBead_RefusesRatherThanRerouteDelete(t *testing.T) {
+	rerouted := map[string]any{
+		"id":          "gt-gastown-polecat-garnet",
+		"title":       "polecat garnet",
+		"issue_type":  "task",
+		"status":      "open",
+		"labels":      []string{"gt:agent"},
+		"description": "polecat garnet\n\nrole_type: polecat\nrig: gastown\nagent_state: done\n",
+	}
+	b, err := json.Marshal([]any{rerouted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := installMockRoutingBD(t, string(b))
+
+	store := NewRigLocal(t.TempDir())
+	err = store.DeleteLegacyAgentBead("gt-gastown-polecat-garnet")
+	if err == nil || !strings.Contains(err.Error(), "not present in this database") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+	log, _ := os.ReadFile(logPath)
+	if strings.Contains(string(log), "args=delete") {
+		t.Fatalf("DeleteLegacyAgentBead must never call bd delete for an ID absent from this store; log:\n%s", log)
+	}
+}
