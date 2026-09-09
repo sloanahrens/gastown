@@ -90,6 +90,102 @@ func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
 	}
 }
 
+func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
+	gitRepo := t.TempDir()
+
+	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+		t.Fatalf("ensureGitRepoInitialized: %v", err)
+	}
+
+	got := gitConfigGet(t, gitRepo, "http.postBuffer")
+	if got != gitPostBufferBytes {
+		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
+	}
+}
+
+func TestEnsureGitRepoInitialized_SetsPostBufferOnExistingRepo(t *testing.T) {
+	// Regression for gt-kxa1: a repo initialized before this fix (or with the
+	// config lost some other way) must also get covered, not just fresh inits.
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+		t.Fatalf("ensureGitRepoInitialized on existing repo: %v", err)
+	}
+
+	got := gitConfigGet(t, gitRepo, "http.postBuffer")
+	if got != gitPostBufferBytes {
+		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
+	}
+}
+
+func gitConfigGet(t *testing.T, gitRepo, key string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", gitRepo, "config", "--get", key).Output()
+	if err != nil {
+		t.Fatalf("git config --get %s: %v", key, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestIsPostBufferPushError(t *testing.T) {
+	tests := []struct {
+		name   string
+		errMsg string
+		want   bool
+	}{
+		{
+			name:   "github chunked-POST rejection",
+			errMsg: "git push: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400",
+			want:   true,
+		},
+		{
+			name:   "bare curl 22 without HTTP 400 substring",
+			errMsg: "git push: curl 22 error sending request",
+			want:   true,
+		},
+		{
+			name:   "unrelated auth failure",
+			errMsg: "git push: fatal: Authentication failed for 'https://github.com/...'",
+			want:   false,
+		},
+		{
+			name:   "unrelated network timeout",
+			errMsg: "git push: context deadline exceeded",
+			want:   false,
+		},
+		{
+			name:   "empty error",
+			errMsg: "",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPostBufferPushError(tt.errMsg); got != tt.want {
+				t.Errorf("isPostBufferPushError(%q) = %v, want %v", tt.errMsg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostBufferHint_NamesCauseAndFix(t *testing.T) {
+	hint := postBufferHint("2.9 MiB")
+	if !contains(hint, "http.postBuffer") {
+		t.Errorf("hint should name http.postBuffer, got: %s", hint)
+	}
+	if !contains(hint, "2.9 MiB") {
+		t.Errorf("hint should include the pack size when known, got: %s", hint)
+	}
+}
+
+func TestPostBufferHint_OkWithoutPackSize(t *testing.T) {
+	hint := postBufferHint("")
+	if !contains(hint, "http.postBuffer") {
+		t.Errorf("hint should still name http.postBuffer with no pack size, got: %s", hint)
+	}
+}
+
 func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
 	// Regression for gt-kme: a JSONL backup repo with commits but no configured
 	// remote used to be reported as a silent success ("skipping push"), even

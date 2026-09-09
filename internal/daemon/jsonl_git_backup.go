@@ -29,6 +29,14 @@ const (
 	gitCmdTimeout                 = 30 * time.Second
 	maxConsecutivePushFailures    = 3
 	defaultSpikeThreshold         = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
+
+	// gitPostBufferBytes raises http.postBuffer above git's 1 MB default on the
+	// offsite backup repo. JSONL exports accumulate across many unpushed
+	// snapshot commits between successful pushes, so the pack GitHub receives
+	// can exceed 1 MB; over that, GitHub's git-receive-pack rejects the chunked
+	// POST with "HTTP 400" (curl 22) and pushes fail until someone notices and
+	// sets this by hand (gt-kxa1).
+	gitPostBufferBytes = "524288000" // 500 MB
 )
 
 // testPollutionPatterns matches issue IDs or titles that indicate test data leaked
@@ -208,7 +216,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 		d.jsonlPushFailures++
 		if d.jsonlPushFailures >= maxConsecutivePushFailures {
 			d.logger.Printf("jsonl_git_backup: ESCALATION: %d consecutive push failures", d.jsonlPushFailures)
-			d.escalate("jsonl_git_backup", fmt.Sprintf("git push failed %d consecutive times", d.jsonlPushFailures))
+			msg := fmt.Sprintf("git push failed %d consecutive times: %v", d.jsonlPushFailures, err)
+			if isPostBufferPushError(err.Error()) {
+				msg += "\n\n" + postBufferHint(d.gitPackSizeSummary(gitRepo))
+			}
+			d.escalate("jsonl_git_backup", msg)
 			// Reset to avoid flooding escalations every tick.
 			d.jsonlPushFailures = 0
 		}
@@ -438,17 +450,41 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 // configured here — that still requires an explicit `git remote add origin`
 // — but at least the local half stops being permanently inert (gt-kme).
 func ensureGitRepoInitialized(gitRepo string) error {
-	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err == nil {
-		return nil // already a git repo
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
+		if err := os.MkdirAll(gitRepo, 0755); err != nil {
+			return fmt.Errorf("creating %s: %w", gitRepo, err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "init", "-b", "main")
+		cmd.Env = gitChildEnv()
+		util.SetDetachedProcessGroup(cmd)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg != "" {
+				return fmt.Errorf("git init: %s", errMsg)
+			}
+			return fmt.Errorf("git init: %w", err)
+		}
 	}
 
-	if err := os.MkdirAll(gitRepo, 0755); err != nil {
-		return fmt.Errorf("creating %s: %w", gitRepo, err)
+	// Set unconditionally (idempotent) rather than only on fresh init, so a
+	// pre-existing repo created before this fix — or one where the config was
+	// lost — also gets covered on the next daemon start (gt-kxa1).
+	if err := setGitPostBuffer(gitRepo); err != nil {
+		return fmt.Errorf("git config http.postBuffer: %w", err)
 	}
+	return nil
+}
 
+// setGitPostBuffer sets http.postBuffer on gitRepo to gitPostBufferBytes.
+func setGitPostBuffer(gitRepo string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "init", "-b", "main")
+	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "config", "http.postBuffer", gitPostBufferBytes)
 	cmd.Env = gitChildEnv()
 	util.SetDetachedProcessGroup(cmd)
 	var stderr bytes.Buffer
@@ -456,11 +492,59 @@ func ensureGitRepoInitialized(gitRepo string) error {
 	if err := cmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
-			return fmt.Errorf("git init: %s", errMsg)
+			return fmt.Errorf("%s", errMsg)
 		}
-		return fmt.Errorf("git init: %w", err)
+		return err
 	}
 	return nil
+}
+
+// isPostBufferPushError reports whether a git push error looks like GitHub
+// rejecting an oversized pack sent as a chunked HTTP POST — the classic
+// "error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400"
+// failure that occurs when http.postBuffer is left at git's 1 MB default
+// (gt-kxa1). It's a plain string classifier (no exec) so it stays cheap to
+// call from a hot error path and easy to table-test.
+func isPostBufferPushError(errMsg string) bool {
+	return strings.Contains(errMsg, "HTTP 400") || strings.Contains(errMsg, "curl 22")
+}
+
+// postBufferHint explains the postBuffer failure and names the local pack
+// size (when known) so an escalation reads as a diagnosis, not just a
+// symptom. packSize is typically the output of gitPackSizeSummary, which
+// returns "" when it couldn't be determined — the hint still reads fine
+// without it.
+func postBufferHint(packSize string) string {
+	hint := fmt.Sprintf("cause: pack exceeds git's http.postBuffer default (1 MB); "+
+		"http.postBuffer is now set to %s bytes at repo init (gt-kxa1) — if this repo "+
+		"predates that fix, run: git config http.postBuffer %s", gitPostBufferBytes, gitPostBufferBytes)
+	if packSize != "" {
+		hint += fmt.Sprintf(" (local pack size: %s)", packSize)
+	}
+	return hint
+}
+
+// gitPackSizeSummary returns the repo's local pack size as reported by
+// `git count-objects -v` (its "size-pack" line, in KiB), for inclusion in
+// postBuffer escalation hints. Returns "" on any failure — the hint is still
+// useful without this detail, so callers don't need to handle an error.
+func (d *Daemon) gitPackSizeSummary(gitRepo string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "count-objects", "-v")
+	cmd.Env = gitChildEnv()
+	util.SetDetachedProcessGroup(cmd)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if kb, ok := strings.CutPrefix(line, "size-pack:"); ok {
+			return strings.TrimSpace(kb) + " KiB"
+		}
+	}
+	return ""
 }
 
 // discoverJsonlBackupDatabases lists production database directories under
