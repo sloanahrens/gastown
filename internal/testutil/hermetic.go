@@ -536,8 +536,12 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 // legitimately returns it whenever GetRole() can't resolve an agent identity
 // (e.g. a scheduler tick or sling invoked outside an agent session) — it is a
 // real system fallback value, not a test fixture (gt-ro0).
+// "dog" is included because deacon dogs (internal/cmd/dog.go, RoleDog) are
+// real town-level infrastructure workers that emit events (e.g. nudge) during
+// normal operation, such as the deacon patrol's dog-pool-maintenance step —
+// not a test fixture (gt-kvc).
 var builtinActorPrefixes = []string{
-	"mayor", "overseer", "deacon", "daemon", "convoy", "town", "gt", "boot", "human", "crew", "unknown",
+	"mayor", "overseer", "deacon", "daemon", "convoy", "town", "gt", "boot", "human", "crew", "unknown", "dog",
 }
 
 func knownActorPrefixes(root string) map[string]bool {

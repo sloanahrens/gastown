@@ -139,6 +139,28 @@ func TestTripwire_ToleratesUnknownActor(t *testing.T) {
 	}
 }
 
+func TestTripwire_ToleratesDogActor(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	f, err := os.OpenFile(filepath.Join(town, ".events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deacon dogs (internal/cmd/dog.go, RoleDog) are real town-level
+	// infrastructure workers that emit events like "nudge" during normal
+	// operation (e.g. the deacon patrol's dog-pool-maintenance step). That
+	// must not trip the leak detector (gt-kvc).
+	_, _ = f.WriteString(`{"ts":"2026-09-08T00:01:00Z","source":"gt","type":"nudge","actor":"dog","visibility":"feed"}` + "\n")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if leaks := snap.diff(); len(leaks) != 0 {
+		t.Errorf("legitimate dog-actor nudge event flagged as leak: %v", leaks)
+	}
+}
+
 func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
 	t.Setenv("GT_ROLE", "gastown/polecats/flint")
 	t.Setenv("BD_ACTOR", "someone")
