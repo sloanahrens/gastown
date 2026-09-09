@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,12 +258,17 @@ func NewGtEventsSource(townRoot string) (*GtEventsSource, error) {
 func (s *GtEventsSource) tail(ctx context.Context) {
 	defer close(s.events)
 
-	// Load recent events (last 200 lines) for initial display
-	s.loadRecentEvents()
-
-	// Seek to true EOF so the tail scanner starts cleanly,
-	// regardless of the preload scanner's internal read-ahead buffer.
-	_, _ = s.file.Seek(0, 2)
+	// Load recent events (last 200 lines) for initial display, then resume
+	// tailing from exactly where that scan stopped reading - NOT from
+	// whatever the file's end happens to be by the time we get here.
+	// Concurrent writers keep appending to .events.jsonl the whole time
+	// loadRecentEvents is scanning + emitting; if we instead seeked to the
+	// file's current end (`Seek(0, 2)`), any lines written during that
+	// window would land strictly between "what the scan already consumed"
+	// and "the new true EOF" - never scanned (backlog already finished)
+	// and never tailed (we'd jump straight past them) - silently and
+	// permanently dropped.
+	_, _ = s.file.Seek(s.loadRecentEvents(), io.SeekStart)
 
 	// Now tail for new events, polling every 100ms using a fresh scanner
 	// each tick. bufio.Scanner latches an internal error (including
@@ -296,31 +302,36 @@ func (s *GtEventsSource) tail(ctx context.Context) {
 	}
 }
 
-// loadRecentEvents reads the last N lines of the file and emits them as events.
-// Uses a ring buffer so memory is O(maxLines) regardless of file size.
-func (s *GtEventsSource) loadRecentEvents() {
+// loadRecentEvents reads the last N lines of the file and emits them as
+// events. Uses a ring buffer so memory is O(maxLines) regardless of file
+// size. Returns the byte offset where scanning stopped, so the caller can
+// resume tailing from exactly there instead of re-querying the file's end
+// (which may have advanced past lines written during this scan - see tail).
+func (s *GtEventsSource) loadRecentEvents() int64 {
 	const maxLines = 200
 
 	if _, err := s.file.Seek(0, 0); err != nil {
-		return
+		return 0
 	}
 
 	// Ring buffer: only keep the last maxLines lines in memory
 	ring := make([]string, maxLines)
 	idx := 0
 	count := 0
+	var consumed int64
 
 	scanner := bufio.NewScanner(s.file)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		ring[idx%maxLines] = scanner.Text()
+		consumed += int64(len(scanner.Bytes())) + 1 // +1 for the newline delimiter
 		idx++
 		count++
 	}
 	if scanner.Err() != nil {
 		// Scanner failed (e.g. token too long) — seek to EOF so tail starts clean
-		_, _ = s.file.Seek(0, 2)
-		return
+		eof, _ := s.file.Seek(0, io.SeekEnd)
+		return eof
 	}
 
 	// Emit lines in order (oldest first)
@@ -338,6 +349,8 @@ func (s *GtEventsSource) loadRecentEvents() {
 			}
 		}
 	}
+
+	return consumed
 }
 
 // Events returns the event channel
