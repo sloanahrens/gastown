@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -197,6 +200,113 @@ func TestLoadRigGateConfig(t *testing.T) {
 			t.Errorf("expected nil for no test commands, got %+v", cfg)
 		}
 	})
+}
+
+// goTestFixtureOneFailingPackage mimics real `go test ./...` output where
+// most packages pass and one, deep in the middle of the run, fails — the
+// exact shape that let the old last-50-lines tail bury the failure under
+// later "ok" lines (gt-1s2g).
+const goTestFixtureOneFailingPackage = `ok  	github.com/steveyegge/gastown/internal/aaa	0.010s
+ok  	github.com/steveyegge/gastown/internal/bbb	0.020s
+--- FAIL: TestWidgetRenders (0.00s)
+    widget_test.go:42: expected 3, got 4
+FAIL
+FAIL	github.com/steveyegge/gastown/internal/widget	0.030s
+ok  	github.com/steveyegge/gastown/internal/ccc	0.010s
+ok  	github.com/steveyegge/gastown/internal/ddd	0.010s
+ok  	github.com/steveyegge/gastown/internal/eee	0.010s
+`
+
+func TestExtractDiagnosticLines(t *testing.T) {
+	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage)
+
+	found := false
+	for _, line := range diagnostic {
+		if strings.Contains(line, "internal/widget") {
+			found = true
+		}
+		if strings.HasPrefix(line, "ok") {
+			t.Errorf("expected only failure lines, got passing-package line: %q", line)
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic lines to name the failing package internal/widget, got %v", diagnostic)
+	}
+}
+
+func TestExtractDiagnosticLines_CapsAtMax(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < maxDiagnosticLines+10; i++ {
+		sb.WriteString("--- FAIL: TestSomething\n")
+	}
+	diagnostic := extractDiagnosticLines(sb.String())
+	if len(diagnostic) != maxDiagnosticLines {
+		t.Errorf("expected %d lines, got %d", maxDiagnosticLines, len(diagnostic))
+	}
+}
+
+func TestWriteMainBranchTestLog(t *testing.T) {
+	townRoot := t.TempDir()
+	logPath, err := writeMainBranchTestLog(townRoot, "gastown", goTestFixtureOneFailingPackage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(logPath, filepath.Join(townRoot, "logs", "main_branch_test")) {
+		t.Errorf("expected log under logs/main_branch_test, got %q", logPath)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("could not read log file: %v", err)
+	}
+	if string(data) != goTestFixtureOneFailingPackage {
+		t.Errorf("log file content mismatch")
+	}
+}
+
+// TestRunCommandOnWorktree_FailureBodyNamesFailingPackage is the fixture test
+// called out in gt-1s2g: a run with one failing package (buried among
+// passing ones) must produce an escalation body naming that package, plus
+// the rig, the commit tested, and the on-disk log path — not a blind tail
+// of trailing "ok" lines and not just the bare exit status.
+func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
+
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", cmd)
+	if err == nil {
+		t.Fatal("expected error from failing command")
+	}
+
+	body := err.Error()
+	if !strings.Contains(body, "internal/widget") {
+		t.Errorf("expected body to name the failing package, got:\n%s", body)
+	}
+	if !strings.Contains(body, "rig: gastown") {
+		t.Errorf("expected body to name the rig, got:\n%s", body)
+	}
+	if !strings.Contains(body, "commit: deadbeef") {
+		t.Errorf("expected body to name the commit tested, got:\n%s", body)
+	}
+	if !strings.Contains(body, filepath.Join(townRoot, "logs", "main_branch_test")) {
+		t.Errorf("expected body to reference the log path, got:\n%s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ok") {
+			t.Errorf("expected no passing-package lines in body, got:\n%s", body)
+		}
+	}
+}
+
+// shellQuote wraps s in single quotes for safe use as a literal sh argument,
+// escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func TestContains(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,7 +18,48 @@ import (
 const (
 	defaultMainBranchTestInterval = 30 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
+
+	// maxDiagnosticLines bounds how many matching failure lines go into the
+	// escalation body — enough for the mayor to triage without a rerun,
+	// short enough to stay readable.
+	maxDiagnosticLines = 40
 )
+
+// diagnosticLinePattern matches the lines worth surfacing from a failing
+// test/build run: test failures, panics, and build errors. Plain "ok"
+// lines from passing packages are excluded so a long run with one early
+// failure doesn't bury it under trailing successes (gt-1s2g).
+var diagnosticLinePattern = regexp.MustCompile(`^(FAIL|--- FAIL|panic:|# |.*\[build failed\])`)
+
+// extractDiagnosticLines returns the first maxDiagnosticLines lines of output
+// that match diagnosticLinePattern, in their original order.
+func extractDiagnosticLines(output string) []string {
+	var diagnostic []string
+	for _, line := range strings.Split(output, "\n") {
+		if diagnosticLinePattern.MatchString(line) {
+			diagnostic = append(diagnostic, line)
+			if len(diagnostic) >= maxDiagnosticLines {
+				break
+			}
+		}
+	}
+	return diagnostic
+}
+
+// writeMainBranchTestLog captures the full output of a failed run to
+// ~/gt/logs/main_branch_test/<rig>-<ts>.log so the mayor can inspect it
+// without rerunning the test (gt-1s2g).
+func writeMainBranchTestLog(townRoot, rigName, output string) (string, error) {
+	dir := filepath.Join(townRoot, "logs", "main_branch_test")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("creating log dir: %w", err)
+	}
+	logPath := filepath.Join(dir, fmt.Sprintf("%s-%s.log", rigName, time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.WriteFile(logPath, []byte(output), 0644); err != nil {
+		return "", fmt.Errorf("writing log file: %w", err)
+	}
+	return logPath, nil
+}
 
 // MainBranchTestConfig holds configuration for the main_branch_test patrol.
 // This patrol periodically runs quality gates on each rig's main branch to
@@ -245,18 +287,35 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		}
 	}()
 
+	commit := d.commitTested(ctx, rigName, worktreePath)
+
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
-		return d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
+		return d.runGatesOnWorktree(ctx, rigName, commit, worktreePath, gateCfg.Gates)
 	}
-	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+	return d.runCommandOnWorktree(ctx, rigName, commit, worktreePath, "test", gateCfg.TestCommand)
+}
+
+// commitTested returns the commit SHA checked out in the worktree, or ""
+// if it can't be determined — the escalation body degrades gracefully
+// rather than failing the whole test run over this.
+func (d *Daemon) commitTested(ctx context.Context, rigName, worktreePath string) string {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = worktreePath
+	util.SetDetachedProcessGroup(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		d.logger.Printf("main_branch_test: %s: warning: could not determine tested commit: %v", rigName, err)
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
-func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]string) error {
+func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDir string, gates map[string]string) error {
 	var failures []string
 	for name, cmd := range gates {
-		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, cmd); err != nil {
+		if err := d.runCommandOnWorktree(ctx, rigName, commit, workDir, name, cmd); err != nil {
 			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
 		}
 	}
@@ -267,7 +326,12 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string
 }
 
 // runCommandOnWorktree runs a single shell command in the given worktree directory.
-func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command string) error {
+// On failure it captures the full output to a log file and builds an error
+// carrying the failing rig, the commit tested, the lines that actually
+// diagnose the failure (FAIL/panic/build-error lines, not a blind tail that
+// can be all-"ok" noise from later packages), and the log path so the mayor
+// can triage without rerunning (gt-1s2g).
+func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
@@ -276,16 +340,38 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Truncate output to last 50 lines for the error message
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		tail := lines
-		if len(tail) > 50 {
-			tail = tail[len(tail)-50:]
-		}
-		return fmt.Errorf("%s failed: %v\n%s", label, err, strings.Join(tail, "\n"))
+	if err == nil {
+		return nil
 	}
-	return nil
+
+	logPath, logErr := writeMainBranchTestLog(d.config.TownRoot, rigName, string(output))
+	if logErr != nil {
+		d.logger.Printf("main_branch_test: %s: warning: could not write diagnostic log: %v", rigName, logErr)
+	}
+
+	diagnostic := extractDiagnosticLines(string(output))
+	if len(diagnostic) == 0 {
+		// Nothing matched a known failure pattern (e.g. a shell error before
+		// the test binary even ran) — fall back to a short tail so the body
+		// isn't empty.
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(lines) > 20 {
+			lines = lines[len(lines)-20:]
+		}
+		diagnostic = lines
+	}
+
+	var body strings.Builder
+	fmt.Fprintf(&body, "%s failed: %v\n", label, err)
+	fmt.Fprintf(&body, "rig: %s\n", rigName)
+	if commit != "" {
+		fmt.Fprintf(&body, "commit: %s\n", commit)
+	}
+	body.WriteString(strings.Join(diagnostic, "\n"))
+	if logPath != "" {
+		fmt.Fprintf(&body, "\nlog: %s", logPath)
+	}
+	return fmt.Errorf("%s", body.String())
 }
 
 // contains checks if a string slice contains a value.
