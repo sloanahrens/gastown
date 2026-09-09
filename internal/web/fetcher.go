@@ -895,6 +895,12 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		agentType := constants.RolePolecat // Default for ephemeral sessions (polecats, crew)
 		if identity.Role == session.RoleRefinery {
 			agentType = constants.RoleRefinery
+			// Refinery identities carry no per-agent Name (there's one
+			// refinery per rig, so AgentIdentity.Name is always empty for
+			// this role) - without this the Polecats panel rendered an
+			// unlabeled "refinery" row, and the workerName == "refinery"
+			// check below (for status hints) could never match.
+			workerName = "refinery"
 		}
 
 		// Parse activity timestamp
@@ -1190,6 +1196,32 @@ func formatAgentAddress(addr string) string {
 	return addr
 }
 
+// countLivePolecatsByRig returns per-rig counts of live polecat tmux sessions.
+// The Rigs panel's polecat count must reflect the actual running pool, not
+// leftover worktree directories under <rig>/polecats/: those persist after a
+// polecat finishes (gt done) or crashes without full cleanup, which inflated
+// the displayed count well beyond the live pool.
+func (f *LiveConvoyFetcher) countLivePolecatsByRig() map[string]int {
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		// tmux not running or no sessions - no live polecats anywhere.
+		return nil
+	}
+
+	counts := make(map[string]int)
+	for _, sessionName := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if sessionName == "" {
+			continue
+		}
+		identity, err := session.ParseSessionNameWithRegistry(sessionName, f.registry)
+		if err != nil || identity.Role != session.RolePolecat {
+			continue
+		}
+		counts[identity.Rig]++
+	}
+	return counts
+}
+
 // FetchRigs returns all registered rigs with their agent counts.
 func (f *LiveConvoyFetcher) FetchRigs() ([]RigRow, error) {
 	// Load rigs config from mayor/rigs.json
@@ -1199,24 +1231,17 @@ func (f *LiveConvoyFetcher) FetchRigs() ([]RigRow, error) {
 		return nil, fmt.Errorf("loading rigs config: %w", err)
 	}
 
+	livePolecatCounts := f.countLivePolecatsByRig()
+
 	var rows []RigRow
 	for name, entry := range rigsConfig.Rigs {
 		row := RigRow{
-			Name:   name,
-			GitURL: entry.GitURL,
+			Name:         name,
+			GitURL:       entry.GitURL,
+			PolecatCount: livePolecatCounts[name],
 		}
 
 		rigPath := filepath.Join(f.townRoot, name)
-
-		// Count polecats
-		polecatsDir := filepath.Join(rigPath, "polecats")
-		if entries, err := os.ReadDir(polecatsDir); err == nil {
-			for _, e := range entries {
-				if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-					row.PolecatCount++
-				}
-			}
-		}
 
 		// Count crew
 		crewDir := filepath.Join(rigPath, "crew")
