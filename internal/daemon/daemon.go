@@ -2808,7 +2808,7 @@ func (d *Daemon) emitMassDeathEvent() {
 	d.logger.Printf("MASS DEATH DETECTED: %d sessions died in %s: %v", count, window, sessions)
 
 	// Emit feed event
-	_ = events.LogFeedTo(d.config.TownRoot, events.TypeMassDeath, "daemon",
+	_ = events.LogFeedTo(d.config.TownRoot, events.TypeMassDeath, events.ActorDaemon,
 		events.MassDeathPayload(count, window, sessions, ""))
 
 	// Clear the deaths to avoid repeated alerts

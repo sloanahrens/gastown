@@ -86,6 +86,17 @@ const (
 // EventsFile is the name of the raw events log.
 const EventsFile = ".events.jsonl"
 
+// Infrastructure actors: literal actor values for events with no owning
+// agent role (internal/cmd.Role covers agent-originated actors instead —
+// see internal/cmd.AllRoles and detectActor). Named here, rather than
+// inlined at each call site, so the hermetic test tripwire's tolerance list
+// (internal/testutil.BuiltinActorPrefixes) can be verified against the same
+// values that actually get logged (gt-9pn).
+const (
+	ActorGt     = "gt"     // town-infrastructure events: boot, halt, spawn
+	ActorDaemon = "daemon" // daemon-originated events, e.g. mass-death detection
+)
+
 // Log writes an event to the events log.
 // The event is appended to <town-root>/.events.jsonl, with the town root
 // resolved from the current working directory. Callers that already know

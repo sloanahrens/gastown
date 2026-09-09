@@ -461,7 +461,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		if downNuke {
 			stoppedServices = append(stoppedServices, "tmux-server")
 		}
-		_ = events.LogFeed(events.TypeHalt, "gt", events.HaltPayload(stoppedServices))
+		_ = events.LogFeed(events.TypeHalt, events.ActorGt, events.HaltPayload(stoppedServices))
 	} else {
 		fmt.Printf("%s Some services failed to stop\n", style.Bold.Render("✗"))
 		return fmt.Errorf("not all services stopped")

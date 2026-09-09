@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,6 +159,38 @@ func TestTripwire_ToleratesDogActor(t *testing.T) {
 
 	if leaks := snap.diff(); len(leaks) != 0 {
 		t.Errorf("legitimate dog-actor nudge event flagged as leak: %v", leaks)
+	}
+}
+
+func TestTripwire_ToleratesAllBuiltinActorPrefixes(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	f, err := os.OpenFile(filepath.Join(town, ".events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, actor := range BuiltinActorPrefixes() {
+		line, err := json.Marshal(map[string]string{
+			"ts":         "2026-09-08T00:02:00Z",
+			"source":     "gt",
+			"type":       "test",
+			"actor":      actor,
+			"visibility": "feed",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if leaks := snap.diff(); len(leaks) != 0 {
+		t.Errorf("builtin actor prefixes flagged as leaks: %v", leaks)
 	}
 }
 

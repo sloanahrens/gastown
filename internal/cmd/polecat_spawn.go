@@ -249,7 +249,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			sessionName := polecatSessMgr.SessionName(polecatName)
 
 			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
-			_ = events.LogFeed(events.TypeSpawn, "gt", events.SpawnPayload(rigName, polecatName))
+			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 
 			effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
 			if effectiveBranch == "" {
@@ -359,7 +359,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	fmt.Printf("%s Polecat %s spawned (session start deferred)\n", style.Bold.Render("✓"), polecatName)
 
 	// Log spawn event to activity feed
-	_ = events.LogFeed(events.TypeSpawn, "gt", events.SpawnPayload(rigName, polecatName))
+	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 
 	// Compute effective base branch (strip origin/ prefix since formula prepends it)
 	effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")

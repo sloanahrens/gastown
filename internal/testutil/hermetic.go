@@ -532,16 +532,56 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 }
 
 // builtinActorPrefixes are town-level actors that are always legitimate.
-// "unknown" is included because detectActor() (internal/cmd/sling_helpers.go)
-// legitimately returns it whenever GetRole() can't resolve an agent identity
-// (e.g. a scheduler tick or sling invoked outside an agent session) — it is a
-// real system fallback value, not a test fixture (gt-ro0).
-// "dog" is included because deacon dogs (internal/cmd/dog.go, RoleDog) are
-// real town-level infrastructure workers that emit events (e.g. nudge) during
-// normal operation, such as the deacon patrol's dog-pool-maintenance step —
-// not a test fixture (gt-kvc).
+//
+// gt-9pn: this list was previously enumerated entirely by hand and was
+// missing a legitimate actor twice (gt-ro0 "unknown", gt-kvc "dog") — each
+// time a false positive that could have blocked a real merge. Most of these
+// entries are no longer maintained by hand alone: internal/cmd's
+// TestDetectActorOutputsToleratedByTripwire iterates every internal/cmd.Role
+// (the enum backing detectActor(), the function that actually writes most
+// agent-originated actor values) and fails if RoleInfo.ActorString() ever
+// produces a value not in this list — so the two sides can no longer
+// silently drift apart the way they did before.
+//
+// "mayor", "deacon", "witness", "refinery", "polecat", "crew", "dog",
+// "unknown" are the bare (no-rig) actor strings for their respective Roles.
+// "deacon-boot" is RoleBoot's actor string — RoleInfo.ActorString() returns
+// "deacon-boot", never bare "boot"; the cross-check test caught that the old
+// literal "boot" entry never matched anything real.
+//
+// The remaining four are not derivable from internal/cmd.Role because they
+// come from other construction paths, verified directly against source:
+//   - "overseer": the fallback in detectSender() (internal/cmd/mail_identity.go)
+//     used as the mail actor when no agent identity resolves.
+//   - "gt": literal actor for town-infrastructure events with no owning
+//     agent (internal/cmd/up.go, polecat_spawn.go, down.go).
+//   - "daemon": literal actor for daemon-originated events, e.g. mass-death
+//     detection (internal/daemon/daemon.go).
+//   - "convoy": convoyNotifyFrom() (internal/cmd/convoy.go, also inlined at
+//     internal/refinery/engineer.go) builds "convoy/<convoy-id>" as the
+//     --from actor for a convoy's completion-notification mail — confirmed
+//     live in ~/gt/.events.jsonl while verifying this change (gt-9pn), which
+//     is exactly the kind of dynamically-built actor a plain string search
+//     for "convoy" as a whole value misses.
+//
+// "town" and "human" were removed (gt-9pn): neither a repo-wide search for
+// them as a literal actor value nor for a "<prefix>/"+id-style builder (the
+// pattern that caught "convoy" above) found a code path that ever writes
+// them as an event actor. If one is ever needed, the tripwire's leak report
+// will name the exact actor to add back — that is the point of deriving
+// this list instead of guessing at it.
 var builtinActorPrefixes = []string{
-	"mayor", "overseer", "deacon", "daemon", "convoy", "town", "gt", "boot", "human", "crew", "unknown", "dog",
+	"mayor", "deacon", "deacon-boot", "witness", "refinery", "polecat", "crew",
+	"dog", "unknown", "overseer", "gt", "daemon", "convoy",
+}
+
+// BuiltinActorPrefixes returns a copy of the always-legitimate town-level
+// actor prefixes. It exists so other packages (e.g. internal/cmd's
+// TestDetectActorOutputsToleratedByTripwire) can cross-check their own
+// actor-construction logic against the tripwire's tolerances without
+// duplicating this list.
+func BuiltinActorPrefixes() []string {
+	return append([]string(nil), builtinActorPrefixes...)
 }
 
 func knownActorPrefixes(root string) map[string]bool {

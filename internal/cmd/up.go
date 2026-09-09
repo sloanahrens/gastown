@@ -426,7 +426,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			startedServices = append(startedServices, fmt.Sprintf("%s/witness", rigName))
 			startedServices = append(startedServices, fmt.Sprintf("%s/refinery", rigName))
 		}
-		_ = events.LogFeed(events.TypeBoot, "gt", events.BootPayload("town", startedServices))
+		_ = events.LogFeed(events.TypeBoot, events.ActorGt, events.BootPayload("town", startedServices))
 	}
 
 	// Output JSON or text

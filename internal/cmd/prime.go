@@ -63,6 +63,19 @@ const (
 	RoleUnknown  Role = "unknown"
 )
 
+// AllRoles returns every Role value GetRole can produce. It is the
+// enumeration half of the single source of truth for actor construction:
+// combined with RoleInfo.ActorString(), it lets callers (e.g. the hermetic
+// test tripwire's cross-check in role_actor_tripwire_test.go) verify every
+// actor string detectActor() can emit is accounted for, instead of a
+// hand-maintained list that has to be kept in sync by hand (gt-9pn).
+func AllRoles() []Role {
+	return []Role{
+		RoleMayor, RoleDeacon, RoleBoot, RoleWitness, RoleRefinery,
+		RolePolecat, RoleCrew, RoleDog, RoleUnknown,
+	}
+}
+
 var primeCmd = &cobra.Command{
 	Use:         "prime",
 	GroupID:     GroupDiag,
