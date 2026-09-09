@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func TestGetNextSeverity(t *testing.T) {
@@ -654,7 +655,7 @@ esac
 	}
 	callLog := string(logData)
 
-	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--json"} {
+	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--include-infra", "--json"} {
 		if !strings.Contains(callLog, want) {
 			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
 		}
@@ -698,6 +699,76 @@ esac
 	}
 	if n != 0 {
 		t.Fatalf("closed count = %d, want 0", n)
+	}
+}
+
+// TestRunEscalateListAllPassesIncludeInfra verifies `gt escalate list --all`
+// queries bd with --include-infra.
+//
+// Regression test for gt-fcsf: escalations are ephemeral wisps, invisible to
+// `bd list` without --include-infra — the same bug class as gt-4mnd.
+func TestRunEscalateListAllPassesIncludeInfra(t *testing.T) {
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+
+	stubScript := `#!/bin/sh
+{
+  for a in "$@"; do printf '%s\t' "$a"; done
+  printf '\n'
+} >> "` + argsPath + `"
+case "$1" in
+  --allow-stale)
+    exit 1
+    ;;
+  list)
+    echo '[]'
+    exit 0
+    ;;
+  *)
+    echo '{}'
+    exit 0
+    ;;
+esac
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	beads.ResetBdAllowStaleCacheForTest()
+
+	// runEscalateList resolves the workspace via workspace.FindFromCwdOrError()
+	// and shells out with cmd.Dir set to <townRoot>/.beads. The hermetic test
+	// sandbox town (see testutil.HermeticMain) only creates mayor/town.json,
+	// not .beads, so that directory must exist before the subprocess runs or
+	// the exec fails with an unrelated "no such file or directory" from the
+	// chdir, not from bd itself.
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		t.Fatalf("workspace.FindFromCwdOrError: %v", err)
+	}
+	if err := os.MkdirAll(beads.ResolveBeadsDir(townRoot), 0o755); err != nil {
+		t.Fatalf("creating .beads dir: %v", err)
+	}
+
+	origAll, origJSON := escalateListAll, escalateListJSON
+	defer func() { escalateListAll, escalateListJSON = origAll, origJSON }()
+	escalateListAll = true
+	escalateListJSON = true
+
+	if err := runEscalateList(escalateListCmd, nil); err != nil {
+		t.Fatalf("runEscalateList: %v", err)
+	}
+
+	logData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	callLog := string(logData)
+	for _, want := range []string{"--label=gt:escalation", "--status=all", "--include-infra"} {
+		if !strings.Contains(callLog, want) {
+			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
+		}
 	}
 }
 

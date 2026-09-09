@@ -337,6 +337,48 @@ func TestFilterEscalationRecordsSkipsMailMessages(t *testing.T) {
 	}
 }
 
+// TestListEscalationsPassesIncludeInfra verifies that ListEscalations queries
+// bd with --include-infra.
+//
+// Regression test for gt-fcsf: escalations are created as ephemeral wisps
+// (--ephemeral --wisp-type=escalation, see CreateEscalationBead), which `bd
+// list` hides by default. Without --include-infra, `gt escalate list`
+// reported "No escalations found" while 11 escalations sat open and
+// unacknowledged for hours — the same bug class as gt-4mnd (ephemeral wisps
+// invisible to bd list).
+func TestListEscalationsPassesIncludeInfra(t *testing.T) {
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+
+	stubScript := `#!/bin/sh
+for a in "$@"; do
+  printf '%s\n' "$a" >> "` + argsPath + `"
+done
+echo '[]'
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	if _, err := b.ListEscalations(); err != nil {
+		t.Fatalf("ListEscalations: %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args log: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "--include-infra") {
+		t.Fatalf("ListEscalations did not pass --include-infra, got args:\n%s", args)
+	}
+}
+
 func TestBumpSeverity(t *testing.T) {
 	tests := []struct {
 		input string
