@@ -139,7 +139,7 @@ type HandlerResult struct {
 // HandlePolecatDone processes a POLECAT_DONE message from a polecat.
 // For PHASE_COMPLETE exits, recycles the polecat (session ends, worktree kept).
 // For exits with pending MR, creates cleanup wisp and sends MERGE_READY to Refinery.
-// For exits without MR, acknowledges completion (polecat goes idle).
+// For exits without MR, acknowledges completion (polecat stays in "done").
 //
 // When a pending MR exists, sends MERGE_READY to the Refinery to trigger
 // immediate merge queue processing. This ensures work flows through the system
@@ -147,7 +147,10 @@ type HandlerResult struct {
 //
 // Persistent Polecat Model (gt-4ac):
 // Polecats persist after work completion - sandbox is preserved for reuse.
-// When work is done, the polecat transitions to idle state (no nuke).
+// `gt done` sets agent_state=done and exits (gt-ho4f: there is no done->idle
+// transition — "done" is the canonical resting state; the allocator and
+// workstate classifier both treat it as reuse-eligible, see
+// polecat.State.IsReuseEligible).
 // The MR lifecycle continues independently in the Refinery.
 // If conflicts arise, Refinery creates a conflict-resolution task for an available polecat.
 func HandlePolecatDone(bd *BdCli, workDir, rigName string, msg *mail.Message, router *mail.Router) *HandlerResult {
@@ -288,16 +291,6 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 	return result
 }
 
-// TransitionPolecatToIdle sets a polecat's agent_state to idle after the witness
-// has processed its completion (gt-a6gp). With self-managed completion (gt-1qlg),
-// polecats transition to idle directly — this function is now a safety net for
-// crash recovery where the polecat set completion metadata but didn't reach
-// the idle transition.
-func TransitionPolecatToIdle(workDir, agentBeadID string) error {
-	bd := beads.New(beads.ResolveBeadsDir(workDir))
-	return bd.UpdateAgentState(agentBeadID, string(AgentStateIdle))
-}
-
 func completionPayloadHasPendingMR(bd *BdCli, workDir, rigName string, payload *PolecatDonePayload) bool {
 	if payload == nil || payload.MRID == "" {
 		return false
@@ -357,11 +350,12 @@ func notifyRefineryMergeReady(workDir, rigName string, result *HandlerResult) {
 // handlePolecatDoneNoMR handles a POLECAT_DONE with no pending MR.
 // Tries auto-nuke; falls back to creating a cleanup wisp for manual intervention.
 func handlePolecatDoneNoMR(_, _ string, payload *PolecatDonePayload, result *HandlerResult) *HandlerResult {
-	// Persistent polecat model (gt-4ac): polecats go idle after completion, no nuke.
-	// The polecat has already set its own state to "idle" in gt done.
+	// Persistent polecat model (gt-4ac): polecats stay in "done" after completion,
+	// no nuke. `gt done` already set agent_state=done (gt-ho4f: there is no
+	// done->idle transition; "done" is the reuse-eligible resting state).
 	// We just acknowledge the completion here.
 	result.Handled = true
-	result.Action = fmt.Sprintf("polecat %s completed (exit=%s, no MR) — now idle, sandbox preserved", payload.PolecatName, payload.Exit)
+	result.Action = fmt.Sprintf("polecat %s completed (exit=%s, no MR) — sandbox preserved", payload.PolecatName, payload.Exit)
 	return result
 }
 
@@ -383,7 +377,7 @@ func isStalePolecatDone(workDir, rigName, polecatName string, msg *mail.Message)
 
 // HandleLifecycleShutdown processes a LIFECYCLE:Shutdown message.
 // Similar to POLECAT_DONE but triggered by daemon rather than polecat.
-// Persistent polecat model (gt-4ac): sandbox preserved, polecat goes idle.
+// Persistent polecat model (gt-4ac): sandbox preserved, polecat remains reuse-eligible.
 func HandleLifecycleShutdown(workDir, rigName string, msg *mail.Message) *HandlerResult {
 	result := &HandlerResult{
 		MessageID:    msg.ID,
@@ -398,11 +392,11 @@ func HandleLifecycleShutdown(workDir, rigName string, msg *mail.Message) *Handle
 	}
 	polecatName := matches[1]
 
-	// Persistent model: polecat goes idle, sandbox preserved for reuse.
-	// If polecat has dirty state, that's fine — it stays idle until
+	// Persistent model: sandbox preserved for reuse.
+	// If polecat has dirty state, that's fine — it stays reuse-eligible until
 	// someone slings new work to it (which will repair the worktree).
 	result.Handled = true
-	result.Action = fmt.Sprintf("polecat %s shutdown — now idle, sandbox preserved", polecatName)
+	result.Action = fmt.Sprintf("polecat %s shutdown — sandbox preserved", polecatName)
 
 	return result
 }
@@ -478,14 +472,14 @@ func HandleMerged(bd *BdCli, workDir, rigName string, msg *mail.Message) *Handle
 }
 
 // handleMergedCleanupStatus acknowledges merge completion for persistent polecats.
-// Persistent model (gt-4ac): polecats go idle after merge, sandbox preserved.
+// Persistent model (gt-4ac): polecats remain reuse-eligible after merge, sandbox preserved.
 // ZFC (gt-5rne): Reports cleanup_status as data. The witness agent decides
 // whether dirty state warrants escalation — Go code does not make that policy call.
 func handleMergedCleanupStatus(_, _, polecatName, cleanupStatus, wispID string, result *HandlerResult) {
 	result.Handled = true
 	result.WispCreated = wispID
 	result.CleanupStatus = cleanupStatus
-	result.Action = fmt.Sprintf("polecat %s merged — idle, sandbox preserved (cleanup_status=%s, wisp=%s)", polecatName, cleanupStatus, wispID)
+	result.Action = fmt.Sprintf("polecat %s merged — sandbox preserved (cleanup_status=%s, wisp=%s)", polecatName, cleanupStatus, wispID)
 }
 
 // HandleMergeFailed processes a MERGE_FAILED message from the Refinery.
@@ -2434,16 +2428,18 @@ type DiscoverCompletionsResult struct {
 const discoverCompletionsConcurrency = 8
 
 // DiscoverCompletions scans all polecat agent beads for completion metadata
-// written by gt done. With self-managed completion (gt-1qlg), this is now a
-// SAFETY NET — polecats transition to idle directly and nudge refinery themselves.
-// This function catches crash recovery cases where a polecat wrote completion
-// metadata but crashed before transitioning to idle.
+// written by gt done. With self-managed completion (gt-1qlg), gt done itself
+// sets agent_state=done and nudges refinery — this is now a SAFETY NET that
+// catches crash recovery cases where a polecat wrote completion metadata but
+// crashed before finishing its own exit sequence. gt-ho4f: there is no
+// done->idle transition anywhere in this flow; "done" is the resting state
+// (see polecat.State.IsReuseEligible).
 //
 // For each polecat with completion metadata (exit_type + completion_time set):
 //   - PHASE_COMPLETE: acknowledge (polecat recycled, awaiting gate)
 //   - COMPLETED with MR: create cleanup wisp, send MERGE_READY to refinery
-//   - COMPLETED without MR: acknowledge idle state
-//   - ESCALATED/DEFERRED: acknowledge (polecat goes idle)
+//   - COMPLETED without MR: acknowledge completion, remains in "done"
+//   - ESCALATED/DEFERRED: acknowledge (polecat remains in "done")
 //
 // After processing, clears the completion metadata on the agent bead to prevent
 // re-processing on the next patrol cycle.
