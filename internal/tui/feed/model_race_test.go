@@ -225,6 +225,40 @@ func TestAddEventLocked(t *testing.T) {
 	}
 }
 
+// TestAddEventLocked_AgentTreeIgnoresOutOfOrderEvents reproduces gt-0qu: the
+// agent tree's "last activity" for an agent must never regress to an older
+// event just because that event happened to arrive later. Sources are
+// polling/subprocess based and don't guarantee strict chronological arrival
+// (e.g. a delayed source flushing a backlog after a faster source's live
+// event already landed), so addEventLocked must compare timestamps instead
+// of unconditionally overwriting agent.LastEvent/LastUpdate.
+func TestAddEventLocked_AgentTreeIgnoresOutOfOrderEvents(t *testing.T) {
+	m := NewModel(nil)
+
+	now := time.Now()
+	newer := Event{
+		Time: now, Type: "create", Actor: "gastown/crew/joe",
+		Target: "gt-new", Message: "newer event", Rig: "gastown", Role: "crew",
+	}
+	older := Event{
+		Time: now.Add(-time.Hour), Type: "create", Actor: "gastown/crew/joe",
+		Target: "gt-old", Message: "stale backlog event", Rig: "gastown", Role: "crew",
+	}
+
+	m.mu.Lock()
+	m.addEventLocked(newer)
+	m.addEventLocked(older) // arrives second but is chronologically older
+	agent := m.rigs["gastown"].Agents["gastown/crew/joe"]
+	m.mu.Unlock()
+
+	if agent.LastUpdate.Before(now) {
+		t.Errorf("agent tree regressed to a stale event: LastUpdate = %v, want >= %v", agent.LastUpdate, now)
+	}
+	if agent.LastEvent.Message != "newer event" {
+		t.Errorf("agent tree shows stale LastEvent %q, want %q", agent.LastEvent.Message, "newer event")
+	}
+}
+
 // TestEventsHistoryLimit verifies that the events slice doesn't grow beyond
 // maxEventHistory.
 func TestEventsHistoryLimit(t *testing.T) {

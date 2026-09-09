@@ -795,8 +795,15 @@ func (m *Model) addEventLocked(e Event) bool {
 				}
 				rig.Agents[e.Actor] = agent
 			}
-			agent.LastEvent = &e
-			agent.LastUpdate = e.Time
+			// Sources are polling/subprocess based and don't guarantee
+			// strict chronological arrival (e.g. a slower source's
+			// backlog can still be flushing after a faster source's
+			// live event already landed). Never let an out-of-order
+			// event regress the tree's displayed last-activity time.
+			if agent.LastEvent == nil || !e.Time.Before(agent.LastUpdate) {
+				agent.LastEvent = &e
+				agent.LastUpdate = e.Time
+			}
 		}
 	}
 
