@@ -704,6 +704,14 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 		}
 	}
 
+	// Clear any heartbeat left behind by a previous incarnation of this name
+	// (gt-5mkr). Without this, the idle reaper reads the PREVIOUS incarnation's
+	// stale timestamp/state (e.g. state=exiting from hours ago) against the new
+	// session and reaps it within one tick of the session starting, even though
+	// the new incarnation hasn't written its own heartbeat yet.
+	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	RemoveSessionHeartbeat(m.townRoot, sessionName)
+
 	// Directory exists — pool lock can be released. No concurrent AllocateName
 	// can reallocate this name because reconcilePoolInternal will see the directory.
 	_ = poolLock.Unlock()

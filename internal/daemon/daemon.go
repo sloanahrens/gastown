@@ -2949,6 +2949,19 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		return
 	}
 
+	// Never reap a session younger than the idle threshold, regardless of what
+	// the heartbeat file says. A reused polecat name can inherit a heartbeat
+	// file written by a PREVIOUS incarnation (stale timestamp, state=exiting)
+	// before the new session gets a chance to write its own heartbeat — see
+	// gt-5mkr. Session age, taken straight from tmux, is authoritative for
+	// "how long has THIS incarnation existed" in a way the heartbeat file
+	// is not.
+	if created, err := d.tmux.GetSessionCreatedTime(sessionName); err == nil {
+		if time.Since(created) < timeout {
+			return
+		}
+	}
+
 	// Read heartbeat to check state and idle duration
 	hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName)
 	if hb == nil {

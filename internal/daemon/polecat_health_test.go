@@ -638,3 +638,65 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 		t.Errorf("expected working-no-hook reason, got: %q", got)
 	}
 }
+
+// TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat verifies that
+// reapIdlePolecat does NOT kill a session that tmux reports as freshly created,
+// even when the heartbeat file is very stale. Regression test for gt-5mkr: a
+// reused polecat name inherits the PREVIOUS incarnation's heartbeat file
+// (state=exiting, hours old) until the new incarnation writes its own — the
+// reaper must not treat that inherited staleness as the new session's idle time.
+func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux")
+	}
+	old := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("myr", "myr")
+	session.SetDefaultRegistry(reg)
+	defer session.SetDefaultRegistry(old)
+
+	binDir := t.TempDir()
+	// Fake tmux: session alive, and reports session_created as 3 minutes ago —
+	// simulating a freshly re-allocated incarnation of a reused polecat name.
+	recentUnix := time.Now().Add(-3 * time.Minute).Unix()
+	script := fmt.Sprintf("#!/bin/sh\n"+
+		"case \"$*\" in\n"+
+		"  *has-session*) exit 0;;\n"+
+		"  *list-sessions*) echo '%d';;\n"+
+		"  *kill-session*) exit 0;;\n"+
+		"  *) exit 1;;\n"+
+		"esac\n", recentUnix)
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatalf("writing fake tmux: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmuxWithSocket(""),
+	}
+
+	// Heartbeat left behind by a PREVIOUS incarnation of this name: state=exiting,
+	// ~4h stale — matches the observed "state=exiting, idle 3h48m" bug report.
+	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
+	if err := os.MkdirAll(filepath.Dir(hbPath), 0755); err != nil {
+		t.Fatalf("creating heartbeats dir: %v", err)
+	}
+	staleHB := polecat.SessionHeartbeat{
+		Timestamp: time.Now().UTC().Add(-4 * time.Hour),
+		State:     polecat.HeartbeatExiting,
+	}
+	data, _ := json.Marshal(staleHB)
+	_ = os.WriteFile(hbPath, data, 0644)
+
+	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+	got := logBuf.String()
+	if strings.Contains(got, "Reaping idle polecat") {
+		t.Errorf("must NOT reap a freshly-created session with a stale inherited heartbeat (gt-5mkr), got: %q", got)
+	}
+}
