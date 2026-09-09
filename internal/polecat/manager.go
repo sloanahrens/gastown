@@ -2370,13 +2370,13 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 			input.GitCheckFailed = true
 		}
 	}
-	// Legacy/test polecats can lack agent cleanup metadata. If git proves there is
-	// no local work at risk, treat the missing cleanup_status as clean; otherwise
-	// DecideSlotReuse will continue to fail closed on CleanupUnknown.
+	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
+	// never be silently promoted to clean. A narrow local git check (no dirty
+	// files, no stash, no unpushed commits) is not proof of safety by itself —
+	// it says nothing about a live session or a still-hooked bead, and a false
+	// clear here authorizes destructive cleanup on real, at-risk work. Do not
+	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown.
 	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
-	if input.CleanupStatus == CleanupUnknown && gitSafe {
-		input.CleanupStatus = CleanupClean
-	}
 	activeMRSafe := true
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {

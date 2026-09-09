@@ -248,6 +248,31 @@ func TestIsMQNotRequiredSource(t *testing.T) {
 	}
 }
 
+// TestFormatActorIdentity covers gt-7kr's nuke-feed-attribution helper: the
+// feed event nuke now emits needs an actor string per role so the audit
+// trail is legible, not just present.
+func TestFormatActorIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		info RoleInfo
+		want string
+	}{
+		{name: "mayor", info: RoleInfo{Role: RoleMayor}, want: "mayor"},
+		{name: "deacon", info: RoleInfo{Role: RoleDeacon}, want: "deacon"},
+		{name: "witness", info: RoleInfo{Role: RoleWitness, Rig: "gastown"}, want: "gastown/witness"},
+		{name: "refinery", info: RoleInfo{Role: RoleRefinery, Rig: "gastown"}, want: "gastown/refinery"},
+		{name: "polecat", info: RoleInfo{Role: RolePolecat, Rig: "gastown", Polecat: "onyx"}, want: "gastown/onyx"},
+		{name: "crew", info: RoleInfo{Role: RoleCrew, Rig: "gastown", Polecat: "toast"}, want: "gastown/crew/toast"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatActorIdentity(tt.info); got != tt.want {
+				t.Errorf("formatActorIdentity(%+v) = %q, want %q", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCleanupStatusBlocker(t *testing.T) {
 	tests := []struct {
 		status string

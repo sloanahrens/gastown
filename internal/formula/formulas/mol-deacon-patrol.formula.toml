@@ -325,10 +325,19 @@ for dogdir in ~/gt/deacon/dogs/*/; do
     echo "Orphaned dog worktree: $DOG/$(basename "$rigrepo") (dog no longer registered)"
     MAIN_REPO=$(git -C "$rigrepo" rev-parse --git-common-dir 2>/dev/null)
     if [ -n "$MAIN_REPO" ]; then
-      # No --force: a clean worktree removes cleanly; one with in-flight
-      # changes refuses instead of silently destroying work.
-      git worktree remove "$rigrepo" 2>/dev/null && \
-        echo "Pruned worktree: $rigrepo"
+      # gt-7kr: `git worktree remove` (no --force) only refuses on a dirty
+      # working tree — it happily deletes a worktree whose HEAD has commits
+      # that never made it to any remote. Committed-but-unpushed is NOT
+      # clean; check for it explicitly before removing.
+      UNPUSHED=$(git -C "$rigrepo" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
+      if [ -n "$UNPUSHED" ] && [ "$UNPUSHED" -gt 0 ] 2>/dev/null; then
+        echo "Refusing to prune $rigrepo: $UNPUSHED unpushed commit(s) — needs recovery, not pruning"
+      else
+        # No --force: a clean worktree removes cleanly; one with in-flight
+        # changes refuses instead of silently destroying work.
+        git worktree remove "$rigrepo" 2>/dev/null && \
+          echo "Pruned worktree: $rigrepo"
+      fi
     fi
   done
 done
@@ -350,6 +359,7 @@ If all counts are 0, log "Test pollution cleanup: clean" and move on.
 - NEVER remove dirs where lsof shows active file handles
 - NEVER remove PID files where the PID is still alive
 - NEVER prune worktrees for dogs with live tmux sessions
+- NEVER prune a worktree with committed-but-unpushed commits (`git log --branches --not --remotes` non-empty) — a clean working tree is not proof the content itself is safe
 
 **Exit criteria:** All dead-process pollution cleaned and counts logged."""
 
