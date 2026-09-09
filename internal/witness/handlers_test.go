@@ -1526,6 +1526,61 @@ func TestDetectZombie_BeadClosedVsDoneIntent(t *testing.T) {
 	}
 }
 
+// TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat reproduces gt-gf6t:
+// a polecat with a LIVE tmux session, stuck at agent_state=spawning (never
+// advanced to "working"), no hook_bead durably attached, and no heartbeat file
+// ever written (agent stuck at startup) was invisible to zombie detection
+// because the "never heartbeated" check required hook_bead != "". This is
+// exactly jade's reported shape: "Claude at an empty prompt, no hook" with a
+// live session, while `gt polecat list --json` already flags any active
+// agent_state (spawning included) as NEEDS_RECOVERY regardless of hook_bead.
+func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	socket := fmt.Sprintf("gt-test-gf6t-%d", time.Now().UnixNano())
+	tm := tmux.NewTmuxWithSocket(socket)
+	t.Cleanup(func() { _ = tm.KillServer() })
+
+	sessionName := "gt-test-jade"
+	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	// Declare the pane's process name so IsAgentAlive matches it as "alive" —
+	// simulates a live agent process (bare Claude prompt) rather than a dead one.
+	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
+		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
+	}
+
+	if !tm.IsAgentAlive(sessionName) {
+		t.Fatal("precondition failed: fake session should report agent alive")
+	}
+
+	// Ensure session age exceeds the (artificially tiny) startup grace period.
+	time.Sleep(20 * time.Millisecond)
+	witCfg := &config.WitnessThresholds{HeartbeatStartupGrace: "1ms"}
+
+	bd, _ := fakeBd()
+	snap := &agentBeadSnapshot{
+		AgentState: "spawning",
+		HookBead:   "", // partial spawn: never durably attached a hook_bead
+	}
+
+	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap)
+	t.Logf("found=%v zombie=%+v", found, zombie)
+	if !found {
+		t.Fatal("expected zombie detection for live session stuck at agent_state=spawning with no hook_bead and no heartbeat")
+	}
+	if zombie.Classification != ZombieNeverHeartbeated {
+		t.Errorf("Classification = %q, want %q", zombie.Classification, ZombieNeverHeartbeated)
+	}
+}
+
 func TestResetAbandonedBead_EmptyHookBead(t *testing.T) {
 	t.Parallel()
 	// resetAbandonedBead should return false for empty hookBead

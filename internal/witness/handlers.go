@@ -1821,11 +1821,18 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		return zombie, true
 	}
 
-	// Live session with assigned work but no heartbeat file: agent stuck at startup
-	// (e.g., auth 401 blocking initialization). Once the session is old enough to
-	// have written a first heartbeat and hasn't, flag for formula-step review.
+	// Live session with assigned work OR an active agent_state (e.g. "spawning")
+	// but no heartbeat file: agent stuck at startup (e.g., auth 401 blocking
+	// initialization, or a partial spawn that never durably attached a hook_bead).
+	// Once the session is old enough to have written a first heartbeat and hasn't,
+	// flag for formula-step review. gt-gf6t: previously gated on hook_bead alone,
+	// so a polecat stuck at agent_state=spawning with no hook_bead yet was
+	// invisible here even though `gt polecat list --json` already flags any
+	// active agent_state as NEEDS_RECOVERY regardless of hook_bead. Idle/done/
+	// nuked states never reach this function, so this can't fire on a healthy
+	// idle polecat.
 	// ZFC (gt-uk7): No auto-restart — auth errors don't self-heal on restart.
-	if snapHook != "" && hb == nil {
+	if (snapHook != "" || beads.AgentState(snapState).IsActive()) && hb == nil {
 		if createdAt, err := t.GetSessionCreatedTime(sessionName); err == nil {
 			age := time.Since(createdAt)
 			if age > witCfg.HeartbeatStartupGraceD() {
