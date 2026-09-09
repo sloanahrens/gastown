@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1209,62 +1210,89 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	// Human-readable output
-	fmt.Printf("%s\n\n", style.Bold.Render(fmt.Sprintf("Recovery Status: %s/%s", rigName, polecatName)))
-	fmt.Printf("  Cleanup Status:  %s\n", status.CleanupStatus)
+	renderCheckRecoveryText(os.Stdout, status)
+
+	return nil
+}
+
+// renderCheckRecoveryText writes the human-readable check-recovery report for
+// status. It must switch on exactly the same status.Verdict value the JSON
+// encoder marshals (see runPolecatCheckRecovery) — gt-u4x was a live divergence
+// where this switch had no case for WorkstateVerdictWorking and silently fell
+// into a "default means SAFE_TO_NUKE" branch, printing a false clearance for
+// an actively working polecat while --json on the same struct, same instant,
+// correctly reported verdict=WORKING/safe_to_nuke=false. Any verdict without
+// an explicit case below must fail closed (NOT render as SAFE_TO_NUKE) so a
+// future new verdict can't silently reintroduce that split.
+func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render(fmt.Sprintf("Recovery Status: %s/%s", status.Rig, status.Polecat)))
+	fmt.Fprintf(w, "  Cleanup Status:  %s\n", status.CleanupStatus)
 	if status.Branch != "" {
-		fmt.Printf("  Branch:          %s\n", status.Branch)
+		fmt.Fprintf(w, "  Branch:          %s\n", status.Branch)
 	}
 	if status.Issue != "" {
-		fmt.Printf("  Issue:           %s\n", status.Issue)
+		fmt.Fprintf(w, "  Issue:           %s\n", status.Issue)
 	}
 	if status.ActiveMR != "" {
-		fmt.Printf("  Active MR:       %s\n", status.ActiveMR)
+		fmt.Fprintf(w, "  Active MR:       %s\n", status.ActiveMR)
 	}
 	if len(status.Diagnostics) > 0 {
-		fmt.Printf("  Diagnostics:     %s\n", strings.Join(status.Diagnostics, "; "))
+		fmt.Fprintf(w, "  Diagnostics:     %s\n", strings.Join(status.Diagnostics, "; "))
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	switch status.Verdict {
-	case "NEEDS_MQ_SUBMIT":
-		fmt.Printf("  Verdict:         %s\n", style.Warning.Render("NEEDS_MQ_SUBMIT"))
-		fmt.Printf("  MQ Status:       %s\n", status.MQStatus)
-		fmt.Println()
-		fmt.Printf("  %s Work is pushed but was never submitted to the merge queue.\n", style.Warning.Render("⚠"))
-		fmt.Println("  Submit to MQ before cleanup, or the branch will be orphaned.")
-	case "PENDING_MR":
-		fmt.Printf("  Verdict:         %s\n", style.Warning.Render("PENDING_MR"))
-		fmt.Println()
-		fmt.Println("  Work is waiting on an active merge request; preserve this polecat until it lands.")
-	case "NEEDS_RECOVERY":
-		fmt.Printf("  Verdict:         %s\n", style.Error.Render("NEEDS_RECOVERY"))
-		fmt.Println()
+	case polecat.WorkstateVerdictNeedsMQSubmit:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Warning.Render("NEEDS_MQ_SUBMIT"))
+		fmt.Fprintf(w, "  MQ Status:       %s\n", status.MQStatus)
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s Work is pushed but was never submitted to the merge queue.\n", style.Warning.Render("⚠"))
+		fmt.Fprintln(w, "  Submit to MQ before cleanup, or the branch will be orphaned.")
+	case polecat.WorkstateVerdictPendingMR:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Warning.Render("PENDING_MR"))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Work is waiting on an active merge request; preserve this polecat until it lands.")
+	case polecat.WorkstateVerdictNeedsRecovery:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render("NEEDS_RECOVERY"))
+		fmt.Fprintln(w)
 		if len(status.Blockers) > 0 {
-			fmt.Printf("  %s Cleanup refused by these predicate(s):\n", style.Warning.Render("⚠"))
+			fmt.Fprintf(w, "  %s Cleanup refused by these predicate(s):\n", style.Warning.Render("⚠"))
 			for _, blocker := range status.Blockers {
-				fmt.Printf("    - %s\n", blocker)
+				fmt.Fprintf(w, "    - %s\n", blocker)
 			}
 			if len(status.RecoveryActions) > 0 {
-				fmt.Println()
-				fmt.Println("  Recovery action(s):")
+				fmt.Fprintln(w)
+				fmt.Fprintln(w, "  Recovery action(s):")
 				for _, action := range status.RecoveryActions {
-					fmt.Printf("    - %s\n", action)
+					fmt.Fprintf(w, "    - %s\n", action)
 				}
 			}
 		} else {
-			fmt.Printf("  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
+			fmt.Fprintf(w, "  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
 		}
-		fmt.Println("  Escalate to Mayor for recovery before cleanup.")
-	default:
-		fmt.Printf("  Verdict:         %s\n", style.Success.Render("SAFE_TO_NUKE"))
+		fmt.Fprintln(w, "  Escalate to Mayor for recovery before cleanup.")
+	case polecat.WorkstateVerdictWorking:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render("WORKING"))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s Polecat is actively working; NOT safe to nuke.\n", style.Warning.Render("⚠"))
+		if len(status.Blockers) > 0 {
+			fmt.Fprintln(w, "  Blocker(s):")
+			for _, blocker := range status.Blockers {
+				fmt.Fprintf(w, "    - %s\n", blocker)
+			}
+		}
+	case polecat.WorkstateVerdictSafeToNuke:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Success.Render("SAFE_TO_NUKE"))
 		if status.MQStatus != "" {
-			fmt.Printf("  MQ Status:       %s\n", status.MQStatus)
+			fmt.Fprintf(w, "  MQ Status:       %s\n", status.MQStatus)
 		}
-		fmt.Println()
-		fmt.Printf("  %s Safe to nuke - no work at risk.\n", style.Success.Render("✓"))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s Safe to nuke - no work at risk.\n", style.Success.Render("✓"))
+	default:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render(status.Verdict))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s Unrecognized verdict %q — treating as NOT safe to nuke. Escalate to Mayor.\n", style.Warning.Render("⚠"), status.Verdict)
 	}
-
-	return nil
 }
 
 func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath string, gitState *GitState, gitErr error) {

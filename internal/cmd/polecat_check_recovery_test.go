@@ -826,6 +826,63 @@ func TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure(t *t
 	}
 }
 
+// TestCheckRecoveryTextMatchesJSONForWorkingPolecat is the gt-u4x regression
+// test. Deacon's round-3 probe found that check-recovery's TEXT output
+// printed "Safe to nuke - no work at risk" for a live, actively-working
+// polecat while its own --json on the same struct, same instant, correctly
+// reported verdict=WORKING/safe_to_nuke=false — the switch rendering the text
+// had no case for WorkstateVerdictWorking and fell into a "default means
+// SAFE_TO_NUKE" branch. This drives the real decision layer (not a hand-built
+// RecoveryStatus literal) through applyWorkstateDispositionToRecoveryStatus,
+// the same function runPolecatCheckRecovery calls, then renders the text from
+// that status the same way the CLI does — so the assertion is exactly "the
+// text agrees with what --json would report", the invariant the bug report
+// asked to be pinned rather than either surface alone.
+func TestCheckRecoveryTextMatchesJSONForWorkingPolecat(t *testing.T) {
+	input := polecat.WorkstateInput{
+		State:    polecat.StateWorking,
+		HookBead: "gt-axh",
+	}
+	d := polecat.DecideWorkstate(input)
+	if d.SafeToNuke || d.Verdict != polecat.WorkstateVerdictWorking {
+		t.Fatalf("DecideWorkstate() = %+v, want Verdict=WORKING and SafeToNuke=false — fixture invalid", d)
+	}
+
+	status := RecoveryStatus{Rig: "gastown", Polecat: "amethyst"}
+	applyWorkstateDispositionToRecoveryStatus(&status, d)
+	if status.SafeToNuke {
+		t.Fatalf("status.SafeToNuke = true, want false (this is what --json reports)")
+	}
+
+	var buf bytes.Buffer
+	renderCheckRecoveryText(&buf, status)
+	text := buf.String()
+
+	if strings.Contains(text, "SAFE_TO_NUKE") || strings.Contains(text, "Safe to nuke") {
+		t.Fatalf("text output claims a safe-to-nuke clearance while status.SafeToNuke=%v (the --json value): %s", status.SafeToNuke, text)
+	}
+	if !strings.Contains(text, "WORKING") {
+		t.Fatalf("text output does not surface the WORKING verdict: %s", text)
+	}
+}
+
+// TestCheckRecoveryTextRendersUnknownVerdictAsUnsafe guards the default
+// branch of renderCheckRecoveryText: an unrecognized status.Verdict must
+// never render as a clearance. This is what makes it impossible for a future
+// new WorkstateVerdict to silently fall into "default means SAFE_TO_NUKE"
+// the way WorkstateVerdictWorking did before this fix.
+func TestCheckRecoveryTextRendersUnknownVerdictAsUnsafe(t *testing.T) {
+	status := RecoveryStatus{Rig: "gastown", Polecat: "amethyst", Verdict: "SOME_FUTURE_VERDICT"}
+
+	var buf bytes.Buffer
+	renderCheckRecoveryText(&buf, status)
+	text := buf.String()
+
+	if strings.Contains(text, "SAFE_TO_NUKE") || strings.Contains(text, "Safe to nuke") {
+		t.Fatalf("text output claims a safe-to-nuke clearance for an unrecognized verdict: %s", text)
+	}
+}
+
 func TestPartialSpawnWithoutDurableHook(t *testing.T) {
 	assignee := "gastown/polecats/nitro"
 	tests := []struct {
