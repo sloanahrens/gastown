@@ -836,3 +836,21 @@ func (b *Beads) ListWispIDs() (map[string]bool, error) {
 	}
 	return result, nil
 }
+
+// DeleteLegacyAgentBead permanently deletes an agent bead row from the
+// database this wrapper is PINNED to. It exists for the gt-a6g reconcile
+// command only: the wrapper must be pinned (NewRigLocal) so the caller has
+// chosen the database explicitly, and the row must be an agent bead.
+func (b *Beads) DeleteLegacyAgentBead(id string) error {
+	if !b.noRoute {
+		return fmt.Errorf("DeleteLegacyAgentBead requires a pinned wrapper (beads.NewRigLocal)")
+	}
+	issue, err := b.Show(id)
+	if err != nil {
+		return err
+	}
+	if !IsAgentBead(issue) {
+		return fmt.Errorf("refusing to delete %s: not an agent bead (type=%s)", id, issue.Type)
+	}
+	return b.deleteBead(id)
+}
