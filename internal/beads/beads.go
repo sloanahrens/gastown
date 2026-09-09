@@ -565,11 +565,10 @@ type Beads struct {
 	noRoute bool
 
 	// agentScope marks a wrapper returned by ForAgentBead. Per-ID operations
-	// (Show, Update, and the agent-bead helpers) resolve each ID with
-	// dual-scope resolution (see resolveAgentBead): the canonical database
-	// first (rig-local for rig-prefixed agents — gt-abj/gt-8we), then the
-	// town database as a fallback for legacy agent beads created before the
-	// rig-local migration.
+	// (Show, Update, and the agent-bead helpers) resolve each ID to its
+	// canonical database only (see resolveAgentBead): rig-local for
+	// rig-prefixed agents, town for hq- agents — no town fallback for
+	// rig-prefixed IDs (gt-a6g completed the gt-8we migration).
 	agentScope bool
 }
 
@@ -614,37 +613,30 @@ func NewRigLocal(workDir string) *Beads {
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
-// Agent beads (labeled gt:agent) canonically live RIG-LOCAL: patrol commands
-// (gt agents resolve --rig) hard-require rig-local agent beads (gt-abj), so
-// rig-prefixed agent IDs (e.g. "za-zack-polecat-furiosa") belong in their
-// rig's database and hq-prefixed global agents (mayor, deacon) in the town
-// database. Historically agent beads were re-rooted to the town database
-// regardless of prefix; existing towns still carry such legacy beads.
+// Agent beads (labeled gt:agent) live RIG-LOCAL: rig-prefixed agent IDs
+// (e.g. "gt-gastown-polecat-furiosa") belong in their rig's database and
+// hq-prefixed global agents (mayor, deacon, dogs) in the town database.
 //
-// The returned wrapper handles both eras (gt-8we migration): per-ID
-// operations (Show, Update, and the agent-bead helpers) resolve each ID with
-// dual-scope resolution — the canonical prefix-routed database first, the
-// town database as a legacy fallback — so neither direction silently misses.
-// List-style operations run against the town database, as before.
+// Per-ID operations (Show, Update, and the agent-bead helpers) resolve each
+// ID to its canonical prefix-routed database and nowhere else: there is no
+// town fallback for rig-prefixed IDs (gt-a6g completed the gt-8we migration;
+// legacy town rows are reconciled and deleted by
+// `gt polecat identity reconcile`). List-style operations run against the
+// wrapper's own database, so a wrapper built from a rig lists that rig's
+// agents and one built from the town root lists town agents.
 //
-// If the town root cannot be determined (or the wrapper is already pinned or
-// agent-scoped), returns the original wrapper to preserve current behavior.
+// If the wrapper is already pinned or agent-scoped, returns it unchanged.
 func (b *Beads) ForAgentBead() *Beads {
 	if b.noRoute || b.agentScope {
 		return b
 	}
-	townRoot := b.getTownRoot()
-	if townRoot == "" {
-		return b
-	}
-	townBeadsDir := filepath.Join(townRoot, ".beads")
 	return &Beads{
-		workDir:    townRoot,
-		beadsDir:   townBeadsDir,
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
 		store:      b.store,
-		townRoot:   townRoot,
+		townRoot:   b.getTownRoot(),
 		agentScope: true,
 	}
 }
@@ -658,17 +650,6 @@ func (b *Beads) agentBeadTarget() *Beads {
 		return b
 	}
 	return b.ForAgentBead()
-}
-
-// agentBeadDirCache memoizes which beads directory an agent bead ID resolved
-// to, keyed by townRoot + "\x00" + id. gt commands are short-lived processes
-// and a bead's home database does not move within one command (creates record
-// their target here), so a process-lifetime cache is safe and avoids repeated
-// existence probes.
-var agentBeadDirCache sync.Map
-
-func cacheAgentBeadDir(townRoot, id, beadsDir string) {
-	agentBeadDirCache.Store(townRoot+"\x00"+id, beadsDir)
 }
 
 // pinnedToBeadsDir returns a copy of b pinned (noRoute) to the given beads
@@ -714,45 +695,21 @@ func (b *Beads) agentBeadCreateTarget(id string) *Beads {
 	return b.pinnedToBeadsDir(dir)
 }
 
-// resolveAgentBead returns a wrapper pinned to the database where the agent
-// bead with this ID currently lives, using dual-scope resolution:
-//
-//  1. The canonical database (prefix-routed: rig-local for rig agents, town
-//     for hq- agents) — checked first so migrated/new beads win.
-//  2. The town database — legacy fallback for agent beads created before the
-//     rig-local migration (gt-8we).
-//
-// If the bead exists in neither, the canonical wrapper is returned so
-// follow-up creates and error messages point at the right database. Pinned
-// wrappers are returned unchanged, and so is b when no town root is found.
+// resolveAgentBead returns a wrapper pinned to the canonical database for
+// this agent bead ID: the database its prefix routes to (rig-local for rig
+// agents, town for hq- agents). No existence probe and no town fallback: a
+// rig-prefixed ID whose rig row is missing is simply not found there.
+// Pinned wrappers are returned unchanged, and so is b when no town root is
+// found.
 func (b *Beads) resolveAgentBead(id string) *Beads {
 	if b.noRoute {
 		return b
 	}
-	townRoot := b.getTownRoot()
-	if townRoot == "" {
+	dir := b.agentBeadCanonicalDir(id)
+	if dir == "" {
 		return b
 	}
-	if dir, ok := agentBeadDirCache.Load(townRoot + "\x00" + id); ok {
-		return b.pinnedToBeadsDir(dir.(string))
-	}
-	townDir := GetTownBeadsPath(townRoot)
-	canonicalDir := ResolveBeadsDirForID(townDir, id)
-	canonical := b.pinnedToBeadsDir(canonicalDir)
-	if _, err := canonical.Show(id); err == nil {
-		cacheAgentBeadDir(townRoot, id, canonicalDir)
-		return canonical
-	}
-	if ResolveBeadsDir(canonicalDir) != ResolveBeadsDir(townDir) {
-		town := b.pinnedToBeadsDir(townDir)
-		if _, err := town.Show(id); err == nil {
-			cacheAgentBeadDir(townRoot, id, townDir)
-			return town
-		}
-	}
-	// Not found anywhere — don't cache: the bead may be created (canonically)
-	// right after this lookup, possibly by another process.
-	return canonical
+	return b.pinnedToBeadsDir(dir)
 }
 
 // getActor returns the BD_ACTOR value for this context.
@@ -817,8 +774,8 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 // ID to determine the owning database.
 //
 // When noRoute is set, routing is skipped: the wrapper is returned unchanged.
-// Agent-scoped wrappers (see ForAgentBead) resolve dual-scope instead:
-// canonical prefix-routed database first, town database as legacy fallback.
+// Agent-scoped wrappers (see ForAgentBead) resolve to the canonical
+// prefix-routed database only — no town fallback.
 func (b *Beads) forIssueID(id string) *Beads {
 	if b.noRoute {
 		return b

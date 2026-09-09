@@ -221,15 +221,9 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// rig-prefixed agents, town for hq- global agents (gt-8we).
 	target := b.agentBeadCreateTarget(id)
 	targetDir := target.getResolvedBeadsDir()
-	recordCreate := func() {
-		if townRoot := b.getTownRoot(); townRoot != "" && !b.noRoute {
-			cacheAgentBeadDir(townRoot, id, targetDir)
-		}
-	}
 
 	description := FormatAgentDescription(title, fields)
 	if issue, err := target.createAgentBeadViaStore(context.Background(), id, title, description); err == nil {
-		recordCreate()
 		return issue, nil
 	}
 
@@ -273,7 +267,6 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// Note: role slot no longer set - role definitions are config-based
 	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
 
-	recordCreate()
 	return &issue, nil
 }
 
