@@ -216,6 +216,110 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 	}
 }
 
+// ResolveIgnoreCleanupStatus is the single fail-closed gate for whether a
+// non-safe CleanupStatus may be ignored when assembling a WorkstateInput.
+//
+// It wraps CanIgnoreStaleCleanupStatus with one narrow extension: a polecat
+// that never durably picked up work (allowMissingForPartialSpawn — its
+// hook_bead points at a bead it no longer owns, or never owned) may also
+// ignore a missing/unknown CleanupStatus, which CanIgnoreStaleCleanupStatus
+// always refuses. Even then this is gated by the SAME hook/active-MR/git
+// safety facts required for every other case — never granted unconditionally.
+//
+// gt-hsg: a prior version of this check (in cmd/polecat.go's check-recovery
+// handler) set IgnoreCleanupStatus=true for the partial-spawn case without
+// checking hookSafe/activeMRSafe/gitSafe at all — an ungated promotion of
+// exactly the shape gt-7kr removed from workstateInputForPolecat, just
+// reintroduced via a different precondition in a second, undiscovered copy
+// of this policy. Route every caller through this one function instead.
+func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpawn, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if allowMissingForPartialSpawn && (status == "" || status == CleanupUnknown) {
+		return hookSafe && activeMRSafe && gitSafe
+	}
+	return CanIgnoreStaleCleanupStatus(status, workTerminal, hookSafe, activeMRSafe, gitSafe)
+}
+
+// WorkstateFacts carries the already-gathered lifecycle, git, and
+// merge-queue signals a caller needs in order to build a WorkstateInput.
+// Fact-gathering (beads reads, git checks) stays caller-specific — the
+// Manager and the CLI check-recovery handler use different beads/git
+// plumbing — but every production caller MUST assemble its final
+// WorkstateInput through NewWorkstateInput. A WorkstateInput{} literal
+// anywhere else in production code reintroduces the duplicated,
+// independently-drifting input-building layer responsible for gt-7kr,
+// gt-14a, and gt-hsg (see TestNoWorkstateInputLiteralsOutsideConstructor).
+type WorkstateFacts struct {
+	State                          State
+	HookBead                       string
+	HookBeadSafe                   bool
+	HookBeadTerminal               bool
+	PartialSpawnWithoutDurableHook bool
+	CleanupStatus                  CleanupStatus
+	PushFailed                     bool
+	MRFailed                       bool
+	Branch                         string
+	GitDirty                       bool
+	GitDirtyReason                 string
+	StashCount                     int
+	UnpushedCommits                int
+	GitCheckFailed                 bool
+	GitCheckFailedReason           string
+	ActiveWorkBlocker              string
+	ActiveWorkCountsTowardCapacity bool
+	ActiveMR                       string
+	ActiveMRBlocker                string
+	ActiveMRSourceTerminal         bool
+	AssignedBeadTerminal           bool
+	MQCheckRequired                bool
+	HasSubmittableWork             bool
+	MQNotRequired                  bool
+	MRSubmitted                    bool
+	MQLookupFailed                 bool
+}
+
+// NewWorkstateInput is the single production constructor for WorkstateInput.
+// It derives gitSafe/activeMRSafe/workTerminal from the supplied facts and
+// resolves IgnoreCleanupStatus through ResolveIgnoreCleanupStatus, so the
+// fail-closed policy lives in exactly one place regardless of which caller
+// (Manager, CLI check-recovery, list/inventory) is building the input.
+func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
+	gitSafe := !f.GitCheckFailed && !f.GitDirty && f.StashCount == 0 && f.UnpushedCommits == 0
+	activeMRSafe := f.ActiveMRBlocker == ""
+	workTerminal := f.AssignedBeadTerminal || f.ActiveMRSourceTerminal || f.HookBeadTerminal
+
+	input := WorkstateInput{
+		State:                          f.State,
+		CleanupStatus:                  f.CleanupStatus,
+		PartialSpawnWithoutDurableHook: f.PartialSpawnWithoutDurableHook,
+		PushFailed:                     f.PushFailed,
+		MRFailed:                       f.MRFailed,
+		Branch:                         f.Branch,
+		GitDirty:                       f.GitDirty,
+		GitDirtyReason:                 f.GitDirtyReason,
+		StashCount:                     f.StashCount,
+		UnpushedCommits:                f.UnpushedCommits,
+		GitCheckFailed:                 f.GitCheckFailed,
+		GitCheckFailedReason:           f.GitCheckFailedReason,
+		ActiveWorkBlocker:              f.ActiveWorkBlocker,
+		ActiveWorkCountsTowardCapacity: f.ActiveWorkCountsTowardCapacity,
+		ActiveMR:                       f.ActiveMR,
+		ActiveMRBlocker:                f.ActiveMRBlocker,
+		AssignedBeadTerminal:           f.AssignedBeadTerminal,
+		MQCheckRequired:                f.MQCheckRequired,
+		HasSubmittableWork:             f.HasSubmittableWork,
+		MQNotRequired:                  f.MQNotRequired,
+		MRSubmitted:                    f.MRSubmitted,
+		MQLookupFailed:                 f.MQLookupFailed,
+	}
+	if !f.HookBeadSafe {
+		input.HookBead = f.HookBead
+	}
+	if !input.CleanupStatus.IsSafe() {
+		input.IgnoreCleanupStatus = ResolveIgnoreCleanupStatus(f.CleanupStatus, f.PartialSpawnWithoutDurableHook, workTerminal, f.HookBeadSafe, activeMRSafe, gitSafe)
+	}
+	return input
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

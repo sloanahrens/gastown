@@ -674,20 +674,20 @@ func TestCheckRecoveryRealisticCleanPolecatStillClears(t *testing.T) {
 // TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure is
 // the input-building-layer regression test for gt-14a: when the agent bead
 // can't be read, runPolecatCheckRecovery falls back to a live git check via
-// applyGitStateToWorkstateInput. If the unpushed-commit comparison itself
+// applyGitStateToWorkstateFacts. If the unpushed-commit comparison itself
 // can't be resolved, that must block recovery (GitCheckFailed), not silently
 // pass through as clean the way the pre-fix "no agent bead" branch did.
 func TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure(t *testing.T) {
-	input := polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown}
+	facts := polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, HookBeadSafe: true}
 	gitState := &GitState{Clean: false, PreservationCheckFailed: true, PreservationCheckFailure: "no target/custody refs resolved"}
 
-	applyGitStateToWorkstateInput(&input, "/tmp/polecat", gitState, nil)
+	applyGitStateToWorkstateFacts(&facts, "/tmp/polecat", gitState, nil)
 
-	if !input.GitCheckFailed {
-		t.Fatalf("input.GitCheckFailed = false, want true when the unpushed-commit check could not be resolved")
+	if !facts.GitCheckFailed {
+		t.Fatalf("facts.GitCheckFailed = false, want true when the unpushed-commit check could not be resolved")
 	}
 
-	d := polecat.DecideWorkstate(input)
+	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
 	if d.SafeToNuke || d.Verdict == polecat.WorkstateVerdictSafeToNuke {
 		t.Fatalf("DecideWorkstate() = %+v, want not SAFE_TO_NUKE when the unpushed-commit check failed", d)
 	}

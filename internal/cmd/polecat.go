@@ -437,14 +437,18 @@ func activeMRBlocksReuse(bd reuseMRShower, mrID, sourceHint string, requireGitSa
 }
 
 func polecatReuseStatus(state polecat.State, cleanupStatus, activeMR, branch string, activeMRBlocks, staleCleanupSafe bool) string {
-	input := polecat.WorkstateInput{State: state, CleanupStatus: polecat.CleanupStatus(cleanupStatus), ActiveMR: activeMR, Branch: branch}
+	facts := polecat.WorkstateFacts{State: state, CleanupStatus: polecat.CleanupStatus(cleanupStatus), ActiveMR: activeMR, Branch: branch, HookBeadSafe: true}
 	if activeMRBlocks {
-		input.ActiveMRBlocker = "active_mr=" + activeMR + " status=open"
+		facts.ActiveMRBlocker = "active_mr=" + activeMR + " status=open"
 	}
 	if staleCleanupSafe {
-		input.IgnoreCleanupStatus = true
+		// Caller has already established the CanIgnoreStaleCleanupStatus
+		// predicates hold (workTerminal/hookSafe/activeMRSafe/gitSafe); a
+		// terminal work ref is the only fact NewWorkstateInput needs from us
+		// to reach the same conclusion through ResolveIgnoreCleanupStatus.
+		facts.AssignedBeadTerminal = true
 	}
-	return polecat.DecideWorkstate(input).ReuseStatus
+	return polecat.DecideWorkstate(polecat.NewWorkstateInput(facts)).ReuseStatus
 }
 
 // getPolecatManager creates a polecat manager for the given rig.
@@ -1077,7 +1081,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	workTerminal := beadTerminal
 	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
-	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
+	facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true}
 	var gitState *GitState
 	var gitErr error
 	gitStateLoaded := false
@@ -1101,24 +1105,33 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		// bead means hook_bead, active_mr and push/mr failure flags are all
 		// unverifiable here, not that they're absent; treating that as
 		// "clean" reintroduced the fail-open for this code path specifically.
-		// input.CleanupStatus already defaults to CleanupUnknown, which
-		// DecideWorkstate correctly fails closed on, so leave it there and
-		// only use live git facts as supplementary evidence, same as the
-		// agent-bead-found branch below does via applyGitStateToWorkstateInput.
+		// facts.CleanupStatus already defaults to CleanupUnknown, which
+		// NewWorkstateInput/DecideWorkstate correctly fail closed on, so
+		// leave it there and only use live git facts as supplementary
+		// evidence, same as the agent-bead-found branch below does via
+		// applyGitStateToWorkstateFacts.
 		//
 		// Still honor mgr.Get's canonical hooked-issue detection even without
 		// an agent bead to read hook_bead from — a missing agent bead must
-		// not silently drop the hook-bead safety signal either.
-		input.HookBead = recoveryHookBead(nil, nil, p)
+		// not silently drop the hook-bead safety signal either. Treat any
+		// resolved hook bead as unconditionally unsafe here (rather than
+		// looking it up via hookBeadSafeForCleanup): the agent bead is
+		// already unreadable, so a bd lookup used to decide "safe" would be
+		// trusting the same unreliable data source this branch exists to
+		// distrust.
+		if hookBead := recoveryHookBead(nil, nil, p); hookBead != "" {
+			facts.HookBead = hookBead
+			facts.HookBeadSafe = false
+		}
 		loadGitState()
-		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
+		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
-		input.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
+		facts.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
-		input.ActiveMR = fields.ActiveMR
+		facts.ActiveMR = fields.ActiveMR
 		hookBead := recoveryHookBead(agentIssue, fields, p)
-		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
@@ -1129,11 +1142,10 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			beadTerminal = isAssignedBeadTerminal(bd, sourceHint)
 			workTerminal = beadTerminal || hookTerminal
 		}
-		if hookBlocker != "" {
-			input.HookBead = hookBead
-		}
-		input.PushFailed = fields.PushFailed
-		input.MRFailed = fields.MRFailed
+		facts.HookBead = hookBead
+		facts.HookBeadSafe = hookSafe
+		facts.PushFailed = fields.PushFailed
+		facts.MRFailed = fields.MRFailed
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 		if diagnostic != "" {
@@ -1156,25 +1168,29 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				workTerminal = true
 			}
 			if activeMRAssessment.Pending {
-				input.ActiveMRBlocker = activeMRAssessment.Reason
+				facts.ActiveMRBlocker = activeMRAssessment.Reason
 			}
 		}
-		input.PartialSpawnWithoutDurableHook = partialSpawn
-		if blocker := cleanupStatusBlockerForRecovery(input.CleanupStatus, partialSpawn); blocker == "" && !input.CleanupStatus.IsSafe() {
-			input.IgnoreCleanupStatus = true
-		} else if blocker != "" {
-			if input.CleanupStatus == polecat.CleanupUnpushed {
-				loadGitState()
-			}
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
-			if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
-				input.IgnoreCleanupStatus = true
-				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
-			}
-		}
+		facts.PartialSpawnWithoutDurableHook = partialSpawn
+		facts.AssignedBeadTerminal = workTerminal
+		// gt-hsg: cleanup-status ignoring for BOTH the "partial spawn never
+		// durably hooked" case and the "stale dirty status, live facts prove
+		// safe" case used to be decided here, ad hoc, with the partial-spawn
+		// branch setting IgnoreCleanupStatus unconditionally — never checking
+		// hookSafe/activeMRSafe/gitSafe at all. That is precisely the
+		// ungated fail-open promotion gt-7kr removed from manager.go,
+		// reintroduced here under a different precondition. Load git state
+		// unconditionally and let NewWorkstateInput's single, shared
+		// ResolveIgnoreCleanupStatus gate decide from the full fact set
+		// instead of duplicating (and drifting from) that policy here.
 		loadGitState()
-		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
+		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
+		directGitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
+		if !facts.CleanupStatus.IsSafe() && polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe) {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn))
+		}
 	}
+	input := polecat.NewWorkstateInput(facts)
 
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
@@ -1251,29 +1267,29 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath string, gitState *GitState, gitErr error) {
+func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath string, gitState *GitState, gitErr error) {
 	if gitErr != nil {
-		input.GitCheckFailed = true
-		input.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
+		facts.GitCheckFailed = true
+		facts.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
 		return
 	}
 	if gitState != nil && gitState.PreservationCheckFailed {
-		input.GitCheckFailed = true
-		input.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: unpushed-commit check failed: %s", worktreePath, gitState.PreservationCheckFailure)
+		facts.GitCheckFailed = true
+		facts.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: unpushed-commit check failed: %s", worktreePath, gitState.PreservationCheckFailure)
 		return
 	}
 	if gitState == nil || gitState.Clean {
 		return
 	}
 	if gitState.UnpushedCommits > 0 {
-		input.UnpushedCommits = gitState.UnpushedCommits
+		facts.UnpushedCommits = gitState.UnpushedCommits
 	}
 	if gitState.StashCount > 0 {
-		input.StashCount = gitState.StashCount
+		facts.StashCount = gitState.StashCount
 	}
 	if len(gitState.UncommittedFiles) > 0 {
-		input.GitDirty = true
-		input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+		facts.GitDirty = true
+		facts.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
 	}
 }
 

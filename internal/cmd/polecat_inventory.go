@@ -87,7 +87,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		SessionName:    sessionName,
 	}
 
-	input := polecat.WorkstateInput{State: polecat.StateIdle}
+	facts := polecat.WorkstateFacts{State: polecat.StateIdle, HookBeadSafe: true}
 	if fields != nil {
 		item.CleanupStatus = strings.TrimSpace(fields.CleanupStatus)
 		item.ActiveMR = strings.TrimSpace(fields.ActiveMR)
@@ -96,11 +96,11 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		case beads.AgentStateDone:
 			item.State = polecat.StateDone
 		}
-		input.CleanupStatus = polecat.CleanupStatus(item.CleanupStatus)
-		input.PushFailed = fields.PushFailed
-		input.MRFailed = fields.MRFailed
-		input.Branch = item.Branch
-		input.ActiveMR = item.ActiveMR
+		facts.CleanupStatus = polecat.CleanupStatus(item.CleanupStatus)
+		facts.PushFailed = fields.PushFailed
+		facts.MRFailed = fields.MRFailed
+		facts.Branch = item.Branch
+		facts.ActiveMR = item.ActiveMR
 	}
 
 	if !activeWorkEvidence.BlocksCleanup && fields != nil {
@@ -118,23 +118,23 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		} else if running && !polecat.CleanupStatus(item.CleanupStatus).IsSafe() {
 			item.State = polecat.StateReviewNeeded
 		}
-		input.ActiveWorkBlocker = activeWorkEvidence.Blocker
-		input.ActiveWorkCountsTowardCapacity = activeWorkEvidence.CountsTowardCapacity
+		facts.ActiveWorkBlocker = activeWorkEvidence.Blocker
+		facts.ActiveWorkCountsTowardCapacity = activeWorkEvidence.CountsTowardCapacity
 	} else if item.State == polecat.StateIdle && running && !polecat.CleanupStatus(item.CleanupStatus).IsSafe() {
 		item.State = polecat.StateReviewNeeded
 	}
 
 	if fields != nil && !activeWorkEvidence.BlocksCleanup {
 		if hookBead := strings.TrimSpace(fields.HookBead); hookBead != "" {
-			input.ActiveWorkBlocker = fmt.Sprintf("hook_bead=%s status=unverified", hookBead)
+			facts.ActiveWorkBlocker = fmt.Sprintf("hook_bead=%s status=unverified", hookBead)
 		}
 	}
 	if item.ActiveMR != "" {
-		input.ActiveMRBlocker = "active_mr=" + item.ActiveMR + " status=unknown"
+		facts.ActiveMRBlocker = "active_mr=" + item.ActiveMR + " status=unknown"
 	}
 
-	input.State = item.State
-	item.Disposition = polecat.DecideWorkstate(input)
+	facts.State = item.State
+	item.Disposition = polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
 	return item
 }
 

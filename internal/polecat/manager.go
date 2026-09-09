@@ -2314,24 +2314,20 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 }
 
 func (m *Manager) workstateInputForPolecat(name string, state State, issue string) WorkstateInput {
-	input := WorkstateInput{State: state, CleanupStatus: CleanupUnknown}
+	facts := WorkstateFacts{State: state, CleanupStatus: CleanupUnknown, HookBeadSafe: true}
 	agentID := m.agentBeadID(name)
 	activeMR := ""
 	sourceHint := ""
 	_, fields, err := m.agentBeads().GetAgentBead(agentID)
-	hookSafe := true
-	hookTerminal := false
 	if err != nil {
-		input.GitCheckFailed = true
+		facts.GitCheckFailed = true
 	}
 	if err == nil && fields != nil {
-		hookSafe, hookTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
-		if !hookSafe {
-			input.HookBead = fields.HookBead
-		}
-		input.PushFailed = fields.PushFailed
-		input.MRFailed = fields.MRFailed
-		input.ActiveMR = fields.ActiveMR
+		facts.HookBeadSafe, facts.HookBeadTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
+		facts.HookBead = fields.HookBead
+		facts.PushFailed = fields.PushFailed
+		facts.MRFailed = fields.MRFailed
+		facts.ActiveMR = fields.ActiveMR
 		activeMR = fields.ActiveMR
 		sourceHint = issue
 		if sourceHint == "" {
@@ -2341,33 +2337,33 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 			sourceHint = fields.HookBead
 		}
 		if fields.CleanupStatus != "" {
-			input.CleanupStatus = CleanupStatus(fields.CleanupStatus)
+			facts.CleanupStatus = CleanupStatus(fields.CleanupStatus)
 		}
 	}
 	clonePath := m.clonePath(name)
 	g := git.NewGit(clonePath)
 	branch, branchErr := g.CurrentBranch()
 	if branchErr != nil {
-		input.GitCheckFailed = true
+		facts.GitCheckFailed = true
 	} else {
-		input.Branch = branch
+		facts.Branch = branch
 	}
 	targetRefs, targetRefLookupFailed := m.reuseTargetRefs(fields, branch)
 	if targetRefLookupFailed {
-		input.MQLookupFailed = true
+		facts.MQLookupFailed = true
 	}
 	if status, err := g.CheckUncommittedWork(); err == nil {
-		input.GitDirty = !status.CleanExcludingRuntime()
-		input.StashCount = status.StashCount
-		input.UnpushedCommits = status.UnpushedCommits
+		facts.GitDirty = !status.CleanExcludingRuntime()
+		facts.StashCount = status.StashCount
+		facts.UnpushedCommits = status.UnpushedCommits
 	} else {
-		input.GitCheckFailed = true
+		facts.GitCheckFailed = true
 	}
 	if branch != "" {
 		if preservation, err := g.BranchPreservationStatus(branch, "origin", targetRefs); err == nil {
-			input.UnpushedCommits = preservation.UnpreservedPatchCount
+			facts.UnpushedCommits = preservation.UnpreservedPatchCount
 		} else {
-			input.GitCheckFailed = true
+			facts.GitCheckFailed = true
 		}
 	}
 	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
@@ -2375,41 +2371,38 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// files, no stash, no unpushed commits) is not proof of safety by itself —
 	// it says nothing about a live session or a still-hooked bead, and a false
 	// clear here authorizes destructive cleanup on real, at-risk work. Do not
-	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown.
-	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
-	activeMRSafe := true
+	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown. This
+	// snapshot is consumed both by AssessActiveMR below and, identically
+	// re-derived from the same finalized facts, inside NewWorkstateInput.
+	gitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
 		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
-			input.ActiveMRBlocker = assessment.Reason
+			facts.ActiveMRBlocker = assessment.Reason
 		}
-		activeMRSafe = !assessment.Pending
 		if assessment.SourceTerminal {
 			sourceTerminal = true
 		}
 	}
+	facts.ActiveMRSourceTerminal = sourceTerminal
 	workIssue := issue
 	if workIssue == "" {
 		workIssue = sourceHint
 	}
-	input.MQCheckRequired = input.Branch != ""
-	input.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath, targetRefs)
-	input.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
-	workTerminal := input.AssignedBeadTerminal || sourceTerminal || hookTerminal
-	if CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe) {
-		input.IgnoreCleanupStatus = true
-	}
-	input.MQNotRequired = m.mqNotRequiredSource(workIssue)
-	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
-		mr, err := m.beads.FindMRForBranchAny(input.Branch)
+	facts.MQCheckRequired = facts.Branch != ""
+	facts.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath, targetRefs)
+	facts.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
+	facts.MQNotRequired = m.mqNotRequiredSource(workIssue)
+	if facts.MQCheckRequired && facts.HasSubmittableWork && !facts.AssignedBeadTerminal && !facts.MQNotRequired {
+		mr, err := m.beads.FindMRForBranchAny(facts.Branch)
 		if err != nil {
-			input.MQLookupFailed = true
+			facts.MQLookupFailed = true
 		} else {
-			input.MRSubmitted = mr != nil
+			facts.MRSubmitted = mr != nil
 		}
 	}
-	return input
+	return NewWorkstateInput(facts)
 }
 
 func (m *Manager) hookBeadSafeForWorkstate(hookBead string) (safe bool, terminal bool) {

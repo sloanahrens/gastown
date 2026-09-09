@@ -144,3 +144,170 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveIgnoreCleanupStatusPartialSpawnStillGated is the gt-hsg
+// regression test. A prior version of the check-recovery CLI's own
+// input-building code set IgnoreCleanupStatus=true for a "partial spawn
+// without a durable hook" polecat with a missing/unknown CleanupStatus
+// WITHOUT checking hookSafe/activeMRSafe/gitSafe at all — an ungated
+// fail-open promotion of exactly the shape gt-7kr removed from
+// workstateInputForPolecat, reintroduced via a different precondition.
+// allowMissingForPartialSpawn must only waive a missing/unknown status
+// alongside the same live safety facts every other case requires.
+func TestResolveIgnoreCleanupStatusPartialSpawnStillGated(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       CleanupStatus
+		allowPartial bool
+		workTerminal bool
+		hookSafe     bool
+		activeMRSafe bool
+		gitSafe      bool
+		want         bool
+	}{
+		{
+			name:         "partial spawn with all facts safe may ignore missing status",
+			status:       "",
+			allowPartial: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			want:         true,
+		},
+		{
+			name:         "partial spawn does NOT waive a still-open hook bead",
+			status:       "",
+			allowPartial: true,
+			hookSafe:     false,
+			activeMRSafe: true,
+			gitSafe:      true,
+			want:         false,
+		},
+		{
+			name:         "partial spawn does NOT waive a pending active MR",
+			status:       "",
+			allowPartial: true,
+			hookSafe:     true,
+			activeMRSafe: false,
+			gitSafe:      true,
+			want:         false,
+		},
+		{
+			name:         "partial spawn does NOT waive dirty/unpushed git state",
+			status:       CleanupUnknown,
+			allowPartial: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      false,
+			want:         false,
+		},
+		{
+			name:   "non-partial-spawn missing status still fails closed unconditionally",
+			status: "",
+			// allowPartial false, and workTerminal/hookSafe/activeMRSafe/gitSafe
+			// all true: CanIgnoreStaleCleanupStatus never waives ""/Unknown.
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			want:         false,
+		},
+		{
+			name:         "non-partial-spawn stale unpushed status still uses the general gate",
+			status:       CleanupUnpushed,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveIgnoreCleanupStatus(tt.status, tt.allowPartial, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
+			if got != tt.want {
+				t.Fatalf("ResolveIgnoreCleanupStatus() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupStatus
+// exercises NewWorkstateInput (the single production constructor) against
+// the gt-swq/gt-hsg fixture: cleanup_status empty (the state that produces
+// the bug — a populated status would pass for the wrong reason), and each
+// work-at-risk signal (hooked bead, active MR, unpushed/dirty git) present
+// on its own. Each must block SAFE_TO_NUKE independently.
+func TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupStatus(t *testing.T) {
+	base := WorkstateFacts{State: StateIdle, CleanupStatus: "", HookBeadSafe: true}
+
+	tests := []struct {
+		name  string
+		facts WorkstateFacts
+	}{
+		{
+			name: "hooked bead blocks alone",
+			facts: func() WorkstateFacts {
+				f := base
+				f.HookBead = "gt-x8y"
+				f.HookBeadSafe = false
+				return f
+			}(),
+		},
+		{
+			name: "pending active MR blocks alone",
+			facts: func() WorkstateFacts {
+				f := base
+				f.ActiveMRBlocker = "active_mr=gt-wisp-rxnx status=open"
+				return f
+			}(),
+		},
+		{
+			name: "unpushed commit blocks alone",
+			facts: func() WorkstateFacts {
+				f := base
+				f.UnpushedCommits = 1
+				return f
+			}(),
+		},
+		{
+			name: "dirty worktree blocks alone",
+			facts: func() WorkstateFacts {
+				f := base
+				f.GitDirty = true
+				f.GitDirtyReason = "git_state=has_uncommitted uncommitted_files=1"
+				return f
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := DecideWorkstate(NewWorkstateInput(tt.facts))
+			if d.SafeToNuke || d.Verdict == WorkstateVerdictSafeToNuke {
+				t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want not SAFE_TO_NUKE", tt.facts, d)
+			}
+		})
+	}
+}
+
+// TestNewWorkstateInputRealisticCleanPolecatStillClears is the adversarial
+// control required alongside the above: a genuinely clean, done polecat
+// (real work, merged, closed out, cleanup_status=clean, no live signals at
+// risk) must still report SAFE_TO_NUKE through the shared constructor.
+// Without this, a blanket fail-closed change would pass every regression
+// test above while stranding the rig at its polecat cap.
+func TestNewWorkstateInputRealisticCleanPolecatStillClears(t *testing.T) {
+	facts := WorkstateFacts{
+		State:          StateDone,
+		CleanupStatus:  CleanupClean,
+		HookBeadSafe:   true,
+		Branch:         "main",
+		MQCheckRequired: false,
+	}
+	d := DecideWorkstate(NewWorkstateInput(facts))
+	if !d.SafeToNuke || d.Verdict != WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want SAFE_TO_NUKE", facts, d)
+	}
+}
