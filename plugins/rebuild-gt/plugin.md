@@ -58,7 +58,7 @@ Before building, verify the source repo is clean and on main:
 
 ```bash
 cd ~/gt/gastown/mayor/rig
-git status --porcelain  # Must be clean
+git status --porcelain --untracked-files=no -- . ':(exclude).beads'  # No tracked changes that affect the build
 git branch --show-current  # Must be "main"
 ```
 

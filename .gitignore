@@ -98,3 +98,8 @@ docs/fork-info/
 
 # Gas Town (added by gt)
 GEMINI.md
+
+# Local agent-runtime state and git worktrees inside a rig clone; never build inputs.
+.agents/
+.codex/
+.worktrees/

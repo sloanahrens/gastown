@@ -47,7 +47,11 @@ if [ ! -d "$RIG_ROOT" ]; then
   exit 0
 fi
 
-DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)
+# Only TRACKED modifications outside .beads/ can change what 'make build'
+# produces. Untracked entries (.agents/, .codex/, .worktrees/) and bd's own
+# rewriting of .beads/config.yaml must not trip this guard: a plain
+# --porcelain check skipped every rebuild for hours while exiting 0 (gt-50k).
+DIRTY=$(git -C "$RIG_ROOT" status --porcelain --untracked-files=no -- . ':(exclude).beads' 2>/dev/null)
 if [ -n "$DIRTY" ]; then
   log "Repo is dirty, skipping rebuild."
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
