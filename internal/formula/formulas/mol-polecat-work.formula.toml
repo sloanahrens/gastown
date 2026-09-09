@@ -501,13 +501,17 @@ Empty commands mean "not configured" — skip silently.
 - Fix the issue, commit, and re-run from step 1
 - Do NOT proceed with --pre-verified if gates failed
 
-**4. If all gates pass:**
+**4. If ALL FIVE commands are empty (none configured for this rig):**
+Do NOT use `--pre-verified` — there is nothing you actually verified. Use
+plain `gt done` and let the refinery run gates normally (slower but correct).
+
+**5. If at least one gate command ran and all that ran passed:**
 You will use `gt done --pre-verified` in the next step. This tells the refinery
 that you ran the full gate suite on a rebased branch, enabling fast-path merge.
 
-**Note:** If this step takes too long or the gates are not configured for this
-project, you may skip this step and use `gt done` without --pre-verified.
-The refinery will run gates normally (slower but still correct).
+**Note:** If this step takes too long, you may skip it and use `gt done`
+without --pre-verified even when gates are configured — the refinery will
+run gates normally.
 
 **Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
 

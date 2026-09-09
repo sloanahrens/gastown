@@ -339,3 +339,53 @@ exit 1
 		t.Fatalf("bd update invoked %s times, want 1", got)
 	}
 }
+
+// TestLoadRigCommandVarsReadsRigRootMergeQueue reproduces gt-me9t: operators
+// following docs/onboard-repo write merge_queue.{build,test,lint}_command
+// into <rig>/config.json (the rig root config, alongside default_branch and
+// beads.prefix). loadRigCommandVars must surface those commands as formula
+// vars, not just the ones from settings/config.json or the repo-committed
+// .gastown/settings.json.
+func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig dir: %v", err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "default_branch": "main",
+  "beads": {"prefix": "gt"},
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "make test",
+    "lint_command": "make lint"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	vars := loadRigCommandVars(townRoot, "gastown")
+
+	want := map[string]string{
+		"build_command": "make build",
+		"test_command":  "make test",
+		"lint_command":  "make lint",
+	}
+	got := make(map[string]string, len(vars))
+	for _, v := range vars {
+		if eq := strings.Index(v, "="); eq > 0 {
+			got[v[:eq]] = v[eq+1:]
+		}
+	}
+	for key, wantVal := range want {
+		if gotVal, ok := got[key]; !ok || gotVal != wantVal {
+			t.Errorf("loadRigCommandVars() var %q = %q, want %q (vars: %v)", key, gotVal, wantVal, vars)
+		}
+	}
+}

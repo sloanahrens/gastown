@@ -1413,8 +1413,16 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		localMQ = localSettings.MergeQueue
 	}
 
-	// Merge: repo defaults + local overrides
-	mq := config.MergeSettingsCommand(repoMQ, localMQ)
+	// Rig root config.json (operator-set at onboarding time, see docs/onboard-repo;
+	// this is where merge_queue.build/test/lint_command actually live in practice — gt-me9t)
+	var rigRootMQ *config.MergeQueueConfig
+	if rigCfg != nil {
+		rigRootMQ = rigCfg.MergeQueue
+	}
+
+	// Merge: repo defaults (floor) -> rig root config.json -> rig-local settings (final override)
+	mq := config.MergeSettingsCommand(repoMQ, rigRootMQ)
+	mq = config.MergeSettingsCommand(mq, localMQ)
 	if mq == nil {
 		return vars
 	}

@@ -106,6 +106,12 @@ type RigConfig struct {
 	CreatedAt     time.Time    `json:"created_at"`               // when rig was created
 	Beads         *BeadsConfig `json:"beads,omitempty"`
 
+	// MergeQueue holds gate commands and merge behavior set at rig onboarding
+	// time (see docs/onboard-repo). Without this field json.Unmarshal silently
+	// drops the whole section, so operators following onboarding docs end up
+	// with commands that are never read back (gt-me9t).
+	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
+
 	// Persistent polecat pool configuration.
 	// PolecatPoolSize is the number of persistent polecats to create with pool init.
 	// PolecatNames optionally specifies fixed names (overrides theme-based naming).

@@ -551,7 +551,9 @@ If test_command is set: run {{test_command}}
 
 Skip any empty/unconfigured commands silently.
 
-**3. If all gates pass, submit to merge queue:**
+**3. Submit to merge queue:**
+- If ALL FOUR commands were empty (none configured for this rig): `gt done --target {{base_branch}}` — no `--pre-verified`, you verified nothing.
+- If at least one gate ran and all that ran passed:
 ```bash
 gt done --pre-verified --target {{base_branch}}
 ```
