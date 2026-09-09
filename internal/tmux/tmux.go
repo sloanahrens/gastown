@@ -2482,6 +2482,13 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 
 // GetSessionActivity returns the last activity time for a session.
 // This is updated whenever there's any activity in the session (input/output).
+//
+// CAUTION: tmux only advances #{session_activity} for ATTACHED sessions.
+// Every unattended agent session is unattached, so for that population this
+// value freezes at session creation time and never moves again — comparing
+// it against a staleness threshold silently collapses to comparing session
+// age against that threshold (see gt-2sln). Prefer GetWindowActivity for
+// unattended-session liveness checks.
 func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	out, err := t.run("display-message", "-t", session, "-p", "#{session_activity}")
 	if err != nil {
@@ -2491,6 +2498,24 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	timestamp, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parsing session activity: %w", err)
+	}
+	return time.Unix(timestamp, 0), nil
+}
+
+// GetWindowActivity returns the last activity time for a session's active
+// window. Unlike #{session_activity}, tmux advances #{window_activity} for
+// unattached sessions too — it tracks real pane output rather than client
+// attachment, which makes it the correct liveness signal for unattended
+// agent sessions (see gt-2sln).
+func (t *Tmux) GetWindowActivity(session string) (time.Time, error) {
+	out, err := t.run("display-message", "-t", session, "-p", "#{window_activity}")
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing window activity: %w", err)
 	}
 	return time.Unix(timestamp, 0), nil
 }

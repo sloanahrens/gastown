@@ -2748,6 +2748,95 @@ func TestGetSessionActivity_NonexistentSession(t *testing.T) {
 	}
 }
 
+func TestGetWindowActivity(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-winactivity-" + t.Name()
+
+	// Clean up any existing session
+	_ = tm.KillSession(sessionName)
+
+	// Create session
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	activity, err := tm.GetWindowActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetWindowActivity: %v", err)
+	}
+
+	if activity.IsZero() {
+		t.Error("GetWindowActivity returned zero time")
+	}
+	if activity.Year() < 2000 {
+		t.Errorf("GetWindowActivity returned suspicious time: %v", activity)
+	}
+}
+
+func TestGetWindowActivity_NonexistentSession(t *testing.T) {
+	tm := newTestTmux(t)
+
+	_, err := tm.GetWindowActivity("nonexistent-session-xyz-12345")
+	if err == nil {
+		t.Error("GetWindowActivity on nonexistent session should return error")
+	}
+}
+
+// TestGetWindowActivity_AdvancesOnUnattendedOutput is the regression guard
+// for gt-2sln: an unattached session's #{session_activity} freezes at
+// session_created and never moves, while #{window_activity} advances when
+// the pane produces output. This distinguishes "gate 2 discriminates
+// hung-from-working" (correct fix) from "gate 2 is comparing a constant
+// against a constant" (the bug this replaces).
+func TestGetWindowActivity_AdvancesOnUnattendedOutput(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-winactivity-adv-" + t.Name()
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	before, err := tm.GetWindowActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetWindowActivity (before): %v", err)
+	}
+
+	// Sleep past tmux's 1-second activity resolution, then produce pane
+	// output on this UNATTACHED session (no client ever attaches in this
+	// test — that is the whole point).
+	time.Sleep(1100 * time.Millisecond)
+	if err := tm.SendKeys(sessionName, "echo hello-from-gt-2sln-test"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	after, err := tm.GetWindowActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetWindowActivity (after): %v", err)
+	}
+
+	if !after.After(before) {
+		t.Errorf("window_activity did not advance on an unattended session: before=%v after=%v", before, after)
+	}
+
+	// Sanity check on the bug this replaces: session_activity should NOT
+	// have advanced, confirming the session genuinely stayed unattached.
+	sessActivity, err := tm.GetSessionActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetSessionActivity: %v", err)
+	}
+	createdUnix, err := tm.GetSessionCreatedUnix(sessionName)
+	if err != nil {
+		t.Fatalf("GetSessionCreatedUnix: %v", err)
+	}
+	if sessActivity.Unix() != createdUnix {
+		t.Skipf("session_activity advanced (session_activity=%v created=%v) — environment attached the session, precondition for this regression guard not met", sessActivity, createdUnix)
+	}
+}
+
 func TestNewSessionSet(t *testing.T) {
 	// Test creating SessionSet from names
 	names := []string{"session-a", "session-b", "session-c"}

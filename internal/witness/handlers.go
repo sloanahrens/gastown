@@ -2298,7 +2298,18 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 		}
 
 		// Legacy: Use structured signals to detect startup stalls:
-		// session_created (age) + session_activity (last output).
+		// session_created (age) + window_activity (last output).
+		//
+		// gt-2sln: this used to read #{session_activity}, which tmux only
+		// advances for ATTACHED sessions. Every agent session is unattended,
+		// so that field freezes at session_created and never moves — the
+		// activityAge check below silently collapsed to activityAge ==
+		// sessionAge, making it dead code and leaving this gate equivalent
+		// to "sessionAge > stallThreshold" alone. That misclassified any
+		// agent mid-way through a turn longer than the v2 heartbeat's grace
+		// window as a startup stall, on every scan, and fired blind dismiss
+		// keystrokes into its live pane. #{window_activity} tracks real pane
+		// output and advances correctly for unattended sessions.
 		createdUnix, err := t.GetSessionCreatedUnix(sessionName)
 		if err != nil {
 			result.Errors = append(result.Errors,
@@ -2310,10 +2321,10 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 			continue // Too young — still in normal startup
 		}
 
-		activity, err := t.GetSessionActivity(sessionName)
+		activity, err := t.GetWindowActivity(sessionName)
 		if err != nil {
 			result.Errors = append(result.Errors,
-				fmt.Errorf("getting session activity for %s: %w", sessionName, err))
+				fmt.Errorf("getting window activity for %s: %w", sessionName, err))
 			continue
 		}
 		activityAge := now.Sub(activity)
