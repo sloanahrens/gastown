@@ -1542,23 +1542,31 @@ func (b *Beads) ListByAssignee(assignee string) ([]*Issue, error) {
 	})
 }
 
-// GetAssignedIssue returns the first issue assigned to the given assignee.
-// Checks open, in_progress, and hooked statuses (hooked = work on agent's hook).
-// Returns nil if no matching issue is assigned.
+// GetAssignedIssue returns the first issue assigned to the given assignee,
+// preferring open over in_progress over hooked (hooked = work on agent's
+// hook) when more than one active-status issue is assigned.
+//
+// This used to issue one "bd list" subprocess per status (3 serial bd calls,
+// each paying its own process-startup + Dolt round-trip cost). check-recovery
+// calls this multiple times per invocation (mgr.Get's loadFromBeads fallback,
+// then again in recoveryHookBead's last-resort check), so the redundant
+// subprocesses compounded into a measurable share of check-recovery's ~20s
+// latency (gt-ct3). A single "status=all" query plus client-side precedence
+// filtering returns the same result with 1 bd call instead of 3.
 func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
-	// Check all active work statuses: open, in_progress, and hooked
-	// "hooked" status is set by gt sling when work is attached to an agent's hook
+	issues, err := b.List(ListOptions{
+		Status:   "all",
+		Assignee: assignee,
+		Priority: -1,
+	})
+	if err != nil {
+		return nil, err
+	}
 	for _, status := range []string{"open", "in_progress", StatusHooked} {
-		issues, err := b.List(ListOptions{
-			Status:   status,
-			Assignee: assignee,
-			Priority: -1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(issues) > 0 {
-			return issues[0], nil
+		for _, issue := range issues {
+			if issue.Status == status {
+				return issue, nil
+			}
 		}
 	}
 

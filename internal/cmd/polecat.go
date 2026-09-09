@@ -1082,7 +1082,16 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	workTerminal := beadTerminal
-	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
+	// targetRefs is resolved once below, inside whichever branch actually
+	// applies (no-agent-bead vs. agent-bead-found) — the agent-bead-found
+	// branch has an extra sourceHint input, so resolving it here unconditionally
+	// used to mean the agent-bead-found branch immediately discarded and
+	// recomputed it, paying for recoveryTargetRefs' bd lookups (including a
+	// FindMRForBranchAny call) twice per check-recovery invocation (gt-ct3).
+	var targetRefs []string
+	var targetRefLookupFailed bool
+	var mrForBranch *beads.Issue
+	var mrForBranchErr error
 	facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true}
 	var gitState *GitState
 	var gitErr error
@@ -1096,6 +1105,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	if err != nil || fields == nil {
+		targetRefs, targetRefLookupFailed, mrForBranch, mrForBranchErr = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 		// No agent bead reachable - fall back to a live git check.
 		//
 		// gt-14a: this branch used to derive a confident CleanupClean straight
@@ -1136,7 +1146,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
-		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
+		targetRefs, targetRefLookupFailed, mrForBranch, mrForBranchErr = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
 		if status.Issue == "" && sourceHint != "" {
 			status.Issue = sourceHint
 		}
@@ -1194,7 +1204,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	input := polecat.NewWorkstateInput(facts)
 
 	status.CleanupStatus = input.CleanupStatus
-	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
+	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr, mrForBranch, mrForBranchErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1321,7 +1331,12 @@ func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath s
 	}
 }
 
-func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error) {
+// mrForBranch/mrForBranchErr is the FindMRForBranchAny(status.Branch) result
+// the caller already resolved via recoveryTargetRefs. FindMRForBranchAny scans
+// every gt:merge-request bead in the rig's Dolt db, so reusing it here instead
+// of querying again saves a second full scan on every check-recovery call for
+// a branch with submittable work (gt-ct3).
+func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error, mrForBranch *beads.Issue, mrForBranchErr error) {
 	if status.Branch == "" {
 		return
 	}
@@ -1335,12 +1350,11 @@ func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *Recover
 	if !input.HasSubmittableWork || input.MQNotRequired || input.AssignedBeadTerminal {
 		return
 	}
-	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
-	if mrErr != nil {
+	if mrForBranchErr != nil {
 		input.MQLookupFailed = true
 		return
 	}
-	input.MRSubmitted = mr != nil
+	input.MRSubmitted = mrForBranch != nil
 }
 
 func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, disposition polecat.WorkstateDisposition) {
@@ -1599,9 +1613,13 @@ func isRecoveryBaseBranch(branch string) bool {
 	return branch == "main" || branch == "master" || strings.HasPrefix(branch, "integration/")
 }
 
-func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extraIssueIDs ...string) ([]string, bool) {
-	var refs []string
-	lookupFailed := false
+// recoveryTargetRefs also returns the MR bead it found (if any) for branch,
+// via FindMRForBranchAny, so callers that separately need "is there an MR
+// for this branch" (e.g. applyMQFactsToWorkstateInput's submitted check) can
+// reuse it instead of re-running the same lookup — FindMRForBranchAny scans
+// every gt:merge-request bead in the rig's Dolt db, so repeating it per
+// check-recovery invocation was a real, measured cost (gt-ct3).
+func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extraIssueIDs ...string) (refs []string, lookupFailed bool, mrForBranch *beads.Issue, mrForBranchErr error) {
 	appendMRTarget := func(issue *beads.Issue) {
 		if fields := beads.ParseMRFields(issue); fields != nil && fields.Target != "" {
 			refs = append(refs, fields.Target)
@@ -1616,13 +1634,18 @@ func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extra
 			}
 		}
 		if branch != "" {
-			if issue, err := bd.FindMRForBranchAny(branch); err == nil {
-				appendMRTarget(issue)
-			} else if !errors.Is(err, beads.ErrNotFound) {
+			mrForBranch, mrForBranchErr = bd.FindMRForBranchAny(branch)
+			if mrForBranchErr == nil {
+				appendMRTarget(mrForBranch)
+			} else if !errors.Is(mrForBranchErr, beads.ErrNotFound) {
 				lookupFailed = true
 			}
 		}
-		for _, candidateIssueID := range append([]string{issueID}, extraIssueIDs...) {
+		// sourceHint (the caller's extraIssueIDs) is frequently identical to
+		// issueID (agentSourceIssueHint returns status.Issue verbatim whenever
+		// it's non-empty) — dedupe before showing, or the same bead gets a
+		// second bd subprocess call for no new information (gt-ct3).
+		for _, candidateIssueID := range uniqueStrings(append([]string{issueID}, extraIssueIDs...)) {
 			if candidateIssueID == "" {
 				continue
 			}
@@ -1633,7 +1656,7 @@ func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extra
 			}
 		}
 	}
-	return uniqueStrings(refs), lookupFailed
+	return uniqueStrings(refs), lookupFailed, mrForBranch, mrForBranchErr
 }
 
 func appendAttachmentTargets(refs *[]string, bd *beads.Beads, issue *beads.Issue) {
