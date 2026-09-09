@@ -880,6 +880,80 @@ func TestAPIHandler_SSE_ContentType(t *testing.T) {
 	}
 }
 
+// TestSSEDashboardPollIsSharedAcrossConnections is a regression test for
+// gt-q1h: the dashboard-hash poll used to run its own gt subprocess loop
+// (status/hooks/mail, every 2s) independently INSIDE every open SSE
+// connection. With multiple dashboard tabs or reconnects open, that
+// multiplied gt subprocess load N-fold, starving the shared cmdSem slots
+// that /api/crew and /api/mail/threads also depend on and producing the
+// "Failed to load crew/mail" hang. The poll must run once, on a single
+// shared background goroutine, no matter how many SSE clients connect.
+func TestSSEDashboardPollIsSharedAcrossConnections(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	// Every invocation appends one line to callLog, so the test can count
+	// exactly how many gt subprocesses were spawned across all connections.
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "status --json") printf '{"agents":[]}\n' ;;
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	h := &APIHandler{
+		gtPath:            gtPath,
+		workDir:           t.TempDir(),
+		defaultRunTimeout: 5 * time.Second,
+		maxRunTimeout:     10 * time.Second,
+		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+	}
+
+	const numConnections = 4
+	var wg sync.WaitGroup
+	wg.Add(numConnections)
+	for i := 0; i < numConnections; i++ {
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+			ctx, cancel := context.WithTimeout(req.Context(), 2500*time.Millisecond)
+			defer cancel()
+			req = req.WithContext(ctx)
+			h.handleSSE(httptest.NewRecorder(), req)
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("expected the shared poller to have run at least once: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	numCalls := len(lines)
+
+	// One poll tick shells out exactly 3 times (status, hooks, mail). With
+	// numConnections independent pollers this would be numCalls >= 3*numConnections
+	// per tick; with a single shared poller it stays at 3 per tick regardless
+	// of how many SSE clients are connected. Allow up to 2 ticks of slack for
+	// timing jitter around the 2s poll interval and 2.5s connection lifetime.
+	maxExpected := 3 * 2
+	if numCalls > maxExpected {
+		t.Errorf("gt was invoked %d times across %d concurrent SSE connections (calls: %v); want <= %d — the dashboard poll must be shared, not per-connection",
+			numCalls, numConnections, lines, maxExpected)
+	}
+	if numCalls == 0 {
+		t.Error("gt was never invoked — the shared poller did not run")
+	}
+}
+
 // TestOptionsCacheConcurrentAccess verifies that concurrent cache reads and
 // writes don't race. The read lock is held through serialization so a
 // concurrent writer can't replace the cached pointer mid-encode.

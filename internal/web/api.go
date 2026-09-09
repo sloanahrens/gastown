@@ -64,6 +64,19 @@ type APIHandler struct {
 	cmdSem chan struct{}
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
+
+	// dashboardPollOnce starts the single shared dashboard-hash poller the
+	// first time an SSE client connects, regardless of how many clients
+	// connect afterward.
+	dashboardPollOnce sync.Once
+	// dashboardMu guards dashboardHash and dashboardHashCh below.
+	dashboardMu sync.RWMutex
+	// dashboardHash is the last computed dashboard state hash.
+	dashboardHash string
+	// dashboardHashCh is closed (and replaced with a fresh channel) every
+	// time dashboardHash changes, broadcasting the update to every SSE
+	// connection currently blocked waiting on it.
+	dashboardHashCh chan struct{}
 }
 
 const optionsCacheTTL = 30 * time.Second
@@ -87,6 +100,7 @@ func NewAPIHandler(defaultRunTimeout, maxRunTimeout time.Duration, csrfToken str
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
 		csrfToken:         csrfToken,
+		dashboardHashCh:   make(chan struct{}),
 	}
 }
 
@@ -2199,9 +2213,23 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: connected\ndata: ok\n\n")
 	flusher.Flush()
 
-	var lastHash string
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	// The dashboard-hash poll shells out to several gt subprocesses (see
+	// computeDashboardHash). It runs on a single shared background
+	// goroutine, started once regardless of how many SSE clients connect —
+	// NOT per connection — so that N open dashboard tabs/reconnects don't
+	// multiply subprocess load and starve /api/crew, /api/mail/threads, and
+	// other cmdSem-gated handlers.
+	h.dashboardPollOnce.Do(func() {
+		// Handlers built via struct literal (as tests do) skip NewAPIHandler,
+		// so dashboardHashCh may still be nil here — initialize it lazily
+		// rather than requiring every caller to remember this field.
+		h.dashboardMu.Lock()
+		if h.dashboardHashCh == nil {
+			h.dashboardHashCh = make(chan struct{})
+		}
+		h.dashboardMu.Unlock()
+		go h.pollDashboardHash()
+	})
 
 	// Send heartbeat event every 15 seconds. This prevents connection
 	// timeouts AND gives the client a liveness signal: SSE comments are
@@ -2212,19 +2240,54 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer keepalive.Stop()
 
 	for {
+		h.dashboardMu.RLock()
+		changed := h.dashboardHashCh
+		h.dashboardMu.RUnlock()
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-keepalive.C:
 			fmt.Fprintf(w, "event: heartbeat\ndata: ping\n\n")
 			flusher.Flush()
-		case <-ticker.C:
-			hash := h.computeDashboardHash(ctx)
-			if hash != "" && hash != lastHash {
-				lastHash = hash
-				fmt.Fprintf(w, "event: dashboard-update\ndata: %s\n\n", hash)
-				flusher.Flush()
-			}
+		case <-changed:
+			h.dashboardMu.RLock()
+			hash := h.dashboardHash
+			h.dashboardMu.RUnlock()
+			fmt.Fprintf(w, "event: dashboard-update\ndata: %s\n\n", hash)
+			flusher.Flush()
+		}
+	}
+}
+
+// pollDashboardHash runs for the lifetime of the process on a single shared
+// goroutine (started via dashboardPollOnce), recomputing the dashboard hash
+// every 2 seconds and broadcasting changes to every connected SSE client by
+// closing dashboardHashCh. This keeps the underlying gt subprocess load at a
+// constant O(1) regardless of how many dashboard tabs or SSE reconnects are
+// open — see handleSSE.
+func (h *APIHandler) pollDashboardHash() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		hash := h.computeDashboardHash(context.Background())
+		if hash == "" {
+			continue
+		}
+
+		h.dashboardMu.Lock()
+		if hash == h.dashboardHash {
+			h.dashboardMu.Unlock()
+			continue
+		}
+		h.dashboardHash = hash
+		old := h.dashboardHashCh
+		h.dashboardHashCh = make(chan struct{})
+		h.dashboardMu.Unlock()
+
+		if old != nil {
+			close(old)
 		}
 	}
 }

@@ -1140,6 +1140,8 @@
                 }
             })
             .catch(function(err) {
+                threadsContainer.style.display = 'none';
+                if (empty) empty.style.display = 'none';
                 loading.style.display = '';
                 loading.textContent = 'Failed to load mail: ' + describePanelError(err);
                 console.error('Mail load error:', err);
@@ -1177,8 +1179,17 @@
 
     // Load mail on page load
     loadMailInbox();
-    // Expose for refresh after HTMX swaps and SSE-reconnect recovery
-    window.refreshMailPanel = loadMailInbox;
+    // Expose for refresh after HTMX swaps: gated so a routine refresh cycle
+    // doesn't yank the view out from under someone reading a message or
+    // composing a reply.
+    window.refreshMailPanel = function() {
+        if (currentMailTab !== 'inbox') return;
+        if (mailDetail.style.display !== 'none' || mailCompose.style.display !== 'none') return;
+        loadMailInbox();
+    };
+    // registerPanelLoader uses the raw (ungated) loader: a real SSE-reconnect
+    // recovery (see refreshAllPanels) should resync everything regardless of
+    // which view is open, since the panel may have been dead the whole time.
     registerPanelLoader('mail', loadMailInbox);
 
     // ============================================
@@ -1260,6 +1271,8 @@
                 }
             })
             .catch(function(err) {
+                table.style.display = 'none';
+                if (empty) empty.style.display = 'none';
                 loading.style.display = '';
                 loading.textContent = 'Failed to load crew: ' + describePanelError(err);
                 console.error('Crew load error:', err);
