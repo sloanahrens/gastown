@@ -148,6 +148,42 @@ func TestCooldownDurationParsing(t *testing.T) {
 	}
 }
 
+// TestQueryRunsIncludesInfraFlag guards against gt-5sq: RecordRun creates
+// receipts with --ephemeral, and `bd list` hides ephemeral beads by default
+// even with --all. Without --include-infra, queryRuns always sees zero
+// results, so cooldown gates never see a "last run" and never gate.
+func TestQueryRunsIncludesInfraFlag(t *testing.T) {
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-args.log")
+	bdPath := filepath.Join(binDir, "bd")
+	fakeBD := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"  list) printf '[]\\n' ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", logPath)
+
+	recorder := NewRecorder(townRoot)
+	if _, err := recorder.CountRunsSince("tool-updater", "1h"); err != nil {
+		t.Fatalf("CountRunsSince failed: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "--include-infra") {
+		t.Fatalf("queryRuns did not pass --include-infra, ephemeral receipts would never be found:\n%s", log)
+	}
+}
+
 // Integration tests for RecordRun, GetLastRun, GetRunsSince require
 // a working beads installation and are skipped in unit tests.
 // These functions shell out to `bd` commands.

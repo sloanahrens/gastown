@@ -138,7 +138,8 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 	args := []string{
 		"list",
 		"--json",
-		"--all", // Include closed beads too
+		"--all",           // Include closed beads too
+		"--include-infra", // Plugin-run receipts are ephemeral; bd hides those by default
 		"-l", "type:plugin-run",
 		"-l", fmt.Sprintf("plugin:%s", pluginName),
 	}
