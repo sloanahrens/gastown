@@ -143,20 +143,34 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	// relative to a *build branch*.
 	var compareCommit string
 	if info.OnMainBranch {
-		// Already on a build branch — its HEAD is normally the build branch.
-		info.CompareRef = branch
-		compareCommit, err = resolveGitCommit(repoDir, "HEAD")
-		if err != nil {
-			info.Error = fmt.Errorf("cannot resolve build branch HEAD: %w", err)
-			return info
+		// Prefer the remote-tracking ref over this worktree's local branch
+		// pointer. A worktree like mayor/rig can sit unfetched for a long
+		// time; if its local main lags origin/main and the binary was last
+		// built from that same stale local tip, comparing against local HEAD
+		// makes binary and compare-ref match and the check reports "fresh"
+		// even though origin/main has since moved on (gt-h8s8). Comparing
+		// against the remote-tracking ref instead — kept current by
+		// CheckStaleBinaryFresh's explicit fetch — catches that case.
+		if ref, ok := resolveMainRemoteRef(repoDir, branch); ok {
+			info.CompareRef = ref.display
+			compareCommit = ref.commit
+		} else {
+			info.CompareRef = branch
+			compareCommit, err = resolveGitCommit(repoDir, "HEAD")
+			if err != nil {
+				info.Error = fmt.Errorf("cannot resolve build branch HEAD: %w", err)
+				return info
+			}
 		}
 
-		// Local main/master can lag its remote (e.g. the refinery merges to
-		// origin without fast-forwarding this checkout's branch pointer). If
-		// the local tip doesn't even contain the binary commit, it predates
-		// the binary and is not a meaningful staleness reference — fall
-		// through to the freshest build-branch ref that does contain it
-		// (origin/main preferred; see resolveBuildBranchRef) (gt-ugo).
+		// Local main/master can lag its remote too far to even contain the
+		// binary commit (e.g. the refinery merges to origin without
+		// fast-forwarding this checkout's branch pointer, and no remote ref
+		// was resolvable above). If the compare ref doesn't contain the
+		// binary commit, it predates the binary and is not a meaningful
+		// staleness reference — fall through to the freshest build-branch
+		// ref that does contain it (origin/main preferred; see
+		// resolveBuildBranchRef) (gt-ugo).
 		if !isAncestor(repoDir, binaryCommit, compareCommit) {
 			if ref, ok := resolveBuildBranchRef(repoDir, binaryCommit); ok {
 				info.CompareRef = ref.display
@@ -350,6 +364,24 @@ func resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranchRef, bool) 
 		}
 	}
 	return frontier[0], true
+}
+
+// resolveMainRemoteRef looks up the remote-tracking ref for branch (the
+// build branch the worktree is currently on), preferring upstream over
+// origin, so staleness can be checked against the branch's actual remote
+// tip instead of this worktree's own local branch pointer (gt-h8s8).
+// Returns false if neither remote has a tracking ref for branch.
+func resolveMainRemoteRef(repoDir, branch string) (buildBranchRef, bool) {
+	for _, remote := range []string{"upstream", "origin"} {
+		display := remote + "/" + branch
+		ref := "refs/remotes/" + display
+		commit, err := resolveGitCommit(repoDir, ref)
+		if err != nil {
+			continue
+		}
+		return buildBranchRef{ref: ref, display: display, commit: commit}, true
+	}
+	return buildBranchRef{}, false
 }
 
 func buildBranchCandidates(repoDir string) []buildBranchRef {

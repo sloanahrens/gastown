@@ -12,32 +12,6 @@ RIG_ROOT="${TOWN_ROOT}/gastown/mayor/rig"
 
 log() { echo "[rebuild-gt] $*"; }
 
-# --- Detection ---------------------------------------------------------------
-
-log "Checking binary staleness..."
-STALE_JSON=$(gt stale --json 2>/dev/null) || {
-  log "gt stale --json failed, skipping"
-  exit 0
-}
-
-IS_STALE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('stale', False))" 2>/dev/null || echo "False")
-SAFE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('safe_to_rebuild', False))" 2>/dev/null || echo "False")
-
-if [ "$IS_STALE" != "True" ]; then
-  log "Binary is fresh. Nothing to do."
-  gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
-    --title "rebuild-gt: binary is fresh" >/dev/null 2>&1 || true
-  exit 0
-fi
-
-if [ "$SAFE" != "True" ]; then
-  log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
-  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
-    --title "Plugin: rebuild-gt [skipped]" \
-    --description "Skipped: not safe to rebuild" >/dev/null 2>&1 || true
-  exit 0
-fi
-
 # --- Pre-flight checks -------------------------------------------------------
 
 log "Pre-flight checks..."
@@ -73,6 +47,13 @@ fi
 # whatever commit a human last checked out, and 'make safe-install' fails its
 # check-up-to-date gate against origin/main on every run until a human pulls
 # (gt-4g1m). ff-only only: a real divergence must never be reset --hard away.
+#
+# This MUST run before the staleness check below (gt-h8s8): 'gt stale'
+# compares the binary against RIG_ROOT's local main ref. If RIG_ROOT's own
+# checkout is what's stale — and the binary was last built from that same
+# stale local tip — checking staleness first lets it read as "fresh" and the
+# fetch/pull never runs. Syncing first means the staleness check that
+# follows sees a caught-up local main.
 log "Syncing $RIG_ROOT with origin/main..."
 git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
 if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
@@ -80,6 +61,32 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# --- Detection ---------------------------------------------------------------
+
+log "Checking binary staleness..."
+STALE_JSON=$(gt stale --json 2>/dev/null) || {
+  log "gt stale --json failed, skipping"
+  exit 0
+}
+
+IS_STALE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('stale', False))" 2>/dev/null || echo "False")
+SAFE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('safe_to_rebuild', False))" 2>/dev/null || echo "False")
+
+if [ "$IS_STALE" != "True" ]; then
+  log "Binary is fresh. Nothing to do."
+  gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+    --title "rebuild-gt: binary is fresh" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+if [ "$SAFE" != "True" ]; then
+  log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped]" \
+    --description "Skipped: not safe to rebuild" >/dev/null 2>&1 || true
   exit 0
 fi
 

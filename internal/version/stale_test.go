@@ -263,6 +263,54 @@ func TestCheckStaleBinary_OnMainBehind(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinary_OnMainBranchLocalTipMatchesStaleBinary is the gt-h8s8
+// regression: RIG_ROOT's local main hasn't been pulled in a while, and the
+// binary was itself built from that same stale local tip — so binary and
+// local HEAD match exactly. The pre-fix gt-ugo fallback only triggered when
+// the binary was NOT an ancestor of local HEAD, which doesn't cover this
+// case (they're equal), so the old code reported "fresh" and mayor/rig's
+// run.sh never pulled or rebuilt. Comparing against origin/main (already
+// fetched ahead) must catch it.
+func TestCheckStaleBinary_OnMainBranchLocalTipMatchesStaleBinary(t *testing.T) {
+	remoteDir := newBareRemote(t)
+
+	dir := newGitRepo(t)
+	gitRun(t, dir, "remote", "add", "origin", remoteDir)
+	localTip := gitCommit(t, dir, "a.go", "1")
+	gitRun(t, dir, "branch", "-M", "main")
+	gitRun(t, dir, "push", "-q", "origin", "main")
+	// origin/main advances further (e.g. the refinery merging other work)
+	// without this worktree ever fetching again.
+	remoteTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "push", "-q", "origin", "main")
+	// Roll this worktree's local main back to its last-fetched tip so it no
+	// longer matches origin — but the binary was built from that same tip.
+	gitRun(t, dir, "reset", "-q", "--hard", localTip)
+	setBinaryCommit(t, localTip)
+
+	// Refresh the cached origin/main ref, as CheckStaleBinaryFresh would
+	// before calling CheckStaleBinary — simulating a rig that fetched but
+	// never fast-forwarded its local main pointer.
+	gitRun(t, dir, "fetch", "-q", "origin")
+
+	info := CheckStaleBinary(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.OnMainBranch {
+		t.Fatalf("OnMainBranch should be true on main")
+	}
+	if info.CompareRef != "origin/main" {
+		t.Errorf("CompareRef = %q, want \"origin/main\" (stale local main must not win just because it matches the binary)", info.CompareRef)
+	}
+	if !info.IsStale {
+		t.Fatalf("binary matching only the stale local tip, with origin/main ahead, must be reported stale")
+	}
+	if info.RepoCommit != remoteTip {
+		t.Errorf("RepoCommit = %q, want origin/main tip %q", info.RepoCommit, remoteTip)
+	}
+}
+
 // TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin: on main, but
 // the local branch pointer was never fast-forwarded past a commit that
 // predates the binary (e.g. refinery merged to origin without updating this
