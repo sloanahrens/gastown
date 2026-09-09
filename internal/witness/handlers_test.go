@@ -849,13 +849,13 @@ func installFakeTmuxNoServer(t *testing.T) {
 }
 
 // fakeBd creates a test-local *BdCli matching the old shell script behavior:
-// list→"[]", update→ok, show→cleanup wisp JSON. Returns BdCli and captured call log.
+// list/query→"[]", update→ok, show→cleanup wisp JSON. Returns BdCli and captured call log.
 func fakeBd() (*BdCli, *mockBdCalls) {
 	return mockBd(
 		func(args []string) (string, error) {
 			if len(args) > 0 {
 				switch args[0] {
-				case "list":
+				case "list", "query":
 					return "[]", nil
 				case "show":
 					return `[{"labels":["cleanup","polecat:testpol","state:pending"]}]`, nil
@@ -962,7 +962,7 @@ func TestHasPendingMRFromSnapshotAssessesMRStatus(t *testing.T) {
 						return "", nil
 					}
 					switch args[0] {
-					case "list":
+					case "list", "query":
 						return "[]", nil
 					case "show":
 						return tt.show(args[1])
@@ -987,7 +987,7 @@ func TestHasPendingMRUsesAgentLastSourceIssue(t *testing.T) {
 				return "", nil
 			}
 			switch args[0] {
-			case "list":
+			case "list", "query":
 				return "[]", nil
 			case "show":
 				switch args[1] {
@@ -1016,7 +1016,7 @@ func TestHasPendingMRFromSnapshotRequiresGitSafe(t *testing.T) {
 				return "", nil
 			}
 			switch args[0] {
-			case "list":
+			case "list", "query":
 				return "[]", nil
 			case "show":
 				if args[1] == "gt-mr" {
@@ -1092,7 +1092,7 @@ func TestTerminalSafeDoneSnapshot(t *testing.T) {
 	}
 }
 
-func TestFindCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
+func TestFindCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	t.Parallel()
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
@@ -1101,17 +1101,13 @@ func TestFindCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
 
 	got := strings.Join(mock.calls, "\n")
 
-	// Must use --label (singular), NOT --labels (plural)
-	if !strings.Contains(got, "--label") {
-		t.Errorf("findCleanupWisp: expected --label flag, got: %s", got)
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list" never sees them
+	// regardless of flags. Must use "bd query" with ephemeral=true instead.
+	if !strings.Contains(got, "query") {
+		t.Errorf("findCleanupWisp: expected \"bd query\", got: %s", got)
 	}
-	if strings.Contains(got, "--labels") {
-		t.Errorf("findCleanupWisp: must not use --labels (plural), got: %s", got)
-	}
-
-	// Must NOT use --ephemeral (invalid for bd list)
-	if strings.Contains(got, "--ephemeral") {
-		t.Errorf("findCleanupWisp: must not use --ephemeral (invalid for bd list), got: %s", got)
+	if !strings.Contains(got, "ephemeral=true") {
+		t.Errorf("findCleanupWisp: expected ephemeral=true filter, got: %s", got)
 	}
 
 	// Must include the polecat label filter
@@ -1120,7 +1116,7 @@ func TestFindCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
 	}
 }
 
-func TestFindAnyCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
+func TestFindAnyCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	t.Parallel()
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
@@ -1129,17 +1125,13 @@ func TestFindAnyCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
 
 	got := strings.Join(mock.calls, "\n")
 
-	// Must use --label (singular), NOT --labels (plural)
-	if !strings.Contains(got, "--label") {
-		t.Errorf("findAnyCleanupWisp: expected --label flag, got: %s", got)
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list" never sees them
+	// regardless of flags. Must use "bd query" with ephemeral=true instead.
+	if !strings.Contains(got, "query") {
+		t.Errorf("findAnyCleanupWisp: expected \"bd query\", got: %s", got)
 	}
-	if strings.Contains(got, "--labels") {
-		t.Errorf("findAnyCleanupWisp: must not use --labels (plural), got: %s", got)
-	}
-
-	// Must NOT use --ephemeral (invalid for bd list)
-	if strings.Contains(got, "--ephemeral") {
-		t.Errorf("findAnyCleanupWisp: must not use --ephemeral (invalid for bd list), got: %s", got)
+	if !strings.Contains(got, "ephemeral=true") {
+		t.Errorf("findAnyCleanupWisp: expected ephemeral=true filter, got: %s", got)
 	}
 
 	// Must include the polecat label filter
@@ -1161,7 +1153,7 @@ func TestFindAllCleanupWisps_ReturnsAllIDs(t *testing.T) {
 	t.Parallel()
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
-			if len(args) > 0 && args[0] == "list" {
+			if len(args) > 0 && args[0] == "query" {
 				return `[{"id":"gt-wisp-aaa"},{"id":"gt-wisp-bbb"}]`, nil
 			}
 			return "{}", nil
@@ -1180,8 +1172,13 @@ func TestFindAllCleanupWisps_ReturnsAllIDs(t *testing.T) {
 	}
 
 	got := strings.Join(mock.calls, "\n")
-	if !strings.Contains(got, "--label") {
-		t.Errorf("findAllCleanupWisps: expected --label flag, got: %s", got)
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list" never sees them
+	// regardless of flags. Must use "bd query" with ephemeral=true instead.
+	if !strings.Contains(got, "query") {
+		t.Errorf("findAllCleanupWisps: expected \"bd query\", got: %s", got)
+	}
+	if !strings.Contains(got, "ephemeral=true") {
+		t.Errorf("findAllCleanupWisps: expected ephemeral=true filter, got: %s", got)
 	}
 	if !strings.Contains(got, "polecat:nux") {
 		t.Errorf("findAllCleanupWisps: expected polecat:nux label, got: %s", got)

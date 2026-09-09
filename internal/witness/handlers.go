@@ -619,9 +619,11 @@ func createSwarmWisp(bd *BdCli, workDir string, payload *SwarmStartPayload) (str
 
 // findCleanupWisp finds an existing cleanup wisp for a polecat.
 func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
-	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("polecat:%s,state:merge-requested", polecatName),
-		"--status", "open",
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
+	// the issues table and never sees them, regardless of flags. Use "bd
+	// query" instead, same fix as findMRBeadForBranch (GH#2446).
+	output, err := bd.Exec(workDir, "query",
+		fmt.Sprintf("ephemeral=true AND label=polecat:%s AND label=state:merge-requested AND status=open", polecatName),
 		"--json",
 	)
 	if err != nil {
@@ -3311,9 +3313,11 @@ func sessionRecreated(t *tmux.Tmux, sessionName string, detectedAt time.Time) bo
 // regardless of state. Used to prevent duplicate escalation on repeated patrol
 // cycles for the same zombie.
 func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
-	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("cleanup,polecat:%s", polecatName),
-		"--status", "open",
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
+	// the issues table and never sees them, regardless of flags. Use "bd
+	// query" instead, same fix as findMRBeadForBranch (GH#2446).
+	output, err := bd.Exec(workDir, "query",
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
 		"--json",
 	)
 	if err != nil {
@@ -3335,9 +3339,11 @@ func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
 // Used for dedup after wisp creation to detect races between concurrent patrol
 // cycles (gt-7vs1). If the query fails, returns nil (caller treats as no race).
 func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
-	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("cleanup,polecat:%s", polecatName),
-		"--status", "open",
+	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
+	// the issues table and never sees them, regardless of flags. Use "bd
+	// query" instead, same fix as findMRBeadForBranch (GH#2446).
+	output, err := bd.Exec(workDir, "query",
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
 		"--json",
 	)
 	if err != nil {
