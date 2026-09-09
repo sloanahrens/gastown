@@ -5212,6 +5212,117 @@ func TestBdEmptyOutputIsError(t *testing.T) {
 	}
 }
 
+// TestBdWireLevelBannerOnlyStderrIsSuccess is the end-to-end regression test
+// gt-plj6 asked for. TestBdEmptyOutputIsError above only exercises the
+// bdEmptyOutputIsError helper directly, but the actual gt-iksp bug lived in
+// the '&& bdEmptyOutputIsError(...)' clause wired into TWO call sites —
+// runWithStdin (beads.go:936) and runWithRouting (beads.go:976) — and a
+// helper-only test stays green even if either clause is deleted, because the
+// helper would still exist and behave correctly in isolation. This drives
+// each real call site through a stubbed bd binary instead.
+func TestBdWireLevelBannerOnlyStderrIsSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	stubBD := func(t *testing.T, stderr string) {
+		stubDir := t.TempDir()
+		// Unix heredoc with a quoted delimiter emits stderr verbatim,
+		// reproducing bd's real "empty stdout, banner-only stderr, exit 0"
+		// shape from isolated mode (gt-iksp) without needing a real bd.
+		script := "#!/bin/sh\ncat >&2 <<'BD_STUB_EOF'\n" + stderr + "BD_STUB_EOF\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(script), 0755); err != nil {
+			t.Fatalf("write bd stub: %v", err)
+		}
+		t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+
+	tests := []struct {
+		name    string
+		stderr  string
+		wantErr bool
+	}{
+		{
+			name:    "banner-only stderr from a successful command is not an error",
+			stderr:  bdFirstRunMetricsNoticeText,
+			wantErr: false,
+		},
+		{
+			name:    "genuine error stderr with empty stdout is still an error",
+			stderr:  "Error: could not connect to dolt server\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run("runWithStdin/"+tc.name, func(t *testing.T) {
+			stubBD(t, tc.stderr)
+			b := NewIsolated(t.TempDir())
+			// Init -> run -> runWithStdin(nil, ...): the real path gt-iksp's
+			// bug report (gt-iksp) was filed against.
+			err := b.Init("")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Init() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+		t.Run("runWithRouting/"+tc.name, func(t *testing.T) {
+			stubBD(t, tc.stderr)
+			b := NewIsolated(t.TempDir())
+			_, err := b.runWithRouting("show", "tt-1")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("runWithRouting() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBdFirstRunMetricsNoticeConstantsMatchInstalledBd guards GAP 2 from
+// gt-plj6: bdFirstRunMetricsNoticeStart/End are literal substrings lifted
+// from bd 1.2.2's actual banner text (see stripFirstRunMetricsNotice in
+// beads.go). If a future bd reword changes that text, this is the ONE test
+// that should fail with a clear message pointing at the constants —
+// preventing a recurrence of the twelve unrelated failures gt-iksp fixed.
+// Runs the real installed bd against a fresh HOME so the first-run notice
+// actually fires; bd's embedded Dolt engine needs no server, so this is
+// unaffected by hermetic test harnesses that poison the Dolt port.
+func TestBdFirstRunMetricsNoticeConstantsMatchInstalledBd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not found on PATH")
+	}
+
+	workDir := t.TempDir()
+	fakeHome := t.TempDir()
+
+	cmd := exec.Command("bd", "init", "--quiet", "--non-interactive")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "HOME="+fakeHome)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init: %v\nstderr: %s", err, stderr.String())
+	}
+
+	raw := stderr.String()
+	startIdx := strings.Index(raw, bdFirstRunMetricsNoticeStart)
+	if startIdx == -1 {
+		t.Fatalf("installed bd's first-run banner no longer contains %q — update bdFirstRunMetricsNoticeStart.\nRaw stderr:\n%s", bdFirstRunMetricsNoticeStart, raw)
+	}
+	endIdx := strings.Index(raw, bdFirstRunMetricsNoticeEnd)
+	if endIdx == -1 {
+		t.Fatalf("installed bd's first-run banner no longer contains %q — update bdFirstRunMetricsNoticeEnd.\nRaw stderr:\n%s", bdFirstRunMetricsNoticeEnd, raw)
+	}
+	if endIdx < startIdx {
+		t.Fatalf("bdFirstRunMetricsNoticeEnd now appears before bdFirstRunMetricsNoticeStart in the installed bd's banner — stripFirstRunMetricsNotice would no longer bound it correctly.\nRaw stderr:\n%s", raw)
+	}
+
+	if got := bdEmptyOutputIsError(raw); got {
+		t.Fatalf("bdEmptyOutputIsError(installed bd's real first-run banner) = true, want false — stripFirstRunMetricsNotice no longer fully removes it.\nRaw stderr:\n%s", raw)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests — verify env behavior with real os.Environ()
 // ---------------------------------------------------------------------------
