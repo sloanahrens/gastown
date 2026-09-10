@@ -23,6 +23,67 @@ func stubNoContainers(t *testing.T) {
 	t.Cleanup(func() { runningGateContainers = orig })
 }
 
+// TestMatchGateContainers covers the `docker ps` output parsing/matching
+// logic in isolation: which lines count as a gate container, case
+// sensitivity, and non-matching/empty input.
+func TestMatchGateContainers(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want []string
+	}{
+		{
+			name: "empty output",
+			out:  "",
+			want: nil,
+		},
+		{
+			name: "no matching containers",
+			out:  "nginx:latest my-web-server\npostgres:16 my-db\n",
+			want: nil,
+		},
+		{
+			name: "matches dolt image",
+			out:  "dolt/dolt-sql-server:2.2.0 some-suite\n",
+			want: []string{"dolt/dolt-sql-server:2.2.0 some-suite"},
+		},
+		{
+			name: "matches testcontainers and ryuk, skips unrelated",
+			out: "nginx:latest my-web-server\n" +
+				"testcontainers/ryuk:0.5.1 reaper\n" +
+				"some/testcontainers-postgres:1.0 pg-suite\n",
+			want: []string{
+				"testcontainers/ryuk:0.5.1 reaper",
+				"some/testcontainers-postgres:1.0 pg-suite",
+			},
+		},
+		{
+			name: "matches regardless of case",
+			out:  "MyRegistry/DOLT-Server:latest CONTAINER-NAME\n",
+			want: []string{"MyRegistry/DOLT-Server:latest CONTAINER-NAME"},
+		},
+		{
+			name: "trims surrounding whitespace and blank lines",
+			out:  "\n\ndolt/dolt-sql-server:2.2.0 suite\n\n",
+			want: []string{"dolt/dolt-sql-server:2.2.0 suite"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchGateContainers(tt.out)
+			if len(got) != len(tt.want) {
+				t.Fatalf("matchGateContainers(%q) = %v, want %v", tt.out, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("matchGateContainers(%q)[%d] = %q, want %q", tt.out, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestAcquireReleaseStatus(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
