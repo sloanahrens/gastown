@@ -240,6 +240,37 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// runWithStdin executes a git command, feeding it stdin, and returns stdout.
+// Used for piping one git command's output into another (e.g. diff | patch-id)
+// without shelling out to a real shell pipeline.
+func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
+	if err := g.guardUnsafeTownRootMutation(args); err != nil {
+		return "", err
+	}
+
+	if g.gitDir != "" {
+		args = append([]string{"--git-dir=" + g.gitDir}, args...)
+	}
+
+	cmd := exec.Command("git", args...)
+	util.SetDetachedProcessGroup(cmd)
+	if g.workDir != "" {
+		cmd.Dir = g.workDir
+	}
+	cmd.Stdin = strings.NewReader(stdin)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+	}
+
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 func (g *Git) guardUnsafeTownRootMutation(args []string) error {
 	cmd, rest := gitSubcommand(args)
 	if cmd == "" {
@@ -1128,6 +1159,65 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 		args = append(args, "--force")
 	}
 	_, err := g.runWithEnvAndTimeout(args, env, pushTimeout)
+	return err
+}
+
+// ErrNoNote is returned by NotesShow when commit has no note under ref.
+var ErrNoNote = errors.New("no note")
+
+// PatchID returns the stable patch-id of the diff between base and head
+// (git diff base..head | git patch-id --stable), i.e. the first field of the
+// tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase
+// that leaves the diff content identical, and changes whenever the content
+// does — used to detect whether a reviewed range still matches its target.
+func (g *Git) PatchID(base, head string) (string, error) {
+	diff, err := g.run("diff", base+".."+head)
+	if err != nil {
+		return "", err
+	}
+	out, err := g.runWithStdin(diff, "patch-id", "--stable")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("git patch-id produced no output for range %s..%s", base, head)
+	}
+	return fields[0], nil
+}
+
+// NotesAdd attaches content as a note on commit under the given notes ref,
+// overwriting any note already there (git notes --ref <ref> add -f -m).
+func (g *Git) NotesAdd(ref, commit, content string) error {
+	_, err := g.run("notes", "--ref", ref, "add", "-f", "-m", content, commit)
+	return err
+}
+
+// NotesShow returns the note content on commit under ref, or ErrNoNote if
+// commit has no note there.
+func (g *Git) NotesShow(ref, commit string) (string, error) {
+	out, err := g.run("notes", "--ref", ref, "show", commit)
+	if err != nil {
+		var ge *GitError
+		if errors.As(err, &ge) && strings.Contains(ge.Stderr, "no note found") {
+			return "", ErrNoNote
+		}
+		return "", err
+	}
+	return out, nil
+}
+
+// NotesCopy copies the note on from to on under ref, overwriting any note
+// already on to (git notes --ref <ref> copy -f).
+func (g *Git) NotesCopy(ref, from, to string) error {
+	_, err := g.run("notes", "--ref", ref, "copy", "-f", from, to)
+	return err
+}
+
+// PushNotes pushes the notes ref to remote (git push <remote> refs/notes/<ref>),
+// with the same hang-prevention timeout as Push.
+func (g *Git) PushNotes(remote, ref string) error {
+	_, err := g.runWithTimeout(pushTimeout, "push", remote, "refs/notes/"+ref)
 	return err
 }
 
