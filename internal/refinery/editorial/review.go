@@ -151,7 +151,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 
 	head := req.RehearsedHead
 	if head == "" {
-		rehearsed, err := rehearse(deps.Git, req.Target, req.Branch)
+		rehearsed, err := Rehearse(deps.Git, req.Target, req.Branch)
 		if err != nil {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("rehearsal failed: %v", err), 0)
 		}
@@ -330,11 +330,17 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 	return &v, "", nil
 }
 
-// rehearse merges origin/<branch> into a temp branch cut from origin/<target>
+// Rehearse merges origin/<branch> into a temp branch cut from origin/<target>
 // and returns the resulting head sha, so the review sees exactly what would
 // land. Callers that already rehearsed (or are re-reviewing a fixed head)
 // pass ReviewRequest.RehearsedHead instead and skip this.
-func rehearse(g *git.Git, target, branch string) (string, error) {
+//
+// Exported so batch callers (om-gate T7) can rehearse every candidate
+// sequentially — each rehearsal checks out a temp branch in the shared
+// working directory, so it is not safe to call concurrently — before
+// running Run itself with bounded parallelism via RehearsedHead, which
+// skips this step entirely.
+func Rehearse(g *git.Git, target, branch string) (string, error) {
 	if err := g.Fetch("origin"); err != nil {
 		return "", fmt.Errorf("fetch origin: %w", err)
 	}

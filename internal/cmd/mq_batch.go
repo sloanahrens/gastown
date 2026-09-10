@@ -316,13 +316,22 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 
 	if mqBatchRunJSON {
 		type jsonResult struct {
-			Merged      []*refinery.MRInfo `json:"merged"`
-			Culprits    []*refinery.MRInfo `json:"culprits"`
-			Conflicts   []*refinery.MRInfo `json:"conflicts"`
-			MergeCommit string             `json:"merge_commit,omitempty"`
-			Error       string             `json:"error,omitempty"`
+			Merged      []*refinery.MRInfo    `json:"merged"`
+			Culprits    []*refinery.MRInfo    `json:"culprits"`
+			Conflicts   []*refinery.MRInfo    `json:"conflicts"`
+			Reviewed    []refinery.ReviewedMR `json:"reviewed,omitempty"`
+			Ejected     []refinery.EjectedMR  `json:"ejected,omitempty"`
+			MergeCommit string                `json:"merge_commit,omitempty"`
+			Error       string                `json:"error,omitempty"`
 		}
-		out := jsonResult{Merged: result.Merged, Culprits: result.Culprits, Conflicts: result.Conflicts, MergeCommit: result.MergeCommit}
+		out := jsonResult{
+			Merged:      result.Merged,
+			Culprits:    result.Culprits,
+			Conflicts:   result.Conflicts,
+			Reviewed:    result.Reviewed,
+			Ejected:     result.Ejected,
+			MergeCommit: result.MergeCommit,
+		}
 		if result.Error != nil {
 			out.Error = result.Error.Error()
 		}
@@ -334,6 +343,13 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		printMQBatchIDs("Merged", result.Merged)
 		printMQBatchIDs("Culprits (isolated by bisection)", result.Culprits)
 		printMQBatchIDs("Conflicts (left in queue)", result.Conflicts)
+		if len(result.Ejected) > 0 {
+			ids := make([]string, len(result.Ejected))
+			for i, ej := range result.Ejected {
+				ids[i] = fmt.Sprintf("%s (%s)", ej.ID, ej.Reason)
+			}
+			fmt.Printf("  %s: %s\n", "Ejected (patch-id changed on stack)", strings.Join(ids, ", "))
+		}
 		if result.MergeCommit != "" {
 			fmt.Printf("  Merge commit: %s\n", result.MergeCommit)
 		}

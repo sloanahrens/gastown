@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -278,7 +279,8 @@ type Engineer struct {
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
 	recoverDeadWorker     func(deadWorkerRecoveryRequest) bool
-	testAllowSyntheticMRs bool // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
+	testAllowSyntheticMRs bool               // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
+	editorialExec         editorial.ExecFunc // Gate-script invoker for batch editorial reviews; production: editorial.RunGateScript, tests override with a stub.
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -313,6 +315,7 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		},
 		mergeSlotMaxRetries:   10,
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
+		editorialExec:         editorial.RunGateScript,
 	}
 	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
 		// Read e.router/e.output/e.beads fresh on each call (SetOutput may run
