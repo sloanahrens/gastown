@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -119,12 +120,12 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 	// 2. Databases (only if server is running)
 	if report.Server.Running {
-		report.Databases = checkDatabaseHealth(report.Server.Port)
+		report.Databases = checkDatabaseHealth(townRoot, report.Server.Port)
 	}
 
 	// 3. Pollution scan
 	if report.Server.Running {
-		report.Pollution = checkPollution(report.Server.Port)
+		report.Pollution = checkPollution(townRoot, report.Server.Port)
 	}
 
 	// 4. Backups
@@ -177,8 +178,31 @@ func checkServerHealth(townRoot string) *ServerHealth {
 	return sh
 }
 
-func checkDatabaseHealth(port int) []DatabaseHealth {
-	productionDBs := []string{"hq", "gt", "mo"}
+// productionDatabaseNames returns the real set of production databases —
+// town beads (hq) plus every rig's beads database — derived the same way as
+// `gt dolt status`/orphan detection (doltserver.CollectDatabaseOwners), instead
+// of a hardcoded list that drifts from rigs.json as rigs are added or renamed
+// (gt-lekn: a stale list invented a nonexistent "mo" db and omitted "be"/"om").
+func productionDatabaseNames(townRoot string) []string {
+	owners := doltserver.CollectDatabaseOwners(townRoot)
+	names := make([]string, 0, len(owners))
+	for name := range owners {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// Report "hq" first when present — it's the town database, not a rig.
+	for i, name := range names {
+		if name == "hq" && i != 0 {
+			names[0], names[i] = names[i], names[0]
+			break
+		}
+	}
+	return names
+}
+
+func checkDatabaseHealth(townRoot string, port int) []DatabaseHealth {
+	productionDBs := productionDatabaseNames(townRoot)
 	var results []DatabaseHealth
 
 	for _, dbName := range productionDBs {
@@ -218,8 +242,8 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 	return results
 }
 
-func checkPollution(port int) []PollutionRecord {
-	productionDBs := []string{"hq", "gt", "mo"}
+func checkPollution(townRoot string, port int) []PollutionRecord {
+	productionDBs := productionDatabaseNames(townRoot)
 	var records []PollutionRecord
 
 	// Known pollution patterns to check in the issues table.
