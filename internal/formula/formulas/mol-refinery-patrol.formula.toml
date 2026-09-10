@@ -86,13 +86,12 @@ resolve that placeholder with this rule:
 - FORBIDDEN: Landing integration branches to the default branch via raw git commands (`git merge`, `git push`).
   Integration branches may ONLY be landed via `gt mq integration land <epic-id>`.
   This applies regardless of `auto_land` configuration. The pre-push hook enforces this.
-- FORBIDDEN: Reviewing (self-review or `om review`) a raw `origin/<polecat-branch>`
-  against `origin/<merge-target>` with a two-dot diff or a bare `--base <target>
-  --head <branch>` invocation before rehearsal. If the branch forked behind a
-  target that has since moved, that comparison shows the target's own later
-  merges as deletions authored by the polecat — a false "this reverts X"
-  verdict (gt-oh41). Always review the rehearsed `temp` branch produced by
-  process-branch, or an explicit three-dot diff / `om review --branch`.
+- FORBIDDEN: Invoking `gt mq review` against the raw `origin/<polecat-branch>`
+  instead of the rehearsed `temp` branch. If the branch forked behind a
+  target that has since moved, an unrehearsed comparison shows the target's
+  own later merges as deletions authored by the polecat — a false "this
+  reverts X" verdict (gt-oh41). Always pass `--rehearsed temp`, the branch
+  process-branch already built.
 
 ## Step Execution Order
 
@@ -372,7 +371,6 @@ description = """
 **Config: batch_min_age = {{batch_min_age}}**
 **Config: batch_max = {{batch_max}}**
 **Config: batch_min_count = {{batch_min_count}}**
-**Config: judgment_enabled = {{judgment_enabled}}**
 
 **If batch_enabled = "false": SKIP this entire step, proceed to process-branch
 (single-MR path).**
@@ -397,56 +395,22 @@ priority score, and caps at batch_max. Read `.eligible_total` from the output.
 proceed to process-branch.** Not enough has queued up to be worth batching
 this cycle — the single-MR path will process what's ready.
 
-**Step 2: If judgment_enabled = "true", pre-filter candidates through om review**
+**Step 2: Reviews happen inside `gt mq batch run` — do not review candidates here**
 
-The batch gate only re-runs the test suite — it does not review diffs. Before
-assembling the batch, review each candidate MR's branch in parallel (so this
-doesn't cost more wall-clock than reviewing one).
-
-**⚠ Same REBASE-BEFORE-REVIEW precondition as quality-review (gt-oh41):**
-Do NOT invoke `om review --base <target> --head <branch>` here — that's a
-bare two-dot comparison of the MR's un-rehearsed tip, which misattributes
-any later-merged main commits the branch hasn't rebased past as deletions
-authored by the polecat (see quality-review's precondition above; this
-happened for real on gt-wisp-bakv). Rehearsing each candidate onto a temp
-branch first (as process-branch does) would work but costs a checkout per
-candidate; use `om review --branch`, the same target-drift-immune fallback
-quality-review itself falls back to — it reviews since the branch's
-merge-base with the default branch, equivalent to a three-dot diff, with no
-rehearsal needed:
-
-```bash
-CANDIDATES=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json)
-IDS=$(echo "$CANDIDATES" | jq -r '.batch[].ID')
-APPROVED=()
-for id in $IDS; do
-  branch=$(echo "$CANDIDATES" | jq -r --arg id "$id" '.batch[] | select(.ID==$id) | .Branch')
-  (
-    om review --branch "$branch" -C . --depth {{review_depth}}
-    echo "$id:$?" >> /tmp/om-batch-$$.result
-  ) &
-done
-wait
-```
-
-Any MR whose recorded exit code is 1 (request_changes) is dropped — it simply
-stays in the queue and gets reviewed again individually next cycle, same as
-a single-MR quality-review rejection. Exit code 2 (execution error) is
-fail-open by default: keep the MR in the batch. Build `APPROVED` from the
-IDs with exit 0 (or fail-open 2).
-
-If judgment_enabled = "false", skip straight to Step 3 with all candidates.
+`gt mq batch run` reviews every member itself: it runs the same `gt mq
+review` editorial check per candidate (bounded by the rig's review
+parallelism) before stacking, and ejects any member whose patch-id changed
+during stacking rather than landing a diff nobody reviewed. Do not pre-filter
+candidates with a parallel review loop here — proceed straight to Step 3
+with all eligible candidates.
 
 **Step 3: Assemble, gate, and land the batch**
 
 ```bash
-gt mq batch run <rig> --min-age {{batch_min_age}} --max {{batch_max}} --only <comma-separated APPROVED ids> --json
+gt mq batch run <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
 ```
 
-(Omit `--only` entirely if judgment_enabled = "false" — batch every eligible
-candidate.)
-
-This one command stacks the approved MRs via ancestry-preserving merges, runs
+This one command reviews and stacks the approved MRs via ancestry-preserving merges, runs
 the configured gate commands once, and either fast-forwards the whole batch to
 {{target_branch}} or bisects to isolate a red MR and lands the rest. It also
 runs the same post-merge cleanup as a single-MR merge (closes MR + source
@@ -528,8 +492,8 @@ make `temp` safe to review, not only to test the merge. Once it succeeds,
 `temp`'s merge-base with `origin/<merge-target>` IS `origin/<merge-target>`'s
 current tip, so a three-dot diff and a plain diff against `temp` agree by
 construction. The raw `origin/<polecat-branch>` — before this rehearsal —
-is NOT safe to review directly: see quality-review's precondition check
-before handing any diff (self-review or `om review`) to a reviewer.
+is NOT safe to pass to `gt mq review` directly: quality-review always
+invokes it with `--rehearsed temp`, this branch.
 
 **Step 2: Check merge rehearsal result**
 
@@ -668,109 +632,84 @@ Track results: pass count, fail count, specific failures."""
 
 [[steps]]
 id = "quality-review"
-title = "Quality review merge diff"
+title = "Editorial review via gt mq review"
 needs = ["run-tests"]
 description = """
-**Config: judgment_enabled = {{judgment_enabled}}**
-**Config: review_depth = {{review_depth}}**
+`gt mq review` is the single invoker of om: it accepts the already-rehearsed
+`temp` branch process-branch built, asserts the harness manifest version,
+invokes the rig's editorial gate, classifies the outcome, retries once for
+transient failures, and on a verdict writes a git note and a receipt bead.
+Never invoke om directly from this formula — always go through this command.
 
-Review the merge diff for quality issues. This step is measurement-only (Phase 1):
-reviews are recorded but do NOT gate merges.
-
-**⚠ REBASE-BEFORE-REVIEW (mandatory precondition, gt-oh41):** Review ONLY
-the rehearsed `temp` branch process-branch already built. NEVER review the
-raw `origin/<polecat-branch>` against `origin/<merge-target>` with a
-two-dot diff, and never invoke `om review --base <merge-target> --head
-<polecat-branch>` against the un-rehearsed tips. If the branch forked
-behind a target that has since moved (e.g. other MRs merged while it
-queued), that comparison presents the target's own later merges as
-DELETIONS authored by the polecat — a false, specific, technically-worded
-"this reverts X" verdict with no tell that it's wrong. This happened on
-gt-wisp-bakv: a two-dot review reported two refinery merges the branch
-never touched as deleted guards.
-
-Cheap check for staleness, if you ever need to reason about the raw branch
-directly (e.g. before rehearsal exists):
-```bash
-git rev-list --count origin/<polecat-branch>..origin/<merge-target>
-```
-Nonzero = the branch is behind = a two-dot review of it is contaminated.
-
-**Step 1: Check if quality review is enabled**
-
-If judgment_enabled is not "true", skip this step entirely and proceed to
-handle-failures. Log: "Quality review skipped (judgment_enabled=false)"
-
-**Step 2: Get the merge diff**
-
-Resolve `<merge-target>` via the **Target Resolution Rule** above — do not
-hardcode `main`.
+**Step 1: Run the review against the rehearsed branch**
 
 ```bash
-git diff origin/<merge-target>...temp
+REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --json)
+REVIEW_EXIT=$?
 ```
 
-If using `om review` instead of (or alongside) self-review, invoke it
-against the rehearsed branch, never the raw one:
-```bash
-om review --base <merge-target> --head temp
-```
+**Step 2: Branch on the exit code**
 
-**Fallback (no rehearsal available):** review forms that are immune to
-target drift by construction — `om review --branch <polecat-branch>`
-(reviews since the merge-base, same as three-dot) or an explicit
-`git diff origin/<merge-target>...origin/<polecat-branch>`. Never a bare
-`--base <target> --head <branch>` two-dot comparison of un-rehearsed tips.
+**Exit 0 — approve:** Continue to handle-failures, then merge-push, as normal.
 
-If the diff is empty, skip with: "No diff to review"
+**Exit 1 — request_changes:** The rehearsed branch has editorial findings.
+- Abort the rehearsal (same cleanup as a test/build rejection):
+  ```bash
+  git checkout {{target_branch}}
+  git branch -D temp
+  ```
+- Send FIX_NEEDED directly to the polecat:
+  ```bash
+  gt mail send <rig>/polecats/<polecat-name> -s "FIX_NEEDED <polecat-name>" --stdin <<'BODY'
+  Branch: <branch>
+  Issue: <issue-id>
+  Polecat: <polecat-name>
+  Rig: <rig>
+  Target: <target-branch>
+  Failed-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+  Failure-Type: om-editorial
+  Error: findings are on MR bead <mr-bead-id> and source issue <issue-id>
+  MR-Bead-ID: <mr-bead-id>
+  Attempt-Number: <N>
+  BODY
+  ```
+- Update the bead with MERGE REJECTION notes, using the exact vocabulary and
+  the same polecat-liveness check and dead-polecat RECOVERED_BEAD redispatch
+  that handle-failures uses for test/build rejections (see that step) — an
+  editorial rejection sent to a polecat that already exited would otherwise
+  sit unread forever:
+  ```bash
+  bd update <issue-id> --notes "MERGE REJECTION (attempt <N>): om-editorial - findings on MR bead <mr-bead-id>
+  Branch: <branch>
+  Target: <target-branch>
+  MR: <mr-bead-id>"
+  ```
+- Do NOT close the MR bead. Do NOT delete the polecat branch.
+- Archive the MERGE_READY message and skip to loop-check.
 
-**Step 3: Review the diff**
+**Exit 2 — execution error (never an approval):** `gt mq review` could not
+produce a verdict — binary missing, version mismatch, backend timeout, or
+similar. This is an infra failure, not a judgment on the branch.
+- Read the failure class from the captured JSON:
+  ```bash
+  echo "$REVIEW_JSON" | jq -r '.Class'
+  ```
+- Leave the MR bead open and the branch intact — do not touch either.
+- Escalate to the witness with the failure class:
+  ```bash
+  gt mail send <rig>/witness -s "HELP: gt mq review failed" -m "MR: <mr-bead-id>
+  Issue: <issue-id>
+  Branch: <branch>
+  failure_class: <class from above>"
+  ```
+- Clean up the temp branch and skip to loop-check:
+  ```bash
+  git checkout {{target_branch}}
+  git branch -D temp
+  ```
+- Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
 
-Review the diff yourself using your judgment. Assess:
-
-1. **Correctness**: Logic errors, off-by-one, nil/null handling, race conditions
-2. **Security**: Injection, auth bypass, secrets in code, unsafe deserialization
-3. **Clarity**: Naming, structure, comments where non-obvious
-4. **Style**: Consistency with surrounding code, idiomatic patterns
-
-Depth is controlled by review_depth:
-- `quick`: Focus on correctness and security only. Skim for obvious issues.
-- `standard`: All four categories. Moderate detail.
-- `deep`: Thorough line-by-line review. Flag even minor style issues.
-
-**Step 4: Score and recommend**
-
-Assign a score from 0.0 to 1.0:
-- 0.9-1.0: Excellent — no issues or only trivial nits
-- 0.7-0.89: Good — minor issues only
-- 0.45-0.69: Needs work — significant issues found
-- 0.0-0.44: Breach — critical issues (security, correctness)
-
-Recommendation:
-- `approve`: Score >= 0.45
-- `request_changes`: Score < 0.45
-
-**Step 5: Record the result as a wisp**
-
-Record the quality review result. This is fail-open: if the command fails,
-log the error and continue — never block the merge.
-
-```bash
-gt plugin record-run --plugin quality-review-result --result success --rig <rig-name> \\
-  --label worker:<polecat-name> --label score:<score> --label recommendation:<approve|request_changes> \\
-  --title "quality-review: Score <score>, <recommendation>" \\
-  --description "Score: <score>, <recommendation>. Issues: <count> (<summary>)" >/dev/null 2>&1 || true
-```
-
-**Step 6: Handle breach scores (measurement-only)**
-
-If score < 0.45 (breach threshold):
-- Add a note to your merge summary: "Warning: Quality review breach (score: X.XX)"
-- List the critical/major issues found
-- Do NOT block the merge — Phase 1 is measurement-only
-- Proceed to handle-failures normally
-
-Track: review score, recommendation, issue count, duration."""
+Track: review exit code, failure class (exit 2 only)."""
 
 [[steps]]
 id = "handle-failures"
