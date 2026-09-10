@@ -224,6 +224,18 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.processSingleMR(ctx, batch[0], target)
 	}
 
+	// merge_strategy=pr routes single MRs through the VCS provider's PR merge
+	// API (doMerge -> doMergePR) so branch protection/required-review rules
+	// apply. fastForwardBatch below has no PR equivalent — it merges locally
+	// and pushes straight to target — so batching more than one MR together
+	// would bypass those rules entirely. Refuse rather than silently do that;
+	// these MRs fall back to the single-MR path, which already handles PR mode.
+	if e.config.MergeStrategy == "pr" {
+		_, _ = fmt.Fprintln(e.output, "[Batch] merge_strategy=pr does not support multi-MR batching (would bypass PR review/branch protection) — refusing batch, process these MRs individually instead")
+		result.Error = fmt.Errorf("batch processing does not support merge_strategy=pr (%d MRs in batch)", len(batch))
+		return result
+	}
+
 	_, _ = fmt.Fprintf(e.output, "[Batch] Processing batch of %d MRs targeting %s\n", len(batch), target)
 	if !e.recheckBatchEligibility(batch, target, result) {
 		return result

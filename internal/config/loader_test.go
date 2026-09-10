@@ -440,6 +440,70 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 	if cfg.StaleClaimTimeout != "30m" {
 		t.Errorf("StaleClaimTimeout = %q, want '30m'", cfg.StaleClaimTimeout)
 	}
+	if cfg.IsBatchEnabled() {
+		t.Error("IsBatchEnabled should be false by default")
+	}
+	if cfg.GetBatchMinAge() != "1h" {
+		t.Errorf("GetBatchMinAge() = %q, want '1h'", cfg.GetBatchMinAge())
+	}
+	if cfg.GetBatchMax() != 12 {
+		t.Errorf("GetBatchMax() = %d, want 12", cfg.GetBatchMax())
+	}
+	if cfg.GetBatchMinCount() != 4 {
+		t.Errorf("GetBatchMinCount() = %d, want 4", cfg.GetBatchMinCount())
+	}
+}
+
+func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
+	t.Parallel()
+	var cfg MergeQueueConfig // zero value, as if unmarshaled from JSON with no batch_* keys
+
+	if cfg.IsBatchEnabled() {
+		t.Error("IsBatchEnabled should default to false on zero value")
+	}
+	if got := cfg.GetBatchMinAge(); got != "1h" {
+		t.Errorf("GetBatchMinAge() = %q, want '1h'", got)
+	}
+	if got := cfg.GetBatchMax(); got != 12 {
+		t.Errorf("GetBatchMax() = %d, want 12", got)
+	}
+	if got := cfg.GetBatchMinCount(); got != 4 {
+		t.Errorf("GetBatchMinCount() = %d, want 4", got)
+	}
+	cfg.BatchMinCount = 8
+	if got := cfg.GetBatchMinCount(); got != 8 {
+		t.Errorf("GetBatchMinCount() = %d, want 8 (explicit override)", got)
+	}
+}
+
+func TestValidateMergeQueueConfig_Batch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     *MergeQueueConfig
+		wantErr bool
+	}{
+		{name: "valid batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "90m"}, wantErr: false},
+		{name: "empty batch_min_age is valid (uses default)", cfg: &MergeQueueConfig{}, wantErr: false},
+		{name: "unparseable batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "not-a-duration"}, wantErr: true},
+		{name: "zero batch_min_age is invalid", cfg: &MergeQueueConfig{BatchMinAge: "0s"}, wantErr: true},
+		{name: "negative batch_max is invalid", cfg: &MergeQueueConfig{BatchMax: -1}, wantErr: true},
+		{name: "positive batch_max is valid", cfg: &MergeQueueConfig{BatchMax: 20}, wantErr: false},
+		{name: "negative batch_min_count is invalid", cfg: &MergeQueueConfig{BatchMinCount: -1}, wantErr: true},
+		{name: "positive batch_min_count is valid", cfg: &MergeQueueConfig{BatchMinCount: 8}, wantErr: false},
+		{name: "zero batch_min_count is valid (uses default)", cfg: &MergeQueueConfig{BatchMinCount: 0}, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateMergeQueueConfig(tt.cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateMergeQueueConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 // TestMergeQueueConfig_HasAnyGateCommand guards the gt-k4sy fix: gt done's
@@ -587,6 +651,25 @@ func TestMergeSettingsCommand(t *testing.T) {
 		result := MergeSettingsCommand(nil, local)
 		if result.TestCommand != "local-test" {
 			t.Errorf("expected 'local-test', got %q", result.TestCommand)
+		}
+	})
+
+	t.Run("local overrides batch settings", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5, BatchMinCount: 3}
+		local := &MergeQueueConfig{BatchEnabled: boolPtr(true), BatchMax: 20}
+		result := MergeSettingsCommand(repo, local)
+		if !result.IsBatchEnabled() {
+			t.Error("expected batch_enabled=true from local override")
+		}
+		if result.BatchMinAge != "2h" {
+			t.Errorf("expected batch_min_age='2h' (not overridden by local), got %q", result.BatchMinAge)
+		}
+		if result.BatchMax != 20 {
+			t.Errorf("expected batch_max=20 from local override, got %d", result.BatchMax)
+		}
+		if result.BatchMinCount != 3 {
+			t.Errorf("expected batch_min_count=3 (not overridden by local), got %d", result.BatchMinCount)
 		}
 	})
 

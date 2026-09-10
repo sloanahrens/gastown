@@ -10,14 +10,21 @@ func TestRefineryPatrolMergedPRSweepUsesAuthoritativeLookup(t *testing.T) {
 
 	queueScan := requireFormulaStep(t, f, "queue-scan")
 	mergedSweep := requireFormulaStep(t, f, "merged-pr-sweep")
+	batchScan := requireFormulaStep(t, f, "batch-scan")
 	processBranch := requireFormulaStep(t, f, "process-branch")
 	mergePush := requireFormulaStep(t, f, "merge-push")
 
 	if !containsStepNeed(mergedSweep, "queue-scan") {
 		t.Fatalf("merged-pr-sweep needs = %v, want queue-scan", mergedSweep.Needs)
 	}
-	if !containsStepNeed(processBranch, "merged-pr-sweep") {
-		t.Fatalf("process-branch needs = %v, want merged-pr-sweep", processBranch.Needs)
+	// process-branch now runs after batch-scan (gt-hqji), which itself runs
+	// after merged-pr-sweep — merged-pr-sweep still precedes process-branch,
+	// just transitively.
+	if !containsStepNeed(batchScan, "merged-pr-sweep") {
+		t.Fatalf("batch-scan needs = %v, want merged-pr-sweep", batchScan.Needs)
+	}
+	if !containsStepNeed(processBranch, "batch-scan") {
+		t.Fatalf("process-branch needs = %v, want batch-scan", processBranch.Needs)
 	}
 
 	for _, step := range []struct {
