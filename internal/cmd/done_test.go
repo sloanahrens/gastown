@@ -2289,3 +2289,65 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+// TestDoneNoMergeUnmergedBranchReason covers gt-ntqf's prevention half: a
+// no_merge/PR-review branch must not be treated as mergeable-and-closeable
+// just because it was pushed. gt-fcsf's shape was a source issue closed at
+// gt-done time while its branch (no MR, or a rejected one) sat unmerged with
+// nothing left to notice or re-sling it.
+func TestDoneNoMergeUnmergedBranchReason(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	local := filepath.Join(tmp, "local")
+	testRunGit(t, tmp, "clone", remote, local)
+	testRunGit(t, local, "config", "user.email", "test@test.com")
+	testRunGit(t, local, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(local, "README.md"), []byte("# hi\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "initial commit")
+	testRunGit(t, local, "push", "origin", "main")
+
+	g := gitpkg.NewGit(local)
+
+	// A no-op / no-commit close (e.g. genuine report-only task) must not be
+	// blocked by this check — nothing to verify.
+	if reason := doneNoMergeUnmergedBranchReason(g, "main", ""); reason != "" {
+		t.Fatalf("empty commit should not block close, got %q", reason)
+	}
+
+	// Push a feature branch with unmerged work (the no_merge/PR-review shape:
+	// branch pushed to origin, source issue about to be closed anyway).
+	testRunGit(t, local, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(local, "feature.txt"), []byte("wip\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "feature work")
+	featureSHA, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev feature: %v", err)
+	}
+	testRunGit(t, local, "push", "origin", "feature")
+
+	reason := doneNoMergeUnmergedBranchReason(g, "main", featureSHA)
+	if reason == "" {
+		t.Fatal("expected a hold reason for a branch not yet merged into main, got none")
+	}
+
+	// Once the same commit actually lands on main, the hold must clear.
+	testRunGit(t, local, "checkout", "main")
+	testRunGit(t, local, "merge", "--ff-only", "feature")
+	testRunGit(t, local, "push", "origin", "main")
+
+	if reason := doneNoMergeUnmergedBranchReason(g, "main", featureSHA); reason != "" {
+		t.Fatalf("expected no hold reason once merged into main, got %q", reason)
+	}
+}

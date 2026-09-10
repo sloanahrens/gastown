@@ -460,6 +460,28 @@ func doneDirectMergeSkipReason(bd *beads.Beads, issueID string, issue *beads.Iss
 	return ""
 }
 
+// doneNoMergeUnmergedBranchReason returns a non-empty reason when a
+// no-merge/PR-review branch's pushed commit is not yet reachable from the
+// target branch on origin. This is the gt-ntqf prevention half: a no_merge
+// task with real code (merge_strategy=pr, or any other case where commits
+// exist) previously closed its source issue right after pushing the feature
+// branch, with the branch itself left unmerged and nothing to notice or
+// re-sling it — the same orphan shape gt-2usm fixed for rejected MRs, but
+// with no MR bead at all. If the reachability check itself fails for any
+// reason (network, missing branch, etc.), that counts as "not verified
+// merged" too — fail closed rather than closing an issue we can't confirm
+// landed.
+func doneNoMergeUnmergedBranchReason(g *git.Git, defaultBranch, commit string) string {
+	commit = strings.TrimSpace(commit)
+	if g == nil || commit == "" || defaultBranch == "" {
+		return ""
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, commit); err != nil {
+		return fmt.Sprintf("commit %s not yet merged into %s: %v", commit, defaultBranch, err)
+	}
+	return ""
+}
+
 func doneSourceCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
@@ -1625,6 +1647,29 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 							return fmt.Errorf("cannot complete review-only/no-merge work: %s", skipReason)
 						}
 						canCloseIssue = false
+					}
+					// gt-ntqf: the branch has commits (that's how we got into this
+					// no-merge block at all — the aheadCount==0 case exits earlier).
+					// Don't close the source issue while those commits sit unmerged
+					// on origin, PR or no PR — record the hold on the bead itself so
+					// it survives this polecat's session death.
+					// Recompute HEAD directly rather than trusting pushedCommitSHA:
+					// a resumed gt done (CheckpointPushed already set) jumps straight
+					// to afterPush and never populates that variable.
+					if canCloseIssue {
+						noMergeHeadSHA, _ := g.Rev("HEAD")
+						if unmergedReason := doneNoMergeUnmergedBranchReason(g, defaultBranch, noMergeHeadSHA); unmergedReason != "" {
+							holdReason := fmt.Sprintf("gt done hold: %s (branch: %s)", unmergedReason, branch)
+							if prURL != "" {
+								holdReason = fmt.Sprintf("gt done hold: %s (branch: %s, pr: %s)", unmergedReason, branch, prURL)
+							}
+							style.PrintWarning("%s", holdReason)
+							if commentErr := noMergeBd.AddComment(issueID, holdReason); commentErr != nil {
+								style.PrintWarning("could not record hold comment on %s: %v", issueID, commentErr)
+							}
+							notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, holdReason)
+							canCloseIssue = false
+						}
 					}
 					if canCloseIssue && attachmentFields.AttachedMolecule != "" {
 						if n := closeDescendants(noMergeBd, attachmentFields.AttachedMolecule); n > 0 {
