@@ -427,16 +427,78 @@ func escapeSQLString(s string) string {
 // For town-level agents (mayor/, deacon/), also includes the variant without
 // trailing slash for backwards compatibility with legacy messages.
 func (m *Mailbox) identityVariants() []string {
-	variants := []string{m.identity}
+	return identityVariantsFor(m.identity)
+}
+
+// identityVariantsFor returns all identity formats to query for a given
+// identity/address. Standalone so batch queries (see BatchMailSummaries) can
+// build a combined identity list without needing a Mailbox per address.
+func identityVariantsFor(identity string) []string {
+	variants := []string{identity}
 
 	// Town-level agents may have legacy messages without trailing slash
-	if m.identity == "mayor/" {
+	if identity == "mayor/" {
 		variants = append(variants, "mayor")
-	} else if m.identity == "deacon/" {
+	} else if identity == "deacon/" {
 		variants = append(variants, "deacon")
 	}
 
 	return variants
+}
+
+// issueBatchRow is one row from queryIssueMessagesBatch: an issue-backed
+// gt:message matched by assignee or by a watched cc: label.
+type issueBatchRow struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Assignee    string `json:"assignee"`
+	CCLabelsCSV string `json:"cc_labels_csv"`
+}
+
+// queryIssueMessagesBatch fetches all open/hooked gt:message issues assigned
+// to, or CC'ing, any of the given identities in a single bd sql call — O(1)
+// regardless of len(identities), unlike queryIssueMessagesByAssignee/
+// queryIssueMessagesByCC which issue one bd list call per identity. Used by
+// Router.BatchMailSummaries (see gt-978i).
+func queryIssueMessagesBatch(workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
+	if len(identities) == 0 {
+		return nil, nil
+	}
+
+	ccLabels := make([]string, 0, len(identities))
+	for _, id := range identities {
+		ccLabels = append(ccLabels, "cc:"+id)
+	}
+	identityList := sqlStringList(identities)
+	ccLabelList := sqlStringList(ccLabels)
+
+	query := fmt.Sprintf(
+		"SELECT i.id, i.title, i.status, i.assignee, "+
+			"GROUP_CONCAT(DISTINCT cc.label) AS cc_labels_csv "+
+			"FROM issues i "+
+			"JOIN labels msg_label ON i.id = msg_label.issue_id AND msg_label.label = 'gt:message' "+
+			"LEFT JOIN labels cc ON i.id = cc.issue_id AND cc.label IN (%s) "+
+			"WHERE i.status IN ('open', 'hooked') AND (i.assignee IN (%s) OR cc.label IS NOT NULL) "+
+			"GROUP BY i.id, i.title, i.status, i.assignee",
+		ccLabelList, identityList)
+
+	args := []string{"sql", "--json", query}
+	ctx, cancel := bdReadCtx()
+	defer cancel()
+	stdout, err := runBdCommand(ctx, args, workDir, beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if !isJSON(stdout) {
+		return nil, nil
+	}
+
+	var rows []issueBatchRow
+	if err := json.Unmarshal(stdout, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (m *Mailbox) listLegacy() ([]*Message, error) {

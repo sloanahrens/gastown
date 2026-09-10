@@ -74,6 +74,18 @@ type APIHandler struct {
 	dashboardMu sync.RWMutex
 	// dashboardHash is the last computed dashboard state hash.
 	dashboardHash string
+	// dashboardComputeTime is when computeDashboardHash last actually ran.
+	// pollDashboardHash skips recomputation while this is fresher than
+	// dashboardComputeCacheTTL, even with SSE clients connected: the assembled
+	// dashboard model doesn't need finer resolution than that, and recomputing
+	// every 2s tick was the other half of the gt-978i fan-out (the batched
+	// per-agent mail lookup fixed the per-tick cost; this fixes the per-tick
+	// frequency).
+	dashboardComputeTime time.Time
+	// dashboardComputeCacheTTL overrides the minimum interval between actual
+	// computeDashboardHash runs. Zero (the default) means
+	// dashboardComputeCacheTTLDefault. Tests use a much shorter value.
+	dashboardComputeCacheTTL time.Duration
 	// dashboardHashCh is closed (and replaced with a fresh channel) every
 	// time dashboardHash changes, broadcasting the update to every SSE
 	// connection currently blocked waiting on it.
@@ -123,6 +135,12 @@ const optionsFetchTimeout = 10 * time.Second
 // dashboardPollIntervalDefault is the production cadence for
 // pollDashboardHash when dashboardPollInterval is unset.
 const dashboardPollIntervalDefault = 2 * time.Second
+
+// dashboardComputeCacheTTLDefault is the minimum interval between actual
+// computeDashboardHash runs when dashboardComputeCacheTTL is unset. The
+// 2-second poll tick only decides whether to check for a change; the
+// underlying model is assembled at most this often (gt-978i).
+const dashboardComputeCacheTTLDefault = 30 * time.Second
 
 // maxConcurrentCommands limits how many gt subprocesses can run at once.
 // handleOptions alone spawns 7; allow headroom for other concurrent handlers.
@@ -2310,15 +2328,19 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 // pollDashboardHash runs for the lifetime of the process on a single shared
-// goroutine (started via dashboardPollOnce), recomputing the dashboard hash
-// every 2 seconds and broadcasting changes to every connected SSE client by
-// closing dashboardHashCh. This keeps the underlying gt subprocess load at a
-// constant O(1) regardless of how many dashboard tabs or SSE reconnects are
-// open — see handleSSE. Once started it never stops (dashboardPollOnce only
-// ever fires once), so it also skips computeDashboardHash entirely while
-// dashboardClients is zero: otherwise a dashboard opened once and later
-// closed in every tab would keep spawning per-identity gt subprocesses on
-// every tick forever (gt-c9rl).
+// goroutine (started via dashboardPollOnce), ticking every 2 seconds but
+// only actually recomputing the dashboard hash at most once per
+// dashboardComputeCacheTTL, broadcasting changes to every connected SSE
+// client by closing dashboardHashCh. This keeps the underlying gt subprocess
+// load at a constant O(1) regardless of how many dashboard tabs or SSE
+// reconnects are open — see handleSSE. Once started it never stops
+// (dashboardPollOnce only ever fires once), so it also skips
+// computeDashboardHash entirely while dashboardClients is zero: otherwise a
+// dashboard opened once and later closed in every tab would keep spawning
+// gt subprocesses on every tick forever (gt-c9rl). With clients connected,
+// a tick that finds the cache still fresh also does nothing — the 2s tick
+// only decides whether to check freshness, not how often the model is
+// assembled (gt-978i).
 func (h *APIHandler) pollDashboardHash() {
 	tickC := h.dashboardPollTickC
 	if tickC == nil {
@@ -2331,6 +2353,11 @@ func (h *APIHandler) pollDashboardHash() {
 		tickC = ticker.C
 	}
 
+	ttl := h.dashboardComputeCacheTTL
+	if ttl <= 0 {
+		ttl = dashboardComputeCacheTTLDefault
+	}
+
 	for range tickC {
 		if h.dashboardClients.Load() <= 0 {
 			if h.dashboardPollTick != nil {
@@ -2339,7 +2366,20 @@ func (h *APIHandler) pollDashboardHash() {
 			continue
 		}
 
+		h.dashboardMu.RLock()
+		fresh := time.Since(h.dashboardComputeTime) < ttl
+		h.dashboardMu.RUnlock()
+		if fresh {
+			if h.dashboardPollTick != nil {
+				h.dashboardPollTick(false)
+			}
+			continue
+		}
+
 		hash := h.computeDashboardHash(context.Background())
+		h.dashboardMu.Lock()
+		h.dashboardComputeTime = time.Now()
+		h.dashboardMu.Unlock()
 		if h.dashboardPollTick != nil {
 			h.dashboardPollTick(true)
 		}

@@ -1589,6 +1589,130 @@ func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 	return NewMailboxFromAddress(address, workDir), nil
 }
 
+// MailSummary holds the aggregate unread-mail state for one address, as
+// produced by BatchMailSummaries.
+type MailSummary struct {
+	UnreadCount  int
+	FirstSubject string
+}
+
+// BatchMailSummaries computes unread-mail counts and each address's first
+// unread subject for many addresses at once, using two bd calls total (one
+// for issue-backed messages, one for wisp messages) regardless of how many
+// addresses are requested.
+//
+// This replaces the previous per-address pattern of calling
+// GetMailbox(address).List(), which shells out 2-3 bd subprocesses per
+// address on its own. gt status --json used that pattern once per agent
+// identity in the town; with an SSE dashboard client connected, that poll
+// runs every 2s, so a town with ~40 identities fanned out to ~150-180 bd
+// processes per tick. See gt-978i.
+func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary, error) {
+	summaries := make(map[string]MailSummary, len(addresses))
+	if len(addresses) == 0 {
+		return summaries, nil
+	}
+
+	beadsDir := r.resolveBeadsDir()
+	workDir := filepath.Dir(beadsDir)
+
+	// Map every queried identity variant (e.g. legacy "mayor" alongside
+	// "mayor/") back to the canonical address so counts attribute correctly.
+	variantToAddr := make(map[string]string)
+	variants := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		for _, v := range identityVariantsFor(addr) {
+			if _, ok := variantToAddr[v]; !ok {
+				variantToAddr[v] = addr
+				variants = append(variants, v)
+			}
+		}
+	}
+
+	tmpMailbox := &Mailbox{workDir: workDir}
+
+	var issueRows []issueBatchRow
+	var issueErr error
+	var wisps []wispQueryMessage
+	var wispErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		issueRows, issueErr = queryIssueMessagesBatch(workDir, beadsDir, variants)
+	}()
+	go func() {
+		defer wg.Done()
+		wisps, wispErr = tmpMailbox.queryWispMessages(beadsDir, variants)
+	}()
+	wg.Wait()
+
+	if issueErr != nil {
+		return nil, issueErr
+	}
+
+	addUnread := func(addr, subject string) {
+		s := summaries[addr]
+		s.UnreadCount++
+		if s.FirstSubject == "" {
+			s.FirstSubject = subject
+		}
+		summaries[addr] = s
+	}
+
+	// ccAddressesFromLabels maps a CSV of "cc:<identity>" labels to the
+	// watched canonical addresses they refer to, excluding one already
+	// counted via assignee match on the same message.
+	ccAddressesFromLabels := func(csv, exclude string) map[string]bool {
+		result := make(map[string]bool)
+		if csv == "" {
+			return result
+		}
+		for _, label := range strings.Split(csv, ",") {
+			variant := strings.TrimPrefix(label, "cc:")
+			if variant == label {
+				continue // not a "cc:" label
+			}
+			if addr, ok := variantToAddr[variant]; ok && addr != exclude {
+				result[addr] = true
+			}
+		}
+		return result
+	}
+
+	for _, row := range issueRows {
+		assigneeAddr, hasAssignee := variantToAddr[row.Assignee]
+		if hasAssignee {
+			addUnread(assigneeAddr, row.Title)
+		}
+		// CC'd recipients (not also the assignee) only see it while open —
+		// matches queryIssueMessagesByCC's includeHooked=false semantics.
+		if row.Status == "open" {
+			for addr := range ccAddressesFromLabels(row.CCLabelsCSV, assigneeAddr) {
+				addUnread(addr, row.Title)
+			}
+		}
+	}
+
+	if wispErr == nil {
+		for i := range wisps {
+			bm := &wisps[i].message
+			assigneeAddr, hasAssignee := variantToAddr[bm.Assignee]
+			if hasAssignee {
+				addUnread(assigneeAddr, bm.Title)
+			}
+			if bm.Status == "open" {
+				for addr := range ccAddressesFromLabels(strings.Join(bm.Labels, ","), assigneeAddr) {
+					addUnread(addr, bm.Title)
+				}
+			}
+		}
+	}
+
+	return summaries, nil
+}
+
 // notifyRecipient sends a notification to a recipient's tmux session.
 //
 // Notification strategy (idle-aware):

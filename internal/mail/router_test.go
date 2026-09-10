@@ -360,6 +360,82 @@ func TestResolveBeadsDir(t *testing.T) {
 	}
 }
 
+// TestRouterBatchMailSummaries is a regression test for gt-978i: gt status
+// --json used to call GetMailbox(address).List() once per agent identity,
+// each spawning 2-3 bd subprocesses on its own. In a town with dozens of
+// identities and an SSE dashboard client connected, that fanned out to
+// ~150-180 bd processes every 2s poll tick. BatchMailSummaries must compute
+// the same per-address unread counts and first-unread-subject using exactly
+// two bd calls (one for issue-backed messages, one for wisps) no matter how
+// many addresses are requested, and must attribute assignee vs CC matches to
+// the correct address without double-counting a message that matches an
+// address both ways.
+func TestRouterBatchMailSummaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake bd is POSIX-only")
+	}
+
+	binDir := t.TempDir()
+	callLog := filepath.Join(t.TempDir(), "bd-sql.log")
+	fakeBD := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+if [ "$1" = "sql" ]; then
+  printf '%s\n' "$3" >> "$BD_SQL_LOG"
+  case "$3" in
+    *"FROM issues"*)
+      printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/synth","cc_labels_csv":null},{"id":"issue-direct-hooked","title":"Direct hooked","status":"hooked","assignee":"gastown/synth","cc_labels_csv":null},{"id":"issue-cc-both","title":"CC to synth and mayor","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/synth,cc:mayor/"}]'
+      ;;
+    *"FROM wisps"*)
+      printf '%s\n' '[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0}]'
+      ;;
+    *)
+      printf '[]\n'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected bd args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", callLog)
+
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	summaries, err := r.BatchMailSummaries([]string{"gastown/synth", "mayor/"})
+	if err != nil {
+		t.Fatalf("BatchMailSummaries: %v", err)
+	}
+
+	// gastown/synth: assignee on issue-direct-open, issue-direct-hooked, and
+	// wisp-direct; CC on issue-cc-both. 4 unread total.
+	if got := summaries["gastown/synth"].UnreadCount; got != 4 {
+		t.Errorf("gastown/synth UnreadCount = %d, want 4", got)
+	}
+	if got := summaries["gastown/synth"].FirstSubject; got != "Direct open" {
+		t.Errorf("gastown/synth FirstSubject = %q, want %q", got, "Direct open")
+	}
+
+	// mayor/: CC only, on issue-cc-both. 1 unread total.
+	if got := summaries["mayor/"].UnreadCount; got != 1 {
+		t.Errorf("mayor/ UnreadCount = %d, want 1", got)
+	}
+	if got := summaries["mayor/"].FirstSubject; got != "CC to synth and mayor" {
+		t.Errorf("mayor/ FirstSubject = %q, want %q", got, "CC to synth and mayor")
+	}
+
+	logBytes, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	queries := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(queries) != 2 {
+		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; log:\n%s", len(queries), string(logBytes))
+	}
+}
+
 func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a bash bd stub")
