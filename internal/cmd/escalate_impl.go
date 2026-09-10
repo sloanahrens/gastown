@@ -72,9 +72,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Would create escalation:\n")
 		fmt.Printf("  Severity: %s\n", severity)
 		fmt.Printf("  Description: %s\n", description)
-		if escalateReason != "" {
-			fmt.Printf("  Reason: %s\n", escalateReason)
-		}
+		fmt.Printf("  Reason: %s\n", reasonDisplay(escalateReason))
 		if escalateSource != "" {
 			fmt.Printf("  Source: %s\n", escalateSource)
 		}
@@ -212,6 +210,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		result := map[string]interface{}{
 			"id":       issue.ID,
 			"severity": severity,
+			"reason":   escalateReason,
 			"actions":  actions,
 			"targets":  targets,
 			"delivery": statuses,
@@ -229,6 +228,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		emoji := severityEmoji(severity)
 		fmt.Printf("%s Escalation created: %s\n", emoji, issue.ID)
 		fmt.Printf("  Severity: %s\n", severity)
+		fmt.Printf("  Reason: %s\n", reasonDisplay(escalateReason))
 		if escalateSource != "" {
 			fmt.Printf("  Source: %s\n", escalateSource)
 		}
@@ -244,6 +244,18 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// reasonDisplay renders an escalation's reason field for human-readable
+// output, making an absent reason explicit rather than printing nothing.
+// gt-umx6: a silently omitted reason line was mistaken for lost escalation
+// data by two operators independently, since an escalation created with
+// only a description (no --reason) genuinely stores an empty reason.
+func reasonDisplay(reason string) string {
+	if reason == "" {
+		return "(none provided)"
+	}
+	return reason
 }
 
 func escalationFingerprintLabel(raw string) string {
@@ -688,9 +700,7 @@ func runEscalateShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Severity: %s\n", fields.Severity)
 	fmt.Printf("  Created: %s\n", formatRelativeTime(issue.CreatedAt))
 	fmt.Printf("  Escalated by: %s\n", fields.EscalatedBy)
-	if fields.Reason != "" {
-		fmt.Printf("  Reason: %s\n", fields.Reason)
-	}
+	fmt.Printf("  Reason: %s\n", reasonDisplay(fields.Reason))
 	if fields.AckedBy != "" {
 		fmt.Printf("  Acknowledged by: %s at %s\n", fields.AckedBy, fields.AckedAt)
 	}
