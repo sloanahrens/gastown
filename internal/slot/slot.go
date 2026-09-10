@@ -225,7 +225,7 @@ func Status(townRoot string) (Report, error) {
 	var rep Report
 
 	lockPath := LockPath(townRoot)
-	if _, statErr := os.Stat(lockPath); statErr == nil {
+	if _, statErr := os.Stat(lockPath); statErr == nil || !os.IsNotExist(statErr) {
 		unlock, ok, err := lock.FlockTryAcquire(lockPath)
 		if err != nil {
 			return Report{}, err
