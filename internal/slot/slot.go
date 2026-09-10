@@ -24,12 +24,14 @@
 package slot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +42,47 @@ import (
 // DefaultPollInterval is how often Acquire retries after a failed
 // non-blocking attempt while waiting for a timed acquire.
 const DefaultPollInterval = 2 * time.Second
+
+// dockerPSTimeout bounds the `docker ps` call runningGateContainers makes.
+// Status() is on gt-status's hot path (gt-tuiy: polled frequently by
+// witness patrols and `gt slot status`), so a wedged docker daemon must not
+// be able to hang it indefinitely — a bounded, explicit "unknown" beats an
+// unbounded call that never returns.
+const dockerPSTimeout = 5 * time.Second
+
+// reentrantEnvVar marks, in a process's own environment, "<lockPath>|<pid>"
+// for a container-gate slot it already holds — the lock path so a nested
+// Acquire against a *different* slot still contends normally, and the PID
+// so mutual exclusion is preserved between two unrelated callers that
+// happen to share a process (e.g. two goroutines in the same test binary,
+// or any future long-lived server): the reentrant fast path only applies
+// when the caller's own PID differs from the recorded holder's, i.e. it is
+// truly a descendant process that inherited the marker (`gt slot run`
+// spawns children with the current environment by default), not a sibling
+// call in the same process pretending to be one.
+//
+// This closes a real deadlock risk (gt-tuiy): the polecat-work formula's
+// `gt slot run` wrap can run nested inside a Go call path that already
+// holds the slot in-process (e.g. runMQBatchRun in mq_batch.go) via a
+// spawned subprocess. Without reentrancy, that nested acquire would block
+// forever on a flock its own ancestor process is still holding while
+// waiting for the child to exit.
+const reentrantEnvVar = "GT_SLOT_HELD"
+
+// reentrantHolder parses reentrantEnvVar's value, returning the recorded
+// lock path and PID.
+func reentrantHolder() (lockPath string, pid int, ok bool) {
+	val := os.Getenv(reentrantEnvVar)
+	path, pidStr, found := strings.Cut(val, "|")
+	if !found {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return "", 0, false
+	}
+	return path, p, true
+}
 
 // gateContainerPatterns matches the container images/names this gate cares
 // about: Dolt's own server image, the testcontainers library's images, and
@@ -57,7 +100,9 @@ var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 // containers running". Declared as a var so tests can substitute a fake
 // docker CLI response.
 var runningGateContainers = func() ([]string, error) {
-	out, err := exec.Command("docker", "ps", "--format", "{{.Image}} {{.Names}}").Output() //nolint:gosec // G204: fixed args, no user input
+	ctx, cancel := context.WithTimeout(context.Background(), dockerPSTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.Image}} {{.Names}}").Output() //nolint:gosec // G204: fixed args, no user input
 	if err != nil {
 		var execErr *exec.Error
 		if errors.As(err, &execErr) {
@@ -66,6 +111,9 @@ var runningGateContainers = func() ([]string, error) {
 			// distinct from an *exec.ExitError (docker installed but the
 			// daemon is unreachable), which IS treated as unknown below.
 			return nil, nil
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("docker ps did not respond within %s: %w", dockerPSTimeout, ctx.Err())
 		}
 		return nil, err
 	}
@@ -114,8 +162,9 @@ type Owner struct {
 // Handle represents a held slot. Call Release exactly once when the
 // container-backed suite has finished.
 type Handle struct {
-	townRoot string
-	unlock   func()
+	townRoot  string
+	unlock    func()
+	reentrant bool // true: this Handle rides an ancestor's real hold; Release is a no-op.
 }
 
 // Acquire blocks until the container-gate slot is available (or timeout
@@ -126,19 +175,33 @@ type Handle struct {
 // suite WITHOUT going through gt slot run leaves the flock untouched while
 // still occupying the Docker VM (gt-tuiy). So a successful flock acquire is
 // re-verified against `docker ps`: if matching containers are already
-// running, or the docker daemon can't be reached to check, Acquire releases
-// the flock and keeps waiting rather than handing out a slot that isn't
-// actually safe to use.
+// running, Acquire releases the flock and keeps waiting rather than handing
+// out a slot that isn't actually safe to use. If the docker daemon can't be
+// reached to check, Acquire fails fast instead — that state won't resolve
+// itself by waiting, so there's no reason to poll it out to the full
+// timeout (gt-tuiy).
 //
 // role is a short human-readable identifier for the caller (e.g.
 // "gastown/refinery" or a rig/MR id) and is recorded in the owner file for
 // `gt status` / `gt doctor` display only; it plays no part in correctness.
 func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
+	lockPath := LockPath(townRoot)
+
+	// Reentrant fast path: a *descendant* process of one that already holds
+	// this exact slot does not compete with its own ancestor — see
+	// reentrantEnvVar's doc comment. The PID check is what keeps this from
+	// also matching an unrelated second caller sharing the same process
+	// (e.g. TestAcquire_MutualExclusion's two calls from one goroutine, or
+	// any future concurrent caller): only a genuinely different process
+	// that inherited the marker takes this path.
+	if holderPath, holderPID, ok := reentrantHolder(); ok && holderPath == lockPath && holderPID != os.Getpid() {
+		return &Handle{townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
+	}
+
 	if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
 	}
 
-	lockPath := LockPath(townRoot)
 	hasDeadline := timeout > 0
 	deadline := time.Now().Add(timeout)
 
@@ -149,7 +212,16 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 		}
 		if ok {
 			containers, containerErr := runningGateContainers()
-			if containerErr == nil && len(containers) == 0 {
+			if containerErr != nil {
+				// The daemon/docker is unreachable: this is not a transient
+				// "someone else is using it" state that more waiting will
+				// resolve, it's an inability to verify at all. Fail fast
+				// instead of releasing and polling until the full timeout
+				// elapses (gt-tuiy).
+				unlock()
+				return nil, fmt.Errorf("checking for unwrapped container suites: %w", containerErr)
+			}
+			if len(containers) == 0 {
 				h := &Handle{townRoot: townRoot, unlock: unlock}
 				// Best-effort: the owner file is display-only, so a write
 				// failure here must not fail the acquire (we already hold
@@ -159,11 +231,11 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 					PID:        os.Getpid(),
 					AcquiredAt: time.Now(),
 				})
+				_ = os.Setenv(reentrantEnvVar, lockPath+"|"+strconv.Itoa(os.Getpid()))
 				return h, nil
 			}
-			// Either an unwrapped suite already has containers up, or we
-			// can't tell (daemon unreachable) — neither is safe to hand the
-			// slot out for, so release and keep waiting.
+			// An unwrapped suite already has containers up — not safe to
+			// hand the slot out for, so release and keep waiting.
 			unlock()
 		}
 		if hasDeadline && time.Now().After(deadline) {
@@ -178,8 +250,14 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 // release the lock on process exit/death even if Release is never called —
 // this just makes a graceful release immediate instead of exit-triggered.
 func (h *Handle) Release() error {
+	if h.reentrant {
+		// The real holder is an ancestor in this process tree; it owns the
+		// owner file, the flock, and clearing reentrantEnvVar.
+		return nil
+	}
 	_ = os.Remove(OwnerPath(h.townRoot))
 	h.unlock()
+	_ = os.Unsetenv(reentrantEnvVar)
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -309,9 +310,10 @@ func TestAcquire_WaitsForUnwrappedContainersToClear(t *testing.T) {
 	orig := runningGateContainers
 	defer func() { runningGateContainers = orig }()
 
-	var containersUp = true
+	var containersUp atomic.Bool
+	containersUp.Store(true)
 	runningGateContainers = func() ([]string, error) {
-		if containersUp {
+		if containersUp.Load() {
 			return []string{"testcontainers/ryuk:0.5.1 unwrapped-reaper"}, nil
 		}
 		return nil, nil
@@ -330,7 +332,7 @@ func TestAcquire_WaitsForUnwrappedContainersToClear(t *testing.T) {
 	// Give the waiter a couple of poll cycles to observe containers up
 	// before clearing them, so this actually exercises the wait path.
 	time.Sleep(DefaultPollInterval + 200*time.Millisecond)
-	containersUp = false
+	containersUp.Store(false)
 
 	select {
 	case err := <-done:
@@ -339,6 +341,129 @@ func TestAcquire_WaitsForUnwrappedContainersToClear(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Acquire never succeeded after unwrapped containers cleared")
+	}
+}
+
+// TestAcquire_FailsFastWhenDockerUnreachable is the regression test for
+// gt-tuiy's rework: Acquire must not poll a docker-unreachable state out to
+// the full timeout — that state won't resolve itself by waiting — it must
+// return an error as soon as it observes it.
+func TestAcquire_FailsFastWhenDockerUnreachable(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return nil, errors.New("Cannot connect to the Docker daemon")
+	}
+
+	timeout := 30 * time.Second
+	start := time.Now()
+	_, err := Acquire(townRoot, "waiter", timeout)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Acquire succeeded while docker was unreachable")
+	}
+	if elapsed >= timeout {
+		t.Fatalf("Acquire took %s to fail — it waited out the full %s timeout instead of failing fast", elapsed, timeout)
+	}
+	if elapsed > 2*DefaultPollInterval {
+		t.Fatalf("Acquire took %s to fail — expected it to fail on the first check, not after polling", elapsed)
+	}
+}
+
+// TestAcquire_SameProcessSecondCallStillContends guards the boundary of the
+// reentrant fast path: two Acquire calls from the *same* process/PID (no
+// subprocess involved) must NOT take the reentrant shortcut — that would
+// silently break mutual exclusion for any genuinely concurrent, unrelated
+// caller that happens to share a process. Only a real descendant process
+// (proven by TestAcquire_ReentrantChildProcessSkipsFlock below) qualifies.
+func TestAcquire_SameProcessSecondCallStillContends(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	h, err := Acquire(townRoot, "holder", time.Second)
+	if err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+	defer h.Release()
+
+	timeout := DefaultPollInterval + 500*time.Millisecond
+	start := time.Now()
+	_, err = Acquire(townRoot, "same-process-caller", timeout)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("second same-process Acquire succeeded — reentrant fast path wrongly applied to an unrelated caller")
+	}
+	if elapsed < timeout {
+		t.Fatalf("second Acquire returned after %s, before its %s timeout — it took the reentrant shortcut instead of really contending", elapsed, timeout)
+	}
+}
+
+// TestAcquire_ReentrantChildProcessSkipsFlock proves the deadlock fix: a
+// child process spawned while this process holds the slot inherits the
+// parent's reentrantEnvVar marker (as `gt slot run` does by default, and as
+// a Go call path like runMQBatchRun's spawned formula-driven subprocess
+// would) and takes the reentrant fast path instead of blocking on a flock
+// its own ancestor is still holding — the crux of the runMQBatchRun +
+// formula-wrap nesting gt-tuiy identified.
+func TestAcquire_ReentrantChildProcessSkipsFlock(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	h, err := Acquire(townRoot, "ancestor", time.Second)
+	if err != nil {
+		t.Fatalf("ancestor Acquire: %v", err)
+	}
+	defer h.Release()
+
+	bin, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot resolve test binary: %v", err)
+	}
+
+	cmd := exec.Command(bin, "-test.run=TestHelperReentrantAcquire")
+	cmd.Env = append(os.Environ(), "GT_SLOT_REENTRANT_HELPER=1", "GT_SLOT_TOWN_ROOT="+townRoot)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reentrant child process failed: %v\n%s", err, out)
+	}
+
+	// The ancestor's real hold must be unaffected by the child's Release.
+	rep, err := Status(townRoot)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !rep.Held {
+		t.Fatalf("Status reported not held after child's reentrant Release — reentrant Release must not touch the real lock: %+v", rep)
+	}
+}
+
+// TestHelperReentrantAcquire is not a real test; it is spawned as a
+// subprocess by TestAcquire_ReentrantChildProcessSkipsFlock. It inherits
+// reentrantEnvVar from its parent (set by the parent's own successful
+// Acquire) and must acquire near-instantly via the reentrant fast path
+// rather than blocking on the real flock its parent still holds.
+func TestHelperReentrantAcquire(t *testing.T) {
+	if os.Getenv("GT_SLOT_REENTRANT_HELPER") != "1" {
+		t.Skip("not invoked as reentrant-acquire helper")
+	}
+	stubNoContainers(t)
+	townRoot := os.Getenv("GT_SLOT_TOWN_ROOT")
+
+	start := time.Now()
+	h, err := Acquire(townRoot, "child", 3*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("reentrant child Acquire: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("child Acquire took %s — expected the near-instant reentrant fast path, not a poll/wait", elapsed)
+	}
+	if err := h.Release(); err != nil {
+		t.Fatalf("child Release: %v", err)
 	}
 }
 
