@@ -325,5 +325,22 @@ func ParseResetTime(resetsAt string, reference time.Time) (time.Time, error) {
 	resetTime := time.Date(refInLoc.Year(), refInLoc.Month(), refInLoc.Day(),
 		hour, minute, 0, 0, loc)
 
+	// A bare clock time ("resets 2am") only carries a time of day, not a
+	// date, so pinning it to today's date is ambiguous once today's
+	// occurrence is far behind reference: an overnight reset like "2am"
+	// observed at 11pm the same calendar day computes to a time ~21h in
+	// the past, when the intended moment is actually ~3h in the future
+	// (tomorrow's 2am) — the nearest occurrence of that clock time.
+	//
+	// A same-day reset that's merely a few hours behind reference (e.g.
+	// "11am" checked at 3pm) is genuinely in the past — callers like
+	// ClearExpired rely on that to recognize an already-elapsed limit —
+	// so only roll forward past this threshold, comfortably larger than
+	// any real reset window but well under 24h.
+	const rolloverThreshold = 12 * time.Hour
+	if refInLoc.Sub(resetTime) > rolloverThreshold {
+		resetTime = resetTime.AddDate(0, 0, 1)
+	}
+
 	return resetTime, nil
 }

@@ -656,7 +656,10 @@ func excludeAssignedSessions(candidates []quota.ResumeCandidate, assignments map
 // announced session-limit reset has passed. In dry-run mode it reports what
 // would happen without touching tmux.
 func runResumeNudges(t *ttmux.Tmux, candidates []quota.ResumeCandidate, dryRun bool) []quota.RotateResult {
-	var results []quota.RotateResult
+	// Non-nil so json.Marshal renders "[]" rather than "null" when there are
+	// no candidates — quota_dog.go's "[]"/"[]\n" sentinel treats a bare
+	// "null" as a non-empty result and logs it every cycle (gt-omg1).
+	results := []quota.RotateResult{}
 	for _, c := range candidates {
 		r := quota.RotateResult{Session: c.Session, Resumed: true}
 		if !dryRun {

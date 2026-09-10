@@ -534,6 +534,44 @@ func TestParseResetTime_NoTimezone(t *testing.T) {
 	}
 }
 
+func TestParseResetTime_OvernightResetRollsOverToNextDay(t *testing.T) {
+	la, _ := time.LoadLocation("America/Los_Angeles")
+	// Reference is 11pm; a "resets 2am" banner refers to tomorrow's 2am (3h
+	// away), not today's 2am (21h behind reference).
+	ref := time.Date(2026, 2, 18, 23, 0, 0, 0, la)
+
+	got, err := ParseResetTime("2am (America/Los_Angeles)", ref)
+	if err != nil {
+		t.Fatalf("ParseResetTime error: %v", err)
+	}
+	if !got.After(ref) {
+		t.Fatalf("ParseResetTime(%q, ref=%v) = %v, want a time after ref", "2am", ref, got)
+	}
+	gotInLA := got.In(la)
+	wantDate := time.Date(2026, 2, 19, 2, 0, 0, 0, la)
+	if !gotInLA.Equal(wantDate) {
+		t.Errorf("ParseResetTime(%q) = %v, want %v", "2am", gotInLA, wantDate)
+	}
+}
+
+func TestParseResetTime_SameDayPastTimeStaysToday(t *testing.T) {
+	// A reset just a few hours behind reference is genuinely elapsed, not
+	// a mis-parsed next-day occurrence — ClearExpired depends on this to
+	// recognize an already-passed limit.
+	la, _ := time.LoadLocation("America/Los_Angeles")
+	ref := time.Date(2026, 2, 18, 15, 0, 0, 0, la)
+
+	got, err := ParseResetTime("11am (America/Los_Angeles)", ref)
+	if err != nil {
+		t.Fatalf("ParseResetTime error: %v", err)
+	}
+	gotInLA := got.In(la)
+	wantDate := time.Date(2026, 2, 18, 11, 0, 0, 0, la)
+	if !gotInLA.Equal(wantDate) {
+		t.Errorf("ParseResetTime(%q) = %v, want %v", "11am", gotInLA, wantDate)
+	}
+}
+
 func TestParseResetTime_InvalidInput(t *testing.T) {
 	ref := time.Now()
 	_, err := ParseResetTime("garbage", ref)
