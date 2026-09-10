@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestFormatAssigneeDisplay(t *testing.T) {
+	if got := formatAssigneeDisplay(""); got != "-" {
+		t.Errorf("expected empty assignee to render as %q, got %q", "-", got)
+	}
+	if strings.Contains(formatAssigneeDisplay(""), "unclaimed") {
+		t.Errorf("empty assignee must not render as a claim about the world (gt-fbf9), got %q", formatAssigneeDisplay(""))
+	}
+	if got := formatAssigneeDisplay("gastown/refinery"); got != "gastown/refinery" {
+		t.Errorf("expected populated assignee to pass through unchanged, got %q", got)
+	}
+}
+
 func TestRefineryStartAgentFlag(t *testing.T) {
 	flag := refineryStartCmd.Flags().Lookup("agent")
 	if flag == nil {

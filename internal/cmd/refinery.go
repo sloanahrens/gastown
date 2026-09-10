@@ -801,6 +801,21 @@ func runRefineryReady(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// formatAssigneeDisplay renders an MR bead's assignee field for display.
+//
+// The assignee field is only written by the standalone `gt refinery claim`
+// command — the automatic merge-processing path (doMerge/ProcessBatch) never
+// calls ClaimMR. So an empty value does not mean the MR is unclaimed; it
+// means the claim state is untracked for however this MR is being handled.
+// Render it as absent data ("-"), never as "(unclaimed)", which asserts a
+// fact the field does not support (gt-fbf9).
+func formatAssigneeDisplay(assignee string) string {
+	if assignee == "" {
+		return "-"
+	}
+	return assignee
+}
+
 func runRefineryReadyAll(eng *refinery.Engineer, rigName string) error {
 	mrs, err := eng.ListAllOpenMRs()
 	if err != nil {
@@ -825,10 +840,7 @@ func runRefineryReadyAll(eng *refinery.Engineer, rigName string) error {
 		priority := fmt.Sprintf("P%d", mr.Priority)
 		fmt.Printf("  %d. [%s] %s → %s\n", i+1, priority, mr.Branch, mr.Target)
 
-		assignee := mr.Assignee
-		if assignee == "" {
-			assignee = "(unclaimed)"
-		}
+		assignee := formatAssigneeDisplay(mr.Assignee)
 		age := ""
 		if !mr.UpdatedAt.IsZero() {
 			age = fmt.Sprintf(" (updated %s ago)", time.Since(mr.UpdatedAt).Truncate(time.Second))
