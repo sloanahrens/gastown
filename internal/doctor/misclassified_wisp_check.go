@@ -73,7 +73,7 @@ func (c *CheckMisclassifiedWisps) Run(ctx *CheckContext) *CheckResult {
 	} else {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
+			Status:  StatusSkipped,
 			Message: "Dolt unavailable — skipping misplaced ephemeral check",
 		}
 	}

@@ -34,11 +34,14 @@ func (c *ThemeCheck) Run(ctx *CheckContext) *CheckResult {
 	// List all sessions
 	sessions, err := t.ListSessions()
 	if err != nil {
-		// No tmux server or error - not a problem, just skip
+		// Could not enumerate tmux sessions — this is not knowledge that no
+		// sessions exist, only that we couldn't ask. Report as skipped, not
+		// as a pass.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "No tmux sessions running",
+			Status:  StatusSkipped,
+			Message: "Could not list tmux sessions",
+			Details: []string{err.Error()},
 		}
 	}
 

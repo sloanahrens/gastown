@@ -82,11 +82,13 @@ func (c *RigNameMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 	rigPath := ctx.RigPath()
 	cfg, err := loadRigConfigLocal(rigPath)
 	if err != nil {
-		// Missing or unreadable config.json — skip gracefully
+		// Missing or unreadable config.json — we could not verify name/prefix
+		// match, not that they do match.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
+			Status:  StatusSkipped,
 			Message: "No config.json found (skipped)",
+			Details: []string{err.Error()},
 		}
 	}
 

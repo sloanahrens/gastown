@@ -402,7 +402,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 		if _, err := exec.LookPath("bd"); err != nil {
 			return &CheckResult{
 				Name:     c.Name(),
-				Status:   StatusOK,
+				Status:   StatusSkipped,
 				Message:  "beads not installed (skipped)",
 				Category: c.Category(),
 			}
@@ -419,12 +419,14 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 	townBeadsDir, _ := filepath.Abs(beads.ResolveBeadsDir(ctx.TownRoot))
 
 	var problems []string
+	var candidates, checked int
 
 	for _, route := range routes {
 		// Skip town root route
 		if route.Path == "." || route.Path == "" {
 			continue
 		}
+		candidates++
 
 		rigPath := filepath.Join(ctx.TownRoot, route.Path)
 		rigBeadsDir := beads.ResolveBeadsDir(rigPath)
@@ -447,6 +449,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 		if err != nil {
 			continue
 		}
+		checked++
 
 		routesPrefix := strings.TrimSuffix(route.Prefix, "-")
 
@@ -462,6 +465,18 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(c.mismatches) == 0 {
+		// Routes existed to check, but every one was excluded (missing beads
+		// dir, redirected to the shared town DB, or prefix lookup failed)
+		// before a single prefix comparison happened. That is not the same
+		// as having verified they match.
+		if candidates > 0 && checked == 0 {
+			return &CheckResult{
+				Name:     c.Name(),
+				Status:   StatusSkipped,
+				Message:  "No database prefixes could be verified (all routes redirected or unavailable)",
+				Category: c.Category(),
+			}
+		}
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusOK,

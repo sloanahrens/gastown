@@ -49,7 +49,7 @@ func staleResult(name string, info *version.StaleBinaryInfo) *CheckResult {
 	if info.Error != nil {
 		return &CheckResult{
 			Name:    name,
-			Status:  StatusOK,
+			Status:  StatusSkipped,
 			Message: "Cannot determine binary version (dev build?)",
 			Details: []string{info.Error.Error()},
 		}
@@ -58,7 +58,7 @@ func staleResult(name string, info *version.StaleBinaryInfo) *CheckResult {
 	if info.Skipped {
 		return &CheckResult{
 			Name:    name,
-			Status:  StatusOK,
+			Status:  StatusSkipped,
 			Message: "Binary staleness check skipped",
 			Details: []string{info.SkipReason},
 		}

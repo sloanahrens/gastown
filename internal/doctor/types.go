@@ -42,6 +42,12 @@ const (
 	StatusWarning
 	// StatusError indicates a critical problem.
 	StatusError
+	// StatusSkipped indicates the check could not run or could not determine
+	// a result — e.g. a required dependency was unavailable, or a file it
+	// needed to read was missing or unreadable. A skipped check proves
+	// nothing about the thing it was meant to check, so it must never
+	// aggregate as a pass.
+	StatusSkipped
 )
 
 // String returns a human-readable status.
@@ -53,6 +59,8 @@ func (s CheckStatus) String() string {
 		return "Warning"
 	case StatusError:
 		return "Error"
+	case StatusSkipped:
+		return "Skipped"
 	default:
 		return "Unknown"
 	}
@@ -116,6 +124,7 @@ type ReportSummary struct {
 	OK          int
 	Warnings    int
 	Errors      int
+	Skipped     int           // Checks that could not run or could not determine a result
 	Fixed       int           // Checks that were auto-fixed
 	Slow        int           // Checks that took longer than threshold (counted during Print)
 	SlowestName string        // Name of the slowest check
@@ -149,6 +158,8 @@ func (r *Report) Add(result *CheckResult) {
 		r.Summary.Warnings++
 	case StatusError:
 		r.Summary.Errors++
+	case StatusSkipped:
+		r.Summary.Skipped++
 	}
 
 	// Track fixed checks
@@ -173,9 +184,18 @@ func (r *Report) HasWarnings() bool {
 	return r.Summary.Warnings > 0
 }
 
-// IsHealthy returns true if all checks passed without errors or warnings.
+// HasSkipped returns true if any check could not run or could not determine
+// a result.
+func (r *Report) HasSkipped() bool {
+	return r.Summary.Skipped > 0
+}
+
+// IsHealthy returns true if all checks passed without errors, warnings, or
+// skips. A run with skipped checks has not proven the workspace healthy —
+// it has simply failed to find out — so it must not report the same result
+// as a run where everything actually ran and passed.
 func (r *Report) IsHealthy() bool {
-	return r.Summary.Errors == 0 && r.Summary.Warnings == 0
+	return r.Summary.Errors == 0 && r.Summary.Warnings == 0 && r.Summary.Skipped == 0
 }
 
 // PrintSummaryOnly outputs just the summary and warnings section.
@@ -282,6 +302,8 @@ func (r *Report) printCheck(w io.Writer, check *CheckResult, verbose bool, slowT
 		statusIcon = ui.RenderWarnIcon()
 	case StatusError:
 		statusIcon = ui.RenderFailIcon()
+	case StatusSkipped:
+		statusIcon = ui.RenderSkipIcon()
 	}
 
 	// Add hourglass for slow checks (only when --slow is enabled)
@@ -342,6 +364,9 @@ func (r *Report) printSummary(w io.Writer, slowThreshold time.Duration) {
 		ui.RenderWarnIcon(), r.Summary.Warnings,
 		ui.RenderFailIcon(), r.Summary.Errors,
 	)
+	if r.Summary.Skipped > 0 {
+		summary += fmt.Sprintf("  %s %d skipped", ui.RenderSkipIcon(), r.Summary.Skipped)
+	}
 	if r.Summary.Fixed > 0 {
 		summary += fmt.Sprintf("  🔧 %d fixed", r.Summary.Fixed)
 	}
@@ -355,15 +380,18 @@ func (r *Report) printSummary(w io.Writer, slowThreshold time.Duration) {
 	_, _ = fmt.Fprintln(w, summary)
 }
 
-// printWarningsSection outputs separate sections for failures, warnings, and fixed items.
+// printWarningsSection outputs separate sections for failures, warnings,
+// skipped, and fixed items.
 func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 	// Separate into categories
-	var failures, warnings, fixed []*CheckResult
+	var failures, warnings, skipped, fixed []*CheckResult
 	for _, check := range issues {
 		if check.Fixed {
 			fixed = append(fixed, check)
 		} else if check.Status == StatusError {
 			failures = append(failures, check)
+		} else if check.Status == StatusSkipped {
+			skipped = append(skipped, check)
 		} else {
 			warnings = append(warnings, check)
 		}
@@ -377,7 +405,7 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 	}
 
 	// If nothing to report, show success message
-	if len(failures) == 0 && len(warnings) == 0 && len(fixed) == 0 {
+	if len(failures) == 0 && len(warnings) == 0 && len(skipped) == 0 && len(fixed) == 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, ui.RenderPass(ui.IconPass+" All checks passed"))
 		return
@@ -409,6 +437,19 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 		}
 	}
 
+	// Print SKIPPED section
+	if len(skipped) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, ui.RenderMuted(ui.IconSkip+"  SKIPPED"))
+		for i, check := range skipped {
+			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+			_, _ = fmt.Fprintf(w, "  %s  %s %s\n", ui.RenderSkipIcon(), ui.RenderMuted(fmt.Sprintf("%d.", i+1)), ui.RenderMuted(line))
+			if check.FixHint != "" {
+				_, _ = fmt.Fprintf(w, "        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.FixHint)
+			}
+		}
+	}
+
 	// Print FIXED section
 	if len(fixed) > 0 {
 		_, _ = fmt.Fprintln(w)
@@ -420,7 +461,7 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 	}
 
 	// If only fixed items, show success message
-	if len(failures) == 0 && len(warnings) == 0 {
+	if len(failures) == 0 && len(warnings) == 0 && len(skipped) == 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, ui.RenderPass(ui.IconPass+" All remaining checks passed"))
 	}

@@ -77,8 +77,8 @@ func TestRunIgnoresJSONLWhenDoltUnavailable(t *testing.T) {
 
 	check := NewCheckMisclassifiedWisps()
 	result := check.Run(&CheckContext{TownRoot: townRoot})
-	if result.Status != StatusOK {
-		t.Fatalf("expected StatusOK when only stale JSONL exists, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Fatalf("expected StatusSkipped when only stale JSONL exists, got %v: %s", result.Status, result.Message)
 	}
 	if !strings.Contains(result.Message, "Dolt unavailable") {
 		t.Fatalf("expected Dolt-unavailable skip message, got %q", result.Message)

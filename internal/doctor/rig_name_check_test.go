@@ -175,8 +175,8 @@ func TestRigNameMismatchCheck_NoConfigJson(t *testing.T) {
 	ctx := &CheckContext{TownRoot: townRoot, RigName: "myrig"}
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK for missing config.json, got %v", result.Status)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped for missing config.json, got %v", result.Status)
 	}
 }
 

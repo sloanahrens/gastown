@@ -23,16 +23,16 @@ func TestStaleResult(t *testing.T) {
 		wantFixHint string
 	}{
 		{
-			name:        "error -> OK dev-build message",
+			name:        "error -> Skipped dev-build message",
 			info:        &version.StaleBinaryInfo{Error: errors.New("cannot determine binary commit")},
-			wantStatus:  StatusOK,
+			wantStatus:  StatusSkipped,
 			wantMessage: "Cannot determine binary version (dev build?)",
 			wantDetail:  "cannot determine binary commit",
 		},
 		{
-			name:        "skipped -> OK with skip reason",
+			name:        "skipped -> Skipped with skip reason",
 			info:        &version.StaleBinaryInfo{Skipped: true, SkipReason: "no build-branch ref found"},
-			wantStatus:  StatusOK,
+			wantStatus:  StatusSkipped,
 			wantMessage: "Binary staleness check skipped",
 			wantDetail:  "no build-branch ref found",
 		},

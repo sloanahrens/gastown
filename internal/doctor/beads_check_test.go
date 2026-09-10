@@ -321,9 +321,10 @@ func TestDatabasePrefixCheck_NoBeadsDir(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	// Should be OK - no beads dir for the rig is fine
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK when rig beads dir doesn't exist, got %v", result.Status)
+	// No beads dir for the rig means zero prefix comparisons were made —
+	// that's unverified, not confirmed-matching (gt-whvu).
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when rig beads dir doesn't exist, got %v", result.Status)
 	}
 }
 
@@ -391,8 +392,11 @@ func TestDatabasePrefixCheck_SkipsRigRedirectingToTownDB(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK (redirect rig should be skipped), got %v: %s\nDetails: %v",
+	// The redirect rig is correctly excluded from comparison (never flagged
+	// as a mismatch), but that also means zero prefixes were actually
+	// verified — report skipped, not a confirmed pass (gt-whvu).
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped (redirect rig excluded, nothing verified), got %v: %s\nDetails: %v",
 			result.Status, result.Message, result.Details)
 	}
 	if len(check.mismatches) != 0 {
@@ -578,8 +582,11 @@ func TestDatabasePrefixCheck_MultipleRedirectsSameDB(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK (all redirect rigs skipped), got %v: %s\nDetails: %v",
+	// All three routes redirect to the shared town DB, so zero prefix
+	// comparisons actually happen — that must surface as skipped, not as a
+	// verified pass (gt-whvu).
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped (all redirect rigs skipped, nothing verified), got %v: %s\nDetails: %v",
 			result.Status, result.Message, result.Details)
 	}
 }
