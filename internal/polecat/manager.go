@@ -407,10 +407,12 @@ func (m *Manager) agentBeadID(name string) string {
 
 // getCleanupStatusFromBead reads the cleanup_status from the polecat's agent bead.
 // Returns CleanupUnknown if the bead doesn't exist or has no cleanup_status.
+// batch, if non-nil and populated, is consulted before falling back to a
+// per-polecat bd call — see beadsBatch.
 // ZFC #10: This is the ZFC-compliant way to check if removal is safe.
-func (m *Manager) getCleanupStatusFromBead(name string) CleanupStatus {
+func (m *Manager) getCleanupStatusFromBead(name string, batch *beadsBatch) CleanupStatus {
 	agentID := m.agentBeadID(name)
-	_, fields, err := m.beads.GetAgentBead(agentID)
+	_, fields, err := m.lookupAgentBead(agentID, batch)
 	if err != nil || fields == nil {
 		return CleanupUnknown
 	}
@@ -1157,7 +1159,7 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	if !nuclear {
 		// ZFC #10: First try to read cleanup_status from agent bead
 		// This is the ZFC-compliant path - trust what the polecat reported
-		cleanupStatus := m.getCleanupStatusFromBead(name)
+		cleanupStatus := m.getCleanupStatusFromBead(name, nil)
 
 		if cleanupStatus != CleanupUnknown {
 			// ZFC path: Use polecat's self-reported status
@@ -1364,7 +1366,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 		return ErrPolecatNotFound
 	}
 
-	current, err := m.loadFromBeads(name)
+	current, err := m.loadFromBeads(name, nil)
 	if err != nil {
 		return err
 	}
@@ -1773,7 +1775,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
 	}
-	current, err := m.loadFromBeads(name)
+	current, err := m.loadFromBeads(name, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2261,15 +2263,24 @@ func (m *Manager) List() ([]*Polecat, error) {
 		names = append(names, entry.Name())
 	}
 
-	// Load all polecats in parallel — each loadFromBeads call involves
-	// multiple bd/git subprocess calls that are independent per polecat.
+	// Fetch the rig-wide bd state ONCE (see beadsBatch) instead of letting
+	// each polecat's loadFromBeads below issue its own hooked/assigned/
+	// agent-bead query (gt-ls4u).
+	batch := m.loadBeadsBatch()
+
+	// Load all polecats in parallel — the remaining per-polecat work
+	// (git branch/worktree checks, tmux session state) is independent per
+	// polecat; beads queries are now served from batch above.
 	results := make([]*Polecat, len(names))
 	var wg sync.WaitGroup
 	for i, name := range names {
 		wg.Add(1)
 		go func(idx int, name string) {
 			defer wg.Done()
-			p, err := m.Get(name)
+			if !m.exists(name) {
+				return // Skip invalid polecats (leaves nil in results)
+			}
+			p, err := m.loadFromBeads(name, batch)
 			if err != nil {
 				return // Skip invalid polecats (leaves nil in results)
 			}
@@ -2558,7 +2569,7 @@ func (m *Manager) Get(name string) (*Polecat, error) {
 		return nil, ErrPolecatNotFound
 	}
 
-	return m.loadFromBeads(name)
+	return m.loadFromBeads(name, nil)
 }
 
 // SetState updates a polecat's state.
@@ -2724,7 +2735,118 @@ func activeWorkBeadsForCleanup(issues []*beads.Issue) []*beads.Issue {
 	return work
 }
 
+// beadsBatch holds rig-wide beads query results fetched ONCE per List() call
+// and reused across every polecat, instead of each polecat's loadFromBeads
+// issuing its own hooked/assigned/agent-bead bd subprocess. On an N-polecat
+// pool this collapses up to 3*N concurrent bd processes down to 3 total
+// (gt-ls4u: measured 18 concurrent 'bd list --json --status=all' calls plus
+// one 'bd show <agent-id>' per polecat during a single gt sling dispatch —
+// 1234% CPU, host idle 0% for the duration).
+//
+// Each field degrades independently: a failed query leaves that map nil, and
+// the lookupX helpers below fall back to the original per-polecat bd call
+// for just that piece of data — a single failed batch query cannot make
+// every polecat look idle/available, nor can it fail List() outright.
+type beadsBatch struct {
+	hookedByAssignee   map[string]*beads.Issue // status=hooked, keyed by assignee (nil = query failed)
+	assignedByAssignee map[string]*beads.Issue // GetAssignedIssue's precedence result, keyed by assignee (nil = query failed)
+	agentBeadsByID     map[string]*beads.Issue // gt:agent beads, keyed by bead ID (nil = query failed)
+}
+
+// loadBeadsBatch issues the rig-wide queries loadFromBeads would otherwise
+// repeat once per polecat. Never returns an error — each query fails
+// independently into a nil map, handled by the lookupX fallbacks.
+func (m *Manager) loadBeadsBatch() *beadsBatch {
+	batch := &beadsBatch{}
+
+	if hooked, err := m.beads.List(beads.ListOptions{Status: beads.StatusHooked, Priority: -1}); err == nil {
+		batch.hookedByAssignee = make(map[string]*beads.Issue, len(hooked))
+		for _, issue := range hooked {
+			if issue.Assignee == "" {
+				continue
+			}
+			if _, exists := batch.hookedByAssignee[issue.Assignee]; !exists {
+				batch.hookedByAssignee[issue.Assignee] = issue
+			}
+		}
+	}
+
+	// Same status set GetAssignedIssue itself filters to (open/in_progress/
+	// hooked) — via ListIssueStatuses' single "bd query" with an OR
+	// expression rather than GetAssignedIssue's per-assignee "status=all"
+	// full-table scan.
+	if assigned, err := m.beads.ListIssueStatuses(beads.StatusOpen, beads.StatusInProgress, beads.IssueStatusHooked); err == nil {
+		byAssignee := make(map[string][]*beads.Issue, len(assigned))
+		for _, issue := range assigned {
+			if issue.Assignee == "" {
+				continue
+			}
+			byAssignee[issue.Assignee] = append(byAssignee[issue.Assignee], issue)
+		}
+		batch.assignedByAssignee = make(map[string]*beads.Issue, len(byAssignee))
+		for assignee, issues := range byAssignee {
+			// Same precedence as Beads.GetAssignedIssue: open > in_progress > hooked.
+			for _, status := range []string{string(beads.StatusOpen), string(beads.StatusInProgress), beads.StatusHooked} {
+				for _, issue := range issues {
+					if issue.Status == status {
+						batch.assignedByAssignee[assignee] = issue
+					}
+				}
+				if batch.assignedByAssignee[assignee] != nil {
+					break
+				}
+			}
+		}
+	}
+
+	if agentBeadsByID, err := m.agentBeads().ListAgentBeads(); err == nil {
+		batch.agentBeadsByID = agentBeadsByID
+	}
+
+	return batch
+}
+
+// lookupHooked returns the first status=hooked issue assigned to assignee,
+// preferring batch data (see beadsBatch) over a per-polecat bd call.
+func (m *Manager) lookupHooked(assignee string, batch *beadsBatch) (*beads.Issue, error) {
+	if batch != nil && batch.hookedByAssignee != nil {
+		return batch.hookedByAssignee[assignee], nil
+	}
+	hookedBeads, err := m.beads.List(beads.ListOptions{Status: beads.StatusHooked, Assignee: assignee, Priority: -1})
+	if err != nil || len(hookedBeads) == 0 {
+		return nil, err
+	}
+	return hookedBeads[0], nil
+}
+
+// lookupAgentBead returns the agent bead and its parsed fields for agentID,
+// preferring batch data (see beadsBatch) over a per-polecat bd call.
+func (m *Manager) lookupAgentBead(agentID string, batch *beadsBatch) (*beads.Issue, *beads.AgentFields, error) {
+	if batch != nil && batch.agentBeadsByID != nil {
+		issue, ok := batch.agentBeadsByID[agentID]
+		if !ok || issue == nil {
+			return nil, nil, nil
+		}
+		fields := beads.ParseAgentFields(issue.Description)
+		fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
+		return issue, fields, nil
+	}
+	return m.beads.GetAgentBead(agentID)
+}
+
+// lookupAssignedIssue returns GetAssignedIssue's result for assignee,
+// preferring batch data (see beadsBatch) over a per-polecat bd call.
+func (m *Manager) lookupAssignedIssue(assignee string, batch *beadsBatch) (*beads.Issue, error) {
+	if batch != nil && batch.assignedByAssignee != nil {
+		return batch.assignedByAssignee[assignee], nil
+	}
+	return m.beads.GetAssignedIssue(assignee)
+}
+
 // loadFromBeads gets polecat info from hooked work beads + beads assignee field + tmux session state.
+// batch, if non-nil, supplies pre-fetched rig-wide query results (see
+// beadsBatch) so List() can load every polecat without a per-polecat bd
+// fan-out; pass nil for a single-polecat lookup (e.g. Get).
 // State derivation priority:
 //  1. Work bead status=hooked + assignee=<polecat> → working (authoritative source)
 //  2. Legacy agent hook_bead that still points to a currently hooked bead for this assignee
@@ -2733,7 +2855,7 @@ func activeWorkBeadsForCleanup(issues []*beads.Issue) []*beads.Issue {
 //  4. Live session without active issue + clean cleanup → idle
 //  5. Live session without active issue + non-clean/unknown cleanup → review-needed
 //  6. Beads query failure + live/dead session → review-needed/stalled fallback
-func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
+func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error) {
 	// Use clonePath which handles both new (polecats/<name>/<rigname>/)
 	// and old (polecats/<name>/) structures
 	clonePath := m.clonePath(name)
@@ -2761,12 +2883,8 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 
 	// Primary source: the work bead itself (status=hooked + assignee).
 	// This is the direct-tracking model introduced in hq-l6mm5.
-	hookedBeads, hookedErr := m.beads.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: assignee,
-		Priority: -1,
-	})
-	if hookedErr == nil && len(hookedBeads) > 0 {
+	hookedIssue, hookedErr := m.lookupHooked(assignee, batch)
+	if hookedErr == nil && hookedIssue != nil {
 		state := StateWorking
 		if sessionDead {
 			state = StateStalled
@@ -2777,7 +2895,7 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 			State:     state,
 			ClonePath: clonePath,
 			Branch:    branchName,
-			Issue:     hookedBeads[0].ID,
+			Issue:     hookedIssue.ID,
 		}, nil
 	}
 
@@ -2785,7 +2903,7 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 	// it resolves to a currently hooked bead for this assignee. This avoids stale
 	// issue reporting when hook_bead diverges from the work bead state.
 	agentID := m.agentBeadID(name)
-	_, fields, agentErr := m.beads.GetAgentBead(agentID)
+	_, fields, agentErr := m.lookupAgentBead(agentID, batch)
 	if agentErr == nil && fields != nil && fields.HookBead != "" {
 		if hookIssue, err := m.beads.Show(fields.HookBead); err == nil &&
 			isCurrentHookedIssueForAssignee(hookIssue, assignee) {
@@ -2806,7 +2924,7 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 
 	// Fallback: Query beads for assigned issue (for polecats without agent beads
 	// or with empty hook_bead)
-	issue, beadsErr := m.beads.GetAssignedIssue(assignee)
+	issue, beadsErr := m.lookupAssignedIssue(assignee, batch)
 	if beadsErr != nil {
 		// If beads query fails, cross-check tmux session state.
 		// Avoid synthesizing working with no issue when we cannot verify active work.
@@ -2847,7 +2965,7 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 		if sessionDead {
 			state = StateStalled
 		}
-	} else if agentState == StateIdle && sessionRunning && !sessionStale && !m.getCleanupStatusFromBead(name).IsSafe() {
+	} else if agentState == StateIdle && sessionRunning && !sessionStale && !m.getCleanupStatusFromBead(name, batch).IsSafe() {
 		state = StateReviewNeeded
 	}
 

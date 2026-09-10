@@ -720,6 +720,89 @@ func TestListWithPolecats(t *testing.T) {
 	}
 }
 
+// TestList_BatchesBeadsQueriesAcrossPolecats guards gt-ls4u: List() used to
+// have each polecat's loadFromBeads issue its own hooked/assigned/agent-bead
+// bd subprocess, so a sling dispatch against an N-polecat pool fanned out to
+// up to 3*N concurrent 'bd' processes — measured as 18 concurrent
+// 'bd list --status=all' calls plus one 'bd show <agent-id>' per polecat on
+// a 29-name pool (1234% CPU, host idle 0% for the duration). The fix
+// (beadsBatch/loadBeadsBatch) issues those queries ONCE for the whole rig
+// and reuses them across every polecat.
+//
+// This asserts an actual bd invocation COUNT, not just that List() still
+// returns the right polecats — an absence-only assertion would pass even if
+// the batching were silently reverted to per-polecat querying.
+func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+
+	root := t.TempDir()
+	names := []string{"toast", "cheedo", "capable", "dag", "furiosa"}
+	for _, name := range names {
+		if err := os.MkdirAll(filepath.Join(root, "polecats", name), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	mayorRig := filepath.Join(root, "mayor", "rig")
+	if err := os.MkdirAll(mayorRig, 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+
+	callLog := filepath.Join(t.TempDir(), "bd-calls.log")
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+echo "$*" >> "` + callLog + `"
+cmd=""
+for arg in "$@"; do
+  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
+done
+case "$cmd" in
+  list|query)
+    printf '[]\n'
+    ;;
+  show)
+    printf '[]\n'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r := &rig.Rig{Name: "test-rig", Path: root}
+	m := NewManager(r, git.NewGit(root), nil)
+
+	polecats, err := m.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(polecats) != len(names) {
+		t.Fatalf("polecats count = %d, want %d", len(polecats), len(names))
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("reading bd call log: %v", err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(calls) == 1 && calls[0] == "" {
+		calls = nil
+	}
+
+	// Batched: 3 rig-wide queries total (hooked, assigned, agent beads),
+	// independent of polecat count. Per-polecat querying would need at
+	// least one bd call per polecat here (5), typically 2-3.
+	if len(calls) >= len(names) {
+		t.Fatalf("bd invoked %d times for %d polecats — want a small constant independent of polecat count (batched); got calls:\n%s",
+			len(calls), len(names), data)
+	}
+}
+
 // Note: TestSetState, TestAssignIssue, and TestClearIssue were removed.
 // These operations now require a running beads instance and are tested
 // via integration tests. The unit tests here focus on testing the basic
