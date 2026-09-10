@@ -645,6 +645,11 @@ type MRFields struct {
 	PreVerified     bool   // Polecat ran full gates after rebasing onto target
 	PreVerifiedAt   string // ISO 8601 timestamp when verification completed
 	PreVerifiedBase string // Target branch SHA at verification time
+
+	// EditorialReviewedHead is the commit gt mq review last wrote an om
+	// verdict note for (refs/notes/om). The push precondition reads this
+	// to find the note without scanning; empty means "never reviewed".
+	EditorialReviewedHead string
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -739,6 +744,9 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "pre_verified_base", "pre-verified-base", "preverifiedbase":
 			fields.PreVerifiedBase = value
 			hasFields = true
+		case "editorial_reviewed_head", "editorial-reviewed-head", "editorialreviewedhead":
+			fields.EditorialReviewedHead = value
+			hasFields = true
 		}
 	}
 
@@ -821,6 +829,9 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.PreVerifiedBase != "" {
 		lines = append(lines, "pre_verified_base: "+fields.PreVerifiedBase)
 	}
+	if fields.EditorialReviewedHead != "" {
+		lines = append(lines, "editorial_reviewed_head: "+fields.EditorialReviewedHead)
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -835,56 +846,59 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 
 	// Known MR field keys (lowercase)
 	mrKeys := map[string]bool{
-		"branch":            true,
-		"target":            true,
-		"source_issue":      true,
-		"source-issue":      true,
-		"sourceissue":       true,
-		"worker":            true,
-		"rig":               true,
-		"commit_sha":        true,
-		"commit-sha":        true,
-		"commitsha":         true,
-		"pr_url":            true,
-		"pr-url":            true,
-		"prurl":             true,
-		"pr_number":         true,
-		"pr-number":         true,
-		"prnumber":          true,
-		"merge_commit":      true,
-		"merge-commit":      true,
-		"mergecommit":       true,
-		"close_reason":      true,
-		"close-reason":      true,
-		"closereason":       true,
-		"agent_bead":        true,
-		"agent-bead":        true,
-		"agentbead":         true,
-		"retry_count":       true,
-		"retry-count":       true,
-		"retrycount":        true,
-		"last_conflict_sha": true,
-		"last-conflict-sha": true,
-		"lastconflictsha":   true,
-		"conflict_task_id":  true,
-		"conflict-task-id":  true,
-		"conflicttaskid":    true,
-		"convoy_id":         true,
-		"convoy-id":         true,
-		"convoyid":          true,
-		"convoy":            true,
-		"convoy_created_at": true,
-		"convoy-created-at": true,
-		"convoycreatedat":   true,
-		"pre_verified":      true,
-		"pre-verified":      true,
-		"preverified":       true,
-		"pre_verified_at":   true,
-		"pre-verified-at":   true,
-		"preverifiedat":     true,
-		"pre_verified_base": true,
-		"pre-verified-base": true,
-		"preverifiedbase":   true,
+		"branch":                  true,
+		"target":                  true,
+		"source_issue":            true,
+		"source-issue":            true,
+		"sourceissue":             true,
+		"worker":                  true,
+		"rig":                     true,
+		"commit_sha":              true,
+		"commit-sha":              true,
+		"commitsha":               true,
+		"pr_url":                  true,
+		"pr-url":                  true,
+		"prurl":                   true,
+		"pr_number":               true,
+		"pr-number":               true,
+		"prnumber":                true,
+		"merge_commit":            true,
+		"merge-commit":            true,
+		"mergecommit":             true,
+		"close_reason":            true,
+		"close-reason":            true,
+		"closereason":             true,
+		"agent_bead":              true,
+		"agent-bead":              true,
+		"agentbead":               true,
+		"retry_count":             true,
+		"retry-count":             true,
+		"retrycount":              true,
+		"last_conflict_sha":       true,
+		"last-conflict-sha":       true,
+		"lastconflictsha":         true,
+		"conflict_task_id":        true,
+		"conflict-task-id":        true,
+		"conflicttaskid":          true,
+		"convoy_id":               true,
+		"convoy-id":               true,
+		"convoyid":                true,
+		"convoy":                  true,
+		"convoy_created_at":       true,
+		"convoy-created-at":       true,
+		"convoycreatedat":         true,
+		"pre_verified":            true,
+		"pre-verified":            true,
+		"preverified":             true,
+		"pre_verified_at":         true,
+		"pre-verified-at":         true,
+		"preverifiedat":           true,
+		"pre_verified_base":       true,
+		"pre-verified-base":       true,
+		"preverifiedbase":         true,
+		"editorial_reviewed_head": true,
+		"editorial-reviewed-head": true,
+		"editorialreviewedhead":   true,
 	}
 
 	// Collect non-MR lines from existing description

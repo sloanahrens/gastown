@@ -1186,6 +1186,14 @@ func (g *Git) PatchID(base, head string) (string, error) {
 	return fields[0], nil
 }
 
+// MergeBase returns the best common ancestor of a and b
+// (git merge-base a b) — used by the editorial push precondition to
+// recompute an MR's range against the target as it sits at push time,
+// independent of whatever base was recorded at review time.
+func (g *Git) MergeBase(a, b string) (string, error) {
+	return g.run("merge-base", a, b)
+}
+
 // NotesAdd attaches content as a note on commit under the given notes ref,
 // overwriting any note already there (git notes --ref <ref> add -f -m).
 func (g *Git) NotesAdd(ref, commit, content string) error {

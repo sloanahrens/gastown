@@ -144,6 +144,24 @@ func TestNotesShow_NoNoteReturnsErrNoNote(t *testing.T) {
 	}
 }
 
+func TestMergeBase_FindsCommonAncestor(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	head := commitFile(t, dir, "feature.txt", "hello\n", "add feature")
+
+	got, err := g.MergeBase(base, head)
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	if got != base {
+		t.Fatalf("MergeBase(base, head) = %s, want %s", got, base)
+	}
+}
+
 func TestNotesCopy(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
