@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/hooks"
 )
 
 func TestExtractCommand(t *testing.T) {
@@ -173,6 +176,63 @@ func TestMatchesPackageInstall(t *testing.T) {
 	}
 }
 
+func TestMatchesUnboundedScan(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Should block — the gt-nqcy incident and its siblings.
+		{"bfs / with -S flag before root", "bfs -S dfs / -name regex.h -path *unicode*", true},
+		{"find /", "find / -name x", true},
+		{"find /*", "find /* -name x", true},
+		{"find $HOME", "find $HOME -iname foo", true},
+		{"find ~", "find ~ -name foo", true},
+		{"find /Users", "find /Users -name x", true},
+		{"find /System", "find /System -name x", true},
+		{"find /Library", "find /Library -name x", true},
+		{"find /opt exact", "find /opt -name x", true},
+		{"fd rooted at root", "fd regex.h /", true},
+		{"rg rooted at root", "rg TODO /", true},
+		{"du rooted at root", "du -sh /", true},
+		{"grep -r rooted at root", "grep -r TODO /", true},
+		{"grep --recursive rooted at root", "grep --recursive TODO /", true},
+		{"ls -R rooted at root", "ls -R /", true},
+		{"ls -laR rooted at root (bundled flags)", "ls -laR /", true},
+		{"find via absolute path to binary", "/usr/bin/find / -name x", true},
+		{"grep -rn bundled flags rooted at root", "grep -rn TODO /", true},
+		{"grep -nr bundled flags, r not first", "grep -nr TODO /", true},
+		{"grep -Rn bundled flags, uppercase R", "grep -Rn TODO /", true},
+		{"find ~/ trailing slash", "find ~/ -name foo", true},
+		{"find /Users/ trailing slash", "find /Users/ -name x", true},
+		{"find $HOME/ trailing slash", "find $HOME/ -iname foo", true},
+
+		// Should allow — bounded or non-recursive.
+		{"find /opt/homebrew", "find /opt/homebrew -name x", false},
+		{"find .", "find . -name x", false},
+		{"find relative", "find src -name x", false},
+		{"find /tmp", "find /tmp -name x", false},
+		{"find /Users/sloan", "find /Users/sloan -name x", false},
+		{"grep without -r", "grep TODO file.go", false},
+		{"ls -r reverse sort, not recursive", "ls -r /", false},
+		{"ls plain", "ls /", false},
+		{"du without root arg", "du -sh .", false},
+		{"no scan tool at all", "echo hello", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(tt.command)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
 // TestDangerousGuard_Integration tests the full pattern set end-to-end.
 func TestDangerousGuard_Integration(t *testing.T) {
 	tests := []struct {
@@ -231,6 +291,97 @@ func TestDangerousGuard_Integration(t *testing.T) {
 			}
 			if blocked != tt.blocked {
 				t.Errorf("command %q: blocked=%v, want %v", tt.command, blocked, tt.blocked)
+			}
+		})
+	}
+}
+
+// bashMatcherGlob mirrors how Claude Code interprets a "Bash(<pattern>)"
+// PreToolUse matcher: '*' matches any run of characters, including '/'.
+func bashMatcherGlob(pattern, command string) bool {
+	inner := strings.TrimSuffix(strings.TrimPrefix(pattern, "Bash("), ")")
+	re, err := regexp.Compile("^" + strings.ReplaceAll(regexp.QuoteMeta(inner), `\*`, ".*") + "$")
+	if err != nil {
+		return false
+	}
+	return re.MatchString(command)
+}
+
+// dangerousCommandGuardMatcher reports whether the given command is routed
+// by hooks.DefaultBase()'s PreToolUse matchers to the dangerous-command
+// guard specifically (as opposed to some other guard, e.g. pr-workflow).
+func dangerousCommandGuardMatcher(command string) bool {
+	for _, entry := range hooks.DefaultBase().PreToolUse {
+		if !bashMatcherGlob(entry.Matcher, command) {
+			continue
+		}
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, "dangerous-command") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestHookMatchersRouteKnownDangerousCommands guards against exactly the bug
+// that bounced the first MR for gt-nqcy: matchesUnboundedScan (and friends)
+// blocking a command in isolation proves nothing if the PreToolUse matcher
+// that's supposed to feed it that command never fires for real invocations
+// like "/usr/bin/find /" or "ls -laR /". This walks the real matcher config
+// from internal/hooks, not a hand-rolled stand-in for it.
+func TestHookMatchersRouteKnownDangerousCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"bfs rooted at root", "bfs -S dfs / -name regex.h -path *unicode*"},
+		{"find rooted at root", "find / -name x"},
+		{"find via absolute path to binary", "/usr/bin/find / -name x"},
+		{"fd rooted at root", "fd regex.h /"},
+		{"rg rooted at root", "rg TODO /"},
+		{"du rooted at root", "du -sh /"},
+		{"grep -r rooted at root", "grep -r TODO /"},
+		{"grep -rn bundled flags rooted at root", "grep -rn TODO /"},
+		{"ls -R rooted at root", "ls -R /"},
+		{"ls -laR bundled flags rooted at root", "ls -laR /"},
+		{"rm -rf root", "rm -rf /"},
+		{"git push --force", "git push --force origin main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !dangerousCommandGuardMatcher(tt.command) {
+				t.Fatalf("command %q: no PreToolUse matcher in hooks.DefaultBase() routes it to the dangerous-command guard", tt.command)
+			}
+		})
+	}
+}
+
+// TestHookMatchersDoNotOverfireOnSafeCommands ensures the broadened matchers
+// (e.g. "Bash(*find*)", "Bash(ls -*)") still leave clearly safe, bounded
+// commands alone — the guard itself would allow them anyway, but a matcher
+// that fires on everything defeats the point of routing selectively.
+func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
+	tests := []string{
+		"find . -name x",
+		"find /tmp -name x",
+		"ls -la .",
+		"ls /opt/homebrew",
+		"grep TODO file.go",
+		"git status",
+	}
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			if dangerousCommandGuardMatcher(command) {
+				// Being routed to the guard isn't itself a failure — the guard
+				// must still allow it. Confirm that's actually what happens.
+				lower := strings.ToLower(command)
+				if reason, _ := matchesUnboundedScan(command); reason != "" {
+					t.Fatalf("command %q reached the dangerous-command guard and was blocked: %q", command, reason)
+				}
+				if matchesDangerousRmRf(lower) != "" || matchesDangerousGitPush(lower) != "" {
+					t.Fatalf("command %q reached the dangerous-command guard and was blocked", command)
+				}
 			}
 		})
 	}
