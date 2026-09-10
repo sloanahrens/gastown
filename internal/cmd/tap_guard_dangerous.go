@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/google/shlex"
 	"github.com/spf13/cobra"
 )
 
@@ -78,44 +79,64 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	lower := strings.ToLower(command)
+	tokens := shellTokenize(command)
+	lowerTokens := make([]string, len(tokens))
+	for i, t := range tokens {
+		lowerTokens[i] = strings.ToLower(t)
+	}
 
 	// Check privilege escalation and package manager commands first
-	if reason := matchesSudo(lower); reason != "" {
+	if reason := matchesSudo(lowerTokens); reason != "" {
 		printDangerousBlock(reason, command)
 		return NewSilentExit(2)
 	}
-	if reason := matchesPackageInstall(lower); reason != "" {
+	if reason := matchesPackageInstall(lowerTokens); reason != "" {
 		printDangerousBlock(reason, command)
 		return NewSilentExit(2)
 	}
 
 	// Check special patterns that need smarter matching
-	if reason := matchesDangerousRmRf(lower); reason != "" {
+	if reason := matchesDangerousRmRf(lowerTokens); reason != "" {
 		printDangerousBlock(reason, command)
 		return NewSilentExit(2)
 	}
-	if reason := matchesDangerousGitPush(lower); reason != "" {
+	if reason := matchesDangerousGitPush(lowerTokens); reason != "" {
 		printDangerousBlock(reason, command)
 		return NewSilentExit(2)
 	}
-	// Unbounded scans need the original (non-lowercased) command: ls -R
-	// (recursive) and ls -r (reverse sort) mean different things, and
-	// lowercasing would collapse that distinction.
-	if reason, alternative := matchesUnboundedScan(command); reason != "" {
+	// Unbounded scans need the original-case tokens: ls -R (recursive) and
+	// ls -r (reverse sort) mean different things, and lowercasing would
+	// collapse that distinction.
+	if reason, alternative := matchesUnboundedScan(tokens); reason != "" {
 		printDangerousBlockWithAlternative(reason, command, alternative)
 		return NewSilentExit(2)
 	}
 
 	// Check simple fragment patterns
 	for _, pattern := range fragmentPatterns {
-		if matchesAllFragments(lower, pattern.contains) {
+		if matchesAllFragments(lowerTokens, pattern.contains) {
 			printDangerousBlock(pattern.reason, command)
 			return NewSilentExit(2)
 		}
 	}
 
 	return nil
+}
+
+// shellTokenize splits a shell command into argv-like tokens the way a real
+// shell would: quoted text becomes a single opaque token instead of being
+// re-split on whitespace, so a pattern living inside a quoted string (a sed
+// script, a jq filter, a mail body passed to -m) is never mistaken for a
+// standalone command-line argument (gt-mkrj). Falls back to naive whitespace
+// splitting on malformed shell syntax (e.g. an unterminated quote) so a
+// parse failure fails toward still checking real risks rather than silently
+// allowing everything through.
+func shellTokenize(command string) []string {
+	tokens, err := shlex.Split(command)
+	if err != nil {
+		return strings.Fields(command)
+	}
+	return tokens
 }
 
 // printDangerousBlock prints the standard block banner to stderr.
@@ -176,9 +197,13 @@ var alwaysRecursiveScanTools = map[string]bool{
 // invocations whose root argument is broad enough to scan the whole
 // filesystem (see scanRootDenylist). It returns a short reason for the
 // fixed-width block banner and a longer alternative-tools suggestion to
-// print separately, or ("", "") if the command is fine.
-func matchesUnboundedScan(command string) (reason, alternative string) {
-	fields := strings.Fields(command)
+// print separately, or ("", "") if the command is fine. tokens must be
+// original-case, shell-aware tokens (see shellTokenize) — quoted text (a
+// sed/jq script, a mail body) must arrive as one opaque token so a "//"
+// appearing inside it is never mistaken for a bare root-path argument
+// (gt-mkrj).
+func matchesUnboundedScan(tokens []string) (reason, alternative string) {
+	fields := tokens
 	for i, f := range fields {
 		base := strings.ToLower(f)
 		if idx := strings.LastIndex(base, "/"); idx >= 0 {
@@ -279,27 +304,51 @@ func extractCommand(input []byte) string {
 	return hookInput.ToolInput.Command
 }
 
-// matchesAllFragments returns true if all fragments appear in the command.
-func matchesAllFragments(command string, fragments []string) bool {
+// matchesAllFragments returns true if every fragment is present somewhere in
+// tokens (order- and position-independent). tokens must already be
+// lowercased; fragments are lowercased here for callers that pass
+// mixed-case literals. Word fragments (e.g. "apt", "table") must match an
+// exact token — not a substring — so "apt" doesn't fire on "capture" or
+// "adapt" (gt-mkrj), and shell-aware tokens (see shellTokenize) keep quoted
+// text — a sed/jq script, a mail body — from being mistaken for standalone
+// command words. A two-character short-flag fragment (e.g. "-f") also
+// matches when bundled into a larger short-option cluster (e.g. "-fd",
+// "git clean -fd"), since that's a real single-token flag combination, not
+// quoted or embedded text.
+func matchesAllFragments(tokens []string, fragments []string) bool {
 	for _, f := range fragments {
-		if !strings.Contains(command, strings.ToLower(f)) {
+		if !tokensContainFragment(tokens, strings.ToLower(f)) {
 			return false
 		}
 	}
 	return true
 }
 
+func tokensContainFragment(tokens []string, want string) bool {
+	for _, tok := range tokens {
+		if tok == want {
+			return true
+		}
+	}
+	if len(want) == 2 && want[0] == '-' && want[1] != '-' {
+		letter := rune(want[1])
+		for _, tok := range tokens {
+			if len(tok) > 2 && tok[0] == '-' && tok[1] != '-' && strings.ContainsRune(tok[1:], letter) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // matchesDangerousRmRf blocks "rm -rf /" targeting the root filesystem.
 // Only blocks when the target is literally "/" or "/*". Normal cleanup
-// commands like "rm -rf ./build/" are allowed.
-func matchesDangerousRmRf(command string) string {
-	if !strings.Contains(command, "rm") {
-		return ""
-	}
-	fields := strings.Fields(command)
+// commands like "rm -rf ./build/" are allowed. tokens must be lowercased,
+// shell-aware tokens (see shellTokenize).
+func matchesDangerousRmRf(tokens []string) string {
 	hasRm := false
 	hasRecursiveForce := false
-	for _, f := range fields {
+	for _, f := range tokens {
 		if f == "rm" {
 			hasRm = true
 		}
@@ -313,11 +362,11 @@ func matchesDangerousRmRf(command string) string {
 	return ""
 }
 
-// matchesSudo blocks any command that starts with or contains "sudo".
-// Agents must never elevate privileges on the host system.
-func matchesSudo(command string) string {
-	fields := strings.Fields(command)
-	for _, f := range fields {
+// matchesSudo blocks any command whose argv contains a bare "sudo" token.
+// Agents must never elevate privileges on the host system. tokens must be
+// lowercased, shell-aware tokens (see shellTokenize).
+func matchesSudo(tokens []string) string {
+	for _, f := range tokens {
 		if f == "sudo" {
 			return "Agents must never use sudo — do not elevate privileges or modify the host OS"
 		}
@@ -341,40 +390,48 @@ var packageManagerPatterns = []struct {
 }
 
 // matchesPackageInstall blocks system package manager install commands.
-// Also blocks "pip install" with --system flag and "npm install -g" (global installs).
-func matchesPackageInstall(command string) string {
+// Also blocks "pip install" with --system flag and "npm install -g" (global
+// installs). tokens must be lowercased, shell-aware tokens (see
+// shellTokenize) — token-exact matching keeps a fragment like "apt" from
+// firing on "capture"/"adapt" and keeps quoted text out of consideration
+// (gt-mkrj).
+func matchesPackageInstall(tokens []string) string {
 	// Check simple token-based patterns (apt install, dnf install, etc.)
 	for _, p := range packageManagerPatterns {
-		if matchesAllFragments(command, p.tokens) {
+		if matchesAllFragments(tokens, p.tokens) {
 			return p.reason
 		}
 	}
 
+	hasToken := func(want string) bool {
+		for _, t := range tokens {
+			if t == want {
+				return true
+			}
+		}
+		return false
+	}
+
 	// pip install --system (but not regular pip install into a venv)
-	if strings.Contains(command, "pip") && strings.Contains(command, "install") && strings.Contains(command, "--system") {
+	if (hasToken("pip") || hasToken("pip3")) && hasToken("install") && hasToken("--system") {
 		return "System-level pip install — use a virtualenv or workspace tools instead"
 	}
 
 	// npm install -g / npm install --global
-	if strings.Contains(command, "npm") && strings.Contains(command, "install") {
-		if strings.Contains(command, " -g ") || strings.Contains(command, " -g") || strings.Contains(command, "--global") {
-			return "Global npm install — use workspace tools instead"
-		}
+	if hasToken("npm") && hasToken("install") && (hasToken("-g") || hasToken("--global")) {
+		return "Global npm install — use workspace tools instead"
 	}
 
 	return ""
 }
 
 // matchesDangerousGitPush blocks "git push --force" while allowing safe
-// variants like "--force-with-lease" and "--force-if-includes".
-func matchesDangerousGitPush(command string) string {
-	if !strings.Contains(command, "git") || !strings.Contains(command, "push") {
-		return ""
-	}
-	fields := strings.Fields(command)
+// variants like "--force-with-lease" and "--force-if-includes". tokens must
+// be lowercased, shell-aware tokens (see shellTokenize).
+func matchesDangerousGitPush(tokens []string) string {
 	hasPush := false
-	for i, f := range fields {
-		if f == "push" && i > 0 && fields[i-1] == "git" {
+	for i, f := range tokens {
+		if f == "push" && i > 0 && tokens[i-1] == "git" {
 			hasPush = true
 			continue
 		}

@@ -183,12 +183,24 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadSettings: %v", err)
 			}
-			entry, ok := findPreToolUse(&settings.Hooks, "Bash(*tmux*send-keys*)")
+			// Post gt-5ihs, the pattern lives in a Hook's If field under the
+			// bare "Bash" matcher — Claude Code's matcher only ever matches
+			// the tool name.
+			entry, ok := findPreToolUse(&settings.Hooks, "Bash")
 			if !ok {
+				t.Fatal("boot install did not write the bare Bash PreToolUse entry")
+			}
+			var tmuxGuardCommand string
+			for _, h := range entry.Hooks {
+				if h.If == "Bash(*tmux*send-keys*)" {
+					tmuxGuardCommand = h.Command
+				}
+			}
+			if tmuxGuardCommand == "" {
 				t.Fatal("boot install did not write managed raw tmux send-keys guard")
 			}
-			if !strings.Contains(entry.Hooks[0].Command, "gt nudge --mode=immediate deacon") {
-				t.Fatalf("boot guard command does not point to gt nudge: %s", entry.Hooks[0].Command)
+			if !strings.Contains(tmuxGuardCommand, "gt nudge --mode=immediate deacon") {
+				t.Fatalf("boot guard command does not point to gt nudge: %s", tmuxGuardCommand)
 			}
 			if len(settings.Hooks.UserPromptSubmit) != 0 {
 				t.Fatalf("boot managed settings should disable UserPromptSubmit, got %+v", settings.Hooks.UserPromptSubmit)

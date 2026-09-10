@@ -22,10 +22,14 @@ Subcommands:
 Hook configuration in .claude/settings.json:
   {
     "PreToolUse": [{
-      "matcher": "Bash(gh pr create*)",
-      "hooks": [{"command": "gt tap guard pr-workflow"}]
+      "matcher": "Bash",
+      "hooks": [{"command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}]
     }]
   }
+
+Matcher matches the TOOL NAME only (e.g. "Bash"); a command pattern like
+"Bash(gh pr create*)" belongs in a hook's "if" field, never in "matcher"
+(gt-5ihs) — a pattern written into matcher never fires.
 
 See ~/gt/docs/HOOKS.md for full documentation.`,
 }

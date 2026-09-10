@@ -17,6 +17,7 @@ var (
 	doctorRestartSessions bool
 	doctorNoStart         bool
 	doctorSlow            string
+	doctorLiveFire        bool
 )
 
 var doctorCmd = &cobra.Command{
@@ -117,7 +118,10 @@ Patrol checks:
 Use --fix to attempt automatic fixes for issues that support it.
 Use --no-start with --fix to suppress starting the daemon and agents.
 Use --rig to check a specific rig instead of the entire workspace.
-Use --slow to highlight slow checks (default threshold: 1s, e.g. --slow=500ms).`,
+Use --slow to highlight slow checks (default threshold: 1s, e.g. --slow=500ms).
+Use --live-fire to add hooks-live-fire (spawns a real claude -p session
+against a live polecat settings.json to verify a PreToolUse guard actually
+blocks end-to-end — slow, token-cost-bearing, not run by default).`,
 	RunE: runDoctor,
 }
 
@@ -130,6 +134,7 @@ func init() {
 	doctorCmd.Flags().StringVar(&doctorSlow, "slow", "", "Highlight slow checks (optional threshold, default 1s)")
 	// Allow --slow without a value (uses default 1s)
 	doctorCmd.Flags().Lookup("slow").NoOptDefVal = "1s"
+	doctorCmd.Flags().BoolVar(&doctorLiveFire, "live-fire", false, "Include hooks-live-fire (spawns a real claude -p session; slow, token-cost-bearing)")
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -150,6 +155,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	d := newDoctorForCommand(doctorRig)
+	if doctorLiveFire {
+		// Opt-in only: spawns a real claude -p subprocess, so it never runs
+		// as part of a default (unwrapped) 'gt doctor' invocation.
+		d.Register(doctor.NewHooksLiveFireCheck())
+	}
 
 	// Parse slow threshold (0 = disabled)
 	var slowThreshold time.Duration

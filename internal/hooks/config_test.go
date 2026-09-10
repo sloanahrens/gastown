@@ -581,35 +581,21 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Error("expected crew to inherit SessionStart from DefaultBase")
 	}
 
-	// Witness should get DefaultBase + built-in patrol-formula-guard (gt-e47hxn)
+	// Witness should get DefaultBase + built-in patrol-formula-guard (gt-e47hxn).
+	// Post gt-5ihs, every PreToolUse Bash guard shares the bare "Bash" tool-name
+	// matcher — Claude Code's matcher only ever matches the tool name — and is
+	// discriminated by each Hook's If field instead. So witness must have
+	// exactly one PreToolUse entry (matcher "Bash") whose Hooks accumulate the
+	// base guards (pr-workflow x3, dangerous-command x1) AND witness's own
+	// 4 patrol-formula-guard hooks.
 	witness, err := ComputeExpected("witness")
 	if err != nil {
 		t.Fatalf("ComputeExpected(witness) failed: %v", err)
 	}
-	// Witness has built-in PreToolUse overrides for patrol-formula-guard
-	if len(witness.PreToolUse) < 4 {
-		t.Errorf("expected witness to have at least 4 PreToolUse hooks from DefaultOverrides (patrol-formula-guard), got %d", len(witness.PreToolUse))
-	}
-	// Should still inherit base SessionStart
+	requireIfConditions(t, "witness", witness, patrolIfConditions)
+	requireIfConditions(t, "witness", witness, prWorkflowIfConditions)
 	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected witness to inherit SessionStart from DefaultBase")
-	}
-	// Verify patrol matchers are present
-	patrolMatchers := map[string]bool{
-		"Bash(*bd mol pour*patrol*)":        false,
-		"Bash(*bd mol pour *mol-witness*)":  false,
-		"Bash(*bd mol pour *mol-deacon*)":   false,
-		"Bash(*bd mol pour *mol-refinery*)": false,
-	}
-	for _, entry := range witness.PreToolUse {
-		if _, ok := patrolMatchers[entry.Matcher]; ok {
-			patrolMatchers[entry.Matcher] = true
-		}
-	}
-	for matcher, found := range patrolMatchers {
-		if !found {
-			t.Errorf("witness missing patrol-formula-guard matcher: %s", matcher)
-		}
 	}
 
 	// Deacon should get DefaultBase + built-in patrol-formula-guard plus anti-batch guards.
@@ -617,30 +603,13 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeExpected(deacon) failed: %v", err)
 	}
-	if len(deacon.PreToolUse) < 7 {
-		t.Errorf("expected deacon to have at least 7 PreToolUse hooks from DefaultOverrides (anti-batch + patrol-formula-guard), got %d", len(deacon.PreToolUse))
-	}
+	requireIfConditions(t, "deacon", deacon, patrolIfConditions)
+	requireIfConditions(t, "deacon", deacon, prWorkflowIfConditions)
+	requireIfConditions(t, "deacon", deacon, []string{
+		"Bash(*for *seq*)", "Bash(*while true*)", "Bash(*while :*)",
+	})
 	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected deacon to inherit SessionStart from DefaultBase")
-	}
-	deaconPatrolMatchers := map[string]bool{
-		"Bash(*for *seq*)":                  false,
-		"Bash(*while true*)":                false,
-		"Bash(*while :*)":                   false,
-		"Bash(*bd mol pour*patrol*)":        false,
-		"Bash(*bd mol pour *mol-witness*)":  false,
-		"Bash(*bd mol pour *mol-deacon*)":   false,
-		"Bash(*bd mol pour *mol-refinery*)": false,
-	}
-	for _, entry := range deacon.PreToolUse {
-		if _, ok := deaconPatrolMatchers[entry.Matcher]; ok {
-			deaconPatrolMatchers[entry.Matcher] = true
-		}
-	}
-	for matcher, found := range deaconPatrolMatchers {
-		if !found {
-			t.Errorf("deacon missing patrol-formula-guard matcher: %s", matcher)
-		}
 	}
 
 	// Refinery should get DefaultBase + built-in patrol-formula-guard (same as witness)
@@ -648,26 +617,42 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeExpected(refinery) failed: %v", err)
 	}
-	if len(refinery.PreToolUse) < 4 {
-		t.Errorf("expected refinery to have at least 4 PreToolUse hooks from DefaultOverrides (patrol-formula-guard), got %d", len(refinery.PreToolUse))
-	}
+	requireIfConditions(t, "refinery", refinery, patrolIfConditions)
+	requireIfConditions(t, "refinery", refinery, prWorkflowIfConditions)
 	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected refinery to inherit SessionStart from DefaultBase")
 	}
-	refineryPatrolMatchers := map[string]bool{
-		"Bash(*bd mol pour*patrol*)":        false,
-		"Bash(*bd mol pour *mol-witness*)":  false,
-		"Bash(*bd mol pour *mol-deacon*)":   false,
-		"Bash(*bd mol pour *mol-refinery*)": false,
+}
+
+var patrolIfConditions = []string{
+	"Bash(*bd mol pour*patrol*)",
+	"Bash(*bd mol pour *mol-witness*)",
+	"Bash(*bd mol pour *mol-deacon*)",
+	"Bash(*bd mol pour *mol-refinery*)",
+}
+
+var prWorkflowIfConditions = []string{
+	"Bash(gh pr create*)",
+	"Bash(git checkout -b*)",
+	"Bash(git switch -c*)",
+}
+
+// requireIfConditions asserts that cfg's PreToolUse has a single bare-"Bash"
+// matcher entry whose Hooks carry every want condition in their If field
+// (gt-5ihs: matcher must be the tool name, never a pattern).
+func requireIfConditions(t *testing.T, label string, cfg *HooksConfig, want []string) {
+	t.Helper()
+	entry, ok := findPreToolUse(cfg, "Bash")
+	if !ok {
+		t.Fatalf("%s: missing bare \"Bash\" PreToolUse matcher entry", label)
 	}
-	for _, entry := range refinery.PreToolUse {
-		if _, ok := refineryPatrolMatchers[entry.Matcher]; ok {
-			refineryPatrolMatchers[entry.Matcher] = true
-		}
+	have := make(map[string]bool, len(entry.Hooks))
+	for _, h := range entry.Hooks {
+		have[h.If] = true
 	}
-	for matcher, found := range refineryPatrolMatchers {
-		if !found {
-			t.Errorf("refinery missing patrol-formula-guard matcher: %s", matcher)
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("%s: missing PreToolUse hook with If=%q under matcher \"Bash\"", label, w)
 		}
 	}
 }
@@ -685,16 +670,10 @@ func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
 		t.Fatalf("ComputeExpected(sky/witness) failed: %v", err)
 	}
 
-	// Should have patrol-formula-guard matchers from DefaultOverrides["witness"]
-	patrolCount := 0
-	for _, entry := range skyWitness.PreToolUse {
-		if strings.Contains(entry.Matcher, "bd mol pour") {
-			patrolCount++
-		}
-	}
-	if patrolCount < 4 {
-		t.Errorf("sky/witness expected 4 patrol-formula-guard matchers, got %d", patrolCount)
-	}
+	// Should have patrol-formula-guard hooks (If field, not Matcher — gt-5ihs)
+	// from DefaultOverrides["witness"], accumulated under the bare "Bash"
+	// matcher entry.
+	requireIfConditions(t, "sky/witness", skyWitness, patrolIfConditions)
 
 	// Should also inherit base hooks (pr-workflow-guard, etc.)
 	if len(skyWitness.SessionStart) == 0 {
@@ -731,31 +710,55 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 		t.Fatalf("ComputeExpected(dog): %v", err)
 	}
 
+	// Post gt-5ihs, dog's formula-allowlist guard and the base's pr-workflow
+	// / dangerous-command guards all share the bare "Bash" matcher — Claude
+	// Code's matcher only ever matches the tool name — and accumulate as
+	// separate Hooks rather than one replacing the other (merge.go's
+	// unionHooks). formula-allowlist has no If (it self-filters, like
+	// dangerous-command), so it must appear among the hooks with an empty If.
 	entry, ok := findPreToolUse(dog, "Bash")
 	if !ok {
-		t.Fatal("dog missing formula-allowlist guard on Bash matcher")
+		t.Fatal("dog missing PreToolUse guard on bare Bash matcher")
 	}
-	if len(entry.Hooks) != 1 {
-		t.Fatalf("dog Bash guard hooks = %d, want 1", len(entry.Hooks))
+	hasAllowlist := false
+	for _, h := range entry.Hooks {
+		if strings.Contains(h.Command, "tap guard formula-allowlist") && h.If == "" {
+			hasAllowlist = true
+		}
 	}
-	if !strings.Contains(entry.Hooks[0].Command, "tap guard formula-allowlist") {
-		t.Fatalf("dog Bash guard should run formula-allowlist, got: %s", entry.Hooks[0].Command)
+	if !hasAllowlist {
+		t.Fatalf("dog Bash guard should include formula-allowlist (no If), got: %+v", entry.Hooks)
 	}
 	if len(dog.UserPromptSubmit) != 0 {
 		t.Fatalf("dog should disable UserPromptSubmit mail-check, got %+v", dog.UserPromptSubmit)
 	}
 	// Base guards must still apply alongside the allowlist guard.
-	if _, ok := findPreToolUse(dog, "Bash(gh pr create*)"); !ok {
-		t.Fatal("dog should inherit pr-workflow guard from DefaultBase")
+	requireIfConditions(t, "dog", dog, prWorkflowIfConditions)
+	hasDangerousCommand := false
+	for _, h := range entry.Hooks {
+		if strings.Contains(h.Command, "tap guard dangerous-command") && h.If == "" {
+			hasDangerousCommand = true
+		}
+	}
+	if !hasDangerousCommand {
+		t.Fatal("dog should inherit dangerous-command guard from DefaultBase")
 	}
 
-	// Other roles must not receive the dog guard.
+	// Other roles must not receive the dog guard. Mayor still has its own
+	// bare "Bash" entry (base's pr-workflow/dangerous-command guards), but
+	// it must not contain formula-allowlist.
 	mayorCfg, err := ComputeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected(mayor): %v", err)
 	}
-	if _, ok := findPreToolUse(mayorCfg, "Bash"); ok {
-		t.Fatal("mayor must not receive the dog formula-allowlist guard")
+	mayorEntry, ok := findPreToolUse(mayorCfg, "Bash")
+	if !ok {
+		t.Fatal("mayor should still have the base Bash guard entry")
+	}
+	for _, h := range mayorEntry.Hooks {
+		if strings.Contains(h.Command, "tap guard formula-allowlist") {
+			t.Fatal("mayor must not receive the dog formula-allowlist guard")
+		}
 	}
 }
 
@@ -768,14 +771,21 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 		t.Fatalf("ComputeExpected(boot): %v", err)
 	}
 
-	entry, ok := findPreToolUse(boot, "Bash(*tmux*send-keys*)")
+	// Post gt-5ihs, the pattern lives in a Hook's If field under the bare
+	// "Bash" matcher — Claude Code's matcher only ever matches the tool name.
+	entry, ok := findPreToolUse(boot, "Bash")
 	if !ok {
-		t.Fatal("boot missing raw tmux send-keys guard")
+		t.Fatal("boot missing bare Bash PreToolUse entry")
 	}
-	if len(entry.Hooks) != 1 {
-		t.Fatalf("boot raw tmux guard hooks = %d, want 1", len(entry.Hooks))
+	var command string
+	for _, h := range entry.Hooks {
+		if h.If == "Bash(*tmux*send-keys*)" {
+			command = h.Command
+		}
 	}
-	command := entry.Hooks[0].Command
+	if command == "" {
+		t.Fatal("boot missing raw tmux send-keys guard (If=Bash(*tmux*send-keys*))")
+	}
 	for _, want := range []string{
 		"BLOCKED: Boot must not use raw tmux send-keys",
 		"gt nudge --mode=immediate deacon",
@@ -793,8 +803,14 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeExpected(mayor): %v", err)
 	}
-	if _, ok := findPreToolUse(mayor, "Bash(*tmux*send-keys*)"); ok {
-		t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
+	mayorEntry, ok := findPreToolUse(mayor, "Bash")
+	if !ok {
+		t.Fatal("mayor should still have the base Bash guard entry")
+	}
+	for _, h := range mayorEntry.Hooks {
+		if h.If == "Bash(*tmux*send-keys*)" {
+			t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
+		}
 	}
 }
 
@@ -1399,5 +1415,40 @@ func TestMarshalConfig(t *testing.T) {
 
 	if len(loaded.SessionStart) != 1 {
 		t.Errorf("round-trip lost SessionStart hooks")
+	}
+}
+
+// TestNoPreToolUseMatcherContainsParenthesis is a regression guard for
+// gt-5ihs: Claude Code's hooks[].matcher matches the TOOL NAME only (exact
+// or regex, e.g. "Bash", "Edit|Write") — a permission-rule pattern like
+// "Bash(git push*)" written into Matcher never fires. Real Claude Code tool
+// names never contain "(", so any PreToolUse Matcher containing one is
+// unreachable dead configuration. Command-pattern conditions belong in a
+// Hook's If field instead. Checked across DefaultBase, every built-in
+// DefaultOverrides role, and ComputeExpected's merged output so a future
+// hand-added guard can't reintroduce the bug in any layer.
+func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
+	assertNoParenMatchers := func(t *testing.T, label string, cfg *HooksConfig) {
+		t.Helper()
+		for _, entry := range cfg.PreToolUse {
+			if strings.Contains(entry.Matcher, "(") {
+				t.Errorf("%s: PreToolUse matcher %q contains \"(\" — permission-rule patterns never fire as a Claude Code matcher; put the pattern in a Hook's If field instead", label, entry.Matcher)
+			}
+		}
+	}
+
+	assertNoParenMatchers(t, "DefaultBase", DefaultBase())
+	for role, cfg := range DefaultOverrides() {
+		assertNoParenMatchers(t, "DefaultOverrides["+role+"]", cfg)
+	}
+
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "dog", "boot", "gastown/crew", "gastown/witness"} {
+		expected, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s) failed: %v", target, err)
+		}
+		assertNoParenMatchers(t, "ComputeExpected("+target+")", expected)
 	}
 }

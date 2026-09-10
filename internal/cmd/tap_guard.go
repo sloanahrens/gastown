@@ -28,11 +28,13 @@ Available guards:
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
 
-Example hook configuration:
+Example hook configuration (matcher is the TOOL NAME only; a command
+pattern like "Bash(gh pr create*)" goes in "if", never in "matcher" —
+gt-5ihs, a matcher-only pattern never fires):
   {
     "PreToolUse": [{
-      "matcher": "Bash(gh pr create*)",
-      "hooks": [{"command": "gt tap guard pr-workflow"}]
+      "matcher": "Bash",
+      "hooks": [{"command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}]
     }]
   }`,
 }

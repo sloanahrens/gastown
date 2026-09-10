@@ -38,7 +38,11 @@ type tapHandler struct {
 	kind        string // guard, audit, inject, check
 	description string
 	event       string
-	matchers    []string
+	// conditions lists the "if" command-pattern(s) that route to this
+	// handler. The actual Claude Code matcher is always the bare tool name
+	// (e.g. "Bash") — a pattern here is never a valid matcher value
+	// (gt-5ihs).
+	conditions  []string
 	implemented bool
 }
 
@@ -50,7 +54,7 @@ func runTapList(cmd *cobra.Command, args []string) error {
 			kind:        "guard",
 			description: "Block PR creation and feature branches",
 			event:       "PreToolUse",
-			matchers:    []string{"Bash(gh pr create*)", "Bash(git checkout -b*)", "Bash(git switch -c*)"},
+			conditions:  []string{"Bash(gh pr create*)", "Bash(git checkout -b*)", "Bash(git switch -c*)"},
 			implemented: true,
 		},
 		{
@@ -58,7 +62,8 @@ func runTapList(cmd *cobra.Command, args []string) error {
 			kind:        "guard",
 			description: "Block sudo, package installs, rm -rf, force push, hard reset, etc.",
 			event:       "PreToolUse",
-			matchers:    []string{"Bash(sudo *)", "Bash(apt install*)", "Bash(dnf install*)", "Bash(brew install*)", "Bash(rm -rf /*)", "Bash(git push --force*)", "Bash(git push -f*)"},
+			// Self-filters on tool_input.command directly — no "if" needed.
+			conditions:  nil,
 			implemented: true,
 		},
 	}
@@ -84,7 +89,7 @@ func runTapList(cmd *cobra.Command, args []string) error {
 					kind:        kind,
 					description: def.Description,
 					event:       def.Event,
-					matchers:    def.Matchers,
+					conditions:  def.Matchers,
 					implemented: def.Enabled,
 				})
 			}
@@ -142,9 +147,13 @@ func runTapList(cmd *cobra.Command, args []string) error {
 
 			fmt.Printf("  %s %s\n", statusStyle.Render(statusIcon), style.Bold.Render(h.name))
 			fmt.Printf("    %s\n", h.description)
+			conditions := strings.Join(h.conditions, ", ")
+			if conditions == "" {
+				conditions = "(self-filtering)"
+			}
 			fmt.Printf("    %s %s  %s %s\n",
 				style.Dim.Render("event:"), h.event,
-				style.Dim.Render("matchers:"), strings.Join(h.matchers, ", "))
+				style.Dim.Render("if:"), conditions)
 		}
 		fmt.Println()
 	}

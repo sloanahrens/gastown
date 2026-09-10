@@ -87,9 +87,27 @@ func applyOverride(result, override *HooksConfig) *HooksConfig {
 }
 
 // mergeEntries merges override entries into base entries.
-// Same-matcher entries from override replace base entries.
-// Override entries with empty Hooks list remove that matcher (explicit disable).
-// Different-matcher entries are appended.
+//
+// Different-matcher entries are appended. An override entry with an empty
+// Hooks list removes that matcher from the result (explicit disable),
+// regardless of matcher kind.
+//
+// For a permission-pattern matcher (contains "(", e.g. "Bash(git push*)"),
+// a same-matcher override entry replaces the base entry entirely — this is
+// the original, still-tested behavior for on-disk customization of a single
+// named rule.
+//
+// For a bare tool-name matcher (no parentheses, e.g. "Bash", "Edit|Write"),
+// a same-matcher override entry instead UNIONS its Hooks into the base
+// entry's Hooks list (gt-5ihs). Bare tool-name matchers are how every
+// PreToolUse guard must route post-fix — Claude Code's matcher only ever
+// matches the tool name, so pr-workflow, dangerous-command, and each role's
+// patrol-formula-guard all legitimately share matcher "Bash", discriminated
+// by each Hook's If field (or by self-inspecting the command) rather than by
+// matcher. Whole-entry replace would silently drop one layer's guards
+// whenever another layer also targets "Bash". Union is keyed by (Command,
+// If) so re-merging is idempotent: a hook already present is replaced in
+// place, a genuinely new one is appended.
 func mergeEntries(base, override []HookEntry) []HookEntry {
 	if len(override) == 0 {
 		return base
@@ -101,25 +119,37 @@ func mergeEntries(base, override []HookEntry) []HookEntry {
 		overrideByMatcher[entry.Matcher] = entry
 	}
 
-	// Process base entries: replace or keep
+	// Process base entries: replace, union, or keep
 	var result []HookEntry
-	replacedMatchers := make(map[string]bool)
+	handledMatchers := make(map[string]bool)
 
 	for _, baseEntry := range base {
-		if ovEntry, found := overrideByMatcher[baseEntry.Matcher]; found {
-			replacedMatchers[baseEntry.Matcher] = true
-			// Empty hooks list means explicit disable (remove)
-			if len(ovEntry.Hooks) > 0 {
-				result = append(result, ovEntry)
-			}
-		} else {
+		ovEntry, found := overrideByMatcher[baseEntry.Matcher]
+		if !found {
 			result = append(result, baseEntry)
+			continue
+		}
+		handledMatchers[baseEntry.Matcher] = true
+
+		// Empty hooks list means explicit disable (remove), regardless of
+		// matcher kind.
+		if len(ovEntry.Hooks) == 0 {
+			continue
+		}
+
+		if isBareToolMatcher(baseEntry.Matcher) {
+			result = append(result, HookEntry{
+				Matcher: baseEntry.Matcher,
+				Hooks:   unionHooks(baseEntry.Hooks, ovEntry.Hooks),
+			})
+		} else {
+			result = append(result, ovEntry)
 		}
 	}
 
 	// Add override entries with new matchers (not in base)
 	for _, ovEntry := range override {
-		if !replacedMatchers[ovEntry.Matcher] {
+		if !handledMatchers[ovEntry.Matcher] {
 			if len(ovEntry.Hooks) > 0 {
 				result = append(result, ovEntry)
 			}
@@ -127,6 +157,47 @@ func mergeEntries(base, override []HookEntry) []HookEntry {
 	}
 
 	return result
+}
+
+// isBareToolMatcher reports whether m is a plain Claude Code tool-name
+// matcher (e.g. "Bash", "Edit|Write") rather than a permission-rule pattern
+// like "Bash(git push*)". Claude Code tool names never contain parentheses;
+// an empty matcher ("" — used by non-PreToolUse event types like Stop) is
+// deliberately excluded so those event types keep whole-entry-replace
+// semantics.
+func isBareToolMatcher(m string) bool {
+	return m != "" && !strings.Contains(m, "(")
+}
+
+// unionHooks merges override hooks into base hooks, keyed by (Command, If)
+// so repeated merges stay idempotent: a hook already present (same command
+// and condition) is replaced in place rather than duplicated, and a
+// genuinely new hook is appended.
+func unionHooks(base, override []Hook) []Hook {
+	result := make([]Hook, len(base))
+	copy(result, base)
+
+	index := make(map[string]int, len(result))
+	for i, h := range result {
+		index[hookKey(h)] = i
+	}
+
+	for _, h := range override {
+		key := hookKey(h)
+		if i, ok := index[key]; ok {
+			result[i] = h
+			continue
+		}
+		index[key] = len(result)
+		result = append(result, h)
+	}
+
+	return result
+}
+
+// hookKey returns the identity key used by unionHooks.
+func hookKey(h Hook) string {
+	return h.Command + "\x00" + h.If
 }
 
 // cloneConfig creates a deep copy of a HooksConfig.

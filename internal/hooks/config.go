@@ -25,6 +25,14 @@ type HookEntry struct {
 type Hook struct {
 	Type    string `json:"type"` // "command"
 	Command string `json:"command"`
+	// If holds a permission-rule-style condition (e.g. "Bash(gh pr create*)")
+	// that Claude Code evaluates against the tool call in addition to the
+	// entry's Matcher. Matcher only ever matches the TOOL NAME (exact or
+	// regex, e.g. "Bash"); command-pattern conditions belong here, not in
+	// Matcher — a pattern written into Matcher never fires (gt-5ihs).
+	// Omit when the handler command self-filters on the actual command text
+	// (e.g. dangerous-command reads tool_input.command off stdin directly).
+	If string `json:"if,omitempty"`
 }
 
 // HooksConfig represents the hooks section of a Claude Code settings.json.
@@ -366,34 +374,32 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// that survive session restarts and accumulate unbounded.
 		"witness": {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			// One bare-Bash entry, patterns in If (gt-5ihs) — see DefaultBase.
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash(*bd mol pour*patrol*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-witness*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-deacon*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-refinery*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour*patrol*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-witness*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-deacon*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-refinery*)",
+						},
+					},
 				},
 			},
 		},
@@ -401,11 +407,14 @@ func DefaultOverrides() map[string]*HooksConfig {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash(*tmux*send-keys*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo 'BLOCKED: Boot must not use raw tmux send-keys; it can leave unsubmitted text staged in the Deacon TUI.' && echo 'Use: gt nudge --mode=immediate deacon \"message\" (do not add --force).' && exit 2",
-					}},
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: "echo 'BLOCKED: Boot must not use raw tmux send-keys; it can leave unsubmitted text staged in the Deacon TUI.' && echo 'Use: gt nudge --mode=immediate deacon \"message\" (do not add --force).' && exit 2",
+							If:      "Bash(*tmux*send-keys*)",
+						},
+					},
 				},
 			},
 		},
@@ -430,55 +439,47 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Deacons also run patrols and must use wisps, not persistent molecules.
 		"deacon": {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			// One bare-Bash entry, patterns in If (gt-5ihs) — see DefaultBase.
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash(*for *seq*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Deacon must not batch patrol cycles with for/seq loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*while true*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Deacon must not run open-ended patrol loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*while :*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Deacon must not run open-ended patrol loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour*patrol*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-witness*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-deacon*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-refinery*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Deacon must not batch patrol cycles with for/seq loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
+							If:      "Bash(*for *seq*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Deacon must not run open-ended patrol loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
+							If:      "Bash(*while true*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Deacon must not run open-ended patrol loops.' && echo 'Run one patrol cycle, then use gt patrol report or gt handoff.' && exit 2",
+							If:      "Bash(*while :*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour*patrol*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-witness*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-deacon*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-refinery*)",
+						},
+					},
 				},
 			},
 		},
@@ -486,34 +487,32 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Refineries also run patrols and must use wisps, not persistent molecules.
 		"refinery": {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			// One bare-Bash entry, patterns in If (gt-5ihs) — see DefaultBase.
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash(*bd mol pour*patrol*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-witness*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-deacon*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
-				},
-				{
-					Matcher: "Bash(*bd mol pour *mol-refinery*)",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
-					}},
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour*patrol*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-witness*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-deacon*)",
+						},
+						{
+							Type:    "command",
+							Command: "echo '❌ BLOCKED: Patrol formulas must use wisps, not persistent molecules.' && echo 'Use: bd mol wisp mol-*-patrol' && echo 'Not:  bd mol pour mol-*-patrol' && exit 2",
+							If:      "Bash(*bd mol pour *mol-refinery*)",
+						},
+					},
 				},
 			},
 		},
@@ -1054,122 +1053,40 @@ func ValidTarget(target string) bool {
 // This includes resolved gt hook commands that all agents need.
 func DefaultBase() *HooksConfig {
 	return &HooksConfig{
+		// PreToolUse guards all route through the bare "Bash" tool-name
+		// matcher (gt-5ihs): Claude Code's hooks[].matcher matches the TOOL
+		// NAME only — a permission-rule pattern like "Bash(gh pr create*)"
+		// written into Matcher never fires. pr-workflow needs per-pattern
+		// routing, so its patterns live in each Hook's If field instead.
+		// dangerous-command reads tool_input.command off stdin and inspects
+		// the actual command itself (see tap_guard_dangerous.go), so it
+		// self-filters and needs no If — one bare-Bash entry covers every
+		// pattern it used to need a dead-duplicate matcher for (gt-nqcy's
+		// find/bfs/fd/rg/du/grep -r/ls -R matchers included).
 		PreToolUse: []HookEntry{
 			{
-				Matcher: "Bash(gh pr create*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
-			},
-			{
-				Matcher: "Bash(git checkout -b*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
-			},
-			{
-				Matcher: "Bash(git switch -c*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
-			},
-			{
-				Matcher: "Bash(rm -rf /*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(git push --force*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(git push -f*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			// Unbounded filesystem scans (gt-nqcy): 'bfs / -name regex.h' ran
-			// 8m21s at 517% peak CPU and froze the operator's terminal; find /
-			// and friends can do the same. matchesUnboundedScan decides which
-			// invocations actually get blocked — these matchers just route the
-			// candidates to it. Leading '*' is load-bearing: a bare-prefix
-			// matcher like "Bash(find*)" misses "/usr/bin/find /" (invoked by
-			// full path) entirely, so the guard never even runs — the MR that
-			// used bare prefixes here was bounced for exactly that gap.
-			{
-				Matcher: "Bash(*find*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(*bfs*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(*fd *)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(*rg *)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(*du *)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(grep -r*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(grep -R*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			{
-				Matcher: "Bash(grep --recursive*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
-			},
-			// "ls -*" (not "ls -R*"): bundled short flags put R anywhere in
-			// the cluster ("ls -laR /"), so the matcher has to route on any
-			// flag and let matchesUnboundedScan's hasShortFlagLetter decide.
-			{
-				Matcher: "Bash(ls -*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard dangerous-command"),
-				}},
+				Matcher: "Bash",
+				Hooks: []Hook{
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+						If:      "Bash(gh pr create*)",
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+						If:      "Bash(git checkout -b*)",
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+						If:      "Bash(git switch -c*)",
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard dangerous-command"),
+					},
+				},
 			},
 		},
 		SessionStart: []HookEntry{
