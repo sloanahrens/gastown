@@ -2750,7 +2750,17 @@ func activeWorkBeadsForCleanup(issues []*beads.Issue) []*beads.Issue {
 type beadsBatch struct {
 	hookedByAssignee   map[string]*beads.Issue // status=hooked, keyed by assignee (nil = query failed)
 	assignedByAssignee map[string]*beads.Issue // GetAssignedIssue's precedence result, keyed by assignee (nil = query failed)
-	agentBeadsByID     map[string]*beads.Issue // gt:agent beads, keyed by bead ID (nil = query failed)
+	// agentBeadsByID is keyed by gt:agent bead ID (nil = query failed). Known
+	// drift from the per-polecat path it replaces: it's sourced from
+	// ListAgentBeads(), which lists open-only (bd list's default status
+	// filter) rather than GetAgentBead's Show()-by-ID lookup, which finds a
+	// bead regardless of status. A polecat whose agent bead has been closed
+	// (e.g. mid-decommission) looks up as "no agent bead" here instead of
+	// returning the closed bead's fields. Not fixed by widening
+	// ListAgentBeads to --all: it's a shared helper used by several other
+	// callers (mail resolution, capacity, doctor checks) that want
+	// open-agent-beads-only semantics.
+	agentBeadsByID map[string]*beads.Issue
 }
 
 // loadBeadsBatch issues the rig-wide queries loadFromBeads would otherwise
@@ -2785,11 +2795,15 @@ func (m *Manager) loadBeadsBatch() *beadsBatch {
 		}
 		batch.assignedByAssignee = make(map[string]*beads.Issue, len(byAssignee))
 		for assignee, issues := range byAssignee {
-			// Same precedence as Beads.GetAssignedIssue: open > in_progress > hooked.
+			// Same precedence as Beads.GetAssignedIssue: open > in_progress > hooked,
+			// and within a status tier, the FIRST matching issue in list order
+			// (not the last — a prior version of this loop didn't break the inner
+			// range, so it kept overwriting down to the last match instead).
 			for _, status := range []string{string(beads.StatusOpen), string(beads.StatusInProgress), beads.StatusHooked} {
 				for _, issue := range issues {
 					if issue.Status == status {
 						batch.assignedByAssignee[assignee] = issue
+						break
 					}
 				}
 				if batch.assignedByAssignee[assignee] != nil {

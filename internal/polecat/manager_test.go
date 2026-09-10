@@ -789,17 +789,33 @@ esac
 	if err != nil {
 		t.Fatalf("reading bd call log: %v", err)
 	}
-	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(calls) == 1 && calls[0] == "" {
-		calls = nil
+	allCalls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(allCalls) == 1 && allCalls[0] == "" {
+		allCalls = nil
 	}
 
-	// Batched: 3 rig-wide queries total (hooked, assigned, agent beads),
-	// independent of polecat count. Per-polecat querying would need at
-	// least one bd call per polecat here (5), typically 2-3.
-	if len(calls) >= len(names) {
-		t.Fatalf("bd invoked %d times for %d polecats — want a small constant independent of polecat count (batched); got calls:\n%s",
-			len(calls), len(names), data)
+	// Exclude the one-time "bd --allow-stale version" capability probe: it's
+	// cached per bd-binary-path for the life of the process (see
+	// BdSupportsAllowStaleWithEnv), so it fires at most once regardless of
+	// polecat count, but it isn't one of the rig-wide beads queries this
+	// test is guarding.
+	var calls []string
+	for _, call := range allCalls {
+		if strings.Contains(call, "version") {
+			continue
+		}
+		calls = append(calls, call)
+	}
+
+	// Batched: 4 rig-wide queries total, independent of polecat count —
+	// hooked list, assigned/status query, agent-beads list, and the
+	// agent-beads wisps-table fallback ListAgentBeads runs internally.
+	// Per-polecat querying would need at least one bd call per polecat here
+	// (5), typically 2-3.
+	const wantBatchedCalls = 4
+	if len(calls) != wantBatchedCalls {
+		t.Fatalf("bd invoked %d times (excluding the version probe) for %d polecats — want exactly %d rig-wide queries (batched); got calls:\n%s",
+			len(calls), len(names), wantBatchedCalls, data)
 	}
 }
 
