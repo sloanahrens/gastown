@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1604,6 +1606,30 @@ func (c *MergeQueueConfig) HasAnyGateCommand() bool {
 	}
 	return c.SetupCommand != "" || c.TypecheckCommand != "" || c.LintCommand != "" ||
 		c.TestCommand != "" || c.BuildCommand != ""
+}
+
+// GateSetSHA returns a sha256 hex digest identifying the ordered set of
+// non-empty gate commands (setup, typecheck, lint, build, test) in cfg.
+// Nil-safe: a nil cfg hashes the same as an empty gate set.
+//
+// A `gt done --pre-verified` stamp records this alongside its verification
+// so the refinery's fast-path can detect when the gate set has changed
+// since the polecat verified — a rig that adds, removes, or edits a gate
+// command must invalidate any pre-verification recorded against the old
+// set (om-gate T8).
+func GateSetSHA(cfg *MergeQueueConfig) string {
+	if cfg == nil {
+		cfg = &MergeQueueConfig{}
+	}
+	ordered := []string{cfg.SetupCommand, cfg.TypecheckCommand, cfg.LintCommand, cfg.BuildCommand, cfg.TestCommand}
+	nonEmpty := make([]string, 0, len(ordered))
+	for _, c := range ordered {
+		if c != "" {
+			nonEmpty = append(nonEmpty, c)
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.Join(nonEmpty, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // boolPtr returns a pointer to a bool value.

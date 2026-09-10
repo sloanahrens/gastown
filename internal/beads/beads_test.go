@@ -2595,6 +2595,40 @@ func TestMRFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPreVerifiedGatesFieldsRoundTrip guards the om-gate T8 honest
+// pre-verification stamp: PreVerifiedGates/Exit/Log must survive a
+// format/parse round trip alongside the existing PreVerified fields.
+func TestPreVerifiedGatesFieldsRoundTrip(t *testing.T) {
+	original := &MRFields{
+		Branch:           "polecat/flint/gt-3s52",
+		Target:           "main",
+		SourceIssue:      "gt-3s52",
+		Worker:           "flint",
+		PreVerified:      true,
+		PreVerifiedAt:    "2026-09-10T21:00:00Z",
+		PreVerifiedBase:  "abc123",
+		PreVerifiedGates: "deadbeef",
+		PreVerifiedExit:  0,
+		PreVerifiedLog:   "cafef00d",
+	}
+
+	formatted := FormatMRFields(original)
+	if !strings.Contains(formatted, "pre_verified_gates: deadbeef") {
+		t.Errorf("formatted output missing pre_verified_gates line: %q", formatted)
+	}
+	if !strings.Contains(formatted, "pre_verified_log: cafef00d") {
+		t.Errorf("formatted output missing pre_verified_log line: %q", formatted)
+	}
+
+	parsed := ParseMRFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if !reflect.DeepEqual(parsed, original) {
+		t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", parsed, original)
+	}
+}
+
 // TestParseMRFieldsFromDesignDoc tests the example from the design doc.
 func TestParseMRFieldsFromDesignDoc(t *testing.T) {
 	// Example from docs/merge-queue-design.md

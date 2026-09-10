@@ -233,12 +233,23 @@ type MRInfo struct {
 	PreVerifiedAt   time.Time // When verification completed
 	PreVerifiedBase string    // Target branch SHA at verification time
 
+<<<<<<< HEAD
 	// EditorialReviewedHead is the commit gt mq review last produced an
 	// approve/request_changes verdict for (refs/notes/om lives there). The
 	// push precondition reads it to find the note without scanning.
 	// Empty means "never reviewed" and the precondition refuses to push
 	// when the rig requires editorial review.
 	EditorialReviewedHead string
+=======
+	// PreVerifiedGates/Exit/Log make the fast-path honest (om-gate T8): the
+	// fast-path additionally requires PreVerifiedGates to match the rig's
+	// current gate-set hash (config.GateSetSHA) before trusting the stamp —
+	// a rig that adds, removes, or edits a gate command invalidates any
+	// pre-verification recorded against the old set.
+	PreVerifiedGates string
+	PreVerifiedExit  int
+	PreVerifiedLog   string
+>>>>>>> 8ff13fa (fix(done): --pre-verified performs the gate run it stamps; fast-path never skips editorial (absorbs om-p2w) (gt-3s52))
 
 	// Raw data for agent-side queue health analysis (ZFC: agent decides, Go transports)
 	UpdatedAt          time.Time // When the MR was last updated
@@ -286,6 +297,12 @@ type Engineer struct {
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
 	recoverDeadWorker     func(deadWorkerRecoveryRequest) bool
 	testAllowSyntheticMRs bool // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
+
+	// currentGateSetSHAFn resolves the rig's current gate-set hash
+	// (config.GateSetSHA over the same binding gt sling/gt done use) for the
+	// pre-verification fast-path staleness check (om-gate T8). Overridable
+	// in tests so the check doesn't require a real rig config layout.
+	currentGateSetSHAFn func() string
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -329,6 +346,10 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		// keeps recovery on the same injected beads client as the rest of
 		// the Engineer instead of shelling out to a separate bd subprocess.
 		return newDeadWorkerRecoverer(r, e.router, e.output, e.beads)(req)
+	}
+	e.currentGateSetSHAFn = func() string {
+		townRoot := filepath.Dir(r.Path)
+		return config.GateSetSHA(rig.ResolveMergeQueueConfig(townRoot, r.Name))
 	}
 	return e
 }
@@ -1372,24 +1393,44 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 	// Phase 3: Check pre-verification fast-path.
 	// If the polecat already rebased onto the target and ran gates, and the target
 	// hasn't moved since, we can skip running gates entirely (~5s merge).
-	skipGates := false
-	if mr.PreVerified && mr.PreVerifiedBase != "" {
-		_, _ = fmt.Fprintf(e.output, "  Pre-verified: yes (base=%s)\n", mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))])
-		// Check if target HEAD still matches the verified base
-		targetHead, err := e.git.Rev("origin/" + mr.Target)
-		if err != nil {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not resolve origin/%s HEAD: %v (falling through to normal gates)\n", mr.Target, err)
-		} else if targetHead == mr.PreVerifiedBase {
-			_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
-			skipGates = true
-		} else {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification stale — target moved (%s → %s), running gates normally\n",
-				mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))], targetHead[:min(8, len(targetHead))])
-		}
-	}
+	skipGates := e.resolveFastPath(mr)
 
 	// Use the shared merge logic
 	return e.doMerge(ctx, mr, skipGates)
+}
+
+// resolveFastPath decides whether the pre-verification fast-path applies to
+// mr: mechanical gates are skipped only when the polecat's verification is
+// both (a) against the target's current HEAD and (b) against the rig's
+// current gate-set (config.GateSetSHA) — a rig that changes its gate
+// commands after a polecat verified must not honor the stale claim
+// (om-gate T8). This governs mechanical gates only: editorialPrecondition
+// always runs regardless of skipGates (T6).
+func (e *Engineer) resolveFastPath(mr *MRInfo) bool {
+	if !mr.PreVerified || mr.PreVerifiedBase == "" {
+		return false
+	}
+	_, _ = fmt.Fprintf(e.output, "  Pre-verified: yes (base=%s)\n", shortSHA(mr.PreVerifiedBase))
+
+	targetHead, err := e.git.Rev("origin/" + mr.Target)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not resolve origin/%s HEAD: %v (falling through to normal gates)\n", mr.Target, err)
+		return false
+	}
+	if targetHead != mr.PreVerifiedBase {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification stale — target moved (%s → %s), running gates normally\n",
+			shortSHA(mr.PreVerifiedBase), shortSHA(targetHead))
+		return false
+	}
+
+	currentGateSHA := e.currentGateSetSHAFn()
+	if mr.PreVerifiedGates != currentGateSHA {
+		_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification stale — gate set changed, running gates normally")
+		return false
+	}
+
+	_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
+	return true
 }
 
 // HandleMRInfoSuccess handles a successful merge from MRInfo.
@@ -2149,6 +2190,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 	}
 
 	return &MRInfo{
+<<<<<<< HEAD
 		ID:                    issue.ID,
 		Branch:                fields.Branch,
 		Target:                fields.Target,
@@ -2172,6 +2214,33 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		CreatedAt:             createdAt,
 		UpdatedAt:             updatedAt,
 		Assignee:              issue.Assignee,
+=======
+		ID:               issue.ID,
+		Branch:           fields.Branch,
+		Target:           fields.Target,
+		SourceIssue:      fields.SourceIssue,
+		Worker:           fields.Worker,
+		Rig:              fields.Rig,
+		Title:            issue.Title,
+		Priority:         issue.Priority,
+		AgentBead:        fields.AgentBead,
+		CommitSHA:        fields.CommitSHA,
+		PRURL:            fields.PRURL,
+		PRNumber:         fields.PRNumber,
+		RetryCount:       fields.RetryCount,
+		ConflictTaskID:   fields.ConflictTaskID,
+		ConvoyID:         fields.ConvoyID,
+		ConvoyCreatedAt:  convoyCreatedAt,
+		PreVerified:      fields.PreVerified,
+		PreVerifiedAt:    preVerifiedAt,
+		PreVerifiedBase:  fields.PreVerifiedBase,
+		PreVerifiedGates: fields.PreVerifiedGates,
+		PreVerifiedExit:  fields.PreVerifiedExit,
+		PreVerifiedLog:   fields.PreVerifiedLog,
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+		Assignee:         issue.Assignee,
+>>>>>>> 8ff13fa (fix(done): --pre-verified performs the gate run it stamps; fast-path never skips editorial (absorbs om-p2w) (gt-3s52))
 	}
 }
 
