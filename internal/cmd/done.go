@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -2497,7 +2498,7 @@ doneStateUpdate:
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol cycles,
 	// etc. accumulate across sessions and pollute bd ready/list output (hq-6161m).
 	// Best-effort: failures are non-fatal since the work is already done.
-	purgeClosedEphemeralBeads(bd)
+	purgeClosedEphemeralBeads(bd, townRoot)
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
 	// for audit purposes and anomaly detection by witness patrol.
@@ -2812,15 +2813,47 @@ func stripOverlayCLAUDEmd(g *git.Git, defaultBranch, baseRef string) bool {
 	return true
 }
 
+// defaultClosedWispDeleteAge is the grace period before a closed ephemeral
+// bead becomes eligible for purge, used when no lifecycle.reaper.delete_age
+// override is configured. Matches the wisp-reaper patrol's own default
+// (internal/daemon/wisp_reaper.go) so the two purge paths agree.
+const defaultClosedWispDeleteAge = "168h"
+
+// closedWispDeleteAge returns the configured grace period (lifecycle.reaper.delete_age)
+// before a closed ephemeral bead may be purged, falling back to
+// defaultClosedWispDeleteAge if unset or invalid.
+func closedWispDeleteAge(townRoot string) string {
+	cfg := daemon.LoadPatrolConfig(townRoot)
+	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.WispReaper == nil {
+		return defaultClosedWispDeleteAge
+	}
+	age := cfg.Patrols.WispReaper.DeleteAgeStr
+	if age == "" {
+		return defaultClosedWispDeleteAge
+	}
+	if _, err := time.ParseDuration(age); err != nil {
+		return defaultClosedWispDeleteAge
+	}
+	return age
+}
+
 // purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated
 // during this and prior sessions. Polecat/witness sessions create mol-polecat-work
 // steps, mol-witness-patrol cycles, etc. as wisps. These get closed during normal
 // operation but are never deleted, accumulating hundreds of rows that pollute
 // bd ready/list output. (hq-6161m)
 //
+// An --older-than grace period (gt-1q46) is REQUIRED here: MR beads (label
+// gt:merge-request) are also closed ephemeral wisps, and a same-session
+// supersede/rejection close (see FindOpenMRsForIssue below) can land just
+// moments before this purge runs. Purging unconditionally deletes that MR
+// bead outright — destroying its close reason/verdict — instead of leaving
+// a "superseded by X" or rejection-verdict record for the next attempt.
+//
 // Best-effort: errors are logged but don't block gt done completion.
-func purgeClosedEphemeralBeads(bd *beads.Beads) {
-	out, err := bd.Run("purge", "--force", "--quiet")
+func purgeClosedEphemeralBeads(bd *beads.Beads, townRoot string) {
+	olderThan := closedWispDeleteAge(townRoot)
+	out, err := bd.Run("purge", "--force", "--quiet", "--older-than", olderThan)
 	if err != nil {
 		// Non-fatal: purge failure shouldn't block session completion
 		fmt.Fprintf(os.Stderr, "Warning: wisp purge failed: %v\n", err)
