@@ -724,6 +724,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
 	}
 
+	// Start quota resume ticker if configured. This runs independently of
+	// quota_dog and the account pool — it nudges sessions whose own
+	// session-limit reset has passed even on a town with < 2 accounts
+	// configured, where quota_dog's rotation path can't run at all (gt-749e).
+	var quotaResumeTicker *time.Ticker
+	var quotaResumeChan <-chan time.Time
+	if d.isPatrolActive("quota_resume") {
+		interval := quotaResumeInterval(d.patrolConfig)
+		quotaResumeTicker = time.NewTicker(interval)
+		quotaResumeChan = quotaResumeTicker.C
+		defer quotaResumeTicker.Stop()
+		d.logger.Printf("Quota resume ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -831,6 +845,14 @@ func (d *Daemon) Run() (err error) {
 			// rotates credentials to available accounts via keychain swap.
 			if !d.isShutdownInProgress() {
 				d.runQuotaDog()
+			}
+
+		case <-quotaResumeChan:
+			// Quota resume — nudges sessions whose own session-limit reset
+			// has passed, independent of quota_dog / the account pool
+			// (gt-749e).
+			if !d.isShutdownInProgress() {
+				d.runQuotaResume()
 			}
 
 		case <-timer.C:

@@ -5,7 +5,25 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/quota"
+	ttmux "github.com/steveyegge/gastown/internal/tmux"
 )
+
+// TestScanForResume_NoAccountsConfigured guards gt-749e: resume scanning
+// must work with a nil accounts config — the situation on a town with no
+// accounts.json at all (never ran 'gt account add'). ttmux.NewTmux() with
+// no running tmux server degrades to zero sessions rather than erroring
+// (see ttmux.Tmux.ListSessions' ErrNoServer handling), so this exercises
+// the real code path end to end without needing a live tmux server.
+func TestScanForResume_NoAccountsConfigured(t *testing.T) {
+	tmux := ttmux.NewTmuxWithSocket("gt-749e-test-no-such-socket")
+	results, candidates, err := scanForResume(tmux, nil)
+	if err != nil {
+		t.Fatalf("scanForResume(nil accounts) returned error: %v", err)
+	}
+	if len(results) != 0 || len(candidates) != 0 {
+		t.Errorf("expected no results/candidates against an empty tmux server, got results=%v candidates=%v", results, candidates)
+	}
+}
 
 // gt-omg1: quota_dog's sentinel check treats a bare "null" as a non-empty
 // rotation result and logs it every cycle. With no resume candidates,

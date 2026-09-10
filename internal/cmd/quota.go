@@ -395,14 +395,22 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finding town root: %w", err)
 	}
 
-	// Load accounts config (required for rotation)
+	// Load accounts config. A missing accounts.json or a pool smaller than 2
+	// disables rotation but NOT the resume fallback below — a town with one
+	// account (or none configured at all) still needs session-limit nudges
+	// once each session's own announced reset has passed; only account
+	// rotation itself requires a pool (gt-749e).
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	acctCfg, err := config.LoadAccountsConfig(accountsPath)
-	if err != nil {
-		return fmt.Errorf("no accounts configured (run 'gt account add' first): %w", err)
-	}
-	if len(acctCfg.Accounts) < 2 {
-		return fmt.Errorf("need at least 2 accounts for rotation (have %d)", len(acctCfg.Accounts))
+	acctCfg, acctErr := config.LoadAccountsConfig(accountsPath)
+	rotationEnabled := acctErr == nil && len(acctCfg.Accounts) >= 2
+
+	t := ttmux.NewTmux()
+
+	if !rotationEnabled {
+		if rotateFrom != "" {
+			return fmt.Errorf("--from requires a configured account pool (need at least 2 accounts)")
+		}
+		return runResumeOnly(t, acctCfg, rotateDryRun)
 	}
 
 	// Validate --from account if specified
@@ -414,7 +422,6 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create scanner and plan rotation
-	t := ttmux.NewTmux()
 	scanner, err := quota.NewScanner(t, nil, acctCfg)
 	if err != nil {
 		return fmt.Errorf("creating scanner: %w", err)
@@ -616,6 +623,123 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 		return enc.Encode(results)
 	}
 
+	return nil
+}
+
+// scanForResume scans all sessions and returns the raw scan results plus the
+// subset whose own announced session-limit reset has already passed. It
+// requires no account pool — unlike rotation, accounts is only used (when
+// non-nil) to resolve which account handle a session belongs to; resume
+// works with zero or one account configured (gt-749e).
+func scanForResume(t *ttmux.Tmux, acctCfg *config.AccountsConfig) ([]quota.ScanResult, []quota.ResumeCandidate, error) {
+	scanner, err := quota.NewScanner(t, nil, acctCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating scanner: %w", err)
+	}
+	results, err := scanner.ScanAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("scanning sessions: %w", err)
+	}
+	return results, quota.PlanResume(results, time.Now()), nil
+}
+
+// runResumeOnly is the degraded path for `gt quota rotate` when rotation
+// itself can't run because no account pool is configured (gt-749e). It
+// still nudges sessions whose own session-limit reset has passed, then
+// exits zero rather than the "no accounts configured" error rotation used
+// to return unconditionally.
+func runResumeOnly(t *ttmux.Tmux, acctCfg *config.AccountsConfig, dryRun bool) error {
+	_, candidates, err := scanForResume(t, acctCfg)
+	if err != nil {
+		return err
+	}
+	resumeResults := runResumeNudges(t, candidates, dryRun)
+
+	if quotaJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resumeResults)
+	}
+	if len(resumeResults) == 0 {
+		fmt.Printf(" %s No sessions past their session-limit reset (no account pool configured, rotation skipped)\n", style.SuccessPrefix)
+		return nil
+	}
+	fmt.Printf(" %s No account pool configured — rotation skipped\n", style.WarningPrefix)
+	printResumeResults(resumeResults, dryRun)
+	return nil
+}
+
+// ResumeReport is the --json output for `gt quota resume`: how many sessions
+// are currently rate-limited (informational) alongside which of them were
+// nudged because their own reset time had already passed. The daemon's
+// quota_resume ticker parses this to log "N limited, M resumed" per cycle.
+type ResumeReport struct {
+	Limited int                  `json:"limited"`
+	Resumed []quota.RotateResult `json:"resumed"`
+}
+
+// Resume command flags
+var (
+	resumeDryRun bool
+)
+
+var quotaResumeCmd = &cobra.Command{
+	Use:   "resume",
+	Short: "Nudge sessions whose own session-limit reset has passed",
+	Long: `Nudge rate-limited sessions back to work once their own announced
+Claude Code session-usage-limit reset time has passed.
+
+This is independent of account rotation: it needs no accounts.json and no
+account pool. A session-scoped usage limit (the "You've hit your session
+limit · resets 5pm" banner) is shared by every account on the session and
+clears on its own once the reset time passes — rotating to a different
+account can't fix it, only waiting can (gt-749e).
+
+'gt quota rotate' already runs this same fallback for sessions rotation
+doesn't reach. This command runs it standalone, which matters on a town
+with fewer than 2 accounts, where 'gt quota rotate' can't rotate at all.
+
+Examples:
+  gt quota resume              # Nudge sessions past their reset time
+  gt quota resume --dry-run    # Show what would be nudged
+  gt quota resume --json       # JSON output`,
+	RunE: runQuotaResume,
+}
+
+func runQuotaResume(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	// Accounts are optional here — resume works with none configured.
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	acctCfg, _ := config.LoadAccountsConfig(accountsPath)
+
+	t := ttmux.NewTmux()
+	scanResults, candidates, err := scanForResume(t, acctCfg)
+	if err != nil {
+		return err
+	}
+	resumeResults := runResumeNudges(t, candidates, resumeDryRun)
+
+	limited := 0
+	for _, r := range scanResults {
+		if r.RateLimited {
+			limited++
+		}
+	}
+
+	if quotaJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(ResumeReport{Limited: limited, Resumed: resumeResults})
+	}
+	if len(resumeResults) == 0 {
+		fmt.Printf(" %s No sessions past their session-limit reset (%d rate-limited)\n", style.SuccessPrefix, limited)
+		return nil
+	}
+	printResumeResults(resumeResults, resumeDryRun)
 	return nil
 }
 
@@ -902,8 +1026,6 @@ func executeKeychainRotation(
 	return result
 }
 
-
-
 // Watch command flags
 var (
 	watchInterval time.Duration
@@ -1069,12 +1191,16 @@ func init() {
 	quotaRotateCmd.Flags().StringVar(&rotateFrom, "from", "", "Preemptively rotate sessions using this account")
 	quotaRotateCmd.Flags().BoolVar(&rotateIdle, "idle", false, "Only rotate sessions at the idle prompt (skip busy agents)")
 
+	quotaResumeCmd.Flags().BoolVar(&resumeDryRun, "dry-run", false, "Show what would be nudged without doing it")
+	quotaResumeCmd.Flags().BoolVar(&quotaJSON, "json", false, "Output as JSON")
+
 	quotaWatchCmd.Flags().DurationVar(&watchInterval, "interval", 5*time.Minute, "Poll interval")
 	quotaWatchCmd.Flags().BoolVar(&watchDryRun, "dry-run", false, "Show detections without executing rotation")
 
 	quotaCmd.AddCommand(quotaStatusCmd)
 	quotaCmd.AddCommand(quotaScanCmd)
 	quotaCmd.AddCommand(quotaRotateCmd)
+	quotaCmd.AddCommand(quotaResumeCmd)
 	quotaCmd.AddCommand(quotaClearCmd)
 	quotaCmd.AddCommand(quotaWatchCmd)
 

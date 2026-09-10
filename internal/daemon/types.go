@@ -130,6 +130,7 @@ type PatrolsConfig struct {
 	ScheduledMaintenance   *ScheduledMaintenanceConfig    `json:"scheduled_maintenance,omitempty"`
 	MainBranchTest         *MainBranchTestConfig          `json:"main_branch_test,omitempty"`
 	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
+	QuotaResume            *QuotaDogConfig                `json:"quota_resume,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 }
 
@@ -307,6 +308,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.QuotaDog.Enabled
+	}
+	// quota_resume defaults ON (unlike quota_dog above): the session-limit
+	// resume nudge must work on a town with no account pool configured, so
+	// it can't be gated behind the same opt-in-only default as rotation
+	// (gt-749e). An explicit config entry can still disable it.
+	if patrol == "quota_resume" {
+		if config == nil || config.Patrols == nil || config.Patrols.QuotaResume == nil {
+			return true
+		}
+		return config.Patrols.QuotaResume.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

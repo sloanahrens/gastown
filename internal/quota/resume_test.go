@@ -5,6 +5,53 @@ import (
 	"time"
 )
 
+// TestScanAndPlanResume_NoAccountsConfigured is the gt-749e acceptance test:
+// a session showing "resets 5pm" with now = 5:01pm gets exactly one resume
+// nudge candidate; with now = 4:59pm it gets none — and this holds with NO
+// accounts.json (accounts passed as nil to NewScanner, the situation on a
+// single-account town where 'gt account add' was never run).
+func TestScanAndPlanResume_NoAccountsConfigured(t *testing.T) {
+	setupTestRegistry(t)
+
+	tmux := &mockTmux{
+		sessions: []string{"gt-agate"},
+		paneContent: map[string]string{
+			"gt-agate": "You've hit your session limit · resets 5pm (America/Chicago)",
+		},
+	}
+
+	// No accounts config at all — this is the "no accounts.json" case.
+	scanner, err := NewScanner(tmux, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := scanner.ScanAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].RateLimited {
+		t.Fatalf("expected one rate-limited scan result, got %+v", results)
+	}
+
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("loading America/Chicago: %v", err)
+	}
+
+	// Before reset (plus grace): no candidate yet.
+	before := time.Date(2026, 9, 9, 16, 59, 0, 0, loc)
+	if got := PlanResume(results, before); len(got) != 0 {
+		t.Errorf("PlanResume() at 4:59pm = %+v, want no candidates", got)
+	}
+
+	// After reset (plus grace): exactly one candidate.
+	after := time.Date(2026, 9, 9, 17, 1, 0, 0, loc)
+	got := PlanResume(results, after)
+	if len(got) != 1 || got[0].Session != "gt-agate" {
+		t.Fatalf("PlanResume() at 5:01pm = %+v, want exactly one candidate for gt-agate", got)
+	}
+}
+
 func TestPlanResume(t *testing.T) {
 	// Fixed reference instant: 2026-09-09 17:04:30 America/Chicago.
 	loc, err := time.LoadLocation("America/Chicago")
