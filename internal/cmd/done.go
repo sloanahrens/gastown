@@ -460,6 +460,54 @@ func doneDirectMergeSkipReason(bd *beads.Beads, issueID string, issue *beads.Iss
 	return ""
 }
 
+// doneNoMergeUnmergedBranchReason returns a non-empty reason when a
+// no-merge branch's pushed commit is not yet reachable from the target
+// branch on origin. If the reachability check itself fails for any reason
+// (network, missing branch, etc.), that counts as "not verified merged"
+// too — fail closed rather than closing an issue we can't confirm landed.
+func doneNoMergeUnmergedBranchReason(g *git.Git, defaultBranch, commit string) string {
+	commit = strings.TrimSpace(commit)
+	if g == nil || commit == "" || defaultBranch == "" {
+		return ""
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, commit); err != nil {
+		return fmt.Sprintf("commit %s not yet merged into %s: %v", commit, defaultBranch, err)
+	}
+	return ""
+}
+
+// doneNoMergeCloseHoldReason is the gt-ntqf prevention half: it decides
+// whether to block closing a no-merge source issue because its branch's
+// commits sit unmerged with nothing tracking them — the gt-31h shape (no
+// PR, no MR, just an abandoned branch that nothing will ever re-sling).
+//
+// It returns "" (no hold, safe to close) when:
+//   - a GitHub PR was created (prURL != ""). The PR is itself durable,
+//     discoverable tracking (gh pr list, a human reviewer) — and a freshly
+//     pushed feature branch is *never* reachable from origin/<default> at
+//     push time by design, since that is what "under review" means.
+//     Gating on reachability here regardless of prURL would be an
+//     unconditional hold: every --no-merge sling that opens a PR would
+//     stop closing its bead, permanently — worse than the orphan bug this
+//     is meant to prevent.
+//   - the caller passed --skip-verify (skipVerify): an explicit operator
+//     opt-out, same as every other verified-push check in this file.
+//
+// Otherwise it resolves HEAD itself (never trusts a caller-supplied SHA
+// that might be stale from a resumed session) and fails CLOSED: an error
+// resolving HEAD is treated as "not verified merged", not as "nothing to
+// check".
+func doneNoMergeCloseHoldReason(g *git.Git, defaultBranch, prURL string, skipVerify bool) string {
+	if prURL != "" || skipVerify {
+		return ""
+	}
+	headSHA, err := g.Rev("HEAD")
+	if err != nil {
+		return fmt.Sprintf("could not resolve HEAD to verify merge status: %v", err)
+	}
+	return doneNoMergeUnmergedBranchReason(g, defaultBranch, headSHA)
+}
+
 func doneSourceCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
@@ -1625,6 +1673,24 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 							return fmt.Errorf("cannot complete review-only/no-merge work: %s", skipReason)
 						}
 						canCloseIssue = false
+					}
+					// gt-ntqf: the branch has commits (that's how we got into this
+					// no-merge block at all — the aheadCount==0 case exits earlier).
+					// Don't close the source issue while doneNoMergeCloseHoldReason
+					// says they sit unmerged and untracked (see its doc comment for
+					// the prURL/--skip-verify exceptions).
+					if canCloseIssue {
+						if holdReason := doneNoMergeCloseHoldReason(g, defaultBranch, prURL, doneSkipVerify); holdReason != "" {
+							fullHoldReason := fmt.Sprintf("gt done hold: %s (branch: %s)", holdReason, branch)
+							style.PrintWarning("%s", fullHoldReason)
+							if commentErr := noMergeBd.AddComment(issueID, fullHoldReason); commentErr != nil {
+								style.PrintWarning("could not record hold comment on %s: %v", issueID, commentErr)
+							}
+							notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, fullHoldReason)
+							canCloseIssue = false
+						} else if doneSkipVerify && prURL == "" {
+							noteVerifiedPushSkipped(noMergeBd, cwd, issueID, defaultBranch, "", "--skip-verify on no-merge close")
+						}
 					}
 					if canCloseIssue && attachmentFields.AttachedMolecule != "" {
 						if n := closeDescendants(noMergeBd, attachmentFields.AttachedMolecule); n > 0 {

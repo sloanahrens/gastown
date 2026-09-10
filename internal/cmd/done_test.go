@@ -2289,3 +2289,151 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+// TestDoneNoMergeUnmergedBranchReason covers gt-ntqf's prevention half: a
+// no_merge/PR-review branch must not be treated as mergeable-and-closeable
+// just because it was pushed. gt-fcsf's shape was a source issue closed at
+// gt-done time while its branch (no MR, or a rejected one) sat unmerged with
+// nothing left to notice or re-sling it.
+func TestDoneNoMergeUnmergedBranchReason(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	local := filepath.Join(tmp, "local")
+	testRunGit(t, tmp, "clone", remote, local)
+	testRunGit(t, local, "config", "user.email", "test@test.com")
+	testRunGit(t, local, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(local, "README.md"), []byte("# hi\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "initial commit")
+	testRunGit(t, local, "push", "origin", "main")
+
+	g := gitpkg.NewGit(local)
+
+	// A no-op / no-commit close (e.g. genuine report-only task) must not be
+	// blocked by this check — nothing to verify.
+	if reason := doneNoMergeUnmergedBranchReason(g, "main", ""); reason != "" {
+		t.Fatalf("empty commit should not block close, got %q", reason)
+	}
+
+	// Push a feature branch with unmerged work (the no_merge/PR-review shape:
+	// branch pushed to origin, source issue about to be closed anyway).
+	testRunGit(t, local, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(local, "feature.txt"), []byte("wip\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "feature work")
+	featureSHA, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev feature: %v", err)
+	}
+	testRunGit(t, local, "push", "origin", "feature")
+
+	reason := doneNoMergeUnmergedBranchReason(g, "main", featureSHA)
+	if reason == "" {
+		t.Fatal("expected a hold reason for a branch not yet merged into main, got none")
+	}
+
+	// Once the same commit actually lands on main, the hold must clear.
+	testRunGit(t, local, "checkout", "main")
+	testRunGit(t, local, "merge", "--ff-only", "feature")
+	testRunGit(t, local, "push", "origin", "main")
+
+	if reason := doneNoMergeUnmergedBranchReason(g, "main", featureSHA); reason != "" {
+		t.Fatalf("expected no hold reason once merged into main, got %q", reason)
+	}
+}
+
+// TestDoneNoMergeCloseHoldReason covers the actual call-site decision (the
+// "seam"), not just the raw git-reachability primitive: gt-wisp-gurk (the
+// first attempt at this bead) was rejected by om-editorial because it
+// applied doneNoMergeUnmergedBranchReason unconditionally, which is an
+// unconditional hold for the ordinary case — a freshly pushed feature
+// branch under PR review is *never* reachable from origin/main at push
+// time by design. This test proves the fix at the same seam runDone calls:
+// a PR (prURL != "") or --skip-verify must bypass the hold even though the
+// commit sits unmerged, while a bare no_merge branch with neither must
+// still be held (the gt-31h orphan shape) — and a failure to resolve HEAD
+// must fail closed, not silently pass through as "nothing to verify".
+func TestDoneNoMergeCloseHoldReason(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	local := filepath.Join(tmp, "local")
+	testRunGit(t, tmp, "clone", remote, local)
+	testRunGit(t, local, "config", "user.email", "test@test.com")
+	testRunGit(t, local, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(local, "README.md"), []byte("# hi\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "initial commit")
+	testRunGit(t, local, "push", "origin", "main")
+
+	// The exact shape at the call site: a feature branch pushed for review,
+	// never merged into main. Right after push, this commit is NEVER
+	// reachable from origin/main — that's the whole point of "under review".
+	testRunGit(t, local, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(local, "feature.txt"), []byte("wip\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	testRunGit(t, local, "add", ".")
+	testRunGit(t, local, "commit", "-m", "feature work")
+	testRunGit(t, local, "push", "origin", "feature")
+
+	g := gitpkg.NewGit(local)
+
+	t.Run("PR created bypasses the hold even though unmerged", func(t *testing.T) {
+		if reason := doneNoMergeCloseHoldReason(g, "main", "https://github.com/example/repo/pull/1", false); reason != "" {
+			t.Fatalf("a created PR must not be held on reachability, got %q", reason)
+		}
+	})
+
+	t.Run("skip-verify bypasses the hold even without a PR", func(t *testing.T) {
+		if reason := doneNoMergeCloseHoldReason(g, "main", "", true); reason != "" {
+			t.Fatalf("--skip-verify must bypass the hold, got %q", reason)
+		}
+	})
+
+	t.Run("no PR and no skip-verify holds the unmerged branch", func(t *testing.T) {
+		reason := doneNoMergeCloseHoldReason(g, "main", "", false)
+		if reason == "" {
+			t.Fatal("expected a hold reason for an unmerged, untracked no_merge branch (gt-31h shape), got none")
+		}
+	})
+
+	t.Run("merged branch with no PR clears the hold", func(t *testing.T) {
+		testRunGit(t, local, "checkout", "main")
+		testRunGit(t, local, "merge", "--ff-only", "feature")
+		testRunGit(t, local, "push", "origin", "main")
+
+		if reason := doneNoMergeCloseHoldReason(g, "main", "", false); reason != "" {
+			t.Fatalf("expected no hold once the branch is actually merged, got %q", reason)
+		}
+	})
+
+	t.Run("HEAD resolution failure fails closed", func(t *testing.T) {
+		// An empty/uninitialized repo has no HEAD commit to resolve, so
+		// g.Rev("HEAD") errors. This must hold, not silently pass through.
+		emptyDir := t.TempDir()
+		testRunGit(t, tmp, "init", "--initial-branch", "main", emptyDir)
+		badGit := gitpkg.NewGit(emptyDir)
+		reason := doneNoMergeCloseHoldReason(badGit, "main", "", false)
+		if reason == "" {
+			t.Fatal("expected a hold reason when HEAD cannot be resolved, got none")
+		}
+	})
+}
