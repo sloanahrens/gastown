@@ -90,7 +90,7 @@ func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{verifyErr: errors.New("not reachable")}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err == nil || !strings.Contains(err.Error(), "merge proof failed") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want merge proof failure", err)
 	}
@@ -108,11 +108,53 @@ func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing
 	}
 }
 
+// TestRunVerifiedMQPostMerge_LandedCommitAttestationSatisfiesConflictResolvedRebase
+// covers the sequential-rebase-with-conflict-resolution case: the submitted
+// commit_sha's patch-id no longer matches anything on target (conflict
+// resolution legitimately changed it), so the default proof fails, but an
+// explicit --landed-commit attestation for the SHA the refinery actually
+// pushed satisfies the proof instead (gt-f5f6).
+func TestRunVerifiedMQPostMerge_LandedCommitAttestationSatisfiesConflictResolvedRebase(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	rigGit := &fakeMQPostMergeGit{}
+	const landedCommit = "2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f"
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called after attested proof")
+	}
+	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != landedCommit {
+		t.Fatalf("verified commits = %v, want [%s] (attested landed commit, not submitted head)", rigGit.verifiedCommits, landedCommit)
+	}
+	if mgr.postMergeMR.MergeCommit != landedCommit {
+		t.Fatalf("MR MergeCommit = %q, want attested landed commit %q recorded for close", mgr.postMergeMR.MergeCommit, landedCommit)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_LandedCommitAttestationStillVerified ensures a
+// bogus or stale --landed-commit is rejected rather than trusted blindly —
+// it must itself be reachable from target.
+func TestRunVerifiedMQPostMerge_LandedCommitAttestationStillVerified(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	rigGit := &fakeMQPostMergeGit{verifyErr: errors.New("not reachable")}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "0000000000000000000000000000000000000f")
+	if err == nil || !strings.Contains(err.Error(), "attested landed commit") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want attested-landed-commit failure", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called after failed attestation")
+	}
+}
+
 func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -140,7 +182,7 @@ func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T)
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, "")
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -162,7 +204,7 @@ func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) 
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{openPR: true, localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -184,7 +226,7 @@ func TestRunVerifiedMQPostMerge_LeaseDeleteFailureReturnsAfterPostMerge(t *testi
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, deleteErr: errors.New("stale info")}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err == nil || !strings.Contains(err.Error(), "remote branch delete") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want remote branch delete failure", err)
 	}
@@ -206,7 +248,7 @@ func TestRunVerifiedMQPostMerge_MissingRemoteBranchIsIdempotentAfterProof(t *tes
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -227,7 +269,7 @@ func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: mr}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err == nil || !strings.Contains(err.Error(), "missing submitted commit_sha") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want missing submitted head", err)
 	}
@@ -246,7 +288,7 @@ func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: mr}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
 	if err == nil || !strings.Contains(err.Error(), "matches target branch") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want source/target failure", err)
 	}

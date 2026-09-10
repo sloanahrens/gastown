@@ -175,6 +175,7 @@ Examples:
 
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
+var mqPostMergeLandedCommit string
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id>",
@@ -190,9 +191,18 @@ This command consolidates post-merge steps into a single atomic operation:
 Designed for use by the refinery formula after a successful merge to main.
 The branch name is read from the MR bead, so no manual branch argument is needed.
 
+The default proof checks the submitted commit_sha for reachability from the
+target (exact tip, ancestor, or a content-preserving rebase via patch-id).
+A rebase that required conflict resolution legitimately changes patch-ids, so
+that proof cannot hold even though the content landed correctly. For that
+case, pass --landed-commit with the SHA that was actually pushed to the
+target; it is still verified as reachable from the target (so a wrong or
+stale SHA is rejected), but stands in for the submitted commit_sha.
+
 Examples:
   gt mq post-merge gastown gt-mr-abc123
-  gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete`,
+  gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete
+  gt mq post-merge gastown gt-mr-abc123 --landed-commit 2bb0bf7f`,
 	Args: cobra.ExactArgs(2),
 	RunE: runMQPostMerge,
 }
@@ -390,6 +400,7 @@ func init() {
 
 	// Post-merge flags
 	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipBranchDelete, "skip-branch-delete", false, "Skip remote branch deletion")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergeLandedCommit, "landed-commit", "", "Attest the actual SHA pushed to the target when it differs from the submitted commit_sha (e.g. a conflict-resolved rebase)")
 
 	// Add subcommands
 	mqCmd.AddCommand(mqSubmitCmd)
@@ -601,7 +612,7 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete)
+	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete, mqPostMergeLandedCommit)
 	if err != nil {
 		return fmt.Errorf("post-merge cleanup: %w", err)
 	}
@@ -641,12 +652,12 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
+func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool, landedCommit string) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
 	mr, err := mgr.FindMRForPostMerge(mrID)
 	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	if err := verifyMQPostMergeProof(rigGit, mr); err != nil {
+	if err := verifyMQPostMergeProof(rigGit, mr, landedCommit); err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
 
@@ -659,7 +670,19 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 	return result, branchCleanup, err
 }
 
-func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) error {
+// verifyMQPostMergeProof proves that mr's work actually landed on its target
+// branch. The default proof requires the submitted commit_sha to be reachable
+// from target — exact tip, ancestor, or content-preserved (same patch-id) —
+// which holds for a plain rebase-merge. It cannot hold when the merge queue's
+// sequential-rebase protocol needed to resolve a real conflict, because
+// resolving the conflict legitimately changes the patch-id of the affected
+// commit even though the work correctly landed. landedCommit is an explicit
+// attestation for that case: the caller (the refinery formula that performed
+// the rebase) names the SHA it actually pushed to target. It still must be
+// reachable from target — a wrong or stale attestation is rejected — but
+// stands in for the submitted commit_sha rather than being compared against
+// it.
+func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, landedCommit string) error {
 	if mr == nil {
 		return fmt.Errorf("merge proof failed: merge request is missing")
 	}
@@ -673,6 +696,13 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) er
 	commit := strings.TrimSpace(mr.CommitSHA)
 	if commit == "" {
 		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
+	}
+	if landedCommit = strings.TrimSpace(landedCommit); landedCommit != "" {
+		if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, landedCommit); err != nil {
+			return fmt.Errorf("merge proof failed for MR %s: attested landed commit %s not reachable from %s: %w", mr.ID, landedCommit, target, err)
+		}
+		mr.MergeCommit = landedCommit
+		return nil
 	}
 	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
 		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
