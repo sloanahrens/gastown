@@ -236,7 +236,8 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
-	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
+	d.Register(doctor.NewIdleTimeoutCheck())     // Verify dolt.idle-timeout: "0" for all rigs
+	d.Register(doctor.NewSyncRemoteOwnerCheck()) // Verify sync.remote owner matches git origin owner (gt-15ry)
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
 	d.Register(doctor.NewRoutingModeCheck())
