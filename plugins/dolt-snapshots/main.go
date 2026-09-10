@@ -173,7 +173,7 @@ func isSystemDB(name string) bool {
 	case "information_schema", "mysql", "dolt_cluster":
 		return true
 	}
-	for _, prefix := range []string{"testdb_", "beads_t", "beads_pt", "doctest_"} {
+	for _, prefix := range []string{"testdb_", "beads_t", "beads_pt", "doctest_", "dolt_remotes_check_"} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}

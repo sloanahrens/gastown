@@ -1214,7 +1214,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  The server is likely overloaded. SQL cleanup would take hours.\n\n")
 		fmt.Printf("  Instead, stop the server and clean the filesystem:\n\n")
 		fmt.Printf("    gt dolt stop\n")
-		fmt.Printf("    cd %s/.dolt-data && rm -rf testdb_* beads_t* beads_pt* beads_vr* doctest_* doctortest_*\n", townRoot)
+		fmt.Printf("    cd %s/.dolt-data && rm -rf testdb_* beads_t* beads_pt* beads_vr* doctest_* doctortest_* dolt_remotes_check_*\n", townRoot)
 		fmt.Printf("    gt dolt start\n\n")
 		fmt.Printf("  This is safe — orphan databases have no production data.\n")
 		return fmt.Errorf("too many orphans (%d) for SQL cleanup — see instructions above", len(orphans))

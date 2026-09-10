@@ -569,7 +569,8 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 			continue
 		}
 		if strings.HasPrefix(name, "testdb_") || strings.HasPrefix(name, "beads_t") ||
-			strings.HasPrefix(name, "beads_pt") || strings.HasPrefix(name, "doctest_") {
+			strings.HasPrefix(name, "beads_pt") || strings.HasPrefix(name, "doctest_") ||
+			strings.HasPrefix(name, "dolt_remotes_check_") {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dataDir, name, ".dolt")); err != nil {

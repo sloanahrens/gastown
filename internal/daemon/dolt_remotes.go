@@ -15,6 +15,13 @@ import (
 const (
 	defaultDoltRemotesInterval = 15 * time.Minute
 	doltPushTimeout            = 60 * time.Second
+
+	// doltRemotesReadTimeout is the MySQL driver's socket-level read/write
+	// timeout for dolt_remotes connections. It must exceed doltPushTimeout so
+	// the request context's deadline fires first (a clean cancellation)
+	// rather than the driver's own readTimeout aborting a large, legitimately
+	// slow DOLT_PUSH mid-flight with a raw i/o timeout.
+	doltRemotesReadTimeout = doltPushTimeout + 30*time.Second
 )
 
 // doltRemotesInterval returns the configured push interval, or the default (15m).
@@ -110,8 +117,8 @@ func (d *Daemon) pushDoltRemotes() {
 // unsafe-concurrent-writer hazard that keeps bd's own auto-push disabled by
 // default; routing through the server that already owns the data dir avoids it.
 func (d *Daemon) openDoltDB(dbName string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
-		d.doltServerHost(), d.doltServerPort(), dbName)
+	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
+		d.doltServerHost(), d.doltServerPort(), dbName, doltRemotesReadTimeout, doltRemotesReadTimeout)
 	return sql.Open("mysql", dsn)
 }
 
@@ -131,33 +138,43 @@ func (d *Daemon) pushDatabase(db, remote, branch string) error {
 	}
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
-	defer cancel()
+	// Each step gets its own doltPushTimeout budget. A single shared context
+	// across add/commit/push would let a slow add or commit eat into the
+	// budget DOLT_PUSH actually needs for large data — silently shrinking it
+	// well below doltPushTimeout.
+	addCtx, addCancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	defer addCancel()
 
 	// Step 1: Stage any unstaged changes (non-fatal)
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+	if _, err := conn.ExecContext(addCtx, "CALL DOLT_ADD('-A')"); err != nil {
 		// Ignore - may have nothing to stage
 		d.logger.Printf("dolt_remotes: %s: add (non-fatal): %v", db, err)
 	}
 
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	defer commitCancel()
+
 	// Step 2: Commit staged changes only if dolt_status shows pending work.
 	// Skipping DOLT_COMMIT when nothing is staged avoids "nothing to commit"
 	// warnings in dolt.log, which were causing log bloat at ~3/sec (gt-zb8).
-	staged, err := d.hasStagedChanges(ctx, conn)
+	staged, err := d.hasStagedChanges(commitCtx, conn)
 	if err != nil {
 		// Fail open: if we can't check, attempt the commit and let it fail naturally.
 		staged = true
 	}
 	if staged {
-		if _, err := conn.ExecContext(ctx,
+		if _, err := conn.ExecContext(commitCtx,
 			"CALL DOLT_COMMIT('-m', 'daemon: auto-commit pending changes', '--author', 'Gas Town Daemon <daemon@gastown.local>')",
 		); err != nil {
 			d.logger.Printf("dolt_remotes: %s: commit (non-fatal): %v", db, err)
 		}
 	}
 
-	// Step 3: Push to remote
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", remote, branch); err != nil {
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	defer pushCancel()
+
+	// Step 3: Push to remote — gets its own fresh doltPushTimeout budget.
+	if _, err := conn.ExecContext(pushCtx, "CALL DOLT_PUSH(?, ?)", remote, branch); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 

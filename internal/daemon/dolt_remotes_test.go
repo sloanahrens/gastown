@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -18,15 +20,37 @@ import (
 // if no container is available (e.g. Docker missing).
 func testDoltRemotesDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	if testutil.DoltContainerPort() == "" {
+	containerPort := testutil.DoltContainerPort()
+	if containerPort == "" {
 		t.Skip("no shared Dolt container available")
 	}
-	return &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
+
+	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
+
+	// Refuse to run against anything but the package's ephemeral container.
+	// d.doltServerPort() falls back to doltserver.DefaultPort (3307) — the
+	// live production town — whenever GT_DOLT_PORT hasn't propagated to this
+	// process. Silently proceeding in that case would let every test below
+	// create and drop databases on production instead of the disposable
+	// container.
+	if port := d.doltServerPort(); strconv.Itoa(port) != containerPort {
+		t.Fatalf("refusing to run: Dolt port resolved to %d (production default is %d), want ephemeral container port %s (GT_DOLT_PORT not propagated?)",
+			port, doltserver.DefaultPort, containerPort)
+	}
+
+	return d
 }
 
 // createTestDB creates a fresh Dolt database on the shared server and
 // returns its name, guaranteed not to collide with the "test"/"beads_t"/
-// "beads_pt"/"doctest_" prefixes pushDatabase refuses to touch.
+// "beads_pt"/"doctest_" prefixes pushDatabase refuses to touch — several
+// tests below push this database over a real (file://) remote and must not
+// trip that refusal. "dolt_remotes_check_" is registered alongside those
+// prefixes at the orphan-cleanup call sites that match on database-name
+// prefix (jsonl_git_backup's discoverJsonlBackupDatabases, the reaper's
+// testPollutionPrefixes, and gt dolt cleanup's filesystem fallback) so a
+// leaked database here is still recognized as test cruft even though it
+// isn't itself referenced by any rig's metadata.json.
 func createTestDB(t *testing.T, d *Daemon) string {
 	t.Helper()
 
@@ -34,18 +58,27 @@ func createTestDB(t *testing.T, d *Daemon) string {
 	if err != nil {
 		t.Fatalf("connect to server: %v", err)
 	}
-	defer admin.Close()
 
 	dbName := fmt.Sprintf("dolt_remotes_check_%d", time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
+		admin.Close()
 		t.Fatalf("create database: %v", err)
 	}
+
+	// admin must stay open until this Cleanup runs at the end of the test —
+	// not closed here via a plain defer, which would fire as soon as
+	// createTestDB returns and leave the DROP below running on a closed
+	// *sql.DB, silently skipped and leaking dolt_remotes-prefixed databases
+	// on whatever server the test reached.
 	t.Cleanup(func() {
+		defer admin.Close()
 		dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer dropCancel()
-		_, _ = admin.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		if _, err := admin.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)); err != nil {
+			t.Logf("drop database %s: %v", dbName, err)
+		}
 	})
 
 	return dbName
@@ -148,6 +181,36 @@ func TestPushDatabase_RefusesTestPrefixes(t *testing.T) {
 		if !strings.Contains(err.Error(), "REFUSED") {
 			t.Errorf("pushDatabase(%q) error = %q, want it to mention REFUSED", name, err)
 		}
+	}
+}
+
+// TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout locks in the DSN fix:
+// openDoltDB's readTimeout must exceed doltPushTimeout, not sit below it.
+// Before the fix, readTimeout=30s meant any query running longer than 30s —
+// including a large, legitimate DOLT_PUSH within its 60s budget — died with a
+// raw i/o timeout from the MySQL driver's socket read deadline, regardless of
+// how much time was left on the request context. A query held open for 45s
+// (comfortably inside doltPushTimeout, well past the old 30s ceiling) must
+// still succeed.
+func TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout(t *testing.T) {
+	d := testDoltRemotesDaemon(t)
+
+	conn, err := d.openDoltDB("information_schema")
+	if err != nil {
+		t.Fatalf("connect to server: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	defer cancel()
+
+	const sleepFor = 45 * time.Second
+	start := time.Now()
+	if _, err := conn.ExecContext(ctx, "SELECT SLEEP(?)", sleepFor.Seconds()); err != nil {
+		t.Fatalf("SELECT SLEEP(%v) failed (readTimeout regressed below doltPushTimeout?): %v", sleepFor, err)
+	}
+	if elapsed := time.Since(start); elapsed < sleepFor {
+		t.Fatalf("SELECT SLEEP(%v) returned early after %v", sleepFor, elapsed)
 	}
 }
 

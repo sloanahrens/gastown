@@ -29,7 +29,7 @@ var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 var DefaultDatabases = []string{"hq"}
 
 // testPollutionPrefixes are database name prefixes created by tests.
-var testPollutionPrefixes = []string{"testdb_", "beads_t", "beads_pt", "doctest_"}
+var testPollutionPrefixes = []string{"testdb_", "beads_t", "beads_pt", "doctest_", "dolt_remotes_check_"}
 
 // isNothingToCommit returns true if the error is a Dolt "nothing to commit" error.
 func isNothingToCommit(err error) bool {
