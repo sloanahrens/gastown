@@ -14,89 +14,23 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash(gh pr create*)",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(git checkout -b*)",
-        "hooks": [
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(gh pr create*)"
+          },
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(git switch -c*)",
-        "hooks": [
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(git checkout -b*)"
+          },
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(sudo *)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(apt install*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(apt-get install*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(dnf install*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(yum install*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(pacman -S*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard dangerous-command"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(brew install*)",
-        "hooks": [
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(git switch -c*)"
+          },
           {
             "type": "command",
             "command": "{{GT_BIN}} tap guard dangerous-command"

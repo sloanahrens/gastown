@@ -79,6 +79,30 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if reason, alternative := evaluateDangerousCommand(command, 0); reason != "" {
+		if alternative != "" {
+			printDangerousBlockWithAlternative(reason, command, alternative)
+		} else {
+			printDangerousBlock(reason, command)
+		}
+		return NewSilentExit(2)
+	}
+
+	return nil
+}
+
+// maxDangerousNestDepth bounds nestedCommands recursion so a pathological
+// input (e.g. deeply chained "eval eval eval ...") can't loop unboundedly.
+const maxDangerousNestDepth = 3
+
+// evaluateDangerousCommand runs every dangerous-pattern check against
+// command and, up to maxDangerousNestDepth, recurses into any shell command
+// it finds embedded as an argument (bash -c/sh -c/eval). Without this, a
+// wrapper like `bash -c "git reset --hard"` was invisible to every check:
+// shlex collapses the quoted payload into a single token, so none of the
+// fragment-based matchers (which require each fragment as its own token)
+// ever fire on it (finding 4, gt-wisp-db27).
+func evaluateDangerousCommand(command string, depth int) (reason, alternative string) {
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -86,41 +110,69 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check privilege escalation and package manager commands first
-	if reason := matchesSudo(lowerTokens); reason != "" {
-		printDangerousBlock(reason, command)
-		return NewSilentExit(2)
+	if r := matchesSudo(lowerTokens); r != "" {
+		return r, ""
 	}
-	if reason := matchesPackageInstall(lowerTokens); reason != "" {
-		printDangerousBlock(reason, command)
-		return NewSilentExit(2)
+	if r := matchesPackageInstall(lowerTokens); r != "" {
+		return r, ""
+	}
+	// pacman needs case-sensitive flag inspection (-S installs, -Ss/-Qs only
+	// search) that lowerTokens has already destroyed — see matchesPacmanInstall.
+	if matchesPacmanInstall(tokens, lowerTokens) {
+		return "System package install (pacman) — use workspace tools instead", ""
 	}
 
 	// Check special patterns that need smarter matching
-	if reason := matchesDangerousRmRf(lowerTokens); reason != "" {
-		printDangerousBlock(reason, command)
-		return NewSilentExit(2)
+	if r := matchesDangerousRmRf(lowerTokens); r != "" {
+		return r, ""
 	}
-	if reason := matchesDangerousGitPush(lowerTokens); reason != "" {
-		printDangerousBlock(reason, command)
-		return NewSilentExit(2)
+	if r := matchesDangerousGitPush(lowerTokens); r != "" {
+		return r, ""
 	}
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
 	// ls -r (reverse sort) mean different things, and lowercasing would
 	// collapse that distinction.
-	if reason, alternative := matchesUnboundedScan(tokens); reason != "" {
-		printDangerousBlockWithAlternative(reason, command, alternative)
-		return NewSilentExit(2)
+	if r, alt := matchesUnboundedScan(tokens); r != "" {
+		return r, alt
 	}
 
 	// Check simple fragment patterns
 	for _, pattern := range fragmentPatterns {
 		if matchesAllFragments(lowerTokens, pattern.contains) {
-			printDangerousBlock(pattern.reason, command)
-			return NewSilentExit(2)
+			return pattern.reason, ""
 		}
 	}
 
-	return nil
+	if depth >= maxDangerousNestDepth {
+		return "", ""
+	}
+	for _, nested := range nestedCommands(tokens, lowerTokens) {
+		if r, alt := evaluateDangerousCommand(nested, depth+1); r != "" {
+			return r, alt
+		}
+	}
+	return "", ""
+}
+
+// shellInvokers are commands whose "-c" argument is itself a nested shell
+// command string, not a plain argument.
+var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true}
+
+// nestedCommands extracts shell command strings embedded as arguments to
+// shell-invoking wrappers (bash -c/sh -c/zsh -c/eval) so evaluateDangerousCommand
+// can check their contents the same as a top-level command. tokens and
+// lowerTokens must be the same length and index-aligned (see shellTokenize).
+func nestedCommands(tokens, lowerTokens []string) []string {
+	var nested []string
+	for i, lt := range lowerTokens {
+		if shellInvokers[lt] && i+1 < len(lowerTokens) && lowerTokens[i+1] == "-c" && i+2 < len(tokens) {
+			nested = append(nested, strings.Join(tokens[i+2:], " "))
+		}
+		if lt == "eval" && i+1 < len(tokens) {
+			nested = append(nested, strings.Join(tokens[i+1:], " "))
+		}
+	}
+	return nested
 }
 
 // shellTokenize splits a shell command into argv-like tokens the way a real
@@ -338,6 +390,22 @@ func tokensContainFragment(tokens []string, want string) bool {
 			}
 		}
 	}
+	// A quoted argument collapses to one token with embedded spaces (e.g.
+	// `dolt sql -q "DROP TABLE issues"` tokenizes to one token
+	// "drop table issues"), which the exact-token check above never
+	// matches — that made every DDL fragment pattern dead against realistic,
+	// always-quoted SQL invocations (finding 4, gt-wisp-db27). Look for the
+	// fragment as a whole word inside such multi-word tokens too.
+	for _, tok := range tokens {
+		if !strings.Contains(tok, " ") {
+			continue
+		}
+		for _, word := range strings.Fields(tok) {
+			if word == want {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -384,9 +452,42 @@ var packageManagerPatterns = []struct {
 	{[]string{"apt-get", "install"}, "System package install (apt-get) — use workspace tools instead"},
 	{[]string{"dnf", "install"}, "System package install (dnf) — use workspace tools instead"},
 	{[]string{"yum", "install"}, "System package install (yum) — use workspace tools instead"},
-	{[]string{"pacman", "-s"}, "System package install (pacman) — use workspace tools instead"},
+	// pacman is deliberately absent here — see matchesPacmanInstall. Its -S
+	// (sync/install) and -s (search modifier, e.g. -Ss/-Qs) flags only
+	// differ by case, which a lowercased fragment match can't distinguish;
+	// the generic rule made "pacman -Ss foo" (a read-only search) block as
+	// an install (finding 7, gt-wisp-db27).
 	{[]string{"brew", "install"}, "Package install (brew) — use workspace tools instead"},
 	{[]string{"gem", "install"}, "System gem install — use workspace tools instead"},
+}
+
+// matchesPacmanInstall reports whether tokens invoke pacman's sync/install
+// operation (-S, capital — bare or bundled like -Sy/-Syu) rather than a
+// read-only query or search. A generic case-insensitive bundled-flag match
+// can't tell these apart: pacman -Ss (sync+search) and pacman -Qs
+// (query+search) both contain the letter 's', but neither installs
+// anything — only -S without a lowercase 's' modifier does. tokens must be
+// original-case (for the flag) and lowerTokens lowercased and index-aligned
+// (to find "pacman" case-insensitively), both from shellTokenize.
+func matchesPacmanInstall(tokens, lowerTokens []string) bool {
+	sawPacman := false
+	for i, lt := range lowerTokens {
+		if lt == "pacman" {
+			sawPacman = true
+			continue
+		}
+		if !sawPacman {
+			continue
+		}
+		t := tokens[i]
+		if len(t) < 2 || t[0] != '-' || t[1] == '-' {
+			continue
+		}
+		if strings.ContainsRune(t, 'S') && !strings.ContainsRune(t, 's') {
+			return true
+		}
+	}
+	return false
 }
 
 // matchesPackageInstall blocks system package manager install commands.

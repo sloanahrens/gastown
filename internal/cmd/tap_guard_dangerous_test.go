@@ -151,7 +151,6 @@ func TestMatchesPackageInstall(t *testing.T) {
 		{"apt-get install", "apt-get install -y build-essential", true},
 		{"dnf install", "dnf install -y postgresql-contrib", true},
 		{"yum install", "yum install -y gcc", true},
-		{"pacman -S", "pacman -S git", true},
 		{"brew install", "brew install node", true},
 		{"gem install", "gem install bundler", true},
 		{"pip install --system", "pip install --system requests", true},
@@ -175,6 +174,91 @@ func TestMatchesPackageInstall(t *testing.T) {
 			got := matchesPackageInstall(lowerTokens(tt.command)) != ""
 			if got != tt.blocked {
 				t.Errorf("matchesPackageInstall(%q) blocked=%v, want %v", tt.command, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestMatchesPacmanInstall pins pacman's case-sensitive -S (install) vs -s
+// (search modifier) distinction: a generic case-insensitive bundled-flag
+// match blocked "pacman -Ss foo" and "pacman -Qs foo" (both read-only
+// searches, since a lowercase 's' anywhere in the cluster negates the
+// capital 'S' sync/install meaning) as if they were installs
+// (finding 7, gt-wisp-db27).
+func TestMatchesPacmanInstall(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"pacman -S install", "pacman -S git", true},
+		{"pacman -Sy install", "pacman -Sy git", true},
+		{"pacman -Syu upgrade", "pacman -Syu", true},
+		{"pacman -Ss search (not install)", "pacman -Ss git", false},
+		{"pacman -Qs query search (not install)", "pacman -Qs git", false},
+		{"pacman -Q query (not install)", "pacman -Q", false},
+		{"no pacman", "echo -S hello", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := shellTokenize(tt.command)
+			got := matchesPacmanInstall(tokens, lowerTokens(tt.command))
+			if got != tt.blocked {
+				t.Errorf("matchesPacmanInstall(%q) blocked=%v, want %v", tt.command, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestNestedShellCommands pins the fix for wrappers that shlex tokenization
+// otherwise hides from every fragment-based check: a quoted payload to
+// bash -c/sh -c/eval collapses to a single token, so exact-token fragment
+// matching never fires on it unless evaluateDangerousCommand recurses into
+// the nested command text (finding 4, gt-wisp-db27).
+func TestNestedShellCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"bash -c wrapped git reset --hard", `bash -c "git reset --hard"`, true},
+		{"sh -c wrapped sudo", `sh -c "sudo rm -rf /"`, true},
+		{"eval wrapped git clean -fd", `eval "git clean -fd"`, true},
+		{"bash -c safe command", `bash -c "echo hello"`, false},
+		{"nested but safe", `sh -c "ls -la"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestQuotedDDLPayload pins the fix for SQL DDL patterns that are, in
+// practice, always passed quoted (dolt sql -q "...", psql -c "...", mysql
+// -e '...'), which shlex collapses into one multi-word token — invisible to
+// the old exact-token fragment match (finding 4, gt-wisp-db27).
+func TestQuotedDDLPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"dolt sql drop table", `dolt sql -q "DROP TABLE issues"`, true},
+		{"psql truncate table", `psql -c "TRUNCATE TABLE users"`, true},
+		{"mysql drop database", `mysql -e "DROP DATABASE prod"`, true},
+		{"quoted but safe select", `dolt sql -q "SELECT * FROM issues"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
 			}
 		})
 	}

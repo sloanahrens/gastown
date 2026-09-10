@@ -12,29 +12,22 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash(gh pr create*)",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(git checkout -b*)",
-        "hooks": [
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(gh pr create*)"
+          },
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash(git switch -c*)",
-        "hooks": [
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(git checkout -b*)"
+          },
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow"
+            "command": "{{GT_BIN}} tap guard pr-workflow",
+            "if": "Bash(git switch -c*)"
           }
         ]
       }

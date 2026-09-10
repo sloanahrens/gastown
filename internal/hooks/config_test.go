@@ -1451,4 +1451,24 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 		}
 		assertNoParenMatchers(t, "ComputeExpected("+target+")", expected)
 	}
+
+	// The embedded settings-autonomous.json/settings-interactive.json
+	// templates are what InstallForRole writes verbatim for a fresh
+	// polecat/crew scaffold (installer.go writeTemplate) — bypassing
+	// DefaultBase/DefaultOverrides entirely. A stale paren-style matcher
+	// here reintroduces gt-5ihs for every newly onboarded agent even after
+	// DefaultBase is fixed, so the templates need their own guard.
+	for _, tmplFile := range []string{"templates/claude/settings-autonomous.json", "templates/claude/settings-interactive.json"} {
+		data, err := templateFS.ReadFile(tmplFile)
+		if err != nil {
+			t.Fatalf("reading %s: %v", tmplFile, err)
+		}
+		var settings struct {
+			Hooks HooksConfig `json:"hooks"`
+		}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Fatalf("parsing %s: %v", tmplFile, err)
+		}
+		assertNoParenMatchers(t, tmplFile, &settings.Hooks)
+	}
 }

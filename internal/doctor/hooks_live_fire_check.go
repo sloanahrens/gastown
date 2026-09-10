@@ -54,6 +54,14 @@ const hooksLiveFireTimeout = 60 * time.Second
 // disposable sandbox repo — that's the ground truth this check reads back.
 const hooksLiveFireBranch = "gt-doctor-live-fire-should-be-blocked"
 
+// hooksLiveFireBlockMarker is the distinctive text the pr-workflow guard
+// prints to stderr when it blocks a command (see runTapGuardPRWorkflow's
+// "PR WORKFLOW BLOCKED" banner). Its presence in the subprocess output is
+// positive confirmation the guard actually ran and fired, independent of
+// branch absence — branch absence alone can't distinguish "the guard
+// blocked it" from "claude never attempted the command at all".
+const hooksLiveFireBlockMarker = "PR WORKFLOW BLOCKED"
+
 // Run spawns claude -p against a real polecat settings.json in a disposable
 // sandbox git repo and asks it to run "git checkout -b <branch>" — a command
 // the pr-workflow guard should block. It never returns StatusOK on an infra
@@ -91,7 +99,14 @@ func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 
 	cmd := exec.CommandContext(cctx, claudePath, "--dangerously-skip-permissions", "--settings", settingsPath, "-p", prompt)
 	cmd.Dir = sandbox
-	cmd.Env = withoutNestedSessionEnv(os.Environ())
+	// GT_POLECAT puts the spawned claude subprocess in Gas Town agent
+	// context so the pr-workflow guard's isGasTownAgentContext() check
+	// actually evaluates true here — without it, a sandbox with no GT_*
+	// env and a /tmp path (not under /polecats/ etc.) and no origin remote
+	// makes the guard allow the command regardless of matcher wiring,
+	// so the check would pass even against broken wiring (finding 1,
+	// gt-wisp-db27).
+	cmd.Env = append(withoutNestedSessionEnv(os.Environ()), "GT_POLECAT=live-fire")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -102,6 +117,7 @@ func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	branchCreated := sandboxBranchExists(sandbox, hooksLiveFireBranch)
+	blockConfirmed := strings.Contains(stdout.String(), hooksLiveFireBlockMarker) || strings.Contains(stderr.String(), hooksLiveFireBlockMarker)
 
 	if branchCreated {
 		return &CheckResult{
@@ -116,6 +132,20 @@ func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 			},
 			FixHint: "Check internal/hooks DefaultBase/DefaultOverrides: PreToolUse matchers must be the bare tool name (e.g. \"Bash\"), never a permission-rule pattern",
 		}
+	}
+
+	// The branch not existing is necessary but not sufficient evidence of a
+	// real block: claude exiting non-zero without ever attempting the
+	// command (auth/network failure, a rejected --settings file, the model
+	// declining the prompt) looks identical from branch state alone. Only
+	// report OK when the guard's own block banner actually appeared in the
+	// subprocess output; otherwise this is inconclusive, not a pass
+	// (finding 2, gt-wisp-db27).
+	if !blockConfirmed {
+		return c.inconclusive(fmt.Sprintf(
+			"branch %q was not created against %s, but the pr-workflow block banner never appeared in output either — claude may not have attempted the command at all (claude exit: %v)",
+			hooksLiveFireBranch, label, runErr,
+		))
 	}
 
 	return &CheckResult{

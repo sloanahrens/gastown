@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/hookutil"
@@ -88,6 +89,38 @@ func needsUpgrade(content []byte) bool {
 		return bytes.Contains(content, []byte(`captureRun("gt prime")`)) ||
 			bytes.Contains(content, []byte("$`gt prime`")) ||
 			!bytes.Contains(content, []byte(`prime --hook`))
+	}
+	// Stale pattern: a PreToolUse matcher written as a permission-rule
+	// pattern (e.g. "Bash(gh pr create*)") instead of a bare tool name —
+	// Claude Code's hooks[].matcher only ever matches the tool name, so a
+	// pattern-style matcher never fires (gt-5ihs). Checked structurally
+	// (not a raw substring scan) so it only trips on an actual PreToolUse
+	// matcher field, not on unrelated JSON containing "Bash(" elsewhere.
+	if hasParenPreToolUseMatcher(content) {
+		return true
+	}
+	return false
+}
+
+// hasParenPreToolUseMatcher reports whether content is a settings.json whose
+// PreToolUse section has a matcher containing "(" — a dead permission-rule
+// pattern rather than a tool name (gt-5ihs). Non-JSON or non-settings
+// content simply fails to unmarshal and is treated as not-stale here.
+func hasParenPreToolUseMatcher(content []byte) bool {
+	var settings struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Matcher string `json:"matcher"`
+			} `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(content, &settings); err != nil {
+		return false
+	}
+	for _, entry := range settings.Hooks.PreToolUse {
+		if strings.Contains(entry.Matcher, "(") {
+			return true
+		}
 	}
 	return false
 }
