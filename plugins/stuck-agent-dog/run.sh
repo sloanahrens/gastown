@@ -130,8 +130,47 @@ rig_hook_assignment() {
   printf '%s|%s\n' "$bead" "$status"
 }
 
+agent_identity_gate() {
+  local rig="$1" pcat="$2" session="$3" dir=""
+  local id_json="" agent_state="" hook_bead=""
+
+  if ! dir=$(rig_workdir "$rig"); then
+    return 0
+  fi
+
+  id_json=$( ( cd "$dir" 2>/dev/null && gt polecat identity show "$rig" "$pcat" --json 2>/dev/null ) || true )
+  if [ -z "$id_json" ]; then
+    # Identity lookup unavailable (older rig, transient failure) — fall back
+    # to the hook-status check below rather than blocking on missing data.
+    return 0
+  fi
+
+  agent_state=$(printf '%s' "$id_json" | jq -r '.agent_state // empty' 2>/dev/null || true)
+  hook_bead=$(printf '%s' "$id_json" | jq -r '.hook_bead // empty' 2>/dev/null || true)
+
+  # A done/idle/nuked polecat is not actionable regardless of what any
+  # leftover in_progress bead (e.g. an unclosed formula step wisp) says —
+  # the agent bead's own agent_state/hook_bead is the authority on whether
+  # the polecat is actually still working (gt-bd68).
+  case "$agent_state" in
+    done|idle|nuked)
+      log "  SKIP $session: agent identity reports agent_state=$agent_state (not actionable regardless of any lingering in_progress bead)"
+      return 1
+      ;;
+  esac
+
+  if [ -z "$hook_bead" ] || [ "$hook_bead" = "null" ]; then
+    log "  SKIP $session: agent identity reports no hook_bead (agent_state=${agent_state:-unknown})"
+    return 1
+  fi
+
+  return 0
+}
+
 hook_restartable() {
-  local session="$1" bead="$2" status="$3"
+  local session="$1" rig="$2" pcat="$3" bead="$4" status="$5"
+
+  agent_identity_gate "$rig" "$pcat" "$session" || return 1
 
   case "$status" in
     hooked|in_progress) [ -n "$bead" ] && return 0 ;;
@@ -183,14 +222,14 @@ confirm_current_polecat_outage() {
     session-dead|session_dead)
       hook_assignment=$(rig_hook_assignment "$rig" "$pcat" || true)
       IFS='|' read -r hook_bead hook_status <<< "$hook_assignment"
-      if hook_restartable "$session" "$hook_bead" "$hook_status"; then
+      if hook_restartable "$session" "$rig" "$pcat" "$hook_bead" "$hook_status"; then
         CONFIRMED_CRASHED+=("$session|$rig|$pcat|$hook_bead")
       fi
       ;;
     agent-dead|agent_dead)
       hook_assignment=$(rig_hook_assignment "$rig" "$pcat" || true)
       IFS='|' read -r hook_bead hook_status <<< "$hook_assignment"
-      if hook_restartable "$session" "$hook_bead" "$hook_status"; then
+      if hook_restartable "$session" "$rig" "$pcat" "$hook_bead" "$hook_status"; then
         CONFIRMED_STUCK+=("$session|$rig|$pcat|$hook_bead|agent_dead")
       fi
       ;;
@@ -258,7 +297,7 @@ while IFS='|' read -r RIG PREFIX; do
       agent-dead|agent_dead)
         HOOK_ASSIGNMENT=$(rig_hook_assignment "$RIG" "$PCAT_NAME")
         IFS='|' read -r HOOK_BEAD HOOK_STATUS <<< "$HOOK_ASSIGNMENT"
-        if hook_restartable "$SESSION_NAME" "$HOOK_BEAD" "$HOOK_STATUS"; then
+        if hook_restartable "$SESSION_NAME" "$RIG" "$PCAT_NAME" "$HOOK_BEAD" "$HOOK_STATUS"; then
           STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
           log "  ZOMBIE: $SESSION_NAME (agent runtime dead, hook=$HOOK_BEAD)"
         fi
@@ -272,7 +311,7 @@ while IFS='|' read -r RIG PREFIX; do
       session-dead|session_dead)
         HOOK_ASSIGNMENT=$(rig_hook_assignment "$RIG" "$PCAT_NAME")
         IFS='|' read -r HOOK_BEAD HOOK_STATUS <<< "$HOOK_ASSIGNMENT"
-        if hook_restartable "$SESSION_NAME" "$HOOK_BEAD" "$HOOK_STATUS"; then
+        if hook_restartable "$SESSION_NAME" "$RIG" "$PCAT_NAME" "$HOOK_BEAD" "$HOOK_STATUS"; then
           CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
           log "  CRASHED: $SESSION_NAME (hook=$HOOK_BEAD)"
         fi
