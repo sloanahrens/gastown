@@ -117,8 +117,16 @@ var runningGateContainers = func() ([]string, error) {
 		}
 		return nil, err
 	}
+	return matchGateContainers(string(out)), nil
+}
+
+// matchGateContainers filters raw `docker ps --format {{.Image}} {{.Names}}`
+// output down to the lines matching gateContainerPatterns. Split out from
+// runningGateContainers so the parsing/matching logic is testable without
+// stubbing the docker CLI call itself.
+func matchGateContainers(psOutput string) []string {
 	var matches []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
 		if line == "" {
 			continue
 		}
@@ -130,7 +138,7 @@ var runningGateContainers = func() ([]string, error) {
 			}
 		}
 	}
-	return matches, nil
+	return matches
 }
 
 // LockDir returns the directory holding the container-gate lock and owner
