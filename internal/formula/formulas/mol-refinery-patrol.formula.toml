@@ -394,13 +394,21 @@ this cycle — the single-MR path will process what's ready.
 pre-filter here either**
 
 `gt mq batch run` does not invoke a fresh editorial verdict per candidate.
-Today it only enforces the existing push precondition — refusing to land any
-member that lacks an approve note whose patch-id matches the branch head —
-the same precondition a single-MR merge already checks. It does not run
-`gt mq review` on batch members itself. Do not pre-filter candidates with a
-parallel review loop here — proceed straight to Step 3 with all eligible
-candidates; a member the precondition refuses comes back in `.conflicts[]`
-(see Step 5) rather than landing unreviewed.
+Today it only enforces the existing push precondition — refusing to push if
+any stacked member lacks an approve note whose patch-id matches the branch
+head — the same precondition a single-MR merge already checks. It does not
+run `gt mq review` on batch members itself. Do not pre-filter candidates with
+a parallel review loop here — proceed straight to Step 3 with all eligible
+candidates.
+
+**On an `editorial_required` rig, this precondition failure aborts the whole
+batch, not just one member.** Because nothing here (or in Step 3) reviews
+candidates before stacking, no batch member will have a matching approve
+note. When the precondition finds the first one missing, `gt mq batch run`
+resets the stack back to `origin/{{target_branch}}`, escalates to the
+witness, and fails with a non-zero exit — the refused member is not set
+aside in `.conflicts[]` the way a stack or gate conflict is (see Step 5).
+Expect every batch-scan cycle to fail this way on such a rig until T7 lands.
 
 Follow-up: reviewing each candidate before stacking, and ejecting any member
 whose patch-id changed on the stack, is tracked as T7 (gt-2liq) and is not on
@@ -412,9 +420,10 @@ main yet. Do not block on it.
 gt mq batch run <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
 ```
 
-This one command reviews and stacks the approved MRs via ancestry-preserving merges, runs
-the configured gate commands once, and either fast-forwards the whole batch to
-{{target_branch}} or bisects to isolate a red MR and lands the rest. It also
+This one command stacks the eligible MRs via ancestry-preserving merges,
+enforces the push precondition described in Step 2, runs the configured gate
+commands once, and either fast-forwards the whole batch to {{target_branch}}
+or bisects to isolate a red MR and lands the rest. It also
 runs the same post-merge cleanup as a single-MR merge (closes MR + source
 beads, deletes branches, nudges mayor) for every MR in `.merged[]` — but it
 does NOT send MERGED mail to Witness. You must do that yourself in Step 4.
@@ -663,8 +672,13 @@ handle-failures exactly as if quality-review did not exist.
 
 **Step 1: Run the review against the rehearsed branch**
 
+Determine N: this issue's current attempt number (count prior `MERGE
+REJECTION (attempt` entries in the issue's bd notes, plus 1 — first attempt
+is N=1). Reuse this same N below in the FIX_NEEDED mail and MERGE REJECTION
+notes.
+
 ```bash
-REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --json)
+REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json)
 REVIEW_EXIT=$?
 ```
 
