@@ -309,10 +309,13 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
 	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
-		// Read e.router/e.output fresh on each call (SetOutput may run after
-		// construction), matching newDeadWorkerRecoverer's shared wiring
-		// used by the Manager's manual `gt mq reject` path (gt-2usm).
-		return newDeadWorkerRecoverer(r, e.router, e.output)(req)
+		// Read e.router/e.output/e.beads fresh on each call (SetOutput may run
+		// after construction, and tests point e.beads at an in-process store),
+		// matching newDeadWorkerRecoverer's shared wiring used by the
+		// Manager's manual `gt mq reject` path (gt-2usm). Passing e.beads
+		// keeps recovery on the same injected beads client as the rest of
+		// the Engineer instead of shelling out to a separate bd subprocess.
+		return newDeadWorkerRecoverer(r, e.router, e.output, e.beads)(req)
 	}
 	return e
 }

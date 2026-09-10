@@ -43,6 +43,12 @@ type MergeRequest struct {
 	// MergeCommit is the SHA that was pushed to the target branch after merge.
 	MergeCommit string `json:"merge_commit,omitempty"`
 
+	// RetryCount is how many times this MR has previously been retried
+	// (conflict resolution or rejection). Used to report a real attempt
+	// number to dead-worker recovery instead of a hardcoded constant that
+	// hides repeated rejections of the same MR from the deacon (gt-pvwy).
+	RetryCount int `json:"retry_count,omitempty"`
+
 	// CreatedAt is when the MR was queued.
 	CreatedAt time.Time `json:"created_at"`
 

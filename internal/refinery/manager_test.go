@@ -616,7 +616,7 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 	// stub it out so RejectMR doesn't reach for real tmux/mail.
 	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool { return false }
 
-	result, err := mgr.RejectMR(mrIssue.ID, "policy failed", false)
+	result, err := mgr.RejectMR(mrIssue.ID, "policy failed", false, false)
 	if err != nil {
 		t.Fatalf("RejectMR() error: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 		return true
 	}
 
-	if _, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false); err != nil {
+	if _, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false, false); err != nil {
 		t.Fatalf("RejectMR() error: %v", err)
 	}
 
@@ -683,6 +683,105 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 	}
 	if gotReq.MRID != mrIssue.ID {
 		t.Errorf("MRID = %q, want %q", gotReq.MRID, mrIssue.ID)
+	}
+}
+
+// TestManager_RejectMR_SupersededSourceBead_NotReopened is the gt-pvwy
+// regression test for the exact gt-wisp-bakv incident: a source bead closed
+// with a deliberate supersede close_reason must survive 'gt mq reject'
+// without being resurrected. Unlike the other RejectMR tests, this one does
+// NOT stub mgr.recoverDeadWorker — it exercises the real recovery wiring
+// from NewManager end to end.
+func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	if err := b.CloseWithReason("superseded by gt-me9t", srcIssue.ID); err != nil {
+		t.Fatalf("close source issue as superseded: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	if _, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false, false); err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	issue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", srcIssue.ID, err)
+	}
+	if issue.Status != string(beads.StatusClosed) {
+		t.Errorf("source issue status = %q, want closed — a superseded bead must not be resurrected", issue.Status)
+	}
+	if issue.Assignee != "" {
+		t.Errorf("source issue assignee = %q, want empty (untouched)", issue.Assignee)
+	}
+}
+
+// TestManager_RejectMR_NoRecoverSkipsRecovery asserts --no-recover (wired
+// through to RejectMR's noRecover param) bypasses dead-worker recovery
+// entirely, regardless of the source bead's state or close_reason — the
+// explicit operator opt-out for superseded/duplicate/cancelled MRs.
+func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	if err := b.Close(srcIssue.ID); err != nil {
+		t.Fatalf("close source issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	called := false
+	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool {
+		called = true
+		return true
+	}
+
+	if _, err := mgr.RejectMR(mrIssue.ID, "superseded by gt-me9t", false, true); err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	if called {
+		t.Fatal("expected --no-recover to skip dead-worker recovery entirely")
+	}
+
+	issue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", srcIssue.ID, err)
+	}
+	if issue.Status != string(beads.StatusClosed) {
+		t.Errorf("source issue status = %q, want still closed", issue.Status)
 	}
 }
 
@@ -724,7 +823,7 @@ func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
 
 	// Recovery reopens the bead; the returned status must reflect that
 	// write, not the pre-recovery snapshot.
-	result, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false)
+	result, err := mgr.RejectMR(mrIssue.ID, "editorial gate: request_changes", false, false)
 	if err != nil {
 		t.Fatalf("RejectMR() error: %v", err)
 	}
@@ -935,7 +1034,7 @@ func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 	// stub it out so RejectMR doesn't reach for real tmux/mail.
 	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool { return false }
 
-	if _, err := mgr.RejectMR(mrIssue.ID, "policy failed", false); err != nil {
+	if _, err := mgr.RejectMR(mrIssue.ID, "policy failed", false, false); err != nil {
 		t.Fatalf("RejectMR() error: %v", err)
 	}
 

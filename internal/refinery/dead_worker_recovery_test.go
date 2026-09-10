@@ -161,6 +161,106 @@ func TestRecoverRejectedMRDeadWorker_ClosedSourceIssue_AliveSession_StillRecover
 	}
 }
 
+// TestRecoverRejectedMRDeadWorker_SupersededCloseReason_NoAction is the
+// gt-pvwy regression test: the exact gt-wisp-bakv incident. A source bead
+// closed with a deliberate supersede/duplicate close_reason must never be
+// resurrected by 'gt mq reject' even though it reads as "closed, unassigned"
+// exactly like the "worker finished it" case this recovery targets.
+func TestRecoverRejectedMRDeadWorker_SupersededCloseReason_NoAction(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:          "gt-src1",
+		Status:      "closed",
+		CloseReason: "superseded by gt-me9t",
+	}}
+	sendMail := func(m *mail.Message) error {
+		t.Fatal("mail should not be sent for a deliberately superseded bead")
+		return nil
+	}
+
+	if recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected no recovery for a bead closed as superseded")
+	}
+	if len(bd.updates) != 0 || len(bd.runCalls) != 0 {
+		t.Fatal("expected no bead mutations for a superseded bead")
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_DeliberateCloseReasons covers the other
+// close_reason shapes an operator or another MR's success can leave behind,
+// all of which must skip recovery the same way superseded does.
+func TestRecoverRejectedMRDeadWorker_DeliberateCloseReasons(t *testing.T) {
+	reasons := []string{
+		"Duplicate of gt-abc1",
+		"cancelled: no longer needed",
+		"Canceled per mayor directive",
+		"wontfix",
+		"Won't Fix — not a bug",
+		"not-planned for this cycle",
+		"obsolete after redesign",
+		"abandoned",
+		"Merged in gt-wisp-iryq",
+	}
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			bd := &fakeRejectedBeads{issue: &beads.Issue{
+				ID:          "gt-src1",
+				Status:      "closed",
+				CloseReason: reason,
+			}}
+			if recoverRejectedMRDeadWorker(bd, deadSession, nil, nil, deadWorkerReq()) {
+				t.Fatalf("expected no recovery for close_reason %q", reason)
+			}
+			if len(bd.updates) != 0 || len(bd.runCalls) != 0 {
+				t.Fatalf("expected no bead mutations for close_reason %q", reason)
+			}
+		})
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_ClosedNoReason_StillRecovers guards against
+// over-correcting: a closed bead with no close_reason (or an ordinary one)
+// is still the "worker finished it" case and must keep recovering — the
+// close_reason gate only fires for markers that signal deliberate closure.
+func TestRecoverRejectedMRDeadWorker_ClosedNoReason_StillRecovers(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected recovery for a closed bead with no close_reason")
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected RECOVERED_BEAD mail, got %d", len(sent))
+	}
+}
+
+func TestIsDeliberateTerminalCloseReason(t *testing.T) {
+	cases := map[string]bool{
+		"":                             false,
+		"finished":                     false,
+		"done":                         false,
+		"superseded by gt-me9t":        true,
+		"Duplicate of gt-abc1":         true,
+		"cancelled":                    true,
+		"canceled by operator":         true,
+		"wontfix":                      true,
+		"won't fix":                    true,
+		"not-planned":                  true,
+		"obsolete":                     true,
+		"abandoned":                    true,
+		"Merged in gt-wisp-iryq":       true,
+		"rejected: editorial feedback": false,
+	}
+	for reason, want := range cases {
+		if got := isDeliberateTerminalCloseReason(reason); got != want {
+			t.Errorf("isDeliberateTerminalCloseReason(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
 // TestRecoverRejectedMRDeadWorker_OpenAndStillAssigned_AliveSession_NoAction
 // covers the genuinely-still-working case: the source bead is open and this
 // same worker still holds it, and its session is confirmed alive. Session
@@ -240,6 +340,30 @@ func TestRecoverRejectedMRDeadWorker_DeadWorkerStillAssigned_Recovers(t *testing
 	}
 }
 
+// TestRecoverRejectedMRDeadWorker_OpenAndUnassigned_Recovers covers the third
+// branch of the status/assignee matrix (om flagged this one as untested):
+// the bead is open but nobody holds it — neither the "reassigned" skip nor
+// the "still assigned, check liveness" path applies, so recovery must still
+// proceed and reopen/re-notify.
+func TestRecoverRejectedMRDeadWorker_OpenAndUnassigned_Recovers(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open", Assignee: ""}}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected recovery for an open, unassigned bead")
+	}
+	if len(bd.updates) != 1 {
+		t.Fatalf("expected bead reopened, got %d updates", len(bd.updates))
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected RECOVERED_BEAD mail, got %d", len(sent))
+	}
+}
+
 func TestRecoverRejectedMRDeadWorker_MissingFields_NoAction(t *testing.T) {
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 
@@ -302,6 +426,27 @@ func TestWorkerNameFromMR(t *testing.T) {
 		if got := workerNameFromMR(in); got != want {
 			t.Errorf("workerNameFromMR(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient asserts the constructor
+// honors an injected beads client instead of always shelling out to a real
+// bd subprocess against r.BeadsPath() — the test-injection seam om flagged
+// as broken for the Engineer's e.beads. A fake client wired here must be the
+// one recovery actually calls, provable because it flows through to a
+// mutation that only the fake would record correctly.
+func TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient(t *testing.T) {
+	r := &rig.Rig{Name: "testrig", Path: t.TempDir()}
+	fake := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+
+	// No router: recoverRejectedMRDeadWorker still reopens the bead before
+	// touching mail, so the reopen update is enough to prove which beads
+	// client recovery actually reached (a real bd subprocess against
+	// r.BeadsPath() would fail against this empty temp dir instead).
+	recover := newDeadWorkerRecoverer(r, nil, nil, fake)
+	recover(deadWorkerReq())
+	if len(fake.updates) != 1 {
+		t.Fatalf("expected the injected fake client to receive the reopen update, got %d", len(fake.updates))
 	}
 }
 

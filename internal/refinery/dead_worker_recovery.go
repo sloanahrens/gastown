@@ -58,6 +58,38 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 		req.Branch, req.Target, req.MRID)
 }
 
+// deliberateTerminalCloseReasonMarkers are substrings of a bead's close_reason
+// that mean the bead was closed on purpose by an operator or by another MR's
+// success, not merely because the assigned worker finished or vanished.
+// Reopening a bead closed for one of these reasons resurrects work that is
+// intentionally done — the exact gt-pvwy incident (gt-wisp-bakv, closed
+// "superseded by gt-me9t" after granite merged the duplicate).
+var deliberateTerminalCloseReasonMarkers = []string{
+	"supersede", // matches "superseded", "supersedes"
+	"duplicate",
+	"cancel", // matches "cancelled", "canceled"
+	"wontfix",
+	"won't fix",
+	"not-planned",
+	"obsolete",
+	"abandoned",
+	"merged in ", // convention used elsewhere for "closed because merged via another MR/dep"
+}
+
+// isDeliberateTerminalCloseReason reports whether a closed bead's close_reason
+// indicates the closure was intentional (cancelled/superseded/duplicate/already
+// merged elsewhere) rather than "the assigned worker finished the work and
+// closed it themselves" — the only case dead-worker recovery should resurrect.
+func isDeliberateTerminalCloseReason(reason string) bool {
+	lower := strings.ToLower(reason)
+	for _, marker := range deliberateTerminalCloseReasonMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // recoverRejectedMRDeadWorker routes a rejected MR into the deacon redispatch
 // pipeline when the assignee polecat can no longer act on it (gt-tc0, gt-2usm).
 //
@@ -81,10 +113,12 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 // reusable, live-but-inert tmux session and will never act on a nudge. The
 // real signal is whether the worker still HOLDS the assignment: the source
 // bead's own status/assignee. Recovery proceeds whenever the bead shows the
-// worker no longer holds it — closed (gt done already ran), unassigned, or
-// assigned to someone else who turns out to also be gone — and is skipped
-// only when a *different* worker plainly owns it now, or when this same
-// worker still holds an open bead and its session is confirmed alive.
+// worker no longer holds it — closed (gt done already ran) or unassigned —
+// and is skipped when a *different* worker plainly owns it now, when this
+// same worker still holds an open bead and its session is confirmed alive,
+// or when a closed bead's own close_reason marks it deliberately cancelled,
+// superseded, or already landed via another MR (gt-pvwy) — reopening those
+// resurrects work an operator or a prior merge already finished.
 //
 // Returns true when the bead was handed to the deacon for redispatch.
 func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polecatName string) (bool, error), sendMail func(*mail.Message) error, out io.Writer, req deadWorkerRecoveryRequest) bool {
@@ -111,6 +145,21 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	status := beads.IssueStatus(strings.TrimSpace(issue.Status))
 	assignee := strings.TrimSpace(issue.Assignee)
 	stillAssignedHere := assignee == polecatName || strings.HasSuffix(assignee, "/"+polecatName)
+
+	// A terminal bead is not automatically safe to resurrect: it may be
+	// closed because the worker finished it (reopen is right), but it may
+	// also be closed because an operator deliberately cancelled/superseded
+	// it, or because the work already landed via a different MR (gt-pvwy —
+	// the superseded-duplicate case that motivated this check happened for
+	// real: gt-wisp-bakv, closed as superseded, would have been resurrected
+	// by 'gt mq reject' had this gate not existed). The close reason is the
+	// cheap, decisive signal a status/assignee check alone cannot give.
+	if status.IsTerminal() {
+		if reason := strings.TrimSpace(issue.CloseReason); reason != "" && isDeliberateTerminalCloseReason(reason) {
+			logf("[Engineer] Source bead %s closed deliberately (close_reason=%q) — skipping dead-worker recovery to avoid resurrecting cancelled/superseded/already-merged work\n", req.SourceIssue, reason)
+			return false
+		}
+	}
 
 	// If a live reassignment already happened (another polecat owns the bead),
 	// leave it alone — the deacon or a fresh worker is already on it.
@@ -164,7 +213,7 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 		logf("[Engineer] Warning: failed to reopen source bead %s for redispatch: %v\n", req.SourceIssue, err)
 		return false
 	}
-	logf("[Engineer] Worker %s has no live session — reopened %s for redispatch (%s)\n", polecatName, req.SourceIssue, MergeRejectionNoteMarker)
+	logf("[Engineer] Worker %s no longer holds %s — reopened for redispatch (%s)\n", polecatName, req.SourceIssue, MergeRejectionNoteMarker)
 
 	if sendMail == nil {
 		logf("[Engineer] Warning: no mail router — %s reopened but RECOVERED_BEAD not sent; deacon patrol will pick it up from ready queue\n", req.SourceIssue)
@@ -204,8 +253,17 @@ can check it out and make a targeted fix instead of starting over.`,
 // automatic build/test-failure poller and the Manager's manual `gt mq
 // reject` CLI path — so both routes maintain source-issue state identically
 // (gt-2usm: the CLI path used to bypass recovery entirely).
-func newDeadWorkerRecoverer(r *rig.Rig, router *mail.Router, out io.Writer) func(deadWorkerRecoveryRequest) bool {
-	beadsClient := beads.New(r.BeadsPath())
+//
+// beadsClient is optional: pass the caller's own injected client (e.g. the
+// Engineer's e.beads, which tests point at an in-process store via
+// beads.NewWithStore) so recovery observes the same beads backend the rest
+// of the caller's tests exercise, instead of silently constructing its own
+// beads.New(r.BeadsPath()) and shelling out to a real bd subprocess. Pass
+// nil to fall back to that default construction.
+func newDeadWorkerRecoverer(r *rig.Rig, router *mail.Router, out io.Writer, beadsClient rejectedSourceBeads) func(deadWorkerRecoveryRequest) bool {
+	if beadsClient == nil {
+		beadsClient = beads.New(r.BeadsPath())
+	}
 	return func(req deadWorkerRecoveryRequest) bool {
 		sessionAlive := func(polecatName string) (bool, error) {
 			t := tmux.NewTmux()

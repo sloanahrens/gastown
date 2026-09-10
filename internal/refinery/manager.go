@@ -84,7 +84,13 @@ func NewManager(r *rig.Rig) *Manager {
 		output:  os.Stdout,
 		router:  mail.NewRouter(r.Path),
 	}
-	m.recoverDeadWorker = newDeadWorkerRecoverer(r, m.router, m.output)
+	// Read m.router/m.output fresh on each call (SetOutput may run after
+	// construction) — matching the Engineer's wiring so a redirected output
+	// writer actually reaches recovery log lines instead of a frozen
+	// construction-time copy.
+	m.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		return newDeadWorkerRecoverer(r, m.router, m.output, nil)(req)
+	}
 	return m
 }
 
@@ -570,6 +576,7 @@ func (m *Manager) issueToMR(issue *beads.Issue) *MergeRequest {
 		Status:       mrStatusFromIssue(issue),
 		CloseReason:  CloseReason(fields.CloseReason),
 		CreatedAt:    parseTime(issue.CreatedAt),
+		RetryCount:   fields.RetryCount,
 	}
 }
 
@@ -698,8 +705,11 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 
 // RejectMR manually rejects a merge request.
 // It closes the MR with rejected status and optionally notifies the worker.
+// noRecover skips dead-worker recovery of the source bead entirely — set it
+// for a superseded/duplicate/cancelled MR where the source issue must not be
+// reopened regardless of what its close_reason says (gt-pvwy).
 // Returns the rejected MR for display purposes.
-func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*MergeRequest, error) {
+func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noRecover bool) (*MergeRequest, error) {
 	b := beads.New(m.rig.BeadsPath())
 	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
@@ -747,7 +757,11 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*Merg
 	// worker that can no longer act on this (bead already closed, or
 	// reassigned elsewhere) hands the source bead back to the deacon
 	// instead of leaving it stranded.
-	if !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" && m.recoverDeadWorker != nil {
+	if noRecover {
+		if strings.TrimSpace(mr.IssueID) != "" {
+			_, _ = fmt.Fprintf(m.output, "  %s\n", style.Dim.Render("--no-recover: source issue left untouched"))
+		}
+	} else if !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" && m.recoverDeadWorker != nil {
 		m.recoverDeadWorker(deadWorkerRecoveryRequest{
 			MRID:          mr.ID,
 			Branch:        mr.Branch,
@@ -757,8 +771,15 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*Merg
 			RigName:       m.rig.Name,
 			FailureType:   "editorial",
 			ErrorMsg:      reason,
-			AttemptNumber: 1,
+			AttemptNumber: mr.RetryCount + 1,
 		})
+		// This CLI path sends mail (RECOVERED_BEAD to the deacon) via
+		// recoverDeadWorker above; every other mail-sending CLI path waits
+		// for in-flight async notifications before returning so a fast exit
+		// can't drop delivery (gt-pvwy: this one didn't).
+		if m.router != nil {
+			m.router.WaitPendingNotifications()
+		}
 	}
 
 	// Read the source issue's actual status back from the bead instead of

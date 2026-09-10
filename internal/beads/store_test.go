@@ -866,6 +866,24 @@ func TestSdkIssueToIssueParent(t *testing.T) {
 	}
 }
 
+// TestSdkIssueToIssueCloseReason guards gt-pvwy: dead-worker recovery in
+// package refinery needs an issue's own close_reason to tell "worker
+// finished it" apart from "operator deliberately cancelled/superseded it",
+// and this field was previously dropped on the store (in-process) read path.
+func TestSdkIssueToIssueCloseReason(t *testing.T) {
+	si := &beadsdk.Issue{
+		ID:          "test-1",
+		Title:       "superseded work",
+		Status:      beadsdk.StatusClosed,
+		CloseReason: "superseded by gt-me9t",
+	}
+
+	issue := sdkIssueToIssue(si)
+	if issue.CloseReason != "superseded by gt-me9t" {
+		t.Fatalf("CloseReason = %q, want %q", issue.CloseReason, "superseded by gt-me9t")
+	}
+}
+
 func TestSdkIssueToIssueNil(t *testing.T) {
 	if sdkIssueToIssue(nil) != nil {
 		t.Fatal("expected nil for nil input")

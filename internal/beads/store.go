@@ -108,6 +108,7 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		Ephemeral:          si.Ephemeral,
 		AcceptanceCriteria: si.AcceptanceCriteria,
 		Metadata:           si.Metadata,
+		CloseReason:        si.CloseReason,
 	}
 	for _, c := range si.Comments {
 		comment, ok := sdkCommentToComment(c)

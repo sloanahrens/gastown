@@ -30,9 +30,10 @@ var (
 	mqRetryNow bool
 
 	// Reject flags
-	mqRejectReason string
-	mqRejectNotify bool
-	mqRejectStdin  bool // Read reason from stdin
+	mqRejectReason    string
+	mqRejectNotify    bool
+	mqRejectStdin     bool // Read reason from stdin
+	mqRejectNoRecover bool // Skip dead-worker recovery of the source bead
 
 	// List command flags
 	mqListReady  bool
@@ -156,11 +157,18 @@ var mqRejectCmd = &cobra.Command{
 	Long: `Manually reject a merge request.
 
 This closes the MR with a 'rejected' status without merging.
-The source issue is NOT closed (work is not done).
+The source issue is NOT closed (work is not done); when the worker can no
+longer act on it, its source bead is reopened for redispatch — unless the
+bead's own close_reason marks it deliberately cancelled/superseded/already
+merged, in which case reopening is skipped automatically.
+
+For an MR whose source work is superseded, duplicate, or already landed via
+another MR, pass --no-recover so the source bead is left untouched no matter
+what its close_reason says.
 
 Examples:
   gt mq reject greenplace polecat/Nux/gp-xyz --reason "Does not meet requirements"
-  gt mq reject greenplace mr-Nux-12345 --reason "Superseded by other work" --notify`,
+  gt mq reject greenplace mr-Nux-12345 --reason "Superseded by gt-me9t" --no-recover`,
 	Args: cobra.ExactArgs(2),
 	RunE: runMQReject,
 }
@@ -375,6 +383,7 @@ func init() {
 	mqRejectCmd.Flags().StringVarP(&mqRejectReason, "reason", "r", "", "Reason for rejection (required unless --stdin)")
 	mqRejectCmd.Flags().BoolVar(&mqRejectNotify, "notify", false, "Send mail notification to worker")
 	mqRejectCmd.Flags().BoolVar(&mqRejectStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
+	mqRejectCmd.Flags().BoolVar(&mqRejectNoRecover, "no-recover", false, "Do not reopen the source bead for redispatch (use for superseded/duplicate/already-merged work)")
 
 	// Status flags
 	mqStatusCmd.Flags().BoolVar(&mqStatusJSON, "json", false, "Output as JSON")
@@ -529,7 +538,7 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify)
+	result, err := mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover)
 	if err != nil {
 		return fmt.Errorf("rejecting MR: %w", err)
 	}
