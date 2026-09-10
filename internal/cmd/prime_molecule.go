@@ -442,8 +442,9 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
 
-	// MQ-specific vars: layer repo floor -> rig root config.json -> rig-local
-	// settings/config.json (same 3-tier precedence gt-me9t fixed for sling),
+	// MQ-specific vars: layer rig root config.json (floor) -> repo settings
+	// (wins over floor) -> rig-local settings/config.json (final override) —
+	// same 3-tier precedence gt-e50d fixed for sling, kept in sync via gt-egiv —
 	// falling back to bead labels only if none of those three sources exist.
 	if mq := rig.LoadEffectiveMergeQueueConfig(ctx.TownRoot, ctx.Rig); mq != nil {
 		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))

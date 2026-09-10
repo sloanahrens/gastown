@@ -119,7 +119,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 20
+version = 21
 
 [vars]
 [vars.wisp_type]
@@ -454,17 +454,27 @@ this, polecat worktrees for batched MRs never get nuked.
 **Step 5: Leave culprits and conflicts alone**
 
 Entries in `.culprits[]` (isolated by bisection) and `.conflicts[]` (stack
-conflicts) are intentionally left untouched — no bead was closed, no branch
-deleted. They remain open/ready and will be picked up by the single-MR path
-(process-branch) on a future cycle, where existing conflict-handling and
-test-failure-handling logic already applies. Do not duplicate that handling
-here.
+conflicts) are intentionally left untouched here — no bead was closed, no
+branch deleted. Do not duplicate conflict/failure bookkeeping in this step;
+they remain open/ready and are picked up by process-branch next, same as any
+other ready MR (see Step 6).
 
-**Step 6: Skip the single-MR path this cycle**
+**Step 6: Continue to the single-MR path — do NOT skip it**
 
-Whether the batch fully landed, partially landed with a bisected culprit, or
-hit conflicts, skip process-branch through merge-push for this cycle — those
-steps exist for the single-MR path. Proceed to loop-check."""
+`gt mq batch run` only ever touches non-P0/P1 MRs older than batch_min_age,
+capped at batch_max. P0/P1 MRs are never batched (by design, so critical
+fixes aren't held up assembling a batch), and any MR beyond batch_max or
+younger than batch_min_age was left untouched too. All of those are still
+sitting in the tracked MR list from queue-scan.
+
+**Do NOT skip to loop-check.** Continue forward in DAG order to process-branch
+as normal, exactly as you would if batch-scan had been skipped (empty
+eligible_total) — this is what prevents P0/P1 fixes from starving behind a
+batch run. MRs the batch already merged are closed and gone from the queue,
+so process-branch will not see them again; MRs left in `.culprits[]` or
+`.conflicts[]` remain ready and are handled by process-branch's existing
+conflict-handling and test-failure-handling logic, same as any other MR —
+no special-casing needed."""
 
 [[steps]]
 id = "process-branch"

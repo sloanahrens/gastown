@@ -7,30 +7,16 @@ import (
 )
 
 // TestLoadEffectiveMergeQueueConfig_ThreeTierPrecedence exercises the same
-// repo-floor -> rig-root config.json -> rig-local settings/config.json
-// layering that gt-me9t fixed for sling_helpers.loadRigCommandVars, applied
+// rig-root-floor -> repo-settings-override -> rig-local-final-override
+// layering that gt-e50d fixed for sling_helpers.loadRigCommandVars, applied
 // here to the refinery-patrol vars path (gt-hqji: batch config knobs must
 // actually reach the formula regardless of which file an operator used).
+// This must stay in lockstep with sling_helpers' precedence (gt-egiv) —
+// polecats and the refinery must compute the same effective config for the
+// same rig.
 func TestLoadEffectiveMergeQueueConfig_ThreeTierPrecedence(t *testing.T) {
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
-
-	repoRigDir := filepath.Join(rigDir, "mayor", "rig", ".gastown")
-	if err := os.MkdirAll(repoRigDir, 0o755); err != nil {
-		t.Fatalf("mkdir repo settings dir: %v", err)
-	}
-	repoSettings := `{
-  "type": "rig-settings",
-  "version": 1,
-  "merge_queue": {
-    "test_command": "repo-floor-test",
-    "lint_command": "repo-floor-lint",
-    "batch_min_age": "3h"
-  }
-}`
-	if err := os.WriteFile(filepath.Join(repoRigDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings: %v", err)
-	}
 
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("mkdir rig dir: %v", err)
@@ -42,13 +28,30 @@ func TestLoadEffectiveMergeQueueConfig_ThreeTierPrecedence(t *testing.T) {
   "git_url": "https://example.com/gastown.git",
   "default_branch": "main",
   "merge_queue": {
-    "test_command": "rig-root-test",
-    "batch_enabled": true,
+    "test_command": "rig-root-floor-test",
+    "lint_command": "rig-root-floor-lint",
+    "batch_min_age": "3h",
     "batch_max": 8
   }
 }`
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigRootConfig), 0o644); err != nil {
 		t.Fatalf("write rig root config.json: %v", err)
+	}
+
+	repoRigDir := filepath.Join(rigDir, "mayor", "rig", ".gastown")
+	if err := os.MkdirAll(repoRigDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo settings dir: %v", err)
+	}
+	repoSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "test_command": "repo-override-test",
+    "batch_enabled": true
+  }
+}`
+	if err := os.WriteFile(filepath.Join(repoRigDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings: %v", err)
 	}
 
 	localSettingsDir := filepath.Join(rigDir, "settings")
@@ -71,20 +74,20 @@ func TestLoadEffectiveMergeQueueConfig_ThreeTierPrecedence(t *testing.T) {
 		t.Fatal("expected non-nil merged config")
 	}
 
-	if mq.TestCommand != "rig-root-test" {
-		t.Errorf("test_command = %q, want %q (rig-root overrides repo floor)", mq.TestCommand, "rig-root-test")
+	if mq.TestCommand != "repo-override-test" {
+		t.Errorf("test_command = %q, want %q (repo settings override the rig-root floor)", mq.TestCommand, "repo-override-test")
 	}
-	if mq.LintCommand != "repo-floor-lint" {
-		t.Errorf("lint_command = %q, want %q (repo floor, not overridden elsewhere)", mq.LintCommand, "repo-floor-lint")
+	if mq.LintCommand != "rig-root-floor-lint" {
+		t.Errorf("lint_command = %q, want %q (rig-root floor, not overridden elsewhere)", mq.LintCommand, "rig-root-floor-lint")
 	}
 	if !mq.IsBatchEnabled() {
-		t.Error("batch_enabled should be true (set at rig-root tier)")
+		t.Error("batch_enabled should be true (set at repo tier)")
 	}
 	if mq.GetBatchMinAge() != "3h" {
-		t.Errorf("batch_min_age = %q, want %q (repo floor, not overridden elsewhere)", mq.GetBatchMinAge(), "3h")
+		t.Errorf("batch_min_age = %q, want %q (rig-root floor, not overridden elsewhere)", mq.GetBatchMinAge(), "3h")
 	}
 	if mq.GetBatchMax() != 20 {
-		t.Errorf("batch_max = %d, want 20 (rig-local settings/config.json wins over rig-root)", mq.GetBatchMax())
+		t.Errorf("batch_max = %d, want 20 (rig-local settings/config.json wins over everything)", mq.GetBatchMax())
 	}
 }
 

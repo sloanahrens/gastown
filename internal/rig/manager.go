@@ -1098,9 +1098,16 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 // LoadEffectiveMergeQueueConfig layers a rig's merge_queue settings from the
 // three places operators actually write them, in priority order (lowest to
 // highest):
-//  1. Repo-committed floor: <rig>/mayor/rig/.gastown/settings.json
-//  2. Rig root config.json: <rig>/config.json (set at onboarding, gt-me9t)
-//  3. Rig-local overrides: <rig>/settings/config.json (operator tuning)
+//  1. Rig root config.json (floor — operator-set at onboarding, gt-me9t):
+//     <rig>/config.json
+//  2. Repo-committed defaults (committed to git, wins over the floor):
+//     <rig>/mayor/rig/.gastown/settings.json
+//  3. Rig-local overrides (operator tuning, final override):
+//     <rig>/settings/config.json
+//
+// This mirrors sling_helpers.loadRigCommandVars's precedence (gt-e50d) so
+// polecats (dispatched via sling) and the refinery (via this function) agree
+// on the effective merge_queue config for the same rig — see gt-egiv.
 //
 // Returns nil if none of the three sources define merge_queue settings.
 func LoadEffectiveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
@@ -1123,7 +1130,7 @@ func LoadEffectiveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueC
 		localMQ = localSettings.MergeQueue
 	}
 
-	mq := config.MergeSettingsCommand(repoMQ, rigRootMQ)
+	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
 	return config.MergeSettingsCommand(mq, localMQ)
 }
 

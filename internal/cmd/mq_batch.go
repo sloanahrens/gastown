@@ -235,6 +235,11 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	}
 	mq := rig.LoadEffectiveMergeQueueConfig(townRoot, rigName)
 
+	if mq != nil && mq.MergeStrategy == "pr" {
+		fmt.Printf("%s '%s' uses merge_strategy=pr — batching would bypass PR review/branch protection, so it is disabled for this rig; MRs will be processed individually by the normal single-MR path\n", style.Dim.Render("ℹ"), rigName)
+		return nil
+	}
+
 	minAge, err := resolveBatchMinAge(mqBatchRunMinAge, mq)
 	if err != nil {
 		return err
