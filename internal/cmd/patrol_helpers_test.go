@@ -214,6 +214,58 @@ func TestBuildRefineryPatrolVars_NilMergeQueue(t *testing.T) {
 	}
 }
 
+// TestBuildRefineryPatrolVars_ReadsRigRootMergeQueue reproduces gt-egiv
+// finding 1: buildRefineryPatrolVars fed the refinery's own gate-command
+// vars from settings/config.json only, so a rig configuring gate commands
+// exclusively at rig-root onboarding time (gt-me9t) produced a refinery
+// patrol that resolved NO commands — unable to re-verify a polecat's
+// --pre-verified claim even though loadRigCommandVars had already surfaced
+// those same commands to the polecat.
+func TestBuildRefineryPatrolVars_ReadsRigRootMergeQueue(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigDir := filepath.Join(tmpDir, "testrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "make test",
+    "lint_command": "make lint"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := RoleContext{
+		TownRoot: tmpDir,
+		Rig:      "testrig",
+	}
+	vars := buildRefineryPatrolVars(ctx)
+	varMap := make(map[string]string)
+	for _, v := range vars {
+		parts := splitFirstEquals(v)
+		if len(parts) == 2 {
+			varMap[parts[0]] = parts[1]
+		}
+	}
+	want := map[string]string{
+		"build_command": "make build",
+		"test_command":  "make test",
+		"lint_command":  "make lint",
+	}
+	for key, wantVal := range want {
+		if gotVal := varMap[key]; gotVal != wantVal {
+			t.Errorf("%s = %q, want %q (rig-root merge_queue floor invisible to refinery patrol vars; vars: %v)", key, gotVal, wantVal, vars)
+		}
+	}
+}
+
 func TestBuildRefineryPatrolVars_FullConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")

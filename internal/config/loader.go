@@ -387,8 +387,81 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.RequireReview != nil {
 			result.RequireReview = local.RequireReview
 		}
+		if local.IntegrationBranchPolecatEnabled != nil {
+			result.IntegrationBranchPolecatEnabled = local.IntegrationBranchPolecatEnabled
+		}
+		if local.IntegrationBranchRefineryEnabled != nil {
+			result.IntegrationBranchRefineryEnabled = local.IntegrationBranchRefineryEnabled
+		}
+		if local.IntegrationBranchTemplate != "" {
+			result.IntegrationBranchTemplate = local.IntegrationBranchTemplate
+		}
+		if local.IntegrationBranchAutoLand != nil {
+			result.IntegrationBranchAutoLand = local.IntegrationBranchAutoLand
+		}
+		if local.VCSProvider != "" {
+			result.VCSProvider = local.VCSProvider
+		}
+		if local.JudgmentEnabled != nil {
+			result.JudgmentEnabled = local.JudgmentEnabled
+		}
+		if local.ReviewDepth != "" {
+			result.ReviewDepth = local.ReviewDepth
+		}
 	}
 	return result
+}
+
+// RigRootMergeQueue reads the merge_queue section directly from a rig root
+// config.json (<rigPath>/config.json), independent of the internal/rig
+// package's RigConfig type — internal/rig already imports internal/config,
+// so importing it back here would cycle. Returns nil, nil if the file is
+// missing or has no merge_queue section.
+func RigRootMergeQueue(rigPath string) (*MergeQueueConfig, error) {
+	data, err := os.ReadFile(filepath.Join(rigPath, "config.json")) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading rig root config: %w", err)
+	}
+	var wrapper struct {
+		MergeQueue *MergeQueueConfig `json:"merge_queue"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, fmt.Errorf("parsing rig root config %s: %w", rigPath, err)
+	}
+	return wrapper.MergeQueue, nil
+}
+
+// ResolveMergeQueueConfig merges merge-queue / gate-command settings across
+// the three layers used town-wide, lowest to highest precedence:
+//  1. Rig root config.json merge_queue (floor — operator-set at onboarding, gt-me9t)
+//  2. repoRoot's committed .gastown/settings.json (wins over the floor)
+//  3. <rigPath>/settings/config.json (rig-local operator tuning, final override)
+//
+// This is the single resolver every gate-command call site must route
+// through. Before gt-egiv, five sites each re-implemented this merge and
+// drifted independently — one of them silently skipped the rig-root floor,
+// leaving the refinery unable to re-verify gates a polecat had already run.
+func ResolveMergeQueueConfig(rigPath, repoRoot string) *MergeQueueConfig {
+	rigRootMQ, _ := RigRootMergeQueue(rigPath)
+
+	var repoMQ *MergeQueueConfig
+	if repoRoot != "" {
+		if repoSettings, err := LoadRepoSettings(repoRoot); err == nil && repoSettings != nil {
+			repoMQ = repoSettings.MergeQueue
+		}
+	}
+
+	var localMQ *MergeQueueConfig
+	settingsPath := filepath.Join(rigPath, "settings", "config.json")
+	if localSettings, err := LoadRigSettings(settingsPath); err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	mq := MergeSettingsCommand(rigRootMQ, repoMQ)
+	return MergeSettingsCommand(mq, localMQ)
 }
 
 // LoadRigSettings loads and validates a rig settings file.

@@ -1400,7 +1400,8 @@ func loadRigCommandVars(townRoot, rig string) []string {
 
 	// Resolve gate commands via the shared rig root -> repo -> rig-local
 	// precedence chain. This is the same resolver gt done's --pre-verified
-	// guard calls, so the two can never read different state (gt-k4sy).
+	// guard, buildRefineryPatrolVars, mq_submit and resolveSetupCommand all
+	// call, so no site can read different state (gt-k4sy, gt-egiv).
 	mq := rigpkg.ResolveMergeQueueConfig(townRoot, rig)
 	if mq == nil {
 		return vars

@@ -3116,3 +3116,73 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 		t.Fatal("expected error from worktree operations")
 	}
 }
+
+// TestResolveSetupCommandReadsRigRootMergeQueue reproduces gt-egiv finding 1:
+// resolveSetupCommand merged repo-committed .gastown/settings.json with
+// rig-local settings/config.json only, so a rig configuring setup_command
+// exclusively at rig-root onboarding time (gt-me9t) never surfaced it to
+// polecat worktree setup.
+func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "testrig")
+	worktreePath := filepath.Join(rigPath, "polecats", "jasper")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"setup_command": "pnpm install"}
+}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "testrig", Path: rigPath}
+	mgr := &Manager{rig: r}
+
+	got := mgr.resolveSetupCommand(worktreePath)
+	if got != "pnpm install" {
+		t.Errorf("resolveSetupCommand() = %q, want %q (rig-root merge_queue floor invisible to polecat setup)", got, "pnpm install")
+	}
+}
+
+// TestResolveSetupCommandPrecedence pins the three-tier merge order for
+// resolveSetupCommand once it routes through config.ResolveMergeQueueConfig:
+// rig-local settings/config.json has the final say over the repo-committed
+// and rig-root layers.
+func TestResolveSetupCommandPrecedence(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "testrig")
+	worktreePath := filepath.Join(rigPath, "polecats", "jasper")
+	gastownDir := filepath.Join(worktreePath, ".gastown")
+	settingsDir := filepath.Join(rigPath, "settings")
+	for _, dir := range []string{gastownDir, settingsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rigConfig := `{"type": "rig", "version": 1, "name": "testrig", "merge_queue": {"setup_command": "root-setup"}}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repoSettings := `{"type": "rig-settings", "version": 1, "merge_queue": {"setup_command": "repo-setup"}}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localSettings := `{"type": "rig-settings", "version": 1, "merge_queue": {"setup_command": "local-setup"}}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(localSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "testrig", Path: rigPath}
+	mgr := &Manager{rig: r}
+
+	got := mgr.resolveSetupCommand(worktreePath)
+	if got != "local-setup" {
+		t.Errorf("resolveSetupCommand() = %q, want %q (rig-local wins over repo and root)", got, "local-setup")
+	}
+}

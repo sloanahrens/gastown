@@ -443,12 +443,12 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
 
-	// MQ-specific vars: try settings/config.json first (legacy format), then
-	// fall back to the layered rig config (bead labels / wisp layer).
-	settingsPath := filepath.Join(rigPath, "settings", "config.json")
-	settings, sErr := config.LoadRigSettings(settingsPath)
-	if sErr == nil && settings != nil && settings.MergeQueue != nil {
-		mq := settings.MergeQueue
+	// MQ-specific vars: resolved across rig root -> repo -> rig-local (gt-egiv),
+	// the same precedence every gate-command call site must use. Falls back to
+	// the layered rig config (bead labels / wisp layer) below if nothing resolves.
+	repoRoot := filepath.Join(rigPath, "mayor", "rig")
+	mq := config.ResolveMergeQueueConfig(rigPath, repoRoot)
+	if mq != nil {
 		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))
 		vars = append(vars, fmt.Sprintf("integration_branch_auto_land=%t", mq.IsIntegrationBranchAutoLandEnabled()))
 		vars = append(vars, fmt.Sprintf("run_tests=%t", mq.IsRunTestsEnabled()))

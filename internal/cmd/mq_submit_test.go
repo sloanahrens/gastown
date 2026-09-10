@@ -11,6 +11,48 @@ import (
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 )
 
+// TestRefineryIntegrationEnabledReadsRigRootMergeQueue reproduces gt-egiv
+// finding 1 for the mq_submit/done target-resolution path: refineryEnabled
+// was resolved from settings/config.json only, so a rig that disables
+// integration-branch auto-detection exclusively at rig-root onboarding time
+// (gt-me9t) had that setting silently ignored — mq submit and gt done would
+// still auto-detect an integration branch as the MR target.
+func TestRefineryIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"integration_branch_refinery_enabled": false}
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := refineryIntegrationEnabled(townRoot, "testrig"); got {
+		t.Error("refineryIntegrationEnabled() = true, want false (rig-root merge_queue floor invisible)")
+	}
+}
+
+// TestRefineryIntegrationEnabledDefaultsTrue verifies the pre-gt-me9t
+// default is preserved when no layer configures the setting.
+func TestRefineryIntegrationEnabledDefaultsTrue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := refineryIntegrationEnabled(townRoot, "testrig"); !got {
+		t.Error("refineryIntegrationEnabled() = false, want true (default when unconfigured)")
+	}
+}
+
 func TestResolveMQSubmitCommitSHAUsesSubmittedBranch(t *testing.T) {
 	repo := t.TempDir()
 	runGitForMQSubmitTest(t, repo, "init")
