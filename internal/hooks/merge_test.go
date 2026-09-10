@@ -145,6 +145,146 @@ func TestMergeHooksEmptyHooksDisables(t *testing.T) {
 	}
 }
 
+// TestMergeHooksParenMatcherStillReplaces pins the original, still-live
+// behavior for a permission-pattern matcher (contains "("): a same-matcher
+// override replaces the base entry wholesale, same as the "" matcher case
+// in TestMergeHooksSameMatcherReplaces. Bare tool-name matchers (see below)
+// deliberately diverge from this.
+func TestMergeHooksParenMatcherStillReplaces(t *testing.T) {
+	base := &HooksConfig{
+		PreToolUse: []HookEntry{
+			{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block-push-old"}}},
+		},
+	}
+
+	overrides := map[string]*HooksConfig{
+		"crew": {
+			PreToolUse: []HookEntry{
+				{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block-push-new"}}},
+			},
+		},
+	}
+
+	result := MergeHooks(base, overrides, "crew")
+
+	if len(result.PreToolUse) != 1 {
+		t.Fatalf("expected 1 PreToolUse (replaced), got %d", len(result.PreToolUse))
+	}
+	if len(result.PreToolUse[0].Hooks) != 1 || result.PreToolUse[0].Hooks[0].Command != "block-push-new" {
+		t.Errorf("expected whole-entry replace, got %+v", result.PreToolUse[0].Hooks)
+	}
+}
+
+// TestMergeHooksBareMatcherUnions pins gt-5ihs's union semantics: a
+// same-matcher override on a bare tool-name matcher (e.g. "Bash") adds its
+// hooks alongside the base entry's, it does not replace them — otherwise a
+// role override targeting "Bash" would silently drop every other layer's
+// "Bash" guards (pr-workflow, dangerous-command, formula-allowlist all
+// legitimately share the matcher).
+func TestMergeHooksBareMatcherUnions(t *testing.T) {
+	base := &HooksConfig{
+		PreToolUse: []HookEntry{
+			{Matcher: "Bash", Hooks: []Hook{
+				{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"},
+				{Type: "command", Command: "gt tap guard dangerous-command"},
+			}},
+		},
+	}
+
+	overrides := map[string]*HooksConfig{
+		"dog": {
+			PreToolUse: []HookEntry{
+				{Matcher: "Bash", Hooks: []Hook{
+					{Type: "command", Command: "gt tap guard formula-allowlist"},
+				}},
+			},
+		},
+	}
+
+	result := MergeHooks(base, overrides, "dog")
+
+	if len(result.PreToolUse) != 1 {
+		t.Fatalf("expected 1 PreToolUse entry (union, same matcher), got %d", len(result.PreToolUse))
+	}
+	hooks := result.PreToolUse[0].Hooks
+	if len(hooks) != 3 {
+		t.Fatalf("expected 3 hooks (2 base + 1 override, unioned), got %d: %+v", len(hooks), hooks)
+	}
+	commands := map[string]bool{}
+	for _, h := range hooks {
+		commands[h.Command] = true
+	}
+	for _, want := range []string{"gt tap guard pr-workflow", "gt tap guard dangerous-command", "gt tap guard formula-allowlist"} {
+		if !commands[want] {
+			t.Errorf("expected union to retain %q, got %+v", want, hooks)
+		}
+	}
+}
+
+// TestMergeHooksBareMatcherUnionIsIdempotent pins that re-merging the same
+// override onto an already-merged result doesn't duplicate hooks: a hook
+// with the same (Command, If) is replaced in place, not appended again
+// (unionHooks/hookKey in merge.go).
+func TestMergeHooksBareMatcherUnionIsIdempotent(t *testing.T) {
+	base := &HooksConfig{
+		PreToolUse: []HookEntry{
+			{Matcher: "Bash", Hooks: []Hook{
+				{Type: "command", Command: "gt tap guard dangerous-command"},
+			}},
+		},
+	}
+
+	overrides := map[string]*HooksConfig{
+		"dog": {
+			PreToolUse: []HookEntry{
+				{Matcher: "Bash", Hooks: []Hook{
+					{Type: "command", Command: "gt tap guard formula-allowlist"},
+				}},
+			},
+		},
+	}
+
+	once := MergeHooks(base, overrides, "dog")
+	twice := MergeHooks(once, overrides, "dog")
+
+	if len(twice.PreToolUse) != 1 || len(twice.PreToolUse[0].Hooks) != 2 {
+		t.Fatalf("re-merge should be idempotent: got %d entries, %+v", len(twice.PreToolUse), twice.PreToolUse)
+	}
+}
+
+// TestMergeHooksBareMatcherEmptyOverrideDisablesAll pins a real sharp edge
+// in the union design: since there is no longer a way to disable a single
+// guard sharing the "Bash" matcher, an override of {"matcher":"Bash",
+// "hooks":[]} disables every "Bash" guard from every layer at once (base
+// pr-workflow + dangerous-command included), not just the override layer's
+// own hooks. This is documented, expected behavior — not a bug — but it
+// must stay pinned so a future change to mergeEntries doesn't silently
+// narrow or widen it.
+func TestMergeHooksBareMatcherEmptyOverrideDisablesAll(t *testing.T) {
+	base := &HooksConfig{
+		PreToolUse: []HookEntry{
+			{Matcher: "Bash", Hooks: []Hook{
+				{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"},
+				{Type: "command", Command: "gt tap guard dangerous-command"},
+			}},
+		},
+	}
+
+	overrides := map[string]*HooksConfig{
+		"mayor": {
+			PreToolUse: []HookEntry{
+				{Matcher: "Bash", Hooks: []Hook{}},
+			},
+		},
+	}
+
+	result := MergeHooks(base, overrides, "mayor")
+
+	if len(result.PreToolUse) != 0 {
+		t.Errorf("expected empty-hooks override to remove the whole Bash entry (all guards), got %+v", result.PreToolUse)
+	}
+}
+
 func TestMergeHooksRigRoleLayering(t *testing.T) {
 	base := &HooksConfig{
 		SessionStart: []HookEntry{

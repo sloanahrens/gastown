@@ -356,6 +356,42 @@ export const GasTown = async ({ $ }) => {
 	}
 }
 
+// TestInstallForRole_UpgradesStaleParenMatcher pins the gt-5ihs follow-up
+// (gt-wisp-db27 finding 3): needsUpgrade must recognize a PreToolUse
+// matcher written as a permission-rule pattern (e.g. "Bash(gh pr
+// create*)") as stale, so an agent scaffolded from an old settings.json
+// gets auto-upgraded to the bare-tool-name + "if" layout instead of being
+// left with dead guards forever.
+func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
+	dir := t.TempDir()
+	hooksPath := filepath.Join(dir, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(hooksPath), 0755)
+
+	stale := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash(gh pr create*)",
+        "hooks": [{"type": "command", "command": "gt tap guard pr-workflow"}]
+      }
+    ]
+  }
+}`
+	os.WriteFile(hooksPath, []byte(stale), 0644)
+
+	if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	got, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read upgraded settings: %v", err)
+	}
+	if hasParenPreToolUseMatcher(got) {
+		t.Error("stale paren-style PreToolUse matcher was not upgraded")
+	}
+}
+
 func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
 	content, err := resolveAndSubstitute("opencode", "gastown.js", "polecat")
 	if err != nil {

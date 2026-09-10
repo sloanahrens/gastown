@@ -161,7 +161,7 @@ func diffHookEntries(hookType string, current, expected []hooks.HookEntry) []str
 				hookType,
 				diffRemove.Render(fmt.Sprintf("-1 hook (matcher %s)", matcherLabel))))
 			for _, h := range entry.Hooks {
-				lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+h.Command)))
+				lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+hookDisplayText(h))))
 			}
 			continue
 		}
@@ -183,7 +183,7 @@ func diffHookEntries(hookType string, current, expected []hooks.HookEntry) []str
 			hookType,
 			diffAdd.Render(fmt.Sprintf("+1 hook (new matcher %s)", matcherLabel))))
 		for _, h := range entry.Hooks {
-			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+h.Command)))
+			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+hookDisplayText(h))))
 		}
 	}
 
@@ -208,26 +208,41 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 	for i := 0; i < maxLen; i++ {
 		if i >= len(current.Hooks) {
 			// New hook added
-			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
-			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+expected.Hooks[i].Command)))
+			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d]:\n", hookType, matcherSuffix, i))
+			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+hookDisplayText(expected.Hooks[i]))))
 			continue
 		}
 		if i >= len(expected.Hooks) {
 			// Hook removed
-			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
-			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+current.Hooks[i].Command)))
+			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d]:\n", hookType, matcherSuffix, i))
+			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+hookDisplayText(current.Hooks[i]))))
 			continue
 		}
 
-		// Both exist - compare
-		if current.Hooks[i].Command != expected.Hooks[i].Command {
-			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
-			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+truncateCommand(current.Hooks[i].Command))))
-			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+truncateCommand(expected.Hooks[i].Command))))
+		// Both exist - compare. If matters: post-gt-5ihs, several hooks on
+		// the same bare-tool matcher can share an identical Command and
+		// differ only by If (e.g. three pr-workflow entries on "Bash"), so
+		// an If-only drift (a typo'd pattern in an on-disk override) must
+		// still show up here.
+		if current.Hooks[i].Command != expected.Hooks[i].Command || current.Hooks[i].If != expected.Hooks[i].If {
+			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d]:\n", hookType, matcherSuffix, i))
+			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+hookDisplayText(current.Hooks[i]))))
+			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+hookDisplayText(expected.Hooks[i]))))
 		}
 	}
 
 	return lines
+}
+
+// hookDisplayText renders a hook's command (truncated) plus its If
+// condition when present, so a diff line distinguishes hooks that share a
+// Command but differ only by If.
+func hookDisplayText(h hooks.Hook) string {
+	text := truncateCommand(h.Command)
+	if h.If != "" {
+		text += fmt.Sprintf(" [if: %s]", h.If)
+	}
+	return text
 }
 
 // indexByMatcher builds a map from matcher string to HookEntry.

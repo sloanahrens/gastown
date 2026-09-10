@@ -119,6 +119,14 @@ func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 	branchCreated := sandboxBranchExists(sandbox, hooksLiveFireBranch)
 	blockConfirmed := strings.Contains(stdout.String(), hooksLiveFireBlockMarker) || strings.Contains(stderr.String(), hooksLiveFireBlockMarker)
 
+	return c.evaluateLiveFireResult(label, settingsPath, branchCreated, blockConfirmed, runErr, stdout.String(), stderr.String())
+}
+
+// evaluateLiveFireResult turns the raw evidence from a live-fire subprocess
+// run into a verdict. Factored out of Run so the three-way verdict logic
+// (blocked / not blocked / inconclusive) can be unit-tested directly,
+// without spawning a real claude subprocess.
+func (c *HooksLiveFireCheck) evaluateLiveFireResult(label, settingsPath string, branchCreated, blockConfirmed bool, runErr error, stdout, stderr string) *CheckResult {
 	if branchCreated {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -127,8 +135,8 @@ func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 			Details: []string{
 				fmt.Sprintf("settings: %s", settingsPath),
 				fmt.Sprintf("claude exit: %v", runErr),
-				"stdout: " + truncate(stdout.String(), 400),
-				"stderr: " + truncate(stderr.String(), 400),
+				"stdout: " + truncate(stdout, 400),
+				"stderr: " + truncate(stderr, 400),
 			},
 			FixHint: "Check internal/hooks DefaultBase/DefaultOverrides: PreToolUse matchers must be the bare tool name (e.g. \"Bash\"), never a permission-rule pattern",
 		}

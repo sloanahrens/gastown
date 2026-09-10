@@ -207,11 +207,15 @@ func findCommonHooks(targets []targetHooks) *hooks.HooksConfig {
 	return result
 }
 
-// hooksFingerprint returns a string key for a slice of hooks, used for deduplication.
+// hooksFingerprint returns a string key for a slice of hooks, used for
+// deduplication. Includes If: post-gt-5ihs, multiple hooks can share the
+// same Type+Command (e.g. three pr-workflow entries on matcher "Bash",
+// discriminated only by If) — omitting If from the key would collapse them
+// into one fingerprint and make an If-only drift invisible.
 func hooksFingerprint(hks []hooks.Hook) string {
 	var s string
 	for _, h := range hks {
-		s += h.Type + ":" + h.Command + ";"
+		s += h.Type + ":" + h.Command + ":" + h.If + ";"
 	}
 	return s
 }
@@ -254,13 +258,17 @@ func computeDiff(base, target *hooks.HooksConfig) *hooks.HooksConfig {
 	return diff
 }
 
-// hooksListEqual checks if two hook lists are identical.
+// hooksListEqual checks if two hook lists are identical, including each
+// hook's If condition (an If-only drift, e.g. a typo'd pattern in an
+// on-disk override, must be visible to gt hooks diff/init — gt-5ihs made If
+// load-bearing for routing three pr-workflow hooks that otherwise share an
+// identical Command).
 func hooksListEqual(a, b []hooks.Hook) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].Type != b[i].Type || a[i].Command != b[i].Command {
+		if a[i].Type != b[i].Type || a[i].Command != b[i].Command || a[i].If != b[i].If {
 			return false
 		}
 	}

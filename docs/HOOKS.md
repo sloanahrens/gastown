@@ -224,11 +224,55 @@ out-of-sync targets.
 
 ## Per-matcher merge semantics
 
-When an override has the same matcher as a base entry, the override
-**replaces** the base entry entirely. Different matchers are appended.
-An override entry with an empty hooks list **removes** that matcher.
+Different matchers are always appended. An override entry with an empty
+hooks list **removes** that matcher, regardless of matcher kind. What
+happens when an override has the *same* matcher as a base entry depends on
+the matcher kind (gt-5ihs):
 
-Example base:
+- **Permission-pattern matcher** (contains `(`, e.g. `Bash(git push*)`, or
+  the empty `""` matcher used by non-PreToolUse event types) — the override
+  **replaces** the base entry entirely.
+- **Bare tool-name matcher** (no parentheses, e.g. `Bash`, `Edit|Write`) —
+  the override's hooks are **unioned** into the base entry's hooks instead,
+  keyed by `(command, if)` so re-merging stays idempotent. Every PreToolUse
+  guard must route through a bare tool-name matcher post-gt-5ihs (Claude
+  Code's matcher only ever matches the tool name), so pr-workflow,
+  dangerous-command, and per-role guards like formula-allowlist commonly
+  all share matcher `"Bash"`, discriminated by each hook's `if` field (or
+  by self-inspecting the command) instead of by matcher. Whole-entry
+  replace would silently drop one layer's guards whenever another layer
+  also targets `"Bash"`.
+
+Example base (bare matcher — unions):
+```json
+{
+  "PreToolUse": [
+    { "matcher": "Bash", "hooks": [
+      { "type": "command", "command": "gt tap guard dangerous-command" }
+    ] }
+  ]
+}
+```
+
+Override for dog:
+```json
+{
+  "PreToolUse": [
+    { "matcher": "Bash", "hooks": [
+      { "type": "command", "command": "gt tap guard formula-allowlist" }
+    ] }
+  ]
+}
+```
+
+Result: dog sessions get **both** `dangerous-command` and
+`formula-allowlist` on the same `"Bash"` matcher — not just the override's
+hook. To disable a single one of several bare-matcher guards, there is
+currently no per-hook removal: an override entry with an empty hooks list
+removes the *entire* matcher's hooks from every layer, not just the
+override layer's own contribution.
+
+Example base (empty `""` matcher — replaces):
 ```json
 {
   "SessionStart": [
@@ -247,7 +291,7 @@ Override for witness:
 ```
 
 Result: The witness gets `gt prime --witness` instead of `gt prime`
-(same matcher = replace).
+(same `""` matcher = replace).
 
 ## Default base config
 

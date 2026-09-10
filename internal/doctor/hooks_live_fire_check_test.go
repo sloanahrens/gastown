@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -52,5 +53,64 @@ func TestFindPolecatSettings_None(t *testing.T) {
 	_, _, err := findPolecatSettings(tmpDir)
 	if err == nil {
 		t.Fatal("expected an error when no polecat settings.json exists")
+	}
+}
+
+// TestEvaluateLiveFireResult pins the three-way verdict (finding 1 & 2,
+// gt-wisp-db27): a created branch is always StatusError regardless of what
+// claude's output said; an unblocked-looking run (no branch, but also no
+// confirmed block banner) must be inconclusive rather than a false pass;
+// only a no-branch run WITH a confirmed block banner earns StatusOK.
+func TestEvaluateLiveFireResult(t *testing.T) {
+	check := NewHooksLiveFireCheck()
+
+	tests := []struct {
+		name           string
+		branchCreated  bool
+		blockConfirmed bool
+		runErr         error
+		wantStatus     CheckStatus
+	}{
+		{
+			name:          "branch created — guard failed open",
+			branchCreated: true,
+			wantStatus:    StatusError,
+		},
+		{
+			name:          "branch created even with a confirmed-looking banner — still an error",
+			branchCreated: true, blockConfirmed: true,
+			wantStatus: StatusError,
+		},
+		{
+			name:           "no branch, block banner confirmed — real pass",
+			branchCreated:  false,
+			blockConfirmed: true,
+			wantStatus:     StatusOK,
+		},
+		{
+			name:           "no branch, no block banner, clean exit — inconclusive, not a pass",
+			branchCreated:  false,
+			blockConfirmed: false,
+			wantStatus:     StatusWarning,
+		},
+		{
+			name:           "no branch, no block banner, claude errored — inconclusive (finding 2)",
+			branchCreated:  false,
+			blockConfirmed: false,
+			runErr:         errors.New("exit status 1"),
+			wantStatus:     StatusWarning,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := check.evaluateLiveFireResult("test-label", "/fake/settings.json", tt.branchCreated, tt.blockConfirmed, tt.runErr, "stdout text", "stderr text")
+			if result.Status != tt.wantStatus {
+				t.Errorf("evaluateLiveFireResult() status = %v, want %v (message: %s)", result.Status, tt.wantStatus, result.Message)
+			}
+			if result.Status == StatusOK && result.Message == "" {
+				t.Error("StatusOK result should carry an explanatory message")
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -130,6 +131,66 @@ func TestMatcherDisplay(t *testing.T) {
 
 	if got := matcherDisplay("Bash(git*)"); got != `"Bash(git*)"` {
 		t.Errorf("specific matcher: got %q", got)
+	}
+}
+
+// TestDiffCommandsDetectsIfOnlyDrift pins finding 6 (gt-wisp-db27): three
+// pr-workflow hooks legitimately share an identical Command on matcher
+// "Bash" post-gt-5ihs, differing only by If. Before this fix, diffCommands
+// compared only Command, so a typo'd If pattern in an on-disk override was
+// invisible to gt hooks diff.
+func TestDiffCommandsDetectsIfOnlyDrift(t *testing.T) {
+	current := hooks.HookEntry{
+		Matcher: "Bash",
+		Hooks: []hooks.Hook{
+			{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gt checkout -b*)"}, // typo: gt vs git
+		},
+	}
+	expected := hooks.HookEntry{
+		Matcher: "Bash",
+		Hooks: []hooks.Hook{
+			{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(git checkout -b*)"},
+		},
+	}
+
+	lines := diffCommands("PreToolUse", "Bash", current, expected)
+	if len(lines) == 0 {
+		t.Fatal("expected diff lines for If-only drift, got none")
+	}
+
+	joined := ""
+	for _, l := range lines {
+		joined += l
+	}
+	if !strings.Contains(joined, "git checkout -b") || !strings.Contains(joined, "gt checkout -b") {
+		t.Errorf("expected diff to show both If values, got: %s", joined)
+	}
+}
+
+// TestHooksFingerprintDistinguishesByIf pins that two hooks sharing
+// Type+Command but differing only in If (e.g. three pr-workflow entries on
+// matcher "Bash") produce different fingerprints — otherwise gt hooks init
+// would deduplicate them into one (finding 6, gt-wisp-db27).
+func TestHooksFingerprintDistinguishesByIf(t *testing.T) {
+	a := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"}}
+	b := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(git checkout -b*)"}}
+
+	if hooksFingerprint(a) == hooksFingerprint(b) {
+		t.Errorf("expected distinct fingerprints for hooks differing only by If, got equal: %q", hooksFingerprint(a))
+	}
+}
+
+// TestHooksListEqualDistinguishesByIf mirrors TestHooksFingerprintDistinguishesByIf
+// for hooksListEqual, used by computeDiff.
+func TestHooksListEqualDistinguishesByIf(t *testing.T) {
+	a := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"}}
+	b := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(git checkout -b*)"}}
+
+	if hooksListEqual(a, b) {
+		t.Error("expected hooksListEqual to return false for hooks differing only by If")
+	}
+	if !hooksListEqual(a, a) {
+		t.Error("expected hooksListEqual to return true for identical hook lists")
 	}
 }
 
