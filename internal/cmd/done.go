@@ -1211,7 +1211,17 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			// gh#3400: Auto-rebase the polecat branch onto the latest target before
 			// push, so the resulting MR/PR has a current base.
-			alreadyPushed := checkpoints[CheckpointPushed] == branch
+			//
+			// gt-bf5x: checkpoints only remember THIS session's own push. A
+			// branch reused across a redispatch (formula's rejected-MR rework
+			// exception) can already be on origin from a *previous* session,
+			// which the checkpoint has no record of — rebasing it here would
+			// diverge local history from origin for no reason (the formula
+			// already rebases such branches itself in step 2). Treat an
+			// existing origin/<branch> the same way the commit-message squash
+			// step below already does: as proof this branch was pushed before.
+			_, originHasBranchErr := g.Rev("origin/" + branch)
+			alreadyPushed := checkpoints[CheckpointPushed] == branch || originHasBranchErr == nil
 			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
 			if rebaseErr != nil {
 				return rebaseErr
@@ -1505,12 +1515,28 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if pushErr != nil {
-			// All push attempts failed
-			pushFailed = true
-			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-			doneErrors = append(doneErrors, errMsg)
-			style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
-			goto notifyWitness
+			// Both push attempts failed non-fast-forward. Before alarming as
+			// possible work loss, check whether origin already has this branch
+			// from an earlier dispatch/rebase with identical content (gt-bf5x) —
+			// if so, it's safe to leased-force-push rather than raise a false
+			// alarm.
+			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
+			if recovered {
+				fmt.Printf("%s Recovered non-fast-forward push: %s\n", style.Bold.Render("✓"), diagnosis)
+				pushErr = nil
+			} else {
+				pushFailed = true
+				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
+				if diagnosis != "" {
+					errMsg = fmt.Sprintf("%s (%s)", errMsg, diagnosis)
+					if recoverErr != nil {
+						errMsg = fmt.Sprintf("%s [recovery attempt: %v]", errMsg, recoverErr)
+					}
+				}
+				doneErrors = append(doneErrors, errMsg)
+				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
+				goto notifyWitness
+			}
 		}
 
 		// Verify the pushed branch tip is the exact local commit before creating
@@ -1538,7 +1564,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Write push checkpoint for resume (gt-aufru)
 		if agentBeadID != "" {
 			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-		// legacy town fallback — gt-8we).
+			// legacy town fallback — gt-8we).
 			cpBd := beads.New(cwd).ForAgentBead()
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, branch)
 		}
@@ -1945,7 +1971,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Write MR checkpoint for resume (gt-aufru)
 		if mrID != "" && agentBeadID != "" {
 			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-		// legacy town fallback — gt-8we).
+			// legacy town fallback — gt-8we).
 			cpBd := beads.New(cwd).ForAgentBead()
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
 		}

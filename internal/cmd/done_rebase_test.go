@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,4 +252,339 @@ func writeRepoFile(t *testing.T, dir, name, content string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
+}
+
+// fakeDivergedPushGit lets us drive recoverDivergedPush's decision logic
+// without a real git repo.
+type fakeDivergedPushGit struct {
+	revs    map[string]string
+	revErrs map[string]error
+
+	mergeBases   map[[2]string]string
+	mergeBaseErr error
+
+	patchIDs   map[[2]string]string
+	patchIDErr error
+
+	leaseErr   error
+	leaseCalls int
+	leaseArgs  []string
+
+	fetchErr   error
+	fetchCalls int
+}
+
+func (f *fakeDivergedPushGit) Fetch(remote string) error {
+	f.fetchCalls++
+	return f.fetchErr
+}
+
+func (f *fakeDivergedPushGit) Rev(ref string) (string, error) {
+	if err, ok := f.revErrs[ref]; ok {
+		return "", err
+	}
+	if sha, ok := f.revs[ref]; ok {
+		return sha, nil
+	}
+	return "", fmt.Errorf("fakeDivergedPushGit: unknown ref %q", ref)
+}
+
+func (f *fakeDivergedPushGit) MergeBase(a, b string) (string, error) {
+	if f.mergeBaseErr != nil {
+		return "", f.mergeBaseErr
+	}
+	if base, ok := f.mergeBases[[2]string{a, b}]; ok {
+		return base, nil
+	}
+	return "base", nil
+}
+
+func (f *fakeDivergedPushGit) PatchID(base, head string) (string, error) {
+	if f.patchIDErr != nil {
+		return "", f.patchIDErr
+	}
+	return f.patchIDs[[2]string{base, head}], nil
+}
+
+func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
+	f.leaseCalls++
+	f.leaseArgs = []string{remote, refspec, branchRef, expectedSHA}
+	return f.leaseErr
+}
+
+func TestRecoverDivergedPush_FetchFailsAborts(t *testing.T) {
+	f := &fakeDivergedPushGit{fetchErr: errors.New("network unreachable")}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if recovered {
+		t.Error("must not recover when the pre-comparison fetch fails")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty (comparison never ran)", diagnosis)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_OriginMissingBranch(t *testing.T) {
+	f := &fakeDivergedPushGit{
+		revErrs: map[string]error{"origin/feature": errors.New("unknown revision")},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if recovered {
+		t.Error("must not recover when origin has no ref for the branch")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty (comparison never ran)", diagnosis)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_PatchIdenticalRecovers(t *testing.T) {
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		mergeBases: map[[2]string]string{
+			{"origin/main", "origSHA"}:  "base1",
+			{"origin/main", "localSHA"}: "base2",
+		},
+		patchIDs: map[[2]string]string{
+			{"base1", "origSHA"}:  "samepatch",
+			{"base2", "localSHA"}: "samepatch",
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "diverged by rebase, content identical") {
+		t.Errorf("diagnosis = %q, want mention of rebase/content-identical", diagnosis)
+	}
+	if f.leaseCalls != 1 {
+		t.Fatalf("expected 1 leased push, got %d", f.leaseCalls)
+	}
+	wantArgs := []string{"origin", "feature:feature", "feature", "origSHA"}
+	if strings.Join(f.leaseArgs, "|") != strings.Join(wantArgs, "|") {
+		t.Errorf("lease args = %v, want %v", f.leaseArgs, wantArgs)
+	}
+}
+
+func TestRecoverDivergedPush_RealDivergenceRefuses(t *testing.T) {
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDs: map[[2]string]string{
+			{"base", "origSHA"}:  "patchA",
+			{"base", "localSHA"}: "patchB",
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: patch-ids differ, this is real divergence")
+	}
+	if !strings.Contains(diagnosis, "NOT patch-identical") {
+		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run on real divergence, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDs: map[[2]string]string{
+			{"base", "origSHA"}:  "samepatch",
+			{"base", "localSHA"}: "samepatch",
+		},
+		leaseErr: errors.New("stale info"),
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if recovered {
+		t.Fatal("recovered must be false when the leased push itself fails")
+	}
+	if !strings.Contains(diagnosis, "diverged by rebase, content identical") {
+		t.Errorf("diagnosis = %q, want it set even though the lease push failed", diagnosis)
+	}
+	if err == nil || !strings.Contains(err.Error(), "leased force-push failed") {
+		t.Errorf("err = %v, want it to wrap the lease failure", err)
+	}
+	if f.leaseCalls != 1 {
+		t.Errorf("expected 1 lease attempt, got %d", f.leaseCalls)
+	}
+}
+
+// TestRecoverDivergedPush_RealRepo exercises the full scenario end to end
+// against real git repos: a branch pushed by one dispatch, main advancing,
+// then a second dispatch reusing the branch and rebasing it onto origin/main
+// (the formula's branch-reuse step) before gt done's plain push fails
+// non-fast-forward. Recovery must land the rebased tip on origin without
+// losing either commit's content. (gt-bf5x)
+func TestRecoverDivergedPush_RealRepo(t *testing.T) {
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// First dispatch: branch, do work, push (this is what lands on origin
+	// before the branch gets reused by a later dispatch).
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature work")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	// main advances independently while the MR sits in the queue.
+	testRunGit(t, seed, "checkout", "main")
+	writeRepoFile(t, seed, "main-new.txt", "advance\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "advance main")
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// Second dispatch: fresh checkout of the reused branch, rebased onto
+	// origin/main per the formula's branch-reuse step — diverges history from
+	// origin while keeping the content identical.
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
+	testRunGit(t, work, "fetch", "origin")
+	testRunGit(t, work, "rebase", "origin/main")
+
+	g := gitpkg.NewGit(work)
+
+	// The primary non-force push (what gt done tries first) must fail
+	// non-fast-forward, exactly as observed in the bead.
+	if err := g.Push("origin", "feature:feature", false); err == nil {
+		t.Fatal("expected plain push to fail non-fast-forward after rebase")
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "diverged by rebase, content identical") {
+		t.Errorf("diagnosis = %q, want mention of rebase/content-identical", diagnosis)
+	}
+
+	verify := filepath.Join(tmp, "verify")
+	testRunGit(t, tmp, "clone", "--branch", "feature", remote, verify)
+	if _, statErr := os.Stat(filepath.Join(verify, "main-new.txt")); statErr != nil {
+		t.Errorf("main-new.txt missing on origin/feature after recovery: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(verify, "feature.txt")); statErr != nil {
+		t.Errorf("feature.txt missing on origin/feature after recovery: %v", statErr)
+	}
+}
+
+// TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence guards the safety
+// side: when origin's tip is real, different work (not the same content
+// rebased), recovery must refuse and leave origin untouched rather than
+// clobber it.
+func TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *testing.T) {
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature work")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "feature")
+	writeRepoFile(t, work, "feature-more.txt", "more local work\n")
+	testRunGit(t, work, "add", ".")
+	testRunGit(t, work, "commit", "-m", "more feature work")
+
+	// Someone else pushes genuinely different content to the same branch
+	// concurrently.
+	other := filepath.Join(tmp, "other")
+	testRunGit(t, tmp, "clone", remote, other)
+	testRunGit(t, other, "config", "user.email", "test@test.com")
+	testRunGit(t, other, "config", "user.name", "Test")
+	testRunGit(t, other, "checkout", "feature")
+	writeRepoFile(t, other, "someone-elses-work.txt", "different content\n")
+	testRunGit(t, other, "add", ".")
+	testRunGit(t, other, "commit", "-m", "someone else's real work")
+	testRunGit(t, other, "push", "origin", "feature:feature")
+	otherHead := gitpkgRev(t, other, "HEAD")
+
+	g := gitpkg.NewGit(work)
+	if err := g.Push("origin", "feature:feature", false); err == nil {
+		t.Fatal("expected plain push to fail non-fast-forward")
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: origin has genuinely different content, not just a rebase")
+	}
+	if !strings.Contains(diagnosis, "NOT patch-identical") {
+		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+
+	testRunGit(t, work, "fetch", "origin")
+	if got := gitpkgRev(t, work, "origin/feature"); got != otherHead {
+		t.Errorf("origin/feature was modified: got %s, want %s (untouched)", got, otherHead)
+	}
+}
+
+func gitpkgRev(t *testing.T, dir, ref string) string {
+	t.Helper()
+	sha, err := gitpkg.NewGit(dir).Rev(ref)
+	if err != nil {
+		t.Fatalf("rev %s in %s: %v", ref, dir, err)
+	}
+	return sha
 }

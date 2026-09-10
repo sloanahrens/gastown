@@ -1162,6 +1162,21 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 	return err
 }
 
+// PushForceWithLease pushes refspec to remote, but only if remote's current
+// value for branchRef is still expectedSHA (git push remote refspec
+// --force-with-lease=branchRef:expectedSHA). Unlike a blind --force, this
+// aborts instead of clobbering if something else moved the ref after
+// expectedSHA was observed — the caller passes the origin SHA it just
+// fetched, so this only overwrites the exact state it inspected.
+func (g *Git) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
+	if err := g.RefuseForkBackedDefaultPush(remote, refspec, g.RemoteDefaultBranch()); err != nil {
+		return err
+	}
+	args := []string{"push", remote, refspec, fmt.Sprintf("--force-with-lease=%s:%s", branchRef, expectedSHA)}
+	_, err := g.runWithTimeout(pushTimeout, args...)
+	return err
+}
+
 // ErrNoNote is returned by NotesShow when commit has no note under ref.
 var ErrNoNote = errors.New("no note")
 
