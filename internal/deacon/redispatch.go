@@ -59,6 +59,70 @@ type BeadRedispatchState struct {
 
 	// EscalatedAt is when the bead was escalated.
 	EscalatedAt time.Time `json:"escalated_at,omitempty"`
+
+	// LastReceipt is the om editorial ReceiptSummary from the most recent
+	// resubmit attempt, when this bead's re-dispatches are gated by
+	// editorial convergence rather than a plain attempt count. Nil for
+	// beads that have never had an editorial rejection (e.g. build/test
+	// failure recoveries), and for the first editorial rejection.
+	LastReceipt *ReceiptSummary `json:"last_receipt,omitempty"`
+}
+
+// ReceiptSummary is the minimal signal from an om editorial receipt the
+// deacon needs to decide whether a redispatched resubmit is converging.
+type ReceiptSummary struct {
+	Score      float64  `json:"score"`
+	Unresolved []string `json:"unresolved,omitempty"`
+}
+
+// Converging reports whether attempt cur trends toward a mergeable state
+// relative to the prior attempt prev: the review score strictly increased
+// AND no finding id still open in cur was already unresolved in prev. When
+// false, reason names which condition failed, for use directly in
+// escalation logs ("not converging: <reason> — escalating").
+//
+// An identical finding set across two attempts is the canonical
+// non-convergence case: cur.Unresolved is non-empty (those exact ids), so
+// this returns false before the score is even compared.
+func Converging(prev, cur ReceiptSummary) (ok bool, reason string) {
+	if len(cur.Unresolved) > 0 {
+		return false, "unresolved " + strings.Join(cur.Unresolved, ", ")
+	}
+	if cur.Score <= prev.Score {
+		return false, "score did not rise"
+	}
+	return true, ""
+}
+
+// NeedsHumanLabel is applied to a bead when the deacon stops redispatching
+// an om editorial resubmit — because it is not converging or the
+// merge_queue.editorial.max_attempts cap was reached — instead of another
+// automatic resubmit.
+const NeedsHumanLabel = "needs_human"
+
+// DefaultEditorialMaxAttempts mirrors config.EditorialConfig.WithDefaults'
+// MaxAttempts default. Kept as a local constant (rather than importing
+// internal/config here) to avoid a dependency edge from deacon to config;
+// callers should prefer the resolved merge_queue.editorial.max_attempts.
+const DefaultEditorialMaxAttempts = 5
+
+// decideEditorialRedispatch is the pure decision gate behind RedispatchEditorial:
+// given the resubmit's position (attemptCount so far, out of maxAttempts)
+// and, when available, the receipt from the prior attempt, it decides
+// whether to stop redispatching. Convergence is checked before the attempt
+// cap so the escalation log names the actual defect (non-convergence) when
+// both conditions hold at once, matching the spec's "Not converging, or
+// attempt = max_attempts -> stop" (an OR, not solely a count check).
+func decideEditorialRedispatch(attemptCount, maxAttempts int, lastReceipt *ReceiptSummary, cur ReceiptSummary) (stop bool, reason string) {
+	if lastReceipt != nil {
+		if ok, why := Converging(*lastReceipt, cur); !ok {
+			return true, "not converging: " + why + " — escalating"
+		}
+	}
+	if attemptCount >= maxAttempts {
+		return true, fmt.Sprintf("max attempts (%d) reached — escalating", maxAttempts)
+	}
+	return false, ""
 }
 
 // ModelEscalationRule defines a single agent promotion rule.
@@ -336,6 +400,168 @@ func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown ti
 	}
 
 	return result
+}
+
+// RedispatchEditorial handles a RECOVERED_BEAD message whose rejection came
+// from an om editorial review, gating on convergence in addition to the
+// plain attempt count that Redispatch enforces (spec: "Convergence (decided
+// by the deacon from the receipt alone) ... Not converging, or attempt =
+// max_attempts -> stop, label needs_human, escalate with the finding
+// history").
+//
+//   - maxAttempts: the rig's resolved merge_queue.editorial.max_attempts
+//     (0 = DefaultEditorialMaxAttempts).
+//   - cur: the receipt summary (score, unresolved finding ids) from the
+//     rejection that triggered this call.
+//   - findingHistory: the full finding history (e.g. every attempt's
+//     Rejection-Findings/-Summary lines) to attach to the needs_human
+//     escalation mail so a human picks up with full context.
+func RedispatchEditorial(townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration, cur ReceiptSummary, findingHistory string) *RedispatchResult {
+	result := &RedispatchResult{BeadID: beadID}
+
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultEditorialMaxAttempts
+	}
+	if cooldown <= 0 {
+		cooldown = DefaultRedispatchCooldown
+	}
+
+	state, err := LoadRedispatchState(townRoot)
+	if err != nil {
+		result.Action = "error"
+		result.Error = fmt.Errorf("loading redispatch state: %w", err)
+		return result
+	}
+
+	beadState := state.GetBeadState(beadID)
+	result.Attempts = beadState.AttemptCount
+
+	if beadState.Escalated {
+		result.Action = "already-escalated"
+		result.Message = fmt.Sprintf("bead already escalated to Mayor at %s", beadState.EscalatedAt.Format(time.RFC3339))
+		return result
+	}
+	if beadState.IsInCooldown(cooldown) {
+		remaining := beadState.CooldownRemaining(cooldown)
+		result.Action = "cooldown"
+		result.Message = fmt.Sprintf("in cooldown (remaining: %s)", remaining.Round(time.Second))
+		return result
+	}
+
+	if stop, reason := decideEditorialRedispatch(beadState.AttemptCount, maxAttempts, beadState.LastReceipt, cur); stop {
+		result.Action = "escalated"
+		result.Message = reason
+
+		if err := labelNeedsHuman(townRoot, beadID); err != nil {
+			result.Message += fmt.Sprintf(" (warning: failed to label %s: %v)", NeedsHumanLabel, err)
+		}
+		if err := escalateEditorialToMayor(townRoot, beadID, reason, findingHistory, beadState); err != nil {
+			result.Error = fmt.Errorf("escalating to mayor: %w", err)
+			result.Message += fmt.Sprintf(" (warning: escalation mail failed: %v)", err)
+		} else {
+			beadState.RecordEscalation()
+		}
+
+		if saveErr := SaveRedispatchState(townRoot, state); saveErr != nil {
+			result.Message += fmt.Sprintf(" (warning: state save failed: %v)", saveErr)
+		}
+		return result
+	}
+
+	// Converging (or no prior receipt yet) and under the attempt cap:
+	// proceed exactly like the generic Redispatch, then remember this
+	// attempt's receipt so the next call can judge convergence against it.
+	targetRig := sourceRig
+	if targetRig == "" {
+		targetRig = resolveRigFromBead(townRoot, beadID)
+	}
+	if targetRig == "" {
+		result.Action = "error"
+		result.Error = fmt.Errorf("cannot determine target rig for bead %s", beadID)
+		return result
+	}
+	result.TargetRig = targetRig
+
+	beadStatus := getBeadStatusForRedispatch(townRoot, beadID)
+	if beadStatus != "open" {
+		result.Action = "skipped"
+		if beadStatus == "" {
+			result.Message = "could not determine bead status (treating as not open)"
+		} else {
+			result.Message = fmt.Sprintf("bead status is %q (expected open)", beadStatus)
+		}
+		return result
+	}
+
+	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
+
+	if err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
+		result.Action = "error"
+		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
+		beadState.LastAgent = escalationAgent
+		beadState.RecordAttempt(targetRig)
+		receipt := cur
+		beadState.LastReceipt = &receipt
+		_ = SaveRedispatchState(townRoot, state)
+		return result
+	}
+
+	beadState.LastAgent = escalationAgent
+	beadState.RecordAttempt(targetRig)
+	receipt := cur
+	beadState.LastReceipt = &receipt
+	result.Action = "redispatched"
+	result.Attempts = beadState.AttemptCount
+	if escalationAgent != "" {
+		result.Message = fmt.Sprintf("re-dispatched to %s with agent %q (attempt %d/%d)", targetRig, escalationAgent, beadState.AttemptCount, maxAttempts)
+	} else {
+		result.Message = fmt.Sprintf("re-dispatched to %s (attempt %d/%d)", targetRig, beadState.AttemptCount, maxAttempts)
+	}
+
+	if saveErr := SaveRedispatchState(townRoot, state); saveErr != nil {
+		result.Message += fmt.Sprintf(" (warning: state save failed: %v)", saveErr)
+	}
+
+	return result
+}
+
+// labelNeedsHuman applies NeedsHumanLabel to a bead so it surfaces for
+// human triage instead of further automatic resubmits.
+func labelNeedsHuman(townRoot, beadID string) error {
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.MutationRouting, "update", beadID, "--add-label", NeedsHumanLabel)
+	cmd.Dir = townRoot
+	return cmd.Run()
+}
+
+// escalateEditorialToMayor sends the needs_human escalation mail, including
+// the full finding history so a human doesn't have to reconstruct it from
+// bead notes.
+func escalateEditorialToMayor(townRoot, beadID, reason, findingHistory string, beadState *BeadRedispatchState) error {
+	subject := fmt.Sprintf("REDISPATCH_FAILED: %s (needs_human)", beadID)
+	body := fmt.Sprintf(`Bead %s stopped resubmitting under om editorial review: %s
+
+Bead: %s
+Attempts: %d
+Last Rig: %s
+
+Finding history:
+%s
+
+This bead has been labeled %s. Please investigate and either:
+1. Fix the underlying issue and re-sling manually
+2. Close/deprioritize the bead if it's not actionable
+3. Adjust merge_queue.editorial.max_attempts if attempts were legitimately still improving`,
+		beadID, reason,
+		beadID, beadState.AttemptCount, beadState.LastRig,
+		findingHistory,
+		NeedsHumanLabel,
+	)
+
+	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
+	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
+	util.SetDetachedProcessGroup(cmd)
+	return cmd.Run()
 }
 
 // PruneRedispatchState removes entries for beads that are no longer open.

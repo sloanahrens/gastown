@@ -31,6 +31,40 @@ type deadWorkerRecoveryRequest struct {
 	FailureType   string
 	ErrorMsg      string
 	AttemptNumber int
+
+	// Findings carries the om editorial findings behind this rejection, when
+	// it came from an om review (`gt mq review`) rather than a plain
+	// build/test failure. Nil/empty for non-editorial rejections. Findings
+	// travel forward onto the source bead notes and the RECOVERED_BEAD mail
+	// so the next attempt — and its reviewer — sees them (gt-zdxn, absorbs
+	// gt-htn2): T5's prior-findings builder parses the '- id:' note lines.
+	Findings []RejectionFinding
+
+	// Summary is a one-line verdict summary for the RECOVERED_BEAD mail's
+	// Rejection-Summary line. Empty for non-editorial rejections.
+	Summary string
+}
+
+// RejectionFinding is one om editorial finding attached to a merge
+// rejection. ID is the finding's stable 12-hex id (om: first 12 hex of
+// sha256(path|title)), matching the id om's --prior-findings classification
+// keys on.
+type RejectionFinding struct {
+	ID       string
+	Severity string // "major" | "minor" | "info"
+	Path     string
+	Line     int
+	Title    string
+}
+
+// rejectionFindingIDs returns just the ids, in order, for the
+// Rejection-Findings mail line.
+func rejectionFindingIDs(findings []RejectionFinding) []string {
+	ids := make([]string, len(findings))
+	for i, f := range findings {
+		ids[i] = f.ID
+	}
+	return ids
 }
 
 // rejectedSourceBeads is the narrow beads surface needed for recovery.
@@ -53,9 +87,13 @@ func workerNameFromMR(worker string) string {
 }
 
 func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
-	return fmt.Sprintf("%s (attempt %d): %s - %s\nBranch: %s\nTarget: %s\nMR: %s",
+	note := fmt.Sprintf("%s (attempt %d): %s - %s\nBranch: %s\nTarget: %s\nMR: %s",
 		MergeRejectionNoteMarker, req.AttemptNumber, req.FailureType, req.ErrorMsg,
 		req.Branch, req.Target, req.MRID)
+	for _, f := range req.Findings {
+		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s", f.ID, f.Severity, f.Path, f.Line, f.Title)
+	}
+	return note
 }
 
 // deliberateTerminalCloseReasonMarkers are substrings of a bead's close_reason
@@ -220,6 +258,14 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 		return false
 	}
 
+	var rejectionLines strings.Builder
+	if len(req.Findings) > 0 {
+		fmt.Fprintf(&rejectionLines, "Rejection-Findings: %s\n", strings.Join(rejectionFindingIDs(req.Findings), ","))
+	}
+	if req.Summary != "" {
+		fmt.Fprintf(&rejectionLines, "Rejection-Summary: %s\n", req.Summary)
+	}
+
 	msg := &mail.Message{
 		From:     req.RigName + "/refinery",
 		To:       "deacon/",
@@ -233,12 +279,12 @@ MR: %s
 Branch: %s
 Failure-Type: %s
 Attempt: %d
-
+%s
 The source bead has been reopened with %s notes.
 Please re-dispatch. The branch survives on origin, so the next polecat
 can check it out and make a targeted fix instead of starting over.`,
 			req.SourceIssue, req.RigName, polecatName, req.MRID, req.Branch,
-			req.FailureType, req.AttemptNumber, MergeRejectionNoteMarker),
+			req.FailureType, req.AttemptNumber, rejectionLines.String(), MergeRejectionNoteMarker),
 	}
 	if err := sendMail(msg); err != nil {
 		logf("[Engineer] Warning: failed to send RECOVERED_BEAD for %s: %v\n", req.SourceIssue, err)

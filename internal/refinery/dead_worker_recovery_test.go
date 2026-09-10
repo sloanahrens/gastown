@@ -237,6 +237,108 @@ func TestRecoverRejectedMRDeadWorker_ClosedNoReason_StillRecovers(t *testing.T) 
 	}
 }
 
+// TestFormatMergeRejectionNote_FindingsAppendIDLines is gt-zdxn acceptance
+// criterion 1: a rejection carrying findings gains one '- id:' line per
+// finding on the source bead notes, in the format the T5 prior-findings
+// builder parses.
+func TestFormatMergeRejectionNote_FindingsAppendIDLines(t *testing.T) {
+	req := deadWorkerReq()
+	req.Findings = []RejectionFinding{
+		{ID: "abc123def456", Severity: "major", Path: "internal/foo.go", Line: 42, Title: "missing nil check"},
+		{ID: "789012345678", Severity: "minor", Path: "internal/bar.go", Line: 7, Title: "unused import"},
+	}
+
+	note := formatMergeRejectionNote(req)
+
+	want1 := "- id:abc123def456 sev:major internal/foo.go:42 — missing nil check"
+	want2 := "- id:789012345678 sev:minor internal/bar.go:7 — unused import"
+	if !strings.Contains(note, want1) {
+		t.Errorf("note missing first finding line:\nwant substring: %s\ngot: %s", want1, note)
+	}
+	if !strings.Contains(note, want2) {
+		t.Errorf("note missing second finding line:\nwant substring: %s\ngot: %s", want2, note)
+	}
+	if got := strings.Count(note, "- id:"); got != 2 {
+		t.Errorf("expected exactly 2 '- id:' lines, got %d in:\n%s", got, note)
+	}
+}
+
+// TestFormatMergeRejectionNote_NoFindings_NoIDLines guards the non-editorial
+// (build/test failure) path: no findings means no '- id:' lines are added,
+// preserving the original note format exactly.
+func TestFormatMergeRejectionNote_NoFindings_NoIDLines(t *testing.T) {
+	note := formatMergeRejectionNote(deadWorkerReq())
+	if strings.Contains(note, "- id:") {
+		t.Errorf("expected no finding lines when Findings is empty, got:\n%s", note)
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail is gt-zdxn
+// acceptance criteria 1 and 2 end-to-end: a rejection with two findings puts
+// two '- id:' lines on the source bead notes, and the RECOVERED_BEAD mail
+// body carries both ids under 'Rejection-Findings:' plus 'Rejection-Summary:'.
+func TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+
+	req := deadWorkerReq()
+	req.Summary = "2 findings: 1 major, 1 minor"
+	req.Findings = []RejectionFinding{
+		{ID: "abc123def456", Severity: "major", Path: "internal/foo.go", Line: 42, Title: "missing nil check"},
+		{ID: "789012345678", Severity: "minor", Path: "internal/bar.go", Line: 7, Title: "unused import"},
+	}
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, req) {
+		t.Fatal("expected recovery")
+	}
+
+	if len(bd.runCalls) != 1 {
+		t.Fatalf("expected 1 notes update, got %d", len(bd.runCalls))
+	}
+	notesArg := bd.runCalls[0][len(bd.runCalls[0])-1]
+	if got := strings.Count(notesArg, "- id:"); got != 2 {
+		t.Errorf("expected 2 '- id:' lines in notes, got %d:\n%s", got, notesArg)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 mail, got %d", len(sent))
+	}
+	body := sent[0].Body
+	if !strings.Contains(body, "Rejection-Findings: abc123def456,789012345678") {
+		t.Errorf("mail body missing Rejection-Findings line:\n%s", body)
+	}
+	if !strings.Contains(body, "Rejection-Summary: 2 findings: 1 major, 1 minor") {
+		t.Errorf("mail body missing Rejection-Summary line:\n%s", body)
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_NoFindings_NoRejectionLinesInMail guards
+// the non-editorial path: mail body carries no Rejection-Findings/-Summary
+// lines when the rejection has none.
+func TestRecoverRejectedMRDeadWorker_NoFindings_NoRejectionLinesInMail(t *testing.T) {
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected recovery")
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 mail, got %d", len(sent))
+	}
+	body := sent[0].Body
+	if strings.Contains(body, "Rejection-Findings:") || strings.Contains(body, "Rejection-Summary:") {
+		t.Errorf("mail body should carry no rejection-finding lines when there are none:\n%s", body)
+	}
+}
+
 func TestIsDeliberateTerminalCloseReason(t *testing.T) {
 	cases := map[string]bool{
 		"":                             false,
