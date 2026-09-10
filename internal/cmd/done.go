@@ -127,6 +127,28 @@ func updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID string, pu
 	return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID)
 }
 
+// resolvePreVerifiedClaim decides whether to honor a --pre-verified request
+// when writing the MR bead's pre_verified stamp. It exists so the stamp can
+// never diverge from the same gate-command binding `gt sling` uses to
+// populate formula vars: a rig with zero configured gate commands has
+// nothing a polecat could have verified, so the claim is downgraded here
+// rather than trusted at face value (gt-k4sy — the stamp was observed true
+// when no gates were bound and absent when they were, because nothing
+// checked the claim against the binding).
+//
+// Returns whether to honor the claim, and a non-empty warning to surface to
+// the polecat when the claim is downgraded.
+func resolvePreVerifiedClaim(requested bool, townRoot, rigName string) (honor bool, warning string) {
+	if !requested {
+		return false, ""
+	}
+	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+	if !mq.HasAnyGateCommand() {
+		return false, "ignoring --pre-verified: rig has no configured gate commands (setup/typecheck/lint/test/build) — there is nothing to have verified"
+	}
+	return true, ""
+}
+
 func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1797,7 +1819,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
 			// The refinery uses these fields to fast-path merge without re-running gates.
-			if donePreVerified {
+			// honorPreVerified is gated on the same gate-command binding gt sling reads,
+			// so the stamp can't say "verified" when there was nothing to verify (gt-k4sy).
+			honorPreVerified, preVerifiedWarning := resolvePreVerifiedClaim(donePreVerified, townRoot, rigName)
+			if preVerifiedWarning != "" {
+				style.PrintWarning("%s", preVerifiedWarning)
+			}
+			if honorPreVerified {
 				description += "\npre_verified: true"
 				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
 				// Capture current clean target HEAD as the verified base.

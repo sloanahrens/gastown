@@ -1481,6 +1481,20 @@ func (c *MergeQueueConfig) GetReviewDepth() string {
 	return c.ReviewDepth
 }
 
+// HasAnyGateCommand reports whether at least one of the five gate commands
+// (setup, typecheck, lint, test, build) is configured. Nil-safe.
+//
+// Used to decide whether a --pre-verified claim is even possible to honor:
+// a rig with zero configured gate commands has nothing a polecat could have
+// run, so the claim has no basis (gt-k4sy).
+func (c *MergeQueueConfig) HasAnyGateCommand() bool {
+	if c == nil {
+		return false
+	}
+	return c.SetupCommand != "" || c.TypecheckCommand != "" || c.LintCommand != "" ||
+		c.TestCommand != "" || c.BuildCommand != ""
+}
+
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b

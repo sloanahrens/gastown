@@ -1095,6 +1095,46 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	return &cfg, nil
 }
 
+// ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
+// the same three-tier precedence `gt sling` uses to populate formula gate
+// vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
+// mayor/rig/.gastown/settings.json (wins over the floor) -> rig-local
+// settings/config.json (operator override, final say).
+//
+// Both the var binding (`gt sling`, via loadRigCommandVars) and the
+// --pre-verified stamp (`gt done`) call this so they read the identical
+// state and can never diverge again (gt-k4sy: the stamp was found true when
+// nothing was bound and absent when everything ran, because each path had
+// its own copy of this resolution logic).
+//
+// Returns nil if no merge-queue config exists at any tier.
+func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
+	if townRoot == "" || rigName == "" {
+		return nil
+	}
+
+	var rigRootMQ *config.MergeQueueConfig
+	if rigCfg, err := LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg != nil {
+		rigRootMQ = rigCfg.MergeQueue
+	}
+
+	var repoMQ *config.MergeQueueConfig
+	repoRoot := filepath.Join(townRoot, rigName, "mayor", "rig")
+	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
+	var localMQ *config.MergeQueueConfig
+	settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
+	if localSettings, err := config.LoadRigSettings(settingsPath); err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
+	mq = config.MergeSettingsCommand(mq, localMQ)
+	return mq
+}
+
 // warnDeprecatedRigConfigKeys detects merge_queue keys in rig root config.json
 // that are silently ignored by json.Unmarshal (RigConfig has no merge_queue field).
 // Without this warning, users can set merge_queue.target_branch believing it

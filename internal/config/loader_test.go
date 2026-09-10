@@ -442,6 +442,41 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 	}
 }
 
+// TestMergeQueueConfig_HasAnyGateCommand guards the gt-k4sy fix: gt done's
+// --pre-verified guard trusts this method to tell whether a rig has any gate
+// command a polecat could plausibly have run.
+func TestMergeQueueConfig_HasAnyGateCommand(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *MergeQueueConfig
+	if nilCfg.HasAnyGateCommand() {
+		t.Error("nil *MergeQueueConfig should report no gate commands")
+	}
+
+	if (&MergeQueueConfig{}).HasAnyGateCommand() {
+		t.Error("zero-value MergeQueueConfig should report no gate commands")
+	}
+
+	cases := []struct {
+		name string
+		cfg  MergeQueueConfig
+	}{
+		{"setup", MergeQueueConfig{SetupCommand: "pnpm install"}},
+		{"typecheck", MergeQueueConfig{TypecheckCommand: "tsc --noEmit"}},
+		{"lint", MergeQueueConfig{LintCommand: "make lint"}},
+		{"test", MergeQueueConfig{TestCommand: "make test"}},
+		{"build", MergeQueueConfig{BuildCommand: "make build"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !tc.cfg.HasAnyGateCommand() {
+				t.Errorf("MergeQueueConfig with only %s set should report a gate command", tc.name)
+			}
+		})
+	}
+}
+
 func TestLoadRigConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadRigConfig("/nonexistent/path.json")
