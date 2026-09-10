@@ -1414,6 +1414,11 @@ type MergeQueueConfig struct {
 	// BatchMax is the maximum number of MRs to include in a single batch.
 	// Zero or unset defaults to 12.
 	BatchMax int `json:"batch_max,omitempty"`
+
+	// BatchMinCount is the minimum number of batch-eligible ready MRs
+	// required before the refinery batches instead of processing them one
+	// at a time. Zero or unset defaults to 4.
+	BatchMinCount int `json:"batch_min_count,omitempty"`
 }
 
 // OnConflict strategy constants.
@@ -1520,6 +1525,15 @@ func (c *MergeQueueConfig) GetBatchMax() int {
 		return 12
 	}
 	return c.BatchMax
+}
+
+// GetBatchMinCount returns the configured minimum number of batch-eligible
+// ready MRs required before batching kicks in. Nil-safe, defaults to 4.
+func (c *MergeQueueConfig) GetBatchMinCount() int {
+	if c.BatchMinCount <= 0 {
+		return 4
+	}
+	return c.BatchMinCount
 }
 
 // HasAnyGateCommand reports whether at least one of the five gate commands

@@ -304,7 +304,8 @@ func TestBuildRefineryPatrolVars_FullConfig(t *testing.T) {
 	// merge_strategy is omitted when not explicitly set (formula default "direct" applies)
 	// New commands (setup, typecheck, lint, build) default to empty = omitted
 	// judgment_enabled defaults to false, review_depth defaults to "standard"
-	// batch_enabled defaults to false, batch_min_age to "1h", batch_max to 12 (gt-hqji)
+	// batch_enabled defaults to false, batch_min_age to "1h", batch_max to 12,
+	// batch_min_count to 4 (gt-hqji)
 	expected := map[string]string{
 		"rig":                                 "testrig",
 		"integration_branch_refinery_enabled": "true",
@@ -318,6 +319,7 @@ func TestBuildRefineryPatrolVars_FullConfig(t *testing.T) {
 		"batch_enabled":                       "false",
 		"batch_min_age":                       "1h",
 		"batch_max":                           "12",
+		"batch_min_count":                     "4",
 	}
 
 	varMap := make(map[string]string)

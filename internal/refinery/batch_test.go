@@ -482,6 +482,59 @@ func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
 	}
 }
 
+func TestProcessBatch_MergeStrategyPR_RefusesMultiMRBatch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+	createFeatureBranch(t, workDir, "feature-b", "b.txt", "hello b\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.MergeStrategy = "pr"
+	batch := []*MRInfo{
+		makeMR("mr-a", "feature-a", "main"),
+		makeMR("mr-b", "feature-b", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error == nil {
+		t.Fatal("expected an error refusing to batch under merge_strategy=pr, got nil")
+	}
+	if !strings.Contains(result.Error.Error(), "merge_strategy=pr") {
+		t.Errorf("expected error to mention merge_strategy=pr, got: %v", result.Error)
+	}
+	if len(result.Merged) != 0 {
+		t.Errorf("expected no MRs merged, got %d", len(result.Merged))
+	}
+
+	// Verify nothing landed on main.
+	run(t, workDir, "git", "checkout", "main")
+	for _, f := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Stat(filepath.Join(workDir, f)); err == nil {
+			t.Errorf("expected %s NOT to land on main under refused merge_strategy=pr batch", f)
+		}
+	}
+}
+
+func TestProcessBatch_MergeStrategyPR_AllowsSingleMR(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.MergeStrategy = "pr"
+	batch := []*MRInfo{makeMR("mr-a", "feature-a", "main")}
+
+	// A single-MR batch takes the processSingleMR path, which predates and
+	// is independent of the batch merge_strategy=pr refusal — it must not
+	// be refused here just because MergeStrategy is "pr".
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil && strings.Contains(result.Error.Error(), "does not support merge_strategy=pr") {
+		t.Fatalf("single-MR batch should not hit the multi-MR merge_strategy=pr refusal: %v", result.Error)
+	}
+}
+
 func TestProcessBatch_WithConflict(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()

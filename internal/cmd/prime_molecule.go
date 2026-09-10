@@ -475,6 +475,7 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 		vars = append(vars, fmt.Sprintf("batch_enabled=%t", mq.IsBatchEnabled()))
 		vars = append(vars, fmt.Sprintf("batch_min_age=%s", mq.GetBatchMinAge()))
 		vars = append(vars, fmt.Sprintf("batch_max=%d", mq.GetBatchMax()))
+		vars = append(vars, fmt.Sprintf("batch_min_count=%d", mq.GetBatchMinCount()))
 		return vars
 	}
 
@@ -492,7 +493,7 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 					labelMap[label[:idx]] = label[idx+1:]
 				}
 			}
-			for _, key := range []string{"integration_branch_refinery_enabled", "integration_branch_auto_land", "run_tests", "delete_merged_branches", "setup_command", "typecheck_command", "lint_command", "test_command", "build_command", "merge_strategy", "require_review", "batch_enabled", "batch_min_age", "batch_max"} {
+			for _, key := range []string{"integration_branch_refinery_enabled", "integration_branch_auto_land", "run_tests", "delete_merged_branches", "setup_command", "typecheck_command", "lint_command", "test_command", "build_command", "merge_strategy", "require_review", "batch_enabled", "batch_min_age", "batch_max", "batch_min_count"} {
 				if val := labelMap[key]; val != "" {
 					vars = append(vars, fmt.Sprintf("%s=%s", key, val))
 				}

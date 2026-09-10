@@ -168,6 +168,17 @@ func filterAndSortBatchCandidates(ready []*refinery.MRInfo, minAge time.Duration
 	return eligible
 }
 
+// newBatchConfig builds a BatchConfig from refinery.DefaultBatchConfig with
+// MaxBatchSize overridden. Starting from the default (rather than a bare
+// &refinery.BatchConfig{MaxBatchSize: max} literal) keeps RetryBatchOnFlaky
+// and BatchWaitTime at their sensible defaults instead of silently zeroing
+// them out.
+func newBatchConfig(max int) *refinery.BatchConfig {
+	cfg := refinery.DefaultBatchConfig()
+	cfg.MaxBatchSize = max
+	return cfg
+}
+
 // buildBatchGateCommand chains the rig's configured setup/typecheck/lint/
 // build/test commands into a single "&&"-joined shell command, run in that
 // order so each step gates the next (mirrors the single-MR formula's
@@ -204,13 +215,21 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	batch := eng.AssembleBatch(eligible, &refinery.BatchConfig{MaxBatchSize: max})
+	batch := eng.AssembleBatch(eligible, newBatchConfig(max))
 
 	if mqBatchCandidatesJSON {
+		// eligible_total is the pre-filter count (age + priority only, no cap,
+		// no blocker-awareness) — the right number for a "has enough queued up
+		// to be worth batching" threshold check. batch_total is len(batch): the
+		// post-filter count after applying --max and excluding MRs blocked by
+		// something outside the batch. The two can differ; callers that want
+		// "how many will actually be batched" should use batch_total or
+		// `.batch | length`, not eligible_total.
 		return outputJSON(struct {
-			Eligible int                `json:"eligible_total"`
-			Batch    []*refinery.MRInfo `json:"batch"`
-		}{Eligible: len(eligible), Batch: batch})
+			Eligible   int                `json:"eligible_total"`
+			BatchTotal int                `json:"batch_total"`
+			Batch      []*refinery.MRInfo `json:"batch"`
+		}{Eligible: len(eligible), BatchTotal: len(batch), Batch: batch})
 	}
 
 	fmt.Printf("%s Batch candidates for '%s' (min-age=%s, max=%d):\n\n", style.Bold.Render("📦"), rigName, minAge, max)
@@ -254,8 +273,15 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s No setup/typecheck/lint/build/test commands configured for '%s' — batch will land with zero verification\n", style.Dim.Render("⚠"), rigName)
 	}
-	if mq != nil {
-		eng.Config().RetryFlakyTests = maxInt(1, mq.RetryFlakyTests)
+	// config.MergeQueueConfig.RetryFlakyTests is a plain int, so a
+	// zero value is ambiguous between "explicitly set to 0" and "not
+	// configured" — unlike the single-MR path's raw *int JSON parsing,
+	// which preserves that distinction. Only override the engineer's own
+	// default (1, see DefaultEngineerConfig) when the resolved value is
+	// positive; leave it alone rather than forcing a minimum of 1, which
+	// would silently clobber an intentional 0.
+	if mq != nil && mq.RetryFlakyTests > 0 {
+		eng.Config().RetryFlakyTests = mq.RetryFlakyTests
 	}
 
 	eligible, err := selectBatchCandidates(eng, minAge)
@@ -277,7 +303,8 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		eligible = filtered
 	}
 
-	batch := eng.AssembleBatch(eligible, &refinery.BatchConfig{MaxBatchSize: max})
+	batchCfg := newBatchConfig(max)
+	batch := eng.AssembleBatch(eligible, batchCfg)
 	if len(batch) == 0 {
 		fmt.Printf("%s No MRs eligible for batching on '%s' (min-age=%s)\n", style.Dim.Render("ℹ"), rigName, minAge)
 		return nil
@@ -285,7 +312,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 
 	target := r.DefaultBranch()
 	ctx := context.Background()
-	result := eng.ProcessBatch(ctx, batch, target, &refinery.BatchConfig{MaxBatchSize: max})
+	result := eng.ProcessBatch(ctx, batch, target, batchCfg)
 
 	if mqBatchRunJSON {
 		type jsonResult struct {
@@ -327,11 +354,4 @@ func printMQBatchIDs(label string, mrs []*refinery.MRInfo) {
 		ids[i] = mr.ID
 	}
 	fmt.Printf("  %s: %s\n", label, strings.Join(ids, ", "))
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

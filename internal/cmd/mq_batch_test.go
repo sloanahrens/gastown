@@ -169,3 +169,18 @@ func TestResolveBatchMax(t *testing.T) {
 		})
 	}
 }
+
+func TestNewBatchConfig_KeepsDefaultsOtherThanMaxBatchSize(t *testing.T) {
+	def := refinery.DefaultBatchConfig()
+	got := newBatchConfig(7)
+
+	if got.MaxBatchSize != 7 {
+		t.Errorf("MaxBatchSize = %d, want 7", got.MaxBatchSize)
+	}
+	if got.RetryBatchOnFlaky != def.RetryBatchOnFlaky {
+		t.Errorf("RetryBatchOnFlaky = %v, want default %v (bare struct literal would silently zero this)", got.RetryBatchOnFlaky, def.RetryBatchOnFlaky)
+	}
+	if got.BatchWaitTime != def.BatchWaitTime {
+		t.Errorf("BatchWaitTime = %v, want default %v", got.BatchWaitTime, def.BatchWaitTime)
+	}
+}

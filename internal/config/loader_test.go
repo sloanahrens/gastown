@@ -449,6 +449,9 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 	if cfg.GetBatchMax() != 12 {
 		t.Errorf("GetBatchMax() = %d, want 12", cfg.GetBatchMax())
 	}
+	if cfg.GetBatchMinCount() != 4 {
+		t.Errorf("GetBatchMinCount() = %d, want 4", cfg.GetBatchMinCount())
+	}
 }
 
 func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
@@ -463,6 +466,13 @@ func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
 	}
 	if got := cfg.GetBatchMax(); got != 12 {
 		t.Errorf("GetBatchMax() = %d, want 12", got)
+	}
+	if got := cfg.GetBatchMinCount(); got != 4 {
+		t.Errorf("GetBatchMinCount() = %d, want 4", got)
+	}
+	cfg.BatchMinCount = 8
+	if got := cfg.GetBatchMinCount(); got != 8 {
+		t.Errorf("GetBatchMinCount() = %d, want 8 (explicit override)", got)
 	}
 }
 
@@ -480,6 +490,9 @@ func TestValidateMergeQueueConfig_Batch(t *testing.T) {
 		{name: "zero batch_min_age is invalid", cfg: &MergeQueueConfig{BatchMinAge: "0s"}, wantErr: true},
 		{name: "negative batch_max is invalid", cfg: &MergeQueueConfig{BatchMax: -1}, wantErr: true},
 		{name: "positive batch_max is valid", cfg: &MergeQueueConfig{BatchMax: 20}, wantErr: false},
+		{name: "negative batch_min_count is invalid", cfg: &MergeQueueConfig{BatchMinCount: -1}, wantErr: true},
+		{name: "positive batch_min_count is valid", cfg: &MergeQueueConfig{BatchMinCount: 8}, wantErr: false},
+		{name: "zero batch_min_count is valid (uses default)", cfg: &MergeQueueConfig{BatchMinCount: 0}, wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -643,7 +656,7 @@ func TestMergeSettingsCommand(t *testing.T) {
 
 	t.Run("local overrides batch settings", func(t *testing.T) {
 		t.Parallel()
-		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5}
+		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5, BatchMinCount: 3}
 		local := &MergeQueueConfig{BatchEnabled: boolPtr(true), BatchMax: 20}
 		result := MergeSettingsCommand(repo, local)
 		if !result.IsBatchEnabled() {
@@ -654,6 +667,9 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 		if result.BatchMax != 20 {
 			t.Errorf("expected batch_max=20 from local override, got %d", result.BatchMax)
+		}
+		if result.BatchMinCount != 3 {
+			t.Errorf("expected batch_min_count=3 (not overridden by local), got %d", result.BatchMinCount)
 		}
 	})
 

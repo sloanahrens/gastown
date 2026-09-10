@@ -119,7 +119,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 21
+version = 22
 
 [vars]
 [vars.wisp_type]
@@ -400,16 +400,29 @@ this cycle — the single-MR path will process what's ready.
 **Step 2: If judgment_enabled = "true", pre-filter candidates through om review**
 
 The batch gate only re-runs the test suite — it does not review diffs. Before
-assembling the batch, review each candidate MR's diff in parallel (so this
-doesn't cost more wall-clock than reviewing one):
+assembling the batch, review each candidate MR's branch in parallel (so this
+doesn't cost more wall-clock than reviewing one).
+
+**⚠ Same REBASE-BEFORE-REVIEW precondition as quality-review (gt-oh41):**
+Do NOT invoke `om review --base <target> --head <branch>` here — that's a
+bare two-dot comparison of the MR's un-rehearsed tip, which misattributes
+any later-merged main commits the branch hasn't rebased past as deletions
+authored by the polecat (see quality-review's precondition above; this
+happened for real on gt-wisp-bakv). Rehearsing each candidate onto a temp
+branch first (as process-branch does) would work but costs a checkout per
+candidate; use `om review --branch`, the same target-drift-immune fallback
+quality-review itself falls back to — it reviews since the branch's
+merge-base with the default branch, equivalent to a three-dot diff, with no
+rehearsal needed:
 
 ```bash
-IDS=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json | jq -r '.batch[].ID')
+CANDIDATES=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json)
+IDS=$(echo "$CANDIDATES" | jq -r '.batch[].ID')
 APPROVED=()
 for id in $IDS; do
-  branch=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json | jq -r --arg id "$id" '.batch[] | select(.ID==$id) | .Branch')
+  branch=$(echo "$CANDIDATES" | jq -r --arg id "$id" '.batch[] | select(.ID==$id) | .Branch')
   (
-    scripts/om-gate.sh --dir . --base "origin/{{target_branch}}" --head "$branch" --mr "$id" --worker refinery --rig {{rig}}
+    om review --branch "$branch" -C . --depth {{review_depth}}
     echo "$id:$?" >> /tmp/om-batch-$$.result
   ) &
 done
@@ -418,9 +431,9 @@ wait
 
 Any MR whose recorded exit code is 1 (request_changes) is dropped — it simply
 stays in the queue and gets reviewed again individually next cycle, same as
-a single-MR quality-review rejection. Exit code 2 (infra error) is fail-open
-by default: keep the MR in the batch unless the rig's om-gate config says
-`--fail-closed`. Build `APPROVED` from the IDs with exit 0 (or fail-open 2).
+a single-MR quality-review rejection. Exit code 2 (execution error) is
+fail-open by default: keep the MR in the batch. Build `APPROVED` from the
+IDs with exit 0 (or fail-open 2).
 
 If judgment_enabled = "false", skip straight to Step 3 with all candidates.
 

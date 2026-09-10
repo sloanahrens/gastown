@@ -291,6 +291,10 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: batch_max must be non-negative", ErrMissingField)
 	}
 
+	if c.BatchMinCount < 0 {
+		return fmt.Errorf("%w: batch_min_count must be non-negative", ErrMissingField)
+	}
+
 	return nil
 }
 
@@ -431,6 +435,9 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		}
 		if local.BatchMax > 0 {
 			result.BatchMax = local.BatchMax
+		}
+		if local.BatchMinCount > 0 {
+			result.BatchMinCount = local.BatchMinCount
 		}
 	}
 	return result
