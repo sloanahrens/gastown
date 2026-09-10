@@ -5017,7 +5017,8 @@ exit 0
 	}
 	log := string(data)
 	checks := []string{
-		"args=init --prefix covertest --quiet --server --server-port 19999",
+		"args=init --prefix covertest --quiet --database testdb_",
+		"--server --server-port 19999",
 		"BEADS_DIR=" + filepath.Join(workDir, ".beads"),
 		"GT_DOLT_PORT=19999",
 		"BEADS_DOLT_SERVER_PORT=19999",
@@ -5028,6 +5029,78 @@ exit 0
 		if !strings.Contains(log, check) {
 			t.Fatalf("bd init stub log missing %q:\n%s", check, log)
 		}
+	}
+}
+
+// TestInitUsesUniqueDatabasePerCall verifies isolated Init() calls target
+// distinct databases so tests sharing one Dolt container (gt-uq28) don't
+// collide on fork bd's project-identity guard.
+func TestInitUsesUniqueDatabasePerCall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix shell script bd stub")
+	}
+
+	bdAllowStaleMu.Lock()
+	prevPath := bdAllowStalePath
+	prevResult := bdAllowStaleResult
+	bdAllowStaleMu.Unlock()
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(func() {
+		bdAllowStaleMu.Lock()
+		bdAllowStalePath = prevPath
+		bdAllowStaleResult = prevResult
+		bdAllowStaleMu.Unlock()
+	})
+
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "bd.log")
+	stubPath := filepath.Join(stubDir, "bd")
+	script := `#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+printf 'args=%s\n' "$*" >> "$MOCK_BD_LOG"
+exit 0
+`
+	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_LOG", logPath)
+
+	b1 := NewIsolatedWithPort(t.TempDir(), 19999)
+	if err := b1.Init("gt"); err != nil {
+		t.Fatalf("Init 1: %v", err)
+	}
+	b2 := NewIsolatedWithPort(t.TempDir(), 19999)
+	if err := b2.Init("gt"); err != nil {
+		t.Fatalf("Init 2: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 logged bd invocations, got %d:\n%s", len(lines), data)
+	}
+	dbFlag := func(line string) string {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "--database" && i+1 < len(fields) {
+				return fields[i+1]
+			}
+		}
+		return ""
+	}
+	db1, db2 := dbFlag(lines[0]), dbFlag(lines[1])
+	if db1 == "" || db2 == "" {
+		t.Fatalf("expected --database flag on both init calls:\n%s", data)
+	}
+	if db1 == db2 {
+		t.Fatalf("expected distinct --database values, both got %q", db1)
 	}
 }
 

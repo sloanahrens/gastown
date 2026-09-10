@@ -4,6 +4,8 @@ package beads
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -888,6 +890,18 @@ func (b *Beads) forIssueID(id string) *Beads {
 // This uses the same environment isolation as other commands.
 // If ServerPort is set (via NewIsolatedWithPort), passes --server-port to bd init
 // so the database is created on the test Dolt server.
+//
+// Test-isolation callers (serverPort > 0) share ONE Dolt container across many
+// t.TempDir() projects (see testutil.RequireDoltContainer). Each project mints
+// its own project_id on init; fork bd's identity guard refuses a project_id
+// that doesn't match whatever was already recorded for the target database
+// (gt-uq28). Without an explicit --database, bd derives the database name from
+// --prefix, so every "gt"-prefixed test collided on the same database and only
+// the first init on the shared container ever succeeded. Routing each isolated
+// Init to its own randomly named database sidesteps the guard entirely: every
+// test gets a fresh database with no prior identity to conflict with, while
+// still reusing the one shared container (see the testdb_/doctest_ naming
+// convention orphan-cleanup already recognizes in jsonl_git_backup.go).
 func (b *Beads) Init(prefix string) error {
 	args := []string{"init"}
 	if prefix != "" {
@@ -895,10 +909,23 @@ func (b *Beads) Init(prefix string) error {
 	}
 	args = append(args, "--quiet")
 	if b.serverPort > 0 {
-		args = append(args, "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
+		args = append(args, "--database", testDatabaseName(), "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
 	}
 	_, err := b.run(args...)
 	return err
+}
+
+// testDatabaseName generates a unique database name for isolated test Init()
+// calls, using the "testdb_" prefix already recognized as test-database
+// cruft by orphan cleanup (internal/daemon/jsonl_git_backup.go, gt dolt cleanup).
+func testDatabaseName() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand failure is effectively unreachable; fall back to a
+		// timestamp so Init() still gets a database name.
+		return fmt.Sprintf("testdb_%x", time.Now().UnixNano())
+	}
+	return "testdb_" + hex.EncodeToString(buf[:])
 }
 
 // bdSubprocessTimeout caps how long a single bd subprocess may run before
@@ -1110,11 +1137,17 @@ func (b *Beads) buildRunEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
-			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=")
+			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
+			// This port always points at testutil's ephemeral Dolt container
+			// (never production), so declare it a dedicated test server. Without
+			// this, bd refuses to connect the testdb_* databases minted by
+			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
+			// server, or use test helpers in internal/storage/dolt/testserver".
+			env = append(env, "BEADS_TEST_SERVER=1")
 		}
 		return SuppressBDSideEffects(env)
 	}
@@ -1133,11 +1166,17 @@ func (b *Beads) buildRoutingEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
-			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=")
+			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
+			// This port always points at testutil's ephemeral Dolt container
+			// (never production), so declare it a dedicated test server. Without
+			// this, bd refuses to connect the testdb_* databases minted by
+			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
+			// server, or use test helpers in internal/storage/dolt/testserver".
+			env = append(env, "BEADS_TEST_SERVER=1")
 		}
 		return SuppressBDSideEffects(env)
 	}
