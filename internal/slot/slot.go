@@ -185,9 +185,11 @@ type Handle struct {
 // re-verified against `docker ps`: if matching containers are already
 // running, Acquire releases the flock and keeps waiting rather than handing
 // out a slot that isn't actually safe to use. If the docker daemon can't be
-// reached to check, Acquire fails fast instead — that state won't resolve
-// itself by waiting, so there's no reason to poll it out to the full
-// timeout (gt-tuiy).
+// reached to check, Acquire proceeds on the flock alone instead of failing
+// or waiting: an unreachable daemon can't be running any containers either,
+// so there is nothing left to verify (gt-tuiy attempt 2 — the earlier
+// fail-fast behavior turned a stopped Docker Desktop into a town-wide gate
+// outage even for suites that never touch Docker).
 //
 // role is a short human-readable identifier for the caller (e.g.
 // "gastown/refinery" or a rig/MR id) and is recorded in the owner file for
@@ -221,13 +223,19 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 		if ok {
 			containers, containerErr := runningGateContainers()
 			if containerErr != nil {
-				// The daemon/docker is unreachable: this is not a transient
-				// "someone else is using it" state that more waiting will
-				// resolve, it's an inability to verify at all. Fail fast
-				// instead of releasing and polling until the full timeout
-				// elapses (gt-tuiy).
-				unlock()
-				return nil, fmt.Errorf("checking for unwrapped container suites: %w", containerErr)
+				// The daemon/docker is unreachable: no Docker container can
+				// be running against it either, so there is nothing an
+				// unwrapped suite could be occupying — the flock we already
+				// hold is sufficient on its own. Proceed rather than fail:
+				// om-editorial (attempt 2, gt-tuiy) correctly called out
+				// that failing here turns "Docker Desktop isn't running" —
+				// routine on a dev box — into a town-wide outage for every
+				// gate, including ones that never touch Docker. Status still
+				// reports DockerUnknown/Busy for display; that's a distinct,
+				// more conservative concern from Acquire's "is it safe to
+				// hand out the slot" question.
+				fmt.Fprintf(os.Stderr, "gt slot: docker ps unreachable (%v); proceeding on flock alone\n", containerErr)
+				containers = nil
 			}
 			if len(containers) == 0 {
 				h := &Handle{townRoot: townRoot, unlock: unlock}

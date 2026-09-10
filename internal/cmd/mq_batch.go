@@ -252,6 +252,26 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// acquireBatchGateSlot acquires the container-gate slot for the whole batch
+// gate run, or returns (nil, nil) when there is nothing to guard.
+//
+// Batching's whole point is running the gate suite ONCE for the whole batch
+// instead of once per MR (see batch-scan step docs), so the slot is acquired
+// once here around the entire ProcessBatch call — including any bisection
+// retries it does internally — rather than per-MR (gt-tuiy). Only bother
+// when a gate command is actually configured; a batch with zero
+// verification never touches Docker.
+//
+// Split out from runMQBatchRun so the acquire-around-batch behavior is
+// testable without a full cobra/rig/engine harness (gt-tuiy attempt 2: this
+// path shipped with no test coverage).
+func acquireBatchGateSlot(townRoot, rigName, gateCmd string) (*slot.Handle, error) {
+	if gateCmd == "" {
+		return nil, nil
+	}
+	return slot.Acquire(townRoot, rigName+"/refinery-batch", batchSlotTimeout)
+}
+
 func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 	townRoot, r, err := getRig(rigName)
@@ -320,18 +340,11 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	target := r.DefaultBranch()
 	ctx := context.Background()
 
-	// Batching's whole point is running the gate suite ONCE for the whole
-	// batch instead of once per MR (see batch-scan step docs), so the
-	// container-gate slot is acquired once here around the entire
-	// ProcessBatch call — including any bisection retries it does
-	// internally — rather than per-MR (gt-tuiy). Only bother when a gate
-	// command is actually configured; a batch with zero verification never
-	// touches Docker.
-	if gateCmd != "" {
-		h, slotErr := slot.Acquire(townRoot, rigName+"/refinery-batch", batchSlotTimeout)
-		if slotErr != nil {
-			return fmt.Errorf("acquiring container-gate slot for batch gate: %w", slotErr)
-		}
+	h, slotErr := acquireBatchGateSlot(townRoot, rigName, gateCmd)
+	if slotErr != nil {
+		return fmt.Errorf("acquiring container-gate slot for batch gate: %w", slotErr)
+	}
+	if h != nil {
 		defer h.Release()
 	}
 

@@ -52,7 +52,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 13
+version = 14
 
 [[steps]]
 id = "load-context"
@@ -502,12 +502,12 @@ If lint_command is set:
 
 If test_command is set:
 
-**If test_command spins Docker containers (Dolt, testcontainers) — e.g.
-anything under storage/dolt-backed packages — wrap it through the
-container-gate slot instead of running it bare** (gt-tuiy: an unwrapped
-suite that spins Dolt/testcontainers collides with any other rig's
-container-backed suite on the shared Docker VM even though `gt slot status`
-looked free):
+**Rule (gt-tuiy, shared with mol-refinery-patrol's run-tests step — keep
+both in sync): wrap test_command through the container-gate slot only when
+it spins Docker containers (Dolt, testcontainers); run it bare otherwise.**
+An unwrapped suite that spins Dolt/testcontainers collides with any other
+rig's container-backed suite on the shared Docker VM even though
+`gt slot status` looked free — that case must be wrapped:
 ```bash
 gt slot run --role <rig>/<your-name> -- {{test_command}}
 ```
