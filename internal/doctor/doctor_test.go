@@ -230,6 +230,70 @@ func TestReport_Print(t *testing.T) {
 	}
 }
 
+func TestReport_Add_CountsCritical(t *testing.T) {
+	r := NewReport()
+
+	// A critical warning counts toward both Warnings and Critical.
+	r.Add(&CheckResult{Name: "stalled-polecats", Status: StatusWarning, Critical: true})
+	if r.Summary.Warnings != 1 || r.Summary.Critical != 1 {
+		t.Errorf("After adding critical warning: Warnings=%d, Critical=%d, want 1, 1", r.Summary.Warnings, r.Summary.Critical)
+	}
+
+	// An ordinary warning must not inflate the critical count.
+	r.Add(&CheckResult{Name: "stale-binary", Status: StatusWarning})
+	if r.Summary.Warnings != 2 || r.Summary.Critical != 1 {
+		t.Errorf("After adding ordinary warning: Warnings=%d, Critical=%d, want 2, 1", r.Summary.Warnings, r.Summary.Critical)
+	}
+}
+
+// TestReport_Print_CriticalWarningRendersDistinctlyAndSortsFirst is the
+// regression test for gt-7bre: a warning representing irreversible work
+// loss (e.g. stalled-polecats) must not render at the same visual weight
+// as a routine warning (e.g. stale-binary), and must appear before it.
+func TestReport_Print_CriticalWarningRendersDistinctlyAndSortsFirst(t *testing.T) {
+	r := NewReport()
+	r.Add(&CheckResult{
+		Name:    "stale-binary",
+		Status:  StatusWarning,
+		Message: "Binary is 1 commits behind origin/main",
+	})
+	r.Add(&CheckResult{
+		Name:     "stalled-polecats",
+		Status:   StatusWarning,
+		Message:  "Found 1 stalled polecat(s) with unpushed work at risk of loss",
+		Critical: true,
+	})
+
+	var buf bytes.Buffer
+	r.Print(&buf, false, 0)
+	output := buf.String()
+
+	if !strings.Contains(output, "1 critical") {
+		t.Error("Summary line should surface a critical count before the list")
+	}
+	if !strings.Contains(output, "CRITICAL") {
+		t.Error("Output should contain a distinct CRITICAL section")
+	}
+
+	criticalSectionIdx := strings.Index(output, "CRITICAL")
+	warningsSectionIdx := strings.Index(output, "WARNINGS")
+	if criticalSectionIdx == -1 || warningsSectionIdx == -1 {
+		t.Fatal("Expected both a CRITICAL and a WARNINGS section in output")
+	}
+	if criticalSectionIdx > warningsSectionIdx {
+		t.Error("CRITICAL section should render before the WARNINGS section")
+	}
+
+	stalledIdx := strings.Index(output, "stalled-polecats")
+	staleIdx := strings.Index(output, "stale-binary")
+	if stalledIdx == -1 || staleIdx == -1 {
+		t.Fatal("Expected both check names in output")
+	}
+	if stalledIdx > staleIdx {
+		t.Error("Critical check (stalled-polecats) should be listed before the ordinary warning (stale-binary)")
+	}
+}
+
 func TestNewDoctor(t *testing.T) {
 	d := NewDoctor()
 	if d == nil {

@@ -144,11 +144,12 @@ var (
 
 // Core styles - consistent across all commands
 var (
-	PassStyle   = lipgloss.NewStyle().Foreground(ColorPass)
-	WarnStyle   = lipgloss.NewStyle().Foreground(ColorWarn)
-	FailStyle   = lipgloss.NewStyle().Foreground(ColorFail)
-	MutedStyle  = lipgloss.NewStyle().Foreground(ColorMuted)
-	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+	PassStyle     = lipgloss.NewStyle().Foreground(ColorPass)
+	WarnStyle     = lipgloss.NewStyle().Foreground(ColorWarn)
+	FailStyle     = lipgloss.NewStyle().Foreground(ColorFail)
+	CriticalStyle = lipgloss.NewStyle().Foreground(ColorFail).Bold(true) // bold red — outranks a plain warning
+	MutedStyle    = lipgloss.NewStyle().Foreground(ColorMuted)
+	AccentStyle   = lipgloss.NewStyle().Foreground(ColorAccent)
 )
 
 // Issue ID style
@@ -197,12 +198,13 @@ var CommandStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
 // Status icons - consistent semantic indicators
 // Design: small Unicode symbols, NOT emoji-style icons for visual consistency
 const (
-	IconPass = "✓"
-	IconWarn = "⚠"
-	IconFail = "✖"
-	IconSkip = "-"
-	IconInfo = "ℹ"
-	IconFix  = "🔧"
+	IconPass     = "✓"
+	IconWarn     = "⚠"
+	IconCritical = "‼" // irreversible work/data loss risk — distinct from routine ⚠ warnings
+	IconFail     = "✖"
+	IconSkip     = "-"
+	IconInfo     = "ℹ"
+	IconFix      = "🔧"
 )
 
 // Issue status icons - used consistently across all commands
@@ -247,6 +249,12 @@ func RenderWarn(s string) string {
 // RenderFail renders text with fail (red) styling
 func RenderFail(s string) string {
 	return FailStyle.Render(s)
+}
+
+// RenderCritical renders text with critical (bold red) styling — for
+// warning-level results that represent irreversible work/data loss risk.
+func RenderCritical(s string) string {
+	return CriticalStyle.Render(s)
 }
 
 // RenderMuted renders text with muted (gray) styling
@@ -294,6 +302,11 @@ func RenderWarnIcon() string {
 // RenderFailIcon renders the fail icon with styling
 func RenderFailIcon() string {
 	return FailStyle.Render(IconFail)
+}
+
+// RenderCriticalIcon renders the critical icon (‼) with styling
+func RenderCriticalIcon() string {
+	return CriticalStyle.Render(IconCritical)
 }
 
 // RenderSkipIcon renders the skip icon with styling
@@ -358,7 +371,6 @@ func RenderStatusIcon(status string) string {
 	}
 }
 
-
 // RenderPriority renders a priority level with semantic styling
 // Format: "● P0" (icon + label)
 // P0/P1/P2 get color; P3/P4 use standard text
@@ -419,4 +431,3 @@ func RenderType(issueType string) string {
 		return issueType
 	}
 }
-

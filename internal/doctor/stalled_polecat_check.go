@@ -127,8 +127,9 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 		Status: StatusWarning,
 		Message: fmt.Sprintf("Found %d stalled polecat(s) with unpushed work at risk of loss",
 			len(stalled)),
-		Details: details,
-		FixHint: "Run 'gt doctor --fix' to push stalled branches to remote",
+		Details:  details,
+		FixHint:  "Run 'gt doctor --fix' to push stalled branches to remote",
+		Critical: true, // unpushed commits on a dead session are permanently lost if the worktree is reused/nuked
 	}
 }
 

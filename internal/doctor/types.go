@@ -12,13 +12,13 @@ import (
 
 // Category constants for grouping checks
 const (
-	CategoryCore          = "Core"
+	CategoryCore           = "Core"
 	CategoryInfrastructure = "Infrastructure"
-	CategoryRig           = "Rig"
-	CategoryPatrol        = "Patrol"
-	CategoryConfig        = "Configuration"
-	CategoryCleanup       = "Cleanup"
-	CategoryHooks         = "Hooks"
+	CategoryRig            = "Rig"
+	CategoryPatrol         = "Patrol"
+	CategoryConfig         = "Configuration"
+	CategoryCleanup        = "Cleanup"
+	CategoryHooks          = "Hooks"
 )
 
 // CategoryOrder defines the display order for categories
@@ -89,6 +89,13 @@ type CheckResult struct {
 	Category string        // Category for grouping (e.g., CategoryCore)
 	Elapsed  time.Duration // How long the check took to run
 	Fixed    bool          // True if this check was auto-fixed
+
+	// Critical marks a StatusWarning result as representing irreversible
+	// work or data loss risk (e.g. unpushed commits on a dead session).
+	// Critical warnings render distinctly and sort before ordinary
+	// warnings, so a reader skimming a long list won't anchor on the
+	// first/last line and miss the one that actually matters.
+	Critical bool
 }
 
 // Check defines the interface for a health check.
@@ -115,6 +122,7 @@ type ReportSummary struct {
 	Total       int
 	OK          int
 	Warnings    int
+	Critical    int // Warnings flagged Critical (irreversible work/data loss risk); subset of Warnings
 	Errors      int
 	Fixed       int           // Checks that were auto-fixed
 	Slow        int           // Checks that took longer than threshold (counted during Print)
@@ -147,6 +155,9 @@ func (r *Report) Add(result *CheckResult) {
 		r.Summary.OK++
 	case StatusWarning:
 		r.Summary.Warnings++
+		if result.Critical {
+			r.Summary.Critical++
+		}
 	case StatusError:
 		r.Summary.Errors++
 	}
@@ -279,7 +290,11 @@ func (r *Report) printCheck(w io.Writer, check *CheckResult, verbose bool, slowT
 	case StatusOK:
 		statusIcon = ui.RenderPassIcon()
 	case StatusWarning:
-		statusIcon = ui.RenderWarnIcon()
+		if check.Critical {
+			statusIcon = ui.RenderCriticalIcon()
+		} else {
+			statusIcon = ui.RenderWarnIcon()
+		}
 	case StatusError:
 		statusIcon = ui.RenderFailIcon()
 	}
@@ -342,6 +357,12 @@ func (r *Report) printSummary(w io.Writer, slowThreshold time.Duration) {
 		ui.RenderWarnIcon(), r.Summary.Warnings,
 		ui.RenderFailIcon(), r.Summary.Errors,
 	)
+	// Critical warnings (irreversible work/data loss risk) get their own
+	// count so the total is visible before a reader has to skim the list
+	// to notice one is hiding among ordinary warnings.
+	if r.Summary.Critical > 0 {
+		summary = fmt.Sprintf("%s %d critical  %s", ui.RenderCriticalIcon(), r.Summary.Critical, summary)
+	}
 	if r.Summary.Fixed > 0 {
 		summary += fmt.Sprintf("  🔧 %d fixed", r.Summary.Fixed)
 	}
@@ -357,14 +378,21 @@ func (r *Report) printSummary(w io.Writer, slowThreshold time.Duration) {
 
 // printWarningsSection outputs separate sections for failures, warnings, and fixed items.
 func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
-	// Separate into categories
-	var failures, warnings, fixed []*CheckResult
+	// Separate into categories. Critical warnings (irreversible work/data
+	// loss risk) get their own bucket, distinct from ordinary warnings,
+	// so they render in their own section instead of blending into a
+	// same-weight numbered list where a reader can anchor on the first
+	// or last line and miss the one that matters.
+	var failures, critical, warnings, fixed []*CheckResult
 	for _, check := range issues {
-		if check.Fixed {
+		switch {
+		case check.Fixed:
 			fixed = append(fixed, check)
-		} else if check.Status == StatusError {
+		case check.Status == StatusError:
 			failures = append(failures, check)
-		} else {
+		case check.Critical:
+			critical = append(critical, check)
+		default:
 			warnings = append(warnings, check)
 		}
 	}
@@ -377,7 +405,7 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 	}
 
 	// If nothing to report, show success message
-	if len(failures) == 0 && len(warnings) == 0 && len(fixed) == 0 {
+	if len(failures) == 0 && len(critical) == 0 && len(warnings) == 0 && len(fixed) == 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, ui.RenderPass(ui.IconPass+" All checks passed"))
 		return
@@ -390,6 +418,21 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 		for i, check := range failures {
 			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
 			_, _ = fmt.Fprintf(w, "  %s  %s %s\n", ui.RenderFailIcon(), ui.RenderFail(fmt.Sprintf("%d.", i+1)), ui.RenderFail(line))
+			if check.FixHint != "" {
+				_, _ = fmt.Fprintf(w, "        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.FixHint)
+			}
+		}
+	}
+
+	// Print CRITICAL section — sorted first among warnings, styled
+	// distinctly, because these represent work or data that may be
+	// irreversibly lost rather than routine drift.
+	if len(critical) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, ui.RenderCritical(ui.IconCritical+"  CRITICAL"))
+		for i, check := range critical {
+			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+			_, _ = fmt.Fprintf(w, "  %s  %s %s\n", ui.RenderCriticalIcon(), ui.RenderCritical(fmt.Sprintf("%d.", i+1)), ui.RenderCritical(line))
 			if check.FixHint != "" {
 				_, _ = fmt.Fprintf(w, "        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.FixHint)
 			}
@@ -420,7 +463,7 @@ func (r *Report) printWarningsSection(w io.Writer, issues []*CheckResult) {
 	}
 
 	// If only fixed items, show success message
-	if len(failures) == 0 && len(warnings) == 0 {
+	if len(failures) == 0 && len(critical) == 0 && len(warnings) == 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, ui.RenderPass(ui.IconPass+" All remaining checks passed"))
 	}
