@@ -483,6 +483,33 @@ func doneDirectMergeSkipReason(bd *beads.Beads, issueID string, issue *beads.Iss
 	return ""
 }
 
+// doneNoMergeCloseHoldReason is the gt-ntqf prevention half: it decides
+// whether to block closing a no-merge source issue because its branch's
+// commits sit unmerged with nothing tracking them — the gt-31h shape (no
+// PR, no MR, just an abandoned branch that nothing will ever re-sling).
+//
+// no_merge work is deliberately never verified as merged here: the branch
+// is either handed to a human via a GitHub PR (prURL != "") or left on
+// origin for out-of-band review, tracked only by the READY_FOR_REVIEW mail
+// to the dispatcher (dispatcherNotified). Gating on origin/<target>
+// reachability instead — as an earlier version of this fix did — is wrong
+// for the common non-PR case: a freshly pushed no-merge branch is *never*
+// reachable from the target at push time by design (nothing auto-merges
+// it), so that gate never clears and every non-PR no-merge `gt done` holds
+// forever with no path to recovery. See MR comment on gt-wisp-7iy4.
+//
+// It returns "" (no hold, safe to close) when any tracking artifact
+// exists — a PR, a delivered dispatcher notification, or an explicit
+// --skip-verify — and a hold reason only when none of those exist, which
+// means the branch's commits would otherwise vanish with nothing pointing
+// back at them.
+func doneNoMergeCloseHoldReason(prURL string, skipVerify, dispatcherNotified bool) string {
+	if prURL != "" || skipVerify || dispatcherNotified {
+		return ""
+	}
+	return "no-merge close held: no PR, no delivered dispatcher notification, and no --skip-verify — nothing would track this branch's commits if the issue closed now"
+}
+
 func doneSourceCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
@@ -1613,6 +1640,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				}
 
 				// Mail dispatcher with READY_FOR_REVIEW
+				dispatcherNotified := false
 				if dispatcher := attachmentFields.DispatchedBy; dispatcher != "" {
 					townRouter := mail.NewRouter(townRoot)
 					defer townRouter.WaitPendingNotifications()
@@ -1630,6 +1658,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						style.PrintWarning("could not notify dispatcher: %v", err)
 					} else {
 						fmt.Printf("%s Dispatcher notified: READY_FOR_REVIEW\n", style.Bold.Render("✓"))
+						dispatcherNotified = true
 					}
 				}
 
@@ -1648,6 +1677,21 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 							return fmt.Errorf("cannot complete review-only/no-merge work: %s", skipReason)
 						}
 						canCloseIssue = false
+					}
+					// gt-ntqf: don't close the source issue while nothing tracks its
+					// unmerged branch (see doneNoMergeCloseHoldReason doc comment).
+					if canCloseIssue {
+						if holdReason := doneNoMergeCloseHoldReason(prURL, doneSkipVerify, dispatcherNotified); holdReason != "" {
+							fullHoldReason := fmt.Sprintf("gt done hold: %s (branch: %s)", holdReason, branch)
+							style.PrintWarning("%s", fullHoldReason)
+							if commentErr := noMergeBd.AddComment(issueID, fullHoldReason); commentErr != nil {
+								style.PrintWarning("could not record hold comment on %s: %v", issueID, commentErr)
+							}
+							notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, fullHoldReason)
+							canCloseIssue = false
+						} else if doneSkipVerify && prURL == "" && !dispatcherNotified {
+							noteVerifiedPushSkipped(noMergeBd, cwd, issueID, defaultBranch, "", "--skip-verify on no-merge close")
+						}
 					}
 					if canCloseIssue && attachmentFields.AttachedMolecule != "" {
 						if n := closeDescendants(noMergeBd, attachmentFields.AttachedMolecule); n > 0 {

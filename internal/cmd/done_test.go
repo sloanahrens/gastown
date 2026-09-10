@@ -2279,6 +2279,50 @@ func TestSyncGuardWithUncommittedChanges(t *testing.T) {
 	}
 }
 
+// TestDoneNoMergeCloseHoldReason covers gt-ntqf's prevention half at the
+// runDone call-site seam: a no_merge branch with no tracking artifact must
+// not close its source issue (the gt-31h shape — no PR, no MR, an abandoned
+// branch nothing will ever re-sling), while a legitimate non-PR no_merge
+// completion (dispatcher notified, or --skip-verify) must still close.
+//
+// An earlier attempt at this bead (gt-wisp-7iy4) gated the hold on git
+// reachability from origin/<target> instead. That is fundamentally wrong
+// for the common case: merge_strategy != "pr" rigs never open a PR and
+// nothing auto-merges the branch, so prURL is always empty and the
+// reachability check never clears — every non-PR no_merge `gt done` held
+// forever with no path to recovery. The fix drops reachability entirely and
+// keys the hold on whether *some* durable tracking artifact exists.
+func TestDoneNoMergeCloseHoldReason(t *testing.T) {
+	t.Run("PR created bypasses the hold", func(t *testing.T) {
+		if reason := doneNoMergeCloseHoldReason("https://github.com/example/repo/pull/1", false, false); reason != "" {
+			t.Fatalf("a created PR must not be held, got %q", reason)
+		}
+	})
+
+	t.Run("skip-verify bypasses the hold with no PR and no dispatcher", func(t *testing.T) {
+		if reason := doneNoMergeCloseHoldReason("", true, false); reason != "" {
+			t.Fatalf("--skip-verify must bypass the hold, got %q", reason)
+		}
+	})
+
+	t.Run("delivered dispatcher notification bypasses the hold", func(t *testing.T) {
+		// This is the common non-PR no_merge shape: merge_strategy != "pr",
+		// so prURL is always empty, but the READY_FOR_REVIEW mail to the
+		// dispatcher is the durable tracking artifact. Gating on reachability
+		// here (as the rejected first attempt did) would hold this forever.
+		if reason := doneNoMergeCloseHoldReason("", false, true); reason != "" {
+			t.Fatalf("a delivered dispatcher notification must bypass the hold, got %q", reason)
+		}
+	})
+
+	t.Run("no PR, no skip-verify, no dispatcher holds (gt-31h orphan shape)", func(t *testing.T) {
+		reason := doneNoMergeCloseHoldReason("", false, false)
+		if reason == "" {
+			t.Fatal("expected a hold reason when nothing tracks the branch, got none")
+		}
+	})
+}
+
 func testRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	fullArgs := append([]string{"-c", "protocol.file.allow=always"}, args...)
