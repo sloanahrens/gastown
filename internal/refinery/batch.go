@@ -48,6 +48,15 @@ type BatchResult struct {
 	// MergeCommit is the final SHA pushed to the target branch (empty if nothing merged).
 	MergeCommit string
 
+	// Reviewed is the editorial review outcome for every batch candidate
+	// (om-gate T7). Nil when the rig has not set merge_queue.editorial.required.
+	Reviewed []ReviewedMR
+
+	// Ejected is the set of stacked MRs removed after review because their
+	// on-stack patch-id no longer matched their editorial note (om-gate T7).
+	// Left queued and untouched — not a conflict, not a culprit.
+	Ejected []EjectedMR
+
 	// Error is set if the batch processing encountered an infrastructure error.
 	Error error
 }
@@ -241,8 +250,20 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return result
 	}
 
+	// om-gate T7: review every candidate before stacking, bounded by
+	// merge_queue.editorial.review_parallelism concurrent invocations.
+	// No-op (returns batch unchanged) when the rig hasn't set
+	// merge_queue.editorial.required. Members that don't come back approve
+	// are dropped here and left queued, untouched.
+	approved, reviewed, notes := e.reviewBatchCandidates(ctx, batch, target)
+	result.Reviewed = reviewed
+	if len(approved) == 0 {
+		_, _ = fmt.Fprintln(e.output, "[Batch] No MRs approved by editorial review")
+		return result
+	}
+
 	// Step 1: Build the stack
-	stacked, conflicts, err := e.BuildRebaseStack(ctx, batch, target)
+	stacked, conflicts, err := e.BuildRebaseStack(ctx, approved, target)
 	if err != nil {
 		result.Error = fmt.Errorf("build rebase stack: %w", err)
 		return result
@@ -253,6 +274,29 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		_, _ = fmt.Fprintln(e.output, "[Batch] No MRs could be stacked (all conflicted)")
 		return result
 	}
+
+	// om-gate T7: eject any member whose on-stack patch-id no longer
+	// matches its editorial note — e.g. its branch changed after review, or
+	// a clean auto-resolved merge produced content different from what was
+	// reviewed standalone. Ejected members are left queued, untouched; the
+	// stack is rebuilt without them before gates run.
+	kept, ejected, ejErr := e.ejectPatchIDChanged(stacked, notes)
+	if ejErr != nil {
+		result.Error = fmt.Errorf("eject patch-id changed: %w", ejErr)
+		return result
+	}
+	result.Ejected = ejected
+	if len(ejected) > 0 {
+		if len(kept) == 0 {
+			_, _ = fmt.Fprintln(e.output, "[Batch] All stacked MRs ejected (patch-id changed on stack)")
+			return result
+		}
+		if rebuildErr := e.resetAndRebuildStack(kept, target); rebuildErr != nil {
+			result.Error = fmt.Errorf("rebuild stack after ejection: %w", rebuildErr)
+			return result
+		}
+	}
+	stacked = kept
 
 	// If only one MR survived after conflict removal, just process it directly
 	if len(stacked) == 1 {
