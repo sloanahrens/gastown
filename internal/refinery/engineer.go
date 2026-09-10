@@ -233,14 +233,13 @@ type MRInfo struct {
 	PreVerifiedAt   time.Time // When verification completed
 	PreVerifiedBase string    // Target branch SHA at verification time
 
-<<<<<<< HEAD
 	// EditorialReviewedHead is the commit gt mq review last produced an
 	// approve/request_changes verdict for (refs/notes/om lives there). The
 	// push precondition reads it to find the note without scanning.
 	// Empty means "never reviewed" and the precondition refuses to push
 	// when the rig requires editorial review.
 	EditorialReviewedHead string
-=======
+
 	// PreVerifiedGates/Exit/Log make the fast-path honest (om-gate T8): the
 	// fast-path additionally requires PreVerifiedGates to match the rig's
 	// current gate-set hash (config.GateSetSHA) before trusting the stamp —
@@ -249,7 +248,6 @@ type MRInfo struct {
 	PreVerifiedGates string
 	PreVerifiedExit  int
 	PreVerifiedLog   string
->>>>>>> 8ff13fa (fix(done): --pre-verified performs the gate run it stamps; fast-path never skips editorial (absorbs om-p2w) (gt-3s52))
 
 	// Raw data for agent-side queue health analysis (ZFC: agent decides, Go transports)
 	UpdatedAt          time.Time // When the MR was last updated
@@ -2190,7 +2188,6 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 	}
 
 	return &MRInfo{
-<<<<<<< HEAD
 		ID:                    issue.ID,
 		Branch:                fields.Branch,
 		Target:                fields.Target,
@@ -2210,37 +2207,13 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		PreVerified:           fields.PreVerified,
 		PreVerifiedAt:         preVerifiedAt,
 		PreVerifiedBase:       fields.PreVerifiedBase,
+		PreVerifiedGates:      fields.PreVerifiedGates,
+		PreVerifiedExit:       fields.PreVerifiedExit,
+		PreVerifiedLog:        fields.PreVerifiedLog,
 		EditorialReviewedHead: fields.EditorialReviewedHead,
 		CreatedAt:             createdAt,
 		UpdatedAt:             updatedAt,
 		Assignee:              issue.Assignee,
-=======
-		ID:               issue.ID,
-		Branch:           fields.Branch,
-		Target:           fields.Target,
-		SourceIssue:      fields.SourceIssue,
-		Worker:           fields.Worker,
-		Rig:              fields.Rig,
-		Title:            issue.Title,
-		Priority:         issue.Priority,
-		AgentBead:        fields.AgentBead,
-		CommitSHA:        fields.CommitSHA,
-		PRURL:            fields.PRURL,
-		PRNumber:         fields.PRNumber,
-		RetryCount:       fields.RetryCount,
-		ConflictTaskID:   fields.ConflictTaskID,
-		ConvoyID:         fields.ConvoyID,
-		ConvoyCreatedAt:  convoyCreatedAt,
-		PreVerified:      fields.PreVerified,
-		PreVerifiedAt:    preVerifiedAt,
-		PreVerifiedBase:  fields.PreVerifiedBase,
-		PreVerifiedGates: fields.PreVerifiedGates,
-		PreVerifiedExit:  fields.PreVerifiedExit,
-		PreVerifiedLog:   fields.PreVerifiedLog,
-		CreatedAt:        createdAt,
-		UpdatedAt:        updatedAt,
-		Assignee:         issue.Assignee,
->>>>>>> 8ff13fa (fix(done): --pre-verified performs the gate run it stamps; fast-path never skips editorial (absorbs om-p2w) (gt-3s52))
 	}
 }
 
