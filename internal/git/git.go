@@ -1165,6 +1165,16 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 // ErrNoNote is returned by NotesShow when commit has no note under ref.
 var ErrNoNote = errors.New("no note")
 
+// MergeBase returns the best common ancestor of a and b (git merge-base a b),
+// trimmed of trailing whitespace.
+func (g *Git) MergeBase(a, b string) (string, error) {
+	out, err := g.run("merge-base", a, b)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // PatchID returns the stable patch-id of the diff between base and head
 // (git diff base..head | git patch-id --stable), i.e. the first field of the
 // tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase

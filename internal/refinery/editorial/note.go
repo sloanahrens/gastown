@@ -36,6 +36,12 @@ type Note struct {
 	} `json:"prior_findings"`
 	Attempt    int       `json:"attempt"`
 	ReviewedAt time.Time `json:"reviewed_at"`
+
+	// Followups holds the ids of the follow-up beads filed for major
+	// findings on an approve verdict (DECISION 8: approval never dissolves
+	// a finding). Omitted from the JSON when empty so existing notes
+	// without this field still round-trip.
+	Followups []string `json:"followups,omitempty"`
 }
 
 // WriteNote marshals n and attaches it as a git note on n.HeadSHA under

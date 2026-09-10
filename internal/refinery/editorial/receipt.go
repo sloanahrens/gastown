@@ -27,6 +27,9 @@ func RecordReceipt(rec *plugin.Recorder, n Note) (string, error) {
 		fmt.Sprintf("om_version:%s", n.OMVersion),
 		fmt.Sprintf("attempt:%d", n.Attempt),
 	}
+	if len(n.Followups) > 0 {
+		labels = append(labels, fmt.Sprintf("followups:%d", len(n.Followups)))
+	}
 	return rec.RecordRun(plugin.PluginRunRecord{
 		PluginName:  pluginName,
 		RigName:     n.Rig,
