@@ -52,7 +52,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 12
+version = 13
 
 [[steps]]
 id = "load-context"
@@ -500,13 +500,21 @@ If lint_command is set:
 {{lint_command}}
 ```
 
-If test_command is set, run it through the container-gate slot, never bare
-(gt-tuiy — an unwrapped suite that spins Dolt/testcontainers collides with
-any other rig's container-backed suite on the shared Docker VM even though
-`gt slot status` looked free):
+If test_command is set:
+
+**If test_command spins Docker containers (Dolt, testcontainers) — e.g.
+anything under storage/dolt-backed packages — wrap it through the
+container-gate slot instead of running it bare** (gt-tuiy: an unwrapped
+suite that spins Dolt/testcontainers collides with any other rig's
+container-backed suite on the shared Docker VM even though `gt slot status`
+looked free):
 ```bash
 gt slot run --role <rig>/<your-name> -- {{test_command}}
 ```
+Otherwise run it bare. The slot is a townwide lock shared by every rig — only
+suites that actually touch the shared Docker VM need it; wrapping every
+gate run in it regardless serializes unrelated, non-Docker suites against
+each other for no reason (gt-tuiy).
 
 Empty commands mean "not configured" — skip silently.
 
