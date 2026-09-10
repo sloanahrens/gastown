@@ -68,6 +68,10 @@ source of truth.
 | review_depth | standard | Review depth: quick, standard, or deep |
 | merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
+| batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
+| batch_min_age | 1h | Minimum queue age for an MR to be batch-eligible |
+| batch_max | 12 | Maximum number of MRs in a single batch |
+| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in |
 
 ## Target Resolution Rule
 
@@ -97,7 +101,7 @@ Abbreviated patrol rules:
 - **inbox-check**: Run `gt mail drain` and quick inbox check. Skip individual message processing unless new MERGE_READY found.
 - **queue-scan**: Quick `gt mq list` check. If queue is empty, skip directly to check-integration-branches.
 - **merged-pr-sweep**: Run even in reduced mode when queue-scan found queued MRs.
-- **process-branch through merge-push**: Only run if queue-scan found remaining actionable work. Otherwise SKIP all.
+- **batch-scan through merge-push**: Only run if queue-scan found remaining actionable work. Otherwise SKIP all.
 - **loop-check through generate-summary**: SKIP if no merges were processed.
 - **check-integration-branches**: Quick check only.
 - **context-check**: Quick self-assessment (one sentence).
@@ -108,7 +112,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 19
+version = 20
 
 [vars]
 [vars.wisp_type]
@@ -174,6 +178,22 @@ default = "direct"
 [vars.require_review]
 description = "Require at least one approving GitHub review before merging (only applies when merge_strategy=pr)."
 default = "false"
+
+[vars.batch_enabled]
+description = "Whether to batch-gate multiple ready MRs (stack, one suite run, bisect on red) instead of processing one at a time"
+default = "false"
+
+[vars.batch_min_age]
+description = "Minimum time a ready MR must sit in queue before it's batch-eligible (e.g. 1h, 30m)"
+default = "1h"
+
+[vars.batch_max]
+description = "Maximum number of MRs to include in a single batch"
+default = "12"
+
+[vars.batch_min_count]
+description = "Minimum number of batch-eligible ready MRs required before batching instead of single-MR processing"
+default = "4"
 
 [vars.rig]
 description = "Name of the rig this refinery belongs to (e.g., gastown, laser)"
@@ -337,9 +357,112 @@ For each queued MR:
 After sweeping merged PRs, process only MRs still actionable in process-branch."""
 
 [[steps]]
+id = "batch-scan"
+title = "Batch-gate ready MRs (if enough have queued up)"
+needs = ["merged-pr-sweep"]
+description = """
+**Config: batch_enabled = {{batch_enabled}}**
+**Config: batch_min_age = {{batch_min_age}}**
+**Config: batch_max = {{batch_max}}**
+**Config: batch_min_count = {{batch_min_count}}**
+**Config: judgment_enabled = {{judgment_enabled}}**
+
+**If batch_enabled = "false": SKIP this entire step, proceed to process-branch
+(single-MR path).**
+
+Rebasing, gating, and pushing one ready MR at a time costs a full test suite
+run per MR (often ~10 min). When several MRs have queued up, batch them:
+stack them onto one rebase, gate once, and land them all in one push — or
+bisect to isolate a single red MR if the suite fails. P0/P1 MRs are never
+batched; they always take the single-MR path first so critical fixes aren't
+held up waiting for a batch to assemble.
+
+**Step 1: Check how many MRs are batch-eligible**
+
+```bash
+gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
+```
+
+This excludes P0/P1 MRs and anything younger than batch_min_age, sorts by
+priority score, and caps at batch_max. Read `.eligible_total` from the output.
+
+**If `.eligible_total` < {{batch_min_count}}: SKIP the rest of this step,
+proceed to process-branch.** Not enough has queued up to be worth batching
+this cycle — the single-MR path will process what's ready.
+
+**Step 2: If judgment_enabled = "true", pre-filter candidates through om review**
+
+The batch gate only re-runs the test suite — it does not review diffs. Before
+assembling the batch, review each candidate MR's diff in parallel (so this
+doesn't cost more wall-clock than reviewing one):
+
+```bash
+IDS=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json | jq -r '.batch[].ID')
+APPROVED=()
+for id in $IDS; do
+  branch=$(gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json | jq -r --arg id "$id" '.batch[] | select(.ID==$id) | .Branch')
+  (
+    scripts/om-gate.sh --dir . --base "origin/{{target_branch}}" --head "$branch" --mr "$id" --worker refinery --rig {{rig}}
+    echo "$id:$?" >> /tmp/om-batch-$$.result
+  ) &
+done
+wait
+```
+
+Any MR whose recorded exit code is 1 (request_changes) is dropped — it simply
+stays in the queue and gets reviewed again individually next cycle, same as
+a single-MR quality-review rejection. Exit code 2 (infra error) is fail-open
+by default: keep the MR in the batch unless the rig's om-gate config says
+`--fail-closed`. Build `APPROVED` from the IDs with exit 0 (or fail-open 2).
+
+If judgment_enabled = "false", skip straight to Step 3 with all candidates.
+
+**Step 3: Assemble, gate, and land the batch**
+
+```bash
+gt mq batch run <rig> --min-age {{batch_min_age}} --max {{batch_max}} --only <comma-separated APPROVED ids> --json
+```
+
+(Omit `--only` entirely if judgment_enabled = "false" — batch every eligible
+candidate.)
+
+This one command stacks the approved MRs via ancestry-preserving merges, runs
+the configured gate commands once, and either fast-forwards the whole batch to
+{{target_branch}} or bisects to isolate a red MR and lands the rest. It also
+runs the same post-merge cleanup as a single-MR merge (closes MR + source
+beads, deletes branches, nudges mayor) for every MR in `.merged[]` — but it
+does NOT send MERGED mail to Witness. You must do that yourself in Step 4.
+
+**Step 4: Notify Witness for every merged MR (REQUIRED)**
+
+For each entry in the command's `.merged[]` array:
+```bash
+gt mail send <rig>/witness -s "MERGED <worker>" -m "Branch: <branch>
+Issue: <source-issue>
+Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+using that entry's `.Worker`, `.Branch`, and `.SourceIssue` fields. Without
+this, polecat worktrees for batched MRs never get nuked.
+
+**Step 5: Leave culprits and conflicts alone**
+
+Entries in `.culprits[]` (isolated by bisection) and `.conflicts[]` (stack
+conflicts) are intentionally left untouched — no bead was closed, no branch
+deleted. They remain open/ready and will be picked up by the single-MR path
+(process-branch) on a future cycle, where existing conflict-handling and
+test-failure-handling logic already applies. Do not duplicate that handling
+here.
+
+**Step 6: Skip the single-MR path this cycle**
+
+Whether the batch fully landed, partially landed with a bisected culprit, or
+hit conflicts, skip process-branch through merge-push for this cycle — those
+steps exist for the single-MR path. Proceed to loop-check."""
+
+[[steps]]
 id = "process-branch"
 title = "Merge rehearsal"
-needs = ["merged-pr-sweep"]
+needs = ["batch-scan"]
 description = """
 Pick next branch from queue. Rehearse an ancestry-preserving merge against the MR's effective target branch.
 

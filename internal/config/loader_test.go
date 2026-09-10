@@ -440,6 +440,57 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 	if cfg.StaleClaimTimeout != "30m" {
 		t.Errorf("StaleClaimTimeout = %q, want '30m'", cfg.StaleClaimTimeout)
 	}
+	if cfg.IsBatchEnabled() {
+		t.Error("IsBatchEnabled should be false by default")
+	}
+	if cfg.GetBatchMinAge() != "1h" {
+		t.Errorf("GetBatchMinAge() = %q, want '1h'", cfg.GetBatchMinAge())
+	}
+	if cfg.GetBatchMax() != 12 {
+		t.Errorf("GetBatchMax() = %d, want 12", cfg.GetBatchMax())
+	}
+}
+
+func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
+	t.Parallel()
+	var cfg MergeQueueConfig // zero value, as if unmarshaled from JSON with no batch_* keys
+
+	if cfg.IsBatchEnabled() {
+		t.Error("IsBatchEnabled should default to false on zero value")
+	}
+	if got := cfg.GetBatchMinAge(); got != "1h" {
+		t.Errorf("GetBatchMinAge() = %q, want '1h'", got)
+	}
+	if got := cfg.GetBatchMax(); got != 12 {
+		t.Errorf("GetBatchMax() = %d, want 12", got)
+	}
+}
+
+func TestValidateMergeQueueConfig_Batch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     *MergeQueueConfig
+		wantErr bool
+	}{
+		{name: "valid batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "90m"}, wantErr: false},
+		{name: "empty batch_min_age is valid (uses default)", cfg: &MergeQueueConfig{}, wantErr: false},
+		{name: "unparseable batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "not-a-duration"}, wantErr: true},
+		{name: "zero batch_min_age is invalid", cfg: &MergeQueueConfig{BatchMinAge: "0s"}, wantErr: true},
+		{name: "negative batch_max is invalid", cfg: &MergeQueueConfig{BatchMax: -1}, wantErr: true},
+		{name: "positive batch_max is valid", cfg: &MergeQueueConfig{BatchMax: 20}, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateMergeQueueConfig(tt.cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateMergeQueueConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestLoadRigConfigNotFound(t *testing.T) {
@@ -552,6 +603,22 @@ func TestMergeSettingsCommand(t *testing.T) {
 		result := MergeSettingsCommand(nil, local)
 		if result.TestCommand != "local-test" {
 			t.Errorf("expected 'local-test', got %q", result.TestCommand)
+		}
+	})
+
+	t.Run("local overrides batch settings", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5}
+		local := &MergeQueueConfig{BatchEnabled: boolPtr(true), BatchMax: 20}
+		result := MergeSettingsCommand(repo, local)
+		if !result.IsBatchEnabled() {
+			t.Error("expected batch_enabled=true from local override")
+		}
+		if result.BatchMinAge != "2h" {
+			t.Errorf("expected batch_min_age='2h' (not overridden by local), got %q", result.BatchMinAge)
+		}
+		if result.BatchMax != 20 {
+			t.Errorf("expected batch_max=20 from local override, got %d", result.BatchMax)
 		}
 	})
 }

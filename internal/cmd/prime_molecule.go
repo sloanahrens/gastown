@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -443,12 +442,10 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
 
-	// MQ-specific vars: try settings/config.json first (legacy format), then
-	// fall back to the layered rig config (bead labels / wisp layer).
-	settingsPath := filepath.Join(rigPath, "settings", "config.json")
-	settings, sErr := config.LoadRigSettings(settingsPath)
-	if sErr == nil && settings != nil && settings.MergeQueue != nil {
-		mq := settings.MergeQueue
+	// MQ-specific vars: layer repo floor -> rig root config.json -> rig-local
+	// settings/config.json (same 3-tier precedence gt-me9t fixed for sling),
+	// falling back to bead labels only if none of those three sources exist.
+	if mq := rig.LoadEffectiveMergeQueueConfig(ctx.TownRoot, ctx.Rig); mq != nil {
 		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))
 		vars = append(vars, fmt.Sprintf("integration_branch_auto_land=%t", mq.IsIntegrationBranchAutoLandEnabled()))
 		vars = append(vars, fmt.Sprintf("run_tests=%t", mq.IsRunTestsEnabled()))
@@ -474,6 +471,9 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 			vars = append(vars, fmt.Sprintf("merge_strategy=%s", mq.MergeStrategy))
 		}
 		vars = append(vars, fmt.Sprintf("require_review=%t", mq.IsRequireReviewEnabled()))
+		vars = append(vars, fmt.Sprintf("batch_enabled=%t", mq.IsBatchEnabled()))
+		vars = append(vars, fmt.Sprintf("batch_min_age=%s", mq.GetBatchMinAge()))
+		vars = append(vars, fmt.Sprintf("batch_max=%d", mq.GetBatchMax()))
 		return vars
 	}
 
@@ -491,7 +491,7 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 					labelMap[label[:idx]] = label[idx+1:]
 				}
 			}
-			for _, key := range []string{"integration_branch_refinery_enabled", "integration_branch_auto_land", "run_tests", "delete_merged_branches", "setup_command", "typecheck_command", "lint_command", "test_command", "build_command", "merge_strategy", "require_review"} {
+			for _, key := range []string{"integration_branch_refinery_enabled", "integration_branch_auto_land", "run_tests", "delete_merged_branches", "setup_command", "typecheck_command", "lint_command", "test_command", "build_command", "merge_strategy", "require_review", "batch_enabled", "batch_min_age", "batch_max"} {
 				if val := labelMap[key]; val != "" {
 					vars = append(vars, fmt.Sprintf("%s=%s", key, val))
 				}

@@ -276,6 +276,21 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: max_concurrent must be non-negative", ErrMissingField)
 	}
 
+	// Validate batch_min_age if specified
+	if c.BatchMinAge != "" {
+		dur, err := time.ParseDuration(c.BatchMinAge)
+		if err != nil {
+			return fmt.Errorf("invalid batch_min_age: %w", err)
+		}
+		if dur <= 0 {
+			return fmt.Errorf("batch_min_age must be positive, got %v", dur)
+		}
+	}
+
+	if c.BatchMax < 0 {
+		return fmt.Errorf("%w: batch_max must be non-negative", ErrMissingField)
+	}
+
 	return nil
 }
 
@@ -386,6 +401,36 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		}
 		if local.RequireReview != nil {
 			result.RequireReview = local.RequireReview
+		}
+		if local.IntegrationBranchPolecatEnabled != nil {
+			result.IntegrationBranchPolecatEnabled = local.IntegrationBranchPolecatEnabled
+		}
+		if local.IntegrationBranchRefineryEnabled != nil {
+			result.IntegrationBranchRefineryEnabled = local.IntegrationBranchRefineryEnabled
+		}
+		if local.IntegrationBranchTemplate != "" {
+			result.IntegrationBranchTemplate = local.IntegrationBranchTemplate
+		}
+		if local.IntegrationBranchAutoLand != nil {
+			result.IntegrationBranchAutoLand = local.IntegrationBranchAutoLand
+		}
+		if local.VCSProvider != "" {
+			result.VCSProvider = local.VCSProvider
+		}
+		if local.JudgmentEnabled != nil {
+			result.JudgmentEnabled = local.JudgmentEnabled
+		}
+		if local.ReviewDepth != "" {
+			result.ReviewDepth = local.ReviewDepth
+		}
+		if local.BatchEnabled != nil {
+			result.BatchEnabled = local.BatchEnabled
+		}
+		if local.BatchMinAge != "" {
+			result.BatchMinAge = local.BatchMinAge
+		}
+		if local.BatchMax > 0 {
+			result.BatchMax = local.BatchMax
 		}
 	}
 	return result

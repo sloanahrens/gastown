@@ -1095,6 +1095,38 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	return &cfg, nil
 }
 
+// LoadEffectiveMergeQueueConfig layers a rig's merge_queue settings from the
+// three places operators actually write them, in priority order (lowest to
+// highest):
+//  1. Repo-committed floor: <rig>/mayor/rig/.gastown/settings.json
+//  2. Rig root config.json: <rig>/config.json (set at onboarding, gt-me9t)
+//  3. Rig-local overrides: <rig>/settings/config.json (operator tuning)
+//
+// Returns nil if none of the three sources define merge_queue settings.
+func LoadEffectiveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
+	rigPath := filepath.Join(townRoot, rigName)
+
+	var repoMQ *config.MergeQueueConfig
+	repoSettings, _ := config.LoadRepoSettings(filepath.Join(rigPath, "mayor", "rig"))
+	if repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
+	var rigRootMQ *config.MergeQueueConfig
+	if rigCfg, err := LoadRigConfig(rigPath); err == nil && rigCfg != nil {
+		rigRootMQ = rigCfg.MergeQueue
+	}
+
+	var localMQ *config.MergeQueueConfig
+	localSettings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json"))
+	if err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	mq := config.MergeSettingsCommand(repoMQ, rigRootMQ)
+	return config.MergeSettingsCommand(mq, localMQ)
+}
+
 // warnDeprecatedRigConfigKeys detects merge_queue keys in rig root config.json
 // that are silently ignored by json.Unmarshal (RigConfig has no merge_queue field).
 // Without this warning, users can set merge_queue.target_branch believing it
