@@ -238,20 +238,43 @@ func TestNestedShellCommands(t *testing.T) {
 	}
 }
 
-// TestQuotedDDLPayload pins the fix for SQL DDL patterns that are, in
-// practice, always passed quoted (dolt sql -q "...", psql -c "...", mysql
-// -e '...'), which shlex collapses into one multi-word token — invisible to
-// the old exact-token fragment match (finding 4, gt-wisp-db27).
-func TestQuotedDDLPayload(t *testing.T) {
+// TestQuotedSQLStaysOpaque pins mayor scope for gt-5ihs attempt 2: "SQL DDL
+// inside quotes is not a shell hazard; do not flag it." A quoted SQL
+// payload (dolt sql -q "...", psql -c "...", mysql -e '...') must NOT be
+// scanned for DDL fragments — every real false positive this guard has hit
+// (bead ids, mail bodies, a package-manager name inside an ordinary word)
+// came from treating quoted prose as command text, and SQL strings are the
+// same category of risk, not a shell hazard like bash -c/eval.
+func TestQuotedSQLStaysOpaque(t *testing.T) {
+	tests := []string{
+		`dolt sql -q "DROP TABLE issues"`,
+		`psql -c "TRUNCATE TABLE users"`,
+		`mysql -e "DROP DATABASE prod"`,
+		`dolt sql -q "SELECT * FROM issues"`,
+	}
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(command, 0)
+			if reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted SQL must stay opaque", command, reason)
+			}
+		})
+	}
+}
+
+// TestCommandSubstitutionRecursion pins mayor scope for gt-5ihs attempt 2:
+// recurse into $(...) and `...` command substitution, since these really do
+// execute as shell (unlike a quoted SQL string or mail body).
+func TestCommandSubstitutionRecursion(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
 		blocked bool
 	}{
-		{"dolt sql drop table", `dolt sql -q "DROP TABLE issues"`, true},
-		{"psql truncate table", `psql -c "TRUNCATE TABLE users"`, true},
-		{"mysql drop database", `mysql -e "DROP DATABASE prod"`, true},
-		{"quoted but safe select", `dolt sql -q "SELECT * FROM issues"`, false},
+		{"dollar-paren wraps git reset --hard", `echo $(git reset --hard)`, true},
+		{"backtick wraps sudo", "echo `sudo rm -rf /`", true},
+		{"dollar-paren safe", `echo $(ls -la)`, false},
+		{"backtick safe", "echo `date`", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

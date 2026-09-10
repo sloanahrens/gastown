@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -97,11 +98,15 @@ const maxDangerousNestDepth = 3
 
 // evaluateDangerousCommand runs every dangerous-pattern check against
 // command and, up to maxDangerousNestDepth, recurses into any shell command
-// it finds embedded as an argument (bash -c/sh -c/eval). Without this, a
-// wrapper like `bash -c "git reset --hard"` was invisible to every check:
-// shlex collapses the quoted payload into a single token, so none of the
+// it finds embedded as an argument (bash -c/sh -c/eval) or as a command
+// substitution ($(...) / `...`). Without this, a wrapper like
+// `bash -c "git reset --hard"` was invisible to every check: shlex
+// collapses the quoted payload into a single token, so none of the
 // fragment-based matchers (which require each fragment as its own token)
-// ever fire on it (finding 4, gt-wisp-db27).
+// ever fire on it. Quoted text that is NOT one of these shell-executing
+// forms (a SQL string, a mail body, a jq/sed script) deliberately stays
+// opaque — that is where this guard's real false positives have come from
+// (mayor scope, gt-5ihs attempt 2, gt-wisp-db27 finding 4).
 func evaluateDangerousCommand(command string, depth int) (reason, alternative string) {
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
@@ -146,8 +151,10 @@ func evaluateDangerousCommand(command string, depth int) (reason, alternative st
 	if depth >= maxDangerousNestDepth {
 		return "", ""
 	}
-	for _, nested := range nestedCommands(tokens, lowerTokens) {
-		if r, alt := evaluateDangerousCommand(nested, depth+1); r != "" {
+	nested := nestedCommands(tokens, lowerTokens)
+	nested = append(nested, commandSubstitutions(command)...)
+	for _, n := range nested {
+		if r, alt := evaluateDangerousCommand(n, depth+1); r != "" {
 			return r, alt
 		}
 	}
@@ -173,6 +180,31 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 		}
 	}
 	return nested
+}
+
+// commandSubstitutionPattern matches shell command substitution: $(...) or
+// `...`. Scanned against the raw (untokenized) command text, since shlex
+// has no notion of substitution grouping and would otherwise split
+// "$(rm -rf /)" across unrelated tokens. Non-nested only (a $(...) or
+// `...` containing its own nested substitution won't fully match) — good
+// enough for a guard that only needs to catch realistic single-level
+// wrapping, not parse arbitrary shell.
+var commandSubstitutionPattern = regexp.MustCompile(`\$\(([^()]*)\)|` + "`" + `([^` + "`" + `]*)` + "`")
+
+// commandSubstitutions extracts the inner command text of every $(...) or
+// `...` command substitution in command, so evaluateDangerousCommand can
+// recurse into it the same as a bash -c/eval payload (mayor scope, gt-5ihs
+// attempt 2: "recurse into ... command substitution").
+func commandSubstitutions(command string) []string {
+	var out []string
+	for _, m := range commandSubstitutionPattern.FindAllStringSubmatch(command, -1) {
+		if m[1] != "" {
+			out = append(out, m[1])
+		} else if m[2] != "" {
+			out = append(out, m[2])
+		}
+	}
+	return out
 }
 
 // shellTokenize splits a shell command into argv-like tokens the way a real
@@ -376,6 +408,16 @@ func matchesAllFragments(tokens []string, fragments []string) bool {
 	return true
 }
 
+// tokensContainFragment deliberately does NOT look inside a quoted,
+// multi-word token for word matches: mayor scope for gt-5ihs attempt 2 is
+// explicit that quoted text stays opaque outside the shell-invoker
+// recursion in evaluateDangerousCommand (nestedCommands) — "SQL DDL inside
+// quotes is not a shell hazard; do not flag it." Every false positive this
+// guard has hit (bead ids, mail bodies, a package-manager name inside an
+// ordinary word) came from scanning inside quoted prose; the earlier
+// word-boundary DDL fix reintroduced exactly that class of risk for SQL
+// strings. Recursing into sh -c/bash -c/eval/command-substitution payloads
+// is the correct, narrower fix — those really are shell commands.
 func tokensContainFragment(tokens []string, want string) bool {
 	for _, tok := range tokens {
 		if tok == want {
@@ -386,22 +428,6 @@ func tokensContainFragment(tokens []string, want string) bool {
 		letter := rune(want[1])
 		for _, tok := range tokens {
 			if len(tok) > 2 && tok[0] == '-' && tok[1] != '-' && strings.ContainsRune(tok[1:], letter) {
-				return true
-			}
-		}
-	}
-	// A quoted argument collapses to one token with embedded spaces (e.g.
-	// `dolt sql -q "DROP TABLE issues"` tokenizes to one token
-	// "drop table issues"), which the exact-token check above never
-	// matches — that made every DDL fragment pattern dead against realistic,
-	// always-quoted SQL invocations (finding 4, gt-wisp-db27). Look for the
-	// fragment as a whole word inside such multi-word tokens too.
-	for _, tok := range tokens {
-		if !strings.Contains(tok, " ") {
-			continue
-		}
-		for _, word := range strings.Fields(tok) {
-			if word == want {
 				return true
 			}
 		}
