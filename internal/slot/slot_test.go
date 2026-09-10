@@ -435,6 +435,60 @@ func TestAcquire_ProceedsOnFlockWhenDockerUnreachable(t *testing.T) {
 	}
 }
 
+// TestAcquire_DoesNotProceedOnWedgedDockerDaemon is the regression test for
+// om-editorial attempt 3's minor finding: "unreachable daemon ⇒ no
+// containers" only holds when the daemon itself refused the connection. A
+// docker ps call that times out (the daemon is wedged, not absent) or fails
+// for some other reason (e.g. a permission-denied socket) says nothing
+// about whether containers are running, so Acquire must treat it like a
+// real unwrapped container — release and keep waiting — never as a green
+// light to hand out the slot.
+func TestAcquire_DoesNotProceedOnWedgedDockerDaemon(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return nil, errors.New("docker ps did not respond within 5s: context deadline exceeded")
+	}
+
+	timeout := DefaultPollInterval + 500*time.Millisecond
+	start := time.Now()
+	_, err := Acquire(townRoot, "waiter", timeout)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Acquire succeeded while docker ps was timing out (wedged daemon) — should be inconclusive, not treated as free")
+	}
+	if elapsed < timeout {
+		t.Fatalf("Acquire returned after %s, before its %s timeout — it treated the wedged-daemon error as a green light instead of waiting", elapsed, timeout)
+	}
+}
+
+// TestIsDaemonUnreachable pins the exact classification isDaemonUnreachable
+// draws: only the docker CLI's own "cannot connect to the docker daemon"
+// wording (covers both "not running" and "connection refused") counts as
+// verified-empty; a timeout or a permission-denied socket does not.
+func TestIsDaemonUnreachable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"daemon not running", errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), true},
+		{"mixed case", errors.New("cannot CONNECT to the DOCKER daemon"), true},
+		{"wedged/timeout", errors.New("docker ps did not respond within 5s: context deadline exceeded"), false},
+		{"permission denied", errors.New("docker ps failed: permission denied while trying to connect to the Docker daemon socket"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDaemonUnreachable(tt.err); got != tt.want {
+				t.Errorf("isDaemonUnreachable(%q) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestAcquire_SameProcessSecondCallStillContends guards the boundary of the
 // reentrant fast path: two Acquire calls from the *same* process/PID (no
 // subprocess involved) must NOT take the reentrant shortcut — that would

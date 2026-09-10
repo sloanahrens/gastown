@@ -67,7 +67,19 @@ const dockerPSTimeout = 5 * time.Second
 // spawned subprocess. Without reentrancy, that nested acquire would block
 // forever on a flock its own ancestor process is still holding while
 // waiting for the child to exit.
-const reentrantEnvVar = "GT_SLOT_HELD"
+//
+// Deliberately NOT prefixed GT_/BD_/BEADS_ (gt-tuiy attempt 4, CRITICAL):
+// internal/testutil's hermetic test harness scrubs every variable with
+// those prefixes from a test binary's environment before running any test
+// (see internal/testutil/hermetic.go's scrubProcessEnv), specifically so a
+// polecat session's ambient GT_*/BD_* vars can't leak into test
+// subprocesses. A reentrant child spawned BY a hermetic test binary (e.g.
+// internal/cmd's mq_batch reentrancy test) re-runs that same package's
+// TestMain and gets scrubbed before its own test body ever sees this
+// marker — a GT_-prefixed name would make the reentrant fast path
+// untestable across that boundary even though it fires for real in
+// production.
+const reentrantEnvVar = "GASTOWN_SLOT_HELD"
 
 // reentrantHolder parses reentrantEnvVar's value, returning the recorded
 // lock path and PID.
@@ -96,9 +108,11 @@ var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 // runningGateContainers lists "<image> <names>" for every currently running
 // Docker container whose image or name matches gateContainerPatterns. A
 // non-nil error means the check could not be performed (docker daemon
-// unreachable) — callers must treat that as "unknown", never as "no
-// containers running". Declared as a var so tests can substitute a fake
-// docker CLI response.
+// unreachable, wedged, or refused the connection for some other reason) —
+// callers must treat that as "unknown", never as "no containers running",
+// except the specific isDaemonUnreachable case Acquire distinguishes (see
+// its doc comment). Declared as a var so tests can substitute a fake docker
+// CLI response.
 var runningGateContainers = func() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerPSTimeout)
 	defer cancel()
@@ -115,9 +129,51 @@ var runningGateContainers = func() ([]string, error) {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("docker ps did not respond within %s: %w", dockerPSTimeout, ctx.Err())
 		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			// Fold the docker CLI's own stderr into the error text so
+			// isDaemonUnreachable can tell "daemon refused the connection"
+			// (safe to infer nothing is running) apart from other exit
+			// failures like a permission-denied socket (not safe to infer
+			// anything) — exec.ExitError.Error() alone is just "exit status
+			// N" and loses that distinction.
+			return nil, fmt.Errorf("docker ps failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return nil, err
 	}
 	return matchGateContainers(string(out)), nil
+}
+
+// isDaemonUnreachable reports whether a runningGateContainers error means
+// the docker daemon itself refused the connection (the CLI's own message
+// for "not running" and "connection refused" — Docker emits the same
+// wording for both), as opposed to a wedged daemon (docker ps timed out,
+// see dockerPSTimeout), a permission-denied socket, or some other failure.
+// Only the daemon-refused-connection case licenses "nothing could be
+// running" — the others mean the check was inconclusive, not that it came
+// back empty (om-editorial attempt 3 minor finding: "unreachable daemon ⇒
+// no containers" is false for a wedged daemon or a permission-denied
+// socket).
+func isDaemonUnreachable(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "cannot connect to the docker daemon")
+}
+
+// SetContainerListerForTest overrides the function Acquire/Status use to
+// list running gate containers, for tests in OTHER packages that cannot
+// reach the unexported runningGateContainers var directly the way this
+// package's own tests do (see stubNoContainers in slot_test.go).
+// internal/cmd's batch-slot tests drive Acquire through
+// acquireBatchGateSlot and must never shell out to the real docker CLI: a
+// stray dolt/testcontainers/ryuk container on a shared Gas Town host would
+// otherwise make Acquire poll for the full batchSlotTimeout and hang the
+// whole test binary (gt-tuiy attempt 4, CRITICAL). Returns a restore func
+// the caller must invoke (typically via t.Cleanup) to put the real lister
+// back — the override is process-wide state shared by every test in the
+// binary.
+func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
+	prev := runningGateContainers
+	runningGateContainers = fn
+	return func() { runningGateContainers = prev }
 }
 
 // matchGateContainers filters raw `docker ps --format {{.Image}} {{.Names}}`
@@ -184,12 +240,16 @@ type Handle struct {
 // still occupying the Docker VM (gt-tuiy). So a successful flock acquire is
 // re-verified against `docker ps`: if matching containers are already
 // running, Acquire releases the flock and keeps waiting rather than handing
-// out a slot that isn't actually safe to use. If the docker daemon can't be
-// reached to check, Acquire proceeds on the flock alone instead of failing
-// or waiting: an unreachable daemon can't be running any containers either,
-// so there is nothing left to verify (gt-tuiy attempt 2 — the earlier
-// fail-fast behavior turned a stopped Docker Desktop into a town-wide gate
-// outage even for suites that never touch Docker).
+// out a slot that isn't actually safe to use. If the docker daemon refused
+// the connection, Acquire proceeds on the flock alone instead of failing or
+// waiting: a daemon nothing can reach can't be running any containers
+// either, so there is nothing left to verify (gt-tuiy attempt 2 — the
+// earlier fail-fast behavior turned a stopped Docker Desktop into a
+// town-wide gate outage even for suites that never touch Docker). Any other
+// docker-ps failure (a wedged daemon that timed out, a permission-denied
+// socket) is inconclusive rather than verified-empty, so it is treated like
+// a real unwrapped container: release and keep waiting (see
+// isDaemonUnreachable).
 //
 // role is a short human-readable identifier for the caller (e.g.
 // "gastown/refinery" or a rig/MR id) and is recorded in the owner file for
@@ -215,6 +275,22 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 	hasDeadline := timeout > 0
 	deadline := time.Now().Add(timeout)
 
+	// grant hands out the slot: it records display-only owner metadata and
+	// the reentrant marker (both best-effort; the write failing must not
+	// fail the acquire, since the real lock is already held), then returns
+	// the Handle. Shared by the two success paths below (clear docker check,
+	// daemon-refused-connection) so they can't drift out of sync.
+	grant := func(unlock func()) *Handle {
+		h := &Handle{townRoot: townRoot, unlock: unlock}
+		_ = atomicfile.EnsureDirAndWriteJSON(OwnerPath(townRoot), Owner{
+			Role:       role,
+			PID:        os.Getpid(),
+			AcquiredAt: time.Now(),
+		})
+		_ = os.Setenv(reentrantEnvVar, lockPath+"|"+strconv.Itoa(os.Getpid()))
+		return h
+	}
+
 	for {
 		unlock, ok, err := lock.FlockTryAcquire(lockPath)
 		if err != nil {
@@ -222,8 +298,16 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 		}
 		if ok {
 			containers, containerErr := runningGateContainers()
-			if containerErr != nil {
-				// The daemon/docker is unreachable: no Docker container can
+			switch {
+			case containerErr != nil && !isDaemonUnreachable(containerErr):
+				// Inconclusive (a wedged daemon that timed out, a
+				// permission-denied socket, or some other exec failure) —
+				// this does NOT license "nothing could be running" the way
+				// isDaemonUnreachable does. Release and keep waiting exactly
+				// as if a real unwrapped container were found.
+				unlock()
+			case containerErr != nil:
+				// The daemon refused the connection: no Docker container can
 				// be running against it either, so there is nothing an
 				// unwrapped suite could be occupying — the flock we already
 				// hold is sufficient on its own. Proceed rather than fail:
@@ -234,25 +318,15 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 				// reports DockerUnknown/Busy for display; that's a distinct,
 				// more conservative concern from Acquire's "is it safe to
 				// hand out the slot" question.
-				fmt.Fprintf(os.Stderr, "gt slot: docker ps unreachable (%v); proceeding on flock alone\n", containerErr)
-				containers = nil
+				fmt.Fprintf(os.Stderr, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
+				return grant(unlock), nil
+			case len(containers) == 0:
+				return grant(unlock), nil
+			default:
+				// An unwrapped suite already has containers up — not safe to
+				// hand the slot out for, so release and keep waiting.
+				unlock()
 			}
-			if len(containers) == 0 {
-				h := &Handle{townRoot: townRoot, unlock: unlock}
-				// Best-effort: the owner file is display-only, so a write
-				// failure here must not fail the acquire (we already hold
-				// the real lock).
-				_ = atomicfile.EnsureDirAndWriteJSON(OwnerPath(townRoot), Owner{
-					Role:       role,
-					PID:        os.Getpid(),
-					AcquiredAt: time.Now(),
-				})
-				_ = os.Setenv(reentrantEnvVar, lockPath+"|"+strconv.Itoa(os.Getpid()))
-				return h, nil
-			}
-			// An unwrapped suite already has containers up — not safe to
-			// hand the slot out for, so release and keep waiting.
-			unlock()
 		}
 		if hasDeadline && time.Now().After(deadline) {
 			return nil, fmt.Errorf("timed out after %s waiting for container-gate slot", timeout)
