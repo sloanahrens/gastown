@@ -1042,6 +1042,11 @@ esac
 		cmdSem:             make(chan struct{}, maxConcurrentCommands),
 		dashboardPollTickC: tickC,
 		dashboardPollTick:  func(ran bool) { tickDone <- ran },
+		// This test exercises the dashboardClients gate (gt-c9rl), not the
+		// compute-cache TTL (gt-978i) — keep the cache always-stale so every
+		// connected tick is free to run and its ran/skip outcome reflects
+		// client count alone.
+		dashboardComputeCacheTTL: time.Nanosecond,
 	}
 
 	countCalls := func() int {
@@ -1158,6 +1163,274 @@ esac
 	}
 	if got := countCalls(); got <= baseline {
 		t.Fatalf("gt call count %d did not grow after reconnecting (baseline %d)", got, baseline)
+	}
+}
+
+// TestSSEDashboardPollSkipsWhenCacheFresh is a regression test for gt-978i:
+// even after batching each tick's per-agent mail lookups into a constant
+// number of bd calls, computeDashboardHash still ran on every 2s tick while
+// any SSE client was connected. pollDashboardHash must also skip recomputing
+// while the last computed model is still within dashboardComputeCacheTTL,
+// so a client sitting on an open dashboard tab doesn't keep the gt
+// subprocess load running at the full tick rate forever.
+func TestSSEDashboardPollSkipsWhenCacheFresh(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "status --json") printf '{"agents":[]}\n' ;;
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	tickC := make(chan time.Time)
+	tickDone := make(chan bool, 1)
+	h := &APIHandler{
+		gtPath:             gtPath,
+		workDir:            t.TempDir(),
+		defaultRunTimeout:  5 * time.Second,
+		maxRunTimeout:      10 * time.Second,
+		cmdSem:             make(chan struct{}, maxConcurrentCommands),
+		dashboardPollTickC: tickC,
+		dashboardPollTick:  func(ran bool) { tickDone <- ran },
+		// Long enough that every tick in this test lands inside it, so any
+		// tick beyond the first must be skipped for freshness, not timing.
+		dashboardComputeCacheTTL: time.Minute,
+	}
+
+	step := func() bool {
+		t.Helper()
+		select {
+		case tickC <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not accept a tick — is pollDashboardHash running?")
+		}
+		select {
+		case ran := <-tickDone:
+			return ran
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not report a tick outcome")
+			return false
+		}
+	}
+
+	countCalls := func() int {
+		data, err := os.ReadFile(callLog)
+		if err != nil {
+			return 0
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return 0
+		}
+		return len(strings.Split(trimmed, "\n"))
+	}
+
+	// Connect one client so ticks aren't skipped for lack of clients.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handleSSE(httptest.NewRecorder(), req)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.dashboardClients.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("dashboardClients did not increment after connecting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if ran := step(); !ran {
+		t.Fatalf("expected the first tick to run computeDashboardHash")
+	}
+	baseline := countCalls()
+	if baseline == 0 {
+		t.Fatalf("expected computeDashboardHash to have invoked gt at least once")
+	}
+
+	// Several more ticks within the TTL, still with a client connected,
+	// must all be skipped for freshness — not for lack of clients.
+	for i := 0; i < 5; i++ {
+		if ran := step(); ran {
+			t.Fatalf("tick %d ran computeDashboardHash while the cache was still fresh", i)
+		}
+		if got := countCalls(); got != baseline {
+			t.Fatalf("gt was invoked while the cache was still fresh (total %d, want %d)", got, baseline)
+		}
+	}
+}
+
+// countingSessionsHooksFetcher wraps MockConvoyFetcher, counting calls to
+// FetchSessions and FetchHooks. All other ConvoyFetcher methods are
+// promoted unchanged from the embedded mock.
+type countingSessionsHooksFetcher struct {
+	*MockConvoyFetcher
+	mu           sync.Mutex
+	sessionCalls int
+	hookCalls    int
+}
+
+func (f *countingSessionsHooksFetcher) FetchSessions() ([]SessionRow, error) {
+	f.mu.Lock()
+	f.sessionCalls++
+	f.mu.Unlock()
+	return f.MockConvoyFetcher.FetchSessions()
+}
+
+func (f *countingSessionsHooksFetcher) FetchHooks() ([]HookRow, error) {
+	f.mu.Lock()
+	f.hookCalls++
+	f.mu.Unlock()
+	return f.MockConvoyFetcher.FetchHooks()
+}
+
+func (f *countingSessionsHooksFetcher) calls() (sessions, hooks int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionCalls, f.hookCalls
+}
+
+// TestComputeDashboardHashUsesFetcherNotGtStatus is a regression test for
+// gt-978i: computeDashboardHash used to shell out to "gt status --json" on
+// every cache-miss tick. That subprocess re-discovers every rig from
+// scratch and, even after earlier gt-978i work batched each rig's own
+// per-agent mail/hook lookups, still issues several bd/tmux calls per rig —
+// the acceptance criterion on this bead measured that amplitude as a
+// ~180-process burst under a single SSE client. computeDashboardHash must
+// instead reuse the same batched, in-process fetcher ConvoyHandler already
+// uses to render the page (FetchSessions + FetchHooks — each a single
+// bd/tmux call regardless of town size), and must never invoke "gt status"
+// as a subprocess to do it.
+func TestComputeDashboardHashUsesFetcherNotGtStatus(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	// "status --json" is deliberately absent from the allowed cases: if
+	// computeDashboardHash still shells out to it, this fake exits non-zero
+	// and the probe's goroutine (which ignores the error) would silently
+	// swallow the failure — so the real assertion is countCalls("status")
+	// below, not this script's exit code.
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	fetcher := &countingSessionsHooksFetcher{MockConvoyFetcher: &MockConvoyFetcher{
+		Sessions: []SessionRow{{Name: "gt-gastown-onyx"}},
+		Hooks:    []HookRow{{ID: "gt-978i"}},
+	}}
+
+	h := &APIHandler{
+		gtPath:            gtPath,
+		workDir:           t.TempDir(),
+		defaultRunTimeout: 5 * time.Second,
+		maxRunTimeout:     10 * time.Second,
+		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		fetcher:           fetcher,
+	}
+
+	hash := h.computeDashboardHash(context.Background())
+	if hash == "" {
+		t.Fatalf("expected a non-empty hash")
+	}
+
+	sessionCalls, hookCalls := fetcher.calls()
+	if sessionCalls == 0 {
+		t.Fatalf("expected computeDashboardHash to call FetchSessions, got 0 calls")
+	}
+	if hookCalls == 0 {
+		t.Fatalf("expected computeDashboardHash to call FetchHooks, got 0 calls")
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("expected gt hooks list / gt mail inbox to have run: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "status --json" {
+			t.Fatalf("computeDashboardHash invoked \"gt status --json\" as a subprocess; it must use the fetcher instead")
+		}
+	}
+
+	// Changing the fetcher's underlying data must change the hash: this
+	// probe still has to detect real state changes, not just avoid the
+	// subprocess.
+	fetcher.MockConvoyFetcher.Hooks = []HookRow{{ID: "gt-978i"}, {ID: "gt-new"}}
+	hash2 := h.computeDashboardHash(context.Background())
+	if hash2 == hash {
+		t.Fatalf("expected hash to change when FetchHooks data changed")
+	}
+}
+
+// hangingSessionsFetcher blocks FetchSessions until unblocked (or forever, if
+// the test never unblocks it), simulating a bd/tmux call stuck under the
+// exact Dolt contention this bead is about.
+type hangingSessionsFetcher struct {
+	*MockConvoyFetcher
+	unblock chan struct{}
+}
+
+func (f *hangingSessionsFetcher) FetchSessions() ([]SessionRow, error) {
+	<-f.unblock
+	return f.MockConvoyFetcher.FetchSessions()
+}
+
+// TestComputeDashboardHashTimesOutWhenFetcherHangs is a regression test for
+// gt-978i: ConvoyFetcher methods take no context, so computeDashboardHash's
+// fetcher-backed "status:" probe must independently bound how long it waits
+// on them. Without that bound, a single stuck bd/tmux call would block this
+// goroutine — and therefore every later tick, since pollDashboardHash runs
+// on one shared goroutine for the process lifetime — well past the
+// function's advertised 5s budget, silently reintroducing the kind of stall
+// this bead's fix is meant to prevent. A fetcher whose FetchSessions never
+// returns must still make computeDashboardHash return within that budget.
+func TestComputeDashboardHashTimesOutWhenFetcherHangs(t *testing.T) {
+	fetcher := &hangingSessionsFetcher{
+		MockConvoyFetcher: &MockConvoyFetcher{Hooks: []HookRow{{ID: "gt-978i"}}},
+		unblock:           make(chan struct{}), // never closed: FetchSessions hangs forever
+	}
+
+	h := &APIHandler{
+		gtPath:            filepath.Join(t.TempDir(), "gt-does-not-exist"),
+		workDir:           t.TempDir(),
+		defaultRunTimeout: 5 * time.Second,
+		maxRunTimeout:     10 * time.Second,
+		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		fetcher:           fetcher,
+	}
+
+	done := make(chan string, 1)
+	go func() {
+		done <- h.computeDashboardHash(context.Background())
+	}()
+
+	select {
+	case <-done:
+		// Returned in time — the hung status: probe was abandoned rather
+		// than blocking the whole call, as required.
+	case <-time.After(7 * time.Second):
+		t.Fatalf("computeDashboardHash did not return within 7s while FetchSessions hung indefinitely")
 	}
 }
 

@@ -360,6 +360,120 @@ func TestResolveBeadsDir(t *testing.T) {
 	}
 }
 
+// TestRouterBatchMailSummaries is a regression test for gt-978i: gt status
+// --json used to call GetMailbox(address).List() once per agent identity,
+// each spawning 2-3 bd subprocesses on its own. In a town with dozens of
+// identities and an SSE dashboard client connected, that fanned out to
+// ~150-180 bd processes every 2s poll tick. BatchMailSummaries must compute
+// the same per-address unread counts and first-unread-subject using exactly
+// two bd calls (one for issue-backed messages, one for wisps) no matter how
+// many addresses are requested, and must attribute assignee vs CC matches to
+// the correct address without double-counting a message that matches an
+// address both ways.
+//
+// This also regression-tests two wiring defects found in an earlier attempt
+// (gt-978i bounce notes): (1) callers pass GGT addresses like
+// "gastown/crew/max", but messages are stored under the AddressToIdentity-
+// normalized identity ("gastown/max") — querying the raw address matches
+// nothing in a real DB. The fake bd below only returns rows for a query that
+// names the normalized identity, so a regression to querying the raw address
+// makes the fixture invisible and the count assertions fail. (2) a message
+// carrying the "read" label must not count as unread, exactly like the
+// per-identity path's bm.Status == "closed" || bm.HasLabel("read") check —
+// the fixture includes an already-read issue and an already-read wisp for
+// the same address specifically to catch a regression that drops that
+// filter.
+func TestRouterBatchMailSummaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake bd is POSIX-only")
+	}
+
+	binDir := t.TempDir()
+	callLog := filepath.Join(t.TempDir(), "bd-sql.log")
+	fakeBD := filepath.Join(binDir, "bd")
+	// The fixture identity "gastown/max" is what "gastown/crew/max" must
+	// normalize to (AddressToIdentity strips the "crew/" role segment). The
+	// fake only emits the gastown/max-owned rows when the query's identity
+	// list actually names the normalized, quoted identity 'gastown/max' —
+	// simulating a real DB where a message is never assigned to the raw,
+	// un-normalized address, so a query for the raw address returns nothing.
+	script := `#!/bin/sh
+if [ "$1" = "sql" ]; then
+  printf '%s\n' "$3" >> "$BD_SQL_LOG"
+  case "$3" in
+    *"FROM issues"*)
+      case "$3" in
+        *"'gastown/max'"*)
+          printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and mayor","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:mayor/","is_read":0}]'
+          ;;
+        *)
+          printf '[]\n'
+          ;;
+      esac
+      ;;
+    *"FROM wisps"*)
+      case "$3" in
+        *"'gastown/max'"*)
+          printf '%s\n' '[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-already-read","title":"Wisp already read","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,read","assignee_match":1,"cc_match":0}]'
+          ;;
+        *)
+          printf '[]\n'
+          ;;
+      esac
+      ;;
+    *)
+      printf '[]\n'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected bd args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_SQL_LOG", callLog)
+
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	// "gastown/crew/max" is the raw GGT address form (as discoverRigAgents
+	// builds it); it must be normalized to "gastown/max" before querying.
+	summaries, err := r.BatchMailSummaries([]string{"gastown/crew/max", "mayor/"})
+	if err != nil {
+		t.Fatalf("BatchMailSummaries: %v", err)
+	}
+
+	// gastown/crew/max: assignee on issue-direct-open and wisp-direct, CC on
+	// issue-cc-both — 3 unread. issue-already-read and wisp-already-read are
+	// assigned to the same identity but carry is_read/"read" and must not
+	// count. The summary must key off the ORIGINAL requested address
+	// ("gastown/crew/max"), not the normalized identity used for querying.
+	if got := summaries["gastown/crew/max"].UnreadCount; got != 3 {
+		t.Errorf("gastown/crew/max UnreadCount = %d, want 3", got)
+	}
+	if got := summaries["gastown/crew/max"].FirstSubject; got != "Direct open" {
+		t.Errorf("gastown/crew/max FirstSubject = %q, want %q", got, "Direct open")
+	}
+
+	// mayor/: CC only, on issue-cc-both. 1 unread total.
+	if got := summaries["mayor/"].UnreadCount; got != 1 {
+		t.Errorf("mayor/ UnreadCount = %d, want 1", got)
+	}
+	if got := summaries["mayor/"].FirstSubject; got != "CC to max and mayor" {
+		t.Errorf("mayor/ FirstSubject = %q, want %q", got, "CC to max and mayor")
+	}
+
+	logBytes, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	queries := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(queries) != 2 {
+		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; log:\n%s", len(queries), string(logBytes))
+	}
+}
+
 func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a bash bd stub")

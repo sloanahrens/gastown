@@ -1653,6 +1653,17 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 		{constants.RoleDeacon, constants.RoleDeacon + "/", deaconSession, "health-check", beads.DeaconBeadIDTown()},
 	}
 
+	// Batch-fetch mail summaries for all agents in one pair of bd calls
+	// instead of one bd subprocess fan-out per agent (gt-978i).
+	var mailSummaries map[string]mail.MailSummary
+	if !skipMail && mailRouter != nil {
+		addresses := make([]string, len(agentDefs))
+		for i, d := range agentDefs {
+			addresses[i] = d.address
+		}
+		mailSummaries, _ = mailRouter.BatchMailSummaries(addresses)
+	}
+
 	agents := make([]AgentRuntime, len(agentDefs))
 	var wg sync.WaitGroup
 
@@ -1704,9 +1715,9 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 				}
 			}
 
-			// Get mail info (skip if --fast)
+			// Apply pre-fetched mail summary (skip if --fast)
 			if !skipMail {
-				populateMailInfo(&agent, mailRouter)
+				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
 
 			agents[idx] = agent
@@ -1717,30 +1728,12 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 	return agents
 }
 
-// populateMailInfo fetches unread mail count and first subject for an agent
-func populateMailInfo(agent *AgentRuntime, router *mail.Router) {
-	if router == nil {
-		return
-	}
-	mailbox, err := router.GetMailbox(agent.Address)
-	if err != nil {
-		return
-	}
-	messages, err := mailbox.List()
-	if err != nil {
-		return
-	}
-	firstSubjectSet := false
-	for _, msg := range messages {
-		if msg.Read {
-			continue
-		}
-		agent.UnreadMail++
-		if !firstSubjectSet {
-			agent.FirstSubject = msg.Subject
-			firstSubjectSet = true
-		}
-	}
+// applyMailSummary copies a pre-fetched batch mail summary onto an agent.
+// Summaries come from Router.BatchMailSummaries, fetched once per set of
+// agents rather than once per agent (gt-978i).
+func applyMailSummary(agent *AgentRuntime, summary mail.MailSummary) {
+	agent.UnreadMail = summary.UnreadCount
+	agent.FirstSubject = summary.FirstSubject
 }
 
 // detectCurrentDNDStatus returns DND status for the currently resolved role context.
@@ -1849,6 +1842,17 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 		return nil
 	}
 
+	// Batch-fetch mail summaries for all agents in this rig in one pair of
+	// bd calls instead of one bd subprocess fan-out per agent (gt-978i).
+	var mailSummaries map[string]mail.MailSummary
+	if !skipMail && mailRouter != nil {
+		addresses := make([]string, len(defs))
+		for i, d := range defs {
+			addresses[i] = d.address
+		}
+		mailSummaries, _ = mailRouter.BatchMailSummaries(addresses)
+	}
+
 	// Fetch all agents in parallel
 	agents := make([]AgentRuntime, len(defs))
 	var wg sync.WaitGroup
@@ -1887,9 +1891,9 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 				}
 			}
 
-			// Get mail info (skip if --fast)
+			// Apply pre-fetched mail summary (skip if --fast)
 			if !skipMail {
-				populateMailInfo(&agent, mailRouter)
+				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
 
 			agents[idx] = agent

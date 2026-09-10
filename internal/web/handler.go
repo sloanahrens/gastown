@@ -472,6 +472,10 @@ func NewDashboardMux(fetcher ConvoyFetcher, webCfg *config.WebTimeoutsConfig) (h
 	defaultRunTimeout := config.ParseDurationOrDefault(webCfg.DefaultRunTimeout, 30*time.Second)
 	maxRunTimeout := config.ParseDurationOrDefault(webCfg.MaxRunTimeout, 60*time.Second)
 	apiHandler := NewAPIHandler(defaultRunTimeout, maxRunTimeout, csrfToken)
+	// Share the same fetcher ConvoyHandler renders the page with, so the
+	// dashboard-hash probe (computeDashboardHash) reuses its batched,
+	// in-process calls instead of shelling out to "gt status --json" (gt-978i).
+	apiHandler.fetcher = fetcher
 
 	// Create static file server from embedded files
 	staticFS, err := fs.Sub(staticFiles, "static")

@@ -66,6 +66,15 @@ type APIHandler struct {
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
 
+	// fetcher is the same batched, in-process ConvoyFetcher used by
+	// ConvoyHandler to render the dashboard page. computeDashboardHash uses
+	// it instead of shelling out to "gt status --json" (gt-978i): that
+	// subprocess re-discovers every rig from scratch and, even after
+	// batching each rig's own per-agent mail/hook lookups, still issues
+	// several bd/tmux calls per rig on every cache-miss tick. A nil fetcher
+	// (struct-literal test handlers that don't set it) just skips that probe.
+	fetcher ConvoyFetcher
+
 	// dashboardPollOnce starts the single shared dashboard-hash poller the
 	// first time an SSE client connects, regardless of how many clients
 	// connect afterward.
@@ -74,6 +83,18 @@ type APIHandler struct {
 	dashboardMu sync.RWMutex
 	// dashboardHash is the last computed dashboard state hash.
 	dashboardHash string
+	// dashboardComputeTime is when computeDashboardHash last actually ran.
+	// pollDashboardHash skips recomputation while this is fresher than
+	// dashboardComputeCacheTTL, even with SSE clients connected: the assembled
+	// dashboard model doesn't need finer resolution than that, and recomputing
+	// every 2s tick was the other half of the gt-978i fan-out (the batched
+	// per-agent mail lookup fixed the per-tick cost; this fixes the per-tick
+	// frequency).
+	dashboardComputeTime time.Time
+	// dashboardComputeCacheTTL overrides the minimum interval between actual
+	// computeDashboardHash runs. Zero (the default) means
+	// dashboardComputeCacheTTLDefault. Tests use a much shorter value.
+	dashboardComputeCacheTTL time.Duration
 	// dashboardHashCh is closed (and replaced with a fresh channel) every
 	// time dashboardHash changes, broadcasting the update to every SSE
 	// connection currently blocked waiting on it.
@@ -85,10 +106,9 @@ type APIHandler struct {
 	// production cadence under host load (gt-axh).
 	dashboardPollInterval time.Duration
 	// dashboardClients counts currently-connected SSE clients. pollDashboardHash
-	// skips computeDashboardHash (which shells out to gt for every agent
-	// identity) while this is zero, so a dashboard opened once and then closed
-	// in every tab stops spawning subprocesses instead of polling forever
-	// (gt-c9rl).
+	// skips computeDashboardHash while this is zero, so a dashboard opened
+	// once and then closed in every tab stops spawning subprocesses instead
+	// of polling forever (gt-c9rl).
 	dashboardClients atomic.Int64
 	// dashboardPollTickC, when non-nil, replaces the real time.Ticker as the
 	// source of poll ticks: pollDashboardHash processes exactly one tick per
@@ -123,6 +143,12 @@ const optionsFetchTimeout = 10 * time.Second
 // dashboardPollIntervalDefault is the production cadence for
 // pollDashboardHash when dashboardPollInterval is unset.
 const dashboardPollIntervalDefault = 2 * time.Second
+
+// dashboardComputeCacheTTLDefault is the minimum interval between actual
+// computeDashboardHash runs when dashboardComputeCacheTTL is unset. The
+// 2-second poll tick only decides whether to check for a change; the
+// underlying model is assembled at most this often (gt-978i).
+const dashboardComputeCacheTTLDefault = 30 * time.Second
 
 // maxConcurrentCommands limits how many gt subprocesses can run at once.
 // handleOptions alone spawns 7; allow headroom for other concurrent handlers.
@@ -2310,15 +2336,19 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 // pollDashboardHash runs for the lifetime of the process on a single shared
-// goroutine (started via dashboardPollOnce), recomputing the dashboard hash
-// every 2 seconds and broadcasting changes to every connected SSE client by
-// closing dashboardHashCh. This keeps the underlying gt subprocess load at a
-// constant O(1) regardless of how many dashboard tabs or SSE reconnects are
-// open — see handleSSE. Once started it never stops (dashboardPollOnce only
-// ever fires once), so it also skips computeDashboardHash entirely while
-// dashboardClients is zero: otherwise a dashboard opened once and later
-// closed in every tab would keep spawning per-identity gt subprocesses on
-// every tick forever (gt-c9rl).
+// goroutine (started via dashboardPollOnce), ticking every 2 seconds but
+// only actually recomputing the dashboard hash at most once per
+// dashboardComputeCacheTTL, broadcasting changes to every connected SSE
+// client by closing dashboardHashCh. This keeps the underlying gt subprocess
+// load at a constant O(1) regardless of how many dashboard tabs or SSE
+// reconnects are open — see handleSSE. Once started it never stops
+// (dashboardPollOnce only ever fires once), so it also skips
+// computeDashboardHash entirely while dashboardClients is zero: otherwise a
+// dashboard opened once and later closed in every tab would keep spawning
+// gt subprocesses on every tick forever (gt-c9rl). With clients connected,
+// a tick that finds the cache still fresh also does nothing — the 2s tick
+// only decides whether to check freshness, not how often the model is
+// assembled (gt-978i).
 func (h *APIHandler) pollDashboardHash() {
 	tickC := h.dashboardPollTickC
 	if tickC == nil {
@@ -2331,6 +2361,11 @@ func (h *APIHandler) pollDashboardHash() {
 		tickC = ticker.C
 	}
 
+	ttl := h.dashboardComputeCacheTTL
+	if ttl <= 0 {
+		ttl = dashboardComputeCacheTTLDefault
+	}
+
 	for range tickC {
 		if h.dashboardClients.Load() <= 0 {
 			if h.dashboardPollTick != nil {
@@ -2339,7 +2374,20 @@ func (h *APIHandler) pollDashboardHash() {
 			continue
 		}
 
+		h.dashboardMu.RLock()
+		fresh := time.Since(h.dashboardComputeTime) < ttl
+		h.dashboardMu.RUnlock()
+		if fresh {
+			if h.dashboardPollTick != nil {
+				h.dashboardPollTick(false)
+			}
+			continue
+		}
+
 		hash := h.computeDashboardHash(context.Background())
+		h.dashboardMu.Lock()
+		h.dashboardComputeTime = time.Now()
+		h.dashboardMu.Unlock()
 		if h.dashboardPollTick != nil {
 			h.dashboardPollTick(true)
 		}
@@ -2375,14 +2423,66 @@ func (h *APIHandler) computeDashboardHash(ctx context.Context) string {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
-	// Check worker/polecat state
+	// Check worker/hook state via the same batched, in-process fetcher used
+	// to render the dashboard page — NOT "gt status --json". That subprocess
+	// forks a whole second gt binary which re-discovers every rig from
+	// scratch and, even after gt-978i's earlier batching of each rig's own
+	// per-agent mail/hook lookups, still issues several bd/tmux calls per
+	// rig on every cache-miss tick — the amplitude the acceptance criterion
+	// on this bead measured as a ~180-process burst under one SSE client.
+	// FetchSessions and FetchHooks are each a single bd/tmux call regardless
+	// of town size, so this probe's cost no longer scales with rig or agent
+	// count (gt-978i).
 	go func() {
 		defer wg.Done()
-		if out, err := h.runGtCommand(ctx, 3*time.Second, []string{"status", "--json"}); err == nil {
-			mu.Lock()
-			parts = append(parts, "status:"+out)
-			mu.Unlock()
+		if h.fetcher == nil {
+			return
 		}
+		// ConvoyFetcher methods take no context, unlike the runGtCommand
+		// path they replace here, so a slow bd/tmux call under exactly the
+		// Dolt contention this bead is about could otherwise block this
+		// goroutine — and therefore every later tick, since pollDashboardHash
+		// runs on a single shared goroutine — well past computeDashboardHash's
+		// 5s budget. Run the fetch on its own goroutine and give up waiting
+		// at ctx's deadline; the abandoned fetch finishes in the background
+		// and its result is simply dropped (resCh is buffered, so it can't
+		// leak a blocked goroutine).
+		type fetchResult struct {
+			sessions []SessionRow
+			hooks    []HookRow
+			err      error
+		}
+		resCh := make(chan fetchResult, 1)
+		go func() {
+			sessions, err := h.fetcher.FetchSessions()
+			if err != nil {
+				resCh <- fetchResult{err: err}
+				return
+			}
+			hooks, err := h.fetcher.FetchHooks()
+			resCh <- fetchResult{sessions: sessions, hooks: hooks, err: err}
+		}()
+
+		var res fetchResult
+		select {
+		case res = <-resCh:
+			if res.err != nil {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+
+		b, err := json.Marshal(struct {
+			Sessions []SessionRow
+			Hooks    []HookRow
+		}{res.sessions, res.hooks})
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		parts = append(parts, "status:"+string(b))
+		mu.Unlock()
 	}()
 
 	// Check hooks state
