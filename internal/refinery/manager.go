@@ -255,9 +255,12 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 	// worktree doesn't stall on the trust dialog (gt-yy9).
 	runtime.SeedWorkspaceTrust(refineryRigDir, runtimeConfigDir, runtimeConfig)
 
-	// Ensure .gitignore has required Gas Town patterns
-	if err := rig.EnsureGitignorePatterns(refineryRigDir); err != nil {
-		style.PrintWarning("could not update refinery .gitignore: %v", err)
+	// Ensure Gas Town patterns are ignored via the worktree-local git exclude
+	// file rather than the tracked .gitignore, so the worktree stays clean
+	// (a tracked-.gitignore edit shows up as a permanent unstaged change that
+	// blocks `git rebase` — the exact failure reported against beads/refinery).
+	if err := rig.EnsureLocalExcludePatterns(refineryRigDir); err != nil {
+		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{

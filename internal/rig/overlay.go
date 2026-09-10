@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -226,20 +227,32 @@ func EnsureLocalExcludePatterns(worktreePath string) error {
 }
 
 func gitLocalExcludePath(worktreePath string) (string, error) {
-	cmd := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-dir")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("resolving git dir: %w: %s", err, strings.TrimSpace(string(out)))
+	// Guard against git's repository discovery walking up past worktreePath
+	// (e.g. because worktreePath isn't actually a git working tree yet) and
+	// landing on an enclosing repository such as the Gas Town root. Reuses
+	// the same town-root check raw git mutations rely on elsewhere.
+	if err := git.EnsureSafeMutationWorkDir(worktreePath); err != nil {
+		return "", fmt.Errorf("refusing to resolve git exclude path: %w", err)
 	}
 
-	gitDir := strings.TrimSpace(string(out))
-	if gitDir == "" {
-		return "", fmt.Errorf("empty git dir for %s", worktreePath)
+	// Use --git-common-dir, not --git-dir: for a linked worktree, --git-dir
+	// returns the worktree-private directory (.git/worktrees/<name>), whose
+	// info/exclude git never reads. info/exclude is only honored from the
+	// common dir shared by the main checkout and every linked worktree.
+	cmd := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-common-dir")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolving git common dir: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(worktreePath, gitDir)
+
+	gitCommonDir := strings.TrimSpace(string(out))
+	if gitCommonDir == "" {
+		return "", fmt.Errorf("empty git common dir for %s", worktreePath)
 	}
-	return filepath.Join(gitDir, "info", "exclude"), nil
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(worktreePath, gitCommonDir)
+	}
+	return filepath.Join(gitCommonDir, "info", "exclude"), nil
 }
 
 // matchesGitignorePattern checks if a gitignore line covers the required pattern.

@@ -185,9 +185,12 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// dir doesn't stall on the trust dialog (gt-yy9).
 	runtime.SeedWorkspaceTrust(witnessDir, runtimeConfigDir, runtimeConfig)
 
-	// Ensure .gitignore has required Gas Town patterns
-	if err := rig.EnsureGitignorePatterns(witnessDir); err != nil {
-		style.PrintWarning("could not update witness .gitignore: %v", err)
+	// Ensure Gas Town patterns are ignored via the worktree-local git exclude
+	// file rather than the tracked .gitignore, so the worktree stays clean
+	// (a tracked-.gitignore edit shows up as a permanent unstaged change that
+	// blocks `git rebase`).
+	if err := rig.EnsureLocalExcludePatterns(witnessDir); err != nil {
+		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
 	roleConfig, err := m.roleConfig()
