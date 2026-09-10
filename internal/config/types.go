@@ -1400,6 +1400,20 @@ type MergeQueueConfig struct {
 	// is enabled. Valid values: "quick", "standard", "deep".
 	// Nil defaults to "standard".
 	ReviewDepth string `json:"review_depth,omitempty"`
+
+	// BatchEnabled controls whether the refinery batches multiple ready MRs
+	// into a single rebase-stack + one full-suite gate + bisect-on-red cycle
+	// instead of processing them one at a time. Nil defaults to false.
+	BatchEnabled *bool `json:"batch_enabled,omitempty"`
+
+	// BatchMinAge is how long a ready MR must sit in the queue before it's
+	// eligible for batching (e.g. "1h"). Prevents batching MRs that would
+	// merge fast on their own. Empty defaults to "1h".
+	BatchMinAge string `json:"batch_min_age,omitempty"`
+
+	// BatchMax is the maximum number of MRs to include in a single batch.
+	// Zero or unset defaults to 12.
+	BatchMax int `json:"batch_max,omitempty"`
 }
 
 // OnConflict strategy constants.
@@ -1481,6 +1495,33 @@ func (c *MergeQueueConfig) GetReviewDepth() string {
 	return c.ReviewDepth
 }
 
+// IsBatchEnabled returns whether batch-then-bisect merge queue processing
+// is enabled. Nil-safe, defaults to false.
+func (c *MergeQueueConfig) IsBatchEnabled() bool {
+	if c.BatchEnabled == nil {
+		return false
+	}
+	return *c.BatchEnabled
+}
+
+// GetBatchMinAge returns the configured minimum queue age before an MR is
+// eligible for batching. Nil-safe, defaults to "1h".
+func (c *MergeQueueConfig) GetBatchMinAge() string {
+	if c.BatchMinAge == "" {
+		return "1h"
+	}
+	return c.BatchMinAge
+}
+
+// GetBatchMax returns the configured maximum batch size.
+// Nil-safe, defaults to 12.
+func (c *MergeQueueConfig) GetBatchMax() int {
+	if c.BatchMax <= 0 {
+		return 12
+	}
+	return c.BatchMax
+}
+
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b
@@ -1500,6 +1541,9 @@ func DefaultMergeQueueConfig() *MergeQueueConfig {
 		PollInterval:                     "30s",
 		MaxConcurrent:                    1,
 		StaleClaimTimeout:                "30m",
+		BatchEnabled:                     boolPtr(false),
+		BatchMinAge:                      "1h",
+		BatchMax:                         12,
 	}
 }
 
