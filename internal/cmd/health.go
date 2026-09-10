@@ -75,6 +75,11 @@ type BackupHealth struct {
 type ProcessHealth struct {
 	ZombieCount int   `json:"zombie_count"`
 	ZombiePIDs  []int `json:"zombie_pids,omitempty"`
+	// LiveTestCount/LiveTestPIDs are non-production Dolt servers whose
+	// parent process is still alive — isolated test infrastructure, not an
+	// incident. See health.ZombieResult (gt-vzxq).
+	LiveTestCount int   `json:"live_test_count,omitempty"`
+	LiveTestPIDs  []int `json:"live_test_pids,omitempty"`
 }
 
 type OrphanDB struct {
@@ -325,8 +330,10 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 func checkProcessHealth(expectedPort int) *ProcessHealth {
 	result := health.FindZombieServers([]int{expectedPort})
 	return &ProcessHealth{
-		ZombieCount: result.Count,
-		ZombiePIDs:  result.PIDs,
+		ZombieCount:   result.Count,
+		ZombiePIDs:    result.PIDs,
+		LiveTestCount: result.LiveTestCount,
+		LiveTestPIDs:  result.LiveTestPIDs,
 	}
 }
 
@@ -410,8 +417,12 @@ func printHealthReport(r *HealthReport) {
 	if r.Processes.ZombieCount == 0 {
 		fmt.Printf("  %s No zombie processes\n", style.Bold.Render("✓"))
 	} else {
-		fmt.Printf("  %s %d zombie(s): %v\n", style.Bold.Render("!"),
-			r.Processes.ZombieCount, r.Processes.ZombiePIDs)
+		fmt.Printf("  %s %d zombie(s) (orphaned — parent died, safe to clean up): %v\n",
+			style.Bold.Render("!"), r.Processes.ZombieCount, r.Processes.ZombiePIDs)
+	}
+	if r.Processes.LiveTestCount > 0 {
+		fmt.Printf("  %s %d isolated test server(s) running (parent alive, not a concern): %v\n",
+			style.Dim.Render("○"), r.Processes.LiveTestCount, r.Processes.LiveTestPIDs)
 	}
 
 	// 6. Orphans
