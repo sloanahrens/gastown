@@ -60,17 +60,28 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
-    case "$beadID" in
-      gt-gastown-polecat-nux)
-        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
-        ;;
-      gt-base-123)
-        echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
-        ;;
-      gt-wisp-xyz)
-        echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
-        ;;
-    esac
+    if echo "$*" | grep -q -- "--children"; then
+      case "$beadID" in
+        gt-wisp-xyz)
+          echo '{"gt-wisp-xyz":[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"open"}]}'
+          ;;
+        *)
+          echo '{}'
+          ;;
+      esac
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+          ;;
+        gt-base-123)
+          echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
+          ;;
+        gt-wisp-xyz)
+          echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
+          ;;
+      esac
+    fi
     ;;
   list)
     # Return children when listing with parent=gt-wisp-xyz
@@ -237,17 +248,21 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
-    case "$beadID" in
-      gt-gastown-polecat-nux)
-        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
-        ;;
-      gt-base-123)
-        echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
-        ;;
-      gt-wisp-xyz)
-        echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
-        ;;
-    esac
+    if echo "$*" | grep -q -- "--children"; then
+      echo '{"'"$beadID"'":[]}'
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+          ;;
+        gt-base-123)
+          echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
+          ;;
+        gt-wisp-xyz)
+          echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
+          ;;
+      esac
+    fi
     ;;
   list)
     # Always return empty - no children
@@ -367,17 +382,28 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
-    case "$beadID" in
-      gt-gastown-polecat-nux)
-        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
-        ;;
-      gt-base-123)
-        echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
-        ;;
-      gt-wisp-xyz)
-        echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
-        ;;
-    esac
+    if echo "$*" | grep -q -- "--children"; then
+      case "$beadID" in
+        gt-wisp-xyz)
+          echo '{"gt-wisp-xyz":[{"id":"gt-step-open","title":"Step Open","status":"open"},{"id":"gt-step-closed","title":"Step Closed","status":"closed"}]}'
+          ;;
+        *)
+          echo '{}'
+          ;;
+      esac
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+          ;;
+        gt-base-123)
+          echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
+          ;;
+        gt-wisp-xyz)
+          echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
+          ;;
+      esac
+    fi
     ;;
   list)
     # Return one open child and one already-closed child
@@ -515,17 +541,33 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
-    case "$beadID" in
-      gt-gastown-polecat-nux)
-        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
-        ;;
-      gt-base-123)
-        echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
-        ;;
-      gt-wisp-xyz)
-        echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
-        ;;
-    esac
+    if echo "$*" | grep -q -- "--children"; then
+      case "$beadID" in
+        gt-wisp-xyz)
+          # Wisp has one child
+          echo '{"gt-wisp-xyz":[{"id":"gt-child","title":"Child","status":"open"}]}'
+          ;;
+        gt-child)
+          # Child has one grandchild
+          echo '{"gt-child":[{"id":"gt-grandchild","title":"Grandchild","status":"open"}]}'
+          ;;
+        *)
+          echo '{"'"$beadID"'":[]}'
+          ;;
+      esac
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+          ;;
+        gt-base-123)
+          echo '[{"id":"gt-base-123","title":"Base bead","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
+          ;;
+        gt-wisp-xyz)
+          echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
+          ;;
+      esac
+    fi
     ;;
   list)
     # Return children based on parent
@@ -813,6 +855,11 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
+    if echo "$*" | grep -q -- "--children"; then
+      # Simulate error when listing children
+      echo 'Error: database locked' >&2
+      exit 1
+    fi
     case "$beadID" in
       gt-gastown-polecat-nux)
         echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'

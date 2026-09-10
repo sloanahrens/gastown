@@ -1796,6 +1796,70 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	return issues[0], nil
 }
 
+// Children returns the direct children of parentID: issues (or wisps) linked
+// to it by a parent-child dependency.
+//
+// Deliberately does NOT use List(ListOptions{Parent: parentID}) (nor `bd
+// list --parent` / `bd children`, which List shells out to): that path only
+// queries the persistent "dependencies" table and misses ephemeral wisp
+// children, whose parent-child edges live in a separate "wisp_dependencies"
+// table that it never checks. `bd show --children` (and the SDK's
+// GetDependentsWithMetadata, used below for the in-process store path)
+// correctly unions both tables. Discovered via gt-43t7 (mol-polecat-work
+// step wisps leaking without bound because closeDescendantsImpl couldn't
+// find them to close).
+func (b *Beads) Children(parentID string) ([]*Issue, error) {
+	if !b.noRoute {
+		if target := b.forIssueID(parentID); target != b {
+			return target.Children(parentID)
+		}
+	}
+
+	if b.store != nil {
+		return b.storeChildren(parentID)
+	}
+
+	out, err := b.run("show", parentID, "--children", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return parseChildrenJSON(out)
+}
+
+// parseChildrenJSON parses `bd show <id> --children --json` output. bd
+// returns a map keyed by (resolved) parent ID plus envelope metadata, e.g.
+// {"gt-wisp-abc": [{...}, ...], "schema_version": 1}. Since Children always
+// queries a single parent, take the sole non-metadata key's array rather
+// than requiring it to match the ID passed in (bd may resolve a partial or
+// routed ID differently than what was given).
+func parseChildrenJSON(raw []byte) ([]*Issue, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return nil, fmt.Errorf("parsing bd show --children output: %w", err)
+	}
+
+	for key, group := range wrapped {
+		if key == "schema_version" {
+			continue
+		}
+		if len(bytes.TrimSpace(group)) == 0 {
+			continue
+		}
+		var children []*Issue
+		if err := json.Unmarshal(group, &children); err != nil {
+			return nil, fmt.Errorf("parsing bd show --children entries: %w", err)
+		}
+		return children, nil
+	}
+
+	return nil, nil
+}
+
 // FindLatestIssueByTitleAndAssignee finds the newest issue matching the given title and assignee.
 func (b *Beads) FindLatestIssueByTitleAndAssignee(title, assignee string) (*Issue, error) {
 	out, err := b.run("list", "--json", "--limit", "0", "--title", title, "--assignee", assignee)

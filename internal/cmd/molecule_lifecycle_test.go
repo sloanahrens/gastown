@@ -787,7 +787,19 @@ case "$cmd" in
     fi
     ;;
   show)
-    echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol2"}]'
+    beadID="$1"
+    if echo "$*" | grep -q -- "--children"; then
+      case "$beadID" in
+        gt-wisp-mol2)
+          echo '{"gt-wisp-mol2":[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]}'
+          ;;
+        *)
+          echo '{"'"$beadID"'":[]}'
+          ;;
+      esac
+    else
+      echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol2"}]'
+    fi
     ;;
   update)
     exit 0
@@ -929,20 +941,24 @@ shift || true
 case "$cmd" in
   show)
     beadID="$1"
-    case "$beadID" in
-      gt-gastown-polecat-nux)
-        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-abc123","agent_state":"working"}]'
-        ;;
-      gt-abc123)
-        echo '[{"id":"gt-abc123","title":"Bug to fix","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
-        ;;
-      gt-wisp-xyz)
-        echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
-        ;;
-      *)
-        echo '[]'
-        ;;
-    esac
+    if echo "$*" | grep -q -- "--children"; then
+      echo '{"'"$beadID"'":[]}'
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-abc123","agent_state":"working"}]'
+          ;;
+        gt-abc123)
+          echo '[{"id":"gt-abc123","title":"Bug to fix","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]'
+          ;;
+        gt-wisp-xyz)
+          echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
+          ;;
+        *)
+          echo '[]'
+          ;;
+      esac
+    fi
     ;;
   close)
     echo "$1" >> "%s"

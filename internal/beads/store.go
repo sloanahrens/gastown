@@ -287,6 +287,37 @@ func (b *Beads) storeList(opts ListOptions) ([]*Issue, error) {
 	return sdkIssuesToIssues(sdkIssues), nil
 }
 
+// storeChildren implements Children using the in-process store's
+// GetDependentsWithMetadata, which (like `bd show --children`) unions the
+// persistent and wisp dependency tables — unlike storeList's ParentID
+// filter, which only queries the persistent one. See the Children doc
+// comment in beads.go and gt-43t7.
+func (b *Beads) storeChildren(parentID string) ([]*Issue, error) {
+	ctx, cancel := storeCtx()
+	defer cancel()
+
+	deps, err := b.store.GetDependentsWithMetadata(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("store children for %s: %w", parentID, err)
+	}
+
+	var children []*Issue
+	for _, dep := range deps {
+		if dep == nil || dep.DependencyType != beadsdk.DepParentChild {
+			continue
+		}
+		issueDep := sdkDependencyMetadataToIssueDep(dep)
+		children = append(children, &Issue{
+			ID:       issueDep.ID,
+			Title:    issueDep.Title,
+			Status:   issueDep.Status,
+			Priority: issueDep.Priority,
+			Type:     issueDep.Type,
+		})
+	}
+	return children, nil
+}
+
 // storeShow implements Show using the in-process store.
 func (b *Beads) storeShow(id string) (*Issue, error) {
 	ctx, cancel := storeCtx()

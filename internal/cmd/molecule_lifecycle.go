@@ -376,10 +376,13 @@ func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
 }
 
 func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, error) {
-	children, err := b.List(beads.ListOptions{
-		Parent: parentID,
-		Status: "all",
-	})
+	// Uses Children (bd show --children), not List(ListOptions{Parent:
+	// parentID}) (bd list --parent): the latter only checks the persistent
+	// dependencies table and silently misses ephemeral wisp children,
+	// whose parent-child edges live in a separate wisp_dependencies table.
+	// That gap is why mol-polecat-work step wisps leaked without bound —
+	// gt done never found them here to close. See gt-43t7.
+	children, err := b.Children(parentID)
 	if err != nil {
 		return 0, fmt.Errorf("listing children of %s: %w", parentID, err)
 	}
