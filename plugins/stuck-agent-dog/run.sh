@@ -132,7 +132,7 @@ rig_hook_assignment() {
 
 agent_identity_gate() {
   local rig="$1" pcat="$2" session="$3" dir=""
-  local id_json="" agent_state="" hook_bead=""
+  local id_json="" agent_state=""
 
   if ! dir=$(rig_workdir "$rig"); then
     return 0
@@ -146,23 +146,24 @@ agent_identity_gate() {
   fi
 
   agent_state=$(printf '%s' "$id_json" | jq -r '.agent_state // empty' 2>/dev/null || true)
-  hook_bead=$(printf '%s' "$id_json" | jq -r '.hook_bead // empty' 2>/dev/null || true)
 
-  # A done/idle/nuked polecat is not actionable regardless of what any
-  # leftover in_progress bead (e.g. an unclosed formula step wisp) says —
-  # the agent bead's own agent_state/hook_bead is the authority on whether
-  # the polecat is actually still working (gt-bd68).
+  # Only a TERMINAL agent_state (done/nuked) overrides a lingering
+  # hooked/in_progress bead — gt done and the nuke path are the only writers
+  # of these values (done.go:2500), so they are trustworthy regardless of
+  # what an unclosed formula-step wisp still claims (gt-bd68). agent_state
+  # is NOT checked against "idle": only polecat_spawn.go ever writes
+  # "working", so pool-initialized/reused polecats that were slung work as
+  # an existing agent sit at "idle" while genuinely working — treating idle
+  # as terminal would silently stop restarting that whole class (om review
+  # on gt-wisp-vjcc). hook_bead is likewise not checked: per hq-l6mm5
+  # (sling_helpers.go:888-896) it is a documented no-op outside fresh spawn,
+  # so an empty hook_bead is not evidence the polecat is idle.
   case "$agent_state" in
-    done|idle|nuked)
-      log "  SKIP $session: agent identity reports agent_state=$agent_state (not actionable regardless of any lingering in_progress bead)"
+    done|nuked)
+      log "  SKIP $session: agent identity reports agent_state=$agent_state (terminal — not actionable regardless of any lingering in_progress bead)"
       return 1
       ;;
   esac
-
-  if [ -z "$hook_bead" ] || [ "$hook_bead" = "null" ]; then
-    log "  SKIP $session: agent identity reports no hook_bead (agent_state=${agent_state:-unknown})"
-    return 1
-  fi
 
   return 0
 }
@@ -170,15 +171,16 @@ agent_identity_gate() {
 hook_restartable() {
   local session="$1" rig="$2" pcat="$3" bead="$4" status="$5"
 
-  agent_identity_gate "$rig" "$pcat" "$session" || return 1
-
   case "$status" in
-    hooked|in_progress) [ -n "$bead" ] && return 0 ;;
-    empty|"") log "  SKIP $session: no active hook" ;;
-    *) log "  SKIP $session: hook=$bead status=$status not actionable" ;;
+    hooked|in_progress) [ -n "$bead" ] || return 1 ;;
+    empty|"") log "  SKIP $session: no active hook"; return 1 ;;
+    *) log "  SKIP $session: hook=$bead status=$status not actionable"; return 1 ;;
   esac
 
-  return 1
+  # Cheap hook-status check passed (hooked/in_progress with a bead) — only
+  # now pay for the identity lookup, which shells out to
+  # `gt polecat identity show` (git analytics via buildCVSummary) (om review).
+  agent_identity_gate "$rig" "$pcat" "$session"
 }
 
 session_health_status() {

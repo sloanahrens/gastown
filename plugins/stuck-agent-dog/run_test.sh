@@ -479,6 +479,15 @@ test_closed_hook_skips_restart() {
   assert_file_contains "$TEST_STATE/output.log" "status=closed not actionable" "closed hook: status checked"
 }
 
+test_closed_hook_skips_identity_lookup() {
+  setup_case
+  add_polecat alpha agent-dead
+  printf 'closed\n' > "$TEST_STATE/hook_status/alpha"
+  run_script
+
+  assert_file_empty "$TEST_STATE/identity_calls.log" "closed hook: cheap status check filters before paying for identity lookup"
+}
+
 test_done_polecat_stray_inprogress_wisp_skips_restart() {
   setup_case
   add_polecat marble session-dead
@@ -492,16 +501,48 @@ test_done_polecat_stray_inprogress_wisp_skips_restart() {
   assert_file_contains "$TEST_STATE/output.log" "agent_state=done" "done polecat stray wisp: identity gate logged"
 }
 
-test_null_hook_bead_skips_restart_despite_inprogress_bead() {
+test_working_polecat_empty_hook_bead_still_restarts() {
+  # hq-l6mm5: the agent identity bead's hook_bead slot is a documented no-op
+  # outside fresh spawn — a working polecat slung to as an existing agent
+  # (pool init, gt hook self-attach, standalone formula sling) has an empty
+  # hook_bead while genuinely working. A live in_progress hook must still
+  # restart it (om review on gt-wisp-vjcc, gt-bd68).
   setup_case
   add_polecat opal agent-dead
   printf 'in_progress\n' > "$TEST_STATE/hook_status/opal"
   printf 'working|\n' > "$TEST_STATE/identity_state/opal"
   run_script
 
-  assert_file_empty "$TEST_STATE/kill.log" "null hook_bead: no session kill"
-  assert_file_empty "$TEST_STATE/mail.log" "null hook_bead: no restart mail"
-  assert_file_contains "$TEST_STATE/output.log" "no hook_bead" "null hook_bead: identity gate logged"
+  assert_line_count "$TEST_STATE/kill.log" 1 "working polecat empty hook_bead: zombie session killed"
+  assert_line_count "$TEST_STATE/mail.log" 1 "working polecat empty hook_bead: restart requested"
+}
+
+test_idle_agent_state_inprogress_hook_still_restarts() {
+  # Only polecat_spawn.go writes agent_state="working"; a pool-initialized or
+  # reused polecat slung work as an existing agent sits at "idle" while
+  # genuinely working. "idle" is not a terminal state like done/nuked and
+  # must not block a restart when the hook is live (om review on
+  # gt-wisp-vjcc, gt-bd68).
+  setup_case
+  add_polecat topaz agent-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/topaz"
+  printf 'idle|gt-hook-topaz\n' > "$TEST_STATE/identity_state/topaz"
+  run_script
+
+  assert_line_count "$TEST_STATE/kill.log" 1 "idle agent_state, live hook: zombie session killed"
+  assert_line_count "$TEST_STATE/mail.log" 1 "idle agent_state, live hook: restart requested"
+}
+
+test_nuked_polecat_stray_inprogress_wisp_skips_restart() {
+  setup_case
+  add_polecat quartz session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/quartz"
+  printf 'nuked|\n' > "$TEST_STATE/identity_state/quartz"
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "nuked polecat stray wisp: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "nuked polecat stray wisp: no restart mail"
+  assert_file_contains "$TEST_STATE/output.log" "agent_state=nuked" "nuked polecat stray wisp: identity gate logged"
 }
 
 test_identity_lookup_unavailable_falls_back_to_hook_status() {
@@ -710,8 +751,11 @@ test_dead_agent_restarts_one
 test_in_progress_hook_restarts_one
 test_dead_session_restarts_one
 test_closed_hook_skips_restart
+test_closed_hook_skips_identity_lookup
 test_done_polecat_stray_inprogress_wisp_skips_restart
-test_null_hook_bead_skips_restart_despite_inprogress_bead
+test_nuked_polecat_stray_inprogress_wisp_skips_restart
+test_working_polecat_empty_hook_bead_still_restarts
+test_idle_agent_state_inprogress_hook_still_restarts
 test_identity_lookup_unavailable_falls_back_to_hook_status
 test_no_hook_dead_sessions_do_not_mass_death
 test_non_actionable_hook_statuses_do_not_mass_death

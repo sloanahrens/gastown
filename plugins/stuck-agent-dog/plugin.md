@@ -94,13 +94,22 @@ For each rig, enumerate polecats and check their session status.
 A polecat is a concern if:
 - `gt hook show --json` reports active work with status `hooked` or `in_progress`
 - Its central runtime-aware health is `session-dead` OR `agent-dead`
-- Its agent identity bead (`gt polecat identity show --json`) agrees the
-  polecat is actually still working — `agent_state` is not `done`/`idle`/
-  `nuked`, and `hook_bead` is not empty/null. A finished polecat can leave
+- Its agent identity bead (`gt polecat identity show --json`) does not report
+  a TERMINAL `agent_state` of `done` or `nuked`. A finished polecat can leave
   behind an unclosed `in_progress` formula-step wisp still carrying its
-  assignee; the identity bead's own `agent_state`/`hook_bead` is the
-  authority on whether that polecat is actionable, not any bead that
-  happens to be assigned to it (gt-bd68).
+  assignee; `gt done`/nuke are the only writers of `done`/`nuked`
+  (`done.go:2500`), so those two values reliably override a lingering
+  hooked/in_progress bead (gt-bd68). `agent_state=idle` is deliberately NOT
+  treated as terminal here: only fresh spawn ever writes `working`
+  (`polecat_spawn.go:465`), so a pool-initialized or reused polecat slung
+  work as an existing agent sits at `idle` while genuinely working.
+  `hook_bead` is likewise not consulted — per `hq-l6mm5`
+  (`sling_helpers.go:888-896`) it is a documented no-op outside fresh spawn
+  and empty/null is expected for that whole class of polecats, not evidence
+  of idleness. If the identity lookup itself fails or is unavailable (older
+  rig, transient error), the gate falls open and defers entirely to the
+  hook-status check above, so identity-bead unavailability never blocks a
+  genuinely stuck restart.
 
 Polecat liveness must use `gt session health`, which wraps the central
 `tmux.CheckSessionHealth` path. That path reads `GT_PROCESS_NAMES`, `GT_AGENT`,
