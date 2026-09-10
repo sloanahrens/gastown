@@ -31,12 +31,34 @@ type SpawnedPolecatInfo struct {
 	ClonePath   string // Path to polecat's git worktree
 	SessionName string // Tmux session name (e.g., "gt-gastown-p-Toast")
 	Pane        string // Tmux pane ID (empty until StartSession is called)
-	BaseBranch  string // Effective base branch (e.g., "main", "integration/epic-id")
-	Branch      string // Git branch name (for cleanup on rollback)
+	BaseBranch  string // Effective MERGE-TARGET base branch (e.g., "main", "integration/epic-id").
+	// gt-a8i3: this must NEVER be the resume branch — it feeds the base_branch
+	// formula var, which `gt done`/`gt mq submit` read as the MR --target. A
+	// resume dispatch checks out ResumeBranch as the polecat's working branch
+	// (see Branch below) but still merges back to the rig's normal target.
+	Branch string // Git branch name actually checked out (for cleanup on rollback; equals ResumeBranch on a resume dispatch)
 
 	// Internal fields for deferred session start
 	account string
 	agent   string
+}
+
+// resolveSpawnBaseBranch computes the merge-target base branch reported on
+// SpawnedPolecatInfo.BaseBranch, given the caller's raw --base-branch value
+// (already origin/-qualified if auto-detected) and the rig's default branch.
+//
+// gt-a8i3: deliberately takes no resumeBranch parameter. A resume dispatch
+// (`gt sling --branch/--pr`) checks out an existing branch as the polecat's
+// working branch, but that has no bearing on what the work should merge
+// into — conflating the two here previously caused `gt done`/`gt mq submit`
+// to submit a self-targeted MR that merges as a no-op and deletes the only
+// copy of the work on cleanup.
+func resolveSpawnBaseBranch(baseBranch, defaultBranch string) string {
+	effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
+	if effectiveBranch == "" {
+		effectiveBranch = defaultBranch
+	}
+	return effectiveBranch
 }
 
 // AgentID returns the agent identifier (e.g., "gastown/polecats/Toast")
@@ -251,13 +273,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 
-			effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
-			if effectiveBranch == "" {
-				effectiveBranch = r.DefaultBranch()
-			}
-			if opts.ResumeBranch != "" {
-				effectiveBranch = opts.ResumeBranch
-			}
+			effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
 			return &SpawnedPolecatInfo{
 				RigName:     rigName,
@@ -361,14 +377,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// Log spawn event to activity feed
 	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 
-	// Compute effective base branch (strip origin/ prefix since formula prepends it)
-	effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
-	if effectiveBranch == "" {
-		effectiveBranch = r.DefaultBranch()
-	}
-	if opts.ResumeBranch != "" {
-		effectiveBranch = opts.ResumeBranch
-	}
+	effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,

@@ -57,6 +57,28 @@ type SlingResult struct {
 	AttachedMolecule string
 }
 
+// buildSlingFormulaVars assembles the ordered var list for formula
+// instantiation: rig defaults first, then user --var overrides, then
+// spawn-derived base_branch/resume_branch.
+//
+// gt-a8i3: base_branch and resume_branch are DISTINCT and must never
+// collapse into each other. base_branch (from spawnBaseBranch, i.e.
+// SpawnedPolecatInfo.BaseBranch) is the merge-target branch `gt done`/
+// `gt mq submit` read for --target; resume_branch (from resumeBranch, i.e.
+// SlingParams.ResumeBranch / --branch / --pr) is only the polecat's resumed
+// working branch. A formula var list that conflated the two previously
+// caused a resume dispatch to submit a self-targeted MR.
+func buildSlingFormulaVars(rigCmdVars, userVars []string, spawnBaseBranch, resumeBranch string) []string {
+	vars := append(append([]string(nil), rigCmdVars...), userVars...)
+	if spawnBaseBranch != "" && spawnBaseBranch != "main" {
+		vars = append(vars, fmt.Sprintf("base_branch=%s", spawnBaseBranch))
+	}
+	if resumeBranch != "" {
+		vars = append(vars, fmt.Sprintf("resume_branch=%s", resumeBranch))
+	}
+	return vars
+}
+
 // executeSling performs the unified per-bead polecat/rig dispatch.
 // Batch sling and queue dispatch call this function. The single-sling path
 // (runSling) retains its own implementation for now (handles dogs, mayor,
@@ -314,11 +336,9 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	if params.FormulaName != "" && formulaCooked {
 		// Auto-inject rig command vars as defaults (user --var flags override)
 		rigCmdVars := loadRigCommandVars(townRoot, params.RigName)
-		// Build per-bead vars: rig defaults first, then user vars (higher priority)
-		allVars = append(rigCmdVars, params.Vars...)
-		if spawnInfo.BaseBranch != "" && spawnInfo.BaseBranch != "main" {
-			allVars = append(allVars, fmt.Sprintf("base_branch=%s", spawnInfo.BaseBranch))
-		}
+		// Build per-bead vars: rig defaults first, then user vars (higher priority),
+		// then spawn-derived base_branch/resume_branch (gt-a8i3: kept distinct).
+		allVars = buildSlingFormulaVars(rigCmdVars, params.Vars, spawnInfo.BaseBranch, params.ResumeBranch)
 
 		// GH#gt-zqvj: Inject prior attempt context when re-dispatching an issue
 		// that already has an open MR from a previous polecat. The new polecat

@@ -277,6 +277,28 @@ func extractFormulaVar(formulaVars, key string) string {
 	return ""
 }
 
+// resolveMRTarget refuses a self-targeted MR: a resolved target equal to the
+// branch being submitted merges as a no-op and the post-merge cleanup
+// deletes the only copy of the work (gt-a8i3). Used by both `gt done` and
+// `gt mq submit`, which otherwise independently duplicate the same target
+// resolution priority chain (--target/--epic > formula_vars base_branch >
+// integration auto-detect > rig default).
+//
+// Falls back to defaultBranch when target == branch. Returns an error only
+// if the fallback ALSO equals branch (defaultBranch itself is somehow the
+// branch being submitted), since there is then no safe target to fall back
+// to and the caller must be told explicitly rather than guess.
+func resolveMRTarget(target, branch, defaultBranch string) (string, error) {
+	if target != branch {
+		return target, nil
+	}
+	style.PrintWarning("MR target %q equals the source branch; refusing self-target, falling back to rig default %q", target, defaultBranch)
+	if defaultBranch == branch {
+		return "", fmt.Errorf("cannot submit MR: resolved target %q equals the source branch and the rig default branch also equals the source branch; specify the target explicitly", target)
+	}
+	return defaultBranch, nil
+}
+
 // truncateDescription truncates a multi-line description to a single line summary.
 func truncateDescription(desc string, maxLen int) string {
 	// Take just the first line

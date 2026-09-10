@@ -15,6 +15,55 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
+// TestResolveMRTarget guards gt-a8i3: `gt done`/`gt mq submit` must never
+// submit an MR whose target equals the branch being submitted — that merges
+// as a no-op and the post-merge cleanup deletes the only copy of the work.
+// The known trigger was a resume dispatch's base_branch formula var leaking
+// the resume branch, but this guard is unconditional: whatever upstream
+// source produced a self-target, resolveMRTarget refuses it.
+func TestResolveMRTarget(t *testing.T) {
+	t.Run("normal target passes through unchanged", func(t *testing.T) {
+		got, err := resolveMRTarget("main", "polecat/jasper/gt-a8i3+xyz", "main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "main" {
+			t.Fatalf("resolveMRTarget() = %q, want %q", got, "main")
+		}
+	})
+
+	t.Run("self-target falls back to rig default", func(t *testing.T) {
+		branch := "polecat/thunder/be-r18+mtvr3qm3"
+		// Reproduces the exact gt-a8i3 failure mode: base_branch formula var
+		// leaked the resume branch, so target resolved to the polecat's own branch.
+		got, err := resolveMRTarget(branch, branch, "main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "main" {
+			t.Fatalf("resolveMRTarget() = %q, want fallback to rig default %q", got, "main")
+		}
+	})
+
+	t.Run("self-target with no safe fallback errors instead of guessing", func(t *testing.T) {
+		branch := "main"
+		_, err := resolveMRTarget(branch, branch, "main")
+		if err == nil {
+			t.Fatal("expected an error when defaultBranch also equals branch, got nil")
+		}
+	})
+
+	t.Run("integration branch target passes through unchanged", func(t *testing.T) {
+		got, err := resolveMRTarget("integration/epic-1", "polecat/jasper/gt-a8i3+xyz", "main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "integration/epic-1" {
+			t.Fatalf("resolveMRTarget() = %q, want %q", got, "integration/epic-1")
+		}
+	})
+}
+
 // TestDoneUsesResolveBeadsDir verifies that the done command correctly uses
 // beads.ResolveBeadsDir to follow redirect files when initializing beads.
 // This is critical for polecat/crew worktrees that use .beads/redirect to point

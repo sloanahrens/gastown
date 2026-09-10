@@ -196,6 +196,14 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// gt-a8i3: refuse a self-targeted MR no matter which of the sources above
+	// produced it.
+	var targetErr error
+	target, targetErr = resolveMRTarget(target, branch, defaultBranch)
+	if targetErr != nil {
+		return targetErr
+	}
+
 	// Get source issue for priority inheritance and dependency check
 	var priority int
 	if mqSubmitPriority >= 0 {
