@@ -871,9 +871,12 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 
 		// Parse session name using the fetcher's own registry to avoid
 		// dependency on global DefaultRegistry initialization (gt-y24).
+		// A parse failure just means this tmux session isn't a Gas Town
+		// agent (a dev shell, editor, or the dashboard's own "hq-dashboard"
+		// session when the dashboard itself runs under the agent tmux
+		// server) — expected and common, not worth logging (gt-978i).
 		identity, err := session.ParseSessionNameWithRegistry(sessionName, f.registry)
 		if err != nil {
-			log.Printf("dashboard: FetchWorkers: skipping session %q: %v", sessionName, err)
 			continue
 		}
 

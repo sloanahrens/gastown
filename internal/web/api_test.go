@@ -1042,6 +1042,11 @@ esac
 		cmdSem:             make(chan struct{}, maxConcurrentCommands),
 		dashboardPollTickC: tickC,
 		dashboardPollTick:  func(ran bool) { tickDone <- ran },
+		// This test exercises the dashboardClients gate (gt-c9rl), not the
+		// compute-cache TTL (gt-978i) — keep the cache always-stale so every
+		// connected tick is free to run and its ran/skip outcome reflects
+		// client count alone.
+		dashboardComputeCacheTTL: time.Nanosecond,
 	}
 
 	countCalls := func() int {
@@ -1158,6 +1163,112 @@ esac
 	}
 	if got := countCalls(); got <= baseline {
 		t.Fatalf("gt call count %d did not grow after reconnecting (baseline %d)", got, baseline)
+	}
+}
+
+// TestSSEDashboardPollSkipsWhenCacheFresh is a regression test for gt-978i:
+// even after batching each tick's per-agent mail lookups into a constant
+// number of bd calls, computeDashboardHash still ran on every 2s tick while
+// any SSE client was connected. pollDashboardHash must also skip recomputing
+// while the last computed model is still within dashboardComputeCacheTTL,
+// so a client sitting on an open dashboard tab doesn't keep the gt
+// subprocess load running at the full tick rate forever.
+func TestSSEDashboardPollSkipsWhenCacheFresh(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "status --json") printf '{"agents":[]}\n' ;;
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	tickC := make(chan time.Time)
+	tickDone := make(chan bool, 1)
+	h := &APIHandler{
+		gtPath:             gtPath,
+		workDir:            t.TempDir(),
+		defaultRunTimeout:  5 * time.Second,
+		maxRunTimeout:      10 * time.Second,
+		cmdSem:             make(chan struct{}, maxConcurrentCommands),
+		dashboardPollTickC: tickC,
+		dashboardPollTick:  func(ran bool) { tickDone <- ran },
+		// Long enough that every tick in this test lands inside it, so any
+		// tick beyond the first must be skipped for freshness, not timing.
+		dashboardComputeCacheTTL: time.Minute,
+	}
+
+	step := func() bool {
+		t.Helper()
+		select {
+		case tickC <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not accept a tick — is pollDashboardHash running?")
+		}
+		select {
+		case ran := <-tickDone:
+			return ran
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not report a tick outcome")
+			return false
+		}
+	}
+
+	countCalls := func() int {
+		data, err := os.ReadFile(callLog)
+		if err != nil {
+			return 0
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return 0
+		}
+		return len(strings.Split(trimmed, "\n"))
+	}
+
+	// Connect one client so ticks aren't skipped for lack of clients.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handleSSE(httptest.NewRecorder(), req)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.dashboardClients.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("dashboardClients did not increment after connecting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if ran := step(); !ran {
+		t.Fatalf("expected the first tick to run computeDashboardHash")
+	}
+	baseline := countCalls()
+	if baseline == 0 {
+		t.Fatalf("expected computeDashboardHash to have invoked gt at least once")
+	}
+
+	// Several more ticks within the TTL, still with a client connected,
+	// must all be skipped for freshness — not for lack of clients.
+	for i := 0; i < 5; i++ {
+		if ran := step(); ran {
+			t.Fatalf("tick %d ran computeDashboardHash while the cache was still fresh", i)
+		}
+		if got := countCalls(); got != baseline {
+			t.Fatalf("gt was invoked while the cache was still fresh (total %d, want %d)", got, baseline)
+		}
 	}
 }
 
