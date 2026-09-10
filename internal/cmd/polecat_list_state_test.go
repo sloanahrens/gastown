@@ -151,9 +151,13 @@ func TestEffectivePolecatState(t *testing.T) {
 // when an agent bead backs it. A no-bead orphan (e.g. a hermetic test's
 // session that escaped onto the live socket) is foreign, never a zombie —
 // it must not count toward capacity or be targeted by zombie restart/nuke.
+// A FAILED bead lookup (e.g. a Dolt hiccup) must never be collapsed into "no
+// bead": that silently relabeled every genuine zombie as foreign and hid it
+// (the gt-yav3 MR1 bounce) — it must fail safe as an unconfirmed zombie and
+// say so loudly via BeadLookupFailed.
 func TestClassifyOrphanSession(t *testing.T) {
 	t.Run("no bead is foreign, not zombie", func(t *testing.T) {
-		got := classifyOrphanSession("gastown", "test-nudge-immediate-busy-refusal", "gt-test-nudge-immediate-busy-refusal", false)
+		got := classifyOrphanSession("gastown", "test-nudge-immediate-busy-refusal", "gt-test-nudge-immediate-busy-refusal", beadAbsent)
 		if got.State != polecat.StateForeign {
 			t.Errorf("State = %q, want %q", got.State, polecat.StateForeign)
 		}
@@ -163,13 +167,16 @@ func TestClassifyOrphanSession(t *testing.T) {
 		if got.Zombie {
 			t.Error("Zombie = true, want false")
 		}
+		if got.BeadLookupFailed {
+			t.Error("BeadLookupFailed = true, want false for a confirmed absence")
+		}
 		if got.CountsTowardCapacity {
 			t.Error("CountsTowardCapacity = true, want false for a foreign session")
 		}
 	})
 
 	t.Run("existing bead is zombie, not foreign", func(t *testing.T) {
-		got := classifyOrphanSession("gastown", "agate", "gt-agate", true)
+		got := classifyOrphanSession("gastown", "agate", "gt-agate", beadPresent)
 		if got.State != polecat.StateZombie {
 			t.Errorf("State = %q, want %q", got.State, polecat.StateZombie)
 		}
@@ -178,6 +185,28 @@ func TestClassifyOrphanSession(t *testing.T) {
 		}
 		if got.Foreign {
 			t.Error("Foreign = true, want false")
+		}
+		if got.BeadLookupFailed {
+			t.Error("BeadLookupFailed = true, want false for a confirmed presence")
+		}
+	})
+
+	t.Run("failed lookup is an unconfirmed zombie, never foreign", func(t *testing.T) {
+		got := classifyOrphanSession("gastown", "agate", "gt-agate", beadLookupFailed)
+		if got.State != polecat.StateZombie {
+			t.Errorf("State = %q, want %q", got.State, polecat.StateZombie)
+		}
+		if !got.Zombie {
+			t.Error("Zombie = false, want true")
+		}
+		if got.Foreign {
+			t.Error("Foreign = true, want false — a failed lookup must never be downgraded to foreign")
+		}
+		if !got.BeadLookupFailed {
+			t.Error("BeadLookupFailed = false, want true so callers/output surface the uncertainty loudly")
+		}
+		if got.CountsTowardCapacity {
+			t.Error("CountsTowardCapacity = true, want false")
 		}
 	})
 }

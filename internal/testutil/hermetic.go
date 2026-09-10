@@ -161,7 +161,23 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// have provided an ephemeral Dolt server already; keep its routing.
 	externalDolt := os.Getenv("GT_TEST_EXTERNAL_DOLT") == "1"
 
+	// Capture before the scrub below strips it: AllowLiveTmuxEnv is a
+	// BEADS_* var, so scrubProcessEnv always removes it regardless of
+	// externalDolt. Restored immediately after the scrub (see below) so both
+	// isolateTmuxSocket() and tmux.NewTmux()'s own guard — which reads the
+	// same var later in the process lifetime, from inside test bodies — see
+	// the caller's real opt-out instead of an env that was already wiped
+	// before anything checked it. Without this, BEADS_TEST_ALLOW_LIVE_TMUX=1
+	// was a documented but dead opt-out (gt-yav3 MR1 bounce).
+	allowLiveTmux := os.Getenv(AllowLiveTmuxEnv) == "1"
+
 	scrubProcessEnv(externalDolt)
+
+	if allowLiveTmux {
+		if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
+			return nil, fmt.Errorf("restoring %s: %w", AllowLiveTmuxEnv, err)
+		}
+	}
 
 	sandbox, err := os.MkdirTemp("", "gt-hermetic-")
 	if err != nil {

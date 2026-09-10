@@ -406,6 +406,7 @@ type PolecatListItem struct {
 	SessionRunning       bool          `json:"session_running"`
 	Zombie               bool          `json:"zombie,omitempty"`
 	Foreign              bool          `json:"foreign,omitempty"`
+	BeadLookupFailed     bool          `json:"bead_lookup_failed,omitempty"`
 	SessionName          string        `json:"session_name,omitempty"`
 }
 
@@ -507,8 +508,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		agents, agentErr := bd.ListAgentBeads()
-		if agentErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v\n", r.Name, agentErr)
+		agentLookupFailed := agentErr != nil
+		if agentLookupFailed {
+			fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
 			agents = nil
 		}
 		activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name)
@@ -575,8 +577,16 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			agentBeadID := polecatBeadIDForRig(r, r.Name, polecatName)
-			_, hasBead := agents[agentBeadID]
-			allPolecats = append(allPolecats, classifyOrphanSession(r.Name, polecatName, sessionName, hasBead))
+			presence := beadAbsent
+			switch {
+			case agentLookupFailed:
+				presence = beadLookupFailed
+			default:
+				if _, ok := agents[agentBeadID]; ok {
+					presence = beadPresent
+				}
+			}
+			allPolecats = append(allPolecats, classifyOrphanSession(r.Name, polecatName, sessionName, presence))
 		}
 	}
 
@@ -635,10 +645,11 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("    %s\n", style.Dim.Render(details))
 		}
-		if p.Zombie && p.SessionName != "" {
+		if p.BeadLookupFailed && p.SessionName != "" {
+			fmt.Printf("    %s\n", style.Warning.Render("session: "+p.SessionName+" (no worktree, bead lookup FAILED — unconfirmed zombie, do not treat as foreign)"))
+		} else if p.Zombie && p.SessionName != "" {
 			fmt.Printf("    %s\n", style.Dim.Render("session: "+p.SessionName+" (no worktree)"))
-		}
-		if p.Foreign && p.SessionName != "" {
+		} else if p.Foreign && p.SessionName != "" {
 			fmt.Printf("    %s\n", style.Dim.Render("session: "+p.SessionName+" (no worktree, no bead — foreign session)"))
 		}
 	}
@@ -646,14 +657,38 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// beadPresence is the tri-state result of an agent-bead lookup for an orphan
+// tmux session. Collapsing "no bead" and "lookup failed" into a single bool
+// (as an earlier version of this function did) meant one Dolt hiccup relabeled
+// every genuine zombie as foreign and hid it from nuke/restart consideration —
+// see the gt-yav3 MR1 bounce.
+type beadPresence int
+
+const (
+	// beadAbsent means the lookup succeeded and found no bead: the session
+	// never had one (e.g. a hermetic test's session escaping onto the wrong
+	// socket) and is genuinely foreign.
+	beadAbsent beadPresence = iota
+	// beadPresent means the lookup succeeded and found a bead: the session
+	// belongs to a real polecat whose worktree is gone — a genuine zombie.
+	beadPresent
+	// beadLookupFailed means the lookup itself errored (e.g. Dolt
+	// unreachable): presence is unknown, so the caller must not assume
+	// absence.
+	beadLookupFailed
+)
+
 // classifyOrphanSession builds the list entry for a tmux session that parses
-// as a polecat name in rigName but has no matching worktree directory. hasBead
-// reports whether an agent bead exists for that name: a genuine zombie
-// (worktree gone, session lingering) still has one, while a foreign session
-// (e.g. a hermetic test's session escaping onto the wrong socket, gt-yav3)
-// never had a bead to begin with and must not be treated as a zombie.
-func classifyOrphanSession(rigName, polecatName, sessionName string, hasBead bool) PolecatListItem {
-	if !hasBead {
+// as a polecat name in rigName but has no matching worktree directory.
+// presence reports whether an agent bead exists for that name. A confirmed
+// absence (beadAbsent) is foreign, never a zombie. A confirmed presence
+// (beadPresent) is a genuine zombie. A failed lookup (beadLookupFailed) fails
+// safe as an unconfirmed zombie — never silently downgraded to foreign, which
+// would hide a real zombie — and is flagged loud via BeadLookupFailed so
+// callers/output don't mistake it for a confirmed reading.
+func classifyOrphanSession(rigName, polecatName, sessionName string, presence beadPresence) PolecatListItem {
+	switch presence {
+	case beadAbsent:
 		return PolecatListItem{
 			Rig:            rigName,
 			Name:           polecatName,
@@ -662,14 +697,25 @@ func classifyOrphanSession(rigName, polecatName, sessionName string, hasBead boo
 			Foreign:        true,
 			SessionName:    sessionName,
 		}
-	}
-	return PolecatListItem{
-		Rig:            rigName,
-		Name:           polecatName,
-		State:          polecat.StateZombie,
-		SessionRunning: true,
-		Zombie:         true,
-		SessionName:    sessionName,
+	case beadLookupFailed:
+		return PolecatListItem{
+			Rig:              rigName,
+			Name:             polecatName,
+			State:            polecat.StateZombie,
+			SessionRunning:   true,
+			Zombie:           true,
+			BeadLookupFailed: true,
+			SessionName:      sessionName,
+		}
+	default: // beadPresent
+		return PolecatListItem{
+			Rig:            rigName,
+			Name:           polecatName,
+			State:          polecat.StateZombie,
+			SessionRunning: true,
+			Zombie:         true,
+			SessionName:    sessionName,
+		}
 	}
 }
 
