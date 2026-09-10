@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -204,6 +205,42 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "on") {
 		t.Fatalf("expected DND state 'on' in status output, got: %q", out)
+	}
+}
+
+func TestOutputStatusText_ContainerSlot(t *testing.T) {
+	held := TownStatus{
+		Name:     "gt",
+		Location: "/tmp/gt",
+		Slot: &SlotInfo{
+			Role:       "gastown/refinery",
+			PID:        4242,
+			AcquiredAt: time.Now().Add(-90 * time.Second),
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, held); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Container suite running:") {
+		t.Fatalf("expected container-slot line when Slot is set, got: %q", out)
+	}
+	if !strings.Contains(out, "gastown/refinery") {
+		t.Fatalf("expected holder role in status output, got: %q", out)
+	}
+
+	// Free slot: the line must NOT appear — a status render that always
+	// prints it (e.g. from a nil-Slot zero value) would be indistinguishable
+	// from "always holding the slot" to a reader.
+	free := TownStatus{Name: "gt", Location: "/tmp/gt"}
+	buf.Reset()
+	if err := outputStatusText(&buf, free); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if strings.Contains(buf.String(), "Container suite running:") {
+		t.Fatalf("did not expect container-slot line when Slot is nil, got: %q", buf.String())
 	}
 }
 

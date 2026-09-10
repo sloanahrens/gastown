@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -74,6 +75,16 @@ type TownStatus struct {
 	Agents   []AgentRuntime `json:"agents"`             // Global agents (Mayor, Deacon)
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
+	Slot     *SlotInfo      `json:"container_slot,omitempty"` // Container-suite gate slot (gt-bcsq)
+}
+
+// SlotInfo represents the town-level container-suite gate slot (see
+// internal/slot). Only populated in the status output when the slot is
+// currently held — an idle slot is not worth a line in every 'gt status'.
+type SlotInfo struct {
+	Role       string    `json:"role"`
+	PID        int       `json:"pid"`
+	AcquiredAt time.Time `json:"acquired_at"`
 }
 
 // ServiceInfo represents a background service status.
@@ -859,6 +870,13 @@ func gatherStatus() (TownStatus, error) {
 	}
 	status.Tmux = tmuxInfo
 
+	// Container-suite gate slot: only show a line when something is
+	// actually holding it (gt-bcsq). Best-effort — a lock-read failure
+	// shouldn't break 'gt status'.
+	if held, owner, slotErr := slot.Status(townRoot); slotErr == nil && held && owner != nil {
+		status.Slot = &SlotInfo{Role: owner.Role, PID: owner.PID, AcquiredAt: owner.AcquiredAt}
+	}
+
 	// ACP status
 	if mayor.IsACPActive(townRoot) {
 		acpPid, _ := mayor.GetACPPid(townRoot)
@@ -1070,6 +1088,15 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		}
 		fmt.Fprintf(w, "%s\n", strings.Join(parts, "  "))
 		fmt.Fprintln(w)
+	}
+
+	// Container-suite gate slot (gt-bcsq): only one Docker-backed test suite
+	// may run at a time townwide. Only shown while held.
+	if status.Slot != nil {
+		fmt.Fprintf(w, "🔒 %s %s %s\n\n",
+			style.Bold.Render("Container suite running:"),
+			status.Slot.Role,
+			style.Dim.Render(fmt.Sprintf("(pid %d, age %s)", status.Slot.PID, time.Since(status.Slot.AcquiredAt).Round(time.Second))))
 	}
 
 	// Role icons - uses centralized emojis from constants package

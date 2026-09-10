@@ -194,6 +194,11 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
 
+	// Container-suite gate slot: informational check exposing the Docker
+	// VM's CPU/memory bound so operators can see why container-backed
+	// suites contend even when host-idle looks fine (gt-bcsq).
+	d.Register(doctor.NewContainerCapacityCheck())
+
 	// Infrastructure prerequisites — these must pass before any check that
 	// shells out to bd/dolt or queries the database. Order matters:
 	// 1. gt binary freshness
