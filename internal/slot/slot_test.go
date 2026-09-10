@@ -405,11 +405,14 @@ func TestAcquire_WaitsForUnwrappedContainersToClear(t *testing.T) {
 	}
 }
 
-// TestAcquire_FailsFastWhenDockerUnreachable is the regression test for
-// gt-tuiy's rework: Acquire must not poll a docker-unreachable state out to
-// the full timeout — that state won't resolve itself by waiting — it must
-// return an error as soon as it observes it.
-func TestAcquire_FailsFastWhenDockerUnreachable(t *testing.T) {
+// TestAcquire_ProceedsOnFlockWhenDockerUnreachable is the regression test
+// for gt-tuiy attempt 2's finding: an unreachable docker daemon must not
+// block Acquire. Treating it as an unverifiable "busy" (the attempt-1
+// behavior) turned a routinely-stopped Docker Desktop into a town-wide gate
+// outage for every suite, including ones that never touch Docker. Since an
+// unreachable daemon cannot be running any containers either, Acquire must
+// proceed on the flock alone, quickly, rather than failing or waiting.
+func TestAcquire_ProceedsOnFlockWhenDockerUnreachable(t *testing.T) {
 	townRoot := t.TempDir()
 
 	orig := runningGateContainers
@@ -420,17 +423,15 @@ func TestAcquire_FailsFastWhenDockerUnreachable(t *testing.T) {
 
 	timeout := 30 * time.Second
 	start := time.Now()
-	_, err := Acquire(townRoot, "waiter", timeout)
+	h, err := Acquire(townRoot, "waiter", timeout)
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatalf("Acquire succeeded while docker was unreachable")
+	if err != nil {
+		t.Fatalf("Acquire failed while docker was unreachable: %v", err)
 	}
-	if elapsed >= timeout {
-		t.Fatalf("Acquire took %s to fail — it waited out the full %s timeout instead of failing fast", elapsed, timeout)
-	}
+	defer h.Release()
 	if elapsed > 2*DefaultPollInterval {
-		t.Fatalf("Acquire took %s to fail — expected it to fail on the first check, not after polling", elapsed)
+		t.Fatalf("Acquire took %s — expected it to proceed on the first check, not after polling", elapsed)
 	}
 }
 

@@ -119,7 +119,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 23
+version = 24
 
 [vars]
 [vars.wisp_type]
@@ -635,13 +635,25 @@ Proceed to handle-failures step. Track which specific check failed
 
 **3. Run the test suite:**
 
-Run it through the container-gate slot, never bare (gt-tuiy — an unwrapped
-suite that spins Dolt/testcontainers collides with any other rig's
-container-backed suite on the shared Docker VM even though `gt slot status`
-looked free):
+**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step — keep both
+in sync): wrap test_command through the container-gate slot only when it
+spins Docker containers (Dolt, testcontainers) for THIS rig; run it bare
+otherwise.** The slot is a townwide lock shared by every rig — wrapping a
+non-Docker rig's gate serializes it behind every other rig's Dolt/
+testcontainers suite for no reason, and (gt-tuiy attempt 2) a stopped Docker
+Desktop would fail even suites that never touch it. Wrapping IS required
+when test_command spins Dolt/testcontainers (e.g. beads, gastown's
+testcontainers-based patrol tests) — an unwrapped suite like that collides
+with any other rig's container-backed suite on the shared Docker VM even
+though `gt slot status` looked free.
 
+If {{rig}}'s test_command spins Docker containers:
 ```bash
 gt slot run --role {{rig}}/refinery -- {{test_command}}
+```
+Otherwise run it bare:
+```bash
+{{test_command}}
 ```
 
 **Never substitute a bare `go test ./...` for the configured
