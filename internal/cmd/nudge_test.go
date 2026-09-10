@@ -772,7 +772,19 @@ func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CapturePane: %v", err)
 		}
-		if strings.Contains(out, message) {
+		// The message is one long hyphenated token with no spaces, typed
+		// after a real shell prompt whose rendered width varies (hostname,
+		// cwd, async prompt redraws). When prompt+message overflows the
+		// pane's column width, the pane (or the shell's own line editor)
+		// splits the token across two captured rows with a bare "\n" and no
+		// character added or removed at the break — so the delivered text
+		// is intact, but a direct Contains against the raw capture misses it
+		// depending on exactly where that break lands. This is what made
+		// the test flake (main is RED again, gt-isp0): the failure tracked
+		// pane-render width, not nudge delivery. Flatten newlines before
+		// searching so the check is independent of where the pane wrapped.
+		flat := strings.ReplaceAll(out, "\n", "")
+		if strings.Contains(flat, message) {
 			break
 		}
 		if time.Now().After(deadline) {
