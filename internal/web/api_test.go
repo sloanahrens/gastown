@@ -985,6 +985,182 @@ esac
 	}
 }
 
+// TestSSEDashboardPollSkipsWhenNoClients is a regression test for gt-c9rl:
+// pollDashboardHash used to shell out to gt (status/hooks/mail, one process
+// per town agent identity inside "status --json") on every tick FOREVER once
+// started, even after every SSE client disconnected. A dashboard opened once
+// and closed in every tab therefore kept polling at full rate indefinitely —
+// ~80 CPU-equivalents of subprocess load with zero browsers attached. The
+// poller must skip computeDashboardHash while dashboardClients is zero, and
+// resume as soon as a client reconnects.
+//
+// An earlier version of this test drove the poller with a real ticker and
+// wall-clock sleeps, comparing call counts taken at times only loosely
+// synchronized with the poller goroutine. That flaked (~23% of runs, per
+// mayor's review on this bead): a tick's decision to run computeDashboardHash
+// is made against dashboardClients at the moment the real ticker fires, which
+// is not synchronized with the test's own disconnect call, so a tick that
+// legitimately started while still connected could finish logging its
+// subprocess calls after the test had already sampled its "after disconnect"
+// baseline. This version replaces the real ticker with an injected channel
+// (dashboardPollTickC) that the test alone advances, and uses a completion
+// hook (dashboardPollTick) as a synchronization barrier: the hook fires only
+// after a tick's decision — and, for a run, every subprocess call it made —
+// is fully complete. Every assertion below is gated on an observed event from
+// that hook, never on a sleep.
+func TestSSEDashboardPollSkipsWhenNoClients(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	callLog := filepath.Join(binDir, "calls.log")
+
+	gtScript := `#!/usr/bin/env sh
+set -eu
+echo "$*" >> ` + callLog + `
+case "$*" in
+  "status --json") printf '{"agents":[]}\n' ;;
+  "hooks list") printf '\n' ;;
+  "mail inbox") printf '\n' ;;
+  *) printf 'unexpected gt args: %s\n' "$*" >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	// The test drives every tick itself, so ticks arrive strictly one at a
+	// time and only when the test sends one.
+	tickC := make(chan time.Time)
+	// Buffered by 1: pollDashboardHash sends its per-tick outcome and moves
+	// on to wait for the next tick without needing the test to already be
+	// receiving.
+	tickDone := make(chan bool, 1)
+	h := &APIHandler{
+		gtPath:             gtPath,
+		workDir:            t.TempDir(),
+		defaultRunTimeout:  5 * time.Second,
+		maxRunTimeout:      10 * time.Second,
+		cmdSem:             make(chan struct{}, maxConcurrentCommands),
+		dashboardPollTickC: tickC,
+		dashboardPollTick:  func(ran bool) { tickDone <- ran },
+	}
+
+	countCalls := func() int {
+		data, err := os.ReadFile(callLog)
+		if err != nil {
+			return 0
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return 0
+		}
+		return len(strings.Split(trimmed, "\n"))
+	}
+
+	// step sends one tick and waits for pollDashboardHash to fully process
+	// it (including any subprocess calls it made), returning whether it ran.
+	step := func() bool {
+		t.Helper()
+		select {
+		case tickC <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not accept a tick — is pollDashboardHash running?")
+		}
+		select {
+		case ran := <-tickDone:
+			return ran
+		case <-time.After(5 * time.Second):
+			t.Fatalf("poller did not report a tick outcome")
+			return false
+		}
+	}
+
+	// connect starts an SSE connection on its own goroutine and waits for
+	// dashboardClients to reflect it before returning, then returns a
+	// disconnect func that cancels the connection and blocks until
+	// handleSSE has returned — at which point dashboardClients has already
+	// been decremented (handleSSE decrements via defer before returning).
+	//
+	// The wait-for-increment step matters on reconnect: the very first
+	// connect() call is naturally ordered before the poller can observe
+	// dashboardClients at all, because starting the poller goroutine
+	// (dashboardPollOnce, inside handleSSE) happens-before anything the new
+	// goroutine reads, and that Do only fires after dashboardClients.Add(1)
+	// in program order. On a later connect(), though, the poller already
+	// exists and is already parked on tickC, so nothing otherwise orders its
+	// next read of dashboardClients after this connection's own Add(1) —
+	// without waiting here, step() below can race a tick's decision ahead of
+	// the increment it depends on.
+	connect := func() (disconnect func()) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+		done := make(chan struct{})
+		before := h.dashboardClients.Load()
+		go func() {
+			defer close(done)
+			h.handleSSE(httptest.NewRecorder(), req)
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for h.dashboardClients.Load() == before {
+			if time.Now().After(deadline) {
+				t.Fatalf("dashboardClients did not increment after connecting")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("handleSSE did not return after disconnect")
+			}
+		}
+	}
+
+	// First connection starts the shared poller (dashboardPollOnce) and
+	// establishes one connected client.
+	disconnect := connect()
+
+	if ran := step(); !ran {
+		t.Fatalf("expected the poller to run computeDashboardHash while a client was connected")
+	}
+	baseline := countCalls()
+	if baseline == 0 {
+		t.Fatalf("expected computeDashboardHash to have invoked gt at least once")
+	}
+
+	// Disconnecting is synchronous (waits for handleSSE to return), so by
+	// the time it returns dashboardClients is guaranteed back to zero and no
+	// tick has been sent since the one already confirmed above — there is
+	// nothing in flight for the next step to race against.
+	disconnect()
+	if got := h.dashboardClients.Load(); got != 0 {
+		t.Fatalf("dashboardClients = %d after disconnect, want 0", got)
+	}
+
+	// No client connected: several ticks in a row must all be skipped, and
+	// the call count must not move, because each step() only returns once
+	// that tick's outcome (and any calls it made) is fully accounted for.
+	for i := 0; i < 5; i++ {
+		if ran := step(); ran {
+			t.Fatalf("tick %d ran computeDashboardHash with zero SSE clients connected", i)
+		}
+		if got := countCalls(); got != baseline {
+			t.Fatalf("gt was invoked with zero SSE clients connected (total %d, want %d)", got, baseline)
+		}
+	}
+
+	// Reconnecting must resume polling.
+	disconnect = connect()
+	defer disconnect()
+	if ran := step(); !ran {
+		t.Fatalf("expected the poller to resume after a client reconnected")
+	}
+	if got := countCalls(); got <= baseline {
+		t.Fatalf("gt call count %d did not grow after reconnecting (baseline %d)", got, baseline)
+	}
+}
+
 // TestOptionsCacheConcurrentAccess verifies that concurrent cache reads and
 // writes don't race. The read lock is held through serialization so a
 // concurrent writer can't replace the cached pointer mid-encode.
