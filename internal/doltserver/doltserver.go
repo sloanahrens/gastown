@@ -953,6 +953,26 @@ func findDoltServerOnPort(port int) int {
 type DoltListener struct {
 	PID  int
 	Port int
+	// PPID is the parent process ID. A hermetic test server keeps its
+	// spawning parent alive for its whole life, so PPID reflects that
+	// parent right up until the parent exits. A production server is
+	// started via a short-lived `gt dolt start` invocation that exits
+	// immediately, so its PPID becomes 1 (reparented to init) within
+	// moments of starting by design — PPID is only meaningful for
+	// distinguishing genuinely leaked test servers from live ones, and
+	// only once the production listener has already been excluded by
+	// port (see IsOrphaned, FindZombieServers, gt-vzxq).
+	PPID int
+}
+
+// IsOrphaned reports whether the listener's owning process has been
+// reparented to init (PPID == 1), meaning its original parent died without
+// cleaning it up and nothing else ever will. This is the correct signal for
+// "genuinely leaked" — NOT "any Dolt server on a port we didn't expect".
+// A hermetic test server on an ephemeral port with a live parent is normal,
+// expected infrastructure, not an orphan (gt-vzxq).
+func (l DoltListener) IsOrphaned() bool {
+	return l.PPID == 1
 }
 
 // FindAllDoltListeners discovers all Dolt processes with TCP listeners using lsof.
@@ -964,7 +984,7 @@ func FindAllDoltListeners() []DoltListener {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "lsof", "-a", "-c", "dolt", "-sTCP:LISTEN", "-i", "TCP", "-n", "-P", "-F", "pn")
+	cmd := exec.CommandContext(ctx, "lsof", "-a", "-c", "dolt", "-sTCP:LISTEN", "-i", "TCP", "-n", "-P", "-F", "pRn")
 	setProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
@@ -973,9 +993,10 @@ func FindAllDoltListeners() []DoltListener {
 
 	// Parse lsof -F output. Lines are field-prefixed:
 	//   p<PID>     — process ID
+	//   R<PPID>    — parent process ID
 	//   n<addr>    — network name (e.g., "*:3307" or "127.0.0.1:3307")
 	var listeners []DoltListener
-	var currentPID int
+	var currentPID, currentPPID int
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if len(line) == 0 {
 			continue
@@ -985,6 +1006,12 @@ func FindAllDoltListeners() []DoltListener {
 			pid, err := strconv.Atoi(line[1:])
 			if err == nil {
 				currentPID = pid
+				currentPPID = 0
+			}
+		case 'R':
+			ppid, err := strconv.Atoi(line[1:])
+			if err == nil {
+				currentPPID = ppid
 			}
 		case 'n':
 			if currentPID == 0 {
@@ -1004,7 +1031,7 @@ func FindAllDoltListeners() []DoltListener {
 						}
 					}
 					if !dup {
-						listeners = append(listeners, DoltListener{PID: currentPID, Port: port})
+						listeners = append(listeners, DoltListener{PID: currentPID, Port: port, PPID: currentPPID})
 					}
 				}
 			}

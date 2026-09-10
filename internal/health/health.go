@@ -86,17 +86,41 @@ func DatabaseCount(host string, port int) (int, []string, error) {
 }
 
 // ZombieResult holds the result of a zombie server scan.
+//
+// "Zombie" here means a genuinely leaked process — reparented to init, with
+// nothing left to reclaim it — not merely any Dolt listener on a port we
+// didn't ask about. A hermetic test suite's isolated server also shows up
+// on a non-expected port while its parent is alive and it is behaving
+// correctly; counting that as a zombie fires on correct test isolation and
+// trains agents to discount the alarm that would matter (gt-vzxq).
 type ZombieResult struct {
 	Count int
 	PIDs  []int
+
+	// LiveTestCount/LiveTestPIDs are non-expected-port Dolt listeners whose
+	// parent process is still alive — almost always a running test suite's
+	// isolated server, not a problem. Reported separately so callers can
+	// surface it as informational without treating it as an incident.
+	LiveTestCount int
+	LiveTestPIDs  []int
 }
 
-// FindZombieServers scans for dolt sql-server processes not on any expected port.
+// FindZombieServers scans for dolt sql-server processes not on any expected port,
+// then splits them into genuinely orphaned servers (PPID == 1 — the owning
+// process died and nothing will ever clean them up) and live test servers
+// (parent still alive — expected during test runs). Only the former counts
+// as a zombie (gt-vzxq).
 // Uses lsof-based port discovery instead of pgrep/ps string matching (ZFC fix: gt-fj87).
 func FindZombieServers(expectedPorts []int) ZombieResult {
-	result := ZombieResult{}
+	return ClassifyListeners(doltserver.FindAllDoltListeners(), expectedPorts)
+}
 
-	listeners := doltserver.FindAllDoltListeners()
+// ClassifyListeners splits discovered Dolt listeners into genuinely orphaned
+// servers and live test servers, given the ports the caller expects a
+// legitimate (production) server on. Split out from FindZombieServers so the
+// classification logic is unit-testable without shelling out to lsof.
+func ClassifyListeners(listeners []doltserver.DoltListener, expectedPorts []int) ZombieResult {
+	result := ZombieResult{}
 	if len(listeners) == 0 {
 		return result
 	}
@@ -110,8 +134,13 @@ func FindZombieServers(expectedPorts []int) ZombieResult {
 		if expectedSet[l.Port] {
 			continue
 		}
-		result.Count++
-		result.PIDs = append(result.PIDs, l.PID)
+		if l.IsOrphaned() {
+			result.Count++
+			result.PIDs = append(result.PIDs, l.PID)
+			continue
+		}
+		result.LiveTestCount++
+		result.LiveTestPIDs = append(result.LiveTestPIDs, l.PID)
 	}
 
 	return result
