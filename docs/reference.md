@@ -89,6 +89,13 @@ town-level Gas Town beads.
 }
 ```
 
+`merge_queue` is not exclusive to `settings/config.json`. It resolves across three
+layers, lowest to highest precedence: the rig root `config.json` (the floor —
+set once at onboarding), the repo-committed `.gastown/settings.json`, and this
+file, `settings/config.json` (rig-local operator tuning, final override). Every
+gate-command call site in `gt` reads all three through one resolver
+(`config.ResolveMergeQueueConfig`) so they can't drift out of sync.
+
 **Theme fields:**
 
 | Field | Type | Default | Description |

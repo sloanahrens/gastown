@@ -1714,12 +1714,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// 3. Auto-detect integration branch from epic hierarchy (if enabled).
 		// Only overrides if no explicit target was set above.
 		if !explicitTarget && target == defaultBranch {
-			refineryEnabled := true
-			settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
-			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-				refineryEnabled = settings.MergeQueue.IsRefineryIntegrationEnabled()
-			}
-			if refineryEnabled {
+			if refineryIntegrationEnabled(townRoot, rigName) {
 				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
 				if err == nil && autoTarget != "" {
 					target = autoTarget
