@@ -122,6 +122,27 @@ case "${1:-}" in
       exit 0
     fi
     ;;
+  polecat)
+    if [ "${2:-}" = "identity" ] && [ "${3:-}" = "show" ]; then
+      rig="${4:-}"
+      name="${5:-}"
+      printf '%s|%s\n' "$PWD" "$*" >> "$TEST_STATE/identity_calls.log"
+      if [ "${6:-}" != "--json" ]; then
+        exit 1
+      fi
+      if [ -f "$TEST_STATE/identity_fail/$name" ]; then
+        exit 1
+      fi
+      agent_state="working"
+      hook_bead="gt-hook-$name"
+      if [ -f "$TEST_STATE/identity_state/$name" ]; then
+        agent_state=$(cut -d'|' -f1 < "$TEST_STATE/identity_state/$name" | tr -d '\n')
+        hook_bead=$(cut -d'|' -f2 < "$TEST_STATE/identity_state/$name" | tr -d '\n')
+      fi
+      printf '{"agent_state":"%s","hook_bead":"%s"}\n' "$agent_state" "$hook_bead"
+      exit 0
+    fi
+    ;;
   rig)
     if [ "${2:-}" = "list" ] && [ "${3:-}" = "--json" ]; then
       if [ -f "$TEST_STATE/rig_list_fail" ]; then
@@ -292,7 +313,7 @@ setup_case() {
   export TEST_STATE="$TEST_TMP/state"
   export GT_TOWN_ROOT="$TEST_TMP/town"
 
-  mkdir -p "$TEST_STATE/health" "$TEST_STATE/hook_fail" "$TEST_STATE/hook_status" "$TEST_STATE/nohook" "$TEST_STATE/sessions" "$TEST_STATE/status"
+  mkdir -p "$TEST_STATE/health" "$TEST_STATE/hook_fail" "$TEST_STATE/hook_status" "$TEST_STATE/nohook" "$TEST_STATE/sessions" "$TEST_STATE/status" "$TEST_STATE/identity_fail" "$TEST_STATE/identity_state"
   mkdir -p "$GT_TOWN_ROOT/gastown/polecats" "$GT_TOWN_ROOT/deacon"
   printf '{"rigs":{"gastown":{"beads":{"prefix":"gt"}}}}\n' > "$GT_TOWN_ROOT/rigs.json"
   : > "$TEST_STATE/mail.log"
@@ -300,6 +321,7 @@ setup_case() {
   : > "$TEST_STATE/escalate.log"
   : > "$TEST_STATE/health_calls.log"
   : > "$TEST_STATE/hook_calls.log"
+  : > "$TEST_STATE/identity_calls.log"
   : > "$TEST_STATE/bd.log"
   touch "$TEST_STATE/sessions/hq-deacon"
 
@@ -455,6 +477,41 @@ test_closed_hook_skips_restart() {
   assert_file_empty "$TEST_STATE/kill.log" "closed hook: no session kill"
   assert_file_empty "$TEST_STATE/mail.log" "closed hook: no restart mail"
   assert_file_contains "$TEST_STATE/output.log" "status=closed not actionable" "closed hook: status checked"
+}
+
+test_done_polecat_stray_inprogress_wisp_skips_restart() {
+  setup_case
+  add_polecat marble session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/marble"
+  printf 'done|\n' > "$TEST_STATE/identity_state/marble"
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "done polecat stray wisp: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "done polecat stray wisp: no restart mail"
+  assert_file_empty "$TEST_STATE/escalate.log" "done polecat stray wisp: no escalation"
+  assert_file_contains "$TEST_STATE/output.log" "agent_state=done" "done polecat stray wisp: identity gate logged"
+}
+
+test_null_hook_bead_skips_restart_despite_inprogress_bead() {
+  setup_case
+  add_polecat opal agent-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/opal"
+  printf 'working|\n' > "$TEST_STATE/identity_state/opal"
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "null hook_bead: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "null hook_bead: no restart mail"
+  assert_file_contains "$TEST_STATE/output.log" "no hook_bead" "null hook_bead: identity gate logged"
+}
+
+test_identity_lookup_unavailable_falls_back_to_hook_status() {
+  setup_case
+  add_polecat alpha agent-dead
+  touch "$TEST_STATE/identity_fail/alpha"
+  run_script
+
+  assert_line_count "$TEST_STATE/kill.log" 1 "identity unavailable: falls back, one kill"
+  assert_line_count "$TEST_STATE/mail.log" 1 "identity unavailable: falls back, one restart mail"
 }
 
 test_no_hook_dead_sessions_do_not_mass_death() {
@@ -653,6 +710,9 @@ test_dead_agent_restarts_one
 test_in_progress_hook_restarts_one
 test_dead_session_restarts_one
 test_closed_hook_skips_restart
+test_done_polecat_stray_inprogress_wisp_skips_restart
+test_null_hook_bead_skips_restart_despite_inprogress_bead
+test_identity_lookup_unavailable_falls_back_to_hook_status
 test_no_hook_dead_sessions_do_not_mass_death
 test_non_actionable_hook_statuses_do_not_mass_death
 test_docked_rig_skipped
