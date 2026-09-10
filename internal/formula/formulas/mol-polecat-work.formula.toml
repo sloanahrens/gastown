@@ -52,7 +52,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 11
+version = 12
 
 [[steps]]
 id = "load-context"
@@ -440,6 +440,16 @@ go test ./internal/pkg/you/changed/...
 # Or for JS: npx jest --testPathPattern="changed-file"
 ```
 
+**If the package(s) you're targeting spin Docker containers (Dolt,
+testcontainers) — e.g. anything under storage/dolt-backed packages — wrap
+the command through the container-gate slot instead of running it bare**
+(gt-tuiy: an unwrapped `go test` with live Dolt containers is invisible to
+`gt slot status`, but it still collides with any other rig's container
+suite on the shared Docker VM):
+```bash
+gt slot run --role <rig>/<your-name> -- go test ./internal/pkg/you/changed/...
+```
+
 If you're unsure which tests are relevant, skip this — the MQ will catch it.
 
 **4. Lint (OPTIONAL — run if configured and fast):**
@@ -490,9 +500,12 @@ If lint_command is set:
 {{lint_command}}
 ```
 
-If test_command is set:
+If test_command is set, run it through the container-gate slot, never bare
+(gt-tuiy — an unwrapped suite that spins Dolt/testcontainers collides with
+any other rig's container-backed suite on the shared Docker VM even though
+`gt slot status` looked free):
 ```bash
-{{test_command}}
+gt slot run --role <rig>/<your-name> -- {{test_command}}
 ```
 
 Empty commands mean "not configured" — skip silently.

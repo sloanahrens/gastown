@@ -1,6 +1,7 @@
 package slot
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,15 +9,29 @@ import (
 	"time"
 )
 
+// stubNoContainers makes runningGateContainers deterministic for tests that
+// aren't exercising the docker-ps cross-check itself: the flock semantics
+// tests below must not depend on (or be made flaky by) whatever container
+// suites happen to be running on the host, including this bug's own
+// premise — other rigs' Docker-backed suites running concurrently on a
+// shared Gas Town host.
+func stubNoContainers(t *testing.T) {
+	t.Helper()
+	orig := runningGateContainers
+	runningGateContainers = func() ([]string, error) { return nil, nil }
+	t.Cleanup(func() { runningGateContainers = orig })
+}
+
 func TestAcquireReleaseStatus(t *testing.T) {
+	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	held, owner, err := Status(townRoot)
+	rep, err := Status(townRoot)
 	if err != nil {
 		t.Fatalf("Status before acquire: %v", err)
 	}
-	if held {
-		t.Fatalf("Status reported held before any Acquire; owner=%+v", owner)
+	if rep.Busy() {
+		t.Fatalf("Status reported busy before any Acquire: %+v", rep)
 	}
 
 	h, err := Acquire(townRoot, "test-role", time.Second)
@@ -24,27 +39,27 @@ func TestAcquireReleaseStatus(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 
-	held, owner, err = Status(townRoot)
+	rep, err = Status(townRoot)
 	if err != nil {
 		t.Fatalf("Status after acquire: %v", err)
 	}
-	if !held {
-		t.Fatalf("Status reported free while held")
+	if !rep.Held {
+		t.Fatalf("Status reported not held while held")
 	}
-	if owner == nil || owner.Role != "test-role" || owner.PID != os.Getpid() {
-		t.Fatalf("owner metadata wrong: %+v", owner)
+	if rep.Owner == nil || rep.Owner.Role != "test-role" || rep.Owner.PID != os.Getpid() {
+		t.Fatalf("owner metadata wrong: %+v", rep.Owner)
 	}
 
 	if err := h.Release(); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 
-	held, _, err = Status(townRoot)
+	rep, err = Status(townRoot)
 	if err != nil {
 		t.Fatalf("Status after release: %v", err)
 	}
-	if held {
-		t.Fatalf("Status reported held after Release")
+	if rep.Busy() {
+		t.Fatalf("Status reported busy after Release: %+v", rep)
 	}
 
 	if _, err := os.Stat(OwnerPath(townRoot)); !os.IsNotExist(err) {
@@ -58,6 +73,7 @@ func TestAcquireReleaseStatus(t *testing.T) {
 // error" — a timeout implementation that returns immediately would also
 // satisfy a looser assertion without actually enforcing exclusion.
 func TestAcquire_MutualExclusion(t *testing.T) {
+	stubNoContainers(t)
 	townRoot := t.TempDir()
 
 	h, err := Acquire(townRoot, "holder", time.Second)
@@ -83,6 +99,7 @@ func TestAcquire_MutualExclusion(t *testing.T) {
 // complement: it proves a released slot is genuinely acquirable again, not
 // just that a held one is unavailable.
 func TestAcquire_ReleaseUnblocksWaiter(t *testing.T) {
+	stubNoContainers(t)
 	townRoot := t.TempDir()
 
 	h, err := Acquire(townRoot, "holder", time.Second)
@@ -127,6 +144,7 @@ func TestAcquire_ReleaseUnblocksWaiter(t *testing.T) {
 // acquire/release/status assertion above yet fail this one, because nothing
 // would ever remove the file after a SIGKILL.
 func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
+	stubNoContainers(t)
 	townRoot := t.TempDir()
 	lockPath := LockPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
@@ -147,11 +165,11 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 	// Wait for the helper to actually acquire the slot before killing it.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		held, _, err := Status(townRoot)
+		rep, err := Status(townRoot)
 		if err != nil {
 			t.Fatalf("Status while waiting for helper: %v", err)
 		}
-		if held {
+		if rep.Held {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -177,14 +195,174 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 
 // TestHelperHoldSlotUntilKilled is not a real test; it is spawned as a
 // subprocess by TestAcquire_KernelReleasesOnProcessDeath to hold the slot
-// until SIGKILLed, with no Release() call in its shutdown path.
+// until SIGKILLed, with no Release() call in its shutdown path. It stubs
+// runningGateContainers itself since it runs in a separate process from the
+// parent test and doesn't inherit the parent's var override.
 func TestHelperHoldSlotUntilKilled(t *testing.T) {
 	if os.Getenv("GT_SLOT_HELPER") != "1" {
 		t.Skip("not invoked as slot-holder helper")
 	}
+	stubNoContainers(t)
 	townRoot := os.Getenv("GT_SLOT_TOWN_ROOT")
 	if _, err := Acquire(townRoot, "helper", time.Second); err != nil {
 		t.Fatalf("helper failed to acquire: %v", err)
 	}
 	time.Sleep(30 * time.Second) // outlived by the parent's SIGKILL
+}
+
+// TestStatus_ReportsUnwrappedContainers is the regression test for gt-tuiy:
+// a container-backed suite that never went through gt slot run leaves the
+// flock free, but Status must still surface it as busy rather than
+// reporting free.
+func TestStatus_ReportsUnwrappedContainers(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite-1"}, nil
+	}
+
+	rep, err := Status(townRoot)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if rep.Held {
+		t.Fatalf("Status reported held with no flock holder: %+v", rep)
+	}
+	if !rep.Busy() {
+		t.Fatalf("Status reported free while an unwrapped container suite is running: %+v", rep)
+	}
+	if len(rep.UnwrappedContainers) != 1 {
+		t.Fatalf("UnwrappedContainers = %v, want 1 entry", rep.UnwrappedContainers)
+	}
+}
+
+// TestStatus_DockerUnreachableIsNotFree is the other half of gt-tuiy's
+// deliverable: when the docker daemon can't be reached, Status must report
+// unknown/busy, never free — a "free" reading on an unverifiable host is
+// what let two container suites collide in the first place.
+func TestStatus_DockerUnreachableIsNotFree(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return nil, errors.New("Cannot connect to the Docker daemon")
+	}
+
+	rep, err := Status(townRoot)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !rep.DockerUnknown {
+		t.Fatalf("DockerUnknown = false, want true when docker is unreachable: %+v", rep)
+	}
+	if !rep.Busy() {
+		t.Fatalf("Status reported free while docker is unreachable (should be unknown/busy): %+v", rep)
+	}
+}
+
+// TestStatus_HeldContainersAreNotUnwrapped ensures a holder's own
+// containers (found while the flock IS held) are never mislabeled as an
+// "unwrapped" suite — that label is reserved for containers running
+// without a token holder. The holder acquires while the check is clear
+// (mirroring Acquire's own requirement that nothing be running yet), then
+// starts its containers, exactly as a real gt slot run holder does.
+func TestStatus_HeldContainersAreNotUnwrapped(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) { return nil, nil }
+
+	h, err := Acquire(townRoot, "holder", time.Second)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	// The holder's suite now starts its own containers.
+	runningGateContainers = func() ([]string, error) {
+		return []string{"dolt/dolt-sql-server:2.2.0 holders-own-container"}, nil
+	}
+
+	rep, err := Status(townRoot)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !rep.Held {
+		t.Fatalf("Status reported not held: %+v", rep)
+	}
+	if len(rep.UnwrappedContainers) != 0 {
+		t.Fatalf("UnwrappedContainers = %v, want empty — these are the holder's own containers", rep.UnwrappedContainers)
+	}
+}
+
+// TestAcquire_WaitsForUnwrappedContainersToClear proves the flock alone
+// does not make the slot available: Acquire must keep waiting while an
+// unwrapped suite's containers are up even though the flock itself is
+// free, and succeed once they clear.
+func TestAcquire_WaitsForUnwrappedContainersToClear(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+
+	var containersUp = true
+	runningGateContainers = func() ([]string, error) {
+		if containersUp {
+			return []string{"testcontainers/ryuk:0.5.1 unwrapped-reaper"}, nil
+		}
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		h, err := Acquire(townRoot, "waiter", 5*time.Second)
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- h.Release()
+	}()
+
+	// Give the waiter a couple of poll cycles to observe containers up
+	// before clearing them, so this actually exercises the wait path.
+	time.Sleep(DefaultPollInterval + 200*time.Millisecond)
+	containersUp = false
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Acquire after containers cleared: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Acquire never succeeded after unwrapped containers cleared")
+	}
+}
+
+// TestAcquire_TimesOutWhileUnwrappedContainersPersist is the timeout-side
+// complement: Acquire must not succeed (or silently hand out the slot)
+// while unwrapped containers never clear.
+func TestAcquire_TimesOutWhileUnwrappedContainersPersist(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return []string{"dolt/dolt-sql-server:2.2.0 stuck-suite"}, nil
+	}
+
+	timeout := DefaultPollInterval + 500*time.Millisecond
+	start := time.Now()
+	_, err := Acquire(townRoot, "waiter", timeout)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Acquire succeeded while unwrapped containers never cleared")
+	}
+	if elapsed < timeout {
+		t.Fatalf("Acquire returned after %s, before its %s timeout elapsed", elapsed, timeout)
+	}
 }

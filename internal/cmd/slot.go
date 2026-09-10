@@ -123,35 +123,58 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	held, owner, err := slot.Status(townRoot)
+	rep, err := slot.Status(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking container-gate slot: %w", err)
 	}
 
 	if slotStatusJSON {
-		return printSlotStatusJSON(cmd, held, owner)
+		return printSlotStatusJSON(cmd, rep)
 	}
 
-	if !held {
-		fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: free")
+	if rep.Held {
+		if rep.Owner != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot: held by %s (pid %d, since %s, age %s)\n",
+				rep.Owner.Role, rep.Owner.PID, rep.Owner.AcquiredAt.Format(time.RFC3339), time.Since(rep.Owner.AcquiredAt).Round(time.Second))
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: held (owner metadata unavailable)")
+		}
 		return nil
 	}
 
-	if owner != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot: held by %s (pid %d, since %s, age %s)\n",
-			owner.Role, owner.PID, owner.AcquiredAt.Format(time.RFC3339), time.Since(owner.AcquiredAt).Round(time.Second))
-	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: held (owner metadata unavailable)")
+	if rep.DockerUnknown {
+		fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: unknown — Docker daemon unreachable, cannot verify no suite is running")
+		return nil
 	}
+
+	if len(rep.UnwrappedContainers) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: BUSY — unwrapped container suite detected (not holding the slot token):")
+		for _, c := range rep.UnwrappedContainers {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", c)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "This suite should have been run via 'gt slot run -- <command>'.")
+		return nil
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: free")
 	return nil
 }
 
-func printSlotStatusJSON(cmd *cobra.Command, held bool, owner *slot.Owner) error {
+func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 	type jsonOut struct {
-		Held  bool        `json:"held"`
-		Owner *slot.Owner `json:"owner,omitempty"`
+		Held                bool        `json:"held"`
+		Owner               *slot.Owner `json:"owner,omitempty"`
+		Busy                bool        `json:"busy"`
+		UnwrappedContainers []string    `json:"unwrapped_containers,omitempty"`
+		DockerUnknown       bool        `json:"docker_unknown"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
-	return enc.Encode(jsonOut{Held: held, Owner: owner})
+	return enc.Encode(jsonOut{
+		Held:                rep.Held,
+		Owner:               rep.Owner,
+		Busy:                rep.Busy(),
+		UnwrappedContainers: rep.UnwrappedContainers,
+		DockerUnknown:       rep.DockerUnknown,
+	})
 }

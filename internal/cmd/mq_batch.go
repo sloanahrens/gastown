@@ -11,8 +11,14 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/style"
 )
+
+// batchSlotTimeout bounds how long runMQBatchRun waits for the
+// container-gate slot before giving up on the batch (see gt-tuiy). It is
+// independent of gt slot run's own --timeout flag.
+const batchSlotTimeout = 60 * time.Minute
 
 // MQ batch command flags. candidates and run each get their own vars so a
 // test invoking both commands in the same process can't see stale state
@@ -267,7 +273,8 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 
 	eng := refinery.NewEngineer(r)
 
-	if gateCmd := buildBatchGateCommand(mq); gateCmd != "" {
+	gateCmd := buildBatchGateCommand(mq)
+	if gateCmd != "" {
 		eng.Config().RunTests = true
 		eng.Config().TestCommand = gateCmd
 	} else {
@@ -312,6 +319,22 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 
 	target := r.DefaultBranch()
 	ctx := context.Background()
+
+	// Batching's whole point is running the gate suite ONCE for the whole
+	// batch instead of once per MR (see batch-scan step docs), so the
+	// container-gate slot is acquired once here around the entire
+	// ProcessBatch call — including any bisection retries it does
+	// internally — rather than per-MR (gt-tuiy). Only bother when a gate
+	// command is actually configured; a batch with zero verification never
+	// touches Docker.
+	if gateCmd != "" {
+		h, slotErr := slot.Acquire(townRoot, rigName+"/refinery-batch", batchSlotTimeout)
+		if slotErr != nil {
+			return fmt.Errorf("acquiring container-gate slot for batch gate: %w", slotErr)
+		}
+		defer h.Release()
+	}
+
 	result := eng.ProcessBatch(ctx, batch, target, batchCfg)
 
 	if mqBatchRunJSON {
