@@ -873,8 +873,8 @@ func gatherStatus() (TownStatus, error) {
 	// Container-suite gate slot: only show a line when something is
 	// actually holding it (gt-bcsq). Best-effort — a lock-read failure
 	// shouldn't break 'gt status'.
-	if held, owner, slotErr := slot.Status(townRoot); slotErr == nil && held && owner != nil {
-		status.Slot = &SlotInfo{Role: owner.Role, PID: owner.PID, AcquiredAt: owner.AcquiredAt}
+	if rep, slotErr := slot.Status(townRoot); slotErr == nil && rep.Held && rep.Owner != nil {
+		status.Slot = &SlotInfo{Role: rep.Owner.Role, PID: rep.Owner.PID, AcquiredAt: rep.Owner.AcquiredAt}
 	}
 
 	// ACP status
