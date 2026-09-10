@@ -18,6 +18,7 @@ var (
 	doctorNoStart         bool
 	doctorSlow            string
 	doctorLiveFire        bool
+	doctorCheck           []string
 )
 
 var doctorCmd = &cobra.Command{
@@ -82,6 +83,9 @@ Rig checks (with --rig flag):
   - mayor-clone-exists       Verify mayor/rig/ clone exists (fixable)
   - polecat-clones-valid     Verify polecat directories are valid clones
   - beads-config-valid       Verify beads configuration (fixable)
+  - editorial-coverage       Verify landed merges carry a matching om approve note
+  - harness-drift            Detect hand edits to deploy-managed harness files
+  - editorial-required       Warn when a rig has an om rubric but review isn't required
 
 Routing checks (fixable):
   - routes-config            Check beads routing configuration
@@ -118,6 +122,7 @@ Patrol checks:
 Use --fix to attempt automatic fixes for issues that support it.
 Use --no-start with --fix to suppress starting the daemon and agents.
 Use --rig to check a specific rig instead of the entire workspace.
+Use --check <name> to run only the named check (repeatable).
 Use --slow to highlight slow checks (default threshold: 1s, e.g. --slow=500ms).
 Use --live-fire to add hooks-live-fire (spawns a real claude -p session
 against a live polecat settings.json to verify a PreToolUse guard actually
@@ -135,6 +140,7 @@ func init() {
 	// Allow --slow without a value (uses default 1s)
 	doctorCmd.Flags().Lookup("slow").NoOptDefVal = "1s"
 	doctorCmd.Flags().BoolVar(&doctorLiveFire, "live-fire", false, "Include hooks-live-fire (spawns a real claude -p session; slow, token-cost-bearing)")
+	doctorCmd.Flags().StringArrayVar(&doctorCheck, "check", nil, "Run only the named check (repeatable)")
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -159,6 +165,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// Opt-in only: spawns a real claude -p subprocess, so it never runs
 		// as part of a default (unwrapped) 'gt doctor' invocation.
 		d.Register(doctor.NewHooksLiveFireCheck())
+	}
+	if len(doctorCheck) > 0 {
+		d.Only(doctorCheck)
+		if len(d.Checks()) == 0 {
+			return fmt.Errorf("no registered check matches --check %v", doctorCheck)
+		}
 	}
 
 	// Parse slow threshold (0 = disabled)
