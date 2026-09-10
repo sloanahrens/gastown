@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -446,8 +445,7 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	// MQ-specific vars: resolved across rig root -> repo -> rig-local (gt-egiv),
 	// the same precedence every gate-command call site must use. Falls back to
 	// the layered rig config (bead labels / wisp layer) below if nothing resolves.
-	repoRoot := filepath.Join(rigPath, "mayor", "rig")
-	mq := config.ResolveMergeQueueConfig(rigPath, repoRoot)
+	mq := rig.ResolveMergeQueueConfig(ctx.TownRoot, ctx.Rig)
 	if mq != nil {
 		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))
 		vars = append(vars, fmt.Sprintf("integration_branch_auto_land=%t", mq.IsIntegrationBranchAutoLandEnabled()))

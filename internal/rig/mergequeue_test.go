@@ -80,6 +80,49 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
 	}
 }
 
+// TestResolveMergeQueueConfig_RigRootAbsent is the negative case flagged in
+// gt-egiv finding 2: when the rig root has no merge_queue section at all
+// (the pre-gt-me9t shape), the repo/local merge must behave exactly as it
+// did before the rig-root floor was introduced — proving the floor is
+// additive, not a silent precedence inversion.
+func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	repoRoot := filepath.Join(rigDir, "mayor", "rig")
+	gastownDir := filepath.Join(repoRoot, ".gastown")
+	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	}
+
+	// Rig root config.json exists but has no merge_queue key at all.
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/sloanahrens/gastown.git"
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	repoSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {"test_command": "make test-repo"}
+}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings.json: %v", err)
+	}
+
+	mq := ResolveMergeQueueConfig(townRoot, "gastown")
+	if mq == nil {
+		t.Fatal("ResolveMergeQueueConfig() = nil, want non-nil")
+	}
+	if mq.TestCommand != "make test-repo" {
+		t.Errorf("TestCommand = %q, want %q (repo/local merge unaffected by absent rig-root floor)", mq.TestCommand, "make test-repo")
+	}
+}
+
 // TestResolveMergeQueueConfig_NoConfig verifies the nil-townRoot/nil-rigName
 // and no-config-anywhere cases return nil, matching HasAnyGateCommand's
 // nil-safety.

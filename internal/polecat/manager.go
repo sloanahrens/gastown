@@ -2917,7 +2917,7 @@ func (m *Manager) resolveSetupCommand(worktreePath string) string {
 
 	// Resolved across rig root -> repo -> rig-local (gt-egiv), the same
 	// precedence every gate-command call site must use.
-	mq := config.ResolveMergeQueueConfig(m.rig.Path, worktreePath)
+	mq := rig.ResolveMergeQueueConfig(m.townRoot, m.rig.Name)
 	if mq == nil {
 		return ""
 	}

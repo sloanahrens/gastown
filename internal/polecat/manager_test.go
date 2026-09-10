@@ -3141,7 +3141,7 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: "testrig", Path: rigPath}
-	mgr := &Manager{rig: r}
+	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
 	if got != "pnpm install" {
@@ -3150,16 +3150,16 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 }
 
 // TestResolveSetupCommandPrecedence pins the three-tier merge order for
-// resolveSetupCommand once it routes through config.ResolveMergeQueueConfig:
+// resolveSetupCommand once it routes through rig.ResolveMergeQueueConfig:
 // rig-local settings/config.json has the final say over the repo-committed
 // and rig-root layers.
 func TestResolveSetupCommandPrecedence(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	worktreePath := filepath.Join(rigPath, "polecats", "jasper")
-	gastownDir := filepath.Join(worktreePath, ".gastown")
+	gastownDir := filepath.Join(rigPath, "mayor", "rig", ".gastown")
 	settingsDir := filepath.Join(rigPath, "settings")
-	for _, dir := range []string{gastownDir, settingsDir} {
+	for _, dir := range []string{gastownDir, settingsDir, worktreePath} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -3179,7 +3179,7 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: "testrig", Path: rigPath}
-	mgr := &Manager{rig: r}
+	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
 	if got != "local-setup" {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -34,9 +33,7 @@ var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 // rig root -> repo -> rig-local (gt-egiv) — the same precedence every
 // gate-command call site must use. Defaults to true when unconfigured.
 func refineryIntegrationEnabled(townRoot, rigName string) bool {
-	rigPath := filepath.Join(townRoot, rigName)
-	repoRoot := filepath.Join(rigPath, "mayor", "rig")
-	mq := config.ResolveMergeQueueConfig(rigPath, repoRoot)
+	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
 	if mq == nil {
 		return true
 	}
