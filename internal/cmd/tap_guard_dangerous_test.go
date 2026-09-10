@@ -173,6 +173,57 @@ func TestMatchesPackageInstall(t *testing.T) {
 	}
 }
 
+func TestMatchesUnboundedScan(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Should block — the gt-nqcy incident and its siblings.
+		{"bfs / with -S flag before root", "bfs -S dfs / -name regex.h -path *unicode*", true},
+		{"find /", "find / -name x", true},
+		{"find /*", "find /* -name x", true},
+		{"find $HOME", "find $HOME -iname foo", true},
+		{"find ~", "find ~ -name foo", true},
+		{"find /Users", "find /Users -name x", true},
+		{"find /System", "find /System -name x", true},
+		{"find /Library", "find /Library -name x", true},
+		{"find /opt exact", "find /opt -name x", true},
+		{"fd rooted at root", "fd regex.h /", true},
+		{"rg rooted at root", "rg TODO /", true},
+		{"du rooted at root", "du -sh /", true},
+		{"grep -r rooted at root", "grep -r TODO /", true},
+		{"grep --recursive rooted at root", "grep --recursive TODO /", true},
+		{"ls -R rooted at root", "ls -R /", true},
+		{"ls -laR rooted at root (bundled flags)", "ls -laR /", true},
+		{"find via absolute path to binary", "/usr/bin/find / -name x", true},
+
+		// Should allow — bounded or non-recursive.
+		{"find /opt/homebrew", "find /opt/homebrew -name x", false},
+		{"find .", "find . -name x", false},
+		{"find relative", "find src -name x", false},
+		{"find /tmp", "find /tmp -name x", false},
+		{"find /Users/sloan", "find /Users/sloan -name x", false},
+		{"grep without -r", "grep TODO file.go", false},
+		{"ls -r reverse sort, not recursive", "ls -r /", false},
+		{"ls plain", "ls /", false},
+		{"du without root arg", "du -sh .", false},
+		{"no scan tool at all", "echo hello", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(tt.command)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
 // TestDangerousGuard_Integration tests the full pattern set end-to-end.
 func TestDangerousGuard_Integration(t *testing.T) {
 	tests := []struct {

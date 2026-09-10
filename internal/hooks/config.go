@@ -1097,6 +1097,74 @@ func DefaultBase() *HooksConfig {
 					Command: gtCommand("gt tap guard dangerous-command"),
 				}},
 			},
+			// Unbounded filesystem scans (gt-nqcy): 'bfs / -name regex.h' ran
+			// 8m21s at 517% peak CPU and froze the operator's terminal; find /
+			// and friends can do the same. matchesUnboundedScan decides which
+			// invocations actually get blocked — these matchers just route the
+			// candidates to it.
+			{
+				Matcher: "Bash(find*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(bfs*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(fd *)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(rg *)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(du *)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(grep -r*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(grep -R*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(grep --recursive*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				Matcher: "Bash(ls -R*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
 		},
 		SessionStart: []HookEntry{
 			{

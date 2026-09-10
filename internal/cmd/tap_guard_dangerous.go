@@ -28,6 +28,8 @@ This guard blocks operations that could cause irreversible damage:
   - git clean -f / git clean -fd
   - drop table/database
   - truncate table
+  - find/bfs/fd/rg/grep -r/du/ls -R rooted at /, ~, $HOME, /Users, /System,
+    /Library, or /opt (see gt-nqcy — an unbounded 'bfs /' froze a host)
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
 and exits with code 2 to block dangerous operations.
@@ -96,6 +98,13 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		printDangerousBlock(reason, command)
 		return NewSilentExit(2)
 	}
+	// Unbounded scans need the original (non-lowercased) command: ls -R
+	// (recursive) and ls -r (reverse sort) mean different things, and
+	// lowercasing would collapse that distinction.
+	if reason, alternative := matchesUnboundedScan(command); reason != "" {
+		printDangerousBlockWithAlternative(reason, command, alternative)
+		return NewSilentExit(2)
+	}
 
 	// Check simple fragment patterns
 	for _, pattern := range fragmentPatterns {
@@ -120,6 +129,107 @@ func printDangerousBlock(reason, originalCommand string) {
 	fmt.Fprintln(os.Stderr, "║  If this is intentional, ask the user to run it manually.        ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintln(os.Stderr, "")
+}
+
+// printDangerousBlockWithAlternative is printDangerousBlock plus an
+// unabbreviated suggestion line printed below the fixed-width box, so the
+// alternative isn't lost to truncateStr's 53-char box limit.
+func printDangerousBlockWithAlternative(reason, originalCommand, alternative string) {
+	printDangerousBlock(reason, originalCommand)
+	if alternative != "" {
+		fmt.Fprintln(os.Stderr, "  "+alternative)
+		fmt.Fprintln(os.Stderr, "")
+	}
+}
+
+// scanRootDenylist lists filesystem roots broad enough that a recursive
+// scan from them can run for minutes at high CPU and peg the host — see
+// gt-nqcy: 'bfs -S dfs / -name regex.h' ran 8m21s at 517% peak CPU and
+// froze the operator's terminal. A deeper path under these roots (e.g.
+// /opt/homebrew, /Users/me/project) is unaffected — only an exact root
+// token is denied.
+var scanRootDenylist = map[string]bool{
+	"/": true, "/*": true, "~": true, "$home": true,
+	"/users": true, "/system": true, "/library": true, "/opt": true,
+}
+
+func isUnboundedScanRoot(token string) bool {
+	return scanRootDenylist[strings.ToLower(token)]
+}
+
+// alwaysRecursiveScanTools walk a directory tree (or the whole index, for
+// rg/ag) on every ordinary invocation — there's no non-recursive mode to
+// distinguish, so any bare root argument is enough to flag them.
+var alwaysRecursiveScanTools = map[string]bool{
+	"find": true, "bfs": true, "fd": true, "du": true, "rg": true, "ag": true,
+}
+
+// matchesUnboundedScan blocks find/bfs/fd/rg/ag/du, "grep -r", and "ls -R"
+// invocations whose root argument is broad enough to scan the whole
+// filesystem (see scanRootDenylist). It returns a short reason for the
+// fixed-width block banner and a longer alternative-tools suggestion to
+// print separately, or ("", "") if the command is fine.
+func matchesUnboundedScan(command string) (reason, alternative string) {
+	fields := strings.Fields(command)
+	for i, f := range fields {
+		base := strings.ToLower(f)
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
+		}
+
+		rest := fields[i+1:]
+		isScan := alwaysRecursiveScanTools[base]
+		if !isScan {
+			switch base {
+			case "grep":
+				isScan = hasExactArg(rest, "-r", "-R", "--recursive")
+			case "ls":
+				isScan = hasShortFlagLetter(rest, 'R')
+			}
+		}
+		if !isScan {
+			continue
+		}
+
+		for _, arg := range rest {
+			if !isUnboundedScanRoot(arg) {
+				continue
+			}
+			reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
+			alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
+				"or a search rooted inside the repo/rig instead of the whole filesystem."
+			return reason, alternative
+		}
+	}
+	return "", ""
+}
+
+// hasExactArg reports whether any of args exactly matches one of the wanted
+// values.
+func hasExactArg(args []string, wanted ...string) bool {
+	for _, a := range args {
+		for _, w := range wanted {
+			if a == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasShortFlagLetter reports whether any bundled short option (e.g. "-lR")
+// among args contains the given letter, matched case-sensitively — ls's
+// "-R" (recursive) and "-r" (reverse sort) mean different things.
+func hasShortFlagLetter(args []string, letter rune) bool {
+	for _, a := range args {
+		if len(a) < 2 || a[0] != '-' || a[1] == '-' {
+			continue
+		}
+		if strings.ContainsRune(a, letter) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractCommand extracts the bash command from Claude Code hook input JSON.
