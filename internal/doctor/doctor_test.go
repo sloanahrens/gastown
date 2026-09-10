@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/ui"
 )
 
 // mockCheck is a test check that can be configured to return any status.
@@ -129,6 +131,12 @@ func TestReport_Add(t *testing.T) {
 	if r.Summary.Total != 3 || r.Summary.Errors != 1 {
 		t.Errorf("After adding Error: Total=%d, Errors=%d", r.Summary.Total, r.Summary.Errors)
 	}
+
+	// Add a skipped result
+	r.Add(&CheckResult{Name: "test4", Status: StatusSkipped})
+	if r.Summary.Total != 4 || r.Summary.Skipped != 1 {
+		t.Errorf("After adding Skipped: Total=%d, Skipped=%d", r.Summary.Total, r.Summary.Skipped)
+	}
 }
 
 func TestReport_HasErrors(t *testing.T) {
@@ -170,6 +178,23 @@ func TestReport_HasWarnings(t *testing.T) {
 	}
 }
 
+func TestReport_HasSkipped(t *testing.T) {
+	r := NewReport()
+	if r.HasSkipped() {
+		t.Error("Empty report should not have skipped checks")
+	}
+
+	r.Add(&CheckResult{Status: StatusOK})
+	if r.HasSkipped() {
+		t.Error("Report with only OK should not have skipped checks")
+	}
+
+	r.Add(&CheckResult{Status: StatusSkipped})
+	if !r.HasSkipped() {
+		t.Error("Report with Skipped should have skipped checks")
+	}
+}
+
 func TestReport_IsHealthy(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -180,6 +205,7 @@ func TestReport_IsHealthy(t *testing.T) {
 		{"all OK", []CheckStatus{StatusOK, StatusOK}, true},
 		{"has warning", []CheckStatus{StatusOK, StatusWarning}, false},
 		{"has error", []CheckStatus{StatusOK, StatusError}, false},
+		{"has skipped", []CheckStatus{StatusOK, StatusSkipped}, false},
 		{"mixed", []CheckStatus{StatusOK, StatusWarning, StatusError}, false},
 	}
 
@@ -227,6 +253,36 @@ func TestReport_Print(t *testing.T) {
 	}
 	if !bytes.Contains(buf.Bytes(), []byte("1 warnings")) {
 		t.Error("Output should contain summary with warnings count")
+	}
+}
+
+func TestReport_Print_SkippedSection(t *testing.T) {
+	r := NewReport()
+	r.Add(&CheckResult{
+		Name:    "OKCheck",
+		Status:  StatusOK,
+		Message: "All good",
+	})
+	r.Add(&CheckResult{
+		Name:    "SkippedCheck",
+		Status:  StatusSkipped,
+		Message: "Could not determine",
+	})
+
+	var buf bytes.Buffer
+	r.Print(&buf, false, 0)
+
+	output := buf.String()
+	if !bytes.Contains(buf.Bytes(), []byte("SKIPPED")) {
+		t.Error("Output should contain a SKIPPED section for a skipped check")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("1 skipped")) {
+		t.Error("Output should contain summary with skipped count")
+	}
+	// A skipped check has not proven the workspace healthy, so the report
+	// must not claim everything passed (gt-whvu).
+	if bytes.Contains(buf.Bytes(), []byte("All checks passed")) {
+		t.Errorf("Output should not claim all checks passed when a check was skipped, got: %s", output)
 	}
 }
 
@@ -293,6 +349,29 @@ func TestDoctor_Run(t *testing.T) {
 	}
 }
 
+// TestDoctor_RunStreaming_SkippedIcon locks in the fix for gt-whvu: the
+// streaming runner used by `gt doctor` must render a real icon for a skipped
+// check, not an empty string (which misaligned the line and left placeholder
+// remnants on screen).
+func TestDoctor_RunStreaming_SkippedIcon(t *testing.T) {
+	d := NewDoctor()
+	d.Register(newMockCheck("skipped", StatusSkipped))
+
+	var buf bytes.Buffer
+	ctx := &CheckContext{TownRoot: "/test"}
+	d.RunStreaming(ctx, &buf, 0)
+
+	// With no icon, the "\r  %s%s%s" format collapses to four bare spaces
+	// before the name instead of icon + two-space gutter — that's the
+	// misalignment this test guards against.
+	if bytes.Contains(buf.Bytes(), []byte("\r    skipped")) {
+		t.Errorf("Skipped check rendered with no status icon (misaligned line), got: %s", buf.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(ui.IconSkip)) {
+		t.Errorf("Skipped check should render the skip icon, got: %s", buf.String())
+	}
+}
+
 func TestDoctor_Fix(t *testing.T) {
 	d := NewDoctor()
 
@@ -329,6 +408,30 @@ func TestDoctor_Fix(t *testing.T) {
 	}
 	if report.Checks[2].Status != StatusError {
 		t.Error("Unfixable check should remain Error")
+	}
+}
+
+// TestDoctor_Fix_SkipsSkippedChecks locks in the fix for gt-whvu: a check
+// that could not determine a result has nothing to fix, so Fix() must never
+// be invoked on it even when the check is otherwise fixable.
+func TestDoctor_Fix_SkipsSkippedChecks(t *testing.T) {
+	d := NewDoctor()
+
+	skippedCheck := newMockCheck("skipped", StatusSkipped)
+	skippedCheck.fixable = true
+	d.Register(skippedCheck)
+
+	ctx := &CheckContext{TownRoot: "/test"}
+	report := d.Fix(ctx)
+
+	if skippedCheck.fixCount != 0 {
+		t.Error("Skipped check should not have Fix() called")
+	}
+	if report.Checks[0].Status != StatusSkipped {
+		t.Error("Skipped check should remain Skipped")
+	}
+	if report.Checks[0].Fixed {
+		t.Error("Skipped check should not be marked Fixed")
 	}
 }
 

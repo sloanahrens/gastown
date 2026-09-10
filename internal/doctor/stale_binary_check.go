@@ -30,7 +30,7 @@ func (c *StaleBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
+			Status:  StatusSkipped,
 			Message: "Cannot locate gt source repo (not a development environment)",
 			Details: []string{err.Error()},
 		}

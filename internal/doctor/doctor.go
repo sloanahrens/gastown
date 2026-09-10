@@ -81,6 +81,8 @@ func (d *Doctor) RunStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 				statusIcon = ui.RenderWarnIcon()
 			case StatusError:
 				statusIcon = ui.RenderFailIcon()
+			case StatusSkipped:
+				statusIcon = ui.RenderSkipIcon()
 			}
 			// Check if slow (hourglass replaces spaces to maintain alignment)
 			isSlow := slowThreshold > 0 && result.Elapsed >= slowThreshold
@@ -145,8 +147,10 @@ func (d *Doctor) FixStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 			result.Category = cg.Category()
 		}
 
-		// Attempt fix if check failed and is fixable
-		if result.Status != StatusOK && check.CanFix() {
+		// Attempt fix if check failed and is fixable. A skipped check ran but
+		// couldn't determine an answer, so there is nothing to fix — attempting
+		// one anyway runs the fixer against an unverified assumption (gt-whvu).
+		if result.Status != StatusOK && result.Status != StatusSkipped && check.CanFix() {
 			// Stream: show the problem with fixing indicator (all on same line)
 			if w != nil {
 				var problemIcon string
@@ -204,6 +208,8 @@ func (d *Doctor) FixStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 					statusIcon = ui.RenderWarnIcon()
 				case StatusError:
 					statusIcon = ui.RenderFailIcon()
+				case StatusSkipped:
+					statusIcon = ui.RenderSkipIcon()
 				}
 			}
 			// Check if slow (hourglass replaces spaces to maintain alignment)
