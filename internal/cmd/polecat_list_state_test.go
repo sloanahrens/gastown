@@ -146,6 +146,42 @@ func TestEffectivePolecatState(t *testing.T) {
 	}
 }
 
+// TestClassifyOrphanSession guards gt-yav3: a tmux session that parses as a
+// polecat name but has no worktree directory must only be labeled a zombie
+// when an agent bead backs it. A no-bead orphan (e.g. a hermetic test's
+// session that escaped onto the live socket) is foreign, never a zombie —
+// it must not count toward capacity or be targeted by zombie restart/nuke.
+func TestClassifyOrphanSession(t *testing.T) {
+	t.Run("no bead is foreign, not zombie", func(t *testing.T) {
+		got := classifyOrphanSession("gastown", "test-nudge-immediate-busy-refusal", "gt-test-nudge-immediate-busy-refusal", false)
+		if got.State != polecat.StateForeign {
+			t.Errorf("State = %q, want %q", got.State, polecat.StateForeign)
+		}
+		if !got.Foreign {
+			t.Error("Foreign = false, want true")
+		}
+		if got.Zombie {
+			t.Error("Zombie = true, want false")
+		}
+		if got.CountsTowardCapacity {
+			t.Error("CountsTowardCapacity = true, want false for a foreign session")
+		}
+	})
+
+	t.Run("existing bead is zombie, not foreign", func(t *testing.T) {
+		got := classifyOrphanSession("gastown", "agate", "gt-agate", true)
+		if got.State != polecat.StateZombie {
+			t.Errorf("State = %q, want %q", got.State, polecat.StateZombie)
+		}
+		if !got.Zombie {
+			t.Error("Zombie = false, want true")
+		}
+		if got.Foreign {
+			t.Error("Foreign = true, want false")
+		}
+	})
+}
+
 func TestActiveMRBlocksReuse(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -42,8 +42,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// AllowLiveTmuxEnv opts a test process out of the tmux socket isolation
+// StartHermetic applies below, for the rare case that deliberately needs the
+// live/default tmux socket. See gt-yav3. Re-exported from internal/tmux so
+// both the hermetic harness and tmux.NewTmux's own guard read one source of
+// truth.
+const AllowLiveTmuxEnv = tmux.AllowLiveTmuxEnv
 
 // HermeticEnvVar marks a process tree as running under the hermetic test
 // harness. gt subprocesses honor it (internal/events suppresses cwd-resolved
@@ -80,6 +88,10 @@ type Hermetic struct {
 	// RealTownRoot is the live town the test process is running inside, or
 	// "" when not inside one. The tripwire watches it.
 	RealTownRoot string
+	// TmuxSocket is the isolated per-process tmux socket (-L flag) this
+	// harness bound via tmux.SetDefaultSocket, or "" when tmux isn't
+	// installed or isolation was bypassed via AllowLiveTmuxEnv.
+	TmuxSocket string
 
 	cfg  hermeticConfig
 	snap *townSnapshot
@@ -216,7 +228,30 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 		}
 	}
 
+	h.TmuxSocket = isolateTmuxSocket()
+
 	return h, nil
+}
+
+// isolateTmuxSocket binds the package-level tmux default socket (see
+// tmux.SetDefaultSocket) to an isolated per-process name so any test in this
+// binary that constructs tmux.NewTmux() lands on a throwaway server instead
+// of a live town's production socket (gt-yav3: a `go test` run inside a live
+// polecat worktree previously inherited GT_TOWN_SOCKET and created real
+// sessions — including ones named like polecats — on the town's tmux
+// server, flapping zombie/capacity readings and risking a phantom-session
+// auto-nuke). Returns the socket name bound, or "" when tmux isn't
+// installed or AllowLiveTmuxEnv opts out.
+func isolateTmuxSocket() string {
+	if os.Getenv(AllowLiveTmuxEnv) == "1" {
+		return ""
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return ""
+	}
+	socket := fmt.Sprintf("gt-test-%d", os.Getpid())
+	tmux.SetDefaultSocket(socket)
+	return socket
 }
 
 // Finish tears down the sandbox and runs the tripwire against the live town
@@ -228,6 +263,10 @@ func (h *Hermetic) Finish(code int) int {
 	TerminateDoltContainer()
 	if h.SandboxDir != "" {
 		_ = os.RemoveAll(h.SandboxDir)
+	}
+	if h.TmuxSocket != "" {
+		_ = exec.Command("tmux", "-L", h.TmuxSocket, "kill-server").Run() //nolint:errcheck // best-effort cleanup
+		_ = os.Remove(filepath.Join(tmux.SocketDir(), h.TmuxSocket))
 	}
 
 	if h.snap != nil {

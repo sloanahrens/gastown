@@ -69,6 +69,16 @@ const (
 	// This is a detected condition: the polecat was incompletely nuked or has a
 	// session naming mismatch, leaving an orphaned tmux session.
 	StateZombie State = "zombie"
+
+	// StateForeign means a tmux session's name parses as a polecat in this rig
+	// but has neither a worktree directory nor any agent bead — it was never
+	// dispatched as a polecat at all. This covers test fixtures (a hermetic
+	// test's session escaping onto the wrong socket, gt-yav3) and any other
+	// tool that happens to create a same-shaped session name. Unlike a zombie
+	// (which did exist and left an orphaned session), a foreign session has no
+	// prior polecat identity to restart or recover, so instruments must never
+	// treat it as capacity or a nuke candidate.
+	StateForeign State = "foreign"
 )
 
 // IsWorking returns true if the polecat is currently working.
