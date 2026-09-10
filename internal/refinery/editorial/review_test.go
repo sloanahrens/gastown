@@ -162,6 +162,18 @@ func newReviewFixture(t *testing.T) *reviewFixture {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("update-ref origin/main: %v\n%s", err, out)
 	}
+
+	// A real origin remote (unrelated to the fake refs/remotes/origin/main
+	// tracking ref above) so Run's post-approve PushNotes has somewhere to
+	// push refs/notes/om, matching every real rig clone.
+	bareDir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare origin: %v\n%s", err, out)
+	}
+	if _, err := g.AddRemote("origin", bareDir); err != nil {
+		t.Fatalf("add remote origin: %v", err)
+	}
+
 	head := commitFileReview(t, repoDir, "feature.txt", "hello\n", "add feature")
 
 	rigDir := t.TempDir()

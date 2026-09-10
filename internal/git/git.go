@@ -1231,6 +1231,29 @@ func (g *Git) PushNotes(remote, ref string) error {
 	return err
 }
 
+// ErrNoRemoteNotes is returned by FetchNotes when remote has no notes under
+// ref yet, distinct from a real fetch failure (network, auth, missing
+// remote).
+var ErrNoRemoteNotes = errors.New("no notes on remote")
+
+// FetchNotes fetches the notes ref from remote into refs/notes/<ref> locally
+// (git fetch <remote> +refs/notes/<ref>:refs/notes/<ref>), overwriting any
+// local notes ref so a stale local copy never masks the remote's current
+// state. Returns ErrNoRemoteNotes if the remote has no notes under ref yet —
+// callers should fall back to whatever local ref they may already have.
+func (g *Git) FetchNotes(remote, ref string) error {
+	refspec := "+refs/notes/" + ref + ":refs/notes/" + ref
+	_, err := g.run("fetch", remote, refspec)
+	if err != nil {
+		var ge *GitError
+		if errors.As(err, &ge) && strings.Contains(ge.Stderr, "couldn't find remote ref") {
+			return ErrNoRemoteNotes
+		}
+		return err
+	}
+	return nil
+}
+
 // Add stages files for commit.
 func (g *Git) Add(paths ...string) error {
 	args := append([]string{"add"}, paths...)

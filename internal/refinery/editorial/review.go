@@ -264,6 +264,12 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	if err := WriteNote(deps.Git, note); err != nil {
 		return failureResult(deps, req, RecordFailed, fmt.Sprintf("write note: %v", err), retries)
 	}
+	// The note is written into RepoDir's own refs/notes/om, which readers in
+	// other clones (e.g. the editorial-coverage doctor check, run from
+	// mayor/rig) never see unless it reaches the shared origin remote.
+	if err := deps.Git.PushNotes("origin", NotesRef); err != nil {
+		return failureResult(deps, req, RecordFailed, fmt.Sprintf("push note: %v", err), retries)
+	}
 	if _, err := RecordReceipt(deps.Recorder, note); err != nil {
 		return failureResult(deps, req, RecordFailed, fmt.Sprintf("record receipt: %v", err), retries)
 	}

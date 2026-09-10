@@ -36,6 +36,27 @@ func (d *Doctor) Checks() []Check {
 	return d.checks
 }
 
+// Only filters the registered checks down to just those whose Name() is in
+// names, preserving registration order. A no-op when names is empty. Unknown
+// names simply match nothing — callers that need to detect a typo should
+// compare len(names) against len(d.Checks()) after calling this.
+func (d *Doctor) Only(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	filtered := make([]Check, 0, len(names))
+	for _, c := range d.checks {
+		if want[c.Name()] {
+			filtered = append(filtered, c)
+		}
+	}
+	d.checks = filtered
+}
+
 // categoryGetter interface for checks that provide a category
 type categoryGetter interface {
 	Category() string
