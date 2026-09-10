@@ -1297,6 +1297,7 @@ func tryAcquireSlingBeadLock(townRoot, beadID string) (func(), error) {
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
 	}
+	sweepStaleSlingFlocks(lockDir)
 
 	safeBeadID := strings.NewReplacer("/", "_", ":", "_").Replace(beadID)
 	lockPath := filepath.Join(lockDir, safeBeadID+".flock")
@@ -1323,6 +1324,7 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
 	}
+	sweepStaleSlingFlocks(lockDir)
 
 	safeAgent := strings.NewReplacer("/", "_", ":", "_").Replace(targetAgent)
 	lockPath := filepath.Join(lockDir, "assignee_"+safeAgent+".flock")
@@ -1345,6 +1347,33 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	}
 
 	return nil, fmt.Errorf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", targetAgent, maxAttempts*retryInterval/1000)
+}
+
+// sweepStaleSlingFlocks removes .flock sentinel files in dir that are not
+// currently held by any process. The OS releases a flock's advisory lock
+// when the holding process exits, but nothing ever unlinks the zero-byte
+// sentinel file itself, so the directory grows without bound under sustained
+// sling activity (gt-10u8). A file is provably unheld if we can acquire it
+// ourselves with a non-blocking flock; if so, we remove it and release.
+// Best-effort: any error is ignored so a bad entry can't block a sling, and
+// a file we can't lock (held by a live process) is left untouched.
+func sweepStaleSlingFlocks(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".flock") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		release, locked, err := lock.FlockTryAcquire(path)
+		if err != nil || !locked {
+			continue
+		}
+		os.Remove(path) //nolint:errcheck // best-effort cleanup
+		release()
+	}
 }
 
 // resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.
