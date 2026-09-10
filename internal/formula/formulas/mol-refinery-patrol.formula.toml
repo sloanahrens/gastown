@@ -64,8 +64,7 @@ source of truth.
 | build_command | (empty) | Build command (e.g., `go build ./...`). Empty = skip. |
 | target_branch | main | Default target branch for merges |
 | delete_merged_branches | true | Whether to delete source branches after merge |
-| judgment_enabled | false | Enable quality review for merges (true/false) |
-| review_depth | standard | Review depth: quick, standard, or deep |
+| editorial_required | false | Whether merge_queue.editorial.required is set for this rig; gates whether quality-review calls gt mq review at all |
 | merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
@@ -118,7 +117,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 24
+version = 25
 
 [vars]
 [vars.wisp_type]
@@ -169,13 +168,9 @@ default = "main"
 description = "Whether to delete source branches after merge"
 default = "true"
 
-[vars.judgment_enabled]
-description = "Enable quality review for merges (true/false)"
+[vars.editorial_required]
+description = "Whether merge_queue.editorial.required is set for this rig (from config, resolved at prime time). Gates whether quality-review invokes gt mq review at all."
 default = "false"
-
-[vars.review_depth]
-description = "Review depth: quick, standard, or deep"
-default = "standard"
 
 [vars.merge_strategy]
 description = "Merge strategy: 'direct' (ff-only merge + push) or 'pr' (create GitHub PR). Default: direct."
@@ -395,14 +390,21 @@ priority score, and caps at batch_max. Read `.eligible_total` from the output.
 proceed to process-branch.** Not enough has queued up to be worth batching
 this cycle — the single-MR path will process what's ready.
 
-**Step 2: Reviews happen inside `gt mq batch run` — do not review candidates here**
+**Step 2: `gt mq batch run` does not review candidates today — do not
+pre-filter here either**
 
-`gt mq batch run` reviews every member itself: it runs the same `gt mq
-review` editorial check per candidate (bounded by the rig's review
-parallelism) before stacking, and ejects any member whose patch-id changed
-during stacking rather than landing a diff nobody reviewed. Do not pre-filter
-candidates with a parallel review loop here — proceed straight to Step 3
-with all eligible candidates.
+`gt mq batch run` does not invoke a fresh editorial verdict per candidate.
+Today it only enforces the existing push precondition — refusing to land any
+member that lacks an approve note whose patch-id matches the branch head —
+the same precondition a single-MR merge already checks. It does not run
+`gt mq review` on batch members itself. Do not pre-filter candidates with a
+parallel review loop here — proceed straight to Step 3 with all eligible
+candidates; a member the precondition refuses comes back in `.conflicts[]`
+(see Step 5) rather than landing unreviewed.
+
+Follow-up: reviewing each candidate before stacking, and ejecting any member
+whose patch-id changed on the stack, is tracked as T7 (gt-2liq) and is not on
+main yet. Do not block on it.
 
 **Step 3: Assemble, gate, and land the batch**
 
@@ -641,6 +643,24 @@ invokes the rig's editorial gate, classifies the outcome, retries once for
 transient failures, and on a verdict writes a git note and a receipt bead.
 Never invoke om directly from this formula — always go through this command.
 
+**Config: editorial_required = {{editorial_required}}**
+
+**Step 0: Skip this step entirely when the rig hasn't opted into editorial
+review**
+
+`editorial_required` reflects the rig's `merge_queue.editorial.required`
+setting, which defaults to `false`. Most rigs have never set this block.
+`gt mq review` refuses to run without `--force` on such a rig (exit 2,
+Class: config_error) — that refusal is not an infra failure, it is the
+command correctly declining an unconfigured review, and this formula never
+calls `--force`.
+
+**If `editorial_required` is not `"true"`: do NOT call `gt mq review` at
+all.** This step auto-completes with no action; continue straight to
+handle-failures exactly as if quality-review did not exist.
+
+**If `editorial_required` is `"true"`, continue with Step 1.**
+
 **Step 1: Run the review against the rehearsed branch**
 
 ```bash
@@ -689,7 +709,11 @@ REVIEW_EXIT=$?
 
 **Exit 2 — execution error (never an approval):** `gt mq review` could not
 produce a verdict — binary missing, version mismatch, backend timeout, or
-similar. This is an infra failure, not a judgment on the branch.
+similar. This is an infra failure, not a judgment on the branch. (Since Step 0
+already skips the call when `editorial_required` is not `"true"`, a
+config_error here means the rig's config changed to required mid-run, or a
+`--force` call happened elsewhere — treat it the same as any other exit 2,
+never as an approval or a skip.)
 - Read the failure class from the captured JSON:
   ```bash
   echo "$REVIEW_JSON" | jq -r '.Class'
