@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -79,6 +80,18 @@ type Deps struct {
 	Beads    *beads.Beads
 	Recorder *plugin.Recorder
 	Exec     ExecFunc
+
+	// NotesMu, when set, is locked around the WriteNote+PushNotes tail of
+	// Run. A single Deps value (and so a single mutex) shared across
+	// concurrent Run calls on the same RepoDir — the batch path's bounded
+	// parallelism (om-gate T7) — serializes that tail so two goroutines
+	// never race a `git notes add` against a `git push refs/notes/om` on
+	// the same ref: the second writer would otherwise silently overwrite
+	// the first's note (lost update) or have its push rejected as
+	// non-fast-forward, spuriously dropping a batch member. Nil for the
+	// single-invocation `gt mq review` CLI path, which has no concurrent
+	// sibling to race.
+	NotesMu *sync.Mutex
 }
 
 // RunGateScript is the production ExecFunc: it execs path with args, capping
@@ -261,14 +274,26 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		}
 	}
 
-	if err := WriteNote(deps.Git, note); err != nil {
-		return failureResult(deps, req, RecordFailed, fmt.Sprintf("write note: %v", err), retries)
+	if deps.NotesMu != nil {
+		deps.NotesMu.Lock()
 	}
-	// The note is written into RepoDir's own refs/notes/om, which readers in
-	// other clones (e.g. the editorial-coverage doctor check, run from
-	// mayor/rig) never see unless it reaches the shared origin remote.
-	if err := deps.Git.PushNotes("origin", NotesRef); err != nil {
-		return failureResult(deps, req, RecordFailed, fmt.Sprintf("push note: %v", err), retries)
+	writeErr := WriteNote(deps.Git, note)
+	var pushErr error
+	if writeErr == nil {
+		// The note is written into RepoDir's own refs/notes/om, which
+		// readers in other clones (e.g. the editorial-coverage doctor
+		// check, run from mayor/rig) never see unless it reaches the
+		// shared origin remote.
+		pushErr = deps.Git.PushNotes("origin", NotesRef)
+	}
+	if deps.NotesMu != nil {
+		deps.NotesMu.Unlock()
+	}
+	if writeErr != nil {
+		return failureResult(deps, req, RecordFailed, fmt.Sprintf("write note: %v", writeErr), retries)
+	}
+	if pushErr != nil {
+		return failureResult(deps, req, RecordFailed, fmt.Sprintf("push note: %v", pushErr), retries)
 	}
 	if _, err := RecordReceipt(deps.Recorder, note); err != nil {
 		return failureResult(deps, req, RecordFailed, fmt.Sprintf("record receipt: %v", err), retries)
@@ -330,32 +355,51 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 	return &v, "", nil
 }
 
-// Rehearse merges origin/<branch> into a temp branch cut from origin/<target>
-// and returns the resulting head sha, so the review sees exactly what would
-// land. Callers that already rehearsed (or are re-reviewing a fixed head)
-// pass ReviewRequest.RehearsedHead instead and skip this.
+// Rehearse fetches origin and merges origin/<branch> into a temp branch cut
+// from origin/<target>, returning the resulting head sha so the review sees
+// exactly what would land. Callers that already rehearsed (or are
+// re-reviewing a fixed head) pass ReviewRequest.RehearsedHead instead and
+// skip this. Leaves the temp branch behind (pre-existing for this
+// single-invocation path — see RehearseBranch for the batch path, which
+// cleans up after itself).
+func Rehearse(g *git.Git, target, branch string) (string, error) {
+	if err := g.Fetch("origin"); err != nil {
+		return "", fmt.Errorf("fetch origin: %w", err)
+	}
+	head, _, err := RehearseBranch(g, target, branch)
+	return head, err
+}
+
+// RehearseBranch is Rehearse without the origin fetch, returning the temp
+// branch name alongside the head so the caller can delete it once done.
 //
 // Exported so batch callers (om-gate T7) can rehearse every candidate
 // sequentially — each rehearsal checks out a temp branch in the shared
 // working directory, so it is not safe to call concurrently — before
 // running Run itself with bounded parallelism via RehearsedHead, which
-// skips this step entirely.
-func Rehearse(g *git.Git, target, branch string) (string, error) {
-	if err := g.Fetch("origin"); err != nil {
-		return "", fmt.Errorf("fetch origin: %w", err)
-	}
-	tempBranch := fmt.Sprintf("gt-mq-review-%d", time.Now().UnixNano())
+// skips this step entirely. A batch fetches origin once up front (a single
+// candidate's rehearsal failing to find a just-pushed branch is no worse
+// than the pre-batch single-MR path re-fetching per review) instead of
+// once per candidate, and deletes each temp branch after using its head so
+// a busy rig does not accumulate one gt-mq-review-* branch per candidate
+// per cycle.
+func RehearseBranch(g *git.Git, target, branch string) (head, tempBranch string, err error) {
+	tempBranch = fmt.Sprintf("gt-mq-review-%d", time.Now().UnixNano())
 	if err := g.CreateBranchFrom(tempBranch, "origin/"+target); err != nil {
-		return "", fmt.Errorf("create rehearsal branch from origin/%s: %w", target, err)
+		return "", "", fmt.Errorf("create rehearsal branch from origin/%s: %w", target, err)
 	}
 	if err := g.Checkout(tempBranch); err != nil {
-		return "", fmt.Errorf("checkout rehearsal branch: %w", err)
+		return "", "", fmt.Errorf("checkout rehearsal branch: %w", err)
 	}
 	if err := g.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
 		_ = g.AbortMerge()
-		return "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
+		return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
 	}
-	return g.Rev("HEAD")
+	head, err = g.Rev("HEAD")
+	if err != nil {
+		return "", "", err
+	}
+	return head, tempBranch, nil
 }
 
 // setEditorialReviewedHead records the reviewed head on the MR bead so the

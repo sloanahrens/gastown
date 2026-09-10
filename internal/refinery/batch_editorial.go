@@ -51,11 +51,17 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 	cfg := e.config.Editorial.WithDefaults()
 
 	townRoot := filepath.Dir(e.rig.Path)
+	var notesMu sync.Mutex
 	deps := editorial.Deps{
 		Git:      e.git,
 		Beads:    e.beads,
 		Recorder: plugin.NewRecorder(townRoot),
 		Exec:     e.editorialExec,
+		// Shared across every concurrent Run call below: serializes the
+		// WriteNote+PushNotes tail so two goroutines never race a `git
+		// notes add` against a `git push refs/notes/om` on the same ref
+		// (lost update, or a spurious non-fast-forward rejection).
+		NotesMu: &notesMu,
 	}
 
 	// Rehearse every candidate sequentially first: a rehearsal checks out a
@@ -64,10 +70,34 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 	// checkouts. Everything after (manifest checks, patch-id, the gate
 	// script exec) operates on fixed SHAs or an external process and is
 	// safe to run concurrently, bounded below by ReviewParallelism.
+	//
+	// Fetch origin once for the whole batch (rather than once per
+	// candidate) and delete each temp branch as soon as its head is in
+	// hand, so a busy rig doesn't pay one fetch and accumulate one
+	// gt-mq-review-* branch per candidate per cycle.
 	rehearsedHeads := make([]string, len(candidates))
 	rehearsalErrs := make([]error, len(candidates))
-	for i, mr := range candidates {
-		rehearsedHeads[i], rehearsalErrs[i] = editorial.Rehearse(e.git, target, mr.Branch)
+	if fetchErr := e.git.Fetch("origin"); fetchErr != nil {
+		for i := range candidates {
+			rehearsalErrs[i] = fmt.Errorf("fetch origin: %w", fetchErr)
+		}
+	} else {
+		var prevTempBranch string
+		for i, mr := range candidates {
+			head, tempBranch, err := editorial.RehearseBranch(e.git, target, mr.Branch)
+			rehearsedHeads[i], rehearsalErrs[i] = head, err
+			if prevTempBranch != "" {
+				_ = e.git.DeleteBranch(prevTempBranch, true)
+			}
+			prevTempBranch = ""
+			if err == nil {
+				prevTempBranch = tempBranch
+			}
+		}
+		if prevTempBranch != "" {
+			_ = e.git.Checkout(target)
+			_ = e.git.DeleteBranch(prevTempBranch, true)
+		}
 	}
 
 	results := make([]editorial.ReviewResult, len(candidates))
@@ -85,6 +115,7 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		go func(i int, mr *MRInfo) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			attempt := mr.RetryCount + 1
 			req := editorial.ReviewRequest{
 				RigDir:        e.rig.Path,
 				RepoDir:       e.workDir,
@@ -94,7 +125,8 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 				Target:        target,
 				Branch:        mr.Branch,
 				RehearsedHead: rehearsedHeads[i],
-				Attempt:       mr.RetryCount + 1,
+				Attempt:       attempt,
+				PriorFindings: editorial.BuildPriorFindings(e.beads, mr.SourceIssue, attempt),
 				Config:        cfg,
 			}
 			results[i] = editorial.Run(ctx, req, deps)
@@ -113,6 +145,14 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		}
 		reviewed = append(reviewed, ReviewedMR{ID: mr.ID, Exit: r.Exit, Verdict: verdict})
 		if r.Exit == 0 {
+			// The om-gate T6 push precondition reads
+			// mr.EditorialReviewedHead off this same in-memory MRInfo
+			// (editorial_gate.go's buildLandedMRs) — editorial.Run only
+			// persists the reviewed head onto the MR bead
+			// (setEditorialReviewedHead), which this batch's own MRInfo
+			// pointer never re-reads. Without this, T6 refuses to push
+			// every batch member reviewed for the first time here.
+			mr.EditorialReviewedHead = r.Note.HeadSHA
 			approved = append(approved, mr)
 			notes[mr.ID] = r.Note
 		} else {
@@ -136,21 +176,30 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 // the returned kept list (e.g. via resetAndRebuildStack) before running
 // gates whenever len(ejected) > 0, since this leaves the working tree as
 // BuildRebaseStack built it — still containing any ejected member's merge.
-func (e *Engineer) ejectPatchIDChanged(stacked []*MRInfo, notes map[string]*editorial.Note) (kept []*MRInfo, ejected []EjectedMR, err error) {
+//
+// This compares each member's ON-STACK first-parent diff (target ←
+// previous stack tip) to the patch-id its note was reviewed under — not
+// the same range editorialPrecondition/CheckPrecondition (om-gate T6)
+// checks at push time (mergeBase..submittedHead, off the standalone
+// branch). The two can disagree: an earlier stack member touching nearby
+// context lines can shift this range's diff even though the member's own
+// branch is untouched. That is intentional here — this check exists to
+// catch exactly that on-stack drift — but it means a member can pass one
+// check and fail the other.
+func (e *Engineer) ejectPatchIDChanged(stacked []*MRInfo, notes map[string]*editorial.Note, target string) (kept []*MRInfo, ejected []EjectedMR, err error) {
 	if e.config.Editorial == nil || !e.config.Editorial.Required || len(stacked) == 0 {
 		return stacked, nil, nil
 	}
 
 	n := len(stacked)
-	tips := make([]string, n)
-	for i := 0; i < n; i++ {
-		rev, revErr := e.git.Rev(fmt.Sprintf("HEAD~%d", n-1-i))
-		if revErr != nil {
-			return nil, nil, fmt.Errorf("resolving stack tip for %s: %w", stacked[i].ID, revErr)
-		}
-		tips[i] = rev
+	tips, err := e.git.FirstParentLog("origin/"+target, "HEAD")
+	if err != nil {
+		return nil, nil, fmt.Errorf("first-parent log for %s: %w", target, err)
 	}
-	baseSHA, err := e.git.Rev(fmt.Sprintf("HEAD~%d", n))
+	if len(tips) != n {
+		return nil, nil, fmt.Errorf("first-parent log for %s: found %d commit(s), expected %d for %d MR(s)", target, len(tips), n, n)
+	}
+	baseSHA, err := e.git.Rev("origin/" + target)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolving stack base: %w", err)
 	}

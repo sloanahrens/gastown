@@ -1,4 +1,4 @@
-package cmd
+package editorial
 
 import (
 	"context"
@@ -49,7 +49,7 @@ not a finding line
 	}}
 	bd := beads.NewWithStore(t.TempDir(), store)
 
-	got := buildPriorFindings(bd, "gt-source", 3)
+	got := BuildPriorFindings(bd, "gt-source", 3)
 
 	if len(got) != 2 {
 		t.Fatalf("got %d findings, want 2: %+v", len(got), got)
@@ -71,10 +71,10 @@ func TestBuildPriorFindings_NoSourceIssueReturnsNil(t *testing.T) {
 	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{}}
 	bd := beads.NewWithStore(t.TempDir(), store)
 
-	if got := buildPriorFindings(bd, "", 1); got != nil {
+	if got := BuildPriorFindings(bd, "", 1); got != nil {
 		t.Errorf("expected nil for empty sourceIssue, got %+v", got)
 	}
-	if got := buildPriorFindings(bd, "gt-missing", 1); got != nil {
+	if got := BuildPriorFindings(bd, "gt-missing", 1); got != nil {
 		t.Errorf("expected nil for a source issue that can't be shown, got %+v", got)
 	}
 }

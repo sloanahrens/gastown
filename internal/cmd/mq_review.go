@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -124,7 +121,7 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		Branch:        fields.Branch,
 		RehearsedHead: mqReviewRehearsed,
 		Attempt:       mqReviewAttempt,
-		PriorFindings: buildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
+		PriorFindings: editorial.BuildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
 		Config:        editorialCfg,
 	}
 
@@ -136,42 +133,6 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	}
 
 	return editorial.Run(context.Background(), req, deps), nil
-}
-
-// priorFindingLineRE matches the interim MERGE REJECTION finding-line format
-// ("- id:<hex> sev:<severity> <path>:<line> — <title>"); om-gate T10 owns
-// writing these lines and may refine the format.
-var priorFindingLineRE = regexp.MustCompile(`^-\s*id:(\S+)\s+sev:(\S+)\s+([^:]+):(\d+)\s+—\s+(.*)$`)
-
-// buildPriorFindings collects prior MERGE REJECTION findings for sourceIssue
-// so the reviewer classifies them resolved/unresolved/regressed instead of
-// rediscovering them from scratch. Best-effort: an unparsable or missing
-// source issue yields no prior findings rather than an error.
-func buildPriorFindings(bd *beads.Beads, sourceIssue string, attempt int) []editorial.PriorFinding {
-	if sourceIssue == "" {
-		return nil
-	}
-	issue, err := bd.Show(sourceIssue)
-	if err != nil || issue == nil {
-		return nil
-	}
-	var findings []editorial.PriorFinding
-	for _, line := range strings.Split(issue.Notes, "\n") {
-		m := priorFindingLineRE.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
-			continue
-		}
-		lineNo, _ := strconv.Atoi(m[4])
-		findings = append(findings, editorial.PriorFinding{
-			ID:       m[1],
-			Severity: m[2],
-			Path:     m[3],
-			Line:     lineNo,
-			Title:    m[5],
-			Attempt:  attempt,
-		})
-	}
-	return findings
 }
 
 func printMQReviewResult(result editorial.ReviewResult) {

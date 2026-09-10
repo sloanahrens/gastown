@@ -252,12 +252,25 @@ func TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopie
 	}
 }
 
-// TestProcessBatch_EditorialRequired_OneMissingNote_RefusesWholeBatchPush
-// exercises the batch path named in Task 6: verifyAndPush/fastForwardBatch
-// checks the precondition for every stacked member before the merge slot
-// is acquired, and refuses the whole batch's push when any one fails —
-// per-member ejection before stacking is a later task (T7).
-func TestProcessBatch_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *testing.T) {
+// TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush
+// exercises the Task 6 push precondition at the batch level directly —
+// stacking two MRs (BuildRebaseStack) and pushing them (verifyAndPush,
+// which fastForwardBatch drives) — the same precondition check every batch
+// push runs before the merge slot is acquired, refusing the whole push
+// when any one stacked member fails it.
+//
+// This calls BuildRebaseStack/verifyAndPush directly rather than
+// ProcessBatch: since om-gate T7 (batch_editorial.go), a ProcessBatch call
+// with 2+ candidates runs editorial review on every candidate first and
+// drops anything that doesn't come back approved — including, on a rig
+// with no working harness configured (as here), every candidate — before
+// the batch ever reaches this precondition. A batch that was truly never
+// reviewed can no longer reach fastForwardBatch through ProcessBatch, so
+// this test reaches it the way the single-MR path still can (doMerge
+// bypasses T7 entirely — see TestDoMerge_EditorialRequired_NoNote_RefusesPush
+// for that equivalent, ProcessBatch-independent coverage of the same
+// precondition).
+func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	bdLog, gtLog := fakeBDAndGt(t)
@@ -274,7 +287,12 @@ func TestProcessBatch_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *
 		makeMR("mr-batch-a", "feature-a", "main"),
 		makeMR("mr-batch-b", "feature-b", "main"),
 	}
-	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	stacked, conflicts, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("BuildRebaseStack: stacked=%d conflicts=%d err=%v", len(stacked), len(conflicts), err)
+	}
+
+	result := e.verifyAndPush(context.Background(), stacked, "main")
 	if result.Error == nil {
 		t.Fatalf("expected batch push to be refused, got: %+v", result)
 	}

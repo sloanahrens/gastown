@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -307,7 +308,7 @@ func TestEjectPatchIDChanged_NotRequired_NoOp(t *testing.T) {
 	e := NewEngineer(r)
 
 	stacked := []*MRInfo{makeMR("mr-a", "feature-a", "main")}
-	kept, ejected, err := e.ejectPatchIDChanged(stacked, nil)
+	kept, ejected, err := e.ejectPatchIDChanged(stacked, nil, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -357,7 +358,7 @@ func TestEjectPatchIDChanged_MatchingPatchIDs_KeepsAll(t *testing.T) {
 		pre = post
 	}
 
-	kept, ejected, err := e.ejectPatchIDChanged(stacked, notes)
+	kept, ejected, err := e.ejectPatchIDChanged(stacked, notes, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -413,7 +414,7 @@ func TestEjectPatchIDChanged_MismatchedPatchID_Ejects(t *testing.T) {
 		"mr-b": {PatchID: bPatchID},
 	}
 
-	kept, ejected, err := e.ejectPatchIDChanged(stacked, notes)
+	kept, ejected, err := e.ejectPatchIDChanged(stacked, notes, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -470,7 +471,15 @@ func TestProcessBatch_EditorialReview_EjectsPatchIDChanged(t *testing.T) {
 			if !amended {
 				run(t, workDir, "git", "checkout", "feature-c")
 				writeFile(t, workDir, "c-extra.txt", "surprise\n")
-				run(t, workDir, "git", "add", ".")
+				// Stage only the new file: `git add .` would also sweep the
+				// untracked harness manifest and om-stub-binary (written to
+				// workDir by writeEditorialManifest) into this commit, and
+				// the following `git checkout main` then deletes them from
+				// the working tree — starving whichever candidate (e.g.
+				// mr-d, waiting on the semaphore) hasn't reached
+				// LoadManifest yet and turning its expected request_changes
+				// into a BinaryMissing tooling failure instead.
+				run(t, workDir, "git", "add", "c-extra.txt")
 				run(t, workDir, "git", "commit", "-m", "drift after review")
 				run(t, workDir, "git", "checkout", "main")
 				amended = true
@@ -501,6 +510,18 @@ func TestProcessBatch_EditorialReview_EjectsPatchIDChanged(t *testing.T) {
 
 	if len(result.Reviewed) != 4 {
 		t.Fatalf("expected 4 reviewed entries, got %d: %v", len(result.Reviewed), result.Reviewed)
+	}
+	foundMRD := false
+	for _, r := range result.Reviewed {
+		if r.ID == "mr-d" {
+			foundMRD = true
+			if r.Exit != 1 || r.Verdict != "request_changes" {
+				t.Fatalf("expected mr-d reviewed as exit=1 verdict=request_changes, got %+v", r)
+			}
+		}
+	}
+	if !foundMRD {
+		t.Fatalf("expected mr-d in reviewed entries, got %v", result.Reviewed)
 	}
 	if len(result.Ejected) != 1 || result.Ejected[0].ID != "mr-c" || result.Ejected[0].Reason != "patch_id_changed_on_stack" {
 		t.Fatalf("expected mr-c ejected with reason patch_id_changed_on_stack, got %v", result.Ejected)
@@ -533,5 +554,22 @@ func TestProcessBatch_EditorialReview_EjectsPatchIDChanged(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(verifyDir, f)); statErr == nil {
 			t.Errorf("did not expect %s in cloned repo (its MR was ejected/dropped)", f)
 		}
+	}
+
+	// Verify each landed MR's editorial note actually made it onto the
+	// landed commit itself (copyEditorialNotes/CopyNotesToLanded), not
+	// just that review ran somewhere — the notes ref lives outside
+	// refs/heads (a clone doesn't fetch it by default) and review also
+	// leaves a note on every candidate's rehearsed head, approved or not,
+	// so counting refs/notes/om entries overall (mr-a, mr-b, mr-c, mr-d's
+	// rehearsal notes plus mr-a/mr-b's copies) proves nothing on its own;
+	// checking the two actual landed first-parent commits does.
+	run(t, verifyDir, "git", "fetch", "origin", "refs/notes/"+editorial.NotesRef+":refs/notes/"+editorial.NotesRef)
+	landedCommits := strings.Fields(run(t, verifyDir, "git", "rev-list", "--first-parent", "--max-count=2", "main"))
+	if len(landedCommits) != 2 {
+		t.Fatalf("expected 2 first-parent landed commits, got %d: %v", len(landedCommits), landedCommits)
+	}
+	for _, sha := range landedCommits {
+		run(t, verifyDir, "git", "notes", "--ref", editorial.NotesRef, "show", sha)
 	}
 }

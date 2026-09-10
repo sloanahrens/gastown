@@ -280,7 +280,7 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	// a clean auto-resolved merge produced content different from what was
 	// reviewed standalone. Ejected members are left queued, untouched; the
 	// stack is rebuilt without them before gates run.
-	kept, ejected, ejErr := e.ejectPatchIDChanged(stacked, notes)
+	kept, ejected, ejErr := e.ejectPatchIDChanged(stacked, notes, target)
 	if ejErr != nil {
 		result.Error = fmt.Errorf("eject patch-id changed: %w", ejErr)
 		return result
