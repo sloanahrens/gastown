@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -83,6 +84,27 @@ type APIHandler struct {
 	// shorter interval so poll-sharing assertions don't race the real
 	// production cadence under host load (gt-axh).
 	dashboardPollInterval time.Duration
+	// dashboardClients counts currently-connected SSE clients. pollDashboardHash
+	// skips computeDashboardHash (which shells out to gt for every agent
+	// identity) while this is zero, so a dashboard opened once and then closed
+	// in every tab stops spawning subprocesses instead of polling forever
+	// (gt-c9rl).
+	dashboardClients atomic.Int64
+	// dashboardPollTickC, when non-nil, replaces the real time.Ticker as the
+	// source of poll ticks: pollDashboardHash processes exactly one tick per
+	// value received on this channel instead of firing on a wall-clock
+	// interval. Test-only: it lets a test drive the poller one tick at a
+	// time and observe each tick's outcome via dashboardPollTick without
+	// racing real ticker timing against goroutine scheduling (gt-c9rl).
+	dashboardPollTickC <-chan time.Time
+	// dashboardPollTick, when non-nil, is invoked synchronously immediately
+	// after each tick's skip-or-run decision finishes — including, for a
+	// run, after computeDashboardHash has returned and every subprocess
+	// call it made has already been logged. ran reports whether the tick
+	// ran computeDashboardHash (true) or was skipped because no SSE client
+	// was connected (false). Test-only hook so assertions can synchronize
+	// on an observed event instead of a wall-clock sleep (gt-c9rl).
+	dashboardPollTick func(ran bool)
 }
 
 const optionsCacheTTL = 30 * time.Second
@@ -2230,6 +2252,12 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Count this connection so pollDashboardHash knows whether anyone is
+	// listening — see dashboardClients. Decrement on every return path
+	// (client disconnect, including the deadline exceeded in tests).
+	h.dashboardClients.Add(1)
+	defer h.dashboardClients.Add(-1)
+
 	// Send initial connection event
 	fmt.Fprintf(w, "event: connected\ndata: ok\n\n")
 	flusher.Flush()
@@ -2286,17 +2314,35 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 // every 2 seconds and broadcasting changes to every connected SSE client by
 // closing dashboardHashCh. This keeps the underlying gt subprocess load at a
 // constant O(1) regardless of how many dashboard tabs or SSE reconnects are
-// open — see handleSSE.
+// open — see handleSSE. Once started it never stops (dashboardPollOnce only
+// ever fires once), so it also skips computeDashboardHash entirely while
+// dashboardClients is zero: otherwise a dashboard opened once and later
+// closed in every tab would keep spawning per-identity gt subprocesses on
+// every tick forever (gt-c9rl).
 func (h *APIHandler) pollDashboardHash() {
-	interval := h.dashboardPollInterval
-	if interval <= 0 {
-		interval = dashboardPollIntervalDefault
+	tickC := h.dashboardPollTickC
+	if tickC == nil {
+		interval := h.dashboardPollInterval
+		if interval <= 0 {
+			interval = dashboardPollIntervalDefault
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		tickC = ticker.C
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
-	for range ticker.C {
+	for range tickC {
+		if h.dashboardClients.Load() <= 0 {
+			if h.dashboardPollTick != nil {
+				h.dashboardPollTick(false)
+			}
+			continue
+		}
+
 		hash := h.computeDashboardHash(context.Background())
+		if h.dashboardPollTick != nil {
+			h.dashboardPollTick(true)
+		}
 		if hash == "" {
 			continue
 		}
