@@ -415,6 +415,19 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		return result
 	}
 
+	// Editorial push precondition: no approve note with a matching
+	// patch-id, no push. Runs for every stacked member before the merge
+	// slot is acquired so a refusal never holds it. No-op when the rig
+	// hasn't set merge_queue.editorial.required.
+	notes, landed, cerr := e.editorialPrecondition("[Batch]", stacked, target)
+	if cerr != nil {
+		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after editorial precondition failure: %v\n", target, resetErr)
+		}
+		result.Error = cerr
+		return result
+	}
+
 	// Acquire merge slot for default branch pushes
 	var pushHolder string
 	if target == e.rig.DefaultBranch() {
@@ -467,6 +480,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		result.Error = verifyErr
 		return result
 	}
+	e.copyEditorialNotes("[Batch]", landed, notes)
 
 	ids := make([]string, len(stacked))
 	for i, mr := range stacked {

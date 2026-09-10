@@ -1175,6 +1175,23 @@ func (g *Git) MergeBase(a, b string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// FirstParentLog returns the first-parent commits in base..head, oldest
+// first (git rev-list --first-parent --reverse base..head). When head was
+// built by merging N branches onto base one at a time (git merge --no-ff),
+// this returns exactly the N merge commits in merge order — used by the
+// editorial push precondition to find the actual commit that lands for
+// each stacked MR, as opposed to that MR's submitted branch tip.
+func (g *Git) FirstParentLog(base, head string) ([]string, error) {
+	out, err := g.run("rev-list", "--first-parent", "--reverse", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	return strings.Split(strings.TrimSpace(out), "\n"), nil
+}
+
 // PatchID returns the stable patch-id of the diff between base and head
 // (git diff base..head | git patch-id --stable), i.e. the first field of the
 // tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase

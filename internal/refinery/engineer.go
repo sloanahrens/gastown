@@ -233,6 +233,13 @@ type MRInfo struct {
 	PreVerifiedAt   time.Time // When verification completed
 	PreVerifiedBase string    // Target branch SHA at verification time
 
+	// EditorialReviewedHead is the commit gt mq review last produced an
+	// approve/request_changes verdict for (refs/notes/om lives there). The
+	// push precondition reads it to find the note without scanning.
+	// Empty means "never reviewed" and the precondition refuses to push
+	// when the rig requires editorial review.
+	EditorialReviewedHead string
+
 	// Raw data for agent-side queue health analysis (ZFC: agent decides, Go transports)
 	UpdatedAt          time.Time // When the MR was last updated
 	Assignee           string    // Who claimed this MR (empty = unclaimed)
@@ -716,6 +723,19 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 
 	// Step 7-8: Push to origin (when auto_push is enabled).
 	if e.config.AutoPush {
+		// Editorial push precondition: no approve note with a matching
+		// patch-id, no push. Runs before the push slot is acquired so a
+		// refusal never holds it, and unconditionally — skipGates does
+		// not bypass this. No-op when the rig hasn't set
+		// merge_queue.editorial.required.
+		notes, landed, cerr := e.editorialPrecondition("[Engineer]", []*MRInfo{mr}, target)
+		if cerr != nil {
+			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after editorial precondition failure: %v\n", target, resetErr)
+			}
+			return ProcessResult{Success: false, Error: cerr.Error()}
+		}
+
 		// Acquire merge slot before push to serialize writes to the default branch.
 		// Only serialize pushes to the rig's default branch (typically main).
 		// Integration-branch and feature-branch pushes don't need serialization.
@@ -777,6 +797,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 				Error:   err.Error(),
 			}
 		}
+		e.copyEditorialNotes("[Engineer]", landed, notes)
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Auto-push disabled, skipping push to origin/%s\n", target)
 	}
@@ -2128,28 +2149,29 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 	}
 
 	return &MRInfo{
-		ID:              issue.ID,
-		Branch:          fields.Branch,
-		Target:          fields.Target,
-		SourceIssue:     fields.SourceIssue,
-		Worker:          fields.Worker,
-		Rig:             fields.Rig,
-		Title:           issue.Title,
-		Priority:        issue.Priority,
-		AgentBead:       fields.AgentBead,
-		CommitSHA:       fields.CommitSHA,
-		PRURL:           fields.PRURL,
-		PRNumber:        fields.PRNumber,
-		RetryCount:      fields.RetryCount,
-		ConflictTaskID:  fields.ConflictTaskID,
-		ConvoyID:        fields.ConvoyID,
-		ConvoyCreatedAt: convoyCreatedAt,
-		PreVerified:     fields.PreVerified,
-		PreVerifiedAt:   preVerifiedAt,
-		PreVerifiedBase: fields.PreVerifiedBase,
-		CreatedAt:       createdAt,
-		UpdatedAt:       updatedAt,
-		Assignee:        issue.Assignee,
+		ID:                    issue.ID,
+		Branch:                fields.Branch,
+		Target:                fields.Target,
+		SourceIssue:           fields.SourceIssue,
+		Worker:                fields.Worker,
+		Rig:                   fields.Rig,
+		Title:                 issue.Title,
+		Priority:              issue.Priority,
+		AgentBead:             fields.AgentBead,
+		CommitSHA:             fields.CommitSHA,
+		PRURL:                 fields.PRURL,
+		PRNumber:              fields.PRNumber,
+		RetryCount:            fields.RetryCount,
+		ConflictTaskID:        fields.ConflictTaskID,
+		ConvoyID:              fields.ConvoyID,
+		ConvoyCreatedAt:       convoyCreatedAt,
+		PreVerified:           fields.PreVerified,
+		PreVerifiedAt:         preVerifiedAt,
+		PreVerifiedBase:       fields.PreVerifiedBase,
+		EditorialReviewedHead: fields.EditorialReviewedHead,
+		CreatedAt:             createdAt,
+		UpdatedAt:             updatedAt,
+		Assignee:              issue.Assignee,
 	}
 }
 

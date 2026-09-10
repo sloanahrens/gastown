@@ -646,9 +646,9 @@ type MRFields struct {
 	PreVerifiedAt   string // ISO 8601 timestamp when verification completed
 	PreVerifiedBase string // Target branch SHA at verification time
 
-	// EditorialReviewedHead is the head sha `gt mq review` last approved
-	// (om-gate T5). The push precondition (om-gate T6) reads this to find
-	// the matching git note without re-deriving it.
+	// EditorialReviewedHead is the commit gt mq review last wrote an om
+	// verdict note for (refs/notes/om). The push precondition reads this
+	// to find the note without scanning; empty means "never reviewed".
 	EditorialReviewedHead string
 }
 
