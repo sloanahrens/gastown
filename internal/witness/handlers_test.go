@@ -2499,6 +2499,296 @@ func TestProcessDiscoveredCompletion_EscalatedNoMR(t *testing.T) {
 	}
 }
 
+// completionMRQueryHandler returns a mock exec function that answers the
+// merge-request lookup (findMRBeadForBranch) and the cleanup-wisp lookup
+// (findCleanupWispsForCompletion) queries processDiscoveredCompletion issues
+// when routing a completion with a pending MR, plus "create"/"show"/"update"
+// handlers for the wisp lifecycle. wispsJSON is returned verbatim for the
+// cleanup-wisp query; override per test to simulate existing wisps.
+func completionMRQueryHandler(branch, wispsJSON string, newWispID string, createCalled *bool) func(args []string) (string, error) {
+	return func(args []string) (string, error) {
+		if len(args) == 0 {
+			return "{}", nil
+		}
+		switch args[0] {
+		case "query":
+			if len(args) > 1 && strings.Contains(args[1], "gt:merge-request") {
+				return fmt.Sprintf(`[{"id":"gt-mr-1","description":"Branch: %s"}]`, branch), nil
+			}
+			if len(args) > 1 && strings.Contains(args[1], "label=cleanup") {
+				return wispsJSON, nil
+			}
+		case "create":
+			if createCalled != nil {
+				*createCalled = true
+			}
+			return fmt.Sprintf(`{"id":%q}`, newWispID), nil
+		case "show":
+			return `[{"labels":["cleanup","polecat:nux","state:pending"]}]`, nil
+		}
+		return "{}", nil
+	}
+}
+
+func TestProcessDiscoveredCompletion_IdempotentWhenWispAlreadyExists(t *testing.T) {
+	t.Parallel()
+	var createCalled bool
+	var updateCalled bool
+	existingWisps := `[{"id":"gt-wisp-existing","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: feature-x"}]`
+	bd, _ := mockBd(
+		completionMRQueryHandler("feature-x", existingWisps, "gt-wisp-new", &createCalled),
+		func(args []string) error {
+			if len(args) > 0 && args[0] == "update" {
+				updateCalled = true
+			}
+			return nil
+		},
+	)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		Exit:        "COMPLETED",
+		IssueID:     "gt-abc",
+		Branch:      "feature-x",
+	}
+	discovery := &CompletionDiscovery{}
+	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+
+	if createCalled {
+		t.Error("expected no new wisp to be created when an open wisp already matches this (issue, branch)")
+	}
+	if discovery.WispCreated != "gt-wisp-existing" {
+		t.Errorf("WispCreated = %q, want %q", discovery.WispCreated, "gt-wisp-existing")
+	}
+	if !strings.Contains(discovery.Action, "already-tracked") {
+		t.Errorf("Action = %q, want to contain %q", discovery.Action, "already-tracked")
+	}
+	if discovery.Error != nil {
+		t.Errorf("Error = %v, want nil", discovery.Error)
+	}
+	if !updateCalled {
+		t.Error("expected UpdateCleanupWispState to still be attempted for an already-tracked wisp — " +
+			"otherwise a state-update failure on the cycle that created it can never be retried and the " +
+			"wisp is stranded at state:pending forever (gt-mf5q review)")
+	}
+}
+
+func TestProcessDiscoveredCompletion_DoesNotMatchWispForDifferentIssue(t *testing.T) {
+	t.Parallel()
+	// A polecat can legitimately hold an open cleanup wisp for a DIFFERENT
+	// issue (dispatch reuse) at the same time it completes a new one. That
+	// must not be treated as an existing match for this completion.
+	var createCalled bool
+	otherIssueWisps := `[{"id":"gt-wisp-other","description":"Verify and cleanup polecat nux\nIssue: gt-other\nBranch: other-branch"}]`
+	bd, _ := mockBd(
+		completionMRQueryHandler("feature-x", otherIssueWisps, "gt-wisp-new", &createCalled),
+		func(args []string) error { return nil },
+	)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		Exit:        "COMPLETED",
+		IssueID:     "gt-abc",
+		Branch:      "feature-x",
+	}
+	discovery := &CompletionDiscovery{}
+	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+
+	if !createCalled {
+		t.Error("expected a new wisp to be created — the existing wisp is for a different issue")
+	}
+	if discovery.WispCreated != "gt-wisp-new" {
+		t.Errorf("WispCreated = %q, want %q", discovery.WispCreated, "gt-wisp-new")
+	}
+}
+
+func TestProcessDiscoveredCompletion_ClosesDuplicateOnConcurrentRace(t *testing.T) {
+	t.Parallel()
+	// Simulates two concurrent patrol scans racing to process the same
+	// completion (gt-mf5q case 1): the idempotency pre-check sees nothing,
+	// both create a wisp, and the post-create dedup check must find both and
+	// close the loser deterministically (lowest ID wins).
+	var closedIDs []string
+	callCount := 0
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "{}", nil
+			}
+			switch args[0] {
+			case "query":
+				if len(args) > 1 && strings.Contains(args[1], "gt:merge-request") {
+					return `[{"id":"gt-mr-1","description":"Branch: feature-x"}]`, nil
+				}
+				if len(args) > 1 && strings.Contains(args[1], "label=cleanup") {
+					callCount++
+					if callCount == 1 {
+						// Idempotency pre-check: nothing tracked yet.
+						return "[]", nil
+					}
+					// Post-create dedup check: our wisp and the concurrent
+					// scan's wisp both show up now.
+					return `[{"id":"gt-wisp-b","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: feature-x"},` +
+						`{"id":"gt-wisp-a","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: feature-x"}]`, nil
+				}
+			case "create":
+				return `{"id":"gt-wisp-b"}`, nil
+			case "show":
+				return `[{"labels":["cleanup","polecat:nux","state:pending"]}]`, nil
+			case "close":
+				if len(args) > 1 {
+					closedIDs = append(closedIDs, args[1])
+				}
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		Exit:        "COMPLETED",
+		IssueID:     "gt-abc",
+		Branch:      "feature-x",
+	}
+	discovery := &CompletionDiscovery{}
+	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+
+	if len(closedIDs) != 1 || closedIDs[0] != "gt-wisp-b" {
+		t.Errorf("closed IDs = %v, want [gt-wisp-b] (the later, non-winning wisp)", closedIDs)
+	}
+	if discovery.WispCreated != "gt-wisp-a" {
+		t.Errorf("WispCreated = %q, want %q (the deterministic winner)", discovery.WispCreated, "gt-wisp-a")
+	}
+}
+
+func TestProcessDiscoveredCompletion_StrandedPendingWispRetriesStateUpdate(t *testing.T) {
+	t.Parallel()
+	// gt-mf5q review, issue (1): the previous fix's already-tracked
+	// short-circuit returned before ever calling UpdateCleanupWispState, so
+	// a state-update failure on the cycle that created the wisp had no way
+	// to retry — the wisp was stranded at state:pending permanently, a state
+	// findCleanupWisp (which filters on state:merge-requested) never
+	// matches. Simulates rediscovery of such a stranded wisp on a later
+	// cycle and verifies the state update is retried and, on success,
+	// clears the way for the metadata clear (discovery.Error == nil).
+	var updateArgs []string
+	strandedWisp := `[{"id":"gt-wisp-stranded","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: feature-x"}]`
+	bd, _ := mockBd(
+		completionMRQueryHandler("feature-x", strandedWisp, "gt-wisp-new", nil),
+		func(args []string) error {
+			updateArgs = args
+			return nil
+		},
+	)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		Exit:        "COMPLETED",
+		IssueID:     "gt-abc",
+		Branch:      "feature-x",
+	}
+	discovery := &CompletionDiscovery{}
+	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+
+	if len(updateArgs) == 0 || updateArgs[0] != "update" || updateArgs[1] != "gt-wisp-stranded" {
+		t.Errorf("update args = %v, want an update of gt-wisp-stranded", updateArgs)
+	}
+	found := false
+	for _, a := range updateArgs {
+		if strings.Contains(a, "state:merge-requested") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("update args = %v, want a state:merge-requested label", updateArgs)
+	}
+	if discovery.Error != nil {
+		t.Errorf("Error = %v, want nil — the retried state update succeeded, so the completion metadata clear must proceed", discovery.Error)
+	}
+}
+
+func TestProcessDiscoveredCompletion_NudgeFailureDoesNotBlockMetadataClear(t *testing.T) {
+	t.Parallel()
+	// gt-mf5q review, issue (2): the original regression test for this used
+	// installFakeTmuxNoServer, but nudgeRefinery's HasSession check treats
+	// ErrNoServer as (false, nil) and short-circuits to a nil return before
+	// ever attempting the nudge — so that test could never observe a real
+	// nudge failure, before or after the fix. Override the package-level
+	// nudgeRefinery var directly to produce a genuine failure instead.
+	origNudge := nudgeRefinery
+	defer func() { nudgeRefinery = origNudge }()
+	nudgeRefinery = func(townRoot, rigName string) error {
+		return errors.New("refinery session busy")
+	}
+
+	bd, _ := mockBd(
+		completionMRQueryHandler("feature-x", "[]", "gt-wisp-new", nil),
+		func(args []string) error { return nil },
+	)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		Exit:        "COMPLETED",
+		IssueID:     "gt-abc",
+		Branch:      "feature-x",
+	}
+	discovery := &CompletionDiscovery{}
+	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+
+	if discovery.Error != nil {
+		t.Errorf("Error = %v, want nil — a nudge failure must not gate the metadata clear", discovery.Error)
+	}
+	if discovery.WispCreated != "gt-wisp-new" {
+		t.Errorf("WispCreated = %q, want %q", discovery.WispCreated, "gt-wisp-new")
+	}
+	if !strings.Contains(discovery.Action, "nudge") {
+		t.Errorf("Action = %q, want it to record the nudge failure for operator visibility", discovery.Action)
+	}
+}
+
+func TestFindCleanupWispsForCompletion_MatchesExactIssueAndBranch(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			return `[
+				{"id":"gt-wisp-match","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: feature-x"},
+				{"id":"gt-wisp-other-issue","description":"Verify and cleanup polecat nux\nIssue: gt-zzz\nBranch: feature-x"},
+				{"id":"gt-wisp-other-branch","description":"Verify and cleanup polecat nux\nIssue: gt-abc\nBranch: other-branch"}
+			]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+	workDir := t.TempDir()
+
+	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+
+	if len(result) != 1 || result[0] != "gt-wisp-match" {
+		t.Errorf("findCleanupWispsForCompletion = %v, want [gt-wisp-match]", result)
+	}
+
+	got := strings.Join(mock.calls, "\n")
+	if !strings.Contains(got, "ephemeral=true") || !strings.Contains(got, "label=cleanup") || !strings.Contains(got, "polecat:nux") {
+		t.Errorf("findCleanupWispsForCompletion: expected ephemeral/cleanup/polecat filter, got: %s", got)
+	}
+}
+
+func TestFindCleanupWispsForCompletion_NoMatches(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			return `[{"id":"gt-wisp-other","description":"Verify and cleanup polecat nux\nIssue: gt-zzz\nBranch: other-branch"}]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+	workDir := t.TempDir()
+
+	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+	if result != nil {
+		t.Errorf("findCleanupWispsForCompletion = %v, want nil", result)
+	}
+}
+
 func TestGetAgentBeadFields_NoAgentBead(t *testing.T) {
 	t.Parallel()
 	// A workDir with no beads database: GetAgentBead's Show fails, so fields is nil.
