@@ -2289,3 +2289,61 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+// TestResolvePreVerifiedClaim guards gt-k4sy: the pre_verified stamp gt done
+// writes must be gated on the same gate-command binding gt sling reads, so it
+// can never be true when the rig has nothing configured to verify.
+func TestResolvePreVerifiedClaim(t *testing.T) {
+	t.Run("not requested", func(t *testing.T) {
+		honor, warning := resolvePreVerifiedClaim(false, t.TempDir(), "gastown")
+		if honor {
+			t.Error("honor = true, want false when --pre-verified was not requested")
+		}
+		if warning != "" {
+			t.Errorf("warning = %q, want empty when --pre-verified was not requested", warning)
+		}
+	})
+
+	t.Run("requested with zero configured gate commands", func(t *testing.T) {
+		townRoot := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0o755); err != nil {
+			t.Fatalf("mkdir rig dir: %v", err)
+		}
+		// No config.json, no settings — nothing configured anywhere.
+		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
+		if honor {
+			t.Error("honor = true, want false when the rig has zero configured gate commands")
+		}
+		if warning == "" {
+			t.Error("warning = \"\", want a non-empty warning explaining the downgrade")
+		}
+	})
+
+	t.Run("requested with a configured gate command", func(t *testing.T) {
+		townRoot := t.TempDir()
+		rigDir := filepath.Join(townRoot, "gastown")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatalf("mkdir rig dir: %v", err)
+		}
+		rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "default_branch": "main",
+  "beads": {"prefix": "gt"},
+  "merge_queue": {"test_command": "make test"}
+}`
+		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+			t.Fatalf("write rig config.json: %v", err)
+		}
+
+		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
+		if !honor {
+			t.Error("honor = false, want true when the rig has a configured gate command")
+		}
+		if warning != "" {
+			t.Errorf("warning = %q, want empty when the claim is honored", warning)
+		}
+	})
+}

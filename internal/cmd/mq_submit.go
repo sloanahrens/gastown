@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -29,7 +28,20 @@ type branchInfo struct {
 // issuePattern matches issue IDs in branch names (e.g., "gt-xyz" or "gt-abc.1")
 var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 
+// refineryIntegrationEnabled reports whether gt mq submit / gt done should
+// auto-detect an epic's integration branch as the MR target, resolved across
+// rig root -> repo -> rig-local (gt-egiv) — the same precedence every
+// gate-command call site must use. Defaults to true when unconfigured.
+func refineryIntegrationEnabled(townRoot, rigName string) bool {
+	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+	if mq == nil {
+		return true
+	}
+	return mq.IsRefineryIntegrationEnabled()
+}
+
 // parseBranchName extracts issue ID and worker from a branch name.
+//
 // Supports formats:
 //   - polecat/<worker>/<issue>[+|@]<suffix>  → issue=<issue>, worker=<worker>
 //   - polecat/<worker>/<issue>  → issue=<issue>, worker=<worker>
@@ -172,13 +184,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		// Auto-detect: check if source issue has a parent epic with an integration branch
 		// Only if no explicit base_branch was found above
 		if target == defaultBranch {
-			refineryEnabled := true
-			rigPath := filepath.Join(townRoot, rigName)
-			settingsPath := filepath.Join(rigPath, "settings", "config.json")
-			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-				refineryEnabled = settings.MergeQueue.IsRefineryIntegrationEnabled()
-			}
-			if refineryEnabled {
+			if refineryIntegrationEnabled(townRoot, rigName) {
 				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
 				if err != nil {
 					// Non-fatal: log and continue with default branch as target

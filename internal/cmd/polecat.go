@@ -405,6 +405,8 @@ type PolecatListItem struct {
 	Blockers             []string      `json:"blockers,omitempty"`
 	SessionRunning       bool          `json:"session_running"`
 	Zombie               bool          `json:"zombie,omitempty"`
+	Foreign              bool          `json:"foreign,omitempty"`
+	BeadLookupFailed     bool          `json:"bead_lookup_failed,omitempty"`
 	SessionName          string        `json:"session_name,omitempty"`
 }
 
@@ -506,8 +508,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		agents, agentErr := bd.ListAgentBeads()
-		if agentErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v\n", r.Name, agentErr)
+		agentLookupFailed := agentErr != nil
+		if agentLookupFailed {
+			fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
 			agents = nil
 		}
 		activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name)
@@ -556,25 +559,34 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			knownNames[name] = true
 		}
 
-		// Discover zombie tmux sessions: sessions without matching worktree directories.
-		// These occur when a worktree is deleted but the tmux session persists
-		// (incomplete nuke or session naming mismatch).
+		// Discover zombie (and foreign) tmux sessions: sessions without matching
+		// worktree directories. Genuine zombies occur when a worktree is deleted
+		// but the tmux session persists (incomplete nuke or session naming
+		// mismatch) — those still have an agent bead. A session with no worktree
+		// AND no agent bead was never dispatched as a polecat at all (e.g. a
+		// hermetic test's session escaping onto the wrong socket, gt-yav3);
+		// report it as foreign, not zombie, so it never counts toward capacity
+		// or gets restart/nuke treatment aimed at real polecats.
 		zombieSessions := sessions.namesForRig(r.Name)
 		for _, sessionName := range zombieSessions {
 			_, polecatName, ok := parsePolecatSessionName(sessionName)
 			if !ok {
 				continue
 			}
-			if !knownNames[polecatName] {
-				allPolecats = append(allPolecats, PolecatListItem{
-					Rig:            r.Name,
-					Name:           polecatName,
-					State:          polecat.StateZombie,
-					SessionRunning: true,
-					Zombie:         true,
-					SessionName:    sessionName,
-				})
+			if knownNames[polecatName] {
+				continue
 			}
+			agentBeadID := polecatBeadIDForRig(r, r.Name, polecatName)
+			presence := beadAbsent
+			switch {
+			case agentLookupFailed:
+				presence = beadLookupFailed
+			default:
+				if _, ok := agents[agentBeadID]; ok {
+					presence = beadPresent
+				}
+			}
+			allPolecats = append(allPolecats, classifyOrphanSession(r.Name, polecatName, sessionName, presence))
 		}
 	}
 
@@ -613,6 +625,8 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			stateStr = style.Success.Render(stateStr)
 		case polecat.StateZombie:
 			stateStr = style.Error.Render(stateStr)
+		case polecat.StateForeign:
+			stateStr = style.Dim.Render(stateStr)
 		default:
 			stateStr = style.Dim.Render(stateStr)
 		}
@@ -631,12 +645,78 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("    %s\n", style.Dim.Render(details))
 		}
-		if p.Zombie && p.SessionName != "" {
+		if p.BeadLookupFailed && p.SessionName != "" {
+			fmt.Printf("    %s\n", style.Warning.Render("session: "+p.SessionName+" (no worktree, bead lookup FAILED — unconfirmed zombie, do not treat as foreign)"))
+		} else if p.Zombie && p.SessionName != "" {
 			fmt.Printf("    %s\n", style.Dim.Render("session: "+p.SessionName+" (no worktree)"))
+		} else if p.Foreign && p.SessionName != "" {
+			fmt.Printf("    %s\n", style.Dim.Render("session: "+p.SessionName+" (no worktree, no bead — foreign session)"))
 		}
 	}
 
 	return nil
+}
+
+// beadPresence is the tri-state result of an agent-bead lookup for an orphan
+// tmux session. Collapsing "no bead" and "lookup failed" into a single bool
+// (as an earlier version of this function did) meant one Dolt hiccup relabeled
+// every genuine zombie as foreign and hid it from nuke/restart consideration —
+// see the gt-yav3 MR1 bounce.
+type beadPresence int
+
+const (
+	// beadAbsent means the lookup succeeded and found no bead: the session
+	// never had one (e.g. a hermetic test's session escaping onto the wrong
+	// socket) and is genuinely foreign.
+	beadAbsent beadPresence = iota
+	// beadPresent means the lookup succeeded and found a bead: the session
+	// belongs to a real polecat whose worktree is gone — a genuine zombie.
+	beadPresent
+	// beadLookupFailed means the lookup itself errored (e.g. Dolt
+	// unreachable): presence is unknown, so the caller must not assume
+	// absence.
+	beadLookupFailed
+)
+
+// classifyOrphanSession builds the list entry for a tmux session that parses
+// as a polecat name in rigName but has no matching worktree directory.
+// presence reports whether an agent bead exists for that name. A confirmed
+// absence (beadAbsent) is foreign, never a zombie. A confirmed presence
+// (beadPresent) is a genuine zombie. A failed lookup (beadLookupFailed) fails
+// safe as an unconfirmed zombie — never silently downgraded to foreign, which
+// would hide a real zombie — and is flagged loud via BeadLookupFailed so
+// callers/output don't mistake it for a confirmed reading.
+func classifyOrphanSession(rigName, polecatName, sessionName string, presence beadPresence) PolecatListItem {
+	switch presence {
+	case beadAbsent:
+		return PolecatListItem{
+			Rig:            rigName,
+			Name:           polecatName,
+			State:          polecat.StateForeign,
+			SessionRunning: true,
+			Foreign:        true,
+			SessionName:    sessionName,
+		}
+	case beadLookupFailed:
+		return PolecatListItem{
+			Rig:              rigName,
+			Name:             polecatName,
+			State:            polecat.StateZombie,
+			SessionRunning:   true,
+			Zombie:           true,
+			BeadLookupFailed: true,
+			SessionName:      sessionName,
+		}
+	default: // beadPresent
+		return PolecatListItem{
+			Rig:            rigName,
+			Name:           polecatName,
+			State:          polecat.StateZombie,
+			SessionRunning: true,
+			Zombie:         true,
+			SessionName:    sessionName,
+		}
+	}
 }
 
 func runPolecatAdd(cmd *cobra.Command, args []string) error {
@@ -1939,7 +2019,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 	if batchPurge && len(purgeRigs) > 0 {
 		for _, r := range purgeRigs {
-			purgeClosedEphemeralBeads(beads.New(r.Path))
+			purgeClosedEphemeralBeads(beads.New(r.Path), beads.FindTownRoot(r.Path))
 		}
 	}
 
@@ -2093,7 +2173,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol
 	// cycles, etc. accumulate across sessions and pollute bd ready/list (hq-6161m).
 	if opts.PurgeClosedEphemerals {
-		purgeClosedEphemeralBeads(beads.New(r.Path))
+		purgeClosedEphemeralBeads(beads.New(r.Path), beads.FindTownRoot(r.Path))
 	}
 
 	// gt-7kr: destruction left no audit trail — nuke never emitted a feed
@@ -2359,7 +2439,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if batchPurge && nuked > 0 {
-				purgeClosedEphemeralBeads(beads.New(r.Path))
+				purgeClosedEphemeralBeads(beads.New(r.Path), beads.FindTownRoot(r.Path))
 			}
 			fmt.Printf("\n%s Nuked %d stale polecat(s).\n", style.SuccessPrefix, nuked)
 

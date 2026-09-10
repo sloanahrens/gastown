@@ -2915,18 +2915,9 @@ func (m *Manager) resolveSetupCommand(worktreePath string) string {
 		}
 	}
 
-	var repoMQ *config.MergeQueueConfig
-	if repoSettings, err := config.LoadRepoSettings(worktreePath); err == nil && repoSettings != nil {
-		repoMQ = repoSettings.MergeQueue
-	}
-
-	var localMQ *config.MergeQueueConfig
-	settingsPath := filepath.Join(m.rig.Path, "settings", "config.json")
-	if localSettings, err := config.LoadRigSettings(settingsPath); err == nil && localSettings != nil {
-		localMQ = localSettings.MergeQueue
-	}
-
-	mq := config.MergeSettingsCommand(repoMQ, localMQ)
+	// Resolved across rig root -> repo -> rig-local (gt-egiv), the same
+	// precedence every gate-command call site must use.
+	mq := rig.ResolveMergeQueueConfig(m.townRoot, m.rig.Name)
 	if mq == nil {
 		return ""
 	}

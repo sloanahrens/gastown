@@ -501,9 +501,11 @@ Empty commands mean "not configured" — skip silently.
 - Fix the issue, commit, and re-run from step 1
 - Do NOT proceed with --pre-verified if gates failed
 
-**4. If ALL FIVE commands are empty (none configured for this rig):**
-Do NOT use `--pre-verified` — there is nothing you actually verified. Use
-plain `gt done` and let the refinery run gates normally (slower but correct).
+**4. If ALL FOUR commands above (build, typecheck, lint, test) are empty:**
+Do NOT use `--pre-verified` — there is nothing you actually verified. This
+holds even if setup_command is configured: this step never runs it, so a rig
+with only setup_command configured has still verified nothing. Use plain
+`gt done` and let the refinery run gates normally (slower but correct).
 
 **5. If at least one gate command ran and all that ran passed:**
 You will use `gt done --pre-verified` in the next step. This tells the refinery

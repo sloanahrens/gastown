@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -195,6 +196,10 @@ const noTownSocket = "gt-no-town-socket"
 // agents (where pane_current_command remains a shell). See gt-sk5u.
 const EnvAgentReady = "GT_AGENT_READY"
 
+// AllowLiveTmuxEnv opts a test binary out of the guard below, for the rare
+// test that deliberately needs the live/default tmux socket. See gt-yav3.
+const AllowLiveTmuxEnv = "BEADS_TEST_ALLOW_LIVE_TMUX"
+
 // NewTmux creates a new Tmux wrapper using the initialized town socket.
 // Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
 // Empty socket means use the default tmux server.
@@ -204,7 +209,26 @@ func NewTmux() *Tmux {
 		// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
 		// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
 		// target the correct town server even when InitRegistry was not called.
-		sock = os.Getenv("GT_TOWN_SOCKET")
+		//
+		// That fallback is meant for an interactive CLI process, not a `go
+		// test` binary — but a test process started from inside a live
+		// polecat/agent shell can inherit GT_TOWN_SOCKET from its ambient
+		// environment and silently attach to the town's production tmux
+		// server, creating real (if oddly-named) sessions there (gt-yav3).
+		// Refuse it in test binaries unless explicitly overridden; hermetic
+		// test harnesses (internal/testutil) call SetDefaultSocket to an
+		// isolated gt-test-* socket before this ever runs, so this only
+		// fires for a test that bypasses that harness entirely.
+		if env := os.Getenv("GT_TOWN_SOCKET"); env != "" {
+			if testing.Testing() && os.Getenv(AllowLiveTmuxEnv) != "1" {
+				panic(fmt.Sprintf(
+					"tmux.NewTmux: refusing to use GT_TOWN_SOCKET=%q (a live town socket) "+
+						"from a test binary; route the test through the hermetic harness "+
+						"(internal/testutil) or an explicit tmux.NewTmuxWithSocket(\"gt-test-...\"), "+
+						"or set %s=1 to override", env, AllowLiveTmuxEnv))
+			}
+			sock = env
+		}
 	}
 	return &Tmux{socketName: sock}
 }

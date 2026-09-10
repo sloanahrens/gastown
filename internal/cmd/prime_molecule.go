@@ -442,11 +442,11 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
 
-	// MQ-specific vars: layer rig root config.json (floor) -> repo settings
-	// (wins over floor) -> rig-local settings/config.json (final override) —
-	// same 3-tier precedence gt-e50d fixed for sling, kept in sync via gt-egiv —
-	// falling back to bead labels only if none of those three sources exist.
-	if mq := rig.LoadEffectiveMergeQueueConfig(ctx.TownRoot, ctx.Rig); mq != nil {
+	// MQ-specific vars: resolved across rig root -> repo -> rig-local (gt-egiv),
+	// the same precedence every gate-command call site must use. Falls back to
+	// the layered rig config (bead labels / wisp layer) below if nothing resolves.
+	mq := rig.ResolveMergeQueueConfig(ctx.TownRoot, ctx.Rig)
+	if mq != nil {
 		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))
 		vars = append(vars, fmt.Sprintf("integration_branch_auto_land=%t", mq.IsIntegrationBranchAutoLandEnabled()))
 		vars = append(vars, fmt.Sprintf("run_tests=%t", mq.IsRunTestsEnabled()))

@@ -493,6 +493,41 @@ func TestValidateMergeQueueConfig_Batch(t *testing.T) {
 	}
 }
 
+// TestMergeQueueConfig_HasAnyGateCommand guards the gt-k4sy fix: gt done's
+// --pre-verified guard trusts this method to tell whether a rig has any gate
+// command a polecat could plausibly have run.
+func TestMergeQueueConfig_HasAnyGateCommand(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *MergeQueueConfig
+	if nilCfg.HasAnyGateCommand() {
+		t.Error("nil *MergeQueueConfig should report no gate commands")
+	}
+
+	if (&MergeQueueConfig{}).HasAnyGateCommand() {
+		t.Error("zero-value MergeQueueConfig should report no gate commands")
+	}
+
+	cases := []struct {
+		name string
+		cfg  MergeQueueConfig
+	}{
+		{"setup", MergeQueueConfig{SetupCommand: "pnpm install"}},
+		{"typecheck", MergeQueueConfig{TypecheckCommand: "tsc --noEmit"}},
+		{"lint", MergeQueueConfig{LintCommand: "make lint"}},
+		{"test", MergeQueueConfig{TestCommand: "make test"}},
+		{"build", MergeQueueConfig{BuildCommand: "make build"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !tc.cfg.HasAnyGateCommand() {
+				t.Errorf("MergeQueueConfig with only %s set should report a gate command", tc.name)
+			}
+		})
+	}
+}
+
 func TestLoadRigConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadRigConfig("/nonexistent/path.json")
@@ -619,6 +654,47 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 		if result.BatchMax != 20 {
 			t.Errorf("expected batch_max=20 from local override, got %d", result.BatchMax)
+		}
+	})
+
+	// TestBuildRefineryPatrolVars_BoolFormat (gt-egiv) caught this: routing a
+	// single-layer MergeQueueConfig through MergeSettingsCommand(nil, local)
+	// silently dropped IntegrationBranchAutoLand/IntegrationBranchRefineryEnabled
+	// because they weren't in the overlay's field list, even though a direct
+	// struct read (the pre-gt-egiv code path) preserved them.
+	t.Run("local only preserves integration-branch and judgment fields", func(t *testing.T) {
+		t.Parallel()
+		trueVal := true
+		local := &MergeQueueConfig{
+			IntegrationBranchPolecatEnabled:  &trueVal,
+			IntegrationBranchRefineryEnabled: &trueVal,
+			IntegrationBranchAutoLand:        &trueVal,
+			IntegrationBranchTemplate:        "integration/{epic}",
+			VCSProvider:                      "github",
+			JudgmentEnabled:                  &trueVal,
+			ReviewDepth:                      "deep",
+		}
+		result := MergeSettingsCommand(nil, local)
+		if result.IntegrationBranchPolecatEnabled == nil || !*result.IntegrationBranchPolecatEnabled {
+			t.Error("IntegrationBranchPolecatEnabled not preserved from local-only source")
+		}
+		if result.IntegrationBranchRefineryEnabled == nil || !*result.IntegrationBranchRefineryEnabled {
+			t.Error("IntegrationBranchRefineryEnabled not preserved from local-only source")
+		}
+		if result.IntegrationBranchAutoLand == nil || !*result.IntegrationBranchAutoLand {
+			t.Error("IntegrationBranchAutoLand not preserved from local-only source")
+		}
+		if result.IntegrationBranchTemplate != "integration/{epic}" {
+			t.Errorf("IntegrationBranchTemplate = %q, want %q", result.IntegrationBranchTemplate, "integration/{epic}")
+		}
+		if result.VCSProvider != "github" {
+			t.Errorf("VCSProvider = %q, want %q", result.VCSProvider, "github")
+		}
+		if result.JudgmentEnabled == nil || !*result.JudgmentEnabled {
+			t.Error("JudgmentEnabled not preserved from local-only source")
+		}
+		if result.ReviewDepth != "deep" {
+			t.Errorf("ReviewDepth = %q, want %q", result.ReviewDepth, "deep")
 		}
 	})
 }

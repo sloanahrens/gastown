@@ -268,6 +268,25 @@ func TestFormatRelativeTime(t *testing.T) {
 	}
 }
 
+func TestReasonDisplay(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{name: "empty reason is explicit", reason: "", want: "(none provided)"},
+		{name: "non-empty reason passes through", reason: "CI blocked", want: "CI blocked"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := reasonDisplay(tt.reason); got != tt.want {
+				t.Errorf("reasonDisplay(%q) = %q, want %q", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatEscalationMailBody(t *testing.T) {
 	tests := []struct {
 		name     string

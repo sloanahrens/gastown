@@ -3,12 +3,29 @@ package testutil
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// withSavedEnv snapshots the full process environment and restores it via
+// t.Cleanup. StartHermetic mutates process-wide env and does not restore it
+// itself (unlike HermeticTest), so any test calling it directly needs this.
+func withSavedEnv(t *testing.T) {
+	t.Helper()
+	saved := os.Environ()
+	t.Cleanup(func() {
+		os.Clearenv()
+		for _, kv := range saved {
+			if name, val, ok := strings.Cut(kv, "="); ok {
+				_ = os.Setenv(name, val)
+			}
+		}
+	})
+}
 
 // makeFakeTown builds a minimal "live town" fixture: marker file, rigs.json
 // with one known rig, watched subdirectories, and an events log.
@@ -221,6 +238,55 @@ func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
 	}
 	if ok, _ := workspace.IsWorkspace(town); !ok {
 		t.Errorf("sandbox town %q is not a valid workspace", town)
+	}
+}
+
+// TestStartHermetic_IsolatesTmuxSocketByDefault guards the isolation half of
+// gt-yav3: without an explicit opt-out, StartHermetic must bind a throwaway
+// per-process tmux socket rather than leaving the default (town) socket in
+// force, so tests that construct tmux.Tmux land on a private server.
+func TestStartHermetic_IsolatesTmuxSocketByDefault(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	withSavedEnv(t)
+	_ = os.Unsetenv(AllowLiveTmuxEnv)
+
+	h, err := StartHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	defer h.Finish(0)
+
+	if h.TmuxSocket == "" {
+		t.Error("TmuxSocket = \"\", want a per-process isolated socket by default")
+	}
+}
+
+// TestStartHermetic_AllowLiveTmuxSurvivesScrub guards the gt-yav3 MR1 bounce:
+// AllowLiveTmuxEnv (BEADS_TEST_ALLOW_LIVE_TMUX) is itself a BEADS_* variable,
+// so scrubProcessEnv used to wipe it before anything ever checked it —
+// isolateTmuxSocket() here, and tmux.NewTmux()'s own live-socket guard later
+// in the process lifetime — making the documented opt-out permanently dead.
+// StartHermetic must restore the caller's opt-out immediately after the scrub
+// so both call sites see it.
+func TestStartHermetic_AllowLiveTmuxSurvivesScrub(t *testing.T) {
+	withSavedEnv(t)
+	if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := StartHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	defer h.Finish(0)
+
+	if got := os.Getenv(AllowLiveTmuxEnv); got != "1" {
+		t.Errorf("%s = %q after StartHermetic, want \"1\" (the opt-out did not survive scrubProcessEnv)", AllowLiveTmuxEnv, got)
+	}
+	if h.TmuxSocket != "" {
+		t.Errorf("TmuxSocket = %q, want \"\" — AllowLiveTmuxEnv=1 must bypass tmux socket isolation", h.TmuxSocket)
 	}
 }
 

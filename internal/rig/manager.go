@@ -107,9 +107,9 @@ type RigConfig struct {
 	Beads         *BeadsConfig `json:"beads,omitempty"`
 
 	// MergeQueue holds gate commands and merge behavior set at rig onboarding
-	// time (see docs/onboard-repo). Without this field json.Unmarshal silently
-	// drops the whole section, so operators following onboarding docs end up
-	// with commands that are never read back (gt-me9t).
+	// time (see the onboard-repo skill). Without this field json.Unmarshal
+	// silently drops the whole section, so operators following onboarding
+	// end up with commands that are never read back (gt-me9t).
 	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
 
 	// Persistent polecat pool configuration.
@@ -1095,49 +1095,52 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	return &cfg, nil
 }
 
-// LoadEffectiveMergeQueueConfig layers a rig's merge_queue settings from the
-// three places operators actually write them, in priority order (lowest to
-// highest):
-//  1. Rig root config.json (floor — operator-set at onboarding, gt-me9t):
-//     <rig>/config.json
-//  2. Repo-committed defaults (committed to git, wins over the floor):
-//     <rig>/mayor/rig/.gastown/settings.json
-//  3. Rig-local overrides (operator tuning, final override):
-//     <rig>/settings/config.json
+// ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
+// the same three-tier precedence `gt sling` uses to populate formula gate
+// vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
+// mayor/rig/.gastown/settings.json (wins over the floor) -> rig-local
+// settings/config.json (operator override, final say).
 //
-// This mirrors sling_helpers.loadRigCommandVars's precedence (gt-e50d) so
-// polecats (dispatched via sling) and the refinery (via this function) agree
-// on the effective merge_queue config for the same rig — see gt-egiv.
+// Every gate-command resolution site (loadRigCommandVars, buildRefineryPatrolVars,
+// resolveSetupCommand, mq_submit, done's --pre-verified guard) calls this one
+// resolver so they can never read different state (gt-k4sy: the stamp was
+// found true when nothing was bound and absent when everything ran, because
+// each path had its own copy of this resolution logic; gt-egiv: three more
+// sites were still reading settings/config.json alone).
 //
-// Returns nil if none of the three sources define merge_queue settings.
-func LoadEffectiveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
-	rigPath := filepath.Join(townRoot, rigName)
-
-	var repoMQ *config.MergeQueueConfig
-	repoSettings, _ := config.LoadRepoSettings(filepath.Join(rigPath, "mayor", "rig"))
-	if repoSettings != nil {
-		repoMQ = repoSettings.MergeQueue
+// Returns nil if no merge-queue config exists at any tier.
+func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
+	if townRoot == "" || rigName == "" {
+		return nil
 	}
 
 	var rigRootMQ *config.MergeQueueConfig
-	if rigCfg, err := LoadRigConfig(rigPath); err == nil && rigCfg != nil {
+	if rigCfg, err := LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg != nil {
 		rigRootMQ = rigCfg.MergeQueue
 	}
 
+	var repoMQ *config.MergeQueueConfig
+	repoRoot := filepath.Join(townRoot, rigName, "mayor", "rig")
+	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
 	var localMQ *config.MergeQueueConfig
-	localSettings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json"))
-	if err == nil && localSettings != nil {
+	settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
+	if localSettings, err := config.LoadRigSettings(settingsPath); err == nil && localSettings != nil {
 		localMQ = localSettings.MergeQueue
 	}
 
 	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	return config.MergeSettingsCommand(mq, localMQ)
+	mq = config.MergeSettingsCommand(mq, localMQ)
+	return mq
 }
 
-// warnDeprecatedRigConfigKeys detects merge_queue keys in rig root config.json
-// that are silently ignored by json.Unmarshal (RigConfig has no merge_queue field).
-// Without this warning, users can set merge_queue.target_branch believing it
-// controls MR targets, while gt mq submit / gt done actually use default_branch.
+// warnDeprecatedRigConfigKeys detects merge_queue.target_branch in rig root
+// config.json, a key RigConfig.MergeQueue does parse (gt-me9t) but that gt mq
+// submit / gt done have never read — they resolve targets from default_branch
+// instead. Without this warning, operators can set target_branch believing it
+// controls MR targets and be silently ignored.
 func warnDeprecatedRigConfigKeys(data []byte, path string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

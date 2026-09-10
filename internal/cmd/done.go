@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -125,6 +126,28 @@ func updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID string, pu
 		return nil
 	}
 	return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID)
+}
+
+// resolvePreVerifiedClaim decides whether to honor a --pre-verified request
+// when writing the MR bead's pre_verified stamp. It exists so the stamp can
+// never diverge from the same gate-command binding `gt sling` uses to
+// populate formula vars: a rig with zero configured gate commands has
+// nothing a polecat could have verified, so the claim is downgraded here
+// rather than trusted at face value (gt-k4sy — the stamp was observed true
+// when no gates were bound and absent when they were, because nothing
+// checked the claim against the binding).
+//
+// Returns whether to honor the claim, and a non-empty warning to surface to
+// the polecat when the claim is downgraded.
+func resolvePreVerifiedClaim(requested bool, townRoot, rigName string) (honor bool, warning string) {
+	if !requested {
+		return false, ""
+	}
+	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+	if !mq.HasAnyGateCommand() {
+		return false, "ignoring --pre-verified: rig has no configured gate commands (setup/typecheck/lint/test/build) — there is nothing to have verified"
+	}
+	return true, ""
 }
 
 func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
@@ -1691,12 +1714,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// 3. Auto-detect integration branch from epic hierarchy (if enabled).
 		// Only overrides if no explicit target was set above.
 		if !explicitTarget && target == defaultBranch {
-			refineryEnabled := true
-			settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
-			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-				refineryEnabled = settings.MergeQueue.IsRefineryIntegrationEnabled()
-			}
-			if refineryEnabled {
+			if refineryIntegrationEnabled(townRoot, rigName) {
 				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
 				if err == nil && autoTarget != "" {
 					target = autoTarget
@@ -1797,7 +1815,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
 			// The refinery uses these fields to fast-path merge without re-running gates.
-			if donePreVerified {
+			// honorPreVerified is gated on the same gate-command binding gt sling reads,
+			// so the stamp can't say "verified" when there was nothing to verify (gt-k4sy).
+			honorPreVerified, preVerifiedWarning := resolvePreVerifiedClaim(donePreVerified, townRoot, rigName)
+			if preVerifiedWarning != "" {
+				style.PrintWarning("%s", preVerifiedWarning)
+			}
+			if honorPreVerified {
 				description += "\npre_verified: true"
 				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
 				// Capture current clean target HEAD as the verified base.
@@ -2469,7 +2493,7 @@ doneStateUpdate:
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol cycles,
 	// etc. accumulate across sessions and pollute bd ready/list output (hq-6161m).
 	// Best-effort: failures are non-fatal since the work is already done.
-	purgeClosedEphemeralBeads(bd)
+	purgeClosedEphemeralBeads(bd, townRoot)
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
 	// for audit purposes and anomaly detection by witness patrol.
@@ -2784,15 +2808,47 @@ func stripOverlayCLAUDEmd(g *git.Git, defaultBranch, baseRef string) bool {
 	return true
 }
 
+// defaultClosedWispDeleteAge is the grace period before a closed ephemeral
+// bead becomes eligible for purge, used when no lifecycle.reaper.delete_age
+// override is configured. Matches the wisp-reaper patrol's own default
+// (internal/daemon/wisp_reaper.go) so the two purge paths agree.
+const defaultClosedWispDeleteAge = "168h"
+
+// closedWispDeleteAge returns the configured grace period (lifecycle.reaper.delete_age)
+// before a closed ephemeral bead may be purged, falling back to
+// defaultClosedWispDeleteAge if unset or invalid.
+func closedWispDeleteAge(townRoot string) string {
+	cfg := daemon.LoadPatrolConfig(townRoot)
+	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.WispReaper == nil {
+		return defaultClosedWispDeleteAge
+	}
+	age := cfg.Patrols.WispReaper.DeleteAgeStr
+	if age == "" {
+		return defaultClosedWispDeleteAge
+	}
+	if _, err := time.ParseDuration(age); err != nil {
+		return defaultClosedWispDeleteAge
+	}
+	return age
+}
+
 // purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated
 // during this and prior sessions. Polecat/witness sessions create mol-polecat-work
 // steps, mol-witness-patrol cycles, etc. as wisps. These get closed during normal
 // operation but are never deleted, accumulating hundreds of rows that pollute
 // bd ready/list output. (hq-6161m)
 //
+// An --older-than grace period (gt-1q46) is REQUIRED here: MR beads (label
+// gt:merge-request) are also closed ephemeral wisps, and a same-session
+// supersede/rejection close (see FindOpenMRsForIssue below) can land just
+// moments before this purge runs. Purging unconditionally deletes that MR
+// bead outright — destroying its close reason/verdict — instead of leaving
+// a "superseded by X" or rejection-verdict record for the next attempt.
+//
 // Best-effort: errors are logged but don't block gt done completion.
-func purgeClosedEphemeralBeads(bd *beads.Beads) {
-	out, err := bd.Run("purge", "--force", "--quiet")
+func purgeClosedEphemeralBeads(bd *beads.Beads, townRoot string) {
+	olderThan := closedWispDeleteAge(townRoot)
+	out, err := bd.Run("purge", "--force", "--quiet", "--older-than", olderThan)
 	if err != nil {
 		// Non-fatal: purge failure shouldn't block session completion
 		fmt.Fprintf(os.Stderr, "Warning: wisp purge failed: %v\n", err)
