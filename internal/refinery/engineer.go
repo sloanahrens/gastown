@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -177,6 +178,11 @@ type MergeQueueConfig struct {
 	// Batch holds configuration for the batch-then-bisect merge queue.
 	// When nil or MaxBatchSize <= 1, batching is disabled and MRs process sequentially.
 	Batch *BatchConfig `json:"batch,omitempty"`
+
+	// Editorial configures the om editorial gate (push precondition, review
+	// parameters). Nil means no rig tier has set it; Required defaults to
+	// false so upstream behavior is unchanged.
+	Editorial *config.EditorialConfig `json:"editorial,omitempty"`
 }
 
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
@@ -369,6 +375,7 @@ func (e *Engineer) LoadConfig() error {
 		MergeStrategy        *string                   `json:"merge_strategy"`
 		VCSProvider          *string                   `json:"vcs_provider"`
 		RequireReview        *bool                     `json:"require_review"`
+		Editorial            *config.EditorialConfig   `json:"editorial"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -455,6 +462,10 @@ func (e *Engineer) LoadConfig() error {
 	}
 	if mqRaw.RequireReview != nil {
 		e.config.RequireReview = mqRaw.RequireReview
+	}
+	if mqRaw.Editorial != nil {
+		defaulted := mqRaw.Editorial.WithDefaults()
+		e.config.Editorial = &defaulted
 	}
 
 	// Initialize the PR provider when merge_strategy=pr.

@@ -498,6 +498,16 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 		vars = append(vars, fmt.Sprintf("batch_min_age=%s", mq.GetBatchMinAge()))
 		vars = append(vars, fmt.Sprintf("batch_max=%d", mq.GetBatchMax()))
 		vars = append(vars, fmt.Sprintf("batch_min_count=%d", mq.GetBatchMinCount()))
+		if mq.Editorial != nil {
+			ed := mq.Editorial.WithDefaults()
+			vars = append(vars, fmt.Sprintf("editorial_required=%t", ed.Required))
+			vars = append(vars, fmt.Sprintf("editorial_command=%s", ed.Command))
+			if ed.MinVersion != "" {
+				vars = append(vars, fmt.Sprintf("editorial_min_version=%s", ed.MinVersion))
+			}
+			vars = append(vars, fmt.Sprintf("editorial_max_attempts=%d", ed.MaxAttempts))
+			vars = append(vars, fmt.Sprintf("editorial_review_parallelism=%d", ed.ReviewParallelism))
+		}
 		return vars
 	}
 

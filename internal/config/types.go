@@ -1419,6 +1419,62 @@ type MergeQueueConfig struct {
 	// required before the refinery batches instead of processing them one
 	// at a time. Zero or unset defaults to 4.
 	BatchMinCount int `json:"batch_min_count,omitempty"`
+
+	// Editorial configures the om editorial gate: whether a merge requires
+	// an om review before it can land, and how that review runs. Nil means
+	// no tier has set an editorial block; Required defaults to false so
+	// rigs that never configure it keep upstream (pre-gate) behavior.
+	Editorial *EditorialConfig `json:"editorial,omitempty"`
+}
+
+// EditorialConfig controls the om editorial gate for a rig's merge queue:
+// whether `gt mq review` must approve an MR before it can push, and the
+// parameters of that review (which script to invoke, the minimum om
+// version, how many times to retry a non-converging resubmit, and how many
+// reviews may run concurrently in a batch).
+type EditorialConfig struct {
+	// Required controls whether the push precondition refuses to land an MR
+	// without a matching approve note. Defaults to false: upstream behavior
+	// is unchanged for rigs that never set this.
+	Required bool `json:"required"`
+
+	// Command is the gate script to invoke, relative to the rig root.
+	// Empty defaults to "scripts/om-gate.sh" (see WithDefaults).
+	Command string `json:"command,omitempty"`
+
+	// MinVersion is the minimum om semver the harness will accept.
+	// Empty means no floor.
+	MinVersion string `json:"min_version,omitempty"`
+
+	// MaxAttempts is the hard cap on resubmit attempts before the deacon
+	// stops redispatching and escalates to a human. Zero or unset defaults
+	// to 5 (see WithDefaults).
+	MaxAttempts int `json:"max_attempts,omitempty"`
+
+	// ReviewParallelism bounds how many `gt mq review` invocations may run
+	// concurrently when reviewing a batch. Zero or unset defaults to 3
+	// (see WithDefaults).
+	ReviewParallelism int `json:"review_parallelism,omitempty"`
+}
+
+// WithDefaults returns a copy of the editorial config with its zero-value
+// fields filled with the documented defaults. Safe to call on a nil
+// receiver (yields an all-defaults, Required=false config).
+func (c *EditorialConfig) WithDefaults() EditorialConfig {
+	var result EditorialConfig
+	if c != nil {
+		result = *c
+	}
+	if result.Command == "" {
+		result.Command = "scripts/om-gate.sh"
+	}
+	if result.MaxAttempts <= 0 {
+		result.MaxAttempts = 5
+	}
+	if result.ReviewParallelism <= 0 {
+		result.ReviewParallelism = 3
+	}
+	return result
 }
 
 // OnConflict strategy constants.

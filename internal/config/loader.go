@@ -439,6 +439,9 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.BatchMinCount > 0 {
 			result.BatchMinCount = local.BatchMinCount
 		}
+		if local.Editorial != nil {
+			result.Editorial = local.Editorial
+		}
 	}
 	return result
 }

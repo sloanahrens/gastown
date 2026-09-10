@@ -427,6 +427,94 @@ func TestEngineer_LoadConfig_WithMergeQueue(t *testing.T) {
 	}
 }
 
+// TestEngineer_LoadConfig_Editorial guards the om editorial gate config
+// (gt-wsg7): a config.json editorial block with only "required" set must
+// come back through LoadConfig with the other fields defaulted.
+func TestEngineer_LoadConfig_Editorial(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	config := map[string]interface{}{
+		"type":    "rig",
+		"version": 1,
+		"name":    "test-rig",
+		"merge_queue": map[string]interface{}{
+			"editorial": map[string]interface{}{
+				"required": true,
+			},
+		},
+	}
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{
+		Name: "test-rig",
+		Path: tmpDir,
+	}
+
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Errorf("unexpected error loading config: %v", err)
+	}
+
+	if e.config.Editorial == nil {
+		t.Fatal("expected Editorial to be set")
+	}
+	if !e.config.Editorial.Required {
+		t.Error("expected Editorial.Required true")
+	}
+	if e.config.Editorial.Command != "scripts/om-gate.sh" {
+		t.Errorf("expected Editorial.Command default 'scripts/om-gate.sh', got %q", e.config.Editorial.Command)
+	}
+	if e.config.Editorial.MaxAttempts != 5 {
+		t.Errorf("expected Editorial.MaxAttempts default 5, got %d", e.config.Editorial.MaxAttempts)
+	}
+	if e.config.Editorial.ReviewParallelism != 3 {
+		t.Errorf("expected Editorial.ReviewParallelism default 3, got %d", e.config.Editorial.ReviewParallelism)
+	}
+}
+
+// TestEngineer_LoadConfig_NoEditorial guards the omitted case: a rig with
+// no editorial block leaves Editorial nil (upstream behavior unchanged).
+func TestEngineer_LoadConfig_NoEditorial(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	config := map[string]interface{}{
+		"type":        "rig",
+		"version":     1,
+		"name":        "test-rig",
+		"merge_queue": map[string]interface{}{"enabled": true},
+	}
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{
+		Name: "test-rig",
+		Path: tmpDir,
+	}
+
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Errorf("unexpected error loading config: %v", err)
+	}
+	if e.config.Editorial != nil {
+		t.Errorf("expected Editorial nil when not configured, got %+v", e.config.Editorial)
+	}
+}
+
 func TestEngineer_LoadConfig_AutoPushDisabled(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {

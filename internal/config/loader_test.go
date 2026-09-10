@@ -541,6 +541,104 @@ func TestMergeQueueConfig_HasAnyGateCommand(t *testing.T) {
 	}
 }
 
+// TestEditorialConfig_WithDefaults guards the om editorial gate's default
+// values (gt-wsg7): a rig that sets only required=true must still get
+// scripts/om-gate.sh, max_attempts=5, and review_parallelism=3 filled in.
+func TestEditorialConfig_WithDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil receiver yields all-defaults, Required false", func(t *testing.T) {
+		t.Parallel()
+		var nilCfg *EditorialConfig
+		got := nilCfg.WithDefaults()
+		want := EditorialConfig{Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
+		if got != want {
+			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("zero-value fills in defaults", func(t *testing.T) {
+		t.Parallel()
+		got := (&EditorialConfig{}).WithDefaults()
+		want := EditorialConfig{Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
+		if got != want {
+			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("only required set: other fields still default", func(t *testing.T) {
+		t.Parallel()
+		got := (&EditorialConfig{Required: true}).WithDefaults()
+		want := EditorialConfig{Required: true, Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
+		if got != want {
+			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("explicit values are preserved, not overridden", func(t *testing.T) {
+		t.Parallel()
+		got := (&EditorialConfig{
+			Required:          true,
+			Command:           "scripts/custom-gate.sh",
+			MinVersion:        "1.4.0",
+			MaxAttempts:       3,
+			ReviewParallelism: 8,
+		}).WithDefaults()
+		want := EditorialConfig{
+			Required:          true,
+			Command:           "scripts/custom-gate.sh",
+			MinVersion:        "1.4.0",
+			MaxAttempts:       3,
+			ReviewParallelism: 8,
+		}
+		if got != want {
+			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
+		}
+	})
+}
+
+// TestMergeSettingsCommand_Editorial guards the whole-block override
+// semantics for Editorial: a more specific tier that sets any editorial
+// field replaces the entire block rather than deep-merging individual
+// fields, matching the pointer-field pattern used by RequireReview/BatchEnabled.
+func TestMergeSettingsCommand_Editorial(t *testing.T) {
+	t.Parallel()
+
+	t.Run("repo-only editorial carries through untouched", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{Editorial: &EditorialConfig{Required: true}}
+		result := MergeSettingsCommand(repo, nil)
+		if result.Editorial == nil || !result.Editorial.Required {
+			t.Fatalf("Editorial = %+v, want Required=true carried from repo", result.Editorial)
+		}
+	})
+
+	t.Run("local editorial block replaces repo's wholesale", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{Editorial: &EditorialConfig{Required: true, MaxAttempts: 9}}
+		local := &MergeQueueConfig{Editorial: &EditorialConfig{Required: false}}
+		result := MergeSettingsCommand(repo, local)
+		if result.Editorial == nil {
+			t.Fatal("Editorial = nil, want local's block")
+		}
+		if result.Editorial.Required {
+			t.Error("Editorial.Required = true, want false (local wins wholesale)")
+		}
+		if result.Editorial.MaxAttempts != 0 {
+			t.Errorf("Editorial.MaxAttempts = %d, want 0 (repo's field not merged in — whole-block override)", result.Editorial.MaxAttempts)
+		}
+	})
+
+	t.Run("repo-root sets required, repo omits: floor value survives", func(t *testing.T) {
+		t.Parallel()
+		rigRoot := &MergeQueueConfig{Editorial: &EditorialConfig{Required: true}}
+		result := MergeSettingsCommand(rigRoot, nil)
+		if result.Editorial == nil || !result.Editorial.Required {
+			t.Fatalf("Editorial = %+v, want Required=true from rig-root floor", result.Editorial)
+		}
+	})
+}
+
 func TestLoadRigConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadRigConfig("/nonexistent/path.json")

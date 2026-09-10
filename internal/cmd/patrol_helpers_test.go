@@ -712,6 +712,96 @@ func TestBuildRefineryPatrolVars_RequireReview(t *testing.T) {
 	}
 }
 
+// TestBuildRefineryPatrolVars_Editorial guards the om editorial gate vars
+// (gt-wsg7): when a rig configures merge_queue.editorial, the refinery
+// patrol formula must receive the resolved-and-defaulted block as vars.
+func TestBuildRefineryPatrolVars_Editorial(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigDir := filepath.Join(tmpDir, "testrig")
+	settingsDir := filepath.Join(rigDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mq := config.DefaultMergeQueueConfig()
+	mq.Editorial = &config.EditorialConfig{Required: true}
+	settings := config.RigSettings{
+		Type:       "rig-settings",
+		Version:    1,
+		MergeQueue: mq,
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := RoleContext{
+		TownRoot: tmpDir,
+		Rig:      "testrig",
+	}
+	vars := buildRefineryPatrolVars(ctx)
+
+	varMap := make(map[string]string)
+	for _, v := range vars {
+		parts := splitFirstEquals(v)
+		if len(parts) == 2 {
+			varMap[parts[0]] = parts[1]
+		}
+	}
+
+	if got := varMap["editorial_required"]; got != "true" {
+		t.Errorf("editorial_required = %q, want %q", got, "true")
+	}
+	if got := varMap["editorial_command"]; got != "scripts/om-gate.sh" {
+		t.Errorf("editorial_command = %q, want default %q", got, "scripts/om-gate.sh")
+	}
+	if got := varMap["editorial_max_attempts"]; got != "5" {
+		t.Errorf("editorial_max_attempts = %q, want default %q", got, "5")
+	}
+	if got := varMap["editorial_review_parallelism"]; got != "3" {
+		t.Errorf("editorial_review_parallelism = %q, want default %q", got, "3")
+	}
+	if _, ok := varMap["editorial_min_version"]; ok {
+		t.Error("editorial_min_version should be omitted when not configured")
+	}
+}
+
+// TestBuildRefineryPatrolVars_NoEditorial guards the omitted-when-unset
+// counterpart: a rig that never configures editorial gets no editorial_*
+// vars at all (upstream behavior unchanged, gt-wsg7).
+func TestBuildRefineryPatrolVars_NoEditorial(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigDir := filepath.Join(tmpDir, "testrig")
+	settingsDir := filepath.Join(rigDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mq := config.DefaultMergeQueueConfig()
+	settings := config.RigSettings{
+		Type:       "rig-settings",
+		Version:    1,
+		MergeQueue: mq,
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := RoleContext{
+		TownRoot: tmpDir,
+		Rig:      "testrig",
+	}
+	vars := buildRefineryPatrolVars(ctx)
+
+	for _, v := range vars {
+		parts := splitFirstEquals(v)
+		if len(parts) == 2 && strings.HasPrefix(parts[0], "editorial_") {
+			t.Errorf("unexpected %s in vars when editorial is not configured", parts[0])
+		}
+	}
+}
+
 // splitFirstEquals splits a string on the first '=' only.
 func splitFirstEquals(s string) []string {
 	idx := -1
