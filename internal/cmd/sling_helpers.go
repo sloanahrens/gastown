@@ -1398,33 +1398,12 @@ func loadRigCommandVars(townRoot, rig string) []string {
 		vars = append(vars, fmt.Sprintf("base_branch=%s", rigCfg.DefaultBranch))
 	}
 
-	// Load repo-sourced settings (committed to git, wins over the rig-root floor below)
-	var repoMQ *config.MergeQueueConfig
-	repoRoot := filepath.Join(townRoot, rig, "mayor", "rig")
-	repoSettings, _ := config.LoadRepoSettings(repoRoot)
-	if repoSettings != nil {
-		repoMQ = repoSettings.MergeQueue
-	}
-
-	// Load rig-local settings (override — operator tuning)
-	var localMQ *config.MergeQueueConfig
-	settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
-	localSettings, err := config.LoadRigSettings(settingsPath)
-	if err == nil && localSettings != nil {
-		localMQ = localSettings.MergeQueue
-	}
-
-	// Rig root config.json (floor — operator-set at onboarding time, see docs/onboard-repo;
-	// this is where merge_queue.build/test/lint_command actually live in practice — gt-me9t)
-	var rigRootMQ *config.MergeQueueConfig
-	if rigCfg != nil {
-		rigRootMQ = rigCfg.MergeQueue
-	}
-
-	// Merge: rig root config.json (floor) -> repo defaults (committed, wins over floor) ->
-	// rig-local settings (operator override, final say)
-	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	mq = config.MergeSettingsCommand(mq, localMQ)
+	// Resolved across rig root -> repo -> rig-local (gt-egiv): this is the
+	// single resolver every gate-command call site must route through. Before
+	// gt-egiv this merge was duplicated at five sites and drifted.
+	rigPath := filepath.Join(townRoot, rig)
+	repoRoot := filepath.Join(rigPath, "mayor", "rig")
+	mq := config.ResolveMergeQueueConfig(rigPath, repoRoot)
 	if mq == nil {
 		return vars
 	}

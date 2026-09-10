@@ -107,9 +107,9 @@ type RigConfig struct {
 	Beads         *BeadsConfig `json:"beads,omitempty"`
 
 	// MergeQueue holds gate commands and merge behavior set at rig onboarding
-	// time (see docs/onboard-repo). Without this field json.Unmarshal silently
-	// drops the whole section, so operators following onboarding docs end up
-	// with commands that are never read back (gt-me9t).
+	// time (see the onboard-repo skill). Without this field json.Unmarshal
+	// silently drops the whole section, so operators following onboarding
+	// end up with commands that are never read back (gt-me9t).
 	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
 
 	// Persistent polecat pool configuration.
@@ -1095,10 +1095,11 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	return &cfg, nil
 }
 
-// warnDeprecatedRigConfigKeys detects merge_queue keys in rig root config.json
-// that are silently ignored by json.Unmarshal (RigConfig has no merge_queue field).
-// Without this warning, users can set merge_queue.target_branch believing it
-// controls MR targets, while gt mq submit / gt done actually use default_branch.
+// warnDeprecatedRigConfigKeys detects merge_queue.target_branch in rig root
+// config.json, a key RigConfig.MergeQueue does parse (gt-me9t) but that gt mq
+// submit / gt done have never read — they resolve targets from default_branch
+// instead. Without this warning, operators can set target_branch believing it
+// controls MR targets and be silently ignored.
 func warnDeprecatedRigConfigKeys(data []byte, path string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
