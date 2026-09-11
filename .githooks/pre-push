@@ -32,6 +32,12 @@ while read local_ref local_sha remote_ref remote_sha; do
     continue
   fi
 
+  # Skip notes - they're proof records (e.g. refs/notes/om), not branches, and
+  # aren't subject to the branch allowlist below.
+  if [[ "$remote_ref" == refs/notes/* ]]; then
+    continue
+  fi
+
   branch="${remote_ref#refs/heads/}"
 
   # HEAD-mismatch guard: refuse pushing a branch you are not standing on.

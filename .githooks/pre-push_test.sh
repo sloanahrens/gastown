@@ -248,6 +248,14 @@ unset GT_ALLOW_OFFBRANCH_PUSH 2>/dev/null || true
 assert_pass "Off-branch deletion not blocked by HEAD guard" run_hook "refs/heads/$DEFAULT_BRANCH" "0000000000000000000000000000000000000000" "refs/heads/$DEFAULT_BRANCH" "$default_sha"
 cleanup
 
+# Test 14: Notes ref push (e.g. refs/notes/om) — allowed
+echo "Test 14: Notes ref push"
+setup_repos
+cd "$TMPDIR/local"
+local_sha=$(get_sha HEAD)
+assert_pass "Notes ref push allowed" run_hook "refs/notes/om" "$local_sha" "refs/notes/om" "0000000000000000000000000000000000000000"
+cleanup
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 if [[ $FAIL -gt 0 ]]; then
