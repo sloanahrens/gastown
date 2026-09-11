@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
@@ -490,15 +491,151 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return false, nil }
+
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
-	got := findDispatchableDog(mgr, sm, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected an idle dog")
 	}
 	if got.Name != "alpha" && got.Name != "bravo" {
 		t.Errorf("findDispatchableDog = %q, want alpha or bravo", got.Name)
+	}
+}
+
+func TestAnyHasAttachedFormula(t *testing.T) {
+	tests := []struct {
+		name  string
+		beads []*beads.Issue
+		want  bool
+	}{
+		{
+			name:  "no beads",
+			beads: nil,
+			want:  false,
+		},
+		{
+			name: "hooked bead with no attachment metadata",
+			beads: []*beads.Issue{
+				{ID: "hq-wisp-a", Description: "some other issue text"},
+			},
+			want: false,
+		},
+		{
+			name: "hooked bead carries attached_formula",
+			beads: []*beads.Issue{
+				{ID: "hq-wisp-b", Description: "attached_formula: mol-dog-reaper\nattached_molecule: hq-wisp-b\n"},
+			},
+			want: true,
+		},
+		{
+			name: "only one of several beads carries attached_formula",
+			beads: []*beads.Issue{
+				{ID: "hq-wisp-c", Description: "unrelated"},
+				{ID: "hq-wisp-d", Description: "attached_formula: mol-dog-backup\n"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := anyHasAttachedFormula(tt.beads); got != tt.want {
+				t.Errorf("anyHasAttachedFormula() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFindDispatchableDog_SkipsIdleDogWithHookedFormula is the gt-bygj
+// regression: a dog can show registry state=idle (its session exited, or `gt
+// dog done` cleared the work record) while it still holds an open hooked
+// formula molecule from `gt sling`. Dispatching a NEW plugin onto that dog
+// abandons the plugin the instant the dog boots and finds the stale hook —
+// propulsion always runs the hook first — so the plugin never actually runs
+// and the hook still never advances. findDispatchableDog must skip it.
+//
+// The decision logic itself (does a set of hooked beads carry
+// attached_formula metadata) is covered by TestAnyHasAttachedFormula. This
+// test exercises findDispatchableDog's dispatch loop via the
+// dogHasHookedFormulaFn seam so it never shells out to a real bd/Dolt
+// backend.
+func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
+		return dogName == "alpha", nil
+	}
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected bravo to be dispatchable")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (alpha holds a hooked formula)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_NilWhenAllDogsHooked confirms that when every idle
+// dog in the kennel holds an open hooked formula molecule, findDispatchableDog
+// returns nil rather than falling back to picking one anyway.
+func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return true, nil }
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (every dog holds a hooked formula)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_ErrorFallsBackToDispatchable confirms that a
+// dogHasHookedFormulaFn error is treated as "not hooked" rather than
+// disqualifying the dog — a flaky hook check must not wedge dispatch.
+func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
+		return false, fmt.Errorf("simulated bd failure")
+	}
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected alpha to be dispatchable despite the hook-check error")
+	}
+	if got.Name != "alpha" {
+		t.Errorf("findDispatchableDog = %q, want alpha", got.Name)
 	}
 }
 

@@ -1,17 +1,27 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+// dogHookedFormulaCheckTimeout bounds the bd subprocess findDispatchableDog
+// runs per idle dog so a slow Dolt response can't wedge the dispatch cycle.
+const dogHookedFormulaCheckTimeout = 5 * time.Second
 
 // Dog lifecycle defaults — now config-driven via operational.daemon thresholds.
 // These vars are still used as fallbacks and for tests; production code
@@ -291,7 +301,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		// pick the same first idle dog — infinite-looping the same failed
 		// dispatch instead of advancing to the next idle dog in the pack.
 		// See gt-o24.
-		idleDog := findDispatchableDog(mgr, sm, d.logger)
+		idleDog := findDispatchableDog(mgr, sm, d.config.TownRoot, d.logger)
 		if idleDog == nil {
 			d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
 			return
@@ -351,23 +361,41 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 }
 
 // findDispatchableDog returns the first dog in the kennel whose registry
-// state is idle AND whose tmux session is NOT currently running. Returns nil
-// when no dog satisfies both conditions.
+// state is idle, whose tmux session is NOT currently running, and which is
+// not still holding an open hooked formula molecule. Returns nil when no dog
+// satisfies all three conditions.
 //
-// This exists because a dog can be marked idle (via gt dog done or the reaper)
-// before its tmux session fully terminates, producing a transient window where
-// sm.Start would fail with "session already running". Picking that dog every
-// dispatch tick infinite-loops the same failed dispatch instead of advancing
-// to another genuinely-free dog in the pack. See gt-o24.
+// The idle+no-session check exists because a dog can be marked idle (via gt
+// dog done or the reaper) before its tmux session fully terminates, producing
+// a transient window where sm.Start would fail with "session already
+// running". Picking that dog every dispatch tick infinite-loops the same
+// failed dispatch instead of advancing to another genuinely-free dog in the
+// pack. See gt-o24.
 //
 // IsRunning errors are logged and treated as "not dispatchable" so a flaky
 // tmux check can't wedge the whole dispatch cycle.
-func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.Logger) *dog.Dog {
+//
+// The hooked-formula check exists because a dog dispatched with a formula
+// (e.g. mol-dog-reaper via `gt sling`) can end up with registry state=idle
+// again — its session exited, or `gt dog done` cleared the work record —
+// while the molecule wisp `gt sling` attached to its hook is still HOOKED
+// with open steps. Propulsion means a dog always runs whatever is on its
+// hook first: dispatching a plugin onto that dog abandons the plugin
+// assignment as soon as the dog boots and finds the stale hook, and the
+// hooked molecule never advances because nothing dispatches a session to
+// finish it either. Skipping such dogs for new plugin dispatch prevents that
+// abandon-and-strand cycle (gt-bygj); recovering the stranded hook itself is
+// a separate concern (the reaper / deacon patrol).
+func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot string, logger *log.Logger) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {
 		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
 		return nil
 	}
+	// Hoisted out of the loop: every dog's hooked-formula check targets the
+	// same town database, so the bd subprocess routing/target config is
+	// computed once rather than rebuilt per dog.
+	beadsDir := filepath.Join(townRoot, ".beads")
 	for _, d := range dogs {
 		if d.State != dog.StateIdle {
 			continue
@@ -380,9 +408,79 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.L
 		if running {
 			continue
 		}
+		hooked, err := dogHasHookedFormulaFn(townRoot, beadsDir, d.Name)
+		if err != nil {
+			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
+		} else if hooked {
+			logger.Printf("Handler: dog %s is idle but still holds an open hooked formula molecule, skipping dispatch", d.Name)
+			continue
+		}
 		return d
 	}
 	return nil
+}
+
+// dogHasHookedFormulaFn is a seam over dogHasHookedFormula so
+// findDispatchableDog is unit-testable without shelling out to a real bd/Dolt
+// backend. Production code always resolves to dogHasHookedFormula; tests
+// override it to exercise the skip/error-fallback branches deterministically.
+var dogHasHookedFormulaFn = dogHasHookedFormula
+
+// dogHasHookedFormula reports whether the dog identified by name currently
+// holds an open (status=hooked) formula molecule wisp — the ephemeral
+// molecule `gt sling` attaches to a dog's hook bead when dispatching
+// formula-driven work such as mol-dog-reaper or mol-dog-backup. See
+// findDispatchableDog.
+//
+// This shells out to bd directly (mirroring dogMol.runBd) rather than going
+// through beads.Beads.List, whose run() always resolves env via
+// buildRunEnv/BuildPinnedBDEnv — never the daemon's read-only routing env
+// that forces BD_DOLT_AUTO_COMMIT=off. findDispatchableDog calls this once
+// per idle dog on every dispatch tick, so without that env every poll opens
+// a fresh connection attempting a no-op auto-commit (gh#3596).
+func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
+	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
+	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
+		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
+	args := []string{"query", "--json", queryExpr, "--limit=0"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			return false, fmt.Errorf("%w: %s", err, errMsg)
+		}
+		return false, err
+	}
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+		return false, nil
+	}
+
+	var hookedBeads []*beads.Issue
+	if err := json.Unmarshal(out, &hookedBeads); err != nil {
+		return false, fmt.Errorf("parsing bd query output: %w", err)
+	}
+	return anyHasAttachedFormula(hookedBeads), nil
+}
+
+// anyHasAttachedFormula reports whether any of the given beads carries
+// attached_formula metadata (i.e. is the root or a step of a molecule `gt
+// sling` attached to an agent's hook). Split out from dogHasHookedFormula so
+// the decision logic is unit-testable without a real bd/Dolt backend.
+func anyHasAttachedFormula(hookedBeads []*beads.Issue) bool {
+	for _, hb := range hookedBeads {
+		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
