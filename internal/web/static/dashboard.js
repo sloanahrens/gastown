@@ -2,6 +2,22 @@
     'use strict';
 
     // ============================================
+    // IDEMPOTENCY GUARD
+    // ============================================
+    // convoy.html's hx-select scopes htmx's morph swap to #dashboard-main so this
+    // script tag (outside that div) is never part of the swapped content and should
+    // only ever execute once, on initial page load. This guard is defense in depth:
+    // if a future template change drops hx-select or otherwise lets this script tag
+    // back into swapped content, a second execution would open a second EventSource,
+    // a second checkSseStaleness interval and duplicate panel-loader/htmx:afterSwap
+    // listeners, multiplying until the browser's per-host connection pool is
+    // exhausted (gt-8tpe).
+    if (window.__gtDashboardBooted) {
+        return;
+    }
+    window.__gtDashboardBooted = true;
+
+    // ============================================
     // CSRF PROTECTION
     // ============================================
     // Inject dashboard token into all POST requests to prevent cross-site request forgery.
