@@ -153,7 +153,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	if err != nil {
 		return failureResult(deps, req, BinaryMissing, err.Error(), 0)
 	}
-	if err := AssertVersion(manifest, cfg, req.RepoDir); err != nil {
+	if err := AssertVersion(manifest, cfg, req.RigDir, req.RepoDir); err != nil {
 		var ce *ClassifiedError
 		class := VersionMismatch
 		if errors.As(err, &ce) {
