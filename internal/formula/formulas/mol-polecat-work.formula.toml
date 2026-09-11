@@ -502,8 +502,9 @@ If lint_command is set:
 
 If test_command is set:
 
-**Rule (gt-tuiy, shared with mol-refinery-patrol's run-tests step — keep
-both in sync): wrap test_command through the container-gate slot only when
+**Rule (gt-tuiy, shared with mol-refinery-patrol's run-tests step and
+mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
+test_command through the container-gate slot only when
 it spins Docker containers (Dolt, testcontainers); run it bare otherwise.**
 An unwrapped suite that spins Dolt/testcontainers collides with any other
 rig's container-backed suite on the shared Docker VM even though

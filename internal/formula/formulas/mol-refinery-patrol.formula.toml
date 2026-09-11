@@ -610,8 +610,9 @@ Proceed to handle-failures step. Track which specific check failed
 
 **3. Run the test suite:**
 
-**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step — keep both
-in sync): wrap test_command through the container-gate slot only when it
+**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step and
+mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
+test_command through the container-gate slot only when it
 spins Docker containers (Dolt, testcontainers) for THIS rig; run it bare
 otherwise.** The slot is a townwide lock shared by every rig — wrapping a
 non-Docker rig's gate serializes it behind every other rig's Dolt/

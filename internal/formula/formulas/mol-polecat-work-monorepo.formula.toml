@@ -323,6 +323,16 @@ go test ./internal/pkg/you/changed/...
 # Or for JS: npx jest --testPathPattern="changed-file"
 ```
 
+**If the package(s) you're targeting spin Docker containers (Dolt,
+testcontainers) — e.g. anything under storage/dolt-backed packages — wrap
+the command through the container-gate slot instead of running it bare**
+(gt-tuiy: an unwrapped `go test` with live Dolt containers is invisible to
+`gt slot status`, but it still collides with any other rig's container
+suite on the shared Docker VM):
+```bash
+gt slot run --role <rig>/<your-name> -- go test ./internal/pkg/you/changed/...
+```
+
 If you're unsure which tests are relevant, skip this — the MQ will catch it.
 
 **4. Lint (OPTIONAL — run if configured and fast):**
@@ -547,7 +557,19 @@ If rebase conflicts: resolve carefully. If stuck, mail Witness.
 If build_command is set: run {{build_command}}
 If typecheck_command is set: run {{typecheck_command}}
 If lint_command is set: run {{lint_command}}
-If test_command is set: run {{test_command}}
+
+If test_command is set:
+
+**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step and
+mol-refinery-patrol's run-tests step — keep all in sync): wrap test_command
+through the container-gate slot only when it spins Docker containers (Dolt,
+testcontainers); run it bare otherwise.** An unwrapped suite that spins
+Dolt/testcontainers collides with any other rig's container-backed suite on
+the shared Docker VM even though `gt slot status` looked free:
+```bash
+gt slot run --role <rig>/<your-name> -- {{test_command}}
+```
+Otherwise run {{test_command}} bare.
 
 Skip any empty/unconfigured commands silently.
 
