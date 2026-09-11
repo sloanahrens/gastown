@@ -61,13 +61,89 @@ The guard blocks in two scenarios:
   1. Running as a Gas Town agent (crew, polecat, witness, etc.)
   2. Origin remote is steveyegge/gastown (maintainer should push directly)
 
-Humans running outside Gas Town with a fork origin can still use PRs.`,
+Humans running outside Gas Town with a fork origin can still use PRs.
+
+This command expects the hook's tool_input JSON on stdin. Run manually on
+a terminal with no input piped in and it will hang reading stdin until
+EOF (Ctrl-D) — same as the dangerous-command guard.`,
 	RunE: runTapGuardPRWorkflow,
 }
 
 func init() {
 	tapCmd.AddCommand(tapGuardCmd)
 	tapGuardCmd.AddCommand(tapGuardPRWorkflowCmd)
+}
+
+// prWorkflowCommandPrefixes are the exact command shapes this guard blocks,
+// as whitespace-separated tokens, mirroring the "if" glob patterns in
+// DefaultBase() (Bash(gh pr create*), Bash(git checkout -b*),
+// Bash(git switch -c*)). Checking them here too, against tool_input.command
+// read from stdin, means a hooks-sync regression that drops the If field
+// (formerly the guard's only filter) degrades to "blocks nothing unrelated"
+// instead of "blocks every Bash call" — the shape behind gt-pjeh's 12:04
+// outage, where the guard blocked every Bash call in agent context because
+// it never looked at the command at all.
+var prWorkflowCommandPrefixes = [][]string{
+	{"gh", "pr", "create"},
+	{"git", "checkout", "-b"},
+	{"git", "switch", "-c"},
+}
+
+// shellCommandSeparators are shell operators that start a new command
+// within a single line. Claude Code evaluates Bash permission rules
+// per sub-command, so its "if" glob can fire on a later segment of a
+// compound command (cd x && gh pr create ...) — this guard must inspect
+// each ;/&&/||/| segment independently rather than only the start of the
+// whole line, or a leading unrelated segment lets a real PR-workflow
+// command later on the line slip through (gt-wisp-52y4).
+var shellCommandSeparators = map[string]bool{
+	"&&": true,
+	"||": true,
+	";":  true,
+	"|":  true,
+}
+
+// matchesPRWorkflowCommand reports whether command is one of the PR-workflow
+// shapes this guard exists to block. It tokenizes the command (so a quoted
+// argument like a PR body is never mistaken for a shell operator or a
+// command word), splits it into per-segment sub-commands on shell operators,
+// and compares whole tokens rather than raw string prefixes — so e.g.
+// "git checkout -branch" (a different flag) does not falsely match
+// "git checkout -b".
+func matchesPRWorkflowCommand(command string) bool {
+	tokens := shellTokenize(strings.TrimSpace(command))
+
+	segmentMatches := func(segment []string) bool {
+		for _, prefix := range prWorkflowCommandPrefixes {
+			if len(segment) < len(prefix) {
+				continue
+			}
+			match := true
+			for i, want := range prefix {
+				if segment[i] != want {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+		return false
+	}
+
+	var segment []string
+	for _, tok := range tokens {
+		if shellCommandSeparators[tok] {
+			if segmentMatches(segment) {
+				return true
+			}
+			segment = nil
+			continue
+		}
+		segment = append(segment, tok)
+	}
+	return segmentMatches(segment)
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
@@ -80,10 +156,23 @@ func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
 	// All three "if"-matched hook patterns (gh pr create*, git checkout
 	// -b*, git switch -c*) invoke this same command with no argument
 	// telling us which one fired, so the actual command must be read back
-	// off stdin (Claude Code hook protocol) to tell them apart.
-	input, _ := io.ReadAll(os.Stdin)
+	// off stdin (Claude Code hook protocol) to tell them apart. Read once
+	// and share it with the self-filter below.
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return nil
+	}
 	command := extractCommand(input)
 	if isRefineryRole() && isFeatureBranchCommand(command) && !isPRCreateCommand(command) {
+		return nil
+	}
+	// Self-filter only when a command was actually extracted. Some harness
+	// templates (e.g. Copilot's INPUT=$(cat) wrapper, gt-wisp-52y4) drain
+	// stdin before invoking this guard, so empty/unparsable input here means
+	// "we don't know what command this is", not "nothing to block" — fall
+	// back to the unconditional context/origin check below (the guard's only
+	// behavior before this self-filter existed) instead of failing open.
+	if command != "" && !matchesPRWorkflowCommand(command) {
 		return nil
 	}
 

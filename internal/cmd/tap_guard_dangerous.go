@@ -358,23 +358,29 @@ func shellTokenize(command string) []string {
 	return tokens
 }
 
-// spaceOutShellOperators pads the command-chaining operators ;, &, and |
-// with spaces wherever they appear outside quotes, so shlex splits them
-// into their own tokens even when glued directly to an adjacent word with
-// no whitespace ("rm -rf /;echo done" has no space around ';'). Without
-// this, shlex — a generic word-splitter with no notion of shell control
-// operators — folds the operator into whichever word touches it
+// spaceOutShellOperators pads the command-chaining operators ;, &, &&, |,
+// and || with spaces wherever they appear outside quotes, so shlex splits
+// them into their own tokens even when glued directly to an adjacent word
+// with no whitespace ("rm -rf /;echo done" has no space around ';').
+// Without this, shlex — a generic word-splitter with no notion of shell
+// control operators — folds the operator into whichever word touches it
 // ("done;rm" as one token), hiding "rm" from every exact-token matcher
-// (gt-mkrj). Characters inside single/double quotes, or escaped with a
-// backslash outside quotes, are left untouched so quoted content (a sed
-// script containing '|', a jq filter) stays exactly as opaque as it was
+// (gt-mkrj). A doubled "&&" or "||" is emitted as a single spaced-out token
+// rather than two adjacent single-character ones, so a matcher keyed on the
+// whole operator (e.g. matchesPRWorkflowCommand's shellCommandSeparators)
+// sees it as one token instead of two "&" or "|" tokens that never equal
+// "&&"/"||" (gt-pjeh). Characters inside single/double quotes, or escaped
+// with a backslash outside quotes, are left untouched so quoted content (a
+// sed script containing '|', a jq filter) stays exactly as opaque as it was
 // before this pass.
 func spaceOutShellOperators(command string) string {
 	var b strings.Builder
 	b.Grow(len(command) + 8)
 	var quote rune
 	escaped := false
-	for _, r := range command {
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if escaped {
 			b.WriteRune(r)
 			escaped = false
@@ -397,9 +403,17 @@ func spaceOutShellOperators(command string) string {
 			quote = r
 			b.WriteRune(r)
 		case ';', '&', '|':
-			b.WriteRune(' ')
-			b.WriteRune(r)
-			b.WriteRune(' ')
+			if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
+				b.WriteRune(' ')
+				b.WriteRune(r)
+				b.WriteRune(r)
+				b.WriteRune(' ')
+				i++
+			} else {
+				b.WriteRune(' ')
+				b.WriteRune(r)
+				b.WriteRune(' ')
+			}
 		default:
 			b.WriteRune(r)
 		}

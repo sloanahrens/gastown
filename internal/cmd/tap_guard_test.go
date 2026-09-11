@@ -145,3 +145,36 @@ func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout(t *testing.T) {
 		t.Error("expected non-refinery feature-branch checkout to remain blocked, got nil error")
 	}
 }
+
+// The following two tests pin the composition of the refinery exemption
+// (gt-r2xm) with the command self-filter (gt-pjeh): the exemption only
+// fires for the exact feature-branch shape, and the self-filter's fail-shut
+// fallback on unreadable stdin (gt-wisp-52y4) still applies under the
+// refinery role — the exemption must not widen into "refinery role always
+// passes."
+func TestRunTapGuardPRWorkflow_RefineryUnrelatedCommandAllowed(t *testing.T) {
+	t.Setenv("GT_REFINERY", "1")
+	t.Setenv("GT_ROLE", "gastown/refinery")
+
+	hookInput := `{"tool_name":"Bash","tool_input":{"command":"ls -la"}}`
+	var err error
+	withStdin(t, hookInput, func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err != nil {
+		t.Errorf("expected unrelated command to be allowed for refinery role via self-filter, got error: %v", err)
+	}
+}
+
+func TestRunTapGuardPRWorkflow_RefineryEmptyStdinStillBlocks(t *testing.T) {
+	t.Setenv("GT_REFINERY", "1")
+	t.Setenv("GT_ROLE", "gastown/refinery")
+
+	var err error
+	withStdin(t, "", func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err == nil {
+		t.Error("expected refinery role with empty/unparsable stdin to still be blocked (fail closed), got nil error")
+	}
+}
