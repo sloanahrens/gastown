@@ -244,6 +244,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// start with missing PATH exports. See gt-99u.
 	d.Register(doctor.NewClaudeSettingsCheck())
 	d.Register(doctor.NewDaemonCheck())
+	d.Register(doctor.NewDaemonLivenessCheck()) // Verify daemon heartbeat is fresh AND advancing (claude-41j.1 D4)
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())

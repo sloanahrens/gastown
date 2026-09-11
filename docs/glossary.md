@@ -89,6 +89,32 @@ Communicating with previous sessions via `gt seance`. Allows agents to query the
 ### Patrol
 Ephemeral loop maintaining system heartbeat. Patrol agents (Deacon, Witness) continuously cycle through health checks and trigger actions as needed.
 
+## Supervision
+
+### Canary settings file
+A single settings file synced first, before a rollout to every other target. Catches a sync round-trip that silently drops or corrupts fields on the one canary before it ever reaches everyone else.
+
+### Field provenance (Live / Recorded / Unknown)
+The tag on every field of a Summary: Live (measured this cycle from the real artifact), Recorded (read from a store another actor wrote, such as a bead status), or Unknown (could not be measured). A Recorded value is a count of the store, never of reality.
+
+### Pair probe
+A live-fire check that exercises both a shape that must be blocked and a shape that must be allowed, so a guard that has started denying (or permitting) everything is caught rather than only the one-sided case.
+
+### Probe-path rule
+A probe's result counts only if the probe entered through the same production entry point, with the same inherited environment, as the real system. A probe that takes a shortcut path proves nothing about the real one.
+
+### Progress counter
+A monotonic counter carried alongside a heartbeat timestamp (e.g. HeartbeatCount) so readers can tell "fresh" from "advancing" — a clock heartbeat alone proves only that the clock still ticks.
+
+### Self-probe
+A check that injects a known event through a component's own production path and verifies the expected reaction, rather than trusting a clock-only heartbeat.
+
+### Summary
+Any status report a human or acting role consumes to make a decision — a doctor report, a patrol heartbeat, a status mail. Its fields are provenance-tagged Live, Recorded, or Unknown.
+
+### Supervisor
+Any producer of a Summary: monitor scripts, doctor checks, patrol steps, mayor/refinery status mails. Provenance and liveness rules apply to all of them, not just a dedicated watchdog role.
+
 ---
 
 *This glossary was contributed by [Clay Shirky](https://github.com/cshirky) in [Issue #80](https://github.com/steveyegge/gastown/issues/80).*
