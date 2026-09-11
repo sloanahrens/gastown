@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func TestCalculateWorkStatus(t *testing.T) {
@@ -731,6 +732,119 @@ exit 0
 				t.Fatalf("fake bd calls = %d, want 1", got)
 			}
 		})
+	}
+}
+
+// TestGetTrackedIssues_FallsBackToShowForExternalEdges verifies gt-q0is: when
+// `bd dep list --type=tracks` returns empty (as it does for cross-database
+// external:<rig>:<id> tracking edges, see GH #2624, #2832), getTrackedIssues
+// falls back to `bd show` and still resolves the tracked issue instead of
+// silently reporting zero tracked issues.
+func TestGetTrackedIssues_FallsBackToShowForExternalEdges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+case "$1" in
+  dep)
+    echo '[]'
+    ;;
+  show)
+    echo '[{"dependencies":[{"id":"external:gt:gt-dcku","status":"open","dependency_type":"tracks"},{"id":"hq-other","status":"open","dependency_type":"blocks"}]}]'
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			return bytes.NewBufferString(""), nil
+		}
+		// getIssueDetailsBatch: "bd show gt-dcku --json"
+		return bytes.NewBufferString(`[{"id":"gt-dcku","title":"Fix the thing","status":"open","assignee":"gastown/polecats/flint","updated_at":"2026-09-10T22:00:00Z"}]`), nil
+	}
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
+
+	tracked, err := f.getTrackedIssues("hq-cv-432tu")
+	if err != nil {
+		t.Fatalf("getTrackedIssues returned error: %v", err)
+	}
+	if len(tracked) != 1 {
+		t.Fatalf("tracked issues = %d, want 1 (external edge should resolve via bd show fallback)", len(tracked))
+	}
+	if tracked[0].ID != "gt-dcku" {
+		t.Fatalf("tracked[0].ID = %q, want %q", tracked[0].ID, "gt-dcku")
+	}
+	if tracked[0].Assignee != "gastown/polecats/flint" {
+		t.Fatalf("tracked[0].Assignee = %q, want %q", tracked[0].Assignee, "gastown/polecats/flint")
+	}
+}
+
+// TestFetchConvoys_NoAssigneeNeverReportsStuck verifies gt-q0is: a convoy
+// with tracked issues but no assignee (or no tracked issues at all) must
+// never be colored STUCK based on an unrelated polecat's tmux activity. It
+// should render "unassigned"/"waiting" instead.
+func TestFetchConvoys_NoAssigneeNeverReportsStuck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+case "$1" in
+  list)
+    echo '[{"id":"hq-cv-1","title":"Convoy","status":"open","issue_type":"convoy","labels":[]}]'
+    ;;
+  dep)
+    echo '[{"id":"gt-abc"}]'
+    ;;
+  show)
+    echo '[]'
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			// Simulate a long-idle, totally unrelated polecat session still
+			// running elsewhere in the town — this must NOT leak into this
+			// convoy's status.
+			return bytes.NewBufferString("gt-otherrig-somepolecat|1\n"), nil
+		}
+		// getIssueDetailsBatch: "bd show gt-abc --json" — no assignee.
+		return bytes.NewBufferString(`[{"id":"gt-abc","title":"Untouched","status":"open","assignee":"","updated_at":""}]`), nil
+	}
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath, registry: session.DefaultRegistry()}
+
+	rows, err := f.FetchConvoys()
+	if err != nil {
+		t.Fatalf("FetchConvoys returned error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.WorkStatus == "stuck" {
+		t.Fatalf("WorkStatus = %q, want anything but stuck for an unassigned convoy", row.WorkStatus)
+	}
+	if row.WorkStatus != "waiting" {
+		t.Fatalf("WorkStatus = %q, want %q", row.WorkStatus, "waiting")
+	}
+	if !strings.Contains(row.LastActivity.FormattedAge, "unassigned") {
+		t.Fatalf("LastActivity.FormattedAge = %q, want it to mention unassigned", row.LastActivity.FormattedAge)
 	}
 }
 
