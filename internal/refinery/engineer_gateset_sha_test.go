@@ -1,56 +1,13 @@
 package refinery
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
 
-// TestCombineGateSetSHA guards the om-gate T8 review's second major finding:
-// GateSetSHA only hashed the polecat's *_command set, so an operator editing
-// merge_queue.gates (the named-gate map doMerge actually runs when non-empty)
-// left PreVerifiedGates matching the stale hash and the fast-path kept
-// skipping gates the refinery would now run differently.
-func TestCombineGateSetSHA(t *testing.T) {
-	const base = "polecat-command-set-sha"
-
-	nilGates := combineGateSetSHA(base, nil)
-	emptyGates := combineGateSetSHA(base, map[string]*GateConfig{})
-	if nilGates != emptyGates {
-		t.Errorf("nil and empty gates maps should hash the same: nil=%s empty=%s", nilGates, emptyGates)
-	}
-
-	withLint := combineGateSetSHA(base, map[string]*GateConfig{
-		"lint": {Cmd: "golangci-lint run"},
-	})
-	if withLint == nilGates {
-		t.Error("adding a named gate must change the combined hash")
-	}
-
-	editedLint := combineGateSetSHA(base, map[string]*GateConfig{
-		"lint": {Cmd: "golangci-lint run --fix"},
-	})
-	if editedLint == withLint {
-		t.Error("editing a named gate's command must change the combined hash")
-	}
-
-	withLintAndTest := combineGateSetSHA(base, map[string]*GateConfig{
-		"lint": {Cmd: "golangci-lint run"},
-		"test": {Cmd: "go test ./..."},
-	})
-	if withLintAndTest == withLint {
-		t.Error("adding a second named gate must change the combined hash")
-	}
-
-	// Map iteration order is randomized by Go; the hash must not depend on it.
-	reordered := combineGateSetSHA(base, map[string]*GateConfig{
-		"test": {Cmd: "go test ./..."},
-		"lint": {Cmd: "golangci-lint run"},
-	})
-	if reordered != withLintAndTest {
-		t.Error("combined hash must be independent of map iteration order")
-	}
-
-	if combineGateSetSHA("sha-a", nil) == combineGateSetSHA("sha-b", nil) {
-		t.Error("a change to the polecat-side hash must still change the combined hash")
-	}
-}
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/rig"
+)
 
 // TestCurrentGateSetSHAFn_IncludesRefineryGates exercises the production
 // closure NewEngineer installs (not a test fake): editing the Engineer's own
@@ -75,5 +32,56 @@ func TestCurrentGateSetSHAFn_IncludesRefineryGates(t *testing.T) {
 	edited := e.currentGateSetSHAFn()
 	if edited == withGate {
 		t.Fatal("currentGateSetSHAFn() unchanged after editing a configured gate's command")
+	}
+}
+
+// TestGateSetSHA_ProducerConsumerAgree guards the om-gate T8 review's
+// attempt-2 critical finding: gt done stamped pre_verified_gates with
+// config.GateSetSHA(mq) alone, while the refinery's production
+// currentGateSetSHAFn combined mqSHA with the refinery's own gates map via a
+// second, differently-shaped hash function — the two values could never be
+// equal, so resolveFastPath always reported "gate set changed" and the
+// fast-path never fired.
+//
+// This test builds the SAME rig-root config.json both sides read, computes
+// the stamp the way gt done does (rig.ResolveMergeQueueConfig +
+// rig.LoadNamedGateCommands + config.CombineGateSetSHA), builds a production
+// Engineer against that same config.json, and asserts its
+// currentGateSetSHAFn() agrees exactly — a compile-time guarantee that both
+// sides call the identical config.CombineGateSetSHA algorithm.
+func TestGateSetSHA_ProducerConsumerAgree(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	configJSON := `{
+		"merge_queue": {
+			"test_command": "go test ./...",
+			"lint_command": "golangci-lint run",
+			"gates": {
+				"extra": {"cmd": "make extra-check"}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Producer side: what gt done stamps as pre_verified_gates.
+	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+	producerSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
+
+	// Consumer side: the refinery's production closure, unmodified.
+	r := &rig.Rig{Name: rigName, Path: rigPath}
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	consumerSHA := e.currentGateSetSHAFn()
+
+	if producerSHA != consumerSHA {
+		t.Fatalf("producer stamp %q != consumer check %q — the fast-path can never fire", producerSHA, consumerSHA)
 	}
 }

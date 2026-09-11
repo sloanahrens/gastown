@@ -621,3 +621,54 @@ func TestParseDurationOrDefault_AllWebTimeoutDefaults(t *testing.T) {
 		})
 	}
 }
+
+// --- CombineGateSetSHA ---
+
+// TestCombineGateSetSHA guards the om-gate T8 review's finding: an operator
+// editing merge_queue.gates (the refinery's named-gate map) must invalidate
+// any pre-verification stamp recorded against the old combination, and the
+// hash must not depend on Go's randomized map iteration order.
+func TestCombineGateSetSHA(t *testing.T) {
+	base := &MergeQueueConfig{TestCommand: "go test ./..."}
+
+	nilGates := CombineGateSetSHA(base, nil)
+	emptyGates := CombineGateSetSHA(base, map[string]string{})
+	if nilGates != emptyGates {
+		t.Errorf("nil and empty gates maps should hash the same: nil=%s empty=%s", nilGates, emptyGates)
+	}
+	if nilGates != GateSetSHA(base) {
+		t.Error("with no named gates, CombineGateSetSHA must equal GateSetSHA alone")
+	}
+
+	withLint := CombineGateSetSHA(base, map[string]string{"lint": "golangci-lint run"})
+	if withLint == nilGates {
+		t.Error("adding a named gate must change the combined hash")
+	}
+
+	editedLint := CombineGateSetSHA(base, map[string]string{"lint": "golangci-lint run --fix"})
+	if editedLint == withLint {
+		t.Error("editing a named gate's command must change the combined hash")
+	}
+
+	withLintAndTest := CombineGateSetSHA(base, map[string]string{
+		"lint": "golangci-lint run",
+		"test": "go test ./...",
+	})
+	if withLintAndTest == withLint {
+		t.Error("adding a second named gate must change the combined hash")
+	}
+
+	// Map iteration order is randomized by Go; the hash must not depend on it.
+	reordered := CombineGateSetSHA(base, map[string]string{
+		"test": "go test ./...",
+		"lint": "golangci-lint run",
+	})
+	if reordered != withLintAndTest {
+		t.Error("combined hash must be independent of map iteration order")
+	}
+
+	otherBase := &MergeQueueConfig{TestCommand: "make test"}
+	if CombineGateSetSHA(base, nil) == CombineGateSetSHA(otherBase, nil) {
+		t.Error("a change to the polecat-side hash must still change the combined hash")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -1629,6 +1630,40 @@ func GateSetSHA(cfg *MergeQueueConfig) string {
 		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(nonEmpty, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// CombineGateSetSHA folds a set of named gate commands (name -> shell
+// command) into the hash GateSetSHA produces, yielding one hash that
+// changes if either binding changes. Nil or empty namedGates hashes
+// identically to GateSetSHA(cfg) alone.
+//
+// This is the single algorithm the pre-verification producer (`gt done`,
+// stamping pre_verified_gates) and consumer (the refinery's fast-path
+// staleness check) must both call: an earlier version had each side hash
+// this binding differently, so the two values could never agree and the
+// fast-path never fired (om-gate T8 review, attempt 2).
+func CombineGateSetSHA(cfg *MergeQueueConfig, namedGates map[string]string) string {
+	base := GateSetSHA(cfg)
+	if len(namedGates) == 0 {
+		return base
+	}
+
+	names := make([]string, 0, len(namedGates))
+	for name := range namedGates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString(base)
+	for _, name := range names {
+		b.WriteString("\x00")
+		b.WriteString(name)
+		b.WriteString("\x00")
+		b.WriteString(namedGates[name])
+	}
+	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
 }
 
