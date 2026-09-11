@@ -1153,6 +1153,48 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	return mq
 }
 
+// LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
+// map, returning each named gate's command keyed by name (timeout and phase
+// are irrelevant to gate-set identity, so they are not read here). This is
+// the same "gates" JSON key the refinery's Engineer.LoadConfig parses into
+// its own GateConfig map — it lives outside config.MergeQueueConfig (which
+// only carries the polecat's five *_command fields), so ResolveMergeQueueConfig
+// alone cannot see it.
+//
+// gt done calls this to fold the refinery's named gates into the
+// pre_verified_gates stamp via config.CombineGateSetSHA, so the value it
+// stamps is computed the same way the refinery's fast-path recomputes it
+// (om-gate T8 review, attempt 2: the two sides previously hashed different
+// bindings and could never agree). Returns nil if config.json is missing,
+// unreadable, or defines no named gates.
+func LoadNamedGateCommands(townRoot, rigName string) map[string]string {
+	if townRoot == "" || rigName == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(townRoot, rigName, "config.json"))
+	if err != nil {
+		return nil
+	}
+	var raw struct {
+		MergeQueue struct {
+			Gates map[string]struct {
+				Cmd string `json:"cmd"`
+			} `json:"gates"`
+		} `json:"merge_queue"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	if len(raw.MergeQueue.Gates) == 0 {
+		return nil
+	}
+	gates := make(map[string]string, len(raw.MergeQueue.Gates))
+	for name, gc := range raw.MergeQueue.Gates {
+		gates[name] = gc.Cmd
+	}
+	return gates
+}
+
 // warnDeprecatedRigConfigKeys detects merge_queue.target_branch in rig root
 // config.json, a key RigConfig.MergeQueue does parse (gt-me9t) but that gt mq
 // submit / gt done have never read — they resolve targets from default_branch

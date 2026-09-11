@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -171,7 +172,7 @@ type preVerificationStamp struct {
 // check the stamp would record pre_verified_base=<target HEAD the branch
 // never rebased onto>, and the refinery's fast-path would then skip gates
 // on a merged tree nothing ever verified (om-gate T8 review finding).
-func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig) (preVerificationStamp, bool, string) {
+func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, gateSetSHA string) (preVerificationStamp, bool, string) {
 	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
 	verifiedBase, baseErr := g.Rev(verifiedBaseRef)
 	if baseErr != nil {
@@ -196,7 +197,7 @@ func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, 
 
 	return preVerificationStamp{
 		verifiedBase: verifiedBase,
-		gateSetSHA:   config.GateSetSHA(mq),
+		gateSetSHA:   gateSetSHA,
 		logSHA256:    result.logSHA256,
 	}, true, ""
 }
@@ -209,6 +210,16 @@ type preVerificationResult struct {
 	logPath    string // path to the captured combined stdout/stderr log
 	logSHA256  string // sha256 hex digest of the log; empty unless success
 }
+
+// preVerificationGateTimeout bounds each individual pre-verification gate
+// command. Without it a hung gate (e.g. a test waiting on a port) blocks gt
+// done indefinitely at a point where the branch may already be pushed but no
+// MR bead exists yet, and orphans the child process if the session dies
+// (om-gate T8 review, attempt 3 minor). The refinery's own GateConfig.Timeout
+// is per-gate and operator-configured; gt done's gate commands (the
+// polecat-side *_command set) carry no such per-gate config, so this is a
+// single generous fixed bound instead.
+const preVerificationGateTimeout = 10 * time.Minute
 
 // runPreVerificationGates performs the verification `gt done --pre-verified`
 // stamps: it runs each of the rig's configured gate commands, in
@@ -254,14 +265,27 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 
 	for _, ng := range gates {
 		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
+		ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
 		// Trust boundary: gate commands come from rig config.json (operator-
 		// controlled infrastructure config), not from PR branches or user
 		// input — same trust boundary as the refinery's own gate runner.
-		cmd := exec.Command("sh", "-c", ng.cmd) //nolint:gosec // G204: command is from trusted rig config
+		cmd := exec.CommandContext(ctx, "sh", "-c", ng.cmd) //nolint:gosec // G204: command is from trusted rig config
 		cmd.Dir = worktree
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
-		if runErr := cmd.Run(); runErr != nil {
+		util.SetDetachedProcessGroup(cmd)
+		runErr := cmd.Run()
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
+		if timedOut {
+			// A hung gate (e.g. a test waiting on a port) must not wedge gt
+			// done indefinitely at a point where the branch is already
+			// pushed but no MR bead exists yet — degrade to "no stamp"
+			// instead (om-gate T8 review, attempt 3 minor).
+			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, preVerificationGateTimeout)
+			return preVerificationResult{success: false, failedGate: ng.name, exitCode: -1, logPath: logPath}, nil
+		}
+		if runErr != nil {
 			exitCode := -1
 			var exitErr *exec.ExitError
 			if errors.As(runErr, &exitErr) {
@@ -1988,7 +2012,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			if honorPreVerified {
 				mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq)
+				// config.CombineGateSetSHA is the SAME function the refinery's
+				// currentGateSetSHAFn calls (internal/refinery/engineer.go) —
+				// an earlier version stamped with config.GateSetSHA(mq) alone
+				// while the refinery compared against a second, differently
+				// shaped hash, so the two values could never agree and the
+				// fast-path never fired (om-gate T8 review, attempt 2).
+				gateSetSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
+				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA)
 				if warning != "" {
 					style.PrintWarning("%s", warning)
 				}

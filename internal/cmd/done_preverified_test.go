@@ -186,7 +186,7 @@ func TestResolvePreVerification(t *testing.T) {
 	mq := &config.MergeQueueConfig{TestCommand: "true"}
 
 	t.Run("HEAD contains the resolved target base: stamps", func(t *testing.T) {
-		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq)
+		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq))
 		if !ok {
 			t.Fatalf("expected ok=true, got warning=%q", warning)
 		}
@@ -204,7 +204,7 @@ func TestResolvePreVerification(t *testing.T) {
 		runGit("update-ref", "refs/remotes/origin/main", c2)
 		t.Cleanup(func() { runGit("update-ref", "refs/remotes/origin/main", c1) })
 
-		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq)
+		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq))
 		if ok {
 			t.Fatalf("expected ok=false when HEAD does not contain the target base, got stamp=%+v", stamp)
 		}

@@ -4,8 +4,6 @@ package refinery
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -352,38 +350,19 @@ func NewEngineer(r *rig.Rig) *Engineer {
 	}
 	e.currentGateSetSHAFn = func() string {
 		townRoot := filepath.Dir(r.Path)
-		mqSHA := config.GateSetSHA(rig.ResolveMergeQueueConfig(townRoot, r.Name))
-		// Fold in the refinery's own merge_queue.gates map (a config surface
-		// config.GateSetSHA cannot see — it only hashes the polecat's
-		// *_command set). Without this, editing or adding a named gate left
-		// PreVerifiedGates matching and the fast-path kept skipping gates the
-		// refinery would now actually run (om-gate T8 review finding).
-		return combineGateSetSHA(mqSHA, e.config.Gates)
+		mq := rig.ResolveMergeQueueConfig(townRoot, r.Name)
+		namedGates := make(map[string]string, len(e.config.Gates))
+		for name, gc := range e.config.Gates {
+			namedGates[name] = gc.Cmd
+		}
+		// config.CombineGateSetSHA is the SAME function `gt done` calls
+		// (internal/cmd/done.go) to stamp pre_verified_gates. An earlier
+		// version hashed this binding two different ways here and at the
+		// stamp site, so the values could never agree and the fast-path
+		// never fired (om-gate T8 review, attempt 2).
+		return config.CombineGateSetSHA(mq, namedGates)
 	}
 	return e
-}
-
-// combineGateSetSHA folds the refinery's named merge_queue.gates map into
-// the polecat-side gate-set hash so a change to either surface invalidates
-// any pre-verification claim stamped against the old combination.
-func combineGateSetSHA(mqSHA string, gates map[string]*GateConfig) string {
-	names := make([]string, 0, len(gates))
-	for name := range gates {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	b.WriteString(mqSHA)
-	for _, name := range names {
-		gc := gates[name]
-		b.WriteString("\x00")
-		b.WriteString(name)
-		b.WriteString("\x00")
-		b.WriteString(gc.Cmd)
-	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])
 }
 
 // SetOutput sets the output writer for user-facing messages.
