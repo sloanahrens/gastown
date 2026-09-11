@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 func TestMainBranchTestInterval(t *testing.T) {
@@ -318,6 +321,74 @@ func TestContains(t *testing.T) {
 	}
 	if sliceContains(nil, "a") {
 		t.Error("expected false for nil slice")
+	}
+}
+
+// stubNoContainers overrides package slot's docker-ps lookup for the
+// duration of t so these tests never shell out to the real docker CLI (see
+// internal/cmd/mq_batch_slot_test.go's stubNoContainers for the same need).
+func stubNoContainers(t *testing.T) {
+	t.Helper()
+	t.Cleanup(slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil }))
+}
+
+// TestAcquireMainBranchTestSlot_AcquiresAndReleases is the regression test
+// for gt-hpce: testRigMainBranch's gate/test run must be a first-class
+// holder of the container-gate slot instead of an invisible occupant that
+// collides with other rigs' Docker-backed suites (gt-tuiy/gt-afe4's class of
+// bug, but for the daemon's own baseline run rather than a formula-invoked
+// test_command).
+func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	h, err := acquireMainBranchTestSlot(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("acquireMainBranchTestSlot: %v", err)
+	}
+	if h == nil {
+		t.Fatalf("acquireMainBranchTestSlot returned a nil handle")
+	}
+
+	rep, err := slot.Status(townRoot)
+	if err != nil {
+		t.Fatalf("slot.Status while held: %v", err)
+	}
+	if !rep.Held {
+		t.Fatalf("slot.Status reports not held while acquireMainBranchTestSlot's handle is outstanding: %+v", rep)
+	}
+
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	rep, err = slot.Status(townRoot)
+	if err != nil {
+		t.Fatalf("slot.Status after release: %v", err)
+	}
+	if rep.Held {
+		t.Fatalf("slot.Status still reports held after Release: %+v", rep)
+	}
+}
+
+// TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI proves
+// stubNoContainers above is actually wired to the machinery
+// acquireMainBranchTestSlot uses (see the identical concern documented on
+// internal/cmd/mq_batch_slot_test.go's TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI):
+// without the stub, a real docker/testcontainers suite already up on a
+// shared host would make this poll the real `docker ps` for the full
+// mainBranchTestSlotTimeout (60m), hanging the package's test run.
+func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	restore := slot.SetContainerListerForTest(func() ([]string, error) {
+		return []string{"dolt/dolt-sql-server:2.2.0 someone-elses-suite"}, nil
+	})
+	defer restore()
+
+	townRoot := t.TempDir()
+	timeout := slot.DefaultPollInterval + 500*time.Millisecond
+	if _, err := slot.Acquire(townRoot, "gastown/main-branch-test", timeout); err == nil {
+		t.Fatalf("Acquire succeeded even though the stubbed lister reported a running container — the real (docker-absent) lister must have been consulted instead of the stub")
 	}
 }
 
