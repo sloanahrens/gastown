@@ -581,54 +581,46 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Error("expected crew to inherit SessionStart from DefaultBase")
 	}
 
-	// Witness should get DefaultBase + built-in patrol-formula-guard (gt-e47hxn).
-	// Post gt-5ihs, every PreToolUse Bash guard shares the bare "Bash" tool-name
-	// matcher — Claude Code's matcher only ever matches the tool name — and is
-	// discriminated by each Hook's If field instead. So witness must have
-	// exactly one PreToolUse entry (matcher "Bash") whose Hooks accumulate the
-	// base guards (pr-workflow x3, dangerous-command x1) AND witness's own
-	// 4 patrol-formula-guard hooks.
+	// Witness should get DefaultBase + built-in patrol-loop guard (gt-e47hxn,
+	// gt-qqfy). Post gt-5ihs, every PreToolUse Bash guard shares the bare
+	// "Bash" tool-name matcher — Claude Code's matcher only ever matches the
+	// tool name. patrol-loop self-filters on tool_input.command (gt-qqfy),
+	// so it needs no If — witness must have exactly one PreToolUse entry
+	// (matcher "Bash") whose Hooks accumulate the base guards (pr-workflow
+	// x3, dangerous-command x1) AND witness's own ungated patrol-loop hook.
 	witness, err := ComputeExpected("witness")
 	if err != nil {
 		t.Fatalf("ComputeExpected(witness) failed: %v", err)
 	}
-	requireIfConditions(t, "witness", witness, patrolIfConditions)
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard patrol-loop")
 	requireIfConditions(t, "witness", witness, prWorkflowIfConditions)
 	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected witness to inherit SessionStart from DefaultBase")
 	}
 
-	// Deacon should get DefaultBase + built-in patrol-formula-guard plus anti-batch guards.
+	// Deacon should get DefaultBase + the same ungated patrol-loop guard;
+	// the guard itself applies the anti-batch-loop checks (for/seq, while
+	// true, while :) only when it detects the deacon role (gt-qqfy).
 	deacon, err := ComputeExpected("deacon")
 	if err != nil {
 		t.Fatalf("ComputeExpected(deacon) failed: %v", err)
 	}
-	requireIfConditions(t, "deacon", deacon, patrolIfConditions)
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard patrol-loop")
 	requireIfConditions(t, "deacon", deacon, prWorkflowIfConditions)
-	requireIfConditions(t, "deacon", deacon, []string{
-		"Bash(*for *seq*)", "Bash(*while true*)", "Bash(*while :*)",
-	})
 	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected deacon to inherit SessionStart from DefaultBase")
 	}
 
-	// Refinery should get DefaultBase + built-in patrol-formula-guard (same as witness)
+	// Refinery should get DefaultBase + built-in patrol-loop guard (same as witness)
 	refinery, err := ComputeExpected("refinery")
 	if err != nil {
 		t.Fatalf("ComputeExpected(refinery) failed: %v", err)
 	}
-	requireIfConditions(t, "refinery", refinery, patrolIfConditions)
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard patrol-loop")
 	requireIfConditions(t, "refinery", refinery, prWorkflowIfConditions)
 	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected refinery to inherit SessionStart from DefaultBase")
 	}
-}
-
-var patrolIfConditions = []string{
-	"Bash(*bd mol pour*patrol*)",
-	"Bash(*bd mol pour *mol-witness*)",
-	"Bash(*bd mol pour *mol-deacon*)",
-	"Bash(*bd mol pour *mol-refinery*)",
 }
 
 var prWorkflowIfConditions = []string{
@@ -657,6 +649,27 @@ func requireIfConditions(t *testing.T, label string, cfg *HooksConfig, want []st
 	}
 }
 
+// requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare-"Bash"
+// matcher entry with a Hook whose Command contains commandSubstring and
+// whose If field is empty — the shape a self-filtering guard (one that
+// reads tool_input.command off stdin and inspects it directly, like
+// dangerous-command and patrol-loop) needs, since it must run
+// unconditionally rather than depend on an "if" permission-glob to decide
+// when it's even invoked (gt-qqfy).
+func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, commandSubstring string) {
+	t.Helper()
+	entry, ok := findPreToolUse(cfg, "Bash")
+	if !ok {
+		t.Fatalf("%s: missing bare \"Bash\" PreToolUse matcher entry", label)
+	}
+	for _, h := range entry.Hooks {
+		if strings.Contains(h.Command, commandSubstring) && h.If == "" {
+			return
+		}
+	}
+	t.Errorf("%s: missing ungated (If=\"\") PreToolUse hook with Command containing %q under matcher \"Bash\", got: %+v", label, commandSubstring, entry.Hooks)
+}
+
 // TestComputeExpectedWitnessRigSpecific verifies patrol-formula-guard propagates
 // to rig-specific witness targets (e.g., sky/witness) via the witness role default.
 func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
@@ -670,10 +683,10 @@ func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
 		t.Fatalf("ComputeExpected(sky/witness) failed: %v", err)
 	}
 
-	// Should have patrol-formula-guard hooks (If field, not Matcher — gt-5ihs)
-	// from DefaultOverrides["witness"], accumulated under the bare "Bash"
-	// matcher entry.
-	requireIfConditions(t, "sky/witness", skyWitness, patrolIfConditions)
+	// Should have the ungated patrol-loop guard (self-filters, no If —
+	// gt-qqfy) from DefaultOverrides["witness"], accumulated under the bare
+	// "Bash" matcher entry.
+	requireUngatedGuardCommand(t, "sky/witness", skyWitness, "tap guard patrol-loop")
 
 	// Should also inherit base hooks (pr-workflow-guard, etc.)
 	if len(skyWitness.SessionStart) == 0 {
