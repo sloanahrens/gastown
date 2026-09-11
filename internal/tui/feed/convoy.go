@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -62,25 +63,23 @@ func FetchConvoys(townRoot string) (*ConvoyState, error) {
 		LastUpdate: time.Now(),
 	}
 
-	// Fetch open convoys
-	openConvoys, err := listConvoys(townBeads, "open")
+	// Fetch open convoys. Filtered server-side by label so the response is
+	// just the convoys, not the whole town's open beads.
+	openConvoys, err := listConvoys(townBeads, "open", "")
 	if err != nil {
 		// Not a fatal error - just return empty state
 		return state, nil
 	}
+	state.InProgress = enrichConvoysConcurrently(townBeads, openConvoys)
 
-	for _, c := range openConvoys {
-		// Get detailed status for each convoy
-		convoy := enrichConvoy(townBeads, c)
-		state.InProgress = append(state.InProgress, convoy)
-	}
-
-	// Fetch recently closed convoys (landed in last 24h)
-	closedConvoys, err := listConvoys(townBeads, "closed")
+	// Fetch recently closed convoys (landed in last 24h). closedAfter is
+	// applied server-side too — this used to fetch every closed issue in
+	// the town (1800+ rows) just to filter down to a handful of convoys
+	// closed today.
+	cutoff := time.Now().Add(-24 * time.Hour)
+	closedConvoys, err := listConvoys(townBeads, "closed", cutoff.Format(time.RFC3339))
 	if err == nil {
-		cutoff := time.Now().Add(-24 * time.Hour)
-		for _, c := range closedConvoys {
-			convoy := enrichConvoy(townBeads, c)
+		for _, convoy := range enrichConvoysConcurrently(townBeads, closedConvoys) {
 			if !convoy.ClosedAt.IsZero() && convoy.ClosedAt.After(cutoff) {
 				state.Landed = append(state.Landed, convoy)
 			}
@@ -101,9 +100,20 @@ func FetchConvoys(townRoot string) (*ConvoyState, error) {
 	return state, nil
 }
 
-// listConvoys returns convoys with the given status
-func listConvoys(beadsDir, status string) ([]convoyListItem, error) {
-	listArgs := []string{"list", "--status=" + status, "--json", "--limit=0"}
+// listConvoys returns convoys with the given status. closedAfter, if
+// non-empty (RFC3339), additionally restricts results to issues closed after
+// that time — used to fetch only recently-landed convoys instead of every
+// closed convoy the town has ever had.
+//
+// Filtering by --label=gt:convoy server-side is what keeps this call cheap:
+// listing status=closed with no filter returns every closed issue in the
+// town (thousands of rows, megabytes of JSON) just to find the handful that
+// are convoys.
+func listConvoys(beadsDir, status, closedAfter string) ([]convoyListItem, error) {
+	listArgs := []string{"list", "--label=gt:convoy", "--status=" + status, "--json", "--limit=0"}
+	if closedAfter != "" {
+		listArgs = append(listArgs, "--closed-after="+closedAfter)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
@@ -130,6 +140,36 @@ func listConvoys(beadsDir, status string) ([]convoyListItem, error) {
 		}
 	}
 	return items, nil
+}
+
+// maxConvoyFetchConcurrency bounds how many bd subprocesses this package
+// spawns at once when fanning out per-convoy or per-rig queries. Dolt (the
+// backing store for bd) is a single shared server and degrades badly under a
+// burst of concurrent queries, so this trades some parallelism for safety
+// rather than firing off one goroutine per convoy/rig unbounded.
+const maxConvoyFetchConcurrency = 4
+
+// enrichConvoysConcurrently enriches convoys in parallel, bounded by
+// maxConvoyFetchConcurrency. Each enrichConvoy call spawns its own bd
+// subprocesses (see getTrackedIssueStatus); running them serially was the
+// dominant cost in FetchConvoys under load (~1s per convoy).
+func enrichConvoysConcurrently(beadsDir string, items []convoyListItem) []Convoy {
+	result := make([]Convoy, len(items))
+
+	sem := make(chan struct{}, maxConvoyFetchConcurrency)
+	var wg sync.WaitGroup
+	for i, item := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, item convoyListItem) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			result[i] = enrichConvoy(beadsDir, item)
+		}(i, item)
+	}
+	wg.Wait()
+
+	return result
 }
 
 type convoyListItem struct {
@@ -377,7 +417,10 @@ type mqListItem struct {
 	Assignee  string `json:"assignee,omitempty"`
 }
 
-// fetchMQEntries queries all rigs for merge-request beads
+// fetchMQEntries queries all rigs for merge-request beads. Rigs are queried
+// concurrently (bounded by maxConvoyFetchConcurrency) and each rig is a
+// single bd call for both open and in_progress statuses combined — this used
+// to be two serial bd calls per rig (8 calls, ~1-1.6s each, for 4 rigs).
 func fetchMQEntries(townRoot string) []MQEntry {
 	// Load rigs config to discover rigs
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
@@ -386,22 +429,44 @@ func fetchMQEntries(townRoot string) []MQEntry {
 		return nil
 	}
 
-	var entries []MQEntry
+	type rigEntries struct {
+		rigName string
+		entries []MQEntry
+	}
+
+	jobs := make([]rigEntries, 0, len(rigsConfig.Rigs))
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		// Check rig directory exists
 		if _, err := os.Stat(rigPath); err != nil {
 			continue
 		}
+		jobs = append(jobs, rigEntries{rigName: rigName})
+	}
 
-		// Fetch open and in-progress MRs
-		for _, status := range []string{"open", "in_progress"} {
-			items := listMQBeads(rigPath, status)
+	sem := make(chan struct{}, maxConvoyFetchConcurrency)
+	var wg sync.WaitGroup
+	for i := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			rigName := jobs[i].rigName
+			rigPath := filepath.Join(townRoot, rigName)
+			items := listMQBeads(rigPath, "open,in_progress")
+			entries := make([]MQEntry, 0, len(items))
 			for _, item := range items {
-				entry := mqItemToEntry(item, rigName)
-				entries = append(entries, entry)
+				entries = append(entries, mqItemToEntry(item, rigName))
 			}
-		}
+			jobs[i].entries = entries
+		}(i)
+	}
+	wg.Wait()
+
+	var entries []MQEntry
+	for _, job := range jobs {
+		entries = append(entries, job.entries...)
 	}
 
 	// Sort: in-progress (merging) first, then open (queued)
@@ -415,7 +480,9 @@ func fetchMQEntries(townRoot string) []MQEntry {
 	return entries
 }
 
-// listMQBeads queries bd for merge-request beads with given status
+// listMQBeads queries bd for merge-request beads with given status.
+// status may be comma-separated (e.g. "open,in_progress") to fetch multiple
+// statuses in a single call.
 func listMQBeads(rigPath, status string) []mqListItem {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
