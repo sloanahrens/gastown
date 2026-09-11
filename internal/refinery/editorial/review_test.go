@@ -698,6 +698,133 @@ func TestRun_RehearsesWhenNoRehearsedHeadGiven(t *testing.T) {
 	}
 }
 
+// TestRun_RehearsalNeverMovesRepoDirOffItsOriginalCheckout reproduces
+// gt-dcku: the refinery's live clone (RepoDir) can be mid-gate on its own
+// branch (e.g. a batch's "temp") when `gt mq review/retry` rehearses a
+// different MR. The old implementation created a temp branch in RepoDir,
+// checked it out, then "restored" by checking out the TARGET NAME — which
+// silently moved RepoDir's HEAD onto stale local "main" instead of back to
+// "temp", so a concurrent build/test run silently tested the wrong tree.
+// Rehearsal must never touch RepoDir's checkout at all.
+func TestRun_RehearsalNeverMovesRepoDirOffItsOriginalCheckout(t *testing.T) {
+	fakeBDForReview(t)
+
+	bareDir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+
+	repoDir := initTestRepo(t)
+	g := git.NewGit(repoDir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	if _, err := g.AddRemote("origin", bareDir); err != nil {
+		t.Fatalf("add remote: %v", err)
+	}
+	renameCmd := exec.Command("git", "branch", "-M", "main")
+	renameCmd.Dir = repoDir
+	if out, err := renameCmd.CombinedOutput(); err != nil {
+		t.Fatalf("rename branch to main: %v\n%s", err, out)
+	}
+	if err := g.Push("origin", "main", false); err != nil {
+		t.Fatalf("push main: %v", err)
+	}
+
+	featureCmd := exec.Command("git", "checkout", "-b", "polecat/marble/gt-real", base)
+	featureCmd.Dir = repoDir
+	if out, err := featureCmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout feature branch: %v\n%s", err, out)
+	}
+	commitFileReview(t, repoDir, "feature.txt", "hello\n", "add feature")
+	if err := g.Push("origin", "polecat/marble/gt-real", false); err != nil {
+		t.Fatalf("push feature branch: %v", err)
+	}
+
+	// Simulate the refinery being mid-gate on its own "temp" branch — a
+	// stale local "main" (never updated after the initial push) stands in
+	// for the pre-uq28 tree the real incident silently re-tested.
+	if err := g.CreateBranchFrom("temp", "polecat/marble/gt-real"); err != nil {
+		t.Fatalf("create temp branch: %v", err)
+	}
+	if err := g.Checkout("temp"); err != nil {
+		t.Fatalf("checkout temp: %v", err)
+	}
+	tempHead, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev temp HEAD: %v", err)
+	}
+
+	rigDir := t.TempDir()
+	binPath := filepath.Join(rigDir, "om-stub-binary")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho om\n"), 0755); err != nil {
+		t.Fatalf("write om stub binary: %v", err)
+	}
+	sum := sha256.Sum256([]byte("#!/bin/sh\necho om\n"))
+	var m Manifest
+	m.OMBinary.Path = binPath
+	m.OMBinary.SHA256 = hex.EncodeToString(sum[:])
+	m.OMBinary.Version = "1.4.0"
+	data, _ := json.Marshal(m)
+	if err := os.WriteFile(filepath.Join(rigDir, manifestFileName), data, 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	store := newReviewStore(mrIssue("gt-mr-1", "polecat/marble/gt-real", "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      g,
+		Beads:    beads.NewWithStore(repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := ReviewRequest{
+		RigDir:  rigDir,
+		RepoDir: repoDir,
+		MRID:    "gt-mr-1",
+		Worker:  "marble",
+		Rig:     "gastown",
+		Target:  "main",
+		Branch:  "polecat/marble/gt-real",
+		Attempt: 1,
+		Config:  config.EditorialConfig{Required: true},
+	}
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Note.HeadSHA == base || result.Note.HeadSHA == "" {
+		t.Fatalf("expected a rehearsed head distinct from base, got %q", result.Note.HeadSHA)
+	}
+
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if branch != "temp" {
+		t.Fatalf("RepoDir moved off its original branch: now on %q, want temp", branch)
+	}
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	if head != tempHead {
+		t.Fatalf("RepoDir HEAD moved: now %q, want unchanged temp head %q", head, tempHead)
+	}
+	leftover, err := g.ListBranches("gt-mq-review-*")
+	if err != nil {
+		t.Fatalf("ListBranches: %v", err)
+	}
+	if len(leftover) != 0 {
+		t.Fatalf("rehearsal temp branch(es) leaked into RepoDir: %v", leftover)
+	}
+}
+
 // TestRun_ResolvesRehearsedRefToSHA covers the --rehearsed CLI flag, which
 // accepts any ref (branch name, not necessarily a sha already). Note.HeadSHA
 // and editorial_reviewed_head must record the resolved commit sha so they

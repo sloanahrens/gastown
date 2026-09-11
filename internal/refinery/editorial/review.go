@@ -367,29 +367,51 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 	return &v, "", nil
 }
 
-// Rehearse fetches origin and merges origin/<branch> into a temp branch cut
-// from origin/<target>, returning the resulting head sha so the review sees
-// exactly what would land, then restores RepoDir to target and deletes the
-// temp branch. Callers that already rehearsed (or are re-reviewing a fixed
-// head) pass ReviewRequest.RehearsedHead instead and skip this.
+// Rehearse fetches origin and merges origin/<branch> onto origin/<target> in
+// a throwaway detached worktree, returning the resulting head sha so the
+// review sees exactly what would land. Callers that already rehearsed (or
+// are re-reviewing a fixed head) pass ReviewRequest.RehearsedHead instead
+// and skip this.
 //
 // RepoDir for the single-invocation `gt mq review` CLI path (the only
-// caller that reaches this) is the refinery's live clone
-// (refinery/rig — see doMQReview), not a throwaway checkout, so leaving it
-// stranded on a gt-mq-review-* branch mutates shared state other refinery
-// operations depend on being on target. The batch path never calls this —
-// it uses RehearseBranch directly and performs its own equivalent cleanup
-// across multiple candidates before running any gate scripts.
+// caller that reaches this) is the refinery's live clone (refinery/rig —
+// see doMQReview), not a throwaway checkout, and it may be mid-gate on its
+// own branch (e.g. a batch's "temp") when this runs. The rehearsal MUST NOT
+// touch g's HEAD at all: an earlier version created a temp branch and
+// checked it out in g's own working directory, then tried to "restore" by
+// checking out the TARGET NAME — which silently moved g's HEAD onto a stale
+// local target branch instead of back to whatever it was on before, and
+// left the working directory's build/test tooling running against the
+// wrong tree (gt-dcku). Doing the rehearsal in a separate worktree makes
+// that whole class of bug impossible: g's checkout is never touched, so
+// there is nothing to restore. The batch path never calls this — it uses
+// RehearseBranch directly and performs its own equivalent cleanup across
+// multiple candidates before running any gate scripts.
 func Rehearse(g *git.Git, target, branch string) (string, error) {
 	if err := g.Fetch("origin"); err != nil {
 		return "", fmt.Errorf("fetch origin: %w", err)
 	}
-	head, tempBranch, err := RehearseBranch(g, target, branch)
+
+	worktreeDir, err := os.MkdirTemp("", "gt-mq-rehearse-*")
+	if err != nil {
+		return "", fmt.Errorf("mktemp rehearsal worktree: %w", err)
+	}
+	defer os.RemoveAll(worktreeDir)
+
+	if err := g.WorktreeAddDetached(worktreeDir, "origin/"+target); err != nil {
+		return "", fmt.Errorf("add rehearsal worktree from origin/%s: %w", target, err)
+	}
+	defer func() { _ = g.WorktreeRemove(worktreeDir, true) }()
+
+	wg := git.NewGit(worktreeDir)
+	if err := wg.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
+		_ = wg.AbortMerge()
+		return "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
+	}
+	head, err := wg.Rev("HEAD")
 	if err != nil {
 		return "", err
 	}
-	_ = g.Checkout(target)
-	_ = g.DeleteBranch(tempBranch, true)
 	return head, nil
 }
 
