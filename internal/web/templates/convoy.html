@@ -12,7 +12,14 @@
 <body>
     <!-- Custom event is namespaced "gt:" (not "sse:") because "sse:" is reserved by
          htmx's SSE extension and silently fails to bind without an sse-connect source. -->
-    <div class="dashboard" id="dashboard-main" hx-get="/" hx-trigger="gt:dashboard-update, every 30s [!window.pauseRefresh && !window.sseConnected]" hx-swap="morph:outerHTML" hx-ext="morph">
+    <!-- hx-select scopes the swap to this div's own markup in the response. Without it,
+         htmx's morph:outerHTML swap takes the WHOLE response body — including the CDN
+         htmx/idiomorph <script> tags in <head> and /static/dashboard.js at the end of
+         <body> — as the new content, and (allowScriptTags defaults true) re-executes
+         dashboard.js on every swap: a fresh EventSource, panel loaders and
+         htmx:afterSwap listener each time, until they exhaust WebKit's per-host
+         connection pool. See gt-8tpe. -->
+    <div class="dashboard" id="dashboard-main" hx-get="/" hx-select="#dashboard-main" hx-trigger="gt:dashboard-update, every 30s [!window.pauseRefresh && !window.sseConnected]" hx-swap="morph:outerHTML" hx-ext="morph">
         <header>
             <pre class="ascii-title">  __  __    __   _____ __  _   _  __  _    ___ __  __  _ _____ ___  __  _      ______ __  _ _____ ___ ___ 
  / _]/  \ /' _| |_   _/__\| | | ||  \| |  / _//__\|  \| |_   _| _ \/__\| |    / _/ __|  \| |_   _| __| _ \
@@ -1076,6 +1083,6 @@
         <div id="output-panel-content" class="output-panel-content"></div>
     </div>
 
-    <script src="/static/dashboard.js?v=5"></script>
+    <script src="/static/dashboard.js?v=6"></script>
 </body>
 </html>
