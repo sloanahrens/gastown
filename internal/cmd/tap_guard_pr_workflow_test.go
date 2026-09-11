@@ -26,7 +26,11 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"unrelated git command", "git status", false},
 		{"git checkout without -b", "git checkout main", false},
 		{"empty command", "", false},
-		{"pattern not at start", "cd foo && git checkout -b x", false},
+		{"compound command, blocked shape in later segment", "cd foo && git checkout -b x", true},
+		{"compound command, blocked shape first", "gh pr create --title foo && echo done", true},
+		{"compound command with pipe", "echo x | gh pr create --title foo", true},
+		{"compound command, no blocked segment", "cd foo && git status", false},
+		{"different flag not mistaken for -b", "git checkout -branch feature/x", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,14 +83,30 @@ func TestPRWorkflowGuard_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("no stdin at all exits 0", func(t *testing.T) {
+	t.Run("no stdin in agent context blocks (fail closed, gt-wisp-52y4)", func(t *testing.T) {
+		// Some harness templates (Copilot's INPUT=$(cat) wrapper) drain
+		// stdin before invoking this guard, so the guard can't tell what
+		// command is running. It must fall back to the pre-self-filter
+		// unconditional context check rather than allow everything through.
 		env := append(testutil.CleanGTEnv(), "GT_POLECAT=1")
 		cmd := exec.Command(bin, "tap", "guard", "pr-workflow")
 		cmd.Dir = workDir
 		cmd.Env = env
 		cmd.Stdin = bytes.NewBuffer(nil)
+		err := cmd.Run()
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 2 {
+			t.Errorf("expected exit 2 with empty stdin in agent context, got err: %v", err)
+		}
+	})
+
+	t.Run("no stdin outside agent context exits 0", func(t *testing.T) {
+		cmd := exec.Command(bin, "tap", "guard", "pr-workflow")
+		cmd.Dir = workDir
+		cmd.Env = testutil.CleanGTEnv()
+		cmd.Stdin = bytes.NewBuffer(nil)
 		if err := cmd.Run(); err != nil {
-			t.Errorf("expected exit 0 with empty stdin, got error: %v", err)
+			t.Errorf("expected exit 0 with empty stdin outside agent context, got error: %v", err)
 		}
 	})
 
