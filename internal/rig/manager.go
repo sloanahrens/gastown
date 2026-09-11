@@ -580,6 +580,19 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 	fmt.Printf("   ✓ Created mayor clone\n")
 
+	// Protect .beads/ (credential key, backups, locks) in the mayor clone.
+	// The mayor clone is a standalone `git clone`, not a linked worktree off
+	// the bare repo, so it gets its own .git/info/exclude that nothing else
+	// writes to. Without this call the mayor clone is unprotected: .beads/
+	// shows up untracked in `git status` and is one `git clean -fd` away from
+	// deleting the beads credential key (gt-ylpg). Every other agent clone
+	// (polecat, witness, crew, refinery) already gets this via
+	// EnsureLocalExcludePatterns at provisioning time; the mayor clone was
+	// the one path that skipped it.
+	if err := EnsureLocalExcludePatterns(mayorRigPath); err != nil {
+		return nil, fmt.Errorf("protecting .beads/ in mayor clone: %w", err)
+	}
+
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
 	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")

@@ -1912,6 +1912,59 @@ func TestAddRig_UpstreamURL(t *testing.T) {
 	_ = rig
 }
 
+// TestAddRig_MayorCloneProtectsBeads is a regression guard for gt-ylpg: the
+// mayor clone is a standalone `git clone`, not a linked worktree off the
+// bare repo, so it needs its own .git/info/exclude entry for .beads/ or the
+// credential key, backups, and locks it holds are one `git clean -fd` away
+// from deletion. Every other agent clone (polecat, witness, crew, refinery)
+// already gets this via EnsureLocalExcludePatterns; the mayor clone was the
+// one path that skipped it.
+func TestAddRig_MayorCloneProtectsBeads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based bd shim not reliable on Windows CI")
+	}
+
+	fakeBDForAddRig(t)
+
+	root, rigsConfig := setupTestTown(t)
+	gitURL := createTestGitRepoForRig(t, "source")
+
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "beadsrig",
+		GitURL:        gitURL,
+		BeadsPrefix:   "bd",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	mayorRigPath := filepath.Join(root, "beadsrig", "mayor", "rig")
+
+	// Simulate a runtime-created .beads/ directory with a credential file,
+	// exactly as bd init would leave behind after AddRig finishes.
+	beadsDir := filepath.Join(mayorRigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	credentialPath := filepath.Join(beadsDir, ".beads-credential-key")
+	if err := os.WriteFile(credentialPath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("write credential file: %v", err)
+	}
+
+	cmd := exec.Command("git", "-C", mayorRigPath, "status", "--porcelain", "--ignored", "--", ".beads")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git status: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(line, "??") {
+			t.Fatalf("mayor clone .beads/ is untracked and unignored (exposed to git clean -fd): %q\nfull output:\n%s", line, out)
+		}
+	}
+}
+
 // TestAddRig_BranchFlag verifies that --branch is passed to the bare clone so
 // the bare repo's HEAD and origin tracking ref both point to the specified branch.
 func TestAddRig_BranchFlag(t *testing.T) {

@@ -302,6 +302,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewSettingsCheck())
 	d.Register(doctor.NewSessionHookCheck())
 	d.Register(doctor.NewRuntimeGitignoreCheck())
+	d.Register(doctor.NewBeadsExposureCheck())
 	d.Register(doctor.NewLegacyGastownCheck())
 	// NOTE: ClaudeSettingsCheck moved before DaemonCheck (gt-99u race fix)
 	d.Register(doctor.NewDeprecatedMergeQueueKeysCheck())
