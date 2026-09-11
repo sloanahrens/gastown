@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -70,6 +71,22 @@ func init() {
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
+	// The refinery's mandated merge-rehearsal checkout (mol-refinery-patrol
+	// step 1, mol-polecat-conflict-resolve: "git checkout -b temp
+	// origin/<branch>") legitimately needs to create a branch — the same
+	// shape of command isGasTownAgentContext() otherwise blocks for every
+	// role. Exempt only that shape, and only for the refinery role: "gh pr
+	// create" stays blocked for refineries same as everyone else (gt-r2xm).
+	// All three "if"-matched hook patterns (gh pr create*, git checkout
+	// -b*, git switch -c*) invoke this same command with no argument
+	// telling us which one fired, so the actual command must be read back
+	// off stdin (Claude Code hook protocol) to tell them apart.
+	input, _ := io.ReadAll(os.Stdin)
+	command := extractCommand(input)
+	if isRefineryRole() && isFeatureBranchCommand(command) && !isPRCreateCommand(command) {
+		return nil
+	}
+
 	// Check if we're in a Gas Town agent context
 	if isGasTownAgentContext() {
 		fmt.Fprintln(os.Stderr, "")
@@ -155,4 +172,69 @@ func isMaintainerOrigin() bool {
 	// - https://github.com/steveyegge/gastown.git
 	// - git@github.com:steveyegge/gastown.git
 	return strings.Contains(url, "steveyegge/gastown")
+}
+
+// isRefineryRole reports whether the current process is running as the
+// refinery role, via either signal a refinery session may carry:
+// GT_REFINERY (set directly in tmux env — see gt-r2xm's mayor comment,
+// since hooks-overrides could not subtract the compiled default rule) or
+// GT_ROLE resolving to "<rig>/refinery".
+func isRefineryRole() bool {
+	if os.Getenv("GT_REFINERY") != "" {
+		return true
+	}
+	role, _, _ := parseRoleString(os.Getenv("GT_ROLE"))
+	return role == RoleRefinery
+}
+
+// isPRCreateCommand reports whether command invokes "gh pr create" — the
+// one pr-workflow pattern that stays blocked for every role, refinery
+// included. Matched as three consecutive tokens (case-insensitive) rather
+// than a substring, so it isn't fooled by "gh" or "pr" appearing quoted
+// elsewhere in the command.
+func isPRCreateCommand(command string) bool {
+	tokens := shellTokenize(command)
+	for i := 0; i+2 < len(tokens); i++ {
+		if strings.EqualFold(tokens[i], "gh") &&
+			strings.EqualFold(tokens[i+1], "pr") &&
+			strings.EqualFold(tokens[i+2], "create") {
+			return true
+		}
+	}
+	return false
+}
+
+// isFeatureBranchCommand reports whether command creates a new branch via
+// "git checkout -b" or "git switch -c" — the two shapes mol-refinery-patrol
+// step 1 and mol-polecat-conflict-resolve mandate ("git checkout -b temp
+// origin/<branch>") for merge rehearsal. Uses containment rather than
+// strict adjacency (like the dangerous-command guard's fragment matching)
+// so an extra flag between the subcommand and "-b"/"-c" (e.g. "git checkout
+// -q -b temp") still matches.
+func isFeatureBranchCommand(command string) bool {
+	tokens := shellTokenize(command)
+	lower := make([]string, len(tokens))
+	for i, t := range tokens {
+		lower[i] = strings.ToLower(t)
+	}
+	if !containsToken(lower, "git") {
+		return false
+	}
+	if containsToken(lower, "checkout") && containsToken(lower, "-b") {
+		return true
+	}
+	if containsToken(lower, "switch") && containsToken(lower, "-c") {
+		return true
+	}
+	return false
+}
+
+// containsToken reports whether want appears as an exact element of tokens.
+func containsToken(tokens []string, want string) bool {
+	for _, t := range tokens {
+		if t == want {
+			return true
+		}
+	}
+	return false
 }
