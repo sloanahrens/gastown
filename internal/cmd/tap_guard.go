@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -69,7 +70,46 @@ func init() {
 	tapGuardCmd.AddCommand(tapGuardPRWorkflowCmd)
 }
 
+// prWorkflowCommandPrefixes are the exact command shapes this guard blocks,
+// mirroring the "if" glob patterns in DefaultBase() (Bash(gh pr create*),
+// Bash(git checkout -b*), Bash(git switch -c*) — all anchored at the start
+// of the command). Checking them here too, against tool_input.command read
+// from stdin, means a hooks-sync regression that drops the If field (the
+// guard's only filter until now) degrades to "blocks nothing unrelated"
+// instead of "blocks every Bash call" — the fail-shut shape that took down
+// gt-pjeh's 12:04 outage, since this guard previously never looked at the
+// command at all and blocked unconditionally in agent context.
+var prWorkflowCommandPrefixes = []string{
+	"gh pr create",
+	"git checkout -b",
+	"git switch -c",
+}
+
+// matchesPRWorkflowCommand reports whether command is one of the PR-workflow
+// shapes this guard exists to block.
+func matchesPRWorkflowCommand(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	for _, prefix := range prWorkflowCommandPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
+	// Read the hook input from stdin (Claude Code protocol) and self-filter
+	// on the actual command, the same way dangerous-command does. Missing or
+	// unparsable stdin, or a command that isn't one of ours, means there's
+	// nothing to block — fail open.
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return nil
+	}
+	if !matchesPRWorkflowCommand(extractCommand(input)) {
+		return nil
+	}
+
 	// Check if we're in a Gas Town agent context
 	if isGasTownAgentContext() {
 		fmt.Fprintln(os.Stderr, "")
