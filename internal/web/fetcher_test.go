@@ -344,6 +344,28 @@ func TestParseActivityTimestamp(t *testing.T) {
 	}
 }
 
+func TestFormatTimestamp_ConvertsToLocalZone(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Skipf("tzdata not available: %v", err)
+	}
+	orig := time.Local
+	time.Local = loc
+	defer func() { time.Local = orig }()
+
+	// Fixed UTC input (as produced by time.Parse(time.RFC3339, ...) on a
+	// "...Z" value) from a past year so the formatter takes the
+	// year-qualified branch regardless of when the test runs.
+	utcInput := time.Date(2024, time.January, 2, 2, 59, 0, 0, time.UTC)
+	// 02:59 UTC on Jan 2 is 20:59 CST on Jan 1 in America/Chicago (UTC-6, no DST in January).
+	want := "Jan 1 2024, 8:59 PM"
+
+	got := formatTimestamp(utcInput)
+	if got != want {
+		t.Errorf("formatTimestamp(%v) = %q, want %q (must convert to local before formatting)", utcInput, got, want)
+	}
+}
+
 // --- calculateWorkerWorkStatus with configurable thresholds ---
 
 func TestCalculateWorkerWorkStatus_DefaultThresholds(t *testing.T) {
