@@ -541,6 +541,45 @@ func TestMergeQueueConfig_HasAnyGateCommand(t *testing.T) {
 	}
 }
 
+// TestGateSetSHA guards the om-gate T8 fast-path staleness check: the hash
+// must depend only on which gate commands are configured and their text, in
+// setup/typecheck/lint/build/test order, ignoring commands that are empty.
+func TestGateSetSHA(t *testing.T) {
+	t.Parallel()
+
+	if GateSetSHA(nil) != GateSetSHA(&MergeQueueConfig{}) {
+		t.Error("nil config and zero-value config should hash the same (both have no gate commands)")
+	}
+
+	base := &MergeQueueConfig{LintCommand: "make lint", TestCommand: "make test"}
+	same := &MergeQueueConfig{LintCommand: "make lint", TestCommand: "make test"}
+	if GateSetSHA(base) != GateSetSHA(same) {
+		t.Error("identical gate commands should hash identically")
+	}
+
+	// Order in the struct (Build set before Test) must not change the hash —
+	// the hash is over the fixed setup/typecheck/lint/build/test ordering,
+	// not struct field assignment order.
+	reordered := &MergeQueueConfig{TestCommand: "make test", LintCommand: "make lint"}
+	if GateSetSHA(base) != GateSetSHA(reordered) {
+		t.Error("field assignment order should not affect the hash")
+	}
+
+	changedCommand := &MergeQueueConfig{LintCommand: "make lint", TestCommand: "make test-changed"}
+	if GateSetSHA(base) == GateSetSHA(changedCommand) {
+		t.Error("changing a gate command's text should change the hash")
+	}
+
+	addedGate := &MergeQueueConfig{LintCommand: "make lint", TestCommand: "make test", BuildCommand: "make build"}
+	if GateSetSHA(base) == GateSetSHA(addedGate) {
+		t.Error("adding a configured gate should change the hash")
+	}
+
+	if GateSetSHA(&MergeQueueConfig{}) == GateSetSHA(base) {
+		t.Error("empty gate set must not collide with a non-empty one")
+	}
+}
+
 // TestEditorialConfig_WithDefaults guards the om editorial gate's default
 // values (gt-wsg7): a rig that sets only required=true must still get
 // scripts/om-gate.sh, max_attempts=5, and review_parallelism=3 filled in.
