@@ -41,7 +41,7 @@ func TestDoMerge_SecondSequentialMerge_OntoPriorMergeCommit_NoteReachesLandedCom
 	if err := editorial.WriteNote(g, editorial.Note{
 		OMVersion:  "1.4.0",
 		Rig:        "test-rig",
-		MR:         "mr1",
+		MR:         "mr-seq1",
 		Worker:     "polecats/basalt",
 		BaseSHA:    base1,
 		HeadSHA:    head1,
@@ -55,7 +55,7 @@ func TestDoMerge_SecondSequentialMerge_OntoPriorMergeCommit_NoteReachesLandedCom
 	}
 
 	mr1 := &MRInfo{
-		ID:                    "mr1",
+		ID:                    "mr-seq1",
 		Branch:                branch1,
 		Target:                "main",
 		Worker:                "polecats/basalt",
@@ -104,7 +104,7 @@ func TestDoMerge_SecondSequentialMerge_OntoPriorMergeCommit_NoteReachesLandedCom
 	if err := editorial.WriteNote(g, editorial.Note{
 		OMVersion:  "1.4.0",
 		Rig:        "test-rig",
-		MR:         "mr2",
+		MR:         "mr-seq2",
 		Worker:     "polecats/emerald",
 		BaseSHA:    base2,
 		HeadSHA:    head2,
@@ -118,7 +118,7 @@ func TestDoMerge_SecondSequentialMerge_OntoPriorMergeCommit_NoteReachesLandedCom
 	}
 
 	mr2 := &MRInfo{
-		ID:                    "mr2",
+		ID:                    "mr-seq2",
 		Branch:                branch2,
 		Target:                "main",
 		Worker:                "polecats/emerald",
