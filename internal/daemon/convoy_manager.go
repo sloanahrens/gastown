@@ -14,6 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -41,6 +42,10 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string  `json:"ready_issues"`
 	CreatedAt    time.Time `json:"created_at"`
 	BaseBranch   string    `json:"base_branch,omitempty"`
+	// Owned reports whether the convoy carries the gt:owned label. Owned
+	// convoys have a designated owner responsible for their own dispatch
+	// cadence; the stranded scan must not auto-feed them (gt-qw4u).
+	Owned bool `json:"owned,omitempty"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -486,6 +491,14 @@ func (m *ConvoyManager) scan() {
 		}
 
 		if c.ReadyCount > 0 {
+			if c.Owned {
+				// Owned convoys have a designated owner managing their own
+				// dispatch cadence (e.g. the deacon's rejection-aware
+				// redispatch). The system-managed stranded scan must not
+				// race that owner (gt-qw4u).
+				m.logger("Convoy %s: owned, skipping auto-feed (owner manages dispatch)", c.ID)
+				continue
+			}
 			m.feedFirstReady(c)
 		} else if c.TrackedCount == 0 {
 			// Empty convoy — but skip if it was just created (GH#2303).
@@ -558,9 +571,19 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		if m.hasRejectionMarker(rig, issueID) {
+			// This bead was previously rejected and reopened for recovery
+			// (RECOVERED_BEAD). Redispatch of rejected work belongs solely
+			// to the deacon, which applies cooldown/escalation gating and
+			// resumes on the surviving branch. The stranded scan must defer
+			// to it rather than race it with a fresh sling (gt-qw4u).
+			m.logger("Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
-		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
+		slingArgs := []string{"sling", issueID, rig, "--no-boot", "--actor=daemon/convoy:" + c.ID}
 		if c.BaseBranch != "" {
 			slingArgs = append(slingArgs, "--base-branch="+c.BaseBranch)
 		}
@@ -579,6 +602,29 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// hasRejectionMarker reports whether issueID's notes carry the refinery's
+// merge-rejection marker, meaning it was previously rejected and reopened
+// for the deacon's RECOVERED_BEAD recovery flow. Looks up the issue via the
+// already-open per-rig store (populated at daemon startup alongside "hq";
+// see openBeadsStores). If the rig's store isn't available (e.g. in tests
+// that only wire "hq", or a rig whose store failed to open), this fails
+// open and returns false so unrelated stranded-scan behavior is unaffected —
+// the deacon's own gating still applies on any subsequent recovery attempt.
+func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) bool {
+	m.storesMu.Lock()
+	store := m.stores[rig]
+	m.storesMu.Unlock()
+	if store == nil {
+		return false
+	}
+
+	issue, err := store.GetIssue(m.ctx, issueID)
+	if err != nil || issue == nil {
+		return false
+	}
+	return strings.Contains(issue.Notes, refinery.MergeRejectionNoteMarker)
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose

@@ -374,7 +374,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 	result.AttachedMolecule = attachedMoleculeID
 
-	actor := detectActor()
+	actor := resolveSlingActor()
 	fieldUpdates := beadFieldUpdates{
 		Dispatcher:       actor,
 		Args:             params.Args,

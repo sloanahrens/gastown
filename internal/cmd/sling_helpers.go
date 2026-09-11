@@ -842,6 +842,18 @@ func detectActor() string {
 	return roleInfo.ActorString()
 }
 
+// resolveSlingActor returns the --actor override for this sling invocation
+// when one was passed, otherwise falls back to detectActor(). System callers
+// that shell out to `gt sling` without a live agent role of their own (e.g.
+// the daemon's convoy auto-dispatch) would otherwise record actor "unknown";
+// they should pass --actor explicitly instead.
+func resolveSlingActor() string {
+	if slingActor != "" {
+		return slingActor
+	}
+	return detectActor()
+}
+
 // agentIDToBeadID converts an agent ID to its corresponding agent bead ID.
 // Uses canonical naming: prefix-rig-role-name
 // Town-level agents (Mayor, Deacon) use hq- prefix and are stored in town beads.

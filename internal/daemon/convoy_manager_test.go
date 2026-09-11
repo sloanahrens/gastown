@@ -1197,6 +1197,261 @@ exit 0
 	}
 }
 
+func TestFeedFirstReady_PassesDaemonActor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-xprwe",
+		Title:       "Actor Attribution",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+
+	if !strings.Contains(logContent, "--actor=daemon/convoy:hq-cv-xprwe") {
+		t.Errorf("expected daemon-originated sling to record actor daemon/convoy:hq-cv-xprwe, got: %q", logContent)
+	}
+}
+
+func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rejected := &beadsdk.Issue{
+		ID:        "gt-rejected1",
+		Title:     "Previously rejected",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		Notes:     "MERGE REJECTION (attempt 1): needs work - see review\nBranch: polecat/x/gt-rejected1+abc",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, rejected, "test"); err != nil {
+		t.Fatalf("CreateIssue rejected: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID:        "gt-fresh2",
+		Title:     "Never touched",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Has Rejected Bead",
+		ReadyCount:  2,
+		ReadyIssues: []string{"gt-rejected1", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+
+	if strings.Contains(logContent, "gt-rejected1") {
+		t.Errorf("rejected bead should not be slung by the daemon (deacon owns redispatch), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected the never-rejected bead to be slung, got: %q", logContent)
+	}
+
+	deferred := false
+	for _, l := range logged {
+		if strings.Contains(l, "gt-rejected1") && strings.Contains(l, "rejection marker") {
+			deferred = true
+			break
+		}
+	}
+	if !deferred {
+		t.Errorf("expected a rejection-marker skip log for gt-rejected1, got: %v", logged)
+	}
+}
+
+func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// No store is wired for the "gt" rig (only "hq" is present, as in most
+	// daemon deployments where a rig's store failed to open). Rejection-marker
+	// lookup must fail open rather than block dispatch of unrelated issues.
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "No Rig Store",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("expected sling to proceed when rig store is unavailable, but it was never called: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue1") {
+		t.Errorf("expected sling for gt-issue1, got: %q", string(data))
+	}
+}
+
+func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: `[{"id":"hq-cv1","title":"Owned Convoy","ready_count":1,"ready_issues":["gt-issue1"],"owned":true}]`,
+		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
+	})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m.scan()
+
+	if _, err := os.Stat(paths.slingLogPath); err == nil {
+		data, _ := os.ReadFile(paths.slingLogPath)
+		t.Errorf("owned convoy must not be auto-fed by the stranded scan, got sling call: %s", data)
+	}
+
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "hq-cv1") && strings.Contains(l, "owned") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an 'owned, skipping auto-feed' log for hq-cv1, got: %v", logged)
+	}
+}
+
+func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: `[{"id":"hq-cv1","title":"Regular Convoy","ready_count":1,"ready_issues":["gt-issue1"],"owned":false}]`,
+		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
+	})
+
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m.scan()
+
+	data, err := os.ReadFile(paths.slingLogPath)
+	if err != nil {
+		t.Fatalf("expected non-owned convoy to still be auto-fed: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue1") {
+		t.Errorf("expected gt sling to be invoked for gt-issue1, got: %q", string(data))
+	}
+}
+
 func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
