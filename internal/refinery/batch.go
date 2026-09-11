@@ -524,7 +524,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		result.Error = verifyErr
 		return result
 	}
-	e.copyEditorialNotes("[Batch]", landed, notes)
+	e.copyEditorialNotes("[Batch]", landed, notes, stacked)
 
 	ids := make([]string, len(stacked))
 	for i, mr := range stacked {

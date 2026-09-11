@@ -252,6 +252,97 @@ func TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopie
 	}
 }
 
+// TestCopyEditorialNotes_CopyFails_RecordsRecordFailedAndEscalates covers
+// the fail-closed gap fixed by gt-qvxf: a non-ff merge (the landed commit
+// differs from the reviewed head, same as an ordinary MergeNoFF) where the
+// source note is gone by the time the post-push copy runs — mirroring a
+// concurrent gt mq review clobbering refs/notes/om between the push
+// precondition's read and this call, the class of race that produced
+// gt-hpce's landed-but-unproven merge commit 097ab8a — must not silently
+// warn and move on. It must record a record_failed failure receipt per MR
+// and escalate to the witness, since the code has already landed and the
+// push itself can no longer be refused.
+func TestCopyEditorialNotes_CopyFails_RecordsRecordFailedAndEscalates(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	bdLog, gtLog := fakeBDAndGt(t)
+
+	branch := "polecat/test/editorial-race"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	reviewedHead := run(t, workDir, "git", "rev-parse", branch)
+
+	base, err := g.MergeBase("origin/main", reviewedHead)
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	patchID, err := g.PatchID(base, reviewedHead)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	note := editorial.Note{
+		OMVersion:  "1.4.0",
+		Rig:        "test-rig",
+		MR:         "mr-editorial-race",
+		Worker:     "polecats/max",
+		BaseSHA:    base,
+		HeadSHA:    reviewedHead,
+		PatchID:    patchID,
+		Score:      0.9,
+		Verdict:    "approve",
+		Attempt:    1,
+		ReviewedAt: time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC),
+	}
+	if err := editorial.WriteNote(g, note); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	// Produce a landed commit distinct from reviewedHead — an ordinary
+	// non-ff merge commit, the same shape doMerge's MergeNoFF always makes.
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--no-ff", "-m", "merge for test", branch)
+	landedCommit := run(t, workDir, "git", "rev-parse", "HEAD")
+	if landedCommit == reviewedHead {
+		t.Fatal("expected a distinct merge commit, got a fast-forward")
+	}
+
+	// Simulate the note vanishing from refs/notes/om between the push
+	// precondition's read (which already found and verified it) and this
+	// copy attempt.
+	run(t, workDir, "git", "notes", "--ref", editorial.NotesRef, "remove", reviewedHead)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	mr := &MRInfo{ID: "mr-editorial-race", Worker: "polecats/max"}
+	e.copyEditorialNotes("[Engineer]", []editorial.LandedMR{{
+		MRID:         mr.ID,
+		ReviewedHead: reviewedHead,
+		LandedCommit: landedCommit,
+	}}, []editorial.Note{note}, []*MRInfo{mr})
+
+	out := e.output.(interface{ String() string }).String()
+	if !strings.Contains(out, "EDITORIAL_RECORD_FAILED") {
+		t.Fatalf("expected EDITORIAL_RECORD_FAILED in output, got:\n%s", out)
+	}
+
+	bd := readLog(t, bdLog)
+	if !strings.Contains(bd, "failure_class:record_failed") {
+		t.Fatalf("failure receipt missing failure_class:record_failed, bd log:\n%s", bd)
+	}
+	if !strings.Contains(bd, "mr:mr-editorial-race") {
+		t.Fatalf("failure receipt missing mr:mr-editorial-race, bd log:\n%s", bd)
+	}
+
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
+		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+	}
+
+	if _, err := editorial.ReadNote(g, landedCommit); err == nil {
+		t.Fatal("expected no note on the landed commit — the copy failed, so nothing should be there")
+	}
+}
+
 // TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush
 // exercises the Task 6 push precondition at the batch level directly —
 // stacking two MRs (BuildRebaseStack) and pushing them (verifyAndPush,

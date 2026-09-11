@@ -122,6 +122,20 @@ func (e *Engineer) recordEditorialFailure(mr *MRInfo, cerr *editorial.Preconditi
 	}
 }
 
+// recordEditorialRecordFailed records a failure_class:record_failed receipt
+// for mr — used when a verdict exists but the proof could not be attached
+// to (or published on) the commit that actually landed. Mirrors
+// recordEditorialFailure's precondition receipt but for the class the
+// design doc reserves for this case: "a verdict without proof is the
+// defect class this design removes."
+func (e *Engineer) recordEditorialRecordFailed(mr *MRInfo, reason string) {
+	townRoot := filepath.Dir(e.rig.Path)
+	rec := plugin.NewRecorder(townRoot)
+	if _, err := editorial.RecordFailure(rec, e.rig.Name, mr.Worker, mr.ID, editorial.RecordFailed, reason, 0); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record editorial record_failed receipt for %s: %v\n", mr.ID, err)
+	}
+}
+
 // escalateToWitness nudges the rig's witness — routine process signals use
 // nudge (no permanent record), not mail, per the town's Dolt-health
 // communication guidance.
@@ -138,15 +152,39 @@ func (e *Engineer) escalateToWitness(msg string) {
 // copyEditorialNotes copies each note onto its landed commit and pushes
 // the notes ref, when the precondition actually ran (notes is nil when
 // editorial is not required, in which case there is nothing to copy).
-func (e *Engineer) copyEditorialNotes(logPrefix string, landed []editorial.LandedMR, notes []editorial.Note) {
+//
+// The code has already landed on target by the time this runs (it is
+// called after the push succeeds), so a failure here cannot refuse the
+// push the way a precondition failure does — main has already moved.
+// What it must not do is what it did before: log a Warning and return,
+// leaving the landed commit(s) with no reachable proof and nobody told.
+// A verdict without proof on the commit `git log` actually shows is
+// exactly the defect class the design removes (see record_failed in the
+// fail-closed table), so a copy or push failure here records that class
+// per MR and escalates to the witness instead — fail-closed by loud
+// escalation, since fail-closed by refusal is no longer possible.
+func (e *Engineer) copyEditorialNotes(logPrefix string, landed []editorial.LandedMR, notes []editorial.Note, mrs []*MRInfo) {
 	if len(notes) == 0 {
 		return
 	}
 	if err := editorial.CopyNotesToLanded(e.git, landed, notes); err != nil {
-		_, _ = fmt.Fprintf(e.output, "%s Warning: failed to copy editorial note(s): %v\n", logPrefix, err)
+		e.failEditorialRecordFailed(logPrefix, mrs, fmt.Sprintf("copy editorial note(s) to landed commit: %v", err))
 		return
 	}
 	if err := e.git.PushNotes("origin", editorial.NotesRef); err != nil {
-		_, _ = fmt.Fprintf(e.output, "%s Warning: failed to push editorial notes ref: %v\n", logPrefix, err)
+		e.failEditorialRecordFailed(logPrefix, mrs, fmt.Sprintf("push editorial notes ref: %v", err))
 	}
+}
+
+// failEditorialRecordFailed logs reason, records a record_failed failure
+// receipt for every landed MR (each one's proof is separately missing
+// from target), and nudges the witness once — used by copyEditorialNotes
+// when the landed commit(s) end up without reachable editorial proof.
+func (e *Engineer) failEditorialRecordFailed(logPrefix string, mrs []*MRInfo, reason string) {
+	_, _ = fmt.Fprintf(e.output, "%s EDITORIAL_RECORD_FAILED: %s\n", logPrefix, reason)
+	for _, mr := range mrs {
+		e.recordEditorialRecordFailed(mr, reason)
+	}
+	e.escalateToWitness(fmt.Sprintf(
+		"EDITORIAL_RECORD_FAILED: %s — landed commit(s) missing editorial proof", reason))
 }

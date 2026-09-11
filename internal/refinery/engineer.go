@@ -829,7 +829,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 				Error:   err.Error(),
 			}
 		}
-		e.copyEditorialNotes("[Engineer]", landed, notes)
+		e.copyEditorialNotes("[Engineer]", landed, notes, []*MRInfo{mr})
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Auto-push disabled, skipping push to origin/%s\n", target)
 	}
