@@ -2684,6 +2684,14 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+			} else if skipReason := doneCloseTimeInvariantSkipReason(hookBd, cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
+				// gt-6hmz: this routine self-close previously trusted a cached
+				// active_mr field without re-verifying the MR was still open.
+				// Refuse rather than close a bead whose branch carries unmerged
+				// commits with nothing tracking them.
+				style.PrintWarning("%s", skipReason)
+				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
 			} else if pendingMRID != "" {
 				// Transient polecats exit right after gt done, so this issue
 				// is routinely closed seconds after its MR is created — well
