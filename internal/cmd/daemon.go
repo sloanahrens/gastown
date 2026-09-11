@@ -273,6 +273,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			style.Bold.Render("running"),
 			pid)
 		fmt.Printf("  Town: %s\n", townRoot)
+		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatus())
 
 		// Load state for more details
 		state, err := daemon.LoadState(townRoot)
@@ -298,6 +299,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Daemon is %s\n",
 			style.Dim.Render("○"),
 			"not running")
+		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatus())
 		fmt.Printf("\nStart with: %s\n", style.Dim.Render("gt daemon start"))
 	}
 
@@ -391,6 +393,18 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Refuse while a manual daemon holds the lock. RunAtLoad + KeepAlive.Crashed
+	// means launchd would immediately spawn a second daemon that loses the
+	// flock on daemon.lock and exits non-zero, then gets respawned every ~10s
+	// for as long as the manual daemon lives.
+	running, _, err := daemon.IsRunning(townRoot)
+	if err != nil {
+		return fmt.Errorf("checking daemon status: %w", err)
+	}
+	if running {
+		return fmt.Errorf("a daemon is already running — stop the running daemon first: gt daemon stop")
 	}
 
 	msg, err := templates.ProvisionSupervisor(townRoot)

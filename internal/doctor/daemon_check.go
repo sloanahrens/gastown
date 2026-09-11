@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // DaemonCheck verifies the daemon is running.
@@ -38,6 +39,8 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	supervised := templates.SupervisorStatus()
+
 	if running {
 		// Get more info about daemon state
 		state, err := daemon.LoadState(ctx.TownRoot)
@@ -49,6 +52,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 				details = append(details, "Heartbeats: "+string(rune(state.HeartbeatCount)))
 			}
 		}
+		details = append(details, "Supervised: "+supervised)
 
 		return &CheckResult{
 			Name:    c.Name(),
@@ -62,6 +66,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: "Daemon is not running",
+		Details: []string{"Supervised: " + supervised},
 		FixHint: "Run 'gt daemon start' or 'gt doctor --fix'",
 	}
 }

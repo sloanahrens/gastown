@@ -263,6 +263,26 @@ gt witness attach myproject
 
 **When to use**: Production workflows with multiple concurrent agents.
 
+#### Auto-Restart on Crash/Boot (Optional)
+
+To have the daemon auto-restart if it crashes and start automatically on
+login/boot, hand it off to the OS supervisor (launchd on macOS, systemd on
+Linux):
+
+```bash
+# If a manually-started daemon is running, stop it first — enable-supervisor
+# refuses while daemon.lock is held, to avoid a launchd/systemd respawn loop
+# racing the manual daemon for the lock.
+gt daemon stop
+
+gt daemon enable-supervisor
+```
+
+Host-specific environment variables the daemon needs (e.g. `SDKROOT` on
+machines with a custom CLT/SDK setup) can be supplied via
+`settings/daemon.env` — see [Reference](reference.md#daemon-environment-settingsdaemonenv).
+Check `gt daemon status` for a `Supervised: launchd|systemd|none` line.
+
 ### Choosing Roles
 
 Gas Town is modular. Enable only what you need:

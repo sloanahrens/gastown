@@ -9,6 +9,9 @@ WorkingDirectory={{.TownRoot}}
 Restart=always
 RestartSec=5s
 Environment="GT_TOWN_ROOT={{.TownRoot}}"
+{{- range $key, $value := .Env }}
+Environment="{{$key}}={{$value}}"
+{{- end }}
 StandardOutput=append:{{.TownRoot}}/daemon/daemon.log
 StandardError=append:{{.TownRoot}}/daemon/daemon.log
 

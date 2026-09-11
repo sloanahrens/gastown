@@ -159,6 +159,29 @@ Town-level role defaults live in `mayor/config.json` under:
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
+### Daemon Environment (`settings/daemon.env`)
+
+Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with
+`#` are ignored:
+
+```
+# Fix for the CLT/SDK linker break under cmux (om-xij)
+CMUX_CLAUDE_HOOKS_DISABLED=1
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+DEVELOPER_DIR=/Library/Developer/CommandLineTools
+```
+
+A manually-started daemon (`gt daemon start`) inherits the operator's shell
+environment. A daemon launched by an external supervisor (launchd on macOS,
+systemd on Linux, via `gt daemon enable-supervisor`) starts with a bare
+environment instead, so host-specific fixes like the ones above would
+otherwise be silently lost. `gt daemon enable-supervisor` reads this file (if
+present) and renders each pair into the launchd plist's
+`EnvironmentVariables` / the systemd unit's `Environment=` directives.
+`GT_TOWN_ROOT` is always set from the resolved town root and cannot be
+overridden here. Changes only take effect on the next `gt daemon
+enable-supervisor` run (re-run it after editing the file).
+
 ### Runtime (`.runtime/` - gitignored)
 
 Process state, PIDs, ephemeral data.

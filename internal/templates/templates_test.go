@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -671,6 +672,148 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 	wantNeverEdit := customRoot + "/rig1/"
 	if !strings.Contains(output, wantNeverEdit) {
 		t.Errorf("NEVER edit instruction missing %q", wantNeverEdit)
+	}
+}
+
+// TestRenderLaunchdPlist_EnvironmentVariables verifies that extra env vars
+// (e.g. from settings/daemon.env) are rendered into the plist's
+// EnvironmentVariables dict alongside GT_TOWN_ROOT.
+func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
+	data := SupervisorData{
+		GTPath:   "/usr/local/bin/gt",
+		TownRoot: "/test/town",
+		Env: map[string]string{
+			"CMUX_CLAUDE_HOOKS_DISABLED": "1",
+			"SDKROOT":                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+			"DEVELOPER_DIR":              "/Library/Developer/CommandLineTools",
+		},
+	}
+
+	output, err := renderLaunchdPlist(data)
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+
+	if !strings.Contains(output, "<key>GT_TOWN_ROOT</key>") {
+		t.Error("plist missing GT_TOWN_ROOT key")
+	}
+	for key, value := range data.Env {
+		if !strings.Contains(output, "<key>"+key+"</key>") {
+			t.Errorf("plist missing env key %q:\n%s", key, output)
+		}
+		if !strings.Contains(output, "<string>"+value+"</string>") {
+			t.Errorf("plist missing env value %q for key %q:\n%s", value, key, output)
+		}
+	}
+}
+
+// TestRenderSystemdUnit_EnvironmentVariables verifies that extra env vars
+// are rendered into the systemd unit as Environment= directives alongside
+// GT_TOWN_ROOT.
+func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
+	data := SupervisorData{
+		GTPath:   "/usr/local/bin/gt",
+		TownRoot: "/test/town",
+		Env: map[string]string{
+			"CMUX_CLAUDE_HOOKS_DISABLED": "1",
+			"SDKROOT":                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+			"DEVELOPER_DIR":              "/Library/Developer/CommandLineTools",
+		},
+	}
+
+	output, err := renderSystemdUnit(data)
+	if err != nil {
+		t.Fatalf("renderSystemdUnit() error = %v", err)
+	}
+
+	if !strings.Contains(output, `Environment="GT_TOWN_ROOT=/test/town"`) {
+		t.Error("unit missing GT_TOWN_ROOT environment directive")
+	}
+	for key, value := range data.Env {
+		want := `Environment="` + key + "=" + value + `"`
+		if !strings.Contains(output, want) {
+			t.Errorf("unit missing %q:\n%s", want, output)
+		}
+	}
+}
+
+// TestRenderLaunchdPlist_NoExtraEnv verifies the plist still renders cleanly
+// with a nil Env map (the common case before settings/daemon.env exists).
+func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
+	output, err := renderLaunchdPlist(SupervisorData{
+		GTPath:   "/usr/local/bin/gt",
+		TownRoot: "/test/town",
+	})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	if !strings.Contains(output, "<key>GT_TOWN_ROOT</key>") {
+		t.Error("plist missing GT_TOWN_ROOT key")
+	}
+}
+
+// TestSupervisorStatus_None verifies SupervisorStatus reports "none" when
+// no plist/unit file is present.
+func TestSupervisorStatus_None(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+
+	if got := SupervisorStatus(); got != "none" {
+		t.Errorf("SupervisorStatus() = %q, want %q", got, "none")
+	}
+}
+
+// TestSupervisorStatus_Launchd verifies SupervisorStatus reports "launchd"
+// on macOS when the plist file is present.
+func TestSupervisorStatus_Launchd(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd is macOS-only")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistPath, err := LaunchdPlistPath()
+	if err != nil {
+		t.Fatalf("LaunchdPlistPath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if got := SupervisorStatus(); got != "launchd" {
+		t.Errorf("SupervisorStatus() = %q, want %q", got, "launchd")
+	}
+}
+
+// TestSupervisorStatus_Systemd verifies SupervisorStatus reports "systemd"
+// on Linux when the unit file is present.
+func TestSupervisorStatus_Systemd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd is Linux-only")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+
+	unitPath, err := SystemdUnitPath()
+	if err != nil {
+		t.Fatalf("SystemdUnitPath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte("[Unit]"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if got := SupervisorStatus(); got != "systemd" {
+		t.Errorf("SupervisorStatus() = %q, want %q", got, "systemd")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"text/template"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/templates/commands"
 )
 
@@ -118,8 +119,9 @@ type HandoffData struct {
 
 // SupervisorData contains information for rendering supervisor templates.
 type SupervisorData struct {
-	GTPath   string // Path to the gt binary
-	TownRoot string // Path to the Gas Town workspace
+	GTPath   string            // Path to the gt binary
+	TownRoot string            // Path to the Gas Town workspace
+	Env      map[string]string // Extra environment variables from settings/daemon.env
 }
 
 // New creates a new Templates instance.
@@ -312,15 +314,28 @@ func MissingCommandsFor(workspacePath, agent string) []string {
 // On macOS: creates and loads a launchd plist.
 // On Linux: creates and enables a systemd user unit.
 // Returns a message indicating what action was taken (or skipped).
+//
+// Reads settings/daemon.env (if present) and carries its KEY=VALUE pairs into
+// the supervisor's EnvironmentVariables/Environment= so a launchd/systemd-
+// spawned daemon gets the same host-specific env vars a manually-started one
+// inherits from the operator's shell. GT_TOWN_ROOT is always set from
+// townRoot directly and cannot be overridden by the env file.
 func ProvisionSupervisor(townRoot string) (string, error) {
 	gtPath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("finding gt executable: %w", err)
 	}
 
+	env, err := config.LoadDaemonEnv(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("loading daemon env: %w", err)
+	}
+	delete(env, "GT_TOWN_ROOT")
+
 	data := SupervisorData{
 		GTPath:   gtPath,
 		TownRoot: townRoot,
+		Env:      env,
 	}
 
 	switch runtime.GOOS {
@@ -333,27 +348,13 @@ func ProvisionSupervisor(townRoot string) (string, error) {
 	}
 }
 
-// provisionLaunchd creates and loads a launchd plist on macOS.
-func provisionLaunchd(data SupervisorData) (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("finding home directory: %w", err)
-	}
-
-	agentsDir := filepath.Join(homeDir, "Library", "LaunchAgents")
-	if err := os.MkdirAll(agentsDir, 0755); err != nil {
-		return "", fmt.Errorf("creating LaunchAgents directory: %w", err)
-	}
-
-	plistPath := filepath.Join(agentsDir, "com.gastown.daemon.plist")
-
-	// Read the template
+// renderLaunchdPlist renders the launchd plist template for the given data.
+func renderLaunchdPlist(data SupervisorData) (string, error) {
 	templateContent, err := supervisorFS.ReadFile("launchd/com.gastown.daemon.plist")
 	if err != nil {
 		return "", fmt.Errorf("reading launchd template: %w", err)
 	}
 
-	// Parse and execute template
 	tmpl, err := template.New("launchd").Parse(string(templateContent))
 	if err != nil {
 		return "", fmt.Errorf("parsing launchd template: %w", err)
@@ -364,8 +365,93 @@ func provisionLaunchd(data SupervisorData) (string, error) {
 		return "", fmt.Errorf("rendering launchd template: %w", err)
 	}
 
+	return buf.String(), nil
+}
+
+// renderSystemdUnit renders the systemd user unit template for the given data.
+func renderSystemdUnit(data SupervisorData) (string, error) {
+	templateContent, err := supervisorFS.ReadFile("systemd/gastown-daemon.service")
+	if err != nil {
+		return "", fmt.Errorf("reading systemd template: %w", err)
+	}
+
+	tmpl, err := template.New("systemd").Parse(string(templateContent))
+	if err != nil {
+		return "", fmt.Errorf("parsing systemd template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("rendering systemd template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// LaunchdPlistPath returns the path where the launchd plist is (or would be)
+// installed on macOS.
+func LaunchdPlistPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
+	}
+	return filepath.Join(homeDir, "Library", "LaunchAgents", "com.gastown.daemon.plist"), nil
+}
+
+// SystemdUnitPath returns the path where the systemd user unit is (or would
+// be) installed on Linux.
+func SystemdUnitPath() (string, error) {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("finding home directory: %w", err)
+		}
+		dataHome = filepath.Join(homeDir, ".local", "share")
+	}
+	return filepath.Join(dataHome, "systemd", "user", "gastown-daemon.service"), nil
+}
+
+// SupervisorStatus reports which external supervisor is configured for the
+// daemon on this host, by checking for the presence of the launchd plist
+// (macOS) or systemd user unit (Linux). Returns "launchd", "systemd", or
+// "none". Never errors — a path resolution failure is treated as "none".
+func SupervisorStatus() string {
+	switch runtime.GOOS {
+	case "darwin":
+		if path, err := LaunchdPlistPath(); err == nil {
+			if _, statErr := os.Stat(path); statErr == nil {
+				return "launchd"
+			}
+		}
+	case "linux":
+		if path, err := SystemdUnitPath(); err == nil {
+			if _, statErr := os.Stat(path); statErr == nil {
+				return "systemd"
+			}
+		}
+	}
+	return "none"
+}
+
+// provisionLaunchd creates and loads a launchd plist on macOS.
+func provisionLaunchd(data SupervisorData) (string, error) {
+	plistPath, err := LaunchdPlistPath()
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		return "", fmt.Errorf("creating LaunchAgents directory: %w", err)
+	}
+
+	content, err := renderLaunchdPlist(data)
+	if err != nil {
+		return "", err
+	}
+
 	// Write plist file
-	if err := os.WriteFile(plistPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(plistPath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("writing plist file: %w", err)
 	}
 
@@ -382,42 +468,22 @@ func provisionLaunchd(data SupervisorData) (string, error) {
 
 // provisionSystemd creates and enables a systemd user unit on Linux.
 func provisionSystemd(data SupervisorData) (string, error) {
-	// Get XDG_DATA_HOME or use ~/.local/share
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("finding home directory: %w", err)
-		}
-		dataHome = filepath.Join(homeDir, ".local", "share")
+	servicePath, err := SystemdUnitPath()
+	if err != nil {
+		return "", err
 	}
 
-	systemdDir := filepath.Join(dataHome, "systemd", "user")
-	if err := os.MkdirAll(systemdDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0755); err != nil {
 		return "", fmt.Errorf("creating systemd user directory: %w", err)
 	}
 
-	servicePath := filepath.Join(systemdDir, "gastown-daemon.service")
-
-	// Read the template
-	templateContent, err := supervisorFS.ReadFile("systemd/gastown-daemon.service")
+	content, err := renderSystemdUnit(data)
 	if err != nil {
-		return "", fmt.Errorf("reading systemd template: %w", err)
-	}
-
-	// Parse and execute template
-	tmpl, err := template.New("systemd").Parse(string(templateContent))
-	if err != nil {
-		return "", fmt.Errorf("parsing systemd template: %w", err)
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("rendering systemd template: %w", err)
+		return "", err
 	}
 
 	// Write service file
-	if err := os.WriteFile(servicePath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("writing service file: %w", err)
 	}
 

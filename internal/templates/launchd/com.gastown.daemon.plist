@@ -36,6 +36,10 @@
     <dict>
         <key>GT_TOWN_ROOT</key>
         <string>{{.TownRoot}}</string>
+        {{- range $key, $value := .Env }}
+        <key>{{$key}}</key>
+        <string>{{$value}}</string>
+        {{- end }}
     </dict>
 
     <key>ProcessType</key>
