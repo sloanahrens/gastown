@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -23,6 +24,11 @@ const (
 	// escalation body — enough for the mayor to triage without a rerun,
 	// short enough to stay readable.
 	maxDiagnosticLines = 40
+
+	// mainBranchTestSlotTimeout bounds how long the main_branch_test patrol
+	// waits for the container-gate slot before giving up on a rig's run,
+	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
+	mainBranchTestSlotTimeout = 60 * time.Minute
 )
 
 // diagnosticLinePattern matches the lines worth surfacing from a failing
@@ -289,11 +295,33 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 
 	commit := d.commitTested(ctx, rigName, worktreePath)
 
+	// Acquire the container-gate slot before running gates/tests: this
+	// baseline run spins the same Docker-backed suites (Dolt, testcontainers)
+	// that every other caller guards with 'gt slot run', so it must be a
+	// first-class slot holder instead of an invisible occupant that collides
+	// with other rigs' container suites on the shared Docker VM (gt-hpce;
+	// same class as gt-afe4/gt-tuiy, wrapped here in Go rather than shelling
+	// out, matching acquireBatchGateSlot in internal/cmd/mq_batch.go).
+	h, err := acquireMainBranchTestSlot(d.config.TownRoot, rigName)
+	if err != nil {
+		return fmt.Errorf("acquiring container-gate slot: %w", err)
+	}
+	defer h.Release()
+
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
 		return d.runGatesOnWorktree(ctx, rigName, commit, worktreePath, gateCfg.Gates)
 	}
 	return d.runCommandOnWorktree(ctx, rigName, commit, worktreePath, "test", gateCfg.TestCommand)
+}
+
+// acquireMainBranchTestSlot acquires the container-gate slot for a rig's
+// main_branch_test run. Split out from testRigMainBranch so it's testable
+// without the full git-worktree/bare-repo harness that function requires
+// (gt-hpce, following acquireBatchGateSlot's precedent in
+// internal/cmd/mq_batch.go).
+func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
+	return slot.Acquire(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout)
 }
 
 // commitTested returns the commit SHA checked out in the worktree, or ""
