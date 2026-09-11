@@ -568,7 +568,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	}
 	branch, target := mr.Branch, mr.Target
 
-	if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+	if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 		if eligibility.NoMerge {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is not merge-eligible — skipping merge: %s\n", mr.ID, eligibility.Error)
 		}
@@ -650,7 +650,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			if sc.NewSHA == "" {
 				continue // Submodule removed, nothing to push
 			}
-			if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+			if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 				return eligibility
 			}
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing submodule %s (commit %s)...\n", sc.Path, shortSHA(sc.NewSHA))
@@ -801,7 +801,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			}()
 		}
 
-		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+		if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
 			}
@@ -907,7 +907,7 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] PR #%d has approving review\n", pr.Number)
 	}
 
-	if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+	if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 		return eligibility
 	}
 	if err := e.ensureMRInfoCommitSHA(mr); err != nil {
@@ -971,17 +971,29 @@ func mergeIneligibleResult(format string, args ...interface{}) ProcessResult {
 	}
 }
 
-func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string) ProcessResult {
+// recheckMRStillMergeable re-verifies mr is still eligible to merge into
+// target. closeOnReject controls what happens to the MR bead when it is
+// not: true (the normal single-MR/pre-push path) closes it with a
+// "rejected: ..." reason via rejectMRBeforeMerge, since those checks run
+// immediately before an actual merge attempt and a failure there is a real
+// verdict. false (used by the batch path's first-pass eligibility recheck,
+// before any MR has been touched) leaves the bead completely untouched —
+// the caller is expected to just drop the MR from this batch and let it be
+// reconsidered later, since an eligibility miss this early is not yet a
+// verdict and closing here was destructive for a routine, later-tolerated
+// case (gt-di2t: a transient polecat's own pending_mr self-close).
+func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string, closeOnReject bool) ProcessResult {
 	if mr == nil {
 		return ProcessResult{Success: false, Error: "merge request is missing"}
 	}
+	reject := func(reason string) ProcessResult { return e.rejectMRBeforeMerge(mr, reason, closeOnReject) }
 
 	sourceIssue := strings.TrimSpace(mr.SourceIssue)
 	if sourceIssue == "" {
 		if e.isSyntheticMergeMechanicsMR(mr) {
 			return ProcessResult{Success: true}
 		}
-		return e.rejectMRBeforeMerge(mr, "MR has missing source_issue")
+		return reject("MR has missing source_issue")
 	}
 
 	fieldCommit := ""
@@ -1000,12 +1012,12 @@ func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string) ProcessRes
 			return mergeIneligibleResult("MR %s status is %s", mrID, mrIssue.Status)
 		}
 		if beads.HasLabel(mrIssue, "gt:owned-direct") {
-			return e.rejectMRBeforeMerge(mr, "MR is owned-direct")
+			return reject("MR is owned-direct")
 		}
 
 		fields := beads.ParseMRFields(mrIssue)
 		if fields == nil {
-			return e.rejectMRBeforeMerge(mr, "MR has missing merge-request fields")
+			return reject("MR has missing merge-request fields")
 		}
 		if closeReason := strings.TrimSpace(fields.CloseReason); closeReason != "" {
 			if strings.EqualFold(closeReason, string(CloseReasonMerged)) {
@@ -1014,41 +1026,41 @@ func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string) ProcessRes
 				}
 				return mergeIneligibleResult("MR close_reason is %s", closeReason)
 			}
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR close_reason is %s", closeReason))
+			return reject(fmt.Sprintf("MR close_reason is %s", closeReason))
 		}
 		if fields.Branch != "" && mr.Branch != "" && fields.Branch != mr.Branch {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR branch changed from %s to %s", mr.Branch, fields.Branch))
+			return reject(fmt.Sprintf("MR branch changed from %s to %s", mr.Branch, fields.Branch))
 		}
 		if strings.TrimSpace(fields.Target) == "" {
-			return e.rejectMRBeforeMerge(mr, "MR has missing target")
+			return reject("MR has missing target")
 		}
 		if fields.Target != target {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR target changed from %s to %s", target, fields.Target))
+			return reject(fmt.Sprintf("MR target changed from %s to %s", target, fields.Target))
 		}
 		if fields.Rig != "" && !strings.EqualFold(fields.Rig, e.rig.Name) {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR belongs to rig %s", fields.Rig))
+			return reject(fmt.Sprintf("MR belongs to rig %s", fields.Rig))
 		}
 		if strings.TrimSpace(fields.SourceIssue) == "" {
-			return e.rejectMRBeforeMerge(mr, "MR has missing source_issue")
+			return reject("MR has missing source_issue")
 		}
 		if fields.SourceIssue != sourceIssue {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR source_issue changed from %s to %s", sourceIssue, fields.SourceIssue))
+			return reject(fmt.Sprintf("MR source_issue changed from %s to %s", sourceIssue, fields.SourceIssue))
 		}
 		fieldCommit = strings.TrimSpace(fields.CommitSHA)
 		sourceIssue = fields.SourceIssue
 	}
 
-	if eligibility := e.recheckMRSourceStillMergeable(mr, sourceIssue); !eligibility.Success {
+	if eligibility := e.recheckMRSourceStillMergeable(mr, sourceIssue, closeOnReject); !eligibility.Success {
 		return eligibility
 	}
 	if strings.TrimSpace(mr.ID) != "" && !e.isSyntheticMergeMechanicsMR(mr) {
 		if fieldCommit == "" {
-			return e.rejectMRBeforeMerge(mr, "MR has missing commit_sha")
+			return reject("MR has missing commit_sha")
 		}
 		if mr.CommitSHA == "" {
 			mr.CommitSHA = fieldCommit
 		} else if fieldCommit != strings.TrimSpace(mr.CommitSHA) {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR commit_sha changed from %s to %s", shortSHA(mr.CommitSHA), shortSHA(fieldCommit)))
+			return reject(fmt.Sprintf("MR commit_sha changed from %s to %s", shortSHA(mr.CommitSHA), shortSHA(fieldCommit)))
 		}
 	}
 	return ProcessResult{Success: true}
@@ -1058,7 +1070,15 @@ func (e *Engineer) isSyntheticMergeMechanicsMR(mr *MRInfo) bool {
 	return e.testAllowSyntheticMRs && mr != nil && strings.HasPrefix(strings.TrimSpace(mr.ID), "mr-") && strings.TrimSpace(mr.SourceIssue) == ""
 }
 
-func (e *Engineer) rejectMRBeforeMerge(mr *MRInfo, reason string) ProcessResult {
+// rejectMRBeforeMerge reports mr as ineligible to merge for reason. When
+// closeOnReject is true it also closes the MR bead ("rejected: <reason>") —
+// see recheckMRStillMergeable's doc comment for when that is and isn't
+// appropriate. When false, the bead is left untouched and this is purely a
+// reporting call.
+func (e *Engineer) rejectMRBeforeMerge(mr *MRInfo, reason string, closeOnReject bool) ProcessResult {
+	if !closeOnReject {
+		return mergeIneligibleResult("%s", reason)
+	}
 	if err := e.closeIneligibleMR(mr, reason); err != nil {
 		mrID := "<missing>"
 		if mr != nil && mr.ID != "" {
@@ -1069,34 +1089,42 @@ func (e *Engineer) rejectMRBeforeMerge(mr *MRInfo, reason string) ProcessResult 
 	return mergeIneligibleResult("%s", reason)
 }
 
-func (e *Engineer) recheckMRSourceStillMergeable(mr *MRInfo, sourceIssue string) ProcessResult {
+func (e *Engineer) recheckMRSourceStillMergeable(mr *MRInfo, sourceIssue string, closeOnReject bool) ProcessResult {
+	reject := func(reason string) ProcessResult { return e.rejectMRBeforeMerge(mr, reason, closeOnReject) }
 	issue, err := e.beads.Show(sourceIssue)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is missing", sourceIssue))
+			return reject(fmt.Sprintf("source_issue %s is missing", sourceIssue))
 		}
 		return ProcessResult{Success: false, Error: fmt.Sprintf("pre-push recheck source_issue %s: %v", sourceIssue, err)}
 	}
 	if issue == nil {
-		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is missing", sourceIssue))
+		return reject(fmt.Sprintf("source_issue %s is missing", sourceIssue))
 	}
-	if beads.IssueStatus(issue.Status).IsTerminal() {
-		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s status is %s", sourceIssue, issue.Status))
+	if beads.IssueStatus(issue.Status).IsTerminal() && !beads.IsPendingMergeCloseReason(issue.CloseReason, mr.ID) {
+		// A closed source issue is not automatically a rejection: every
+		// polecat on a rig can be transient, so gt done routinely closes the
+		// source issue right after creating this exact MR, seconds before
+		// the MR ever reaches the queue (gt-di2t). IsPendingMergeCloseReason
+		// only tolerates that specific self-close — closed for any other
+		// reason (wontfix, duplicate, superseded by a different MR) still
+		// rejects here.
+		return reject(fmt.Sprintf("source_issue %s status is %s", sourceIssue, issue.Status))
 	}
 	if reason := beads.ConcreteWorkIssueRejectReason(issue); reason != "" {
-		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is not concrete (%s)", sourceIssue, reason))
+		return reject(fmt.Sprintf("source_issue %s is not concrete (%s)", sourceIssue, reason))
 	}
 	if unchecked := beads.HasUncheckedCriteria(issue); unchecked > 0 {
-		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has %d unchecked acceptance criteria", sourceIssue, unchecked))
+		return reject(fmt.Sprintf("source_issue %s has %d unchecked acceptance criteria", sourceIssue, unchecked))
 	}
 	if af := beads.ParseAttachmentFields(issue); af != nil {
 		switch {
 		case af.NoMerge:
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has no_merge=true", sourceIssue))
+			return reject(fmt.Sprintf("source_issue %s has no_merge=true", sourceIssue))
 		case af.ReviewOnly:
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has review_only=true", sourceIssue))
+			return reject(fmt.Sprintf("source_issue %s has review_only=true", sourceIssue))
 		case strings.EqualFold(strings.TrimSpace(af.MergeStrategy), "local"):
-			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has merge_strategy=local", sourceIssue))
+			return reject(fmt.Sprintf("source_issue %s has merge_strategy=local", sourceIssue))
 		}
 	}
 	return ProcessResult{Success: true}

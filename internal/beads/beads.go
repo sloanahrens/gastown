@@ -300,6 +300,31 @@ func ConcreteWorkIssueRejectReason(issue *Issue) string {
 	return ""
 }
 
+// PendingMergeCloseReason returns the close_reason gt done writes on a
+// source issue when it self-closes the issue immediately after creating
+// mrID's merge request — before the request has actually merged. Every
+// polecat on a rig can be transient (gt done exits the session right after
+// submitting), so the source issue is routinely closed while its MR is
+// still queued; that is expected completion, not abandonment.
+func PendingMergeCloseReason(mrID string) string {
+	return "pending_mr: " + strings.TrimSpace(mrID)
+}
+
+// IsPendingMergeCloseReason reports whether reason marks an issue as closed
+// specifically because mrID — this exact merge request — was submitted to
+// the queue (see PendingMergeCloseReason). A pre-merge eligibility check can
+// use this to tell an ordinary transient self-close from a source issue a
+// human closed for real abandonment (wontfix, duplicate, superseded by a
+// different MR): only the former should carry a close_reason matching this
+// exact MR.
+func IsPendingMergeCloseReason(reason, mrID string) bool {
+	mrID = strings.TrimSpace(mrID)
+	if mrID == "" {
+		return false
+	}
+	return strings.TrimSpace(reason) == PendingMergeCloseReason(mrID)
+}
+
 // InternalIssueType reports whether an issue type represents Gas Town runtime
 // state rather than user/code work.
 func InternalIssueType(issueType string) bool {

@@ -1133,6 +1133,41 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 	}
 }
 
+func TestPendingMergeCloseReason(t *testing.T) {
+	if got, want := PendingMergeCloseReason("gt-mr-1"), "pending_mr: gt-mr-1"; got != want {
+		t.Fatalf("PendingMergeCloseReason() = %q, want %q", got, want)
+	}
+	// Trims incidental whitespace on the MR ID rather than baking it into
+	// the reason string.
+	if got, want := PendingMergeCloseReason("  gt-mr-1  "), "pending_mr: gt-mr-1"; got != want {
+		t.Fatalf("PendingMergeCloseReason() with whitespace = %q, want %q", got, want)
+	}
+}
+
+func TestIsPendingMergeCloseReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		mrID   string
+		want   bool
+	}{
+		{name: "matches exact MR", reason: "pending_mr: gt-mr-1", mrID: "gt-mr-1", want: true},
+		{name: "matches with surrounding whitespace", reason: "  pending_mr: gt-mr-1  ", mrID: "gt-mr-1", want: true},
+		{name: "different MR", reason: "pending_mr: gt-mr-2", mrID: "gt-mr-1", want: false},
+		{name: "empty reason", reason: "", mrID: "gt-mr-1", want: false},
+		{name: "empty mrID", reason: "pending_mr: gt-mr-1", mrID: "", want: false},
+		{name: "unrelated close reason", reason: "duplicate", mrID: "gt-mr-1", want: false},
+		{name: "old-format plain close (no reason)", reason: "", mrID: "gt-mr-1", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPendingMergeCloseReason(tt.reason, tt.mrID); got != tt.want {
+				t.Fatalf("IsPendingMergeCloseReason(%q, %q) = %v, want %v", tt.reason, tt.mrID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreateWithRigRepairsTargetConfigPrefix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")

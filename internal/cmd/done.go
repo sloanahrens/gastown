@@ -2586,6 +2586,20 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
 	agentBd := bd.ForAgentBead()
 
+	// Best-effort lookup of the MR this session just submitted (set on the
+	// agent bead's active_mr field earlier in the same gt done invocation —
+	// see UpdateAgentActiveMR). Used below to mark the hooked bead's close
+	// reason so a pre-merge eligibility check can tell this ordinary
+	// transient self-close apart from a source issue closed for real
+	// abandonment (gt-di2t). Empty when this exit had no MR (no-merge,
+	// escalated, etc.) — those go through a different close path already.
+	var pendingMRID string
+	if agentIssue, err := agentBd.Show(agentBeadID); err == nil && agentIssue != nil {
+		if fields := beads.ParseAgentFields(agentIssue.Description); fields != nil {
+			pendingMRID = strings.TrimSpace(fields.ActiveMR)
+		}
+	}
+
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
 	hookedBeadID := issueID
@@ -2670,6 +2684,18 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+			} else if pendingMRID != "" {
+				// Transient polecats exit right after gt done, so this issue
+				// is routinely closed seconds after its MR is created — well
+				// before the MR reaches the merge queue. Record the exact MR
+				// in the close reason so the refinery's pre-merge eligibility
+				// check (recheckMRSourceStillMergeable) can tell this
+				// ordinary self-close apart from a source issue a human
+				// closed for real abandonment (gt-di2t).
+				if err := hookBd.CloseWithReason(beads.PendingMergeCloseReason(pendingMRID), hookedBeadID); err != nil {
+					// Non-fatal: warn but continue
+					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+				}
 			} else if err := hookBd.Close(hookedBeadID); err != nil {
 				// Non-fatal: warn but continue
 				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
