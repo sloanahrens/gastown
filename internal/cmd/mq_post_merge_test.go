@@ -41,6 +41,15 @@ type fakeMQPostMergeGit struct {
 	localHead string
 	tipErr    error
 
+	// Attestation-binding fixtures (verifyLandedCommitMatchesSubmitted).
+	mergeBase       string
+	mergeBaseErr    error
+	landedParent    string
+	landedParentErr error
+	submittedFiles  []string
+	landedFiles     []string
+	diffErr         error
+
 	verifiedCommits []string
 	deletedBranches []string
 	deletedHeads    []string
@@ -60,8 +69,28 @@ func (g *fakeMQPostMergeGit) PushRemoteBranchTip(_, _ string) (string, error) {
 	return g.remoteTip, g.tipErr
 }
 
-func (g *fakeMQPostMergeGit) Rev(string) (string, error) {
+func (g *fakeMQPostMergeGit) Rev(ref string) (string, error) {
+	if strings.HasSuffix(ref, "^") {
+		return g.landedParent, g.landedParentErr
+	}
 	return g.localHead, nil
+}
+
+func (g *fakeMQPostMergeGit) MergeBase(_, _ string) (string, error) {
+	return g.mergeBase, g.mergeBaseErr
+}
+
+// DiffNameOnly returns g.submittedFiles when asked for the submitted range
+// (base == g.mergeBase, as produced by MergeBase above) and g.landedFiles
+// for the attested range (base == g.landedParent, as produced by Rev above).
+func (g *fakeMQPostMergeGit) DiffNameOnly(base, _ string) ([]string, error) {
+	if g.diffErr != nil {
+		return nil, g.diffErr
+	}
+	if base == g.landedParent && g.landedParent != "" {
+		return g.landedFiles, nil
+	}
+	return g.submittedFiles, nil
 }
 
 func (g *fakeMQPostMergeGit) DeleteRemoteBranchIfAt(_, branch, expectedHash string) error {
@@ -116,7 +145,14 @@ func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing
 // pushed satisfies the proof instead (gt-f5f6).
 func TestRunVerifiedMQPostMerge_LandedCommitAttestationSatisfiesConflictResolvedRebase(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
-	rigGit := &fakeMQPostMergeGit{}
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		// Conflict resolution touched an extra file and changed hunks within
+		// the shared one — still a superset of what the polecat submitted.
+		landedFiles: []string{"internal/cmd/mq.go", "internal/cmd/mq_integration.go"},
+	}
 	const landedCommit = "2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f"
 
 	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
@@ -147,6 +183,36 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationStillVerified(t *testing.
 	}
 	if mgr.postMergeCalled {
 		t.Fatal("PostMerge called after failed attestation")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit
+// covers the reported vulnerability (gt-7dnx): --landed-commit previously
+// only had to be *reachable* from target, which every commit already on
+// target trivially is. An unrelated on-target commit — reachable, but whose
+// changed files share nothing with what the MR actually submitted — must be
+// rejected rather than accepted as proof this MR landed.
+func TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		// An unrelated commit that happens to already be on target: it never
+		// touched the file the submitted MR changed.
+		landedFiles: []string{"docs/unrelated.md"},
+	}
+	const unrelatedOnTargetCommit = "cafef00dcafef00dcafef00dcafef00dcafef00d"
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, unrelatedOnTargetCommit)
+	if err == nil || !strings.Contains(err.Error(), "attestation does not match MR") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want attestation-does-not-match-MR failure", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called after unrelated-commit attestation")
+	}
+	if mgr.postMergeMR != nil && mgr.postMergeMR.MergeCommit == unrelatedOnTargetCommit {
+		t.Fatal("MergeCommit recorded for an attestation that did not match the MR")
 	}
 }
 

@@ -197,7 +197,9 @@ A rebase that required conflict resolution legitimately changes patch-ids, so
 that proof cannot hold even though the content landed correctly. For that
 case, pass --landed-commit with the SHA that was actually pushed to the
 target; it is still verified as reachable from the target (so a wrong or
-stale SHA is rejected), but stands in for the submitted commit_sha.
+stale SHA is rejected) and bound to the submitted MR by file (every file the
+submitted branch touched must also appear in the attested commit's own
+diff), so an unrelated on-target commit is rejected too.
 
 Examples:
   gt mq post-merge gastown gt-mr-abc123
@@ -217,6 +219,8 @@ type mqPostMergeGit interface {
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
+	MergeBase(a, b string) (string, error)
+	DiffNameOnly(base, head string) ([]string, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	DeleteBranch(branch string, force bool) error
 }
@@ -701,11 +705,65 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, la
 		if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, landedCommit); err != nil {
 			return fmt.Errorf("merge proof failed for MR %s: attested landed commit %s not reachable from %s: %w", mr.ID, landedCommit, target, err)
 		}
+		if err := verifyLandedCommitMatchesSubmitted(rigGit, target, commit, landedCommit); err != nil {
+			return fmt.Errorf("merge proof failed for MR %s: attestation does not match MR: %w", mr.ID, err)
+		}
 		mr.MergeCommit = landedCommit
 		return nil
 	}
 	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
 		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
+	}
+	return nil
+}
+
+// verifyLandedCommitMatchesSubmitted binds a --landed-commit attestation to
+// the MR it claims to satisfy, so an attester (or a bug) cannot substitute
+// any other commit that merely happens to already be reachable from target.
+//
+// Reachability alone proves nothing about content: essentially every commit
+// in target's history is "reachable from target". The refinery's sequential
+// rebase protocol squash-merges each MR (git.MergeSquash), so landedCommit is
+// a single commit whose sole parent is target's tip at merge time — its own
+// diff against that parent is exactly the change-set that landed. This
+// requires every file the submitted branch touched (relative to where it
+// diverged from target) to also appear changed in landedCommit's diff.
+//
+// This is a file-level binding, not a byte-exact one: a conflict-resolved
+// rebase legitimately changes hunks within those files (that's the entire
+// reason --landed-commit exists — see verifyMQPostMergeProof), so exact
+// patch-id equality would reject every real conflict resolution along with
+// the forgeries. Requiring the submitted file set to survive into the landed
+// diff still rejects an unrelated on-target commit, whose changed files are
+// essentially never a superset of the submitted branch's.
+func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submittedCommit, landedCommit string) error {
+	submittedBase, err := rigGit.MergeBase(target, submittedCommit)
+	if err != nil {
+		return fmt.Errorf("merge-base of %s and submitted head %s: %w", target, submittedCommit, err)
+	}
+	submittedFiles, err := rigGit.DiffNameOnly(submittedBase, submittedCommit)
+	if err != nil {
+		return fmt.Errorf("changed files of submitted head %s: %w", submittedCommit, err)
+	}
+	if len(submittedFiles) == 0 {
+		return fmt.Errorf("submitted head %s has no changed files to bind the attestation to", submittedCommit)
+	}
+	landedParent, err := rigGit.Rev(landedCommit + "^")
+	if err != nil {
+		return fmt.Errorf("resolve parent of attested commit %s: %w", landedCommit, err)
+	}
+	landedFiles, err := rigGit.DiffNameOnly(landedParent, landedCommit)
+	if err != nil {
+		return fmt.Errorf("changed files of attested commit %s: %w", landedCommit, err)
+	}
+	landedSet := make(map[string]bool, len(landedFiles))
+	for _, f := range landedFiles {
+		landedSet[f] = true
+	}
+	for _, f := range submittedFiles {
+		if !landedSet[f] {
+			return fmt.Errorf("submitted file %q not present among attested commit %s's changed files", f, landedCommit)
+		}
 	}
 	return nil
 }
