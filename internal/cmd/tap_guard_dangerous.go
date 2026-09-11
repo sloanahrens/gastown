@@ -108,6 +108,7 @@ const maxDangerousNestDepth = 3
 // opaque — that is where this guard's real false positives have come from
 // (mayor scope, gt-5ihs attempt 2, gt-wisp-db27 finding 4).
 func evaluateDangerousCommand(command string, depth int) (reason, alternative string) {
+	command = stripHeredocBodies(command)
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -169,17 +170,151 @@ var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash
 // shell-invoking wrappers (bash -c/sh -c/zsh -c/eval) so evaluateDangerousCommand
 // can check their contents the same as a top-level command. tokens and
 // lowerTokens must be the same length and index-aligned (see shellTokenize).
+//
+// "<shell> -c" takes exactly ONE command-string argument — any further
+// tokens are positional parameters ($0, $1, ...) passed to that command,
+// never concatenated onto it, so only tokens[i+2] is nested here. Joining
+// the rest of the line (as this used to do) fabricates shell syntax that
+// was never live: quoting is already gone by the time we have tokens, so
+// two separately-quoted args like "echo a" and "rm -rf /" — real argv0
+// and argv1 for the invoked command, not appended text — get glued into
+// one string with a bare space, indistinguishable from an actual
+// "echo a rm -rf /" command line (gt-mkrj). "eval", by contrast, really
+// does concatenate all of its arguments with spaces before evaluating
+// them as one shell command, so joining tokens[i+1:] there matches actual
+// eval semantics rather than fabricating it.
 func nestedCommands(tokens, lowerTokens []string) []string {
 	var nested []string
 	for i, lt := range lowerTokens {
 		if shellInvokers[lt] && i+1 < len(lowerTokens) && lowerTokens[i+1] == "-c" && i+2 < len(tokens) {
-			nested = append(nested, strings.Join(tokens[i+2:], " "))
+			nested = append(nested, tokens[i+2])
 		}
 		if lt == "eval" && i+1 < len(tokens) {
 			nested = append(nested, strings.Join(tokens[i+1:], " "))
 		}
 	}
 	return nested
+}
+
+// heredocStartPattern matches a heredoc redirection operator: "<<TAG",
+// "<<-TAG" (strip-leading-tabs form), or either with the tag quoted
+// ("<<'TAG'", `<<"TAG"`).
+var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?`)
+
+// stripHeredocBodies removes heredoc body text from command before any
+// tokenization or pattern matching runs. A heredoc body is DATA being
+// written to a file or piped to a command's stdin — the same class of
+// risk as a quoted SQL string or a mail body, not shell syntax to
+// evaluate — so scanning it for dangerous fragments produces false
+// positives: "cat > note.md <<'EOF' ... git push --force ... EOF" blocked
+// an ordinary file write because the DATA it wrote happened to mention a
+// dangerous phrase (gt-mkrj). Strips from just after the "<<TAG" line
+// through the line that is exactly TAG (optionally tab-indented, for the
+// "<<-TAG" form); text outside any heredoc span is left untouched.
+func stripHeredocBodies(command string) string {
+	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
+	if matches == nil {
+		return command
+	}
+	var b strings.Builder
+	pos := 0
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		if start < pos {
+			continue // inside a previously-stripped heredoc body
+		}
+		allowIndent := command[m[2]:m[3]] == "-"
+		tag := command[m[6]:m[7]]
+
+		nl := strings.IndexByte(command[end:], '\n')
+		if nl < 0 {
+			// No body follows on a later line (e.g. the heredoc marker is
+			// the last thing on the line with nothing after it) — nothing
+			// to strip.
+			b.WriteString(command[pos:end])
+			pos = end
+			continue
+		}
+		bodyStart := end + nl + 1
+		b.WriteString(command[pos:bodyStart])
+		pos = heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
+	}
+	b.WriteString(command[pos:])
+	return b.String()
+}
+
+// heredocTerminatorEnd scans command starting at bodyStart for a line
+// whose content is exactly tag (leading tabs stripped first when
+// allowIndent, matching the "<<-TAG" form) and returns the offset just
+// past that terminator line (or len(command) if none is found, meaning
+// the heredoc is unterminated and the rest of the command is body).
+func heredocTerminatorEnd(command string, bodyStart int, tag string, allowIndent bool) int {
+	offset := bodyStart
+	for offset <= len(command) {
+		lineEnd := strings.IndexByte(command[offset:], '\n')
+		var line string
+		var next int
+		if lineEnd < 0 {
+			line = command[offset:]
+			next = len(command)
+		} else {
+			line = command[offset : offset+lineEnd]
+			next = offset + lineEnd + 1
+		}
+		check := line
+		if allowIndent {
+			check = strings.TrimLeft(line, "\t")
+		}
+		if check == tag {
+			return next
+		}
+		if lineEnd < 0 {
+			break
+		}
+		offset = next
+	}
+	return len(command)
+}
+
+// shellVarAssignPattern matches a simple "NAME=VALUE" shell variable
+// assignment token (e.g. "x=/", "FOO=bar") as produced by shellTokenize.
+var shellVarAssignPattern = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+
+// shellVarAssignments scans tokens for leading "NAME=VALUE" assignments
+// and returns a name->value map, so a later reference to "$NAME" in the
+// same command line can be resolved to what it was just assigned — e.g.
+// "x=/; bfs $x -name regex.h" assigns x=/ and then scans it. Without this,
+// matchesUnboundedScan only ever compared literal tokens against the
+// denylist, so routing the root path through a variable silently bypassed
+// it (gt-mkrj).
+func shellVarAssignments(tokens []string) map[string]string {
+	vars := make(map[string]string)
+	for _, tok := range tokens {
+		if m := shellVarAssignPattern.FindStringSubmatch(tok); m != nil {
+			vars[m[1]] = m[2]
+		}
+	}
+	return vars
+}
+
+// resolveShellVar returns the value arg would expand to if it is a
+// "$NAME" or "${NAME}" reference to a variable assigned earlier in the
+// same command (per vars); otherwise it returns arg unchanged, preserving
+// existing literal handling (e.g. the bare "$HOME" denylist entry).
+func resolveShellVar(arg string, vars map[string]string) string {
+	name := ""
+	switch {
+	case strings.HasPrefix(arg, "${") && strings.HasSuffix(arg, "}"):
+		name = arg[2 : len(arg)-1]
+	case strings.HasPrefix(arg, "$"):
+		name = arg[1:]
+	default:
+		return arg
+	}
+	if v, ok := vars[name]; ok {
+		return v
+	}
+	return arg
 }
 
 // commandSubstitutionPattern matches shell command substitution: $(...) or
@@ -216,11 +351,60 @@ func commandSubstitutions(command string) []string {
 // parse failure fails toward still checking real risks rather than silently
 // allowing everything through.
 func shellTokenize(command string) []string {
-	tokens, err := shlex.Split(command)
+	tokens, err := shlex.Split(spaceOutShellOperators(command))
 	if err != nil {
 		return strings.Fields(command)
 	}
 	return tokens
+}
+
+// spaceOutShellOperators pads the command-chaining operators ;, &, and |
+// with spaces wherever they appear outside quotes, so shlex splits them
+// into their own tokens even when glued directly to an adjacent word with
+// no whitespace ("rm -rf /;echo done" has no space around ';'). Without
+// this, shlex — a generic word-splitter with no notion of shell control
+// operators — folds the operator into whichever word touches it
+// ("done;rm" as one token), hiding "rm" from every exact-token matcher
+// (gt-mkrj). Characters inside single/double quotes, or escaped with a
+// backslash outside quotes, are left untouched so quoted content (a sed
+// script containing '|', a jq filter) stays exactly as opaque as it was
+// before this pass.
+func spaceOutShellOperators(command string) string {
+	var b strings.Builder
+	b.Grow(len(command) + 8)
+	var quote rune
+	escaped := false
+	for _, r := range command {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if quote != 0 {
+			if r == '\\' && quote == '"' {
+				escaped = true
+			} else if r == quote {
+				quote = 0
+			}
+			b.WriteRune(r)
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+			b.WriteRune(r)
+		case '\'', '"':
+			quote = r
+			b.WriteRune(r)
+		case ';', '&', '|':
+			b.WriteRune(' ')
+			b.WriteRune(r)
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // printDangerousBlock prints the standard block banner to stderr.
@@ -288,6 +472,7 @@ var alwaysRecursiveScanTools = map[string]bool{
 // (gt-mkrj).
 func matchesUnboundedScan(tokens []string) (reason, alternative string) {
 	fields := tokens
+	vars := shellVarAssignments(tokens)
 	for i, f := range fields {
 		base := strings.ToLower(f)
 		if idx := strings.LastIndex(base, "/"); idx >= 0 {
@@ -313,7 +498,8 @@ func matchesUnboundedScan(tokens []string) (reason, alternative string) {
 		}
 
 		for _, arg := range rest {
-			if !isUnboundedScanRoot(arg) {
+			resolved := resolveShellVar(arg, vars)
+			if !isUnboundedScanRoot(resolved) {
 				continue
 			}
 			reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)

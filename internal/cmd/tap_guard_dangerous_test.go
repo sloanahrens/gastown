@@ -419,6 +419,121 @@ func TestGtMkrjRegressions(t *testing.T) {
 	}
 }
 
+// TestGluedOperatorsAreBlocked pins the narrowed gt-mkrj scope: a shell
+// control operator (;, &, |) glued directly to an adjacent word with no
+// surrounding whitespace must still act as a token boundary, so a
+// dangerous command chained after it isn't hidden inside one opaque
+// shlex token (e.g. "hi;rm" swallowing "rm").
+func TestGluedOperatorsAreBlocked(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"semicolon glued to rm -rf /", "echo hi;rm -rf /"},
+		{"double-ampersand glued", "echo hi&&sudo rm -rf /"},
+		{"pipe glued to git push --force", "echo hi|xargs -I{} git push --force"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (glued operator hid a dangerous fragment)", tt.command)
+			}
+		})
+	}
+}
+
+// TestGluedOperatorsInsideQuotesStayOpaque guards spaceOutShellOperators
+// against over-reach: operator characters inside quotes (a sed script, a
+// jq filter) must remain part of their opaque token, exactly like before
+// this pass — see TestQuotedSQLStaysOpaque and TestGtMkrjRegressions for
+// the same invariant on other matchers.
+func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
+	command := `sed -i '' "s|OLD|jq -r '.[] // []'|" watch.sh`
+	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted operators must stay opaque", command, reason)
+	}
+}
+
+// TestShellVariableScanRootIsBlocked pins the narrowed gt-mkrj scope: a
+// scan whose root path is routed through a shell variable assigned
+// earlier in the same command line must be blocked exactly like a literal
+// root argument.
+func TestShellVariableScanRootIsBlocked(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"bare variable assigned to /", "x=/; bfs $x -name regex.h"},
+		{"braced variable form", "x=/; bfs ${x} -name regex.h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (shell variable indirection hid an unbounded scan root)", tt.command)
+			}
+		})
+	}
+}
+
+// TestShellVariableScanRootAllowsBoundedPath ensures the variable
+// resolution added for gt-mkrj doesn't turn every $var-rooted scan into a
+// false positive — only a variable that actually resolves to a denylisted
+// root should block.
+func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
+	command := "x=./src; bfs $x -name regex.h"
+	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — variable resolves to a bounded path", command, reason)
+	}
+}
+
+// TestHeredocBodyStaysOpaque pins the narrowed gt-mkrj scope: heredoc
+// bodies are DATA (a file being written, a message being composed), not
+// shell syntax to evaluate, so a dangerous-looking phrase inside one must
+// not block the command — mirroring TestQuotedSQLStaysOpaque for quoted
+// strings.
+func TestHeredocBodyStaysOpaque(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"sudo mentioned in heredoc body", "cat > note.md <<'EOF'\nsudo rm -rf /tmp\nEOF"},
+		{"force-push phrase in heredoc body", "cat > note.md <<'EOF'\ngit push --force origin main\nEOF"},
+		{"unquoted delimiter", "cat > note.md <<EOF\ndrop table users\nEOF"},
+		{"strip-tabs delimiter form", "cat > note.md <<-'EOF'\n\tsudo rm -rf /\n\tEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — heredoc body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
+// TestHeredocDoesNotHideRealCommand ensures stripHeredocBodies only
+// removes the body span and leaves surrounding shell text — including a
+// second, genuinely dangerous command after the terminator — intact.
+func TestHeredocDoesNotHideRealCommand(t *testing.T) {
+	command := "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /"
+	if reason, _ := evaluateDangerousCommand(command, 0); reason == "" {
+		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — real command after heredoc must still be checked", command)
+	}
+}
+
+// TestNestedShellCPositionalArgsAreNotConcatenated pins the gt-mkrj fix to
+// nestedCommands: "<shell> -c" takes exactly one command-string argument;
+// anything after it is a positional parameter ($0, $1, ...) passed to that
+// command, never appended shell text. Two separately-quoted args here are
+// argv0 and argv1 for "echo a", not "echo a && rm -rf /" — so this must
+// stay allowed even though joining tokens (the old behavior) would have
+// fabricated a dangerous command line that was never actually live.
+func TestNestedShellCPositionalArgsAreNotConcatenated(t *testing.T) {
+	command := `bash -c "echo a" "&&" "rm -rf /"`
+	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — extra -c args are positional params, not appended command text", command, reason)
+	}
+}
+
 // TestDangerousGuard_Integration tests the full pattern set end-to-end.
 func TestDangerousGuard_Integration(t *testing.T) {
 	tests := []struct {
