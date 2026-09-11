@@ -217,7 +217,7 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		}
 	}
 
-	actor := detectActor()
+	actor := resolveSlingActor()
 	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
 
 	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)

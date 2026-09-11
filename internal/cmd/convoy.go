@@ -1509,6 +1509,11 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string `json:"ready_issues"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	BaseBranch   string   `json:"base_branch,omitempty"`
+	// Owned reports whether the convoy carries the gt:owned label. Owned
+	// convoys have a designated owner responsible for their own dispatch
+	// cadence; the system-managed stranded scan (daemon's feedFirstReady)
+	// must not auto-feed them (gt-qw4u).
+	Owned bool `json:"owned,omitempty"`
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1615,6 +1620,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
 		}
+		owned := hasLabel(convoy.Labels, "gt:owned")
 
 		tracked, err := getTrackedIssues(townBeads, convoy.ID)
 		if err != nil {
@@ -1634,6 +1640,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Owned:        owned,
 			})
 			continue
 		}
@@ -1672,6 +1679,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  readyIssues,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Owned:        owned,
 			})
 		} else {
 			// Has tracked issues but none are ready — include in stranded
@@ -1684,6 +1692,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Owned:        owned,
 			})
 		}
 	}

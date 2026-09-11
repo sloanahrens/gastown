@@ -508,7 +508,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 
 	// Log sling event to activity feed (formula slinging)
-	actor := detectActor()
+	actor := resolveSlingActor()
 	payload := events.SlingPayload(wispRootID, targetAgent)
 	payload["formula"] = formulaName
 	_ = events.LogFeed(events.TypeSling, actor, payload)
