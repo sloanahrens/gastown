@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 )
@@ -23,9 +24,10 @@ type daemonLivenessBaseline struct {
 
 // DaemonLivenessCheck verifies the daemon's own heartbeat (daemon/state.json
 // LastHeartbeat/HeartbeatCount) is both fresh and advancing. A clock
-// heartbeat proves only that the clock still ticks (claude-41j.1 D4) — until
-// this check, nothing read LastHeartbeat/HeartbeatCount and acted on it;
-// DaemonCheck only confirms the process is alive via lock/PID.
+// heartbeat proves only that the clock still ticks, not that the daemon's
+// work loop is making progress — until this check, nothing read
+// LastHeartbeat/HeartbeatCount and acted on it; DaemonCheck only confirms
+// the process is alive via lock/PID.
 type DaemonLivenessCheck struct {
 	BaseCheck
 }
@@ -66,6 +68,19 @@ func (c *DaemonLivenessCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: "unknown: daemon/state.json is missing or has no heartbeat recorded yet",
 		}
 	}
+	if !state.Running {
+		// A cleanly stopped daemon leaves LastHeartbeat/HeartbeatCount
+		// untouched (daemon.go's stop path only flips Running to false), so
+		// they go stale by design and prove nothing. Liveness is only
+		// meaningful while the daemon claims to be running; match
+		// DaemonCheck's StatusWarning so "not running" doesn't also fail
+		// doctor's exit code as an error.
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: "Daemon is not running",
+		}
+	}
 
 	recoveryTick := config.LoadOperationalConfig(ctx.TownRoot).GetDaemonConfig().RecoveryHeartbeatIntervalD()
 	staleThreshold := 2 * recoveryTick
@@ -74,6 +89,7 @@ func (c *DaemonLivenessCheck) Run(ctx *CheckContext) *CheckResult {
 	statePath := daemonLivenessStatePath(ctx.TownRoot)
 	baseline, hadBaseline := readDaemonLivenessBaseline(statePath)
 	baselineAge := time.Since(baseline.RecordedAt)
+	countAdvanced := hadBaseline && state.HeartbeatCount != baseline.HeartbeatCount
 
 	var result *CheckResult
 	switch {
@@ -89,7 +105,7 @@ func (c *DaemonLivenessCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusSkipped,
 			Message: "unknown: no baseline yet, recorded the current heartbeat count as the starting point",
 		}
-	case baselineAge >= staleThreshold && state.HeartbeatCount == baseline.HeartbeatCount:
+	case baselineAge >= staleThreshold && !countAdvanced:
 		result = &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -103,19 +119,25 @@ func (c *DaemonLivenessCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// The baseline always advances to the current reading, regardless of
-	// verdict: liveness is reported per run, not accumulated, so a stuck
-	// count flagged this run is not re-flagged forever once the daemon
-	// recovers (matches editorial-coverage-check's baseline handling).
-	if writeErr := writeDaemonLivenessBaseline(statePath, daemonLivenessBaseline{
-		HeartbeatCount: state.HeartbeatCount,
-		RecordedAt:     time.Now(),
-	}); writeErr != nil {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusSkipped,
-			Message: "unknown: could not persist baseline",
-			Details: []string{writeErr.Error()},
+	// Only refresh the baseline when the count has advanced, or when there
+	// was none yet, or when the existing one is already old enough to have
+	// given the daemon a fair chance to tick (which also means a stuck count
+	// flagged this run is not re-flagged forever once the daemon recovers).
+	// Refreshing unconditionally on every run — the previous behavior —
+	// reset baselineAge to ~0 each time, so a doctor cadence shorter than
+	// staleThreshold could never observe baselineAge >= staleThreshold and
+	// the "not advancing" branch above could never fire.
+	if !hadBaseline || countAdvanced || baselineAge >= staleThreshold {
+		if writeErr := writeDaemonLivenessBaseline(statePath, daemonLivenessBaseline{
+			HeartbeatCount: state.HeartbeatCount,
+			RecordedAt:     time.Now(),
+		}); writeErr != nil {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusSkipped,
+				Message: "unknown: could not persist baseline",
+				Details: []string{writeErr.Error()},
+			}
 		}
 	}
 
@@ -138,15 +160,10 @@ func readDaemonLivenessBaseline(path string) (daemonLivenessBaseline, bool) {
 	return baseline, true
 }
 
-// writeDaemonLivenessBaseline persists the baseline state file, creating its
-// .runtime parent directory if needed.
+// writeDaemonLivenessBaseline persists the baseline state file atomically,
+// creating its .runtime parent directory if needed. A torn write (crash
+// mid-write) must not be read back as "no baseline" — that would silently
+// reset the detection window for another staleThreshold.
 func writeDaemonLivenessBaseline(path string, baseline daemonLivenessBaseline) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(baseline, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
+	return atomicfile.EnsureDirAndWriteJSON(path, baseline)
 }
