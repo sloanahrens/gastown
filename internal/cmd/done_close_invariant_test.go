@@ -261,22 +261,17 @@ func TestDoneCloseTimeInvariantSkipReason_StaleLocalMainAllowsZeroCommitClose(t 
 	testRunGit(t, seed, "remote", "add", "origin", remote)
 	testRunGit(t, seed, "push", "origin", "main")
 
-	// Polecat worktree: cloned from origin at the point above, then checks
-	// out its feature branch with zero commits of its own (a report-only
-	// task) — mirroring internal/polecat/manager.go:798's origin/<default>
-	// worktree creation.
+	// Clone the repo at the point above, before origin/main advances — this
+	// is what leaves "work"'s local "main" ref stale.
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
 	testRunGit(t, work, "config", "user.email", "test@test.com")
 	testRunGit(t, work, "config", "user.name", "Test")
-	testRunGit(t, work, "checkout", "-b", "polecat/basalt/gt-6hmz+abc")
 
 	// origin/main advances independently (another polecat merged) while the
 	// SHARED local .repo.git's "main" branch — a distinct, separately
 	// checked out worktree the wrapper's git.NewGit(cwd) never fetches —
-	// stays behind. Simulate that shared, stale local main by leaving
-	// "seed"'s main un-fetched into "work": work's local "main" ref is
-	// whatever origin/main was at clone time, now behind origin/main.
+	// stays behind at clone-time main.
 	testRunGit(t, seed, "checkout", "main")
 	if err := os.WriteFile(filepath.Join(seed, "main-new.txt"), []byte("advance\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -285,6 +280,13 @@ func TestDoneCloseTimeInvariantSkipReason_StaleLocalMainAllowsZeroCommitClose(t 
 	testRunGit(t, seed, "commit", "-m", "advance main")
 	testRunGit(t, seed, "push", "origin", "main")
 	testRunGit(t, work, "fetch", "origin")
+
+	// Polecat worktree: created from origin/<default> AFTER it advanced
+	// (internal/polecat/manager.go:798), so the branch has zero commits of
+	// its own relative to origin/main — a report-only task — even though
+	// "work"'s local "main" ref is still the un-fetched, stale clone-time
+	// commit.
+	testRunGit(t, work, "checkout", "-b", "polecat/basalt/gt-6hmz+abc", "origin/main")
 
 	// Sanity: local main (stale) vs branch is nonzero even though the
 	// polecat authored zero commits — this is the false-refusal trap.
