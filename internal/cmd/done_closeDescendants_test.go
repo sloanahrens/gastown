@@ -1055,3 +1055,126 @@ exit 0
 		t.Logf("Note: closes.log exists with content: %s", string(closesBytes))
 	}
 }
+
+// TestDoneClosesHookedBeadWithPendingMRReason verifies that gt done closes
+// the hooked source bead with a close_reason naming the MR it just
+// submitted (via the agent bead's active_mr field), rather than a bare
+// close with no reason. Every polecat on this rig is transient — gt done
+// closes the source issue seconds after creating its MR, well before the
+// MR reaches the merge queue. Without a recognizable reason, the refinery's
+// pre-merge eligibility check cannot tell that ordinary self-close apart
+// from a source issue a human closed for real abandonment, and rejects
+// every such MR (gt-di2t).
+func TestDoneClosesHookedBeadWithPendingMRReason(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+
+	townRoot := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
+		t.Fatalf("mkdir .beads/locks: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0755); err != nil {
+		t.Fatalf("mkdir gastown: %v", err)
+	}
+	routes := strings.Join([]string{
+		`{"prefix":"gt-","path":"gastown"}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	closesLog := filepath.Join(townRoot, "closes.log")
+
+	// The stub simulates an agent bead whose active_mr already points at the
+	// MR this gt done invocation just submitted (set earlier in the same
+	// run via UpdateAgentActiveMR), and a plain open hooked bead with no
+	// attached molecule.
+	bdScript := fmt.Sprintf(`#!/bin/sh
+while [ "$1" = "--allow-stale" ]; do shift; done
+cmd="$1"
+shift || true
+case "$cmd" in
+  show)
+    beadID="$1"
+    if echo "$*" | grep -q -- "--children"; then
+      echo '{}'
+    else
+      case "$beadID" in
+        gt-gastown-polecat-nux)
+          echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working","description":"active_mr: gt-mr-42"}]'
+          ;;
+        gt-base-123)
+          echo '[{"id":"gt-base-123","title":"Base bead","status":"open"}]'
+          ;;
+      esac
+    fi
+    ;;
+  list)
+    echo '[]'
+    ;;
+  close)
+    # Log the full close invocation (id + flags) so the reason is visible.
+    echo "close $*" >> "%s"
+    ;;
+  agent|update|slot)
+    exit 0
+    ;;
+esac
+exit 0
+`, closesLog)
+
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GT_ROLE", "polecat")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "nux")
+	t.Setenv("GT_CREW", "")
+	t.Setenv("TMUX_PANE", "")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(filepath.Join(townRoot, "gastown")); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
+
+	closesBytes, err := os.ReadFile(closesLog)
+	if err != nil {
+		t.Fatalf("no beads were closed: %v", err)
+	}
+	closes := string(closesBytes)
+
+	baseLine := ""
+	for _, line := range strings.Split(strings.TrimSpace(closes), "\n") {
+		if strings.Contains(line, "gt-base-123") {
+			baseLine = line
+		}
+	}
+	if baseLine == "" {
+		t.Fatalf("hooked bead gt-base-123 was NOT closed\nClose calls:\n%s", closes)
+	}
+	if !strings.Contains(baseLine, "--reason=pending_mr: gt-mr-42") {
+		t.Errorf("close reason did not name the pending MR, got: %q", baseLine)
+	}
+}

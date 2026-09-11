@@ -57,8 +57,24 @@ type BatchResult struct {
 	// Left queued and untouched — not a conflict, not a culprit.
 	Ejected []EjectedMR
 
+	// Skipped is the set of MRs the initial pre-stack eligibility recheck
+	// found ineligible (see recheckBatchEligibility, gt-di2t). Left queued
+	// and untouched — not closed, not rejected — since an eligibility miss
+	// this early is not yet a verdict about the work; a source issue closed
+	// by an ordinary transient-polecat self-close is exactly the case this
+	// exists to not punish. Reconsidered on the next batch or single-MR
+	// cycle.
+	Skipped []SkippedMR
+
 	// Error is set if the batch processing encountered an infrastructure error.
 	Error error
+}
+
+// SkippedMR is a batch candidate dequeued by the pre-stack eligibility
+// recheck before ever being touched (see BatchResult.Skipped).
+type SkippedMR struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // AssembleBatch selects up to MaxBatchSize MRs from the ready queue.
@@ -246,9 +262,15 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	}
 
 	_, _ = fmt.Fprintf(e.output, "[Batch] Processing batch of %d MRs targeting %s\n", len(batch), target)
-	if !e.recheckBatchEligibility(batch, target, result) {
+	eligible, ok := e.recheckBatchEligibility(batch, target, result)
+	if !ok {
 		return result
 	}
+	if len(eligible) == 0 {
+		_, _ = fmt.Fprintln(e.output, "[Batch] No MRs remain eligible after pre-batch recheck")
+		return result
+	}
+	batch = eligible
 
 	// om-gate T7: review every candidate before stacking, bounded by
 	// merge_queue.editorial.review_parallelism concurrent invocations.
@@ -302,7 +324,7 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	if len(stacked) == 1 {
 		_, _ = fmt.Fprintln(e.output, "[Batch] Only 1 MR survived stack construction, processing directly")
 		// We already have the merged stack on the target branch, run gates and push.
-		return e.verifyAndPush(ctx, stacked, target)
+		return e.verifyAndPush(ctx, stacked, target, result)
 	}
 
 	// Step 2: Run gates on the stack tip
@@ -358,19 +380,35 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	return result
 }
 
-func (e *Engineer) recheckBatchEligibility(batch []*MRInfo, target string, result *BatchResult) bool {
+// recheckBatchEligibility re-verifies each MR is still merge-eligible right
+// before stacking. A member found ineligible (NoMerge — e.g. a policy
+// decision, or a source issue closed for real abandonment) is dequeued and
+// dropped from the batch, recorded in result.Skipped, and left completely
+// untouched (not closed, not rejected — closeOnReject: false) rather than
+// closed as "rejected: ...": this recheck runs before the MR has been
+// touched at all, so a miss here is not yet a verdict, and closing was
+// destructive for the routine case this whole fix exists for — a source
+// issue closed by an ordinary transient-polecat self-close (gt-di2t). The
+// rest of the batch is still checked and returned; previously the first
+// ineligible member aborted the whole batch, silently leaving every other
+// member unprocessed with exit 0. The second return value is false only on
+// an infrastructure error (result.Error is set), which still aborts the
+// batch since eligibility of the rest is unknown.
+func (e *Engineer) recheckBatchEligibility(batch []*MRInfo, target string, result *BatchResult) ([]*MRInfo, bool) {
+	eligible := make([]*MRInfo, 0, len(batch))
 	for _, mr := range batch {
-		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+		if eligibility := e.recheckMRStillMergeable(mr, target, false); !eligibility.Success {
 			if eligibility.NoMerge {
-				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s is not merge-eligible: %s\n", mr.ID, eligibility.Error)
-				e.HandleMRInfoFailure(mr, eligibility)
-			} else {
-				result.Error = fmt.Errorf("pre-batch eligibility recheck failed for %s: %s", mr.ID, eligibility.Error)
+				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s is not merge-eligible, skipping (left in queue): %s\n", mr.ID, eligibility.Error)
+				result.Skipped = append(result.Skipped, SkippedMR{ID: mr.ID, Reason: eligibility.Error})
+				continue
 			}
-			return false
+			result.Error = fmt.Errorf("pre-batch eligibility recheck failed for %s: %s", mr.ID, eligibility.Error)
+			return nil, false
 		}
+		eligible = append(eligible, mr)
 	}
-	return true
+	return eligible, true
 }
 
 // processSingleMR handles the degenerate case of a batch with one MR.
@@ -432,9 +470,15 @@ func (e *Engineer) runBatchGates(ctx context.Context) ProcessResult {
 	return ProcessResult{Success: true}
 }
 
-// verifyAndPush runs gates and pushes the current state for a set of stacked MRs.
-func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target string) *BatchResult {
-	result := &BatchResult{}
+// verifyAndPush runs gates and pushes the current state for a set of stacked
+// MRs. result carries fields already accumulated earlier in ProcessBatch
+// (Reviewed, Conflicts, Ejected, Skipped) so they survive the "only one MR
+// left" fast path instead of being silently dropped — pass nil to start
+// fresh (e.g. a standalone caller with nothing accumulated yet).
+func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target string, result *BatchResult) *BatchResult {
+	if result == nil {
+		result = &BatchResult{}
+	}
 
 	gateResult := e.runBatchGates(ctx)
 	if !gateResult.Success {
@@ -494,7 +538,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	}
 
 	for _, mr := range stacked {
-		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+		if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
 			}

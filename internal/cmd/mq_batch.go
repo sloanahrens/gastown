@@ -357,6 +357,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 			Conflicts   []*refinery.MRInfo    `json:"conflicts"`
 			Reviewed    []refinery.ReviewedMR `json:"reviewed,omitempty"`
 			Ejected     []refinery.EjectedMR  `json:"ejected,omitempty"`
+			Skipped     []refinery.SkippedMR  `json:"skipped,omitempty"`
 			MergeCommit string                `json:"merge_commit,omitempty"`
 			Error       string                `json:"error,omitempty"`
 		}
@@ -366,6 +367,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 			Conflicts:   result.Conflicts,
 			Reviewed:    result.Reviewed,
 			Ejected:     result.Ejected,
+			Skipped:     result.Skipped,
 			MergeCommit: result.MergeCommit,
 		}
 		if result.Error != nil {
@@ -385,6 +387,13 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 				ids[i] = fmt.Sprintf("%s (%s)", ej.ID, ej.Reason)
 			}
 			fmt.Printf("  %s: %s\n", "Ejected (patch-id changed on stack)", strings.Join(ids, ", "))
+		}
+		if len(result.Skipped) > 0 {
+			ids := make([]string, len(result.Skipped))
+			for i, sk := range result.Skipped {
+				ids[i] = fmt.Sprintf("%s (%s)", sk.ID, sk.Reason)
+			}
+			fmt.Printf("  %s: %s\n", "Skipped (ineligible, left in queue)", strings.Join(ids, ", "))
 		}
 		if result.MergeCommit != "" {
 			fmt.Printf("  Merge commit: %s\n", result.MergeCommit)

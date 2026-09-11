@@ -78,6 +78,14 @@ func (s *prepushStore) GetDependenciesWithMetadata(_ context.Context, id string)
 	return nil, nil
 }
 
+// SearchIssues backs List/ListMergeRequests for tests that exercise a full
+// merge success (e.g. HandleMRInfoSuccess's closeSupersededConflictArtifacts,
+// which lists open MRs). No prepush test needs the other open-MR beads it
+// would find, so an empty result is always correct here.
+func (s *prepushStore) SearchIssues(_ context.Context, _ string, _ beadsdk.IssueFilter) ([]*beadsdk.Issue, error) {
+	return nil, nil
+}
+
 func (s *prepushStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
 	issue, ok := s.issues[id]
 	if !ok {
@@ -183,7 +191,7 @@ func TestRecheckMRStillMergeable_RejectsMissingSourceField(t *testing.T) {
 	store := newPrepushStore(prepushMRIssue("gt-mr", "feature", "main", ""))
 	e := newPrepushEngineer(t, workDir, store)
 
-	result := e.recheckMRStillMergeable(&MRInfo{ID: "gt-mr", Branch: "feature", Target: "main"}, "main")
+	result := e.recheckMRStillMergeable(&MRInfo{ID: "gt-mr", Branch: "feature", Target: "main"}, "main", true)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("missing source_issue should be rejected, got: %+v", result)
 	}
@@ -199,7 +207,7 @@ func TestRecheckMRStillMergeable_RejectsMissingSourceIssue(t *testing.T) {
 	e := newPrepushEngineer(t, workDir, store)
 
 	mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-missing"}
-	result := e.recheckMRStillMergeable(mr, "main")
+	result := e.recheckMRStillMergeable(mr, "main", true)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("missing source issue should be rejected, got: %+v", result)
 	}
@@ -227,7 +235,7 @@ func TestRecheckMRStillMergeable_RejectsNonConcreteSource(t *testing.T) {
 			e := newPrepushEngineer(t, workDir, store)
 
 			mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-src"}
-			result := e.recheckMRStillMergeable(mr, "main")
+			result := e.recheckMRStillMergeable(mr, "main", true)
 			if result.Success || !result.NoMerge {
 				t.Fatalf("non-concrete source should be rejected, got: %+v", result)
 			}
@@ -249,12 +257,62 @@ func TestRecheckMRStillMergeable_RejectsClosedSource(t *testing.T) {
 	e := newPrepushEngineer(t, workDir, store)
 
 	mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-src"}
-	result := e.recheckMRStillMergeable(mr, "main")
+	result := e.recheckMRStillMergeable(mr, "main", true)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("closed source should be rejected, got: %+v", result)
 	}
 	if got := store.closeReasons["gt-mr"]; got != "rejected: source_issue gt-src status is closed" {
 		t.Fatalf("MR close reason = %q, want closed source rejection", got)
+	}
+}
+
+// TestRecheckMRStillMergeable_ToleratesPendingMergeSelfClose verifies that
+// a source issue closed specifically because THIS MR was submitted to the
+// queue (gt done's transient self-close, gt-di2t) is not treated as a
+// rejection — every polecat on this rig exits right after gt done, closing
+// its source issue seconds after creating the MR and well before the MR
+// reaches the merge queue.
+func TestRecheckMRStillMergeable_ToleratesPendingMergeSelfClose(t *testing.T) {
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+	source := prepushIssue("gt-src", "")
+	now := time.Now()
+	source.Status = beadsdk.StatusClosed
+	source.ClosedAt = &now
+	source.CloseReason = "pending_mr: gt-mr"
+	store := newPrepushStore(source, prepushMRIssue("gt-mr", "feature", "main", "gt-src", "deadbeef"))
+	e := newPrepushEngineer(t, workDir, store)
+
+	mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-src", CommitSHA: "deadbeef"}
+	result := e.recheckMRStillMergeable(mr, "main", true)
+	if !result.Success {
+		t.Fatalf("source closed as pending_mr for this exact MR should be tolerated, got: %+v", result)
+	}
+	if _, closed := store.closeReasons["gt-mr"]; closed {
+		t.Fatalf("MR should not have been closed, but close reason was set: %q", store.closeReasons["gt-mr"])
+	}
+}
+
+// TestRecheckMRStillMergeable_RejectsClosedSourceForDifferentMR verifies
+// that IsPendingMergeCloseReason only tolerates a closure naming THIS exact
+// MR — a source issue closed as pending_mr for some OTHER MR (e.g. the
+// polecat was re-dispatched and created a second MR) still rejects, since
+// tolerating any pending_mr reason would defeat the point of naming the MR.
+func TestRecheckMRStillMergeable_RejectsClosedSourceForDifferentMR(t *testing.T) {
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+	source := prepushIssue("gt-src", "")
+	now := time.Now()
+	source.Status = beadsdk.StatusClosed
+	source.ClosedAt = &now
+	source.CloseReason = "pending_mr: gt-other-mr"
+	store := newPrepushStore(source, prepushMRIssue("gt-mr", "feature", "main", "gt-src"))
+	e := newPrepushEngineer(t, workDir, store)
+
+	mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-src"}
+	result := e.recheckMRStillMergeable(mr, "main", true)
+	if result.Success || !result.NoMerge {
+		t.Fatalf("source closed pending a different MR should still be rejected, got: %+v", result)
 	}
 }
 
@@ -267,7 +325,7 @@ func TestRecheckMRStillMergeable_RejectsUncheckedSourceCriteria(t *testing.T) {
 	e := newPrepushEngineer(t, workDir, store)
 
 	mr := &MRInfo{ID: "gt-mr", Branch: "feature", Target: "main", SourceIssue: "gt-src"}
-	result := e.recheckMRStillMergeable(mr, "main")
+	result := e.recheckMRStillMergeable(mr, "main", true)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("unchecked source criteria should be rejected, got: %+v", result)
 	}
@@ -457,6 +515,71 @@ func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
 	}
 }
 
+// TestProcessBatch_IneligibleMemberDoesNotAbortRestOfBatch verifies that one
+// member already ineligible when the batch starts (unlike the mid-flight
+// mutation in TestProcessBatch_RechecksBatchBeforePush, which trips the
+// separate pre-push recheck in fastForwardBatch) is dequeued — reported in
+// result.Skipped, left OPEN and untouched, never closed as "rejected" — by
+// the initial recheckBatchEligibility pass, while the rest of the batch
+// still lands. Previously the first ineligible member aborted
+// recheckBatchEligibility entirely, silently leaving every other member —
+// including perfectly mergeable ones — untouched in the queue, AND closed
+// the ineligible member's MR bead even though an eligibility miss this
+// early is not yet a verdict (gt-di2t).
+func TestProcessBatch_IneligibleMemberDoesNotAbortRestOfBatch(t *testing.T) {
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
+	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
+	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
+	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
+
+	srcA := prepushIssue("gt-src-a", "")
+	srcB := prepushIssue("gt-src-b", "")
+	now := time.Now()
+	srcB.Status = beadsdk.StatusClosed
+	srcB.ClosedAt = &now
+	srcB.CloseReason = "duplicate"
+
+	store := newPrepushStore(
+		srcA,
+		srcB,
+		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a", commitA),
+		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b", commitB),
+	)
+	e := newPrepushEngineer(t, workDir, store)
+
+	batch := []*MRInfo{
+		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a", CommitSHA: commitA},
+		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b", CommitSHA: commitB},
+	}
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("expected clean dequeue of the ineligible member, got error: %v", result.Error)
+	}
+	if len(result.Merged) != 1 || result.Merged[0].ID != "gt-mr-a" {
+		t.Fatalf("expected gt-mr-a to still merge despite gt-mr-b being ineligible, got merged=%v", result.Merged)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0].ID != "gt-mr-b" {
+		t.Fatalf("expected gt-mr-b in result.Skipped, got %+v", result.Skipped)
+	}
+	if got := store.issues["gt-mr-b"].Status; got != beadsdk.StatusOpen {
+		t.Fatalf("skipped MR gt-mr-b status = %s, want still open (never touched)", got)
+	}
+	if _, closed := store.closeReasons["gt-mr-b"]; closed {
+		t.Fatalf("skipped MR gt-mr-b should not have been closed, got close reason %q", store.closeReasons["gt-mr-b"])
+	}
+	if got := store.issues["gt-mr-a"].Status; got != beadsdk.StatusClosed {
+		t.Fatalf("merged MR gt-mr-a status = %s, want closed (merged)", got)
+	}
+}
+
+// TestProcessBatch_RechecksBatchBeforeGates verifies that a member already
+// policy-ineligible (no_merge=true) when the batch starts is dequeued by
+// the first-pass recheckBatchEligibility, before ever reaching gates —
+// left open and untouched (result.Skipped), never a gate culprit — while
+// the rest of the batch runs gates normally and lands (gt-di2t: this used
+// to abort the whole batch instead of continuing with gt-mr-a).
 func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -471,8 +594,6 @@ func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b", commitB),
 	)
 	e := newPrepushEngineer(t, workDir, store)
-	e.config.Gates = map[string]*GateConfig{"fail": {Cmd: "false"}}
-	before := run(t, workDir, "git", "rev-parse", "origin/main")
 
 	batch := []*MRInfo{
 		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a", CommitSHA: commitA},
@@ -485,12 +606,17 @@ func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 	if len(result.Culprits) != 0 {
 		t.Fatalf("expected no gate culprits for policy-ineligible MR, got %d", len(result.Culprits))
 	}
-	assertOriginMainUnchangedAndReset(t, workDir, before)
-	if got := store.issues["gt-mr-b"].Status; got != beadsdk.StatusClosed {
-		t.Fatalf("invalidated MR status = %s, want closed", got)
+	if len(result.Merged) != 1 || result.Merged[0].ID != "gt-mr-a" {
+		t.Fatalf("expected gt-mr-a to still merge despite gt-mr-b being policy-ineligible, got merged=%v", result.Merged)
 	}
-	if got := store.issues["gt-mr-a"].Status; got != beadsdk.StatusOpen {
-		t.Fatalf("unaffected MR status = %s, want open", got)
+	if len(result.Skipped) != 1 || result.Skipped[0].ID != "gt-mr-b" {
+		t.Fatalf("expected gt-mr-b in result.Skipped, got %+v", result.Skipped)
+	}
+	if got := store.issues["gt-mr-b"].Status; got != beadsdk.StatusOpen {
+		t.Fatalf("skipped MR status = %s, want open (never touched)", got)
+	}
+	if got := store.issues["gt-mr-a"].Status; got != beadsdk.StatusClosed {
+		t.Fatalf("merged MR gt-mr-a status = %s, want closed (merged)", got)
 	}
 }
 

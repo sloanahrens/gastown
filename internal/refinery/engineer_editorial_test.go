@@ -383,7 +383,7 @@ func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *tes
 		t.Fatalf("BuildRebaseStack: stacked=%d conflicts=%d err=%v", len(stacked), len(conflicts), err)
 	}
 
-	result := e.verifyAndPush(context.Background(), stacked, "main")
+	result := e.verifyAndPush(context.Background(), stacked, "main", nil)
 	if result.Error == nil {
 		t.Fatalf("expected batch push to be refused, got: %+v", result)
 	}
