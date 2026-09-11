@@ -1,9 +1,14 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -13,6 +18,10 @@ import (
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+// dogHookedFormulaCheckTimeout bounds the bd subprocess findDispatchableDog
+// runs per idle dog so a slow Dolt response can't wedge the dispatch cycle.
+const dogHookedFormulaCheckTimeout = 5 * time.Second
 
 // Dog lifecycle defaults — now config-driven via operational.daemon thresholds.
 // These vars are still used as fallbacks and for tests; production code
@@ -383,6 +392,10 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
 		return nil
 	}
+	// Hoisted out of the loop: every dog's hooked-formula check targets the
+	// same town database, so the bd subprocess routing/target config is
+	// computed once rather than rebuilt per dog.
+	beadsDir := filepath.Join(townRoot, ".beads")
 	for _, d := range dogs {
 		if d.State != dog.StateIdle {
 			continue
@@ -395,7 +408,7 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 		if running {
 			continue
 		}
-		hooked, err := dogHasHookedFormula(townRoot, d.Name)
+		hooked, err := dogHasHookedFormulaFn(townRoot, beadsDir, d.Name)
 		if err != nil {
 			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
 		} else if hooked {
@@ -407,22 +420,52 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 	return nil
 }
 
+// dogHasHookedFormulaFn is a seam over dogHasHookedFormula so
+// findDispatchableDog is unit-testable without shelling out to a real bd/Dolt
+// backend. Production code always resolves to dogHasHookedFormula; tests
+// override it to exercise the skip/error-fallback branches deterministically.
+var dogHasHookedFormulaFn = dogHasHookedFormula
+
 // dogHasHookedFormula reports whether the dog identified by name currently
 // holds an open (status=hooked) formula molecule wisp — the ephemeral
 // molecule `gt sling` attaches to a dog's hook bead when dispatching
 // formula-driven work such as mol-dog-reaper or mol-dog-backup. See
 // findDispatchableDog.
-func dogHasHookedFormula(townRoot, dogName string) (bool, error) {
+//
+// This shells out to bd directly (mirroring dogMol.runBd) rather than going
+// through beads.Beads.List, whose run() always resolves env via
+// buildRunEnv/BuildPinnedBDEnv — never the daemon's read-only routing env
+// that forces BD_DOLT_AUTO_COMMIT=off. findDispatchableDog calls this once
+// per idle dog on every dispatch tick, so without that env every poll opens
+// a fresh connection attempting a no-op auto-commit (gh#3596).
+func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
 	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
-	hookedBeads, err := beads.New(townRoot).List(beads.ListOptions{
-		Status:    beads.StatusHooked,
-		Assignee:  agentID,
-		Priority:  -1,
-		Ephemeral: true,
-		Limit:     0,
-	})
-	if err != nil {
+	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
+		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
+	args := []string{"query", "--json", queryExpr, "--limit=0"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			return false, fmt.Errorf("%w: %s", err, errMsg)
+		}
 		return false, err
+	}
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+		return false, nil
+	}
+
+	var hookedBeads []*beads.Issue
+	if err := json.Unmarshal(out, &hookedBeads); err != nil {
+		return false, fmt.Errorf("parsing bd query output: %w", err)
 	}
 	return anyHasAttachedFormula(hookedBeads), nil
 }

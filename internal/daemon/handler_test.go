@@ -491,6 +491,10 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return false, nil }
+
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
@@ -555,24 +559,80 @@ func TestAnyHasAttachedFormula(t *testing.T) {
 // propulsion always runs the hook first — so the plugin never actually runs
 // and the hook still never advances. findDispatchableDog must skip it.
 //
-// This exercises the real dogHasHookedFormula path (shelling out to `bd`)
-// against the package's hermetic test townRoot/Dolt harness; it relies on
-// beads.New(...).List returning no hooked beads (and no error) for a dog with
-// no hook, so "alpha" is picked over a dog we can't easily hook here without
-// a full `gt sling` round-trip — see TestAnyHasAttachedFormula for the
-// decision logic itself.
+// The decision logic itself (does a set of hooked beads carry
+// attached_formula metadata) is covered by TestAnyHasAttachedFormula. This
+// test exercises findDispatchableDog's dispatch loop via the
+// dogHasHookedFormulaFn seam so it never shells out to a real bd/Dolt
+// backend.
 func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
+		return dogName == "alpha", nil
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
-		t.Fatal("findDispatchableDog returned nil; expected alpha to be dispatchable (no hook, no bd database)")
+		t.Fatal("findDispatchableDog returned nil; expected bravo to be dispatchable")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (alpha holds a hooked formula)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_NilWhenAllDogsHooked confirms that when every idle
+// dog in the kennel holds an open hooked formula molecule, findDispatchableDog
+// returns nil rather than falling back to picking one anyway.
+func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return true, nil }
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (every dog holds a hooked formula)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_ErrorFallsBackToDispatchable confirms that a
+// dogHasHookedFormulaFn error is treated as "not hooked" rather than
+// disqualifying the dog — a flaky hook check must not wedge dispatch.
+func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaFn
+	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
+	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
+		return false, fmt.Errorf("simulated bd failure")
+	}
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected alpha to be dispatchable despite the hook-check error")
 	}
 	if got.Name != "alpha" {
 		t.Errorf("findDispatchableDog = %q, want alpha", got.Name)

@@ -30,12 +30,22 @@ const (
 // closeWisp runs `bd close <id>` (plus any extra args) with bounded retries so a
 // transient Dolt error does not leave the wisp open. Returns the final error if
 // every attempt fails.
+//
+// A "blocked by open issues" error short-circuits the retry loop: it means a
+// dependency hasn't closed yet, which sleeping and retrying the identical
+// close cannot fix. closeRemainingSteps' multi-pass drain already re-queries
+// and retries this same wisp on its next pass once a sibling closes and
+// unblocks it, so retrying here would only burn dogCloseRetryDelay per
+// attempt for a wait that this call alone can never resolve.
 func (dm *dogMol) closeWisp(id string, extra ...string) error {
 	args := append([]string{"close", id}, extra...)
 	var err error
 	for attempt := 1; attempt <= dogCloseMaxAttempts; attempt++ {
 		if _, err = dm.runBd(args...); err == nil {
 			return nil
+		}
+		if strings.Contains(err.Error(), "blocked by open issues") {
+			return err
 		}
 		if attempt < dogCloseMaxAttempts {
 			time.Sleep(time.Duration(attempt) * dogCloseRetryDelay)
@@ -171,8 +181,9 @@ func (dm *dogMol) closeRemainingSteps() {
 
 	closed := 0
 	forced := 0
+	maxPasses := -1 // set from the initial child count once the first pass lists them
 
-	for {
+	for pass := 1; ; pass++ {
 		out, err := dm.runBd("show", dm.rootID, "--children", "--json")
 		if err != nil {
 			dm.logger.Printf("dog_molecule: closeRemainingSteps: list children of %s failed: %v", dm.rootID, err)
@@ -185,6 +196,15 @@ func (dm *dogMol) closeRemainingSteps() {
 			break
 		}
 
+		if maxPasses < 0 {
+			// A real dependency chain drains in at most len(children) passes
+			// (each successful pass closes at least one leaf); +1 covers this
+			// first listing pass. Without a cap, a bd bug that reports
+			// "progress" without actually closing anything would spin the
+			// daemon forever instead of falling through to force-close.
+			maxPasses = len(children) + 1
+		}
+
 		var remaining []childInfo
 		for _, child := range children {
 			if child.ID == "" || child.Status == "" {
@@ -195,6 +215,18 @@ func (dm *dogMol) closeRemainingSteps() {
 			}
 		}
 		if len(remaining) == 0 {
+			break
+		}
+
+		if pass > maxPasses {
+			dm.logger.Printf("dog_molecule: closeRemainingSteps: pass cap (%d) reached for %s, force-closing %d remaining", maxPasses, dm.rootID, len(remaining))
+			for _, child := range remaining {
+				if err := dm.closeWisp(child.ID, "--force", "--reason", "abandoned: dependency-blocked tail under closed dog molecule root"); err != nil {
+					dm.logger.Printf("dog_molecule: closeRemainingSteps: force-close %s failed after %d attempts: %v", child.ID, dogCloseMaxAttempts, err)
+				} else {
+					forced++
+				}
+			}
 			break
 		}
 
