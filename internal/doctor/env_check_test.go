@@ -94,12 +94,16 @@ func TestEnvVarsCheck_ListSessionsError(t *testing.T) {
 	check := NewEnvVarsCheckWithReader(reader)
 	result := check.Run(testCtx())
 
-	// No tmux server is valid (Gas Town can be down)
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want StatusOK", result.Status)
+	// Could not list sessions at all — this is a could-not-ask condition,
+	// not a verified clean state, so it must not report StatusOK.
+	if result.Status != StatusSkipped {
+		t.Errorf("Status = %v, want StatusSkipped", result.Status)
 	}
-	if result.Message != "No tmux sessions running" {
-		t.Errorf("Message = %q, want %q", result.Message, "No tmux sessions running")
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "tmux not running") {
+		t.Errorf("Details = %v, want the underlying error", result.Details)
 	}
 }
 

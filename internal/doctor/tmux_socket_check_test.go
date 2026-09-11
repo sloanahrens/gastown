@@ -89,10 +89,10 @@ func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected OK, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected Skipped, got %v: %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "server may not be running") {
+	if !strings.HasPrefix(result.Message, "unknown:") {
 		t.Errorf("unexpected message: %s", result.Message)
 	}
 }
@@ -109,10 +109,10 @@ func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected OK, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected Skipped, got %v: %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "No default socket server") {
+	if !strings.HasPrefix(result.Message, "unknown:") {
 		t.Errorf("unexpected message: %s", result.Message)
 	}
 }

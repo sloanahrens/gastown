@@ -50,12 +50,13 @@ func (c *TmuxGlobalEnvCheck) Run(ctx *CheckContext) *CheckResult {
 
 	val, err := accessor.GetGlobalEnvironment("GT_TOWN_ROOT")
 	if err != nil {
-		// No tmux server running — nothing to check or fix.
+		// No tmux server running — we could not read the global env, so we
+		// don't actually know whether GT_TOWN_ROOT is set correctly.
 		if errors.Is(err, tmux.ErrNoServer) {
 			return &CheckResult{
 				Name:    c.Name(),
-				Status:  StatusOK,
-				Message: "No tmux server running (nothing to check)",
+				Status:  StatusSkipped,
+				Message: "unknown: no tmux server running, could not check GT_TOWN_ROOT",
 			}
 		}
 		// Variable not set (tmux returns error for unknown vars) — warn.

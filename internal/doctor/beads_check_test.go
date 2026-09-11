@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -56,8 +57,13 @@ func TestPrefixMismatchCheck_NoRigsJson(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK when no rigs.json, got %v", result.Status)
+	// rigs.json missing means we could not verify prefixes match — a
+	// could-not-ask condition, not a verified clean state.
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when no rigs.json, got %v", result.Status)
+	}
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
 	}
 }
 
@@ -276,6 +282,36 @@ func TestDatabasePrefixCheck_NoRoutes(t *testing.T) {
 
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK for no routes, got %v", result.Status)
+	}
+}
+
+func TestDatabasePrefixCheck_RoutesLoadError(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A directory named routes.jsonl makes beads.LoadRoutes fail with a
+	// genuine read error, distinct from the tolerated "file doesn't exist"
+	// case above.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "routes.jsonl"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewDatabasePrefixCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when routes.jsonl can't be read, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+	}
+	if len(result.Details) == 0 {
+		t.Error("expected Details to carry the underlying error")
 	}
 }
 

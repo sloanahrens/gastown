@@ -50,16 +50,18 @@ var dockerInfoCPUMem = func() (ncpu int, memBytes int64, err error) {
 	return ncpu, memBytes, nil
 }
 
-// Run reports the Docker VM's CPU/memory bound, or skips (OK, no message
-// beyond a note) when Docker isn't installed/running — many rigs never run
-// container-backed suites at all.
+// Run reports the Docker VM's CPU/memory bound. It cannot distinguish
+// "Docker isn't installed" from "Docker is installed but errored" — either
+// way it could not measure the VM's capacity, so it reports StatusSkipped
+// rather than claiming a clean result it never actually observed.
 func (c *ContainerCapacityCheck) Run(_ *CheckContext) *CheckResult {
 	ncpu, memBytes, err := dockerInfoCPUMem()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Docker not available (no container-suite capacity to report)",
+			Status:  StatusSkipped,
+			Message: "unknown: could not determine Docker VM capacity",
+			Details: []string{err.Error()},
 		}
 	}
 

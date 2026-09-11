@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -108,13 +109,17 @@ func TestTmuxGlobalEnvCheck_Correct(t *testing.T) {
 }
 
 func TestTmuxGlobalEnvCheck_NoTmuxServer(t *testing.T) {
-	// No tmux server — should be OK (nothing to check).
+	// No tmux server — we could not read GT_TOWN_ROOT, so this is unknown,
+	// not a verified pass.
 	mock := &mockGlobalEnvAccessor{err: tmux.ErrNoServer}
 	check := NewTmuxGlobalEnvCheckWithAccessor(mock)
 	ctx := &CheckContext{TownRoot: "/home/user/gt"}
 
 	result := check.Run(ctx)
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK when no tmux server, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when no tmux server, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
 	}
 }

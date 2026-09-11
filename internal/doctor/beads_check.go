@@ -126,8 +126,9 @@ func (c *PrefixMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "No rigs.json found (nothing to check)",
+			Status:  StatusSkipped,
+			Message: "unknown: could not load mayor/rigs.json",
+			Details: []string{err.Error()},
 		}
 	}
 
@@ -383,8 +384,9 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:     c.Name(),
-			Status:   StatusOK,
-			Message:  "No routes.jsonl found (nothing to check)",
+			Status:   StatusSkipped,
+			Message:  "unknown: could not load routes.jsonl",
+			Details:  []string{err.Error()},
 			Category: c.Category(),
 		}
 	}

@@ -34,11 +34,13 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 	cmd.Dir = ctx.TownRoot
 	out, err := cmd.Output()
 	if err != nil {
-		// Not a git repo - skip this check (handled by town-git check)
+		// Could not determine the current branch (not a git repo, or some
+		// other git failure) — we did not verify the branch is main.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Town root is not a git repository (skipped)",
+			Status:  StatusSkipped,
+			Message: "unknown: could not determine town root's current branch",
+			Details: []string{err.Error()},
 		}
 	}
 

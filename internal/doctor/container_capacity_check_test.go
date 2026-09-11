@@ -25,7 +25,7 @@ func TestContainerCapacityCheck_ReportsVMSize(t *testing.T) {
 	}
 }
 
-func TestContainerCapacityCheck_DockerUnavailableIsNotAFailure(t *testing.T) {
+func TestContainerCapacityCheck_DockerUnavailableIsSkipped(t *testing.T) {
 	orig := dockerInfoCPUMem
 	defer func() { dockerInfoCPUMem = orig }()
 
@@ -36,7 +36,13 @@ func TestContainerCapacityCheck_DockerUnavailableIsNotAFailure(t *testing.T) {
 	check := NewContainerCapacityCheck()
 	result := check.Run(&CheckContext{})
 
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK (docker absence isn't a doctor failure)", result.Status)
+	if result.Status != StatusSkipped {
+		t.Fatalf("Status = %v, want StatusSkipped (couldn't measure, not a clean pass)", result.Status)
+	}
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "docker: command not found") {
+		t.Errorf("Details = %v, want the underlying error", result.Details)
 	}
 }

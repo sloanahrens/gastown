@@ -71,8 +71,9 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Could not list town socket sessions (server may not be running)",
+			Status:  StatusSkipped,
+			Message: "unknown: could not list town socket sessions",
+			Details: []string{err.Error()},
 		}
 	}
 
@@ -80,8 +81,9 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "No default socket server running — no split-brain",
+			Status:  StatusSkipped,
+			Message: "unknown: could not list default socket sessions",
+			Details: []string{err.Error()},
 		}
 	}
 

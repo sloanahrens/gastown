@@ -214,8 +214,8 @@ func (c *RigsRegistryValidCheck) Run(ctx *CheckContext) *CheckResult {
 		if os.IsNotExist(err) {
 			return &CheckResult{
 				Name:    c.Name(),
-				Status:  StatusOK,
-				Message: "No rigs.json (skipping validation)",
+				Status:  StatusSkipped,
+				Message: "unknown: no mayor/rigs.json found, could not validate registered rigs",
 			}
 		}
 		return &CheckResult{

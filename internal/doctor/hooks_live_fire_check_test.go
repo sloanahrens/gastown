@@ -23,11 +23,11 @@ func TestHooksLiveFireCheck_Metadata(t *testing.T) {
 
 // TestHooksLiveFireCheck_NoPolecatSettings pins the "never StatusOK on infra
 // error" contract for the case where no polecat settings.json exists yet to
-// test against: it must report StatusWarning (inconclusive), never
+// test against: it must report StatusSkipped ("unknown: ..."), never
 // StatusOK. This is the same requirement the bead (gt-5ihs) named
 // explicitly — earlier verification methods gave a false pass; this check
-// must fail toward "inconclusive", never toward "pass", when it can't
-// actually exercise the real dispatch path.
+// must fail toward "could not determine", never toward "pass", when it
+// can't actually exercise the real dispatch path.
 func TestHooksLiveFireCheck_NoPolecatSettings(t *testing.T) {
 	tmpDir := t.TempDir()
 	// No polecats/ directory anywhere under tmpDir, so findPolecatSettings
@@ -40,8 +40,8 @@ func TestHooksLiveFireCheck_NoPolecatSettings(t *testing.T) {
 	if result.Status == StatusOK {
 		t.Fatalf("must never report StatusOK when no target settings.json exists, got: %s", result.Message)
 	}
-	if result.Status != StatusWarning {
-		t.Errorf("expected StatusWarning (inconclusive) for missing target, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped (unknown) for missing target, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -91,14 +91,14 @@ func TestEvaluateLiveFireResult(t *testing.T) {
 			name:           "no branch, no block banner, clean exit — inconclusive, not a pass",
 			branchCreated:  false,
 			blockConfirmed: false,
-			wantStatus:     StatusWarning,
+			wantStatus:     StatusSkipped,
 		},
 		{
 			name:           "no branch, no block banner, claude errored — inconclusive (finding 2)",
 			branchCreated:  false,
 			blockConfirmed: false,
 			runErr:         errors.New("exit status 1"),
-			wantStatus:     StatusWarning,
+			wantStatus:     StatusSkipped,
 		},
 	}
 

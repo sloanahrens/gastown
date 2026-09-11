@@ -34,8 +34,8 @@ func TestForeignRemoteCheck_NoGitRepo(t *testing.T) {
 	check := NewForeignRemoteCheck()
 	result := check.Run(ctx)
 
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK for non-git dir, got %v", result.Status)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped for non-git dir (could not list remotes), got %v", result.Status)
 	}
 }
 

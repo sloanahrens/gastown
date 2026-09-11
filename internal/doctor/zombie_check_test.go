@@ -1,8 +1,34 @@
 package doctor
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
+
+// fakeZombieLister implements zombieSessionLister for testing.
+type fakeZombieLister struct {
+	sessions []string
+	listErr  error
+	alive    map[string]bool // session -> IsAgentAlive result
+	killed   []string
+}
+
+func (f *fakeZombieLister) ListSessions() ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.sessions, nil
+}
+
+func (f *fakeZombieLister) IsAgentAlive(session string) bool {
+	return f.alive[session]
+}
+
+func (f *fakeZombieLister) KillSessionWithProcesses(name string) error {
+	f.killed = append(f.killed, name)
+	return nil
+}
 
 func TestNewZombieSessionCheck(t *testing.T) {
 	check := NewZombieSessionCheck()
@@ -25,16 +51,32 @@ func TestNewZombieSessionCheck(t *testing.T) {
 }
 
 func TestZombieSessionCheck_Run_NoSessions(t *testing.T) {
-	// This test verifies the check runs without error.
-	// Results depend on the test environment.
-	check := NewZombieSessionCheck()
+	lister := &fakeZombieLister{sessions: []string{}}
+	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 
 	result := check.Run(ctx)
 
-	// Should return OK or Warning depending on environment
-	if result.Status != StatusOK && result.Status != StatusWarning {
-		t.Errorf("expected StatusOK or StatusWarning, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK when tmux has no sessions, got %v: %s", result.Status, result.Message)
+	}
+}
+
+func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
+	lister := &fakeZombieLister{listErr: errors.New("no server running")}
+	check := NewZombieSessionCheckWithLister(lister)
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusSkipped {
+		t.Fatalf("Status = %v, want StatusSkipped — could not list sessions", result.Status)
+	}
+	if !strings.HasPrefix(result.Message, "unknown:") {
+		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "no server running") {
+		t.Errorf("Details = %v, want the underlying error", result.Details)
 	}
 }
 

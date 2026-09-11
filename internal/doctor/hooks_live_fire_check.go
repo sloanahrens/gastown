@@ -66,7 +66,7 @@ const hooksLiveFireBlockMarker = "PR WORKFLOW BLOCKED"
 // sandbox git repo and asks it to run "git checkout -b <branch>" — a command
 // the pr-workflow guard should block. It never returns StatusOK on an infra
 // failure (claude missing, no settings file found, sandbox setup failed,
-// timeout): those report StatusWarning ("inconclusive"), never a pass.
+// timeout): those report StatusSkipped ("unknown: ..."), never a pass.
 func (c *HooksLiveFireCheck) Run(ctx *CheckContext) *CheckResult {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
@@ -173,11 +173,16 @@ func (c *HooksLiveFireCheck) CanFix() bool {
 	return false
 }
 
+// inconclusive reports that the live-fire probe could not determine whether
+// the guard blocks or not — infra failure, timeout, or ambiguous evidence.
+// This is a could-not-ask result, not a warning about something observed,
+// so it must never aggregate as StatusOK and must be consistent with the
+// rest of the doctor framework's could-not-ask convention (StatusSkipped).
 func (c *HooksLiveFireCheck) inconclusive(message string) *CheckResult {
 	return &CheckResult{
 		Name:    c.Name(),
-		Status:  StatusWarning,
-		Message: "inconclusive: " + message,
+		Status:  StatusSkipped,
+		Message: "unknown: " + message,
 	}
 }
 

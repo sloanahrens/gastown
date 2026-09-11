@@ -46,8 +46,9 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Not a git repository (skipped)",
+			Status:  StatusSkipped,
+			Message: "unknown: could not list git remotes",
+			Details: []string{err.Error()},
 		}
 	}
 

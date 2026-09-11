@@ -8,12 +8,29 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// zombieSessionLister abstracts the tmux operations this check needs, so
+// tests can inject a failure without a real tmux server.
+type zombieSessionLister interface {
+	ListSessions() ([]string, error)
+	IsAgentAlive(session string) bool
+	KillSessionWithProcesses(name string) error
+}
+
 // ZombieSessionCheck detects tmux sessions that are valid Gas Town sessions
 // but have no Claude/node process running inside (zombies).
 // These occur when Claude exits or crashes but the tmux session remains.
 type ZombieSessionCheck struct {
 	FixableCheck
 	zombieSessions []string // Cached during Run for use in Fix
+
+	listerForTest zombieSessionLister // nil → real tmux
+}
+
+// NewZombieSessionCheckWithLister creates a check with a custom lister (for testing).
+func NewZombieSessionCheckWithLister(lister zombieSessionLister) *ZombieSessionCheck {
+	c := NewZombieSessionCheck()
+	c.listerForTest = lister
+	return c
 }
 
 // NewZombieSessionCheck creates a new zombie session check.
@@ -31,14 +48,17 @@ func NewZombieSessionCheck() *ZombieSessionCheck {
 
 // Run checks for zombie Gas Town sessions (tmux alive but Claude dead).
 func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
-	t := tmux.NewTmux()
+	var t zombieSessionLister = tmux.NewTmux()
+	if c.listerForTest != nil {
+		t = c.listerForTest
+	}
 
 	sessions, err := t.ListSessions()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusWarning,
-			Message: "Could not list tmux sessions",
+			Status:  StatusSkipped,
+			Message: "unknown: could not list tmux sessions",
 			Details: []string{err.Error()},
 		}
 	}
@@ -115,7 +135,10 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	t := tmux.NewTmux()
+	var t zombieSessionLister = tmux.NewTmux()
+	if c.listerForTest != nil {
+		t = c.listerForTest
+	}
 	var lastErr error
 
 	for _, sess := range c.zombieSessions {

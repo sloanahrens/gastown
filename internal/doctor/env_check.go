@@ -86,11 +86,14 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	sessions, err := reader.ListSessions()
 	if err != nil {
-		// No tmux server - treat as success (valid when Gas Town is down)
+		// Could not enumerate tmux sessions at all — this could mean no
+		// server is running, or it could mean something else went wrong.
+		// Either way we didn't verify anything, so it's not a pass.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "No tmux sessions running",
+			Status:  StatusSkipped,
+			Message: "unknown: could not list tmux sessions",
+			Details: []string{err.Error()},
 		}
 	}
 
