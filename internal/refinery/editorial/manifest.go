@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
@@ -50,17 +51,43 @@ func LoadManifest(rigDir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// AssertVersion asserts, in order: the om binary is present and its content
-// sha256 matches the manifest; the rubric file's content sha256 matches the
-// manifest; and, when cfg.MinVersion is set, the manifest's recorded om
-// version is not below it. "dev" (the unset-ldflags default) is treated as
-// below any floor. A mismatch anywhere returns a *ClassifiedError classed
+// AssertVersion asserts, in order: every manifest-managed harness file
+// (m.Files — om-gate.sh, formula overlays, directives; the same set
+// `gt doctor harness-drift` checks) has an on-disk sha256 matching the
+// manifest; the om binary is present and its content sha256 matches the
+// manifest; the rubric file's content sha256 matches the manifest; and,
+// when cfg.MinVersion is set, the manifest's recorded om version is not
+// below it. "dev" (the unset-ldflags default) is treated as below any
+// floor. A mismatch anywhere returns a *ClassifiedError classed
 // BinaryMissing or VersionMismatch — callers must run this before invoking
-// the gate script, per the fail-closed table's ordering.
-func AssertVersion(m *Manifest, cfg config.EditorialConfig, rigRepoDir string) error {
+// the gate script, per the fail-closed table's ordering. Without the
+// managed-file check, a hand-edited gate script is trusted and run as if it
+// were the deployed one (gt-qxot).
+func AssertVersion(m *Manifest, cfg config.EditorialConfig, rigDir, rigRepoDir string) error {
 	if m == nil {
 		return &ClassifiedError{Class: BinaryMissing, Err: fmt.Errorf("no harness manifest loaded")}
 	}
+
+	paths := make([]string, 0, len(m.Files))
+	for p := range m.Files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		wantSHA := m.Files[p]
+		fullPath := p
+		if !filepath.IsAbs(fullPath) {
+			fullPath = filepath.Join(rigDir, p)
+		}
+		actualSHA, err := sha256File(fullPath)
+		if err != nil {
+			return &ClassifiedError{Class: VersionMismatch, Err: fmt.Errorf("managed harness file %s: %w", p, err)}
+		}
+		if actualSHA != wantSHA {
+			return &ClassifiedError{Class: VersionMismatch, Err: fmt.Errorf("managed harness file %s sha256 %s does not match manifest %s", p, actualSHA, wantSHA)}
+		}
+	}
+
 	if m.OMBinary.Path == "" {
 		return &ClassifiedError{Class: BinaryMissing, Err: fmt.Errorf("manifest has no om_binary.path")}
 	}

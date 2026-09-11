@@ -452,6 +452,128 @@ func TestRun_VersionMismatchBeforeInvoke(t *testing.T) {
 	}
 }
 
+// writeManagedFile writes content to rigDir/relPath and records its sha256
+// in the fixture's manifest.Files, so tests can exercise AssertVersion's
+// managed-harness-file check (gt-qxot) — the same check
+// `gt doctor harness-drift` performs — independently of the om binary and
+// rubric checks.
+func (f *reviewFixture) writeManagedFile(t *testing.T, relPath, content string) {
+	t.Helper()
+	fullPath := filepath.Join(f.rigDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatalf("mkdir for managed file %s: %v", relPath, err)
+	}
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write managed file %s: %v", relPath, err)
+	}
+	sum := sha256.Sum256([]byte(content))
+
+	m, err := LoadManifest(f.rigDir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.Files == nil {
+		m.Files = map[string]string{}
+	}
+	m.Files[relPath] = hex.EncodeToString(sum[:])
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.rigDir, manifestFileName), data, 0644); err != nil {
+		t.Fatalf("rewrite manifest: %v", err)
+	}
+}
+
+func TestRun_ManagedFileDriftBeforeInvoke(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	fixture.writeManagedFile(t, "scripts/om-gate.sh", "#!/bin/sh\necho gate\n")
+	// Hand-edit the managed file after the manifest recorded its sha —
+	// harness drift (gt-qxot's repro): a hand-edited gate script must be
+	// caught here, before it is ever invoked.
+	if err := os.WriteFile(filepath.Join(fixture.rigDir, "scripts/om-gate.sh"), []byte("#!/bin/sh\necho hacked\n"), 0644); err != nil {
+		t.Fatalf("hand-edit managed file: %v", err)
+	}
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	calls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, _ []string, _ string) (string, int, error) {
+			calls++
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if calls != 0 {
+		t.Fatalf("gate script invoked %d times, want 0 (version_mismatch caught before invoke)", calls)
+	}
+	if result.Exit != 2 || result.Class != VersionMismatch {
+		t.Fatalf("Exit/Class = %d/%q, want 2/version_mismatch", result.Exit, result.Class)
+	}
+}
+
+func TestRun_ManagedFileMissingBeforeInvoke(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	fixture.writeManagedFile(t, "scripts/om-gate.sh", "#!/bin/sh\necho gate\n")
+	// The manifest records the file but it's gone from disk.
+	if err := os.Remove(filepath.Join(fixture.rigDir, "scripts/om-gate.sh")); err != nil {
+		t.Fatalf("remove managed file: %v", err)
+	}
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	calls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, _ []string, _ string) (string, int, error) {
+			calls++
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if calls != 0 {
+		t.Fatalf("gate script invoked %d times, want 0 (version_mismatch caught before invoke)", calls)
+	}
+	if result.Exit != 2 || result.Class != VersionMismatch {
+		t.Fatalf("Exit/Class = %d/%q, want 2/version_mismatch", result.Exit, result.Class)
+	}
+}
+
+func TestRun_ManagedFilesInSyncInvokesGate(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	fixture.writeManagedFile(t, "scripts/om-gate.sh", "#!/bin/sh\necho gate\n")
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	calls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			calls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 1, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if calls != 1 {
+		t.Fatalf("gate script invoked %d times, want 1 (managed files in sync)", calls)
+	}
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (approve; stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+}
+
 func TestRun_ConfigErrorNoRetry(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)
