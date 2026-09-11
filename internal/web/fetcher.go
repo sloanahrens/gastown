@@ -320,23 +320,19 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 			// Have active tmux session activity from assigned workers
 			row.LastActivity = activity.Calculate(mostRecentActivity)
 		} else if !hasAssignee {
-			// No assignees found in beads - try fallback to any running polecat activity
-			// This handles cases where bd update --assignee didn't persist or wasn't returned
-			if polecatActivity := f.getAllPolecatActivity(); polecatActivity != nil {
-				info := activity.Calculate(*polecatActivity)
-				info.FormattedAge = info.FormattedAge + " (polecat active)"
-				row.LastActivity = info
-			} else if !mostRecentUpdated.IsZero() {
-				// Fall back to issue updated_at if no polecats running
-				info := activity.Calculate(mostRecentUpdated)
-				info.FormattedAge = info.FormattedAge + " (unassigned)"
-				row.LastActivity = info
-			} else {
-				row.LastActivity = activity.Info{
-					FormattedAge: "unassigned",
-					ColorClass:   activity.ColorUnknown,
-				}
+			// No assignees found in beads - a convoy nobody is actively
+			// working stays "unassigned"/"waiting". Never derive its status
+			// from another worker's tmux session: any running polecat's
+			// idle time used to get attributed to this convoy, rendering it
+			// STUCK for no reason (gt-q0is). Pin ColorClass to Unknown so
+			// calculateWorkStatus always reports "waiting" here, while still
+			// showing the age of the most recent tracked-issue update for
+			// context.
+			info := activity.Info{FormattedAge: "unassigned", ColorClass: activity.ColorUnknown}
+			if !mostRecentUpdated.IsZero() {
+				info.FormattedAge = activity.Calculate(mostRecentUpdated).FormattedAge + " (unassigned)"
 			}
+			row.LastActivity = info
 		} else {
 			// Has assignee but no active session
 			row.LastActivity = activity.Info{
@@ -385,6 +381,11 @@ type trackedIssueInfo struct {
 	UpdatedAt    time.Time // Fallback for activity when no assignee
 }
 
+// depRef is a raw dependency edge's target ID as returned by bd.
+type depRef struct {
+	ID string `json:"id"`
+}
+
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInfo, error) {
 	// Query tracked dependencies using bd dep list
@@ -393,11 +394,21 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 		return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
 	}
 
-	var deps []struct {
-		ID string `json:"id"`
-	}
+	var deps []depRef
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
 		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
+	}
+
+	// bd dep list --type=tracks joins against the issues table, which
+	// silently drops cross-database dependencies (external:<rig>:<id> edges)
+	// and only warns on stderr (see GH #2624, #2832). Fall back to bd show,
+	// which returns the convoy's raw dependency list without that join, and
+	// filter to "tracks" edges client-side (gt-q0is).
+	if len(deps) == 0 {
+		deps, err = f.bdShowTrackedDeps(convoyID)
+		if err != nil {
+			return nil, fmt.Errorf("fallback show for tracked deps of %s: %w", convoyID, err)
+		}
 	}
 
 	// Collect resolved issue IDs, unwrapping external:prefix:id format
@@ -438,6 +449,40 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 	}
 
 	return result, nil
+}
+
+// bdShowTrackedDeps falls back to `bd show <convoyID> --json` and extracts
+// "tracks" dependency edges from the convoy's raw dependency list. Unlike
+// `bd dep list --type=tracks`, this avoids the join against the issues
+// table that silently drops cross-database (external:<rig>:<id>) edges
+// (see GH #2624, #2832).
+func (f *LiveConvoyFetcher) bdShowTrackedDeps(convoyID string) ([]depRef, error) {
+	stdout, err := f.runBdCmd(f.townRoot, "show", convoyID, "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var results []struct {
+		Dependencies []struct {
+			ID             string `json:"id"`
+			DependencyType string `json:"dependency_type"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+		return nil, fmt.Errorf("parsing show for %s: %w", convoyID, err)
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	var deps []depRef
+	for _, dep := range results[0].Dependencies {
+		if dep.DependencyType != "tracks" {
+			continue
+		}
+		deps = append(deps, depRef{ID: dep.ID})
+	}
+	return deps, nil
 }
 
 // issueDetail holds basic issue info.
@@ -577,58 +622,6 @@ func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time
 
 	activity := time.Unix(activityUnix, 0)
 	return &activity
-}
-
-// getAllPolecatActivity returns the most recent activity from any running polecat session.
-// This is used as a fallback when no specific assignee activity can be determined.
-// Returns nil if no polecat sessions are running.
-func (f *LiveConvoyFetcher) getAllPolecatActivity() *time.Time {
-	// List all tmux sessions matching gt-*-* pattern (polecat sessions)
-	// Format: gt-{rig}-{polecat}
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}|#{session_activity}")
-	if err != nil {
-		return nil
-	}
-
-	var mostRecent time.Time
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.Split(line, "|")
-		if len(parts) < 2 {
-			continue
-		}
-
-		sessionName := parts[0]
-		// Check if it's a polecat or crew session (skip infrastructure roles).
-		// Use the fetcher's own registry to avoid dependency on global
-		// DefaultRegistry initialization (gt-y24).
-		identity, err := session.ParseSessionNameWithRegistry(sessionName, f.registry)
-		if err != nil {
-			continue
-		}
-		if identity.Role != session.RolePolecat && identity.Role != session.RoleCrew {
-			continue
-		}
-
-		var activityUnix int64
-		if _, err := fmt.Sscanf(parts[1], "%d", &activityUnix); err != nil || activityUnix == 0 {
-			continue
-		}
-
-		activityTime := time.Unix(activityUnix, 0)
-		if activityTime.After(mostRecent) {
-			mostRecent = activityTime
-		}
-	}
-
-	if mostRecent.IsZero() {
-		return nil
-	}
-	return &mostRecent
 }
 
 // calculateWorkStatus determines the work status based on progress and activity.
