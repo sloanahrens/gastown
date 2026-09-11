@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -148,6 +151,132 @@ func resolvePreVerifiedClaim(requested bool, townRoot, rigName string) (honor bo
 		return false, "ignoring --pre-verified: rig has no configured gate commands (setup/typecheck/lint/test/build) — there is nothing to have verified"
 	}
 	return true, ""
+}
+
+// preVerificationStamp holds the pre_verified_* fields to append to the MR
+// bead description once a --pre-verified gate run is trusted.
+type preVerificationStamp struct {
+	verifiedBase string
+	gateSetSHA   string
+	logSHA256    string
+}
+
+// resolvePreVerification runs (and gates trust in) the --pre-verified check
+// that gt done stamps into the MR bead. It refuses to stamp — returning
+// ok=false with a warning instead — when the branch's HEAD does not
+// actually contain the resolved target base as an ancestor.
+//
+// --pre-verified disables autoRebaseOnTarget (done_rebase.go), so a branch
+// left behind the target runs gates at its own (stale) HEAD; without this
+// check the stamp would record pre_verified_base=<target HEAD the branch
+// never rebased onto>, and the refinery's fast-path would then skip gates
+// on a merged tree nothing ever verified (om-gate T8 review finding).
+func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig) (preVerificationStamp, bool, string) {
+	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
+	verifiedBase, baseErr := g.Rev(verifiedBaseRef)
+	if baseErr != nil {
+		return preVerificationStamp{}, false, fmt.Sprintf("could not resolve %s for pre-verified base: %v (skipping pre-verification)", verifiedBaseRef, baseErr)
+	}
+
+	ancestor, ancErr := g.IsAncestor(verifiedBase, "HEAD")
+	if ancErr != nil {
+		return preVerificationStamp{}, false, fmt.Sprintf("could not verify %s is an ancestor of HEAD: %v (skipping pre-verification)", shortSHA(verifiedBase), ancErr)
+	}
+	if !ancestor {
+		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: HEAD does not contain %s (branch is behind %s and --pre-verified skips auto-rebase) — refusing to stamp a base the branch was never verified against; rebase onto %s and retry", shortSHA(verifiedBase), target, target)
+	}
+
+	result, runErr := runPreVerificationGates(worktree, mq)
+	if runErr != nil {
+		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: could not run gates: %v (MR will not carry the pre-verified stamp)", runErr)
+	}
+	if !result.success {
+		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: gate %q failed (exit %d) — see %s; MR will not carry the pre-verified stamp", result.failedGate, result.exitCode, result.logPath)
+	}
+
+	return preVerificationStamp{
+		verifiedBase: verifiedBase,
+		gateSetSHA:   config.GateSetSHA(mq),
+		logSHA256:    result.logSHA256,
+	}, true, ""
+}
+
+// preVerificationResult is the outcome of runPreVerificationGates.
+type preVerificationResult struct {
+	success    bool
+	failedGate string // name of the gate that failed; empty on success or no-op
+	exitCode   int    // failing gate's exit code, or 0 on success/no-op
+	logPath    string // path to the captured combined stdout/stderr log
+	logSHA256  string // sha256 hex digest of the log; empty unless success
+}
+
+// runPreVerificationGates performs the verification `gt done --pre-verified`
+// stamps: it runs each of the rig's configured gate commands, in
+// setup/typecheck/lint/build/test order, in worktree, streaming combined
+// output to <worktree>/.gt-preverify.log. It stops at the first failing
+// gate. There is no path that reports success without this function having
+// actually executed every configured command (om-gate T8 — the prior
+// implementation wrote the stamp on the bare flag alone).
+func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preVerificationResult, error) {
+	type namedGate struct {
+		name string
+		cmd  string
+	}
+	var gates []namedGate
+	if mq != nil {
+		for _, ng := range []namedGate{
+			{"setup", mq.SetupCommand},
+			{"typecheck", mq.TypecheckCommand},
+			{"lint", mq.LintCommand},
+			{"build", mq.BuildCommand},
+			{"test", mq.TestCommand},
+		} {
+			if ng.cmd != "" {
+				gates = append(gates, ng)
+			}
+		}
+	}
+
+	// Written under .runtime/ (constants.DirRuntime) so it is a recognized
+	// runtime artifact (git.go's runtimeArtifactRoot): leaving it untracked
+	// at the worktree root broke CleanExcludingRuntime() and tripped gt
+	// done's uncommitted-work checks on re-runs (om-gate T8 review).
+	logDir := filepath.Join(worktree, constants.DirRuntime)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return preVerificationResult{}, fmt.Errorf("creating pre-verification log dir %s: %w", logDir, err)
+	}
+	logPath := filepath.Join(logDir, "gt-preverify.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return preVerificationResult{}, fmt.Errorf("creating pre-verification log %s: %w", logPath, err)
+	}
+	defer logFile.Close()
+
+	for _, ng := range gates {
+		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
+		// Trust boundary: gate commands come from rig config.json (operator-
+		// controlled infrastructure config), not from PR branches or user
+		// input — same trust boundary as the refinery's own gate runner.
+		cmd := exec.Command("sh", "-c", ng.cmd) //nolint:gosec // G204: command is from trusted rig config
+		cmd.Dir = worktree
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		if runErr := cmd.Run(); runErr != nil {
+			exitCode := -1
+			var exitErr *exec.ExitError
+			if errors.As(runErr, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+			return preVerificationResult{success: false, failedGate: ng.name, exitCode: exitCode, logPath: logPath}, nil
+		}
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		return preVerificationResult{}, fmt.Errorf("reading pre-verification log %s: %w", logPath, err)
+	}
+	sum := sha256.Sum256(logBytes)
+	return preVerificationResult{success: true, logPath: logPath, logSHA256: hex.EncodeToString(sum[:])}, nil
 }
 
 func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
@@ -1858,15 +1987,18 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				style.PrintWarning("%s", preVerifiedWarning)
 			}
 			if honorPreVerified {
-				description += "\npre_verified: true"
-				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
-				// Capture current clean target HEAD as the verified base.
-				// The polecat rebased onto this SHA before running gates.
-				verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
-				if verifiedBase, baseErr := g.Rev(verifiedBaseRef); baseErr == nil {
-					description += fmt.Sprintf("\npre_verified_base: %s", verifiedBase)
-				} else {
-					style.PrintWarning("could not resolve %s for pre-verified base: %v (pre-verification data incomplete)", verifiedBaseRef, baseErr)
+				mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq)
+				if warning != "" {
+					style.PrintWarning("%s", warning)
+				}
+				if ok {
+					description += "\npre_verified: true"
+					description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
+					description += fmt.Sprintf("\npre_verified_base: %s", stamp.verifiedBase)
+					description += fmt.Sprintf("\npre_verified_gates: %s", stamp.gateSetSHA)
+					description += "\npre_verified_exit: 0"
+					description += fmt.Sprintf("\npre_verified_log: %s", stamp.logSHA256)
 				}
 			}
 

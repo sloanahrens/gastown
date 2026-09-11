@@ -650,6 +650,15 @@ type MRFields struct {
 	// verdict note for (refs/notes/om). The push precondition reads this
 	// to find the note without scanning; empty means "never reviewed".
 	EditorialReviewedHead string
+
+	// PreVerifiedGates/Exit/Log make the pre_verified stamp honest (om-gate
+	// T8): `gt done --pre-verified` sets these only after it has itself run
+	// the rig's gate commands and observed a clean exit. The refinery's
+	// fast-path additionally requires PreVerifiedGates to match the rig's
+	// current gate-set hash before trusting the stamp.
+	PreVerifiedGates string // sha256 of the ordered gate-command set (config.GateSetSHA) at verification time
+	PreVerifiedExit  int    // observed exit code of the gate run (always 0 when stamped)
+	PreVerifiedLog   string // sha256 of the captured gate-run log
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -747,6 +756,17 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "editorial_reviewed_head", "editorial-reviewed-head", "editorialreviewedhead":
 			fields.EditorialReviewedHead = value
 			hasFields = true
+		case "pre_verified_gates", "pre-verified-gates", "preverifiedgates":
+			fields.PreVerifiedGates = value
+			hasFields = true
+		case "pre_verified_exit", "pre-verified-exit", "preverifiedexit":
+			if n, err := parseIntField(value); err == nil {
+				fields.PreVerifiedExit = n
+				hasFields = true
+			}
+		case "pre_verified_log", "pre-verified-log", "preverifiedlog":
+			fields.PreVerifiedLog = value
+			hasFields = true
 		}
 	}
 
@@ -832,6 +852,13 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.EditorialReviewedHead != "" {
 		lines = append(lines, "editorial_reviewed_head: "+fields.EditorialReviewedHead)
 	}
+	if fields.PreVerifiedGates != "" {
+		lines = append(lines, "pre_verified_gates: "+fields.PreVerifiedGates)
+		lines = append(lines, fmt.Sprintf("pre_verified_exit: %d", fields.PreVerifiedExit))
+	}
+	if fields.PreVerifiedLog != "" {
+		lines = append(lines, "pre_verified_log: "+fields.PreVerifiedLog)
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -899,6 +926,15 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 		"editorial_reviewed_head": true,
 		"editorial-reviewed-head": true,
 		"editorialreviewedhead":   true,
+		"pre_verified_gates":      true,
+		"pre-verified-gates":      true,
+		"preverifiedgates":        true,
+		"pre_verified_exit":       true,
+		"pre-verified-exit":       true,
+		"preverifiedexit":         true,
+		"pre_verified_log":        true,
+		"pre-verified-log":        true,
+		"preverifiedlog":          true,
 	}
 
 	// Collect non-MR lines from existing description
