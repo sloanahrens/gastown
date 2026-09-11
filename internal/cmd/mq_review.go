@@ -144,6 +144,13 @@ func printMQReviewResult(result editorial.ReviewResult) {
 		switch result.Exit {
 		case 0:
 			fmt.Printf("approve (score %.2f)\n", result.Note.Score)
+			if result.Stderr != "" {
+				// Non-fatal follow-up work that didn't stop the approve
+				// (e.g. filing a major finding's follow-up bead failed) —
+				// DECISION 8 says approval never dissolves a finding, so
+				// surface it rather than dropping it on the success path.
+				fmt.Fprintln(os.Stderr, result.Stderr)
+			}
 		case 1:
 			fmt.Printf("request_changes (score %.2f, %d finding(s))\n", result.Note.Score, result.Note.FindingsCount)
 		default:

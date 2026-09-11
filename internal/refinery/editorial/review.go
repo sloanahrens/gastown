@@ -169,6 +169,18 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("rehearsal failed: %v", err), 0)
 		}
 		head = rehearsed
+	} else {
+		// The CLI's --rehearsed flag accepts a ref NAME (e.g. a temp branch),
+		// not necessarily a sha. Resolve it now: everything downstream
+		// (Note.HeadSHA, setEditorialReviewedHead's editorial_reviewed_head)
+		// is documented and consumed as an immutable commit sha, and a ref
+		// name recorded there stops resolving to the reviewed commit the
+		// moment that branch moves or is deleted.
+		resolved, err := deps.Git.Rev(head)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("resolve rehearsed head %q: %v", head, err), 0)
+		}
+		head = resolved
 	}
 
 	mergeBase, err := deps.Git.MergeBase("origin/"+req.Target, head)
@@ -357,17 +369,28 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 
 // Rehearse fetches origin and merges origin/<branch> into a temp branch cut
 // from origin/<target>, returning the resulting head sha so the review sees
-// exactly what would land. Callers that already rehearsed (or are
-// re-reviewing a fixed head) pass ReviewRequest.RehearsedHead instead and
-// skip this. Leaves the temp branch behind (pre-existing for this
-// single-invocation path — see RehearseBranch for the batch path, which
-// cleans up after itself).
+// exactly what would land, then restores RepoDir to target and deletes the
+// temp branch. Callers that already rehearsed (or are re-reviewing a fixed
+// head) pass ReviewRequest.RehearsedHead instead and skip this.
+//
+// RepoDir for the single-invocation `gt mq review` CLI path (the only
+// caller that reaches this) is the refinery's live clone
+// (refinery/rig — see doMQReview), not a throwaway checkout, so leaving it
+// stranded on a gt-mq-review-* branch mutates shared state other refinery
+// operations depend on being on target. The batch path never calls this —
+// it uses RehearseBranch directly and performs its own equivalent cleanup
+// across multiple candidates before running any gate scripts.
 func Rehearse(g *git.Git, target, branch string) (string, error) {
 	if err := g.Fetch("origin"); err != nil {
 		return "", fmt.Errorf("fetch origin: %w", err)
 	}
-	head, _, err := RehearseBranch(g, target, branch)
-	return head, err
+	head, tempBranch, err := RehearseBranch(g, target, branch)
+	if err != nil {
+		return "", err
+	}
+	_ = g.Checkout(target)
+	_ = g.DeleteBranch(tempBranch, true)
+	return head, nil
 }
 
 // RehearseBranch is Rehearse without the origin fetch, returning the temp

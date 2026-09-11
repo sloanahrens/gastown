@@ -155,6 +155,14 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 			mr.EditorialReviewedHead = r.Note.HeadSHA
 			approved = append(approved, mr)
 			notes[mr.ID] = r.Note
+			if r.Stderr != "" {
+				// Non-fatal follow-up work that didn't stop the approve
+				// (e.g. filing a major finding's follow-up bead failed) —
+				// DECISION 8 says approval never dissolves a finding, so
+				// surface it rather than dropping it silently now that the
+				// approve path is otherwise quiet.
+				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: approved with warning: %s\n", mr.ID, r.Stderr)
+			}
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial review exit=%d, dropped from batch (left queued)\n", mr.ID, r.Exit)
 		}

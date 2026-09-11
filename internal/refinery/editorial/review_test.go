@@ -28,6 +28,9 @@ type reviewStore struct {
 	beadsdk.Storage
 	issues map[string]*beadsdk.Issue
 	nextID int
+	// failCreate makes CreateIssue fail, standing in for a follow-up bead
+	// filing failure on an otherwise-successful approve.
+	failCreate bool
 }
 
 func newReviewStore(issues ...*beadsdk.Issue) *reviewStore {
@@ -74,6 +77,9 @@ func (s *reviewStore) UpdateIssue(_ context.Context, id string, updates map[stri
 }
 
 func (s *reviewStore) CreateIssue(_ context.Context, issue *beadsdk.Issue, actor string) error {
+	if s.failCreate {
+		return fmt.Errorf("simulated create failure")
+	}
 	s.nextID++
 	issue.ID = fmt.Sprintf("gt-followup-%d", s.nextID)
 	issue.CreatedAt = time.Now()
@@ -549,6 +555,41 @@ func TestRun_ApproveWithMajorFindingsFilesFollowups(t *testing.T) {
 	}
 }
 
+// TestRun_ApproveFollowupFilingFailureSurfacedInStderr covers the majors
+// finding that a follow-up filing failure on an approve verdict was silently
+// swallowed: fileFollowups' error must still reach ReviewResult.Stderr so an
+// approve-path caller can surface it, rather than the approve looking clean.
+func TestRun_ApproveFollowupFilingFailureSurfacedInStderr(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	store.failCreate = true
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
+				Score: 0.75, Verdict: "approve",
+				Findings: []verdictFinding{{Title: "leaky abstraction", Severity: "major"}},
+			})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (approval must still stand — DECISION 8)", result.Exit)
+	}
+	if len(result.Note.Followups) != 0 {
+		t.Fatalf("Note.Followups = %v, want none (filing failed)", result.Note.Followups)
+	}
+	if result.Stderr == "" {
+		t.Fatal("Stderr is empty, want the follow-up filing failure surfaced")
+	}
+}
+
 func TestRun_RehearsesWhenNoRehearsedHeadGiven(t *testing.T) {
 	fakeBDForReview(t)
 
@@ -635,5 +676,69 @@ func TestRun_RehearsesWhenNoRehearsedHeadGiven(t *testing.T) {
 	}
 	if result.Note.HeadSHA == branchHead {
 		t.Fatalf("rehearsed head should be a merge commit, not the bare branch head %q", branchHead)
+	}
+
+	// RepoDir here is the CLI's shared clone (real usage: the refinery's own
+	// refinery/rig) — self-rehearsal must not leave it stranded on a
+	// throwaway gt-mq-review-* branch, and must not leave that branch lying
+	// around either.
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if branch != "main" {
+		t.Fatalf("RepoDir left on branch %q after rehearsal, want main", branch)
+	}
+	leftover, err := g.ListBranches("gt-mq-review-*")
+	if err != nil {
+		t.Fatalf("ListBranches: %v", err)
+	}
+	if len(leftover) != 0 {
+		t.Fatalf("rehearsal temp branch(es) not cleaned up: %v", leftover)
+	}
+}
+
+// TestRun_ResolvesRehearsedRefToSHA covers the --rehearsed CLI flag, which
+// accepts any ref (branch name, not necessarily a sha already). Note.HeadSHA
+// and editorial_reviewed_head must record the resolved commit sha so they
+// still identify the reviewed commit after the ref moves or is deleted —
+// not the ref name itself.
+func TestRun_ResolvesRehearsedRefToSHA(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	g := git.NewGit(fixture.repoDir)
+	if err := g.CreateBranchFrom("rehearsed-ref", fixture.head); err != nil {
+		t.Fatalf("create rehearsed-ref branch: %v", err)
+	}
+
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      g,
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = "rehearsed-ref"
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Note.HeadSHA != fixture.head {
+		t.Errorf("Note.HeadSHA = %q, want resolved sha %q, not the ref name", result.Note.HeadSHA, fixture.head)
+	}
+
+	updated, err := store.GetIssue(context.Background(), "gt-mr-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
+	if fields == nil || fields.EditorialReviewedHead != fixture.head {
+		t.Errorf("editorial_reviewed_head = %v, want resolved sha %s, not the ref name", fields, fixture.head)
 	}
 }
