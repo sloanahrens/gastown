@@ -1010,6 +1010,11 @@ func DefaultBase() *HooksConfig {
 		// self-filters and needs no If — one bare-Bash entry covers every
 		// pattern it used to need a dead-duplicate matcher for (gt-nqcy's
 		// find/bfs/fd/rg/du/grep -r/ls -R matchers included).
+		// container-suite is the same self-filtering shape: it inspects
+		// tool_input.command for a bare go test/make test on a
+		// testcontainers-backed package and blocks it in polecat/refinery
+		// context unless already wrapped in 'gt slot run' (see
+		// tap_guard_container_suite.go, gt-e2rs).
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash",
@@ -1032,6 +1037,10 @@ func DefaultBase() *HooksConfig {
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard dangerous-command"),
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard container-suite"),
 					},
 				},
 			},

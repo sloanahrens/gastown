@@ -25,6 +25,7 @@ Available guards:
   mol-patrol         - Block mol patrol from agent contexts
   dangerous-command  - Block rm -rf, force push, hard reset, git clean
   formula-allowlist  - Constrain dog sessions to their formula's declared commands
+  container-suite    - Block unwrapped go test/make test on testcontainers-backed packages
 
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
