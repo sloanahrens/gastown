@@ -17,8 +17,14 @@ func TestAcceptWorkspaceTrustDialog_NoDialog(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Session starts with a shell prompt containing ">", "$", or "%"
+	// Session starts with a shell prompt containing ">", "$", or "%".
 	// The polling loop should exit early when it sees the prompt.
+	//
+	// Wait for that prompt before starting the clock: the early exit is
+	// triggered BY the prompt indicator, so timing from session creation would
+	// measure how long the login shell took to start, not the function (gt-32pv).
+	waitForShellPrompt(t, tm, sessionName)
+
 	start := time.Now()
 	err := tm.AcceptWorkspaceTrustDialog(sessionName)
 	elapsed := time.Since(start)
@@ -27,9 +33,11 @@ func TestAcceptWorkspaceTrustDialog_NoDialog(t *testing.T) {
 		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
 	}
 
-	// Should complete well before the 8s timeout since prompt is visible
-	if elapsed > 6*time.Second {
-		t.Errorf("took %v, expected early exit (< 6s)", elapsed)
+	// With the prompt already on screen the loop should exit on its first
+	// capture. 2s allows for a slow capture-pane call while still catching a
+	// run that burned the full DialogPollTimeout (8s).
+	if elapsed > 2*time.Second {
+		t.Errorf("took %v, expected early exit once prompt is visible (< 2s)", elapsed)
 	}
 }
 
@@ -95,6 +103,11 @@ func TestAcceptBypassPermissionsWarning_NoDialog(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
+	// Wait for the prompt before starting the clock: the early exit under test
+	// is triggered BY the prompt indicator, so timing from session creation
+	// would measure login-shell startup instead (gt-32pv).
+	waitForShellPrompt(t, tm, sessionName)
+
 	start := time.Now()
 	err := tm.AcceptBypassPermissionsWarning(sessionName)
 	elapsed := time.Since(start)
@@ -103,8 +116,11 @@ func TestAcceptBypassPermissionsWarning_NoDialog(t *testing.T) {
 		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
 	}
 
-	if elapsed > 6*time.Second {
-		t.Errorf("took %v, expected early exit (< 6s)", elapsed)
+	// With the prompt already on screen the loop should exit on its first
+	// capture. 2s allows for a slow capture-pane call while still catching a
+	// run that burned the full DialogPollTimeout (8s).
+	if elapsed > 2*time.Second {
+		t.Errorf("took %v, expected early exit once prompt is visible (< 2s)", elapsed)
 	}
 }
 
@@ -144,6 +160,11 @@ func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
+	// Wait for the prompt before starting the clock: both dialog checks
+	// early-exit on the prompt indicator, so timing from session creation would
+	// measure login-shell startup instead (gt-32pv).
+	waitForShellPrompt(t, tm, sessionName)
+
 	start := time.Now()
 	err := tm.AcceptStartupDialogs(sessionName)
 	elapsed := time.Since(start)
@@ -152,9 +173,11 @@ func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
 		t.Fatalf("AcceptStartupDialogs: %v", err)
 	}
 
-	// Both dialog checks should early-exit when prompt is visible
-	if elapsed > 12*time.Second {
-		t.Errorf("took %v, expected faster completion", elapsed)
+	// Both dialog checks should early-exit on their first capture now that the
+	// prompt is visible. 4s allows two slow capture-pane calls while still
+	// catching a run that burned a full DialogPollTimeout (8s) on either check.
+	if elapsed > 4*time.Second {
+		t.Errorf("took %v, expected early exit once prompt is visible (< 4s)", elapsed)
 	}
 }
 

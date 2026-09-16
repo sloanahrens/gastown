@@ -31,6 +31,43 @@ func newTestTmux(t *testing.T) *Tmux {
 	return NewTmux()
 }
 
+// shellPromptWaitTimeout bounds the wait for a new session's first shell
+// prompt. 30s is roughly six times the slowest startup measured on a machine
+// with a heavy interactive rc, so hitting it means the environment is broken
+// rather than merely slow.
+const shellPromptWaitTimeout = 30 * time.Second
+
+// shellPromptPollInterval is how often waitForShellPrompt re-checks the pane.
+const shellPromptPollInterval = 100 * time.Millisecond
+
+// waitForShellPrompt blocks until the session's pane shows a shell prompt,
+// which is the precondition a number of tmux tests silently assume.
+//
+// tmux runs the user's login shell as the pane's initial process, so the first
+// prompt is not free: on a machine whose ~/.zshrc sources something slow
+// (nvm.sh and the node it pulls in, for instance) it took 4.4-5.4s to appear
+// in every new session (gt-32pv). Tests that start measuring before the prompt
+// is up are measuring shell startup rather than the code under test:
+// AcceptWorkspaceTrustDialog and AcceptBypassPermissionsWarning both early-exit
+// on a prompt indicator, and sendEnterVerified decides whether Enter was
+// processed by comparing pane content before and after — none of that is
+// meaningful against a still-blank pane.
+//
+// Skips rather than fails when the prompt never appears: an absent shell prompt
+// is an environment fault, not a product defect.
+func waitForShellPrompt(t *testing.T, tm *Tmux, session string) {
+	t.Helper()
+	deadline := time.Now().Add(shellPromptWaitTimeout)
+	for time.Now().Before(deadline) {
+		if content, err := tm.CapturePane(session, 30); err == nil && containsPromptIndicator(content) {
+			return
+		}
+		time.Sleep(shellPromptPollInterval)
+	}
+	t.Skipf("no shell prompt in %s after %s; the environment cannot supply this test's precondition (gt-32pv)",
+		session, shellPromptWaitTimeout)
+}
+
 func TestListSessionsNoServer(t *testing.T) {
 	tm := newTestTmux(t)
 	sessions, err := tm.ListSessions()
@@ -1920,8 +1957,11 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Give shell a moment to initialize
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the shell prompt rather than a fixed 200ms. sendEnterVerified
+	// decides whether Enter was processed by diffing pane content across the
+	// keystroke, so against a still-blank pane the nudge reports "pane content
+	// unchanged" even though the keystroke landed (gt-32pv).
+	waitForShellPrompt(t, tm, sessionName)
 
 	// NudgeSession should succeed on a ready session
 	err := tm.NudgeSession(sessionName, "test message")
@@ -1939,7 +1979,12 @@ func TestNudgeSession_WithStoredPaneID(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the shell prompt rather than a fixed 200ms: sendEnterVerified
+	// diffs pane content across the Enter, so nudging a still-blank pane fails
+	// with "pane content unchanged" (gt-32pv). The extra GetPaneID and
+	// SetEnvironment calls below push the nudge past any fixed margin, so this
+	// wait is what makes the test deterministic rather than merely slower.
+	waitForShellPrompt(t, tm, sessionName)
 
 	paneID, err := tm.GetPaneID(sessionName)
 	if err != nil {
@@ -1974,7 +2019,12 @@ func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the shell prompt rather than a fixed 200ms: sendEnterVerified
+	// diffs pane content across the Enter, so nudging a still-blank pane fails
+	// with "pane content unchanged" (gt-32pv). Opening the second window below
+	// adds another login-shell startup, which pushes the nudge past any fixed
+	// margin — this wait is what makes the test deterministic.
+	waitForShellPrompt(t, tm, sessionName)
 
 	// The agent pane is window 0's pane. Record it as the declared identity so
 	// FindAgentPane resolves the nudge target to it.
@@ -2160,7 +2210,11 @@ func TestNudgeSession_StalePaneIDFallsBackToFirstPane(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(otherSession) }()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the shell prompt rather than a fixed 200ms: this test asserts
+	// NudgeSession returns no error, and sendEnterVerified reports "pane
+	// content unchanged" when the targeted pane is still blank (gt-32pv).
+	waitForShellPrompt(t, tm, sessionName)
+
 	otherPane, err := tm.GetPaneID(otherSession)
 	if err != nil {
 		t.Fatalf("GetPaneID other: %v", err)
