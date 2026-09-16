@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dangerous-command guard now covers the town tree** (gt-6e2l) — a dog
+  session's `grep -R "record-run" -n /Users/sloan/gt` ran unblocked and
+  walked every rig, every `.repo.git`, and every worktree in the town (>64 MB
+  of output, 15-minute load average 17). The unbounded-scan rule
+  (`scanRootDenylist`) covered `/` and `$HOME` but not the town, which is the
+  largest tree on the host. `matchesUnboundedScan` now also blocks
+  `find`/`bfs`/`fd`/`rg`/`ag`/`du`, `grep -r`, and `ls -R` rooted at the town
+  root, at anything directly under it (every rig root, plus the town's own
+  `.dolt-data`/`logs`/`mayor`), at a rig's worktree-holding directories
+  (`polecats`, `crew`, `refinery`, `witness`, `mayor` — derived from
+  `rig.AgentDirs`), or at any `.repo.git`. A path inside a single repo or
+  worktree is still allowed, and scan roots reached through `~`, `$HOME`,
+  relative paths (`.`, `..`, `./x`), a shell variable assignment, or a nested
+  `bash -c`/`$(...)` payload all resolve before being classified. Both the
+  guard's `--help` text and the block banner's alternative line name the
+  allowed shape.
+
 - **Cross-rig event theft on refinery/witness channels** (gt-dsj) — the
   `refinery` and `witness` event channels were town-global directories
   (`~/gt/events/<channel>/`) but every rig's agent consumed them with
