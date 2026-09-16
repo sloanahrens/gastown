@@ -154,7 +154,7 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 		}
 	})
 
-	t.Run("max_polecats=1 stores as int not bool", func(t *testing.T) {
+	t.Run("max_polecats=1 stores as number not bool", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
 		rigConfigSetGlobal = false
@@ -171,14 +171,15 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 			t.Fatal("expected max_polecats to be set in wisp layer")
 		}
 		if _, ok := val.(bool); ok {
-			t.Errorf("max_polecats=1 was stored as bool (true), want int(1)")
+			t.Errorf("max_polecats=1 was stored as bool (true), want numeric (got %T)", val)
 		}
-		if n, ok := val.(int); !ok || n != 1 {
-			t.Errorf("max_polecats=1 = %T(%v), want int(1)", val, val)
+		// wisp layer stores numbers as float64 (JSON encoding)
+		if f, ok := val.(float64); !ok || f != 1 {
+			t.Errorf("max_polecats=1 = %T(%v), want float64(1)", val, val)
 		}
 	})
 
-	t.Run("max_polecats=0 stores as int not bool", func(t *testing.T) {
+	t.Run("max_polecats=0 stores as number not bool", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
 		rigConfigSetGlobal = false
@@ -194,8 +195,8 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 		if val == nil {
 			t.Fatal("expected max_polecats to be set in wisp layer")
 		}
-		if n, ok := val.(int); !ok || n != 0 {
-			t.Errorf("max_polecats=0 = %T(%v), want int(0)", val, val)
+		if f, ok := val.(float64); !ok || f != 0 {
+			t.Errorf("max_polecats=0 = %T(%v), want float64(0)", val, val)
 		}
 	})
 
@@ -205,7 +206,9 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 		rigConfigSetGlobal = false
 		rigConfigSetBlock = false
 
-		for _, v := range []string{"true", "false", "yes", "no", "1", "0"} {
+		// strconv.ParseBool only accepts true/false/1/0/t/f (case-insensitive).
+		// "yes"/"no" are NOT accepted by strconv.ParseBool — they stay as strings.
+		for _, v := range []string{"true", "false", "1", "0"} {
 			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", v})
 			if err != nil {
 				t.Fatalf("runRigConfigSet auto_restart=%q: %v", v, err)
@@ -216,13 +219,26 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 			if val == nil {
 				t.Fatalf("expected auto_restart to be set for value %q", v)
 			}
-			// "true"/"false"/"yes"/"no" should be bool
-			// "1"/"0" should be int (Atoi wins over ParseBool)
-			switch val.(type) {
-			case bool, int:
-				// acceptable
-			default:
-				t.Errorf("auto_restart=%q = %T(%v), want bool or int", v, val, val)
+			// true/false → bool (not numeric, since Atoi doesn't accept them)
+			if _, ok := val.(bool); !ok {
+				t.Errorf("auto_restart=%q = %T(%v), want bool", v, val, val)
+			}
+		}
+
+		// 1/0 → numeric (Atoi wins over ParseBool, wisp stores as float64)
+		for _, v := range []string{"1", "0"} {
+			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", v})
+			if err != nil {
+				t.Fatalf("runRigConfigSet auto_restart=%q: %v", v, err)
+			}
+
+			wispCfg := wisp.NewConfig(townRoot, rigName)
+			val := wispCfg.Get("auto_restart")
+			if val == nil {
+				t.Fatalf("expected auto_restart to be set for value %q", v)
+			}
+			if _, ok := val.(float64); !ok {
+				t.Errorf("auto_restart=%q = %T(%v), want float64", v, val, val)
 			}
 		}
 	})
