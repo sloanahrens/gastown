@@ -29,6 +29,13 @@ const (
 	// waits for the container-gate slot before giving up on a rig's run,
 	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
 	mainBranchTestSlotTimeout = 60 * time.Minute
+
+	// mainBranchTestSetupTimeout bounds the git fetch/worktree-add/rev-parse
+	// steps that run before the container-gate slot is acquired. Kept
+	// separate from the per-rig test timeout so a long slot wait (up to
+	// mainBranchTestSlotTimeout) never eats into the budget the actual gate
+	// command gets to run (gt-uvxy).
+	mainBranchTestSetupTimeout = 5 * time.Minute
 )
 
 // diagnosticLinePattern matches the lines worth surfacing from a failing
@@ -182,6 +189,23 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	return cfg, nil
 }
 
+// triggerMainBranchTests starts a main_branch_test cycle on its own
+// goroutine, guarded by mainBranchTestRunning so an overlapping tick is
+// skipped rather than stacking a second concurrent cycle on top of one still
+// waiting on a container-gate slot or mid-run (gt-uvxy). Returns true if a
+// cycle was started, false if one was already in progress.
+func (d *Daemon) triggerMainBranchTests() bool {
+	if !d.mainBranchTestRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("main_branch_test: previous cycle still running, skipping this tick")
+		return false
+	}
+	go func() {
+		defer d.mainBranchTestRunning.Store(false)
+		d.runMainBranchTests()
+	}()
+	return true
+}
+
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates failures.
 func (d *Daemon) runMainBranchTests() {
@@ -264,11 +288,14 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		_ = cleanupCmd.Run()
 	}
 
-	ctx, cancel := context.WithTimeout(d.ctx, timeout)
-	defer cancel()
+	// Setup (fetch + worktree add + commit lookup) runs on its own bounded
+	// context, separate from the test-run timeout created below after the
+	// slot is held — see mainBranchTestSetupTimeout's comment.
+	setupCtx, setupCancel := context.WithTimeout(d.ctx, mainBranchTestSetupTimeout)
+	defer setupCancel()
 
 	// Fetch latest main
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", defaultBranch)
+	fetchCmd := exec.CommandContext(setupCtx, "git", "fetch", "origin", defaultBranch)
 	fetchCmd.Dir = bareRepoPath
 	util.SetDetachedProcessGroup(fetchCmd)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
@@ -276,7 +303,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	}
 
 	// Create temporary worktree at origin/<default_branch>
-	addCmd := exec.CommandContext(ctx, "git", "worktree", "add", "--detach", worktreePath, "origin/"+defaultBranch)
+	addCmd := exec.CommandContext(setupCtx, "git", "worktree", "add", "--detach", worktreePath, "origin/"+defaultBranch)
 	addCmd.Dir = bareRepoPath
 	util.SetDetachedProcessGroup(addCmd)
 	if output, err := addCmd.CombinedOutput(); err != nil {
@@ -293,7 +320,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		}
 	}()
 
-	commit := d.commitTested(ctx, rigName, worktreePath)
+	commit := d.commitTested(setupCtx, rigName, worktreePath)
 
 	// Acquire the container-gate slot before running gates/tests: this
 	// baseline run spins the same Docker-backed suites (Dolt, testcontainers)
@@ -308,11 +335,20 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	}
 	defer h.Release()
 
+	// The test-run timeout starts here, after the slot is held, not at the
+	// top of this function — a slot wait can take up to
+	// mainBranchTestSlotTimeout (60m), and starting the clock before that
+	// wait handed the gate command an already-expired context, producing a
+	// "context deadline exceeded" false red with no evidence the command
+	// itself ever ran (gt-uvxy).
+	runCtx, runCancel := context.WithTimeout(d.ctx, timeout)
+	defer runCancel()
+
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
-		return d.runGatesOnWorktree(ctx, rigName, commit, worktreePath, gateCfg.Gates)
+		return d.runGatesOnWorktree(runCtx, rigName, commit, worktreePath, gateCfg.Gates)
 	}
-	return d.runCommandOnWorktree(ctx, rigName, commit, worktreePath, "test", gateCfg.TestCommand)
+	return d.runCommandOnWorktree(runCtx, rigName, commit, worktreePath, "test", gateCfg.TestCommand)
 }
 
 // acquireMainBranchTestSlot acquires the container-gate slot for a rig's
