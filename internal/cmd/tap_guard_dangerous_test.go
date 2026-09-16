@@ -229,7 +229,7 @@ func TestNestedShellCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0)
+			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -254,7 +254,7 @@ func TestQuotedSQLStaysOpaque(t *testing.T) {
 	}
 	for _, command := range tests {
 		t.Run(command, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(command, 0)
+			reason, _ := evaluateDangerousCommand(command, 0, "")
 			if reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted SQL must stay opaque", command, reason)
 			}
@@ -278,7 +278,7 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0)
+			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -332,7 +332,7 @@ func TestMatchesUnboundedScan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command))
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -407,7 +407,7 @@ func TestGtMkrjRegressions(t *testing.T) {
 			if reason := matchesDangerousGitPush(lower); reason != "" {
 				t.Fatalf("matchesDangerousGitPush false-fired: %q", reason)
 			}
-			if reason, _ := matchesUnboundedScan(tokens); reason != "" {
+			if reason, _ := matchesUnboundedScan(tokens, ""); reason != "" {
 				t.Fatalf("matchesUnboundedScan false-fired: %q", reason)
 			}
 			for _, p := range fragmentPatterns {
@@ -435,7 +435,7 @@ func TestGluedOperatorsAreBlocked(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason == "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (glued operator hid a dangerous fragment)", tt.command)
 			}
 		})
@@ -449,7 +449,7 @@ func TestGluedOperatorsAreBlocked(t *testing.T) {
 // the same invariant on other matchers.
 func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
 	command := `sed -i '' "s|OLD|jq -r '.[] // []'|" watch.sh`
-	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted operators must stay opaque", command, reason)
 	}
 }
@@ -468,7 +468,7 @@ func TestShellVariableScanRootIsBlocked(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason == "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (shell variable indirection hid an unbounded scan root)", tt.command)
 			}
 		})
@@ -481,7 +481,7 @@ func TestShellVariableScanRootIsBlocked(t *testing.T) {
 // root should block.
 func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
 	command := "x=./src; bfs $x -name regex.h"
-	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — variable resolves to a bounded path", command, reason)
 	}
 }
@@ -503,7 +503,7 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0); reason != "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — heredoc body is data", tt.command, reason)
 			}
 		})
@@ -515,7 +515,7 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 // second, genuinely dangerous command after the terminator — intact.
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	command := "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /"
-	if reason, _ := evaluateDangerousCommand(command, 0); reason == "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
 		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — real command after heredoc must still be checked", command)
 	}
 }
@@ -529,7 +529,7 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 // fabricated a dangerous command line that was never actually live.
 func TestNestedShellCPositionalArgsAreNotConcatenated(t *testing.T) {
 	command := `bash -c "echo a" "&&" "rm -rf /"`
-	if reason, _ := evaluateDangerousCommand(command, 0); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — extra -c args are positional params, not appended command text", command, reason)
 	}
 }
@@ -662,6 +662,9 @@ func TestHookMatchersRouteKnownDangerousCommands(t *testing.T) {
 		{"du rooted at root", "du -sh /"},
 		{"grep -r rooted at root", "grep -r TODO /"},
 		{"grep -rn bundled flags rooted at root", "grep -rn TODO /"},
+		// The gt-6e2l report shape: a town-root scan must reach the guard.
+		// Town-root resolution itself is exercised in tap_guard_town_scan_test.go.
+		{"grep -R over a town root (gt-6e2l)", `grep -R "record-run" -n /Users/me/gt`},
 		{"ls -R rooted at root", "ls -R /"},
 		{"ls -laR bundled flags rooted at root", "ls -laR /"},
 		{"rm -rf root", "rm -rf /"},
@@ -695,7 +698,7 @@ func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
 				// Being routed to the guard isn't itself a failure — the guard
 				// must still allow it. Confirm that's actually what happens.
 				lower := lowerTokens(command)
-				if reason, _ := matchesUnboundedScan(shellTokenize(command)); reason != "" {
+				if reason, _ := matchesUnboundedScan(shellTokenize(command), ""); reason != "" {
 					t.Fatalf("command %q reached the dangerous-command guard and was blocked: %q", command, reason)
 				}
 				if matchesDangerousRmRf(lower) != "" || matchesDangerousGitPush(lower) != "" {
