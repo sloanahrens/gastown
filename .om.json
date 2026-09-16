@@ -1,9 +1,7 @@
 {
   "backend": [
-    "claude",
-    "-p",
-    "--model",
-    "opus"
+    "/Users/sloan/.local/bin/claude-deepseek-pro",
+    "-p"
   ],
   "threshold": 0.6,
   "depth": "standard",
