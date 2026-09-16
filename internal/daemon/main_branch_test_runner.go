@@ -120,8 +120,9 @@ func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
 
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
 type rigGateConfig struct {
-	TestCommand string
-	Gates       map[string]string // gate name → command
+	SetupCommand string
+	TestCommand  string
+	Gates        map[string]string // gate name → command
 }
 
 // loadRigGateConfig reads the merge_queue section from a rig's config.json
@@ -148,8 +149,9 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	}
 
 	var mq struct {
-		TestCommand *string                    `json:"test_command"`
-		Gates       map[string]json.RawMessage `json:"gates"`
+		SetupCommand *string                    `json:"setup_command"`
+		TestCommand  *string                    `json:"test_command"`
+		Gates        map[string]json.RawMessage `json:"gates"`
 	}
 	if err := json.Unmarshal(raw.MergeQueue, &mq); err != nil {
 		return nil, fmt.Errorf("parsing merge_queue: %w", err)
@@ -173,6 +175,10 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	// Fall back to legacy test_command
 	if mq.TestCommand != nil && *mq.TestCommand != "" {
 		cfg.TestCommand = *mq.TestCommand
+	}
+
+	if mq.SetupCommand != nil && *mq.SetupCommand != "" {
+		cfg.SetupCommand = *mq.SetupCommand
 	}
 
 	if len(cfg.Gates) == 0 && cfg.TestCommand == "" {
@@ -308,11 +314,31 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	}
 	defer h.Release()
 
-	// Run gates or legacy test command
-	if len(gateCfg.Gates) > 0 {
-		return d.runGatesOnWorktree(ctx, rigName, commit, worktreePath, gateCfg.Gates)
+	return d.runRigGates(ctx, rigName, commit, worktreePath, gateCfg)
+}
+
+// runRigGates runs the configured setup command (if any) followed by gates
+// or the legacy test command, in that order, on the given worktree. Setup
+// runs first, using the same timeout ctx, because a fresh worktree from
+// .repo.git has no installed dependencies — any rig needing an install step
+// (e.g. npm ci for mango's nextapp/jest) would otherwise fail every cycle
+// with a misleading "test failed" when the real problem is "setup failed"
+// (gt-znj8). A missing setup_command is a no-op, so rigs that don't
+// configure one are unaffected. Split out from testRigMainBranch so the
+// setup-then-gates ordering is testable without the git-worktree/bare-repo
+// harness that function requires (gt-znj8, following
+// acquireMainBranchTestSlot's precedent for the same need above).
+func (d *Daemon) runRigGates(ctx context.Context, rigName, commit, workDir string, gateCfg *rigGateConfig) error {
+	if gateCfg.SetupCommand != "" {
+		if err := d.runCommandOnWorktree(ctx, rigName, commit, workDir, "setup", gateCfg.SetupCommand); err != nil {
+			return err
+		}
 	}
-	return d.runCommandOnWorktree(ctx, rigName, commit, worktreePath, "test", gateCfg.TestCommand)
+
+	if len(gateCfg.Gates) > 0 {
+		return d.runGatesOnWorktree(ctx, rigName, commit, workDir, gateCfg.Gates)
+	}
+	return d.runCommandOnWorktree(ctx, rigName, commit, workDir, "test", gateCfg.TestCommand)
 }
 
 // acquireMainBranchTestSlot acquires the container-gate slot for a rig's

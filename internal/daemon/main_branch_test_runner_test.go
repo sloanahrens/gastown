@@ -184,6 +184,59 @@ func TestLoadRigGateConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("setup_command with test_command", func(t *testing.T) {
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"setup_command": "npm ci",
+				"test_command":  "npx jest",
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.SetupCommand != "npm ci" {
+			t.Errorf("expected setup command 'npm ci', got %q", cfg.SetupCommand)
+		}
+		if cfg.TestCommand != "npx jest" {
+			t.Errorf("expected test command 'npx jest', got %q", cfg.TestCommand)
+		}
+	})
+
+	t.Run("missing setup_command unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"test_command": "go test ./...",
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.SetupCommand != "" {
+			t.Errorf("expected empty setup command, got %q", cfg.SetupCommand)
+		}
+		if cfg.TestCommand != "go test ./..." {
+			t.Errorf("expected test command unchanged, got %q", cfg.TestCommand)
+		}
+	})
+
 	t.Run("no test commands", func(t *testing.T) {
 		dir := t.TempDir()
 		data := map[string]interface{}{
@@ -303,6 +356,82 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 		if strings.HasPrefix(strings.TrimSpace(line), "ok") {
 			t.Errorf("expected no passing-package lines in body, got:\n%s", body)
 		}
+	}
+}
+
+// TestRunRigGates_SetupRunsBeforeTest is the regression test for gt-znj8:
+// a fresh worktree has no installed dependencies, so a configured
+// setup_command must run before the test command, in the same call. It
+// writes a marker file so ordering is observed directly rather than
+// inferred from a green run (see the adversarial-test-criterion memory:
+// absence of a failure doesn't prove the right thing ran first).
+func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	marker := filepath.Join(workDir, "setup-ran")
+	gateCfg := &rigGateConfig{
+		SetupCommand: "touch " + shellQuote(marker),
+		TestCommand:  "test -f " + shellQuote(marker),
+	}
+
+	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected setup command to have run, marker file missing: %v", err)
+	}
+}
+
+// TestRunRigGates_SetupFailureReportedAsSetupNotTest is the regression test
+// for gt-znj8's "failure = 'setup failed', not 'test failed'" requirement:
+// a rig missing an installed dependency (e.g. mango's jest) must escalate
+// as a setup failure, not a misleading test failure, and the test command
+// must never run.
+func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	marker := filepath.Join(workDir, "test-ran")
+	gateCfg := &rigGateConfig{
+		SetupCommand: "jest-not-installed", // mimics "sh: jest: command not found" (exit 127)
+		TestCommand:  "touch " + shellQuote(marker),
+	}
+
+	err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg)
+	if err == nil {
+		t.Fatal("expected error from failing setup command")
+	}
+	if !strings.HasPrefix(err.Error(), "setup failed:") {
+		t.Errorf("expected error to be reported as a setup failure, got: %v", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("expected test command to be skipped after setup failure, but it ran")
+	}
+}
+
+// TestRunRigGates_MissingSetupCommandUnchanged is the regression test for
+// gt-znj8's "missing setup_command unchanged" requirement: a rig that never
+// configures setup_command must behave exactly as before this change.
+func TestRunRigGates_MissingSetupCommandUnchanged(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	gateCfg := &rigGateConfig{TestCommand: "exit 0"}
+	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
