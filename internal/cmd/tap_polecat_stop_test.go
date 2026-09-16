@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 const polecatStopTestBranch = "polecat/test/gt-ksnv@abc123"
@@ -114,6 +117,105 @@ func TestPolecatStopPendingWork(t *testing.T) {
 		}
 		if pending {
 			t.Fatalf("pending = true (%s), want false", reason)
+		}
+	})
+}
+
+// TestPolecatStopVerificationRunning guards the turn-boundary fix for
+// gt-couv: the Stop hook must not treat "my own slot-wrapped suite is still
+// running" as abandonment, but a slot held by an unrelated polecat/rig must
+// not falsely suppress the auto-done either.
+func TestPolecatStopVerificationRunning(t *testing.T) {
+	t.Run("no slot held", func(t *testing.T) {
+		townRoot := t.TempDir()
+
+		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+		if busy {
+			t.Fatalf("busy = true (%s), want false when nothing holds the slot", reason)
+		}
+	})
+
+	t.Run("slot held by this polecat", func(t *testing.T) {
+		restore := slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
+		defer restore()
+		townRoot := t.TempDir()
+
+		handle, err := slot.Acquire(townRoot, "gastown/coral", time.Second)
+		if err != nil {
+			t.Fatalf("slot.Acquire: %v", err)
+		}
+		defer handle.Release()
+
+		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+		if !busy {
+			t.Fatal("busy = false, want true when this polecat holds the slot")
+		}
+		if !strings.Contains(reason, "gastown/coral") {
+			t.Fatalf("reason = %q, want it to name the holder gastown/coral", reason)
+		}
+	})
+
+	t.Run("slot held by a different polecat does not suppress", func(t *testing.T) {
+		restore := slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
+		defer restore()
+		townRoot := t.TempDir()
+
+		handle, err := slot.Acquire(townRoot, "gastown/citrine", time.Second)
+		if err != nil {
+			t.Fatalf("slot.Acquire: %v", err)
+		}
+		defer handle.Release()
+
+		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+		if busy {
+			t.Fatalf("busy = true (%s), want false when a different polecat holds the slot", reason)
+		}
+	})
+}
+
+// TestPolecatStopCommittedWithinGrace guards the second turn-boundary signal
+// for gt-couv: a commit that just landed means the polecat is very likely
+// still mid-formula (about to build/lint/test), while an old commit carries
+// no such signal.
+func TestPolecatStopCommittedWithinGrace(t *testing.T) {
+	t.Run("fresh commit is within grace", func(t *testing.T) {
+		repo := initPolecatStopTestRepo(t)
+
+		recent, err := polecatStopCommittedWithinGrace(repo)
+		if err != nil {
+			t.Fatalf("polecatStopCommittedWithinGrace: %v", err)
+		}
+		if !recent {
+			t.Fatal("recent = false, want true for a commit made moments ago")
+		}
+	})
+
+	t.Run("old commit is outside grace", func(t *testing.T) {
+		repo := initPolecatStopTestRepo(t)
+		oldDate := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+		cmd := exec.Command("git", "commit", "--amend", "--no-edit", "--date", oldDate)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+oldDate)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git commit --amend: %v\n%s", err, out)
+		}
+
+		recent, err := polecatStopCommittedWithinGrace(repo)
+		if err != nil {
+			t.Fatalf("polecatStopCommittedWithinGrace: %v", err)
+		}
+		if recent {
+			t.Fatal("recent = true, want false for a 10-minute-old commit")
+		}
+	})
+
+	t.Run("invalid repo fails closed", func(t *testing.T) {
+		recent, err := polecatStopCommittedWithinGrace(t.TempDir())
+		if err == nil {
+			t.Fatal("polecatStopCommittedWithinGrace error = nil, want error")
+		}
+		if recent {
+			t.Fatal("recent = true, want false on error")
 		}
 	})
 }
