@@ -2010,6 +2010,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if preVerifiedWarning != "" {
 				style.PrintWarning("%s", preVerifiedWarning)
 			}
+			fullGatesVerified := false
 			if honorPreVerified {
 				mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
 				// config.CombineGateSetSHA is the SAME function the refinery's
@@ -2024,12 +2025,49 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					style.PrintWarning("%s", warning)
 				}
 				if ok {
+					fullGatesVerified = true
 					description += "\npre_verified: true"
 					description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
 					description += fmt.Sprintf("\npre_verified_base: %s", stamp.verifiedBase)
 					description += fmt.Sprintf("\npre_verified_gates: %s", stamp.gateSetSHA)
 					description += "\npre_verified_exit: 0"
 					description += fmt.Sprintf("\npre_verified_log: %s", stamp.logSHA256)
+				}
+			}
+
+			// gt-h9kf: gt done must itself test at least the branch's changed
+			// packages before an MR can be created — polecats were submitting
+			// with their own new tests never run (2 of 4 gate rejections in a
+			// 90-minute window, each costing a full refinery gate cycle plus a
+			// redispatch). Runs unconditionally unless the polecat already ran
+			// the full gate set via --pre-verified (fullGatesVerified, which
+			// already covers this and more) or explicitly opted out with
+			// --skip-verify. A failure here returns an error and no MR bead is
+			// created — that refusal is the fix.
+			if !doneSkipVerify && !fullGatesVerified {
+				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
+				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
+				verify, verifyErr := runDefaultTestVerification(g, cwd, defaultBranch, target, verifyMQ, townRoot, verifyRole)
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if verify.skipReason != "" {
+					style.PrintWarning("gt done: skipping default test-verify: %s", verify.skipReason)
+				} else if verify.ran {
+					if verify.scope == "packages" {
+						fmt.Printf("%s Default test-verify passed (packages: %s)\n", style.Bold.Render("✓"), strings.Join(verify.packages, " "))
+					} else {
+						fmt.Printf("%s Default test-verify passed (full test_command)\n", style.Bold.Render("✓"))
+					}
+					description += "\ntest_verified: true"
+					description += fmt.Sprintf("\ntest_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
+					description += fmt.Sprintf("\ntest_verified_sha: %s", commitSHA)
+					description += fmt.Sprintf("\ntest_verified_scope: %s", verify.scope)
+					if len(verify.packages) > 0 {
+						description += fmt.Sprintf("\ntest_verified_packages: %s", strings.Join(verify.packages, ","))
+					}
+					description += "\ntest_verified_exit: 0"
+					description += fmt.Sprintf("\ntest_verified_log: %s", verify.logSHA256)
 				}
 			}
 
@@ -2684,6 +2722,14 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+			} else if skipReason := doneCloseTimeInvariantSkipReason(bd, cwd, townRoot, ctx.Rig, hookedBeadID, pendingMRID); skipReason != "" {
+				// gt-6hmz: this routine self-close previously trusted a cached
+				// active_mr field without re-verifying the MR was still open.
+				// Refuse rather than close a bead whose branch carries unmerged
+				// commits with nothing tracking them.
+				style.PrintWarning("%s", skipReason)
+				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
 			} else if pendingMRID != "" {
 				// Transient polecats exit right after gt done, so this issue
 				// is routinely closed seconds after its MR is created — well

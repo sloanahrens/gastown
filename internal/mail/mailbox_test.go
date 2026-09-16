@@ -439,6 +439,50 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 	}
 }
 
+// TestCloseInDirPassesActorMatchingAssignee guards against gt-ovem: mail
+// beads for mayor/deacon are created with assignee "mayor/"/"deacon/"
+// (trailing slash, see AddressToIdentity), but the ambient actor bd would
+// otherwise fall back to (BD_ACTOR/git user.name) is the bare role name
+// without the slash. That mismatch makes bd's assignee==actor close guard
+// reject the close, so `gt mail archive` fails for every mail-based role.
+// closeInDir must pass --actor explicitly using the mailbox's own identity
+// so the close always matches the assignee it was filed under.
+func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake bd is POSIX-only")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	fakeBD := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+if [ "$1" = "close" ]; then
+  exit 0
+fi
+printf 'unexpected bd args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", logPath)
+
+	m := NewMailboxWithBeadsDir("deacon/", t.TempDir(), t.TempDir())
+	if err := m.closeInDir("hq-wisp-xv525", t.TempDir()); err != nil {
+		t.Fatalf("closeInDir: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "--actor=deacon/") {
+		t.Fatalf("bd close missing --actor=deacon/ matching assignee identity; log:\n%s", string(logBytes))
+	}
+}
+
 func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fake bd is POSIX-only")

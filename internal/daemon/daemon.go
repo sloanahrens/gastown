@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -140,6 +141,14 @@ type Daemon struct {
 	// legacySocketCleanupOnce ensures upgrade cleanup only runs once per daemon
 	// lifetime, before any patrol agent can be started on the current socket.
 	legacySocketCleanupOnce sync.Once
+
+	// mainBranchTestRunning guards against overlapping main_branch_test
+	// cycles. A single cycle can block for up to (60m slot wait + 10m test)
+	// per rig, so it runs on its own goroutine rather than inline in the
+	// main select loop (which would otherwise freeze heartbeat, reaper, and
+	// dog ticks for hours — gt-uvxy). A tick that arrives while the previous
+	// cycle is still running is skipped rather than piling up concurrently.
+	mainBranchTestRunning atomic.Bool
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -836,8 +845,12 @@ func (d *Daemon) Run() (err error) {
 		case <-mainBranchTestChan:
 			// Main branch test runner — periodically runs quality gates on each
 			// rig's main branch to catch regressions from merges or direct pushes.
+			// Dispatched onto its own goroutine (never awaited here): a cycle can
+			// block for up to (60m slot wait + 10m test) per rig, and running it
+			// inline froze the heartbeat/reaper/dog ticks below for as long as it
+			// waited (gt-uvxy).
 			if !d.isShutdownInProgress() {
-				d.runMainBranchTests()
+				d.triggerMainBranchTests()
 			}
 
 		case <-quotaDogChan:
