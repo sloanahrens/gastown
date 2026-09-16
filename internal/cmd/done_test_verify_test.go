@@ -127,6 +127,18 @@ func TestChangedGoPackages(t *testing.T) {
 // package tests and refuse when they fail, succeed when they pass, and skip
 // cleanly when there is nothing to verify.
 func TestRunDefaultTestVerification(t *testing.T) {
+	// runDefaultTestVerification's slot.Acquire call checks `docker ps`
+	// regardless of townRoot (gt-jqif): even though every subtest below
+	// passes its own fresh t.TempDir() as townRoot — so the flock itself
+	// never contends with anything else — the docker-container check is
+	// global, and this package is guarded as container-suite (gt tap guard
+	// container-suite) precisely because it shares the host with
+	// Dolt/testcontainers-backed suites. Without this stub, any real
+	// dolt/testcontainers/ryuk container running elsewhere on a shared Gas
+	// Town host makes every subtest's slot.Acquire release-and-retry for up
+	// to defaultTestVerifySlotTimeout (20m), blowing internal/cmd's 10m
+	// package test timeout. See stubNoContainers in mq_batch_slot_test.go.
+	stubNoContainers(t)
 	townRoot := t.TempDir()
 
 	t.Run("no test_command configured: skips, does not run anything", func(t *testing.T) {
