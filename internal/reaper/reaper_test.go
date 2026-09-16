@@ -117,6 +117,58 @@ func TestParentExcludeJoin(t *testing.T) {
 	}
 }
 
+func TestMRProtectedJoin(t *testing.T) {
+	joinClause, whereCondition := mrProtectedJoin()
+
+	if !contains(joinClause, "wisp_labels") {
+		t.Error("mrProtectedJoin should query wisp_labels")
+	}
+	if !contains(joinClause, "gt:merge-request") {
+		t.Error("mrProtectedJoin should protect wisps labeled gt:merge-request")
+	}
+	if !contains(joinClause, "'cleanup'") || !contains(joinClause, "'state:merge-requested'") {
+		t.Error("mrProtectedJoin should protect wisps labeled cleanup + state:merge-requested")
+	}
+	if !contains(whereCondition, "IS NULL") {
+		t.Error("mrProtectedJoin whereCondition should use IS NULL for anti-join")
+	}
+}
+
+func TestActiveMRExcludeClause(t *testing.T) {
+	if clause, args := activeMRExcludeClause(nil); clause != "" || args != nil {
+		t.Errorf("activeMRExcludeClause(nil) = (%q, %v), want (\"\", nil)", clause, args)
+	}
+
+	clause, args := activeMRExcludeClause(map[string]bool{"gt-wisp-miky": true})
+	if !contains(clause, "NOT IN") {
+		t.Errorf("activeMRExcludeClause should render a NOT IN clause, got %q", clause)
+	}
+	if len(args) != 1 || args[0] != "gt-wisp-miky" {
+		t.Errorf("activeMRExcludeClause args = %v, want [gt-wisp-miky]", args)
+	}
+}
+
+func TestActiveMRFieldPattern(t *testing.T) {
+	cases := []struct {
+		description string
+		want        string
+	}{
+		{"agent_state: working\nactive_mr: gt-wisp-miky\n", "gt-wisp-miky"},
+		{"agent_state: working\nactive_mr: null\n", "null"},
+		{"agent_state: working\nhook_bead: gt-4okk\n", ""},
+	}
+	for _, c := range cases {
+		m := activeMRFieldPattern.FindStringSubmatch(c.description)
+		got := ""
+		if m != nil {
+			got = m[1]
+		}
+		if got != c.want {
+			t.Errorf("activeMRFieldPattern on %q = %q, want %q", c.description, got, c.want)
+		}
+	}
+}
+
 func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 	sourcePath := "reaper.go"
 	data, err := os.ReadFile(sourcePath)
@@ -463,6 +515,57 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 	}
 }
 
+// TestReapExcludesLiveMergeQueueWisps is a regression test for gt-4okk: the
+// reaper's age-sweep closed a live merge-queue MR wisp (and the witness gc
+// purged it irrecoverably two minutes later) because age was the only signal
+// and a dormant town made the still-queued MR look abandoned. Age must never
+// be sufficient on its own to reap an MR wisp, its tracking cleanup wisp, or
+// anything a live agent still references as active_mr.
+func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"old-mr-wisp":            {id: "old-mr-wisp", status: "open", issueType: "task", createdAt: old, labels: []string{"gt:merge-request"}},
+			"old-cleanup-open-mr":    {id: "old-cleanup-open-mr", status: "open", issueType: "task", createdAt: old, labels: []string{"cleanup", "state:merge-requested"}},
+			"old-cleanup-no-mr":      {id: "old-cleanup-no-mr", status: "open", issueType: "task", createdAt: old, labels: []string{"cleanup", "state:clean"}},
+			"old-active-mr-target":   {id: "old-active-mr-target", status: "open", issueType: "task", createdAt: old},
+			"old-stale-orphan":       {id: "old-stale-orphan", status: "open", issueType: "task", createdAt: old},
+			"live-agent":             {id: "live-agent", status: "open", issueType: "agent", createdAt: now, description: "agent_state: working\nactive_mr: old-active-mr-target\n"},
+			"nuked-agent-active-ref": {id: "nuked-agent-active-ref", status: "open", issueType: "agent", createdAt: now, description: "agent_state: nuked\nactive_mr: old-stale-orphan\n"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	// old-cleanup-no-mr and old-stale-orphan are eligible: the other two old
+	// wisps are protected by MR label, cleanup+merge-requested labels, or active_mr.
+	if scan.ReapCandidates != 2 {
+		t.Fatalf("Scan ReapCandidates = %d, want 2", scan.ReapCandidates)
+	}
+
+	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+		t.Fatalf("real Reap: %v", err)
+	}
+
+	for _, id := range []string{"old-mr-wisp", "old-cleanup-open-mr", "old-active-mr-target"} {
+		if got := state.status(id); got != "open" {
+			t.Fatalf("%s status = %q, want open (protected)", id, got)
+		}
+	}
+	for _, id := range []string{"old-cleanup-no-mr", "old-stale-orphan"} {
+		if got := state.status(id); got != "closed" {
+			t.Fatalf("%s status = %q, want closed (not protected)", id, got)
+		}
+	}
+}
+
 var fakeReaperDriverID uint64
 
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
@@ -477,10 +580,12 @@ func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
 }
 
 type fakeWisp struct {
-	id        string
-	status    string
-	issueType string
-	createdAt time.Time
+	id          string
+	status      string
+	issueType   string
+	createdAt   time.Time
+	description string
+	labels      []string
 }
 
 type fakeDep struct {
@@ -576,6 +681,8 @@ func (s *fakeReaperState) isMoleculeStepCandidateLocked(id string) bool {
 }
 
 func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMoleculeSteps bool) []string {
+	mrProtected := s.mrProtectedLocked()
+	activeMRProtected := s.activeMRProtectedLocked()
 	var ids []string
 	for id, w := range s.wisps {
 		if !isOpenWispStatus(w.status) || w.issueType == "agent" || !w.createdAt.Before(cutoff) {
@@ -587,10 +694,66 @@ func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMolecul
 		if excludeMoleculeSteps && s.isMoleculeStepCandidateLocked(id) {
 			continue
 		}
+		if mrProtected[id] || activeMRProtected[id] {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// mrProtectedLocked mirrors mrProtectedJoin's semantics: wisps labeled
+// gt:merge-request, or labeled both cleanup and state:merge-requested.
+func (s *fakeReaperState) mrProtectedLocked() map[string]bool {
+	protected := map[string]bool{}
+	for id, w := range s.wisps {
+		hasMR, hasCleanup, hasMergeRequested := false, false, false
+		for _, label := range w.labels {
+			switch label {
+			case "gt:merge-request":
+				hasMR = true
+			case "cleanup":
+				hasCleanup = true
+			case "state:merge-requested":
+				hasMergeRequested = true
+			}
+		}
+		if hasMR || (hasCleanup && hasMergeRequested) {
+			protected[id] = true
+		}
+	}
+	return protected
+}
+
+// activeMRProtectedLocked mirrors activeMRProtectedIDs: wisp IDs referenced
+// as active_mr by a live (non-nuked) agent bead's description.
+func (s *fakeReaperState) activeMRProtectedLocked() map[string]bool {
+	protected := map[string]bool{}
+	for _, w := range s.wisps {
+		if w.issueType != "agent" {
+			continue
+		}
+		if m := agentStateFieldPattern.FindStringSubmatch(w.description); m != nil && m[1] == "nuked" {
+			continue
+		}
+		m := activeMRFieldPattern.FindStringSubmatch(w.description)
+		if m == nil || m[1] == "null" {
+			continue
+		}
+		protected[m[1]] = true
+	}
+	return protected
+}
+
+func (s *fakeReaperState) agentDescriptionsLocked() []string {
+	var descriptions []string
+	for _, w := range s.wisps {
+		if w.issueType == "agent" {
+			descriptions = append(descriptions, w.description)
+		}
+	}
+	return descriptions
 }
 
 func (s *fakeReaperState) hasOpenParentLocked(id string) bool {
@@ -654,6 +817,8 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	c.state.record(c.id, "QUERY "+normalized)
 
 	switch {
+	case strings.Contains(normalized, "SELECT description FROM wisps WHERE issue_type = 'agent'"):
+		return fakeDescriptionRows(c.state.agentDescriptionsLocked()), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "created_at <"):
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
@@ -739,6 +904,14 @@ func fakeIDRows(ids []string) *fakeReaperRows {
 	return &fakeReaperRows{cols: []string{"id"}, rows: rows}
 }
 
+func fakeDescriptionRows(descriptions []string) *fakeReaperRows {
+	rows := make([][]driver.Value, len(descriptions))
+	for i, d := range descriptions {
+		rows[i] = []driver.Value{d}
+	}
+	return &fakeReaperRows{cols: []string{"description"}, rows: rows}
+}
+
 func (r *fakeReaperRows) Columns() []string { return r.cols }
 func (r *fakeReaperRows) Close() error      { return nil }
 
@@ -795,6 +968,10 @@ func validateStaleWispQuery(query string) error {
 		"w.created_at < ?",
 		"open_parent.issue_id IS NULL",
 		"closed_molecule_step.issue_id IS NULL",
+		"mr_protected.issue_id IS NULL",
+		"wisp_labels",
+		"gt:merge-request",
+		"state:merge-requested",
 	)
 }
 
