@@ -663,6 +663,15 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	}
 
 	args := []string{"close", id}
+	// Close as the identity the message was addressed to, not whatever
+	// ambient actor bd would otherwise fall back to (BD_ACTOR/git user.name).
+	// mayor/deacon assignees are written with a trailing slash ("deacon/",
+	// see AddressToIdentity) but BD_ACTOR/GIT_AUTHOR_NAME are set to the bare
+	// role name ("deacon"), so bd's assignee==actor close guard rejects the
+	// close and archive silently fails town-wide (gt-ovem, sibling of gt-cut).
+	if m.identity != "" {
+		args = append(args, "--actor="+m.identity)
+	}
 	// Pass session ID for work attribution if available
 	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)

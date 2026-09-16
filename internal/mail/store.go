@@ -119,7 +119,11 @@ func (m *Mailbox) storeCloseInDir(id string) error {
 	defer cancel()
 
 	sessionID := runtime.SessionIDFromEnv()
-	err := m.store.CloseIssue(ctx, id, "", "", sessionID)
+	// Close as the identity the message was addressed to (m.identity), not
+	// an ambient actor — mirrors the CLI path in mailbox.go closeInDir. See
+	// gt-ovem: mayor/deacon assignees carry a trailing slash that ambient
+	// actor resolution (BD_ACTOR/git user.name) doesn't.
+	err := m.store.CloseIssue(ctx, id, "", m.identity, sessionID)
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
