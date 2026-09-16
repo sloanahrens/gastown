@@ -2021,6 +2021,51 @@ func TestBuildAgentStartupCommand_DogUsesRoleAgents(t *testing.T) {
 	}
 }
 
+// TestBuildAgentStartupCommand_DogCustomClaudePreset verifies that an explicit
+// role_agents.dog pointing at a Claude-provider preset survives all the way into
+// the spawned startup command, env vars included.
+//
+// Regression: the dog role used to be hardcoded to the built-in Haiku preset
+// unless the override was non-Claude, so a Claude-driving custom preset (local
+// proxy, cost tier, custom --model) was silently dropped and dogs spawned as
+// `claude --model haiku`.
+func TestBuildAgentStartupCommand_DogCustomClaudePreset(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	townSettings := NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	townSettings.Agents = map[string]*RuntimeConfig{
+		"local-coder": {
+			Provider: "claude",
+			Command:  "claude",
+			Args:     []string{"--dangerously-skip-permissions", "--model", "ollama-local-coder"},
+			Env: map[string]string{
+				"ANTHROPIC_BASE_URL": "http://127.0.0.1:11434",
+				"ANTHROPIC_API_KEY":  "ollama",
+			},
+		},
+	}
+	townSettings.RoleAgents = map[string]string{
+		"dog": "local-coder",
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	cmd := BuildAgentStartupCommand("dog", "", townRoot, "", "")
+
+	if !strings.Contains(cmd, "--model ollama-local-coder") {
+		t.Fatalf("expected custom dog preset model in startup command, got: %q", cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL=http://127.0.0.1:11434") {
+		t.Fatalf("expected custom dog preset env in startup command, got: %q", cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_API_KEY=ollama") {
+		t.Fatalf("expected custom dog preset api key env in startup command, got: %q", cmd)
+	}
+}
+
 func TestValidateAgentConfig(t *testing.T) {
 	t.Parallel()
 
@@ -4556,6 +4601,95 @@ func TestResolveRoleAgentConfig(t *testing.T) {
 		// mayor is in town's RoleAgents and may resolve to a platform-specific claude binary path.
 		if !isClaudeCommand(rc.Command) {
 			t.Errorf("Command = %q, want claude or path ending in /claude", rc.Command)
+		}
+	})
+}
+
+// TestResolveRoleAgentConfig_DogHonorsExplicitClaudePreset covers the dog role's
+// Haiku default: it must be a default, not a policy. Any explicit role_agents.dog
+// entry wins, including one that drives the claude binary (local proxy, cost tier,
+// alternate --model). The Haiku hardcode only applies when role_agents.dog is unset.
+func TestResolveRoleAgentConfig_DogHonorsExplicitClaudePreset(t *testing.T) {
+	t.Parallel()
+
+	newTown := func(t *testing.T) (string, *TownSettings) {
+		t.Helper()
+		townRoot := t.TempDir()
+		townSettings := NewTownSettings()
+		townSettings.DefaultAgent = "claude"
+		townSettings.Agents = map[string]*RuntimeConfig{
+			"local-coder": {
+				Provider: "claude",
+				Command:  "claude",
+				Args:     []string{"--dangerously-skip-permissions", "--model", "ollama-local-coder"},
+				Env: map[string]string{
+					"ANTHROPIC_BASE_URL": "http://127.0.0.1:11434",
+					"ANTHROPIC_API_KEY":  "ollama",
+				},
+			},
+			"claude-haiku": {
+				Provider: "claude",
+				Command:  "claude",
+				Args:     []string{"--dangerously-skip-permissions", "--model", "haiku"},
+			},
+		}
+		return townRoot, townSettings
+	}
+
+	t.Run("custom Claude-provider preset is honored", func(t *testing.T) {
+		t.Parallel()
+		townRoot, townSettings := newTown(t)
+		townSettings.RoleAgents = map[string]string{"dog": "local-coder"}
+		if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+			t.Fatalf("SaveTownSettings: %v", err)
+		}
+
+		rc := ResolveRoleAgentConfig("dog", townRoot, "")
+		if rc == nil {
+			t.Fatal("ResolveRoleAgentConfig returned nil for dog")
+		}
+		if !strings.Contains(rc.BuildCommand(), "--model ollama-local-coder") {
+			t.Fatalf("resolved dog command = %q, want the custom preset's --model", rc.BuildCommand())
+		}
+		if got := rc.Env["ANTHROPIC_BASE_URL"]; got != "http://127.0.0.1:11434" {
+			t.Errorf("ANTHROPIC_BASE_URL = %q, want the custom preset's value", got)
+		}
+		if rc.ResolvedAgent != "local-coder" {
+			t.Errorf("ResolvedAgent = %q, want %q", rc.ResolvedAgent, "local-coder")
+		}
+	})
+
+	t.Run("explicit role_agents.dog beats a non-Claude global default", func(t *testing.T) {
+		t.Parallel()
+		townRoot, townSettings := newTown(t)
+		townSettings.DefaultAgent = "opencode" // global default must not outrank role_agents
+		townSettings.RoleAgents = map[string]string{"dog": "claude-haiku"}
+		if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+			t.Fatalf("SaveTownSettings: %v", err)
+		}
+
+		rc := ResolveRoleAgentConfig("dog", townRoot, "")
+		if rc == nil {
+			t.Fatal("ResolveRoleAgentConfig returned nil for dog")
+		}
+		if rc.ResolvedAgent != "claude-haiku" {
+			t.Fatalf("ResolvedAgent = %q, want %q", rc.ResolvedAgent, "claude-haiku")
+		}
+	})
+
+	t.Run("unset role_agents.dog still defaults to Haiku", func(t *testing.T) {
+		t.Parallel()
+		townRoot, townSettings := newTown(t)
+		if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+			t.Fatalf("SaveTownSettings: %v", err)
+		}
+
+		rc := ResolveRoleAgentConfig("dog", townRoot, "")
+		if rc == nil {
+			t.Fatal("ResolveRoleAgentConfig returned nil for dog")
+		}
+		if cmd := rc.BuildCommand(); !strings.Contains(cmd, "--model haiku") {
+			t.Fatalf("unset role_agents.dog resolved to %q, want the Haiku default", cmd)
 		}
 	})
 }
