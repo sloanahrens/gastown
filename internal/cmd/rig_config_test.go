@@ -206,9 +206,8 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 		rigConfigSetGlobal = false
 		rigConfigSetBlock = false
 
-		// strconv.ParseBool only accepts true/false/1/0/t/f (case-insensitive).
-		// "yes"/"no" are NOT accepted by strconv.ParseBool — they stay as strings.
-		for _, v := range []string{"true", "false", "1", "0"} {
+		// true/false → bool (Atoi doesn't accept them, so ParseBool handles them)
+		for _, v := range []string{"true", "false"} {
 			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", v})
 			if err != nil {
 				t.Fatalf("runRigConfigSet auto_restart=%q: %v", v, err)
@@ -219,13 +218,13 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 			if val == nil {
 				t.Fatalf("expected auto_restart to be set for value %q", v)
 			}
-			// true/false → bool (not numeric, since Atoi doesn't accept them)
 			if _, ok := val.(bool); !ok {
 				t.Errorf("auto_restart=%q = %T(%v), want bool", v, val, val)
 			}
 		}
 
 		// 1/0 → numeric (Atoi wins over ParseBool, wisp stores as float64)
+		// This is the key regression: before the fix, these were stored as bool.
 		for _, v := range []string{"1", "0"} {
 			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", v})
 			if err != nil {
@@ -238,7 +237,7 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 				t.Fatalf("expected auto_restart to be set for value %q", v)
 			}
 			if _, ok := val.(float64); !ok {
-				t.Errorf("auto_restart=%q = %T(%v), want float64", v, val, val)
+				t.Errorf("auto_restart=%q = %T(%v), want float64 (not bool)", v, val, val)
 			}
 		}
 	})
