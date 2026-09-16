@@ -392,6 +392,43 @@ func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 	}
 }
 
+// TestTriggerMainBranchTests_SingleFlight is the regression test for
+// gt-uvxy: an overlapping tick must be skipped rather than stacking a second
+// concurrent main_branch_test cycle on top of one that's still running.
+func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
+	d := &Daemon{
+		logger: log.New(os.Stderr, "", 0),
+		// patrolConfig is nil, so main_branch_test is inactive and
+		// runMainBranchTests returns immediately without touching rigs —
+		// this test exercises only the single-flight guard, not a real cycle.
+	}
+
+	if started := d.triggerMainBranchTests(); !started {
+		t.Fatal("expected first trigger to start a cycle")
+	}
+
+	// Wait for the goroutine launched above to finish and clear the flag,
+	// so the "already running" case below tests a real in-flight state
+	// rather than racing the first goroutine's cleanup.
+	deadline := time.Now().Add(2 * time.Second)
+	for d.mainBranchTestRunning.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first cycle to clear mainBranchTestRunning")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Simulate a still-running cycle and verify the next tick is skipped,
+	// not started concurrently.
+	d.mainBranchTestRunning.Store(true)
+	if started := d.triggerMainBranchTests(); started {
+		t.Error("expected trigger to skip when a cycle is already running")
+	}
+	if !d.mainBranchTestRunning.Load() {
+		t.Error("expected mainBranchTestRunning to remain true after a skipped trigger")
+	}
+}
+
 func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	config := DefaultLifecycleConfig()
 	if config.Patrols.MainBranchTest == nil {
