@@ -1144,8 +1144,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Tells the witness we're in the gt done flow — trust the agent until
 	// heartbeat goes stale. No timer-based inference needed.
 	// Parallel to done-intent label for backwards compat during migration.
-	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" && townRoot != "" {
-		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
+	heartbeatSession := os.Getenv("GT_SESSION")
+	if heartbeatSession != "" && townRoot != "" {
+		polecat.TouchSessionHeartbeatWithState(townRoot, heartbeatSession, polecat.HeartbeatExiting, "gt done", issueID)
 	}
 
 	// Get configured default branch for this rig
@@ -2020,7 +2021,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// shaped hash, so the two values could never agree and the
 				// fast-path never fired (om-gate T8 review, attempt 2).
 				gateSetSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
+				// gt-azmw: renew the exiting heartbeat across this bounded gate
+				// run (up to five 10m gates), exactly as the default test-verify
+				// below does — see StartExitingHeartbeatKeepAlive.
+				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
 				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA)
+				stopHeartbeat()
 				if warning != "" {
 					style.PrintWarning("%s", warning)
 				}
@@ -2047,7 +2053,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if !doneSkipVerify && !fullGatesVerified {
 				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
 				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
+				// gt-azmw: this gate can hold the container slot for 20m and
+				// then run for another 10m, all of it silent, while the
+				// heartbeat written at gt done's start ages past every
+				// consumer's stale threshold. Renew it for exactly as long as
+				// this bounded stage can run.
+				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
 				verify, verifyErr := runDefaultTestVerification(g, cwd, defaultBranch, target, verifyMQ, townRoot, verifyRole)
+				stopHeartbeat()
 				if verifyErr != nil {
 					return verifyErr
 				}

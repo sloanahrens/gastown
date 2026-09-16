@@ -311,6 +311,123 @@ func TestReadSessionHeartbeat_V1BackwardsCompat(t *testing.T) {
 	}
 }
 
+// writeHeartbeat writes an arbitrary heartbeat straight to disk, bypassing
+// TouchSessionHeartbeatWithState so tests can seed a stale timestamp.
+func writeHeartbeat(t *testing.T, townRoot, sessionName string, hb SessionHeartbeat) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionName+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped is the gt-azmw
+// regression test: gt done writes state="exiting" once and can then sit inside
+// a silent bounded gate for 30 minutes, so the heartbeat has to keep being
+// renewed for as long as that stage runs — otherwise every consumer (the
+// witness's 3m stale threshold, the daemon idle-reaper's 15m) sees a dead agent
+// and kills a healthy polecat mid-submit.
+//
+// The three assertions are deliberately count/content, not mere absence: the
+// renewal must actually happen, must keep happening, and must stop happening on
+// stop. Dropping the ticker (keeping only the first write) fails the second;
+// dropping the stop path fails the third.
+func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "myr-mycat"
+	interval := 20 * time.Millisecond
+
+	// Seed the heartbeat exactly as gt done leaves it after its long gate
+	// start: state=exiting, already past every consumer's stale threshold.
+	seeded := time.Now().UTC().Add(-19 * time.Minute)
+	writeHeartbeat(t, townRoot, sessionName, SessionHeartbeat{
+		Timestamp: seeded,
+		State:     HeartbeatExiting,
+		Context:   "gt done",
+		Bead:      "gt-azmw",
+	})
+
+	stop := startHeartbeatKeepAlive(townRoot, sessionName, "gt done", "gt-azmw", interval)
+	defer stop()
+
+	// 1. The first renewal is synchronous, so the stage starts fresh.
+	first := ReadSessionHeartbeat(townRoot, sessionName)
+	if first == nil {
+		t.Fatal("expected a heartbeat after starting the keep-alive")
+	}
+	if !first.Timestamp.After(seeded) {
+		t.Fatalf("keep-alive did not renew the seeded heartbeat: %v is not after %v", first.Timestamp, seeded)
+	}
+	// Content, not just freshness: a renewal that downgrades the state (or
+	// drops the bead) would let the witness's exiting-check miss it and fall
+	// through to the done-intent restart this fix exists to prevent.
+	if first.State != HeartbeatExiting || first.Context != "gt done" || first.Bead != "gt-azmw" {
+		t.Fatalf("renewal changed the heartbeat's meaning: state=%q context=%q bead=%q", first.State, first.Context, first.Bead)
+	}
+
+	// 2. The stage outlives one write: the ticker must keep advancing it.
+	// Poll rather than sleep a fixed span so a loaded machine delays the test
+	// instead of failing it; a missing ticker still fails on the deadline.
+	renewed := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil && hb.Timestamp.After(first.Timestamp) {
+			renewed = true
+			break
+		}
+		time.Sleep(interval)
+	}
+	if !renewed {
+		t.Fatalf("keep-alive renewed the heartbeat once and then stopped; a %v interval must renew repeatedly while the stage runs", interval)
+	}
+
+	// 3. Stop ends the renewal. Wait well past the interval so a live ticker
+	// would have written again many times over.
+	stop()
+	stop() // idempotent — a second call must not panic or re-arm anything
+	frozen := ReadSessionHeartbeat(townRoot, sessionName)
+	if frozen == nil {
+		t.Fatal("expected the heartbeat to survive stop")
+	}
+	time.Sleep(10 * interval)
+	after := ReadSessionHeartbeat(townRoot, sessionName)
+	if after == nil {
+		t.Fatal("expected the heartbeat to survive stop")
+	}
+	if !after.Timestamp.Equal(frozen.Timestamp) {
+		t.Fatalf("keep-alive kept renewing after stop: %v -> %v", frozen.Timestamp, after.Timestamp)
+	}
+}
+
+// TestStartHeartbeatKeepAlive_NoIdentityIsNoop covers the callers that have no
+// session to renew (crew/dog sessions, or a run with GT_SESSION unset): the
+// helper must return a usable stop and must not invent a heartbeat file.
+func TestStartHeartbeatKeepAlive_NoIdentityIsNoop(t *testing.T) {
+	townRoot := t.TempDir()
+
+	for _, tc := range []struct{ name, townRoot, session string }{
+		{"no session", townRoot, ""},
+		{"no town root", "", "myr-mycat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop := StartExitingHeartbeatKeepAlive(tc.townRoot, tc.session, "gt done", "gt-azmw")
+			stop()
+			if tc.session != "" {
+				if hb := ReadSessionHeartbeat(tc.townRoot, tc.session); hb != nil {
+					t.Fatalf("expected no heartbeat to be written by a no-op keep-alive, got %+v", hb)
+				}
+			}
+		})
+	}
+}
+
 func TestReadSessionHeartbeat_V2AllStates(t *testing.T) {
 	townRoot := t.TempDir()
 
