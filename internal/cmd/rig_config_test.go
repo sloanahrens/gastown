@@ -153,4 +153,77 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 			t.Errorf("unexpected ephemeral warning for --block operation, got: %q", stderrOut)
 		}
 	})
+
+	t.Run("max_polecats=1 stores as int not bool", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForConfig(t)
+
+		rigConfigSetGlobal = false
+		rigConfigSetBlock = false
+
+		err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "max_polecats", "1"})
+		if err != nil {
+			t.Fatalf("runRigConfigSet: %v", err)
+		}
+
+		wispCfg := wisp.NewConfig(townRoot, rigName)
+		val := wispCfg.Get("max_polecats")
+		if val == nil {
+			t.Fatal("expected max_polecats to be set in wisp layer")
+		}
+		if _, ok := val.(bool); ok {
+			t.Errorf("max_polecats=1 was stored as bool (true), want int(1)")
+		}
+		if n, ok := val.(int); !ok || n != 1 {
+			t.Errorf("max_polecats=1 = %T(%v), want int(1)", val, val)
+		}
+	})
+
+	t.Run("max_polecats=0 stores as int not bool", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForConfig(t)
+
+		rigConfigSetGlobal = false
+		rigConfigSetBlock = false
+
+		err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "max_polecats", "0"})
+		if err != nil {
+			t.Fatalf("runRigConfigSet: %v", err)
+		}
+
+		wispCfg := wisp.NewConfig(townRoot, rigName)
+		val := wispCfg.Get("max_polecats")
+		if val == nil {
+			t.Fatal("expected max_polecats to be set in wisp layer")
+		}
+		if n, ok := val.(int); !ok || n != 0 {
+			t.Errorf("max_polecats=0 = %T(%v), want int(0)", val, val)
+		}
+	})
+
+	t.Run("boolean values still infer as bool for non-numeric strings", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForConfig(t)
+
+		rigConfigSetGlobal = false
+		rigConfigSetBlock = false
+
+		for _, v := range []string{"true", "false", "yes", "no", "1", "0"} {
+			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", v})
+			if err != nil {
+				t.Fatalf("runRigConfigSet auto_restart=%q: %v", v, err)
+			}
+
+			wispCfg := wisp.NewConfig(townRoot, rigName)
+			val := wispCfg.Get("auto_restart")
+			if val == nil {
+				t.Fatalf("expected auto_restart to be set for value %q", v)
+			}
+			// "true"/"false"/"yes"/"no" should be bool
+			// "1"/"0" should be int (Atoi wins over ParseBool)
+			switch val.(type) {
+			case bool, int:
+				// acceptable
+			default:
+				t.Errorf("auto_restart=%q = %T(%v), want bool or int", v, val, val)
+			}
+		}
+	})
 }

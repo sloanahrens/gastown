@@ -184,12 +184,16 @@ func runRigConfigSet(cmd *cobra.Command, args []string) error {
 	} else {
 		// Set in wisp layer
 		wispCfg := wisp.NewConfig(townRoot, r.Name)
-		// Try to parse as appropriate type
+		// Try to parse as appropriate type.
+		// Integers must be tried before booleans: strconv.ParseBool("1") and
+		// strconv.ParseBool("0") both succeed, so "1" would be inferred as
+		// bool(true) instead of int(1). For numeric config keys like
+		// max_polecats this is a silent data corruption bug.
 		var typedValue interface{} = value
-		if b, err := strconv.ParseBool(value); err == nil {
-			typedValue = b
-		} else if i, err := strconv.Atoi(value); err == nil {
+		if i, err := strconv.Atoi(value); err == nil {
 			typedValue = i
+		} else if b, err := strconv.ParseBool(value); err == nil {
+			typedValue = b
 		}
 		if err := wispCfg.Set(key, typedValue); err != nil {
 			return fmt.Errorf("setting %s: %w", key, err)
