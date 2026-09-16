@@ -2,7 +2,10 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestValidCostTiers(t *testing.T) {
@@ -539,6 +542,77 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 			t.Errorf("economy tier mayor = %q, want claude-sonnet", settings.RoleAgents["mayor"])
 		}
 	})
+}
+
+// TestApplyCostTier_DogMappingReachesResolution verifies that a cost tier's
+// role_agents["dog"] entry actually reaches the resolved RuntimeConfig.
+//
+// Regression: the dog role returned the built-in Haiku preset before tier
+// resolution ran whenever the tier's entry was Claude-provider, so
+// custom-groq-* tiers silently left dogs on local Haiku.
+func TestApplyCostTier_DogMappingReachesResolution(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		tier  CostTier
+		model string
+	}{
+		{TierStandard, "haiku"},
+		{TierEconomy, "haiku"},
+		{TierBudget, "haiku"},
+		{TierCustomGroqOpus, "groq"},
+		{TierCustomGroqSonnet, "groq"},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.tier), func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			settings := NewTownSettings()
+			if err := ApplyCostTier(settings, tc.tier); err != nil {
+				t.Fatalf("ApplyCostTier(%s): %v", tc.tier, err)
+			}
+			if err := SaveTownSettings(TownSettingsPath(townRoot), settings); err != nil {
+				t.Fatalf("SaveTownSettings: %v", err)
+			}
+
+			// Discriminator: local Haiku runs `--model haiku`; groq-compound
+			// runs the plain claude binary but redirects the SDK at Groq via
+			// ANTHROPIC_BASE_URL.
+			assert := func(cmd string) {
+				t.Helper()
+				switch tc.model {
+				case "haiku":
+					if !strings.Contains(cmd, "--model haiku") {
+						t.Errorf("tier %s: dog resolved to %q, want --model haiku", tc.tier, cmd)
+					}
+				case "groq":
+					if strings.Contains(cmd, "--model haiku") {
+						t.Errorf("tier %s: dog resolved to %q, want the groq-compound preset", tc.tier, cmd)
+					}
+					// Compare on the URL alone: the startup command shell-quotes
+					// the whole NAME=value pair, so the "=" is not adjacent.
+					if !strings.Contains(cmd, "https://api.groq.com/openai/v1") {
+						t.Errorf("tier %s: dog resolved to %q, want the groq-compound base URL", tc.tier, cmd)
+					}
+				}
+			}
+
+			// Direct resolver: BuildCommand() carries args only; env rides on rc.Env.
+			rc := ResolveRoleAgentConfig(constants.RoleDog, townRoot, "")
+			if rc == nil {
+				t.Fatal("ResolveRoleAgentConfig returned nil for dog")
+			}
+			if tc.model == "haiku" {
+				assert(rc.BuildCommand())
+			} else if got := rc.Env["ANTHROPIC_BASE_URL"]; !strings.Contains(got, "api.groq.com") {
+				t.Errorf("tier %s: dog ANTHROPIC_BASE_URL = %q, want the groq-compound endpoint", tc.tier, got)
+			}
+
+			// Integration: the spawned command must carry the mapping too.
+			assert(BuildAgentStartupCommand(constants.RoleDog, "", townRoot, "", ""))
+		})
+	}
 }
 
 func TestTierDescription(t *testing.T) {

@@ -1386,7 +1386,31 @@ func lookupAgentConfigIfExists(name string, townSettings *TownSettings, rigSetti
 		return RuntimeConfigFromPreset(AgentPreset(name))
 	}
 
+	// Cost-tier preset names. ApplyCostTier persists RoleAgents entries such as
+	// "claude-haiku" and "claude-sonnet", but those are constructors here rather
+	// than registry presets — and the standard tier does not write them into
+	// settings.Agents at all. Without this fallback the entry resolves to nil,
+	// logs a "not found" warning, and the tier mapping silently does nothing.
+	// Settings lookups above win, so a user-defined agent of the same name still
+	// takes precedence.
+	if rc := costTierPresetByName(name); rc != nil {
+		return fillRuntimeDefaults(rc)
+	}
+
 	return nil
+}
+
+// costTierPresetByName returns the RuntimeConfig for a cost-tier preset name,
+// or nil if the name is not one of the tier-managed Claude presets.
+func costTierPresetByName(name string) *RuntimeConfig {
+	switch name {
+	case "claude-haiku":
+		return claudeHaikuPreset()
+	case "claude-sonnet":
+		return claudeSonnetPreset()
+	default:
+		return nil
+	}
 }
 
 // ResolveRoleAgentConfig resolves the agent configuration for a specific role.
@@ -1690,6 +1714,27 @@ func hasExplicitNonClaudeOverride(role string, townSettings *TownSettings, rigSe
 	return false
 }
 
+// hasExplicitRoleAgent reports whether role_agents[role] is set to a non-empty
+// agent name in either the rig or town settings.
+//
+// Only the role-specific map is consulted — intentionally unlike
+// hasExplicitNonClaudeOverride, which also inspects the global Agent/DefaultAgent
+// fallbacks. A global default is a fallback, not an override of a role, so it
+// must not suppress role defaults such as the dog Haiku preset.
+func hasExplicitRoleAgent(role string, townSettings *TownSettings, rigSettings *RigSettings) bool {
+	if rigSettings != nil && rigSettings.RoleAgents != nil {
+		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
+			return true
+		}
+	}
+	if townSettings != nil && townSettings.RoleAgents != nil {
+		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1713,14 +1758,16 @@ func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 		_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
 	}
 
-	// Dogs default to Haiku (cheap infrastructure workers), but respect
-	// explicit non-Claude overrides (e.g., RoleAgents["dog"] = "opencode").
+	// Dogs default to Haiku (cheap infrastructure workers). That is a default,
+	// not a policy: any explicit role_agents.dog wins, including presets that
+	// drive the claude binary (local proxy, cost tier, alternate --model).
+	// Only non-Claude overrides used to be honored, which silently discarded
+	// Claude-provider overrides.
 	if role == "dog" {
-		if hasExplicitNonClaudeOverride(role, townSettings, rigSettings) {
-			// Fall through to normal resolution below
-		} else {
+		if !hasExplicitRoleAgent(role, townSettings, rigSettings) {
 			return claudeHaikuPreset()
 		}
+		// Fall through to normal resolution below
 	}
 
 	// Check ephemeral cost tier (GT_COST_TIER env var)
