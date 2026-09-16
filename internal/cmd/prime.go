@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -614,57 +613,18 @@ var memoryTypeLabels = map[string]string{
 	"general":   "General",
 }
 
-// runMemoryInject loads memories from beads kv and outputs them during prime.
-// Memories are grouped by type and ordered by priority (feedback first).
+// runMemoryInject loads memories from beads kv and outputs an index of them
+// during prime. Memories are grouped by type and ordered by priority (feedback
+// first). Only previews are rendered — the values themselves are several
+// paragraphs each, and paging them in on demand via `gt memories <key>` keeps
+// the section from dominating the prime payload.
 func runMemoryInject(workDir string) {
 	kvs, err := bdKvListJSONForPrime(workDir)
 	if err != nil {
 		return // Silently skip if kv list fails
 	}
 
-	// Group memories by type
-	type mem struct {
-		shortKey string
-		value    string
-	}
-	grouped := make(map[string][]mem)
-
-	for k, v := range kvs {
-		if !strings.HasPrefix(k, memoryKeyPrefix) {
-			continue
-		}
-		memType, shortKey := parseMemoryKey(k)
-		grouped[memType] = append(grouped[memType], mem{shortKey: shortKey, value: v})
-	}
-
-	if len(grouped) == 0 {
-		return
-	}
-
-	// Sort each group by key
-	for t := range grouped {
-		sort.Slice(grouped[t], func(i, j int) bool {
-			return grouped[t][i].shortKey < grouped[t][j].shortKey
-		})
-	}
-
-	fmt.Println()
-	fmt.Println("# Agent Memories")
-
-	for _, t := range memoryTypeOrder {
-		mems, ok := grouped[t]
-		if !ok || len(mems) == 0 {
-			continue
-		}
-		label := memoryTypeLabels[t]
-		if label == "" {
-			label = t
-		}
-		fmt.Printf("\n## %s\n\n", label)
-		for _, m := range mems {
-			fmt.Printf("- **%s**: %s\n", m.shortKey, m.value)
-		}
-	}
+	fmt.Print(renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
 }
 
 func bdKvListJSONForPrime(workDir string) (map[string]string, error) {

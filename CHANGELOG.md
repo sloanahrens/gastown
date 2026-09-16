@@ -56,6 +56,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rig's own event directory. Town-global channels (e.g. `mayor`) are
   unchanged.
 
+### Changed
+
+- **`gt prime` renders an index of agent memories instead of every value**
+  (gt-hp7t) — prime dumped all 38 beads-kv memories in full on every session:
+  48.5k chars (~12k tokens), 55% of the gastown witness's prime payload, and
+  re-read on every turn of every long-lived witness/refinery/deacon session.
+  The `# Agent Memories` section now renders one `key: preview` line per
+  memory, the preview being the first sentence capped at 160 chars, and points
+  at `gt memories <key>` — which already returned full text — for the rest.
+  The section is also capped as a whole and degrades rather than dropping:
+  entries fall back to bare keys when the budget runs short, and are only
+  omitted, with a count, if even those overflow; a per-entry cap alone would
+  just move the problem, since the corpus only grows. Measured against the
+  live corpus: memory section 48,495 → 7,291 chars, ~12,123 → ~1,822 tokens,
+  saving 10,301 tokens of the 22k-token prime payload. All 38 memories stay
+  discoverable and no content is lost.
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed

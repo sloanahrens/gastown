@@ -59,12 +59,7 @@ func runMemories(cmd *cobra.Command, args []string) error {
 	}
 
 	// Filter for memory.* keys and optional search/type
-	type memory struct {
-		memType  string
-		shortKey string
-		value    string
-	}
-	var memories []memory
+	var memories []memoryEntry
 
 	for k, v := range kvs {
 		if !strings.HasPrefix(k, memoryKeyPrefix) {
@@ -85,7 +80,7 @@ func runMemories(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		memories = append(memories, memory{memType: memType, shortKey: shortKey, value: v})
+		memories = append(memories, memoryEntry{memType: memType, shortKey: shortKey, value: v})
 	}
 
 	sort.Slice(memories, func(i, j int) bool {
