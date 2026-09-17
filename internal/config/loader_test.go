@@ -2475,6 +2475,40 @@ func TestWithRoleSettingsFlag_InjectsForClaude(t *testing.T) {
 	}
 }
 
+func TestWithRoleSettingsFlag_OllamaProviderClaudeCommand(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+
+	// local-coder preset: provider=ollama, command=claude (the gt-be0z bug scenario)
+	settings := NewRigSettings()
+	settings.Runtime = &RuntimeConfig{
+		Provider: "ollama",
+		Command:  "claude",
+	}
+	if err := SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	rc := ResolveRoleAgentConfig("polecat", townRoot, rigPath)
+	// Must contain --settings because command=="claude" identifies a Claude agent
+	// regardless of Provider (gt-be0z fix)
+	found := false
+	for _, arg := range rc.Args {
+		if arg == "--settings" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ollama provider + claude command should get --settings flag, but Args = %v", rc.Args)
+	}
+}
+
 func TestRoleSettingsDir(t *testing.T) {
 	t.Parallel()
 	rigPath := "/fake/rig"
