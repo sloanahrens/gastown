@@ -765,15 +765,11 @@ func (d *Daemon) escalate(source, message string) {
 		// separately so signal-killed processes still show diagnostics.
 		stderr := strings.TrimSpace(string(output))
 		if stderr == "" {
-			// Try to capture stderr in case the process wrote to it before dying.
-			if cmd.Stderr != nil {
-				stderr = strings.TrimSpace(cmd.Stderr.String())
-			}
+			// CombinedOutput captures both stdout+stderr together; if it's
+			// empty the process likely died before flushing anything.
+			stderr = "<no output>"
 		}
-		errMsg := err.Error()
-		if stderr != "" {
-			errMsg = fmt.Sprintf("%s (%s)", err.Error(), stderr)
-		}
+		errMsg := fmt.Sprintf("%s (%s)", err.Error(), stderr)
 
 		d.logger.Printf("escalate(%s): attempt %d/%d failed: %s — dropped message: %s",
 			source, attempt+1, maxEscalationRetries, errMsg, message)
