@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // BatchConfig holds configuration for the batch-then-bisect merge queue.
@@ -552,9 +554,11 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		}
 	}
 
-	// Push to origin
+	// Push to origin. The pre-push hook refuses default-branch pushes from a
+	// polecat session unless GT_REFINERY_MERGE=1 is set (gt-ibt8), and the
+	// Refinery may itself run inside one.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Pushing %d merged MRs to origin/%s...\n", len(stacked), target)
-	if pushErr := e.git.Push("origin", target, false); pushErr != nil {
+	if pushErr := e.git.PushWithEnv("origin", target, false, []string{git.EnvRefineryMerge}); pushErr != nil {
 		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
 		}
