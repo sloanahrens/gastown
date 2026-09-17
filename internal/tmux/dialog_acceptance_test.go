@@ -41,55 +41,12 @@ func TestAcceptWorkspaceTrustDialog_NoDialog(t *testing.T) {
 	}
 }
 
-// TestAcceptWorkspaceTrustDialog_DetectsDialog verifies that when trust dialog
-// text appears in the pane, it is detected and accepted (Enter key sent).
-func TestAcceptWorkspaceTrustDialog_DetectsDialog(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-trust-dlg-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Simulate the trust dialog by echoing its text into the pane
-	if err := tm.SendKeys(sessionName, "echo 'Quick safety check - do you trust this folder?'"); err != nil {
-		t.Fatalf("SendKeys: %v", err)
-	}
-	// Give the echo a moment to execute
-	time.Sleep(300 * time.Millisecond)
-
-	err := tm.AcceptWorkspaceTrustDialog(sessionName)
-	if err != nil {
-		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
-	}
-
-	// Verify that Enter was sent (we can't easily verify the exact keypress,
-	// but the function should return without error after detecting the dialog)
-}
-
-// TestAcceptWorkspaceTrustDialog_DetectsCodexDialog verifies that Codex's
-// workspace trust prompt is treated as a trust dialog instead of an agent prompt.
-func TestAcceptWorkspaceTrustDialog_DetectsCodexDialog(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-trust-codex-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	if err := tm.SendKeys(sessionName, "echo '> You are in /tmp/demo'; echo 'Do you trust the contents of this directory?'"); err != nil {
-		t.Fatalf("SendKeys: %v", err)
-	}
-	time.Sleep(300 * time.Millisecond)
-
-	if err := tm.AcceptWorkspaceTrustDialog(sessionName); err != nil {
-		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
-	}
-}
+// Both dialogs whose behavior AcceptWorkspaceTrustDialog drives are covered by
+// trust_dialog_tmux_test.go, which runs the function against a pane that renders
+// the dialog and records the keys it receives. The tests that used to live here
+// echoed dialog text into a shell prompt: they passed whether or not the dialog
+// was read, which is exactly why the blind Enter that exited Claude survived
+// review (gt-nc1t).
 
 // TestAcceptBypassPermissionsWarning_NoDialog verifies that when no bypass
 // permissions dialog is present, the function returns quickly without error.
