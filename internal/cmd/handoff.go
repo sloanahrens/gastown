@@ -554,11 +554,12 @@ func runHandoffCycle() error {
 		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(subject, true))
 	}
 
-	// Build restart command with --continue so the new session resumes
-	// the previous conversation (preserves context across compaction cycles).
+	// Build restart command for a fresh session — the successor picks up
+	// context from the handoff mail + hook, not from --continue.
+	// Using --continue would resume the same over-threshold conversation,
+	// causing PreCompact to fire again and loop indefinitely.
 	restartCmd, err := buildRestartCommandWithOpts(currentSession, buildRestartCommandOpts{
-		ContinueSession: true,
-		ContinuePrompt:  "Context compacted. Continue your previous task.",
+		ContinueSession: false,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "handoff --cycle: could not build restart command: %v\n", err)
