@@ -207,7 +207,7 @@ func TestGetStringConfig(t *testing.T) {
 	}
 }
 
-func TestToInt(t *testing.T) {
+func TestCoerceInt(t *testing.T) {
 	tests := []struct {
 		input    interface{}
 		expected int
@@ -219,14 +219,91 @@ func TestToInt(t *testing.T) {
 		{float64(3.14), 3},
 		{"123", 123},
 		{"abc", 0},
-		{true, 0}, // bools don't convert to int
+		{false, 0},
+		{true, 1}, // "1" written to an int key as bool before keys were typed
 	}
 
 	for _, tc := range tests {
-		result := toInt(tc.input)
+		result := CoerceInt(tc.input)
 		if result != tc.expected {
-			t.Errorf("toInt(%v) = %d, expected %d", tc.input, result, tc.expected)
+			t.Errorf("CoerceInt(%v) = %d, expected %d", tc.input, result, tc.expected)
 		}
+	}
+}
+
+func TestCoerceBool(t *testing.T) {
+	tests := []struct {
+		input    interface{}
+		expected bool
+	}{
+		{nil, false}, // unset
+		{false, false},
+		{true, true},
+		{"true", true},
+		{"false", false},
+		{"TRUE", true}, // bead labels are written verbatim
+		{"yes", true},  // legacy spelling
+		{"on", true},   // as accepted by `gt config set` and `gt rig config set`
+		{"OFF", false},
+		{"1", true},
+		{"0", false},
+		{1, true},
+		{0, false},
+		{int64(1), true},
+		{float64(1), true}, // wisp values load from JSON as float64
+		{float64(0), false},
+		{"banana", false}, // unrecognized reads as false
+	}
+
+	for _, tc := range tests {
+		if got := CoerceBool(tc.input); got != tc.expected {
+			t.Errorf("CoerceBool(%v) = %v, expected %v", tc.input, got, tc.expected)
+		}
+	}
+}
+
+// TestGetIntConfig_LegacyBoolValue covers rigs whose max_polecats was written as
+// a boolean by an older `gt rig config set` ("1" was parsed as true before values
+// were typed by key). The cap must still read as the 1 the operator asked for,
+// not as 0 with a bool silently ignored.
+func TestGetIntConfig_LegacyBoolValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "testrig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rig := &Rig{Name: "testrig", Path: rigPath}
+
+	wispCfg := wisp.NewConfig(tmpDir, "testrig")
+	if err := wispCfg.Set("max_polecats", true); err != nil {
+		t.Fatalf("seed wisp config: %v", err)
+	}
+
+	if got := rig.GetIntConfig("max_polecats"); got != 1 {
+		t.Errorf("max_polecats = %d, expected 1 for a legacy bool value", got)
+	}
+}
+
+// TestGetBoolConfig_NumericValue covers auto_restart written as a number. A raw
+// `val.(bool)` assertion (what the daemon used to do) ignores the value entirely,
+// so a stored 0 silently leaves auto-restart enabled.
+func TestGetBoolConfig_NumericValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := filepath.Join(tmpDir, "testrig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rig := &Rig{Name: "testrig", Path: rigPath}
+
+	wispCfg := wisp.NewConfig(tmpDir, "testrig")
+	if err := wispCfg.Set("auto_restart", float64(0)); err != nil {
+		t.Fatalf("seed wisp config: %v", err)
+	}
+
+	if rig.GetBoolConfig("auto_restart") {
+		t.Error("auto_restart=0 should read as false, not fall through to the default")
 	}
 }
 

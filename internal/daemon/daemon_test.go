@@ -16,6 +16,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -1053,5 +1054,66 @@ func TestIsRigOperational_MissingWispConfigLoggedOnce(t *testing.T) {
 	}
 	if strings.Contains(logged, "parked state may have been lost") {
 		t.Error("log message should not assert data loss that did not happen")
+	}
+}
+
+// TestAutoRestartDisabled covers the auto_restart check in isRigOperational.
+// The values are written the way the wisp layer stores them, including the
+// numeric encodings that survive a JSON round-trip (float64), because a bare
+// `val.(bool)` assertion ignores every one of those and silently leaves
+// auto-restart enabled - which is what `gt rig config set <rig> auto_restart 0`
+// did for a key whose value was stored as a number.
+func TestAutoRestartDisabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawJSON  string // value as written into .beads-wisp/config/<rig>.json
+		disabled bool
+	}{
+		{"unset stays enabled", "", false},
+		{"true stays enabled", `true`, false},
+		{"bare 1 stays enabled", `1`, false},
+		{"false disables", `false`, true},
+		{"bare 0 disables", `0`, true},
+		{`"false" disables`, `"false"`, true},
+		{`"0" disables`, `"0"`, true},
+		{`"true" stays enabled`, `"true"`, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			rigName := "testrig"
+
+			values := map[string]interface{}{}
+			if tc.rawJSON != "" {
+				var raw interface{}
+				if err := json.Unmarshal([]byte(tc.rawJSON), &raw); err != nil {
+					t.Fatalf("bad test fixture %q: %v", tc.rawJSON, err)
+				}
+				values["auto_restart"] = raw
+			}
+
+			wispDir := filepath.Join(townRoot, wisp.WispConfigDir, wisp.ConfigSubdir)
+			if err := os.MkdirAll(wispDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := json.Marshal(map[string]interface{}{
+				"rig":     rigName,
+				"values":  values,
+				"blocked": []string{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(wispDir, rigName+".json"), contents, 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := wisp.NewConfig(townRoot, rigName)
+			if got := autoRestartDisabled(cfg.Get("auto_restart")); got != tc.disabled {
+				t.Errorf("autoRestartDisabled with auto_restart=%s = %v, want %v",
+					tc.rawJSON, got, tc.disabled)
+			}
+		})
 	}
 }

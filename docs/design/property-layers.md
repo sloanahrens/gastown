@@ -184,6 +184,13 @@ gt rig config set gastown key --block
 gt rig config unset gastown key
 ```
 
+Values are parsed according to the key's type from the table above. Integer keys
+(`max_polecats`, `priority_adjustment`) require a whole number, and boolean keys
+(`auto_restart`, `dnd`, `auto_start_on_up`) accept `true`/`false`/`1`/`0`. A value
+that does not fit the key's type is rejected rather than stored in a form the
+key's reader would ignore; keys with no declared type are still guessed
+(number, then boolean, then string).
+
 ### Rig Lifecycle
 
 ```bash

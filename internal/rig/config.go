@@ -5,6 +5,7 @@ package rig
 import (
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -87,19 +88,47 @@ func (r *Rig) GetConfigWithSource(key string) ConfigResult {
 }
 
 // GetBoolConfig looks up a boolean config value.
-// Returns false if not set, not a bool, or blocked.
+// Returns false if not set or blocked.
+//
+// Values are coerced with CoerceBool rather than type-asserted, so numeric
+// spellings of 0/1 written to the wisp layer (where JSON numbers load back as
+// float64) mean the same thing as their boolean counterparts.
 func (r *Rig) GetBoolConfig(key string) bool {
-	result := r.GetConfig(key)
-	if result == nil {
-		return false
-	}
+	return CoerceBool(r.GetConfig(key))
+}
 
-	switch v := result.(type) {
+// CoerceBool interprets a stored config value as a boolean.
+// Returns false for nil and for values it cannot interpret.
+//
+// Config values travel through layers that each lose type information: bead
+// labels arrive as strings, and wisp values round-trip through JSON, where every
+// number loads back as float64. A key with no entry in SystemDefaults also gets
+// its value guessed at write time, which lands "1"/"0" as numbers. Numeric 0 is
+// therefore false and any other number is true, so those values keep the meaning
+// their author intended instead of silently reading as false.
+func CoerceBool(v interface{}) bool {
+	switch val := v.(type) {
+	case nil:
+		return false
 	case bool:
-		return v
+		return val
 	case string:
-		// Handle string booleans from bead labels
-		return v == "true" || v == "1" || v == "yes"
+		// String booleans from bead labels. The spellings match parseBool in
+		// internal/cmd, which is what parses values on the way in, plus the
+		// "t"/"f" shorthands strconv.ParseBool allows.
+		switch strings.ToLower(val) {
+		case "true", "yes", "1", "on", "t":
+			return true
+		case "false", "no", "0", "off", "f":
+			return false
+		}
+		return false
+	case int:
+		return val != 0
+	case int64:
+		return val != 0
+	case float64:
+		return val != 0
 	default:
 		return false
 	}
@@ -115,7 +144,7 @@ func (r *Rig) GetIntConfig(key string) int {
 	if !StackingKeys[key] {
 		// Override semantics: return first non-nil
 		result := r.GetConfig(key)
-		return toInt(result)
+		return CoerceInt(result)
 	}
 
 	// Stacking semantics: sum up adjustments from all layers
@@ -123,7 +152,7 @@ func (r *Rig) GetIntConfig(key string) int {
 	// Get base value (town or system default)
 	base := 0
 	if val, ok := SystemDefaults[key]; ok {
-		base = toInt(val)
+		base = CoerceInt(val)
 	}
 
 	// Check wisp layer for blocked
@@ -135,13 +164,13 @@ func (r *Rig) GetIntConfig(key string) int {
 	// Add bead adjustment
 	beadAdj := 0
 	if val := r.getBeadLabel(key); val != nil {
-		beadAdj = toInt(val)
+		beadAdj = CoerceInt(val)
 	}
 
 	// Add wisp adjustment
 	wispAdj := 0
 	if val := wispCfg.Get(key); val != nil {
-		wispAdj = toInt(val)
+		wispAdj = CoerceInt(val)
 	}
 
 	return base + beadAdj + wispAdj
@@ -195,19 +224,28 @@ func (r *Rig) getBeadLabel(key string) interface{} {
 	return nil
 }
 
-// toInt converts a value to int, returning 0 for unconvertible types.
-func toInt(v interface{}) int {
-	if v == nil {
-		return 0
-	}
-
+// CoerceInt interprets a stored config value as an integer.
+// Returns 0 for nil and for values it cannot interpret.
+//
+// Bools are accepted because older versions of `gt rig config set` stored a
+// value of "1" as boolean true before this package could tell which keys are
+// integer-typed (see SystemDefaults); true is read back as 1 and false as 0 so
+// those values keep their intended meaning.
+func CoerceInt(v interface{}) int {
 	switch val := v.(type) {
+	case nil:
+		return 0
 	case int:
 		return val
 	case int64:
 		return int(val)
 	case float64:
 		return int(val)
+	case bool:
+		if val {
+			return 1
+		}
+		return 0
 	case string:
 		if i, err := strconv.Atoi(val); err == nil {
 			return i
