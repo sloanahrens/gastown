@@ -29,7 +29,7 @@ gt done $ARGUMENTS
 
 **Common usage:**
 - `gt done` — Submit completed work (default: --status COMPLETED)
-- `gt done --pre-verified` — Submit with pre-verification (you ran gates after rebase)
+- `gt done --pre-verified` — **(refinery/mayor only; polecats: do NOT use)**
 - `gt done --status ESCALATED` — Signal blocker, skip MR
 - `gt done --status DEFERRED` — Pause work, skip MR
 
