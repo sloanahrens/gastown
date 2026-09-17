@@ -185,7 +185,7 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 				}
 
 				result, syncErr := hooks.SyncForRole(hooksProvider, dir, dir, loc.Role,
-					preset.HooksDir, preset.HooksSettingsFile, useSettingsDir)
+					preset.HooksDir, preset.HooksSettingsFile, preset.Command, useSettingsDir)
 				if syncErr != nil {
 					fmt.Printf("  %s %s (%s): %v\n", style.Error.Render("✖"), relPath, hooksProvider, syncErr)
 					errors++

@@ -2400,11 +2400,13 @@ func TestIsClaudeAgent(t *testing.T) {
 	}{
 		{"empty provider and command (defaults)", &RuntimeConfig{}, true},
 		{"explicit claude provider", &RuntimeConfig{Provider: "claude", Command: "anything"}, true},
-		{"explicit codex provider", &RuntimeConfig{Provider: "codex", Command: "claude"}, false},
+		{"codex provider + claude command → command wins", &RuntimeConfig{Provider: "codex", Command: "claude"}, true},
+		{"ollama provider + claude command → command wins (local-coder)", &RuntimeConfig{Provider: "ollama", Command: "claude"}, true},
 		{"bare claude command", &RuntimeConfig{Command: "claude"}, true},
 		{"path to claude binary", &RuntimeConfig{Command: "/usr/local/bin/claude"}, true},
 		{"aider command no provider", &RuntimeConfig{Command: "aider"}, false},
 		{"generic provider", &RuntimeConfig{Provider: "generic"}, false},
+		{"codex provider + aider command → provider authoritative", &RuntimeConfig{Provider: "codex", Command: "aider"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2470,6 +2472,40 @@ func TestWithRoleSettingsFlag_InjectsForClaude(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("default Claude agent should get --settings flag for polecat role, but Args = %v", rc.Args)
+	}
+}
+
+func TestWithRoleSettingsFlag_OllamaProviderClaudeCommand(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+
+	// local-coder preset: provider=ollama, command=claude (the gt-be0z bug scenario)
+	settings := NewRigSettings()
+	settings.Runtime = &RuntimeConfig{
+		Provider: "ollama",
+		Command:  "claude",
+	}
+	if err := SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	rc := ResolveRoleAgentConfig("polecat", townRoot, rigPath)
+	// Must contain --settings because command=="claude" identifies a Claude agent
+	// regardless of Provider (gt-be0z fix)
+	found := false
+	for _, arg := range rc.Args {
+		if arg == "--settings" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ollama provider + claude command should get --settings flag, but Args = %v", rc.Args)
 	}
 }
 

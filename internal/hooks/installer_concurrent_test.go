@@ -57,7 +57,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
 				errs <- err
 			}
 		}()
@@ -121,7 +121,7 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dotClaude, 0755) })
 
-	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true)
+	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
 	if err == nil {
 		t.Fatal("expected error from read-only directory, got nil")
 	}
@@ -157,7 +157,7 @@ func TestSyncForRole_AtomicWriteErrorPropagates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(pluginsDir, 0755) })
 
-	_, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", false)
+	_, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err == nil {
 		t.Fatal("expected error from read-only directory, got nil")
 	}

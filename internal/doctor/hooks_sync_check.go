@@ -244,7 +244,7 @@ func (c *HooksSyncCheck) Fix(ctx *CheckContext) error {
 	// Fix template-based targets via SyncForRole.
 	for _, tt := range c.templateOutOfSync {
 		_, err := hooks.SyncForRole(tt.provider, tt.dir, tt.dir, tt.role,
-			tt.hooksDir, tt.settingsFile, tt.useSettingsDir)
+			tt.hooksDir, tt.settingsFile, tt.provider, tt.useSettingsDir)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", tt.path, err))
 		}

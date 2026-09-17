@@ -1562,19 +1562,33 @@ func IsResolvedAgentClaude(rc *RuntimeConfig) bool {
 }
 
 // isClaudeAgent returns true if the RuntimeConfig represents a Claude agent.
-// When Provider is explicitly set, it's authoritative. When empty, the Command
-// is checked: bare "claude", a path ending in "/claude" (or "\claude" on Windows),
-// or an empty command (the default) all indicate Claude.
+// Command "claude" (or a path to a claude binary) is authoritative regardless of Provider.
+// When Command is explicitly set to a non-claude value, Provider is authoritative.
+// When Command is empty, it defaults to Claude (unless Provider says otherwise).
 func isClaudeAgent(rc *RuntimeConfig) bool {
+	// Command "claude" always means Claude harness, even when Provider != "claude"
+	// (e.g., local-coder preset: provider=ollama, command=claude).
+	if rc.Command == "claude" {
+		return true
+	}
+	if rc.Command != "" {
+		base := filepath.Base(rc.Command)
+		base = strings.TrimSuffix(base, filepath.Ext(base))
+		if base == "claude" {
+			return true
+		}
+		// Command explicitly set to non-claude; Provider is authoritative.
+		if rc.Provider != "" {
+			return rc.Provider == "claude"
+		}
+		// Non-claude command with no Provider → not a Claude agent.
+		return false
+	}
+	// Command is empty → defaults to Claude (unless Provider says otherwise).
 	if rc.Provider != "" {
 		return rc.Provider == "claude"
 	}
-	if rc.Command == "" || rc.Command == "claude" {
-		return true
-	}
-	base := filepath.Base(rc.Command)
-	base = strings.TrimSuffix(base, filepath.Ext(base))
-	return base == "claude"
+	return true
 }
 
 // withRoleSettingsFlag appends --settings to the Args for Claude agents whose

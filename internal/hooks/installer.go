@@ -37,6 +37,8 @@ var templateFS embed.FS
 //   - workDir: the agent's working directory.
 //   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
+//   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
+//     boot/dog settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -46,7 +48,7 @@ var templateFS embed.FS
 //
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
-func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile string, useSettingsDir bool) error {
+func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return nil
 	}
@@ -55,7 +57,7 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	// Boot and dog kennels are managed through the JSON merge path so their
 	// role overrides (e.g. the dog formula-allowlist guard, gt-9iv) are
 	// applied and kept in sync rather than frozen at first install.
-	if provider == "claude" && (role == "boot" || role == "dog") && isSettingsFile(hooksFile) {
+	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog") && isSettingsFile(hooksFile) {
 		_, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
 			Key:      role,
@@ -140,7 +142,7 @@ const (
 // This is the explicit sync path used by "gt hooks sync" for template-based agents
 // (OpenCode, Copilot, Pi, OMP, etc.). It should NOT be used for agents whose settings
 // are managed by the JSON merge path (Claude), as that would clobber merged overrides.
-func SyncForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile string, useSettingsDir bool) (SyncResult, error) {
+func SyncForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) (SyncResult, error) {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return SyncUnchanged, nil
 	}
