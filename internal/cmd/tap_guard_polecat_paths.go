@@ -118,46 +118,15 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 			}
 			resolvedClean := filepath.Clean(resolved)
 
-			// Fail CLOSED on EvalSymlinks error — never allow a new file whose
-			// real location cannot be determined.
-			resolvedReal, err := os.PathExists(resolvedClean)
-			_ = resolvedReal // suppress unused variable
-			if err == nil {
-				if _, err = os.Stat(resolvedClean); err != nil {
-					// Path doesn't exist yet — check its parent directory.
-					parent := filepath.Dir(resolvedClean)
-					if parent != "" && parent != resolvedClean {
-						if _, statErr := os.Stat(parent); statErr != nil {
-							// Parent also doesn't exist — check the path as-is
-							// against the worktree boundary (path-prefix check).
-							if !isPathWithin(resolvedClean, worktreeLower) {
-								printPolecatPathsBlock(raw, "file path outside the polecat's own worktree")
-								return NewSilentExit(2)
-							}
-							if isBlockedTownPath(resolvedClean, townRoot, polecatWorktreeRoot) {
-								printPolecatPathsBlock(raw, "target is a sibling worktree or restricted town directory")
-								return NewSilentExit(2)
-							}
-						} else {
-							if !isPathWithin(resolvedClean, worktreeLower) {
-								printPolecatPathsBlock(raw, "file path outside the polecat's own worktree")
-								return NewSilentExit(2)
-							}
-						}
-					} else {
-						if !isPathWithin(resolvedClean, worktreeLower) {
-							printPolecatPathsBlock(raw, "file path outside the polecat's own worktree")
-							return NewSilentExit(2)
-						}
-					}
-				}
+			// Inside the polecat's own worktree — allowed.
+			if isPathWithin(resolvedClean, worktreeLower) {
+				continue
 			}
 
-			if !isPathWithin(resolvedClean, worktreeLower) {
-				if isBlockedTownPath(resolvedClean, townRoot, polecatWorktreeRoot) {
-					printPolecatPathsBlock(raw, "target is a sibling worktree or restricted town directory")
-					return NewSilentExit(2)
-				}
+			// Outside the worktree — check if it's a blocked town path.
+			if isBlockedTownPath(resolvedClean, townRoot, polecatWorktreeRoot) {
+				printPolecatPathsBlock(raw, "target is a sibling worktree or restricted town directory")
+				return NewSilentExit(2)
 			}
 		}
 	}
@@ -166,9 +135,10 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 }
 
 // extractToolInfo parses the hook input JSON and returns:
-//   - toolName: the tool name (Bash, Edit, Write, NotebookEdit, MultiEdit)
-//   - targetPath: the file/notebook path for file-targeting tools, "" for Bash
-//   - isFileTarget: true if the tool targets a file path
+//
+//	toolName: the tool name (Bash, Edit, Write, NotebookEdit, MultiEdit)
+//	targetPath: the file/notebook path for file-targeting tools, "" for Bash
+//	isFileTarget: true if the tool targets a file path
 func extractToolInfo(input []byte) (toolName, targetPath string, isFileTarget bool) {
 	if len(input) == 0 {
 		return "", "", false
@@ -176,8 +146,8 @@ func extractToolInfo(input []byte) (toolName, targetPath string, isFileTarget bo
 	var hookInput struct {
 		ToolName string `json:"tool_name"`
 		ToolInput struct {
-			Command    string `json:"command"`
-			FilePath   string `json:"file_path"`
+			Command      string `json:"command"`
+			FilePath     string `json:"file_path"`
 			NotebookPath string `json:"notebook_path"`
 		} `json:"tool_input"`
 	}
