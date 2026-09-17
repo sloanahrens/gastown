@@ -1562,10 +1562,9 @@ func IsResolvedAgentClaude(rc *RuntimeConfig) bool {
 }
 
 // isClaudeAgent returns true if the RuntimeConfig represents a Claude agent.
-// When Command is "claude" (or a path to a claude binary), it is authoritative:
-// the agent is a Claude harness regardless of Provider. When Command is empty or
-// unset, Provider is checked: only "claude" indicates a Claude agent. An empty
-// command (the default) defaults to Claude.
+// Command "claude" (or a path to a claude binary) is authoritative regardless of Provider.
+// When Command is explicitly set to a non-claude value, Provider is authoritative.
+// When Command is empty, it defaults to Claude (unless Provider says otherwise).
 func isClaudeAgent(rc *RuntimeConfig) bool {
 	// Command "claude" always means Claude harness, even when Provider != "claude"
 	// (e.g., local-coder preset: provider=ollama, command=claude).
@@ -1578,16 +1577,18 @@ func isClaudeAgent(rc *RuntimeConfig) bool {
 		if base == "claude" {
 			return true
 		}
+		// Command explicitly set to non-claude; Provider is authoritative.
+		if rc.Provider != "" {
+			return rc.Provider == "claude"
+		}
+		// Non-claude command with no Provider → not a Claude agent.
+		return false
 	}
-	// Empty command defaults to Claude.
-	if rc.Command == "" {
-		return true
-	}
-	// Command is non-claude; Provider is authoritative for non-claude commands.
+	// Command is empty → defaults to Claude (unless Provider says otherwise).
 	if rc.Provider != "" {
 		return rc.Provider == "claude"
 	}
-	return false
+	return true
 }
 
 // withRoleSettingsFlag appends --settings to the Args for Claude agents whose
