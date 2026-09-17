@@ -1408,7 +1408,7 @@ type MergeQueueConfig struct {
 	// On a non-Go rig this field is ignored and test_command runs in full.
 	TestVerifyCommand string `json:"test_verify_command,omitempty"`
 
-	// TestVerifyIncludeContainerPackages restores the pre-gt-yihz behaviour
+	// TestVerifyIncludeContainerPackages restores the pre-gt-yihz behavior
 	// of gt done's default test-verify gate running the Dolt/testcontainers-
 	// backed packages too (inside the container-gate slot). Nil/false (the
 	// default) leaves those packages to the refinery's gate so the Docker

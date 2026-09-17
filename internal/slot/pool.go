@@ -38,7 +38,7 @@ type Pool struct {
 	ReservedForGate int
 }
 
-// DefaultPool is the pre-pool behaviour: one slot, nothing reserved. Acquire
+// DefaultPool is the pre-pool behavior: one slot, nothing reserved. Acquire
 // and Status use it.
 var DefaultPool = Pool{Slots: 1}
 
