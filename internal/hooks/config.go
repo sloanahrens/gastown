@@ -338,6 +338,16 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// forget to call gt done before the session ends. The polecat-stop-check
 		// command is idempotent — it checks heartbeat state and branch commits
 		// before deciding whether to run gt done.
+		//
+		// The same override carries the polecat-paths guard (gt-hmaf): a polecat
+		// works in exactly one worktree, and one that edits a sibling's worktree
+		// corrupts a branch its owner cannot see (a local-model polecat did
+		// exactly that on 2026-09-16, editing CORAL's copy of
+		// internal/cmd/rig_config.go). The guard reads tool_input off stdin and
+		// self-filters to its own session, so it needs no If — and the two
+		// matchers are bare tool names, which mergeEntries unions into the base
+		// "Bash" entry rather than replacing it, so the town-wide guards (pr-
+		// workflow, dangerous-command, container-suite) stay in force here.
 		"polecats": {
 			Stop: []HookEntry{
 				{
@@ -348,6 +358,27 @@ func DefaultOverrides() map[string]*HooksConfig {
 							Command: gtCommand("gt tap polecat-stop-check"),
 						},
 					},
+				},
+			},
+			PreToolUse: []HookEntry{
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard polecat-paths"),
+					}},
+				},
+				{
+					// One regex matcher rather than four entries (Edit, Write,
+					// MultiEdit, NotebookEdit): Claude Code matches the tool
+					// name as a regex, so this is one process spawn per file-
+					// writing call instead of four (gt-5ihs documents the bare
+					// tool-name matcher form).
+					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard polecat-paths"),
+					}},
 				},
 			},
 		},

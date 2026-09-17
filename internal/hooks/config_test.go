@@ -775,6 +775,99 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 	}
 }
 
+// TestComputeExpectedPolecatsGetPolecatPathsGuard pins the gt-hmaf wiring: the
+// polecats role must receive the polecat-paths guard on both the Bash matcher
+// and the file-writing tool matcher, alongside — not instead of — the guards it
+// inherits from the base. A hooks-sync regression that dropped it, or a merge
+// change that let a same-matcher override replace the base entry, would remove
+// the only protection against one polecat editing another's worktree.
+func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	polecats, err := ComputeExpected("gastown/polecats")
+	if err != nil {
+		t.Fatalf("ComputeExpected(gastown/polecats): %v", err)
+	}
+
+	const guardCommand = "tap guard polecat-paths"
+	bashEntry, ok := findPreToolUse(polecats, "Bash")
+	if !ok {
+		t.Fatal("polecats missing the base bare \"Bash\" PreToolUse entry")
+	}
+	hasPolecatPaths := false
+	for _, h := range bashEntry.Hooks {
+		if strings.Contains(h.Command, guardCommand) {
+			hasPolecatPaths = true
+			if h.If != "" {
+				t.Errorf("polecat-paths must self-filter (If=\"\"), got If=%q", h.If)
+			}
+		}
+	}
+	if !hasPolecatPaths {
+		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
+	}
+	// The base's own guards share the bare "Bash" matcher and must survive the
+	// union (gt-5ihs): pr-workflow's If-gated patterns, dangerous-command and
+	// container-suite's self-filtering hooks.
+	requireIfConditions(t, "gastown/polecats", polecats, prWorkflowIfConditions)
+	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite"} {
+		found := false
+		for _, h := range bashEntry.Hooks {
+			if strings.Contains(h.Command, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("polecats Bash entry lost the inherited %q guard, got: %+v", want, bashEntry.Hooks)
+		}
+	}
+
+	// One regex matcher covers every tool that writes a file from the model's
+	// side (Edit, Write, MultiEdit, NotebookEdit) — four separate matchers
+	// would spawn the guard four times per call for no extra coverage.
+	fileEntry, ok := findPreToolUse(polecats, "Edit|Write|MultiEdit|NotebookEdit")
+	if !ok {
+		entries := make([]string, 0, len(polecats.PreToolUse))
+		for _, entry := range polecats.PreToolUse {
+			entries = append(entries, entry.Matcher)
+		}
+		t.Fatalf("polecats missing the file-writing guard matcher, have: %v", entries)
+	}
+	fileGuard := false
+	for _, h := range fileEntry.Hooks {
+		if strings.Contains(h.Command, guardCommand) {
+			fileGuard = true
+		}
+	}
+	if !fileGuard {
+		t.Errorf("file-writing matcher missing %q, got: %+v", guardCommand, fileEntry.Hooks)
+	}
+
+	// The same override also carries the idle-polecat Stop hook; wiring the
+	// guard must not have displaced it.
+	if len(polecats.Stop) == 0 {
+		t.Error("polecats must keep the polecat-stop-check Stop hook")
+	}
+
+	// Other roles must not receive the guard — it is a polecat-only boundary.
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "dog"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		for _, eventType := range EventTypes {
+			for _, entry := range cfg.GetEntries(eventType) {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, guardCommand) {
+						t.Errorf("%s must not receive the polecat-paths guard (matcher %q)", target, entry.Matcher)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)

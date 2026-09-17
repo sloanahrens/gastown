@@ -65,6 +65,17 @@ The `dog` override adds a PreToolUse guard on every Bash command
 declares a `command_allowlist` in its TOML, commands outside that list (plus a
 built-in lifecycle baseline) are blocked before they run.
 
+The `polecats` override adds the polecat-paths guard (`gt tap guard
+polecat-paths`, gt-hmaf) on the `Bash` and `Edit|Write|MultiEdit|NotebookEdit`
+matchers. Polecats work in exactly one worktree; a polecat that edits a
+sibling's worktree corrupts a branch its owner cannot see. File-writing tools
+are limited to the polecat's own worktree (plus temp dirs and the session
+scratchpad), and Bash commands that write — including interpreters, `curl -o`,
+redirections, `cd` and `git -C` targets — are blocked when they name a town
+path that is not the polecat's worktree, its own polecat directory, or its
+rig's `.repo.git`. Read-only commands stay allowed anywhere, and a target the
+guard cannot resolve is blocked rather than allowed.
+
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
@@ -168,6 +179,9 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 
 - **bd init guard** (gastown/crew, beads/crew) - blocks `bd init*` inside `.beads/`
 - **mol patrol guards** (gastown roles) - blocks persistent patrol molecules
+- **polecat-paths guard** (polecats) - blocks Edit/Write/MultiEdit/NotebookEdit
+  targets outside the polecat's own worktree, and Bash writes into a sibling
+  worktree or the town's mayor/deacon/settings trees (gt-hmaf)
 - **tmux clear-history** (gastown root) - clears terminal history on session start
 - **SessionStart .beads/ validation** (gastown/crew, beads/crew) - validates CWD
 
