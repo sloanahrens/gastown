@@ -17,6 +17,12 @@ import (
 )
 
 const (
+	// defaultMainBranchTestInterval is how often each rig's main_branch_test
+	// patrol runs. Kept at 60m to avoid starving the container-gate slot:
+	// 3 rigs × 30m × ~10m holds = slot busy ~50% of the hour, leaving
+	// refinery gates and polecat gt done --pre-verified waiting 39-45m.
+	// At 60m each rig holds the slot for ~10m of a 60m window, giving other
+	// callers predictable 50m gaps (gt-uoqg).
 	defaultMainBranchTestInterval = 60 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 

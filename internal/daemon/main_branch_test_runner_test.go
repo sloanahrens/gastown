@@ -566,8 +566,8 @@ func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	if !config.Patrols.MainBranchTest.Enabled {
 		t.Error("expected MainBranchTest.Enabled=true")
 	}
-	if config.Patrols.MainBranchTest.IntervalStr != "30m" {
-		t.Errorf("expected interval '30m', got %q", config.Patrols.MainBranchTest.IntervalStr)
+	if config.Patrols.MainBranchTest.IntervalStr != "60m" {
+		t.Errorf("expected interval '60m', got %q", config.Patrols.MainBranchTest.IntervalStr)
 	}
 	if config.Patrols.MainBranchTest.TimeoutStr != "10m" {
 		t.Errorf("expected timeout '10m', got %q", config.Patrols.MainBranchTest.TimeoutStr)
