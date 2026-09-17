@@ -30,6 +30,18 @@ const (
 	maxConsecutivePushFailures    = 3
 	defaultSpikeThreshold         = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
+	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
+	// child process.  Kept at 60 s so that, even under slot-starvation or
+	// Dolt contention (the conditions that produced the gt-tlwv drops on
+	// 2026-09-16), the child has enough wall-clock to acquire the slot and
+	// complete the Dolt write.  The caller retries up to 3 attempts with
+	// exponential backoff, giving ~120 s total budget.
+	defaultEscalationTimeout = 60 * time.Second
+
+	// maxEscalationRetries is the maximum number of attempts before giving up
+	// and logging the escalation to the feed as a last-resort fallback.
+	maxEscalationRetries = 3
+
 	// gitPostBufferBytes raises http.postBuffer above git's 1 MB default on the
 	// offsite backup repo. JSONL exports accumulate across many unpushed
 	// snapshot commits between successful pushes, so the pack GitHub receives
@@ -697,27 +709,91 @@ func escalationTitle(source, message string) string {
 // escalation reason via --stdin rather than embedded in the title, since
 // `gt escalate` forwards the title straight to `bd create --title=...`,
 // which rejects newlines and would otherwise drop the alert silently.
+//
+// Under load (slot-starvation, Dolt contention) gt escalate can take >10 s.
+// We raise the per-attempt timeout to 60 s, retry up to maxEscalationRetries
+// times with exponential backoff, and on final drop log the full message to
+// the feed as a last-resort fallback (gt-tlwv).
 func (d *Daemon) escalate(source, message string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	title := escalationTitle(source, message)
-	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--stdin", title)
-	cmd.Stdin = strings.NewReader(message)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
-	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("escalate(%s): gt escalate failed: %v (%s) — dropped message: %s",
-			source, err, strings.TrimSpace(string(output)), message)
-		// An escalation path that fails silently is itself the bug this guards
-		// against (gt-qna) — leave a feed-visible trace even when nobody is
-		// tailing the daemon log.
-		_ = events.LogFeedTo(d.config.TownRoot, events.TypeEscalationDropped, "daemon", map[string]interface{}{
-			"source": source,
-			"error":  err.Error(),
-			"title":  title,
-		})
+
+	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
+		cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--stdin", title)
+		cmd.Stdin = strings.NewReader(message)
+		cmd.Dir = d.config.TownRoot
+		cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
+		util.SetDetachedProcessGroup(cmd)
+
+		output, err := cmd.CombinedOutput()
+
+		// Check for context deadline exceeded before cmd.Wait() may mask the
+		// cause; cmd.Process is nil once the process exits, so we must check
+		// the context first (gt-tlwv).
+		if ctxErr := ctx.Err(); ctxErr == context.DeadlineExceeded {
+			d.logger.Printf("escalate(%s): attempt %d/%d timed out after %s — %s",
+				source, attempt+1, maxEscalationRetries, defaultEscalationTimeout, message)
+			cancel()
+
+			// If this was the last attempt, log to feed as fallback.
+			if attempt == maxEscalationRetries-1 {
+				_ = events.LogFeedTo(d.config.TownRoot, events.TypeEscalationDropped, "daemon", map[string]interface{}{
+					"source":  source,
+					"error":   "context deadline exceeded",
+					"title":   title,
+					"message": message, // include the full message on final drop
+				})
+			}
+
+			// Back-off before the next retry (exponential: 1 s, 2 s).
+			if attempt < maxEscalationRetries-1 {
+				backoff := time.Duration(attempt+1) * time.Second
+				d.logger.Printf("escalate(%s): retrying in %s …", source, backoff)
+				time.Sleep(backoff)
+			}
+			continue
+		}
+		cancel()
+
+		if err == nil {
+			return // success
+		}
+
+		// When a process is killed by signal (SIGKILL from CommandContext),
+		// CombinedOutput() returns nil output, so the old "%v (%s)" format
+		// printed "signal: killed ()" with empty parens.  Capture stderr
+		// separately so signal-killed processes still show diagnostics.
+		stderr := strings.TrimSpace(string(output))
+		if stderr == "" {
+			// Try to capture stderr in case the process wrote to it before dying.
+			if cmd.Stderr != nil {
+				stderr = strings.TrimSpace(cmd.Stderr.String())
+			}
+		}
+		errMsg := err.Error()
+		if stderr != "" {
+			errMsg = fmt.Sprintf("%s (%s)", err.Error(), stderr)
+		}
+
+		d.logger.Printf("escalate(%s): attempt %d/%d failed: %s — dropped message: %s",
+			source, attempt+1, maxEscalationRetries, errMsg, message)
+
+		// If this was the last attempt, log to feed as fallback.
+		if attempt == maxEscalationRetries-1 {
+			_ = events.LogFeedTo(d.config.TownRoot, events.TypeEscalationDropped, "daemon", map[string]interface{}{
+				"source":  source,
+				"error":   err.Error(),
+				"title":   title,
+				"message": message, // include the full message on final drop
+			})
+		}
+
+		// Back-off before the next retry (exponential: 1 s, 2 s).
+		if attempt < maxEscalationRetries-1 {
+			backoff := time.Duration(attempt+1) * time.Second
+			d.logger.Printf("escalate(%s): retrying in %s …", source, backoff)
+			time.Sleep(backoff)
+		}
 	}
 }
 
