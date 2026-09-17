@@ -293,7 +293,7 @@ func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 	// Try resolving symlinks; fail closed on error.
 	resolved, err := filepath.EvalSymlinks(targetPath)
 	if err == nil {
-		return isPathWithin(resolved, strings.ToLower(worktreeResolved))
+		return isPathWithinCaseInsensitive(resolved, worktreeResolved)
 	}
 
 	// Path doesn't exist — check its parent directory.
@@ -302,13 +302,13 @@ func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 		if _, statErr := os.Stat(parent); statErr == nil {
 			resolvedParent, err := filepath.EvalSymlinks(parent)
 			if err == nil {
-				return isPathWithin(resolvedParent, strings.ToLower(worktreeResolved))
+				return isPathWithinCaseInsensitive(resolvedParent, worktreeResolved)
 			}
 		}
 	}
 
 	// Parent doesn't exist either — use path-prefix check on the given path.
-	return isPathWithin(targetClean, strings.ToLower(worktreeResolved))
+	return isPathWithinCaseInsensitive(targetClean, worktreeResolved)
 }
 
 // isPathWithin reports whether target (both already cleaned/lowercased) is
@@ -318,6 +318,23 @@ func isPathWithin(target, refLower string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(refLower, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// isPathWithinCaseInsensitive reports whether target is strictly inside ref,
+// comparing both paths case-insensitively. This avoids the pitfall of
+// lowercasing only ref: on macOS, /T/ in target vs /t/ in lowercased ref
+// makes filepath.Rel produce "../..." escapes that falsely report "outside".
+// Both paths are lowercased so filepath.Rel sees identical case and produces
+// a clean relative path.
+func isPathWithinCaseInsensitive(target, ref string) bool {
+	if ref == "" {
+		return false
+	}
+	rel, err := filepath.Rel(strings.ToLower(ref), strings.ToLower(target))
 	if err != nil {
 		return false
 	}
