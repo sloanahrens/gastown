@@ -33,12 +33,6 @@ This guard blocks operations that could cause irreversible damage:
   - truncate table
   - find/bfs/fd/rg/grep -r/du/ls -R rooted at /, ~, $HOME, /Users, /System,
     /Library, or /opt (see gt-nqcy — an unbounded 'bfs /' froze a host)
-  - the same walkers rooted at the town tree: the town root, any rig root,
-    any path directly under the town root, a rig's worktree directories
-    (polecats/crew/refinery/witness/mayor), or any .repo.git — see gt-6e2l,
-    where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
-    every rig and every worktree on the host. A path inside a single repo or
-    worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed.
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
 and exits with code 2 to block dangerous operations.
@@ -86,11 +80,7 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// The town root is resolved once per hook run and threaded down through
-	// the recursion, so a nested payload (bash -c "grep -r x /Users/me/gt")
-	// is judged against the same town tree as the top-level command
-	// (gt-6e2l). "" means "not inside a town" — see currentTownRoot.
-	if reason, alternative := evaluateDangerousCommand(command, 0, currentTownRoot()); reason != "" {
+	if reason, alternative := evaluateDangerousCommand(command, 0); reason != "" {
 		if alternative != "" {
 			printDangerousBlockWithAlternative(reason, command, alternative)
 		} else {
@@ -117,7 +107,7 @@ const maxDangerousNestDepth = 3
 // forms (a SQL string, a mail body, a jq/sed script) deliberately stays
 // opaque — that is where this guard's real false positives have come from
 // (mayor scope, gt-5ihs attempt 2, gt-wisp-db27 finding 4).
-func evaluateDangerousCommand(command string, depth int, townRoot string) (reason, alternative string) {
+func evaluateDangerousCommand(command string, depth int) (reason, alternative string) {
 	command = stripHeredocBodies(command)
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
@@ -148,7 +138,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
 	// ls -r (reverse sort) mean different things, and lowercasing would
 	// collapse that distinction.
-	if r, alt := matchesUnboundedScan(tokens, townRoot); r != "" {
+	if r, alt := matchesUnboundedScan(tokens); r != "" {
 		return r, alt
 	}
 
@@ -165,7 +155,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	nested := nestedCommands(tokens, lowerTokens)
 	nested = append(nested, commandSubstitutions(command)...)
 	for _, n := range nested {
-		if r, alt := evaluateDangerousCommand(n, depth+1, townRoot); r != "" {
+		if r, alt := evaluateDangerousCommand(n, depth+1); r != "" {
 			return r, alt
 		}
 	}
@@ -487,19 +477,14 @@ var alwaysRecursiveScanTools = map[string]bool{
 
 // matchesUnboundedScan blocks find/bfs/fd/rg/ag/du, "grep -r", and "ls -R"
 // invocations whose root argument is broad enough to scan the whole
-// filesystem (see scanRootDenylist) or the town tree (see
-// tap_guard_town_scan.go and townScanHazard). It returns a short reason for
-// the fixed-width block banner and a longer alternative suggestion to print
-// separately, or ("", "") if the command is fine. tokens must be
+// filesystem (see scanRootDenylist). It returns a short reason for the
+// fixed-width block banner and a longer alternative-tools suggestion to
+// print separately, or ("", "") if the command is fine. tokens must be
 // original-case, shell-aware tokens (see shellTokenize) — quoted text (a
 // sed/jq script, a mail body) must arrive as one opaque token so a "//"
 // appearing inside it is never mistaken for a bare root-path argument
 // (gt-mkrj).
-//
-// townRoot is the Gas Town root the guard resolved for this run, or "" when
-// not inside a town; it is the only caller-supplied state here, so the
-// host-root rule behaves identically whether or not a town exists.
-func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative string) {
+func matchesUnboundedScan(tokens []string) (reason, alternative string) {
 	fields := tokens
 	vars := shellVarAssignments(tokens)
 	for i, f := range fields {
@@ -528,31 +513,17 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 
 		for _, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
-			if isUnboundedScanRoot(resolved) {
-				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
-				alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
-					"or a search rooted inside the repo/rig instead of the whole filesystem."
-				return reason, alternative
+			if !isUnboundedScanRoot(resolved) {
+				continue
 			}
-			// The same walkers rooted at the town tree: the town root, a rig
-			// root, a rig's worktree directory, or a .repo.git (gt-6e2l).
-			if hazard := townScanHazard(scanRootPath(resolved), townRoot); hazard != "" {
-				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, hazard)
-				alternative = townScanAlternative
-				return reason, alternative
-			}
+			reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
+			alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
+				"or a search rooted inside the repo/rig instead of the whole filesystem."
+			return reason, alternative
 		}
 	}
 	return "", ""
 }
-
-// townScanAlternative is the allow-path suggestion printed under a town-tree
-// block: the same shape as the host-root rule's (narrow the root until it
-// names something bounded), specialised to the town's layout so the caller
-// knows which part of the tree is safe to walk.
-const townScanAlternative = "Alternative: scan one repo or worktree instead of the town tree — " +
-	"cd into the rig or worktree you need (~/gt/<rig>/polecats/<name>/<repo>) and grep there, " +
-	"or name the specific subdirectory. The town root, rig roots, rig worktree dirs, and .repo.git are off limits."
 
 // hasExactArg reports whether any of args exactly matches one of the wanted
 // values.

@@ -25,23 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Dangerous-command guard now covers the town tree** (gt-6e2l) — a dog
-  session's `grep -R "record-run" -n /Users/sloan/gt` ran unblocked and
-  walked every rig, every `.repo.git`, and every worktree in the town (>64 MB
-  of output, 15-minute load average 17). The unbounded-scan rule
-  (`scanRootDenylist`) covered `/` and `$HOME` but not the town, which is the
-  largest tree on the host. `matchesUnboundedScan` now also blocks
-  `find`/`bfs`/`fd`/`rg`/`ag`/`du`, `grep -r`, and `ls -R` rooted at the town
-  root, at anything directly under it (every rig root, plus the town's own
-  `.dolt-data`/`logs`/`mayor`), at a rig's worktree-holding directories
-  (`polecats`, `crew`, `refinery`, `witness`, `mayor` — derived from
-  `rig.AgentDirs`), or at any `.repo.git`. A path inside a single repo or
-  worktree is still allowed, and scan roots reached through `~`, `$HOME`,
-  relative paths (`.`, `..`, `./x`), a shell variable assignment, or a nested
-  `bash -c`/`$(...)` payload all resolve before being classified. Both the
-  guard's `--help` text and the block banner's alternative line name the
-  allowed shape.
-
 - **Cross-rig event theft on refinery/witness channels** (gt-dsj) — the
   `refinery` and `witness` event channels were town-global directories
   (`~/gt/events/<channel>/`) but every rig's agent consumed them with
@@ -55,23 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context can be resolved. The daemon's refinery spawn gate now checks only
   the rig's own event directory. Town-global channels (e.g. `mayor`) are
   unchanged.
-
-### Changed
-
-- **`gt prime` renders an index of agent memories instead of every value**
-  (gt-hp7t) — prime dumped all 38 beads-kv memories in full on every session:
-  48.5k chars (~12k tokens), 55% of the gastown witness's prime payload, and
-  re-read on every turn of every long-lived witness/refinery/deacon session.
-  The `# Agent Memories` section now renders one `key: preview` line per
-  memory, the preview being the first sentence capped at 160 chars, and points
-  at `gt memories <key>` — which already returned full text — for the rest.
-  The section is also capped as a whole and degrades rather than dropping:
-  entries fall back to bare keys when the budget runs short, and are only
-  omitted, with a count, if even those overflow; a per-entry cap alone would
-  just move the problem, since the corpus only grows. Measured against the
-  live corpus: memory section 48,495 → 7,291 chars, ~12,123 → ~1,822 tokens,
-  saving 10,301 tokens of the 22k-token prime payload. All 38 memories stay
-  discoverable and no content is lost.
 
 ## [1.2.1] - 2026-06-06
 

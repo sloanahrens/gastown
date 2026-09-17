@@ -20,6 +20,7 @@ is violated. They're called before the tool runs, preventing the
 forbidden operation entirely.
 
 Available guards:
+  polecat-paths    - Block Edit/Write/Bash targets outside the polecat's worktree
   pr-workflow        - Block PR creation and feature branches
   bd-init            - Block bd init in wrong directories
   mol-patrol         - Block mol patrol from agent contexts

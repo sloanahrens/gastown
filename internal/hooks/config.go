@@ -350,6 +350,56 @@ func DefaultOverrides() map[string]*HooksConfig {
 					},
 				},
 			},
+			// Polecat path guard: prevent cross-worktree edits (gt-hmaf).
+			PreToolUse: []HookEntry{
+				// Bash calls — fire on every Bash to catch file-path arguments.
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				// File-edit tools — fire on every Edit/Write/NotebookEdit/MultiEdit.
+				{
+					Matcher: "Edit",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "Write",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "NotebookEdit",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "MultiEdit",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+			},
 		},
 		// Crew workers: auto-cycle session on context compaction (gt-op78).
 		// Instead of compacting (lossy), replace with fresh session that
