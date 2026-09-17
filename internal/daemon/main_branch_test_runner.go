@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultMainBranchTestInterval = 30 * time.Minute
+	defaultMainBranchTestInterval = 2 * time.Hour
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 
 	// maxDiagnosticLines bounds how many matching failure lines go into the
@@ -29,6 +29,12 @@ const (
 	// waits for the container-gate slot before giving up on a rig's run,
 	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
 	mainBranchTestSlotTimeout = 60 * time.Minute
+
+	// mainBranchTestSlotRunTimeout is the --timeout passed to `gt slot run`
+	// when wrapping test commands. It mirrors the per-rig timeout so the slot
+	// wrapper never outlives the test-run context that would cancel the
+	// underlying process anyway.
+	mainBranchTestSlotRunTimeout = 15 * time.Minute
 
 	// mainBranchTestSetupTimeout bounds the git fetch/worktree-add/rev-parse
 	// steps that run before the container-gate slot is acquired. Kept
