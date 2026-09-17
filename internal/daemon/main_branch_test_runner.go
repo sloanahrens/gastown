@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultMainBranchTestInterval = 30 * time.Minute
+	defaultMainBranchTestInterval = 60 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 
 	// maxDiagnosticLines bounds how many matching failure lines go into the
