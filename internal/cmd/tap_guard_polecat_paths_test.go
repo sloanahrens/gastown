@@ -59,7 +59,7 @@ func setupPolecatTest(t *testing.T) (town, rig, worktree string) {
 // targeting paths outside the polecat's own worktree are blocked, while those
 // within the worktree are allowed.
 func TestEditWriteBlocksOutsideWorktree(t *testing.T) {
-	town, rig, worktree := setupPolecatTest(t)
+	_, rig, worktree := setupPolecatTest(t)
 
 	t.Setenv("GT_POLECAT", "opal")
 	t.Setenv("GT_ROLE", "gastown/polecats/opal")
@@ -89,7 +89,7 @@ func TestEditWriteBlocksOutsideWorktree(t *testing.T) {
 		{"Write own worktree", "Write", filepath.Join(worktree, "internal", "cmd", "guard.go"), false},
 
 		// Allowed — outside the town.
-		{"Edit outside town", "Edit", filepath.Join(town, "other-project", "main.go"), false},
+		{"Edit outside town", "Edit", "/tmp/other-project/main.go", false},
 		{"Write /tmp", "Write", "/tmp/some-file.go", false},
 	}
 

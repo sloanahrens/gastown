@@ -374,6 +374,15 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 		return true
 	}
 
+	// Paths inside a rig root directory (any depth) are blocked — the rig
+	// root is the first component below town, and anything under it is a rig.
+	if relParts := strings.Split(rel, string(filepath.Separator)); len(relParts) >= 1 {
+		rigRoot := relParts[0]
+		if strings.HasPrefix(rel, rigRoot+string(filepath.Separator)) {
+			return true
+		}
+	}
+
 	// Paths inside a rig directory are blocked (rig roots are the town's
 	// biggest single trees, so anything inside one is hazardous).
 	if firstRel := strings.Split(rel, string(filepath.Separator)); len(firstRel) >= 1 {
