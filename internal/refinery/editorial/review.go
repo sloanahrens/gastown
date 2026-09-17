@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,15 @@ type ReviewRequest struct {
 	// RehearsedHead, when set, is reviewed directly instead of rehearsing
 	// Branch onto Target first (the CLI's --rehearsed flag).
 	RehearsedHead string
+
+	// TimeoutSeconds, when > 0, overrides the rig's .om.json backend
+	// timeout for this one review (the CLI's --timeout flag). It is
+	// appended to the gate-script args as --timeout, which the gate script
+	// forwards to `om review --timeout`, and recorded on the note so the
+	// override is auditable. Zero means "use the rig's configured
+	// timeout" and passes no flag at all, leaving the default path byte
+	// for byte what it was.
+	TimeoutSeconds int
 
 	Attempt       int
 	PriorFindings []PriorFinding
@@ -222,6 +232,13 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		"--out", verdictPath,
 		"--prior-findings", priorPath,
 	}
+	// Only appended when the caller asked for an override: the deployed
+	// gate script parses its args with a strict case and fails closed
+	// (exit 2) on any argument it does not know, so the default path must
+	// stay exactly as it was for a script that predates --timeout support.
+	if req.TimeoutSeconds > 0 {
+		args = append(args, "--timeout", strconv.Itoa(req.TimeoutSeconds))
+	}
 
 	var v *verdictJSON
 	var class FailureClass
@@ -263,6 +280,10 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		FindingsCount: len(v.Findings),
 		Attempt:       req.Attempt,
 		ReviewedAt:    time.Now().UTC(),
+		// Recorded only when the review actually ran with an override, so
+		// the note distinguishes "used the rig default" from "was allowed
+		// N seconds" (see Note.TimeoutSeconds).
+		TimeoutSeconds: req.TimeoutSeconds,
 	}
 	if v.PriorFindings != nil {
 		note.PriorFindings.Resolved = v.PriorFindings.Resolved

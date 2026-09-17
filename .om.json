@@ -5,7 +5,7 @@
   ],
   "threshold": 0.6,
   "depth": "standard",
-  "timeout": 300,
+  "timeout": 900,
   "rubric": [
     {
       "name": "correctness",
