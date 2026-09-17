@@ -20,6 +20,10 @@ const (
 	defaultMainBranchTestInterval = 2 * time.Hour
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 
+	// slotReentrantEnvVar matches the marker name used by internal/slot so
+	// the daemon's commands are recognized as belonging to its own slot hold.
+	slotReentrantEnvVar = "GASTOWN_SLOT_HELD"
+
 	// maxDiagnosticLines bounds how many matching failure lines go into the
 	// escalation body — enough for the mayor to triage without a rerun,
 	// short enough to stay readable.
@@ -346,6 +350,15 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
 	defer h.Release()
+
+	// Set the reentrant env marker so the daemon's own commands (and any
+	// gt slot run wrappers) are recognized as belonging to this slot holder,
+	// preventing the docker ps check from flagging them as "unwrapped" and
+	// blocking subsequent callers (gt-uoqg).
+	if err := os.Setenv(slotReentrantEnvVar, slot.LockPath(d.config.TownRoot)+"|"+fmt.Sprint(os.Getpid())); err != nil {
+		d.logger.Printf("main_branch_test: %s: warning: could not set slot reentrant marker: %v", rigName, err)
+	}
+	defer os.Unsetenv(slotReentrantEnvVar)
 
 	// The test-run timeout starts here, after the slot is held, not at the
 	// top of this function — a slot wait can take up to
