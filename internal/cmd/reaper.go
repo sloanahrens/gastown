@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,22 +10,64 @@ import (
 
 	"github.com/spf13/cobra"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
 var (
-	reaperDB       string
-	reaperHost     string
-	reaperPort     int
-	reaperMaxAge   string
-	reaperPurgeAge string
-	reaperMailAge  string
-	reaperStaleAge string
-	reaperDBDelay  string
-	reaperDryRun   bool
-	reaperJSON     bool
+	reaperDB        string
+	reaperHost      string
+	reaperPort      int
+	reaperMaxAge    string
+	reaperPurgeAge  string
+	reaperMailAge   string
+	reaperStaleAge  string
+	reaperDBDelay   string
+	reaperDryRun    bool
+	reaperJSON      bool
+	reaperMaxCloses int
+	reaperForce     bool
 )
+
+// parseReaperAge parses an age flag, accepting the day suffix the mol-dog-reaper
+// formula emits for its 30d default. time.ParseDuration alone rejects "30d" as
+// "unknown unit d" (gt-2qzr).
+func parseReaperAge(flag, value string) (time.Duration, error) {
+	d, err := daemon.ParseAgeDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", flag, err)
+	}
+	return d, nil
+}
+
+// reaperAutoCloseDisarmed reports whether daemon.json disarms the wisp_reaper
+// auto-close step, and where that config lives for the message. Checked here as
+// well as in the daemon so a Dog that ignores the formula instruction still
+// cannot sweep: the disarm has to hold on every path that reaches the write.
+func reaperAutoCloseDisarmed() (bool, string) {
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return false, ""
+	}
+	return daemon.WispReaperAutoCloseDisarmed(daemon.LoadPatrolConfig(townRoot)),
+		daemon.PatrolConfigFile(townRoot)
+}
+
+// printAutoCloseCandidates lists the issues a sweep selected. Printed on a
+// refusal as well as a dry run: the refusal is the designed stop, and it is
+// only actionable if it shows what tripped it. toStderr keeps --json output
+// parseable.
+func printAutoCloseCandidates(result *reaper.AutoCloseResult, toStderr bool) {
+	out := os.Stdout
+	if toStderr {
+		out = os.Stderr
+	}
+	for _, entry := range result.ClosedEntries {
+		fmt.Fprintf(out, "  %s %s (%dd stale, db:%s)\n",
+			entry.ID, entry.Title, entry.AgeDays, entry.Database)
+	}
+}
 
 func reaperDatabaseNames() []string {
 	if reaperDB == "" {
@@ -125,21 +168,21 @@ all databases on the Dolt server and scans each one, printing a summary.
 Returns counts and anomaly detection results without modifying any data.
 The Dog uses this to understand the state before deciding what to reap.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		maxAge, err := time.ParseDuration(reaperMaxAge)
+		maxAge, err := parseReaperAge("--max-age", reaperMaxAge)
 		if err != nil {
-			return fmt.Errorf("invalid --max-age: %w", err)
+			return err
 		}
-		purgeAge, err := time.ParseDuration(reaperPurgeAge)
+		purgeAge, err := parseReaperAge("--purge-age", reaperPurgeAge)
 		if err != nil {
-			return fmt.Errorf("invalid --purge-age: %w", err)
+			return err
 		}
-		mailAge, err := time.ParseDuration(reaperMailAge)
+		mailAge, err := parseReaperAge("--mail-age", reaperMailAge)
 		if err != nil {
-			return fmt.Errorf("invalid --mail-age: %w", err)
+			return err
 		}
-		staleAge, err := time.ParseDuration(reaperStaleAge)
+		staleAge, err := parseReaperAge("--stale-age", reaperStaleAge)
 		if err != nil {
-			return fmt.Errorf("invalid --stale-age: %w", err)
+			return err
 		}
 
 		databases := reaperDatabaseNames()
@@ -229,9 +272,9 @@ all databases on the Dolt server and reaps each one.
 
 Returns the count of reaped wisps. Use --dry-run to preview.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		maxAge, err := time.ParseDuration(reaperMaxAge)
+		maxAge, err := parseReaperAge("--max-age", reaperMaxAge)
 		if err != nil {
-			return fmt.Errorf("invalid --max-age: %w", err)
+			return err
 		}
 
 		databases := reaperDatabaseNames()
@@ -321,13 +364,13 @@ all databases on the Dolt server and purges each one.
 
 Returns counts of purged rows. Use --dry-run to preview.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		purgeAge, err := time.ParseDuration(reaperPurgeAge)
+		purgeAge, err := parseReaperAge("--purge-age", reaperPurgeAge)
 		if err != nil {
-			return fmt.Errorf("invalid --purge-age: %w", err)
+			return err
 		}
-		mailAge, err := time.ParseDuration(reaperMailAge)
+		mailAge, err := parseReaperAge("--mail-age", reaperMailAge)
 		if err != nil {
-			return fmt.Errorf("invalid --mail-age: %w", err)
+			return err
 		}
 
 		databases := reaperDatabaseNames()
@@ -400,21 +443,39 @@ var reaperAutoCloseCmd = &cobra.Command{
 	Use:   "auto-close",
 	Short: "Close stale issues past stale-age",
 	Long: `Close issues open with no updates past the stale-age threshold.
-Excludes P0/P1 priority, epics, and issues with active dependencies.
+
+Eligibility excludes P0/P1, epics, convoys, molecules and other infrastructure
+issue types, agent beads (every mayor, deacon, dog, witness, refinery, crew and
+polecat bead carries gt:agent), plugin receipts, and issues with active
+dependencies. Scan and auto-close share one eligibility clause, so 'gt reaper
+scan' is a faithful preview of this command.
+
+Three guards apply, each answering the 2026-09-16 mis-close that swept 102
+durable beads (gt-2qzr):
+  - --stale-age below 7d is refused unless --force.
+  - more than --max-closes candidates in one database refuses the whole run
+    (nothing is closed) unless --force.
+  - auto-close disarmed in daemon.json (patrols.wisp_reaper.auto_close=false)
+    is refused unless --force.
 
 When --db is provided, auto-closes in a single database. When omitted,
 auto-discovers all databases on the Dolt server and auto-closes in each one.
 
 Returns the count of closed issues. Use --dry-run to preview.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		staleAge, err := time.ParseDuration(reaperStaleAge)
+		staleAge, err := parseReaperAge("--stale-age", reaperStaleAge)
 		if err != nil {
-			return fmt.Errorf("invalid --stale-age: %w", err)
+			return err
+		}
+
+		if disarmed, configPath := reaperAutoCloseDisarmed(); disarmed && !reaperForce {
+			return fmt.Errorf("auto-close is disarmed by %s (patrols.wisp_reaper.auto_close=false); pass --force to override", configPath)
 		}
 
 		databases := reaperDatabaseNames()
 
 		var results []*reaper.AutoCloseResult
+		var refusals []string
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {
 				return err
@@ -439,9 +500,25 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				continue
 			}
 
-			result, err := reaper.AutoClose(db, dbName, staleAge, reaperDryRun)
+			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				StaleAge:  staleAge,
+				DryRun:    reaperDryRun,
+				MaxCloses: reaperMaxCloses,
+				Force:     reaperForce,
+			})
 			db.Close()
 			if err != nil {
+				if errors.Is(err, reaper.ErrTooManyCloses) {
+					// Nothing was closed. Keep the detail so the operator can
+					// see what the sweep wanted to take. Candidates go to
+					// stderr under --json so the stream stays parseable.
+					fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
+					if result != nil {
+						printAutoCloseCandidates(result, reaperJSON)
+					}
+					refusals = append(refusals, fmt.Sprintf("%s: %v", dbName, err))
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "%s: auto-close error: %v\n", dbName, err)
 				continue
 			}
@@ -457,10 +534,7 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				if r.DryRun {
 					prefix = "[DRY RUN] would "
 				}
-				for _, entry := range r.ClosedEntries {
-					fmt.Printf("  %s %s (%dd stale, db:%s)\n",
-						entry.ID, entry.Title, entry.AgeDays, entry.Database)
-				}
+				printAutoCloseCandidates(r, false)
 				fmt.Printf("%s: %sauto-closed %d stale issues\n",
 					r.Database, prefix, r.Closed)
 				totalClosed += r.Closed
@@ -473,6 +547,11 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				fmt.Printf("\n%sAuto-close summary (%d databases): auto-closed %d stale issues\n",
 					prefix, len(results), totalClosed)
 			}
+		}
+
+		if len(refusals) > 0 {
+			return fmt.Errorf("auto-close refused in %d database(s): %s",
+				len(refusals), strings.Join(refusals, "; "))
 		}
 		return nil
 	},
@@ -488,22 +567,24 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		databases := reaperDatabaseNames()
 
-		maxAge, err := time.ParseDuration(reaperMaxAge)
+		maxAge, err := parseReaperAge("--max-age", reaperMaxAge)
 		if err != nil {
-			return fmt.Errorf("invalid --max-age: %w", err)
+			return err
 		}
-		purgeAge, err := time.ParseDuration(reaperPurgeAge)
+		purgeAge, err := parseReaperAge("--purge-age", reaperPurgeAge)
 		if err != nil {
-			return fmt.Errorf("invalid --purge-age: %w", err)
+			return err
 		}
-		mailAge, err := time.ParseDuration(reaperMailAge)
+		mailAge, err := parseReaperAge("--mail-age", reaperMailAge)
 		if err != nil {
-			return fmt.Errorf("invalid --mail-age: %w", err)
+			return err
 		}
-		staleAge, err := time.ParseDuration(reaperStaleAge)
+		staleAge, err := parseReaperAge("--stale-age", reaperStaleAge)
 		if err != nil {
-			return fmt.Errorf("invalid --stale-age: %w", err)
+			return err
 		}
+
+		autoCloseDisarmed, autoCloseConfigPath := reaperAutoCloseDisarmed()
 
 		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
 
@@ -563,15 +644,26 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			}
 
 			// Auto-close
-			closeResult, err := reaper.AutoClose(db, dbName, staleAge, reaperDryRun)
-			if err != nil {
-				fmt.Printf("%s: auto-close error: %v\n", dbName, err)
+			if autoCloseDisarmed && !reaperForce {
+				fmt.Printf("%s: auto-close skipped (disarmed by %s)\n", dbName, autoCloseConfigPath)
 			} else {
-				for _, entry := range closeResult.ClosedEntries {
-					fmt.Printf("  %s %s (%dd stale, db:%s)\n",
-						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				closeResult, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+					StaleAge:  staleAge,
+					DryRun:    reaperDryRun,
+					MaxCloses: reaperMaxCloses,
+					Force:     reaperForce,
+				})
+				if err != nil {
+					// A refusal is a stop, not a partial sweep: report it and
+					// leave the database untouched.
+					fmt.Printf("%s: auto-close refused: %v\n", dbName, err)
+					if closeResult != nil {
+						printAutoCloseCandidates(closeResult, false)
+					}
+				} else {
+					printAutoCloseCandidates(closeResult, false)
+					totalClosed += closeResult.Closed
 				}
-				totalClosed += closeResult.Closed
 			}
 
 			db.Close()
@@ -628,7 +720,15 @@ func init() {
 		cmd.Flags().StringVar(&reaperMailAge, "mail-age", "168h", "Max closed mail age before purging (7d)")
 	}
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperAutoCloseCmd, reaperRunCmd} {
-		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d)")
+		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d; below 7d requires --force)")
+	}
+	// Guardrails on the auto-close write (gt-2qzr). --force is deliberately
+	// absent from scan: a preview should never need overriding.
+	for _, cmd := range []*cobra.Command{reaperAutoCloseCmd, reaperRunCmd} {
+		cmd.Flags().IntVar(&reaperMaxCloses, "max-closes", reaper.DefaultAutoCloseMaxPerRun,
+			"Refuse the run if a database has more than this many auto-close candidates")
+		cmd.Flags().BoolVar(&reaperForce, "force", false,
+			"Override the stale-age floor, the per-run cap, and the daemon.json auto-close disarm")
 	}
 
 	reaperCmd.AddCommand(reaperDatabasesCmd)

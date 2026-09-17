@@ -24,6 +24,11 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				IntervalStr:  "30m",
 				MaxAgeStr:    "24h",
 				DeleteAgeStr: "168h", // 7 days
+				// Auto-close is stated explicitly so the threshold is visible in
+				// daemon.json rather than inferred from code. It matches the
+				// mol-dog-reaper formula default; shortening it is what swept the
+				// town's agent beads in gt-2qzr.
+				StaleIssueAgeStr: "720h", // 30 days
 			},
 			CompactorDog: &CompactorDogConfig{
 				Enabled:     true,

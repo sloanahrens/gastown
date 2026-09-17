@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,7 +28,14 @@ const (
 	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
 	// Issues stale longer than this are auto-closed. Formula var: stale_issue_age.
-	defaultStaleIssueAge = 7 * 24 * time.Hour
+	//
+	// This MUST track the mol-dog-reaper formula default (720h). It was 7d until
+	// gt-2qzr: the daemon injected the shorter value on the dog path, overriding
+	// the formula, and the inline fallback used it directly. Agent beads are idle
+	// by design and were eight days old, so a 7d threshold swept 102 durable
+	// beads — every agent, dog, and patrol-molecule bead in the town. Auto-close
+	// is for work that was abandoned, and abandonment does not look like a week.
+	defaultStaleIssueAge = 30 * 24 * time.Hour
 )
 
 // WispReaperConfig holds configuration for the wisp_reaper patrol.
@@ -38,13 +46,23 @@ type WispReaperConfig struct {
 	MaxAgeStr    string   `json:"max_age,omitempty"`
 	DeleteAgeStr string   `json:"delete_age,omitempty"`
 	Databases    []string `json:"databases,omitempty"`
+
+	// StaleIssueAgeStr overrides how long an issue may sit untouched before
+	// auto-close (e.g. "720h" or "30d"). Empty means defaultStaleIssueAge.
+	StaleIssueAgeStr string `json:"stale_issue_age,omitempty"`
+
+	// AutoClose disarms ONLY the stale-issue auto-close step, leaving reap and
+	// purge running — the point of a dedicated knob (gt-2qzr), since dry_run
+	// pauses the whole patrol. nil means unset: the dog path keeps its default
+	// behavior while the inline fallback stays disarmed.
+	AutoClose *bool `json:"auto_close,omitempty"`
 }
 
 // wispReaperInterval returns the configured interval, or the default (1h).
 func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.IntervalStr != "" {
-			if d, err := time.ParseDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
+			if d, err := ParseAgeDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -56,7 +74,7 @@ func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.MaxAgeStr != "" {
-			if d, err := time.ParseDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
+			if d, err := ParseAgeDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -68,12 +86,74 @@ func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.DeleteAgeStr != "" {
-			if d, err := time.ParseDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
+			if d, err := ParseAgeDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
 	}
 	return defaultWispDeleteAge
+}
+
+// wispReaperStaleIssueAge returns the configured stale-issue age, or the
+// formula default (30d).
+func wispReaperStaleIssueAge(config *DaemonPatrolConfig) time.Duration {
+	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
+		if config.Patrols.WispReaper.StaleIssueAgeStr != "" {
+			if d, err := ParseAgeDuration(config.Patrols.WispReaper.StaleIssueAgeStr); err == nil && d > 0 {
+				return d
+			}
+		}
+	}
+	return defaultStaleIssueAge
+}
+
+// WispReaperAutoCloseDisarmed reports whether daemon.json explicitly disarms
+// the wisp_reaper auto-close step (patrols.wisp_reaper.auto_close=false).
+//
+// This is read by `gt reaper auto-close` as well, so the setting disarms the
+// Dog-driven path too — not just the daemon's own inline fallback. A nil knob
+// is "unset", not "disarmed".
+func WispReaperAutoCloseDisarmed(config *DaemonPatrolConfig) bool {
+	if config == nil || config.Patrols == nil || config.Patrols.WispReaper == nil {
+		return false
+	}
+	knob := config.Patrols.WispReaper.AutoClose
+	return knob != nil && !*knob
+}
+
+// wispReaperAutoCloseEnabled reports whether a given execution path may
+// auto-close. The Dog-driven path is the designed home for the sweep, so an
+// unset knob leaves it enabled. The inline fallback is an error path: it runs
+// because Dog dispatch FAILED, and a dispatch failure must never be upgraded
+// into a destructive sweep, so it needs an explicit opt-in (gt-2qzr).
+func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig, inlineFallback bool) bool {
+	if WispReaperAutoCloseDisarmed(config) {
+		return false
+	}
+	if !inlineFallback {
+		return true
+	}
+	knob := (*bool)(nil)
+	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
+		knob = config.Patrols.WispReaper.AutoClose
+	}
+	return knob != nil && *knob
+}
+
+// ParseAgeDuration parses an age string, accepting the day suffix that the
+// mol-dog-reaper formula emits for its 30d default. time.ParseDuration rejects
+// "30d" as "unknown unit d", which is how the incident run ended up with a
+// locally-invented shorter value instead of the formula's intent (gt-2qzr).
+func ParseAgeDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(days))
+		if err != nil {
+			return 0, fmt.Errorf("invalid day suffix in %q: %w", s, err)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // reapWisps is the thin orchestrator for the wisp_reaper patrol.
@@ -88,17 +168,24 @@ func (d *Daemon) reapWisps() {
 	config := d.patrolConfig.Patrols.WispReaper
 	maxAge := wispReaperMaxAge(d.patrolConfig)
 	deleteAge := wispDeleteAge(d.patrolConfig)
+	staleIssueAge := wispReaperStaleIssueAge(d.patrolConfig)
 
 	vars := map[string]string{
 		"max_age":         maxAge.String(),
 		"purge_age":       deleteAge.String(),
-		"stale_issue_age": defaultStaleIssueAge.String(),
+		"stale_issue_age": staleIssueAge.String(),
 		"mail_delete_age": defaultMailDeleteAge.String(),
 		"alert_threshold": fmt.Sprintf("%d", wispAlertThreshold),
 	}
 
 	if config.DryRun {
 		vars["dry_run"] = "true"
+	}
+	if WispReaperAutoCloseDisarmed(d.patrolConfig) {
+		// Belt and braces: the formula skips the step, and `gt reaper auto-close`
+		// independently refuses, so a Dog that ignores the instruction still
+		// cannot sweep.
+		vars["auto_close"] = "false"
 	}
 	if len(config.Databases) > 0 {
 		vars["databases"] = strings.Join(config.Databases, ",")
@@ -114,8 +201,11 @@ func (d *Daemon) reapWisps() {
 
 	// Try dispatching to a Dog for formula-driven execution.
 	if err := d.dispatchReaperDog(vars); err != nil {
+		// The cause matters more than the fact: gt-2qzr was diagnosed late
+		// because the log recorded only "exit status 1", which said nothing
+		// about why the sweep had silently moved to the inline fallback.
 		d.logger.Printf("wisp_reaper: Dog dispatch failed (%v), running inline fallback", err)
-		d.reapWispsInline(config, maxAge, deleteAge, mol)
+		d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, mol)
 		return
 	}
 
@@ -135,15 +225,33 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 	// while stripping stale bd target selectors and derived Beads endpoint aliases.
 	cmd.Env = bdMutationRoutingEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("gt sling: %w", err)
+	// Capture output so a failure reports WHY it failed, not just that it did.
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gt sling: %w: %s", err, summarizeCommandOutput(out))
 	}
 	return nil
 }
 
+// summarizeCommandOutput renders subprocess output for a single log line.
+// Commands here are chatty (sling prints progress), so the tail is what
+// carries the failure; the cap keeps one bad cycle from filling the log.
+func summarizeCommandOutput(out []byte) string {
+	const maxLen = 2000
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return "(no output)"
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxLen {
+		s = s[len(s)-maxLen:]
+	}
+	return s
+}
+
 // reapWispsInline is the fallback that runs the reaper cycle inline when
 // Dog dispatch is unavailable. Delegates to the reaper package for SQL execution.
-func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge time.Duration, mol *dogMol) {
+func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, mol *dogMol) {
 	databases := config.Databases
 	host := d.doltServerHost()
 	if len(databases) == 0 {
@@ -291,35 +399,50 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 	}
 
 	// Step 4: Auto-close
-	autoCloseErrors := 0
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
-		if err != nil {
-			autoCloseErrors++
-			continue
-		}
-		// Auto-close operates on the issues table, not wisps, but if the database
-		// has no beads schema at all we should skip it too.
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
-		result, err := reaper.AutoClose(db, dbName, defaultStaleIssueAge, dryRun)
-		db.Close()
-		if err != nil {
-			d.logger.Printf("wisp_reaper: %s: auto-close error: %v", dbName, err)
-			autoCloseErrors++
-			continue
-		}
-		totalAutoClosed += result.Closed
-	}
-	if autoCloseErrors > 0 {
-		mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
-	} else {
+	//
+	// The inline path runs because Dog dispatch FAILED. Auto-close writes to
+	// durable issues, unlike reap/purge which only retire ephemeral wisps, so a
+	// dispatch error must not be upgraded into a sweep of the town's issue
+	// tracker (gt-2qzr). It therefore requires patrols.wisp_reaper.auto_close to
+	// be explicitly true — `dry_run` is not the disarm, because that knob also
+	// stops reap and purge.
+	if !wispReaperAutoCloseEnabled(d.patrolConfig, true) {
+		d.logger.Printf("wisp_reaper: auto-close skipped in inline fallback (set patrols.wisp_reaper.auto_close=true to allow)")
 		mol.closeStep("auto-close")
+	} else {
+		autoCloseErrors := 0
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				continue
+			}
+			db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				autoCloseErrors++
+				continue
+			}
+			// Auto-close operates on the issues table, not wisps, but if the database
+			// has no beads schema at all we should skip it too.
+			if ok, _ := reaper.HasReaperSchema(db); !ok {
+				db.Close()
+				continue
+			}
+			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				StaleAge: staleIssueAge,
+				DryRun:   dryRun,
+			})
+			db.Close()
+			if err != nil {
+				d.logger.Printf("wisp_reaper: %s: auto-close error: %v", dbName, err)
+				autoCloseErrors++
+				continue
+			}
+			totalAutoClosed += result.Closed
+		}
+		if autoCloseErrors > 0 {
+			mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
+		} else {
+			mol.closeStep("auto-close")
+		}
 	}
 
 	// Step 5: Report

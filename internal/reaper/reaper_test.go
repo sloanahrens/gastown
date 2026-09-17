@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -184,6 +185,7 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 	autoCloseBody := sourceBetween(t, source, "func AutoClose(", "// batchDeleteRows")
 	batchDeleteBody := sourceBetween(t, source, "func batchDeleteRows(", "// ClosePluginReceiptResult")
 	schemaBody := sourceBetween(t, source, "func HasReaperSchema(", "func tableExists(")
+	eligibilityBody := sourceBetween(t, source, "func staleIssueEligibilityClause(", "// AutoClose closes issues")
 
 	for _, want := range []string{
 		`hasColumns(ctx, db, "wisp_dependencies", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external")`,
@@ -194,22 +196,23 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 		}
 	}
 
-	for _, body := range []struct {
-		name string
-		text string
-	}{
-		{name: "Scan", text: scanBody},
-		{name: "AutoClose", text: autoCloseBody},
+	// The eligibility clause moved to a shared helper in gt-2qzr so Scan and
+	// AutoClose cannot drift apart; assert it there and assert both callers
+	// route through it.
+	for _, want := range []string{
+		"d.depends_on_issue_id = dep.id",
+		"SELECT DISTINCT d.depends_on_issue_id",
+		"d.depends_on_issue_id IS NOT NULL",
 	} {
-		if !strings.Contains(body.text, "d.depends_on_issue_id = dep.id") {
-			t.Fatalf("%s should join dependency blockers through depends_on_issue_id", body.name)
+		if !strings.Contains(eligibilityBody, want) {
+			t.Fatalf("staleIssueEligibilityClause missing typed dependency predicate %q", want)
 		}
-		if !strings.Contains(body.text, "SELECT DISTINCT d.depends_on_issue_id") {
-			t.Fatalf("%s should exclude blocked issues through depends_on_issue_id", body.name)
-		}
-		if !strings.Contains(body.text, "d.depends_on_issue_id IS NOT NULL") {
-			t.Fatalf("%s should guard nullable depends_on_issue_id in NOT IN subquery", body.name)
-		}
+	}
+	if !strings.Contains(scanBody, "staleIssueEligibilityClause(") {
+		t.Fatal("Scan must count stale candidates with the shared eligibility clause")
+	}
+	if !strings.Contains(autoCloseBody, "staleIssueEligibilityClause(") {
+		t.Fatal("AutoClose must select candidates with the shared eligibility clause")
 	}
 
 	if !strings.Contains(scanBody, "wd.depends_on_wisp_id IS NOT NULL OR wd.depends_on_issue_id IS NOT NULL") {
@@ -226,6 +229,93 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 	}
 	if !strings.Contains(batchDeleteBody, "DELETE FROM dependencies WHERE depends_on_issue_id IN %s") {
 		t.Fatal("batchDeleteRows should clean reverse issue dependency references")
+	}
+}
+
+// TestAutoCloseEligibilityExcludesInfrastructureBeads is the regression guard
+// for gt-2qzr, where a mis-set stale-age swept 102 durable beads: every agent
+// bead in the town, all dog beads, and every rig patrol molecule. The labels
+// and types below are the ones those victims actually carried — agent beads are
+// issue_type=task with gt:agent, and patrol molecules are issue_type=molecule
+// with no labels at all.
+func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
+	clause := staleIssueEligibilityClause("`hq`.")
+
+	for _, want := range []struct {
+		fragment string
+		why      string
+	}{
+		{"'gt:agent'", "agent beads (mayor, deacon, dog, witness, refinery, crew, polecat) carry this label"},
+		{"'epic', 'convoy', 'molecule', 'rig', 'agent', 'event'", "infrastructure issue types are lifecycle containers, not stale work"},
+		{"i.id NOT LIKE '%-witness'", "witness bead id pattern"},
+		{"i.id NOT LIKE '%-refinery'", "refinery bead id pattern"},
+		{"i.id NOT LIKE '%-mayor'", "mayor bead id pattern"},
+		{"i.id NOT LIKE '%-deacon'", "deacon bead id pattern"},
+		{"i.id NOT LIKE '%-crew-%'", "crew bead id pattern"},
+		{"i.id NOT LIKE '%-polecat-%'", "polecat bead id pattern"},
+		{"i.id NOT LIKE '%-dog-%'", "dog bead id pattern"},
+		{"'type:plugin-run'", "plugin receipts are closed by their own fast-track step"},
+		{"i.priority > 1", "P0/P1 are never stale"},
+	} {
+		if !strings.Contains(clause, want.fragment) {
+			t.Errorf("eligibility clause missing %q (%s)", want.fragment, want.why)
+		}
+	}
+
+	// The qualifier-free clause is Scan's form. It must name tables bare — a
+	// backtick-wrapped empty identifier (``.labels) would be a syntax error.
+	unqualified := staleIssueEligibilityClause("")
+	if strings.Contains(unqualified, "`") {
+		t.Fatalf("unqualified clause should name tables bare, got:\n%s", unqualified)
+	}
+	if !strings.Contains(unqualified, "SELECT DISTINCT l.issue_id FROM labels l") {
+		t.Fatalf("unqualified clause should reference labels bare, got:\n%s", unqualified)
+	}
+	// The qualified form is AutoClose's, and must target the same schema.
+	if !strings.Contains(clause, "FROM `hq`.labels l") {
+		t.Fatalf("qualified clause should target the named schema, got:\n%s", clause)
+	}
+}
+
+// TestAutoCloseRejectsStaleAgeBelowFloor covers the second brake from gt-2qzr:
+// the incident run's 7d threshold was short enough to catch eight-day-old agent
+// beads, so anything below a week is refused outright.
+func TestAutoCloseRejectsStaleAgeBelowFloor(t *testing.T) {
+	// db is nil on purpose: the floor is checked before any query runs, so a
+	// non-refusing implementation would panic here rather than pass.
+	for _, age := range []time.Duration{time.Hour, 24 * time.Hour, 6 * 24 * time.Hour} {
+		_, err := AutoClose(nil, "hq", AutoCloseOptions{StaleAge: age})
+		if !errors.Is(err, ErrStaleAgeTooLow) {
+			t.Errorf("AutoClose(StaleAge=%s) error = %v, want ErrStaleAgeTooLow", age, err)
+		}
+	}
+
+	// The floor itself is allowed — it is the explicit lower bound — and Force
+	// lifts it. Both get past validation and reach the query, so any error they
+	// return is the fake driver's, never the floor's.
+	db := openFakeReaperDB(t, &fakeReaperState{wisps: map[string]*fakeWisp{}, ops: map[int][]string{}})
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge}); errors.Is(err, ErrStaleAgeTooLow) {
+		t.Errorf("AutoClose(StaleAge=MinStaleIssueAge) should not be refused by the floor")
+	}
+	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true}); errors.Is(err, ErrStaleAgeTooLow) {
+		t.Errorf("AutoClose(StaleAge=1h, Force) should not be refused by the floor")
+	}
+}
+
+// TestAutoCloseMaxPerRunDefaults guards the cap's default: a zero value means
+// "use the package default", never "unlimited".
+func TestAutoCloseMaxPerRunDefaults(t *testing.T) {
+	if DefaultAutoCloseMaxPerRun <= 0 {
+		t.Fatalf("DefaultAutoCloseMaxPerRun = %d, want positive", DefaultAutoCloseMaxPerRun)
+	}
+	// 102 beads were closed in the gt-2qzr run across four databases; the
+	// per-database cap has to sit below the per-database share of that to be a
+	// brake at all.
+	if DefaultAutoCloseMaxPerRun >= 102 {
+		t.Fatalf("DefaultAutoCloseMaxPerRun = %d is too high to brake a gt-2qzr-class sweep",
+			DefaultAutoCloseMaxPerRun)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -142,7 +143,25 @@ type AutoCloseResult struct {
 	Closed        int           `json:"closed"`
 	ClosedEntries []ClosedEntry `json:"closed_entries,omitempty"`
 	DryRun        bool          `json:"dry_run,omitempty"`
-	Anomalies     []Anomaly     `json:"anomalies,omitempty"`
+	// MaxCloses is the per-run cap that applied to this operation.
+	MaxCloses int       `json:"max_closes,omitempty"`
+	Anomalies []Anomaly `json:"anomalies,omitempty"`
+}
+
+// AutoCloseOptions parameterizes an AutoClose sweep.
+type AutoCloseOptions struct {
+	// StaleAge is how long an issue may sit untouched before it is stale.
+	// Values below MinStaleIssueAge are rejected unless Force is set.
+	StaleAge time.Duration
+	// DryRun reports candidates without writing.
+	DryRun bool
+	// MaxCloses caps how many issues one call may close. Zero means
+	// DefaultAutoCloseMaxPerRun. Exceeding it refuses the whole run unless
+	// Force is set.
+	MaxCloses int
+	// Force lifts both the StaleAge floor and the MaxCloses cap. Reserved for
+	// a human operator who has looked at the candidate list.
+	Force bool
 }
 
 // Anomaly represents an unexpected condition found during reaper operations.
@@ -167,6 +186,29 @@ const (
 	// being wrong. Raised to 3000 so the alert tracks runaway growth rather than
 	// the normal working set. See hq-57jr8.
 	DefaultAlertThreshold = 3000
+
+	// MinStaleIssueAge is the shortest stale-age AutoClose will accept without
+	// Force. The 2026-09-16 reaper incident ran at 7d, which was short enough to
+	// sweep eight-day-old agent beads; anything below a week cannot distinguish
+	// "abandoned" from "waiting its turn" in a town that moves this fast.
+	// See gt-2qzr.
+	MinStaleIssueAge = 7 * 24 * time.Hour
+
+	// DefaultAutoCloseMaxPerRun caps how many issues a single AutoClose call
+	// may close. A run that exceeds it refuses outright rather than closing a
+	// prefix of the list. The incident run closed 102 beads across four
+	// databases in one cycle; a cap this side of that turns a mis-set threshold
+	// into a refusal an operator can read. See gt-2qzr.
+	DefaultAutoCloseMaxPerRun = 20
+)
+
+var (
+	// ErrStaleAgeTooLow is returned when a sweep is requested below
+	// MinStaleIssueAge without Force.
+	ErrStaleAgeTooLow = errors.New("stale-age below minimum")
+	// ErrTooManyCloses is returned when a sweep would exceed its per-run cap
+	// without Force. No issues are closed when this is returned.
+	ErrTooManyCloses = errors.New("auto-close candidate count exceeds cap")
 )
 
 // ValidateDBName returns an error if the database name is unsafe.
@@ -436,27 +478,11 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		// issues/labels table not on this server — skip mail count
 	}
 
-	// Count stale issue candidates.
+	// Count stale issue candidates using the SAME eligibility clause as
+	// AutoClose (gt-2qzr). Scan is the dog's preview of the sweep; if the two
+	// diverge the count cannot be used to gate the write.
 	// Same caveat: issues/dependencies tables may live on a separate Dolt instance.
-	// Convoys excluded to mirror AutoClose (hq-jnap): convoy lifecycle is
-	// tracked-bead-status driven, never staleness driven.
-	staleQuery := `
-		SELECT COUNT(*) FROM issues i
-		WHERE i.status IN ('open', 'in_progress')
-		AND i.updated_at < ?
-		AND i.priority > 1
-		AND i.issue_type NOT IN ('epic', 'convoy')
-		AND i.id NOT IN (
-			SELECT DISTINCT d.issue_id FROM dependencies d
-			INNER JOIN issues dep ON d.depends_on_issue_id = dep.id
-			WHERE dep.status IN ('open', 'in_progress')
-		)
-		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_issue_id FROM dependencies d
-			INNER JOIN issues blocker ON d.issue_id = blocker.id
-			WHERE d.depends_on_issue_id IS NOT NULL
-			AND blocker.status IN ('open', 'in_progress')
-		)`
+	staleQuery := "SELECT COUNT(*) FROM issues i WHERE " + staleIssueEligibilityClause("")
 	if err := db.QueryRowContext(ctx, staleQuery, now.Add(-staleIssueAge)).Scan(&result.StaleCandidates); err != nil {
 		if !isTableNotFound(err) {
 			return nil, fmt.Errorf("count stale candidates: %w", err)
@@ -807,42 +833,90 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 	return totalDeleted, nil
 }
 
-// AutoClose closes issues that have been open with no updates past staleAge.
-// Excludes P0/P1 priority, epics, hooked/pinned issues, standing-order labels,
-// and issues with active dependencies.
-func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (*AutoCloseResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
-	defer cancel()
-
-	staleCutoff := time.Now().UTC().Add(-staleAge)
-	result := &AutoCloseResult{Database: dbName, DryRun: dryRun}
-
-	// Convoys are excluded from staleness auto-close (hq-jnap): their lifecycle
-	// is driven by tracked-bead status (`gt convoy check` / refinery post-merge),
-	// and the 'tracks' relation is non-blocking so the dependency exclusions
-	// below do NOT protect a convoy with open tracked issues. Stale-closing a
-	// convoy while its tracked beads are open orphans them from dispatch
-	// tracking and causes duplicate dispatches (hq-qouv/hq-shb1 incident).
-	whereClause := fmt.Sprintf(`
+// staleIssueEligibilityClause is the single definition of which open issues
+// are eligible for staleness auto-close, shared by Scan (candidate counting)
+// and AutoClose (the write). Scan is the dog's preview of the sweep, so the
+// two MUST agree; when they diverged the dog could not gate the write on the
+// count it had just produced (gt-2qzr).
+//
+// dbQualifier is "" when the connection is already scoped to one database
+// (Scan) or the backtick-quoted database name plus a dot when the statement
+// resolves tables explicitly (AutoClose).
+//
+// Exclusions, and the incident each one answers:
+//   - P0/P1 (priority > 1): incidents and criticals are never "stale".
+//   - Infrastructure issue types (gt-2qzr): molecule beads ARE the patrol and
+//     work molecules — closing one detaches live agent lifecycle. rig/agent are
+//     standing identities, event/convoy/epic are lifecycle containers whose
+//     retirement is status-driven, never staleness-driven (hq-jnap for convoys).
+//   - Protection and runtime labels (gt-2qzr): gt:agent marks every mayor,
+//     deacon, dog, witness, refinery, crew, and polecat bead. They are idle by
+//     design, so staleness is meaningless for them, and closing one breaks
+//     `gt agents resolve` for that role. The rest of the list mirrors
+//     beads.ProtectedIssueLabel plus beads.InternalIssueLabel, and covers
+//     plugin receipts (type:plugin-run).
+//   - Agent id patterns (gt-2qzr): defense in depth for an agent bead that
+//     somehow lost its label. `gt agents list` resolves these roles by id.
+//   - Active dependency edges: an issue that is blocked by, or blocks, an open
+//     issue is still in play.
+func staleIssueEligibilityClause(dbQualifier string) string {
+	table := func(name string) string { return dbQualifier + name }
+	return fmt.Sprintf(`
 		i.status IN ('open', 'in_progress')
 		AND i.updated_at < ?
 		AND i.priority > 1
-		AND i.issue_type NOT IN ('epic', 'convoy')
+		AND i.issue_type NOT IN ('epic', 'convoy', 'molecule', 'rig', 'agent', 'event')
 		AND i.id NOT IN (
-			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
-			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig')
+			SELECT DISTINCT l.issue_id FROM %s l
+			WHERE l.label IN (
+				'gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent',
+				'gt:wisp', 'gt:message', 'gt:handoff', 'gt:merge-request',
+				'gt:queue', 'gt:convoy', 'gt:formula', 'type:plugin-run'
+			)
 		)
+		AND i.id NOT LIKE '%%-witness' AND i.id NOT LIKE '%%-refinery'
+		AND i.id NOT LIKE '%%-mayor' AND i.id NOT LIKE '%%-deacon'
+		AND i.id NOT LIKE '%%-crew-%%' AND i.id NOT LIKE '%%-polecat-%%'
+		AND i.id NOT LIKE '%%-dog-%%' AND i.id NOT LIKE '%%-dogs'
 		AND i.id NOT IN (
-			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
+			SELECT DISTINCT d.issue_id FROM %s d
+			INNER JOIN %s dep ON d.depends_on_issue_id = dep.id
 			WHERE dep.status IN ('open', 'in_progress')
 		)
 		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues blocker ON d.issue_id = blocker.id
+			SELECT DISTINCT d.depends_on_issue_id FROM %s d
+			INNER JOIN %s blocker ON d.issue_id = blocker.id
 			WHERE d.depends_on_issue_id IS NOT NULL
 			AND blocker.status IN ('open', 'in_progress')
-		)`, dbName, dbName, dbName, dbName, dbName)
+		)`,
+		table("labels"), table("dependencies"), table("issues"),
+		table("dependencies"), table("issues"))
+}
+
+// AutoClose closes issues that have been open with no updates past
+// opts.StaleAge. Eligibility is defined by staleIssueEligibilityClause.
+//
+// Two brakes guard against a mis-parameterized sweep (gt-2qzr, where a
+// hardcoded 7d threshold closed 102 beads, including every agent bead in the
+// town): opts.StaleAge must be at least MinStaleIssueAge, and one run may not
+// close more than opts.MaxCloses issues. Both are lifted by opts.Force.
+func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
+	if opts.StaleAge < MinStaleIssueAge && !opts.Force {
+		return nil, fmt.Errorf("%w: %s (minimum %s, pass --force to override)",
+			ErrStaleAgeTooLow, opts.StaleAge, MinStaleIssueAge)
+	}
+	maxCloses := opts.MaxCloses
+	if maxCloses <= 0 {
+		maxCloses = DefaultAutoCloseMaxPerRun
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	staleCutoff := time.Now().UTC().Add(-opts.StaleAge)
+	result := &AutoCloseResult{Database: dbName, DryRun: opts.DryRun, MaxCloses: maxCloses}
+
+	whereClause := staleIssueEligibilityClause("`" + dbName + "`.")
 
 	// Two-step SELECT-then-UPDATE to avoid self-referencing subquery in UPDATE,
 	// which is not valid MySQL (Error 1093) and fragile in Dolt (dolthub/dolt#10600).
@@ -883,13 +957,23 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 		})
 	}
 
-	if dryRun {
+	if opts.DryRun {
 		result.Closed = len(ids)
 		return result, nil
 	}
 
 	if len(ids) == 0 {
 		return result, nil
+	}
+
+	// Refuse-and-report rather than close-then-apologize: a sweep this large
+	// means the threshold is wrong or a filter regressed, and the stop is the
+	// designed signal (see the formula's Scope Boundary). Nothing is closed,
+	// but the candidate list rides along so the operator can inspect the
+	// refusal instead of re-running to see what it would have taken.
+	if len(ids) > maxCloses && !opts.Force {
+		return result, fmt.Errorf("%w: %d candidates in %s exceeds the per-run cap of %d (pass --force to override)",
+			ErrTooManyCloses, len(ids), dbName, maxCloses)
 	}
 
 	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
