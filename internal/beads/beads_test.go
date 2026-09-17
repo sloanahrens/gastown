@@ -1503,6 +1503,19 @@ func TestResolveBdAllowStaleProbeTimeout(t *testing.T) {
 	}
 }
 
+// listConcurrencyBackstop bounds every wall-clock wait in
+// TestBDListSlowListDoesNotBlockUnrelatedList that exists only so a blocked or
+// wedged command fails the test instead of hanging it.
+//
+// The property under test is an ordering property -- the unrelated list
+// completes while the slow list is still running -- and carries no wall-clock
+// component at all. The bound is therefore set far above any plausible
+// scheduling delay, because this test's flake history (gt-gmd, gt-0f83) is a
+// series of tight bounds that failed on loaded hosts rather than on real
+// regressions: a helper is a full re-exec of this test binary, so under load
+// the host, not the code under test, decides how long it takes to start.
+const listConcurrencyBackstop = 60 * time.Second
+
 func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 	// The helper subprocess re-execs this same test binary, which runs its
 	// own TestMain (the hermetic harness) before this body ever sees the
@@ -1555,7 +1568,15 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(markerDir, "release-slow"), []byte("ok"), 0644)
 	}
 
-	slowCtx, slowCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// The slow command's lifetime is tied to the test, not to a clock. It must
+	// stay alive until the overlap check below has run, so any wall-clock bound
+	// here would make the overlap window itself a latency assertion: under load
+	// the fast command can legitimately take longer than that bound, the slow
+	// command would die first, and the overlap check would fail for a reason
+	// that has nothing to do with serialization. Cancelling is safe -- the
+	// cleanup below always releases the stub, cancels it, and bounds the wait
+	// for it to exit, so a wedged slow command cannot hang the test.
+	slowCtx, slowCancel := context.WithCancel(context.Background())
 	defer slowCancel()
 	slowCmd := bdListConcurrencyHelperCommand(slowCtx, helperPath, markerDir, slowWorkDir, "open")
 	type helperResult struct {
@@ -1580,21 +1601,33 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		}
 	})
 
-	waitForFile(t, filepath.Join(markerDir, "slow-started"), 10*time.Second)
+	waitForFile(t, filepath.Join(markerDir, "slow-started"), listConcurrencyBackstop)
 
-	fastCtx, fastCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// The unrelated list must complete while the slow list still holds "the
+	// lock". That ordering is the assertion, and it is checked below with no
+	// wall-clock component. This deadline is only an anti-hang backstop: a
+	// genuinely serialized command would never complete while the slow stub
+	// held the lock, so bounding the call is what turns that regression into a
+	// prompt failure instead of a run to the global go test timeout. Nothing
+	// cancels fastCtx early, so DeadlineExceeded below can only mean the fast
+	// command failed to complete during the whole overlap window.
+	fastCtx, fastCancel := context.WithTimeout(context.Background(), listConcurrencyBackstop)
 	defer fastCancel()
 	fastCmd := bdListConcurrencyHelperCommand(fastCtx, helperPath, markerDir, fastWorkDir, "closed")
 	started := time.Now()
 	fastOut, fastErr := fastCmd.CombinedOutput()
-	fastElapsed := time.Since(started)
 	if fastCtx.Err() == context.DeadlineExceeded {
-		t.Fatalf("fast unrelated bd list blocked behind slow list; output:\n%s", fastOut)
+		t.Fatalf("fast unrelated bd list blocked behind slow list for %s; output:\n%s", time.Since(started), fastOut)
 	}
 	if fastErr != nil {
-		t.Fatalf("fast unrelated bd list failed after %s: %v\n%s", fastElapsed, fastErr, fastOut)
+		t.Fatalf("fast unrelated bd list failed after %s: %v\n%s", time.Since(started), fastErr, fastOut)
 	}
 
+	// This is the assertion the test exists for, and it is deliberately
+	// wall-clock free: the slow stub holds "the lock" until this test releases
+	// it, so the fast list finishing while slowDone is still empty proves the
+	// unrelated list ran concurrently with the slow one, however long either
+	// took. No elapsed-time bound can make that proof stronger or weaker.
 	select {
 	case res := <-slowDone:
 		slowConsumed = true
@@ -1707,13 +1740,13 @@ done
 
 if [ "$status" = "open" ]; then
   : > "${LISTCONC_MARKER_DIR}/slow-started"
-  i=0
+  # Hold "the lock" until the test releases it. There is deliberately no
+  # self-release timer: a timer would tie the fast command's pass window to how
+  # long this stub happens to stay alive (gt-gmd attempt 3 -- the fast command
+  # completed just before the deadline only because the stub gave up first,
+  # which made the block-detection branch unreachable). The test always
+  # releases the stub or cancels it before it finishes.
   while [ ! -e "${LISTCONC_MARKER_DIR}/release-slow" ]; do
-    i=$((i + 1))
-    if [ "$i" -ge 1000 ]; then
-      echo "timed out waiting for release-slow" >&2
-      exit 2
-    fi
     sleep 0.01
   done
 fi
