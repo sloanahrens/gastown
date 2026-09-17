@@ -14,11 +14,11 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-const memoryKeyPrefix = "memory."
+const memoryKeyPrefix = "gt."
 
 // validMemoryTypes are the recognized memory type categories.
-// Typed memories are stored as memory.<type>.<key> in the kv store.
-// Legacy untyped memories (memory.<key>) are treated as "general".
+// Typed memories are stored as gt.<type>.<key> in the kv store.
+// Legacy untyped memories (gt.<key>) are treated as "general".
 var validMemoryTypes = map[string]string{
 	"feedback":  "Guidance or corrections from users — behavioral rules for future work",
 	"project":   "Ongoing work context, goals, deadlines, decisions",
