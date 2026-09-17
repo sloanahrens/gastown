@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -680,6 +683,14 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 	// regardless of current work state.
 	closePluginMails(name)
 
+	// Close any formula wisps attached to this dog's hook bead.
+	// Prevents stranded wisps when a dog goes idle (gt-da2x).
+	if wispsClosed, err := closeDogFormulaWisps(name); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not close formula wisps for dog %s: %v\n", name, err)
+	} else if wispsClosed > 0 {
+		fmt.Printf("  Closed %d formula wisp(s) attached to hook\n", wispsClosed)
+	}
+
 	if d.State == dog.StateIdle && d.Work == "" {
 		fmt.Printf("Dog %s is already idle with no work\n", name)
 		return nil
@@ -778,6 +789,72 @@ func closePluginMails(dogName string) {
 	if closed > 0 {
 		fmt.Printf("  Closed %d stale plugin mail(s) from inbox\n", closed)
 	}
+}
+
+// closeDogFormulaWisps finds and force-closes every formula wisp (molecule-type
+// ephemeral bead with attached_formula metadata) currently hooked to the dog's
+// hook bead. Returns the count of wisps closed.
+//
+// This shells out to bd directly (mirroring dogHasHookedFormula in handler.go)
+// rather than going through beads.Beads.List, whose run() always resolves env via
+// buildRunEnv/BuildPinnedBDEnv — never the daemon's read-only routing env that
+// forces BD_DOLT_AUTO_COMMIT=off.
+func closeDogFormulaWisps(dogName string) (int, error) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return 0, nil // not in a Gas Town workspace, skip
+	}
+	workDir, err := findLocalBeadsDir()
+	if err != nil {
+		return 0, nil // not in a beads workspace, skip
+	}
+
+	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
+	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
+		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
+	args := []string{"query", "--json", queryExpr, "--limit=0"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, townRoot, workDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			return 0, fmt.Errorf("bd query: %s", errMsg)
+		}
+		return 0, err
+	}
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+		return 0, nil
+	}
+
+	var hookedBeads []*beads.Issue
+	if err := json.Unmarshal(out, &hookedBeads); err != nil {
+		return 0, fmt.Errorf("parsing bd query output: %w", err)
+	}
+
+	closed := 0
+	for _, hb := range hookedBeads {
+		fields := beads.ParseAttachmentFields(hb)
+		if fields == nil || fields.AttachedFormula == "" {
+			continue // not a formula wisp
+		}
+		bd := beads.New(workDir)
+		if _, err := forceCloseDescendants(bd, hb.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not close descendants of wisp %s: %v\n", hb.ID, err)
+		}
+		if err := bd.ForceCloseWithReason("dog done", hb.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not close wisp %s: %v\n", hb.ID, err)
+			continue
+		}
+		closed++
+	}
+	return closed, nil
 }
 
 func runDogStatus(cmd *cobra.Command, args []string) error {

@@ -424,7 +424,20 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 // findDispatchableDog is unit-testable without shelling out to a real bd/Dolt
 // backend. Production code always resolves to dogHasHookedFormula; tests
 // override it to exercise the skip/error-fallback branches deterministically.
+//
+// Deprecated: use dogHasHookedFormulaWithIDFn for the new stale-wisp detection.
 var dogHasHookedFormulaFn = dogHasHookedFormula
+
+// dogHasHookedFormulaWithIDFn is the production seam for hooked-formula checks
+// that need the wisp root ID (for stale-wisp cleanup). Production code always
+// resolves to dogHasHookedFormulaWithID; tests override it deterministically.
+var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
+
+// hookedFormulaResult holds the outcome of a hooked-formula check.
+type hookedFormulaResult struct {
+	hasHooked bool
+	wispID    string // non-empty only when hasHooked is true
+}
 
 // dogHasHookedFormula reports whether the dog identified by name currently
 // holds an open (status=hooked) formula molecule wisp — the ephemeral
@@ -468,6 +481,47 @@ func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
 		return false, fmt.Errorf("parsing bd query output: %w", err)
 	}
 	return anyHasAttachedFormula(hookedBeads), nil
+}
+
+// dogHasHookedFormulaWithID is like dogHasHookedFormula but also returns the
+// root issue ID of the first hooked formula wisp found (if any). This enables
+// downstream callers to close the wisp rather than just detecting it.
+func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
+	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
+		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
+	args := []string{"query", "--json", queryExpr, "--limit=0"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			return hookedFormulaResult{}, fmt.Errorf("%w: %s", err, errMsg)
+		}
+		return hookedFormulaResult{}, err
+	}
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+		return hookedFormulaResult{}, nil
+	}
+
+	var hookedBeads []*beads.Issue
+	if err := json.Unmarshal(out, &hookedBeads); err != nil {
+		return hookedFormulaResult{}, fmt.Errorf("parsing bd query output: %w", err)
+	}
+
+	for _, hb := range hookedBeads {
+		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
+			return hookedFormulaResult{hasHooked: true, wispID: hb.ID}, nil
+		}
+	}
+	return hookedFormulaResult{}, nil
 }
 
 // anyHasAttachedFormula reports whether any of the given beads carries
