@@ -33,11 +33,24 @@ func makeFakePolecatTown(t *testing.T, town string) string {
 	return town
 }
 
-func fakePolecatTown(t *testing.T) (town, rig, worktree string) {
-	town = filepath.Join(t.TempDir(), "gt")
-	makeFakePolecatTown(t, town)
+// setupPolecatTest creates a fake town under $HOME/gt, pins HOME, GT_TOWN_ROOT,
+// and GT_ROOT so workspace.FindFromCwdOrError() and isGasTownAgentContext()
+// both resolve correctly. Returns (town, rig, worktree, teardown).
+func setupPolecatTest(t *testing.T) (town, rig, worktree string) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+
+	town = makeFakePolecatTown(t, filepath.Join(home, "gt"))
 	rig = filepath.Join(town, fakeRigName)
 	worktree = filepath.Join(rig, "polecats", "opal", "gastown")
+
+	// The guard walks up from cwd to find /polecats/<name>/ and also relies
+	// on workspace.FindFromCwdOrError() to locate the town root. Both need
+	// cwd to be inside a polecat worktree under the fake town.
+	t.Chdir(filepath.Join(worktree, "internal"))
+
 	return
 }
 
@@ -45,7 +58,7 @@ func fakePolecatTown(t *testing.T) (town, rig, worktree string) {
 // targeting paths outside the polecat's own worktree are blocked, while those
 // within the worktree are allowed.
 func TestEditWriteBlocksOutsideWorktree(t *testing.T) {
-	town, rig, worktree := fakePolecatTown(t)
+	town, rig, worktree := setupPolecatTest(t)
 
 	t.Setenv("GT_POLECAT", "opal")
 	t.Setenv("GT_ROLE", "gastown/polecats/opal")
@@ -115,7 +128,7 @@ func TestEditWriteBlocksOutsideWorktree(t *testing.T) {
 // TestNotebookEditBlocksOutsideWorktree verifies that NotebookEdit operations
 // targeting paths outside the polecat's own worktree are blocked.
 func TestNotebookEditBlocksOutsideWorktree(t *testing.T) {
-	_, rig, worktree := fakePolecatTown(t)
+	_, rig, worktree := setupPolecatTest(t)
 
 	t.Setenv("GT_POLECAT", "opal")
 	t.Setenv("GT_ROLE", "gastown/polecats/opal")
@@ -158,7 +171,7 @@ func TestNotebookEditBlocksOutsideWorktree(t *testing.T) {
 // TestNonPolecatContextNotBlocked verifies that non-polecat contexts (e.g.
 // crew) are not affected by this guard even when in the same town directory.
 func TestNonPolecatContextNotBlocked(t *testing.T) {
-	_, rig, _ := fakePolecatTown(t)
+	_, rig, _ := setupPolecatTest(t)
 
 	t.Setenv("GT_POLECAT", "")
 	t.Setenv("GT_ROLE", "gastown/crew")
@@ -194,7 +207,7 @@ func TestNonPolecatContextNotBlocked(t *testing.T) {
 // outside the worktree are blocked only for write-capable tools, while
 // read-only tools are allowed everywhere.
 func TestBashBlocksWriteCapableTargets(t *testing.T) {
-	town, rig, worktree := fakePolecatTown(t)
+	town, rig, worktree := setupPolecatTest(t)
 
 	t.Setenv("GT_POLECAT", "opal")
 	t.Setenv("GT_ROLE", "gastown/polecats/opal")
