@@ -28,6 +28,9 @@ This guard blocks operations that could cause irreversible damage:
   - rm -rf /             (only blocks root target; rm -rf ./build/ is allowed)
   - git push --force/-f  (--force-with-lease is allowed)
   - git reset --hard
+  - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
+    onto origin/main etc. reverts everything merged since the checkout was cut
+    and, for the tree-carrying modes, destroys uncommitted work — see gt-63sz)
   - git clean -f / git clean -fd
   - drop table/database
   - truncate table
@@ -144,6 +147,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	}
 	if r := matchesDangerousGitPush(lowerTokens); r != "" {
 		return r, ""
+	}
+	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
+		return r, alt
 	}
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
 	// ls -r (reverse sort) mean different things, and lowercasing would
@@ -805,4 +811,56 @@ func matchesDangerousGitPush(tokens []string) string {
 		}
 	}
 	return ""
+}
+
+// gitResetRemotePrefixes are token prefixes that name a remote-tracking ref:
+// "origin/main", "upstream/main", and the long form of either.
+var gitResetRemotePrefixes = []string{"origin/", "upstream/", "refs/remotes/"}
+
+// matchesDangerousGitReset blocks `git reset <remote-tracking-ref>` in any of
+// its modes — explicit --soft/--mixed/--hard/--keep, or the implicit --mixed of
+// a bare `git reset origin/main`.
+//
+// The usual reason a branch is reset onto the remote is to squash local work
+// onto a fresh base, and that is exactly what produces a revert of everything
+// merged since the checkout was cut: reset moves HEAD while the index and
+// working tree stay where the old checkout left them, so the next commit
+// records (old tree) - (new tip). Two polecat MRs landed that way in one night
+// (gt-wisp-hrau, gt-wisp-p7nl — gt-63sz), each reverting other people's merged
+// work under a message describing unrelated work. The modes that take a working
+// tree along (--hard, --keep) additionally destroy uncommitted work.
+//
+// The sanctioned integration is `git rebase <remote-ref>`, which replays the
+// branch's own commits onto the new base and leaves the remote's content alone.
+// Only a reset whose TARGET is a remote-tracking ref is blocked, so the
+// ordinary `git reset --soft HEAD~1` squash — and every reset to a local ref or
+// pathspec — still works. tokens must be lowercased, shell-aware tokens (see
+// shellTokenize); the "git reset" adjacency check matches matchesDangerousGitPush,
+// which treats `git -C <dir> push --force` as out of scope for the same reason:
+// the guard scans argv shapes, and the branch content check in gt done is what
+// actually fails closed.
+func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
+	inReset := false
+	for i, f := range tokens {
+		if f == "reset" && i > 0 && tokens[i-1] == "git" {
+			inReset = true
+			continue
+		}
+		if !inReset {
+			continue
+		}
+		// A bare "--" ends the revisions: everything after it is a pathspec,
+		// so "git reset -- origin/main" is unstaging a path that happens to be
+		// spelled like a ref, not resetting onto one.
+		if f == "--" {
+			return "", ""
+		}
+		for _, prefix := range gitResetRemotePrefixes {
+			if strings.HasPrefix(f, prefix) {
+				return "Reset onto a remote-tracking ref drops merged work",
+					"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
+			}
+		}
+	}
+	return "", ""
 }

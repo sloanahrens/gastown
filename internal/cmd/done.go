@@ -74,6 +74,7 @@ var (
 	donePreVerified   bool
 	doneTarget        string
 	doneSkipVerify    bool
+	doneAllowReverts  bool
 )
 
 // Valid exit types for gt done
@@ -869,6 +870,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
+	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -1387,6 +1389,23 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			} else if skipReason != "" {
 				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
 			}
+		}
+
+		// Refuse to submit a branch that reverts work already merged to the
+		// target (gt-63sz). Anything else in this path — the contamination
+		// check above, the MR gate, the refinery — reads the commit graph, and
+		// a `git reset --soft origin/main` over a stale checkout produces a
+		// branch that is one commit ahead of a fresh base while its content
+		// undoes every commit merged in between. Only the branch's file content
+		// shows that, so this is the one place that looks at it.
+		//
+		// Runs after the auto-rebase above: a rebase replays the same diff, so
+		// it neither causes nor cures this and the check must see the branch in
+		// the state that would actually be pushed.
+		if doneAllowReverts {
+			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
+		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {
+			return err
 		}
 
 		// Rewrite machine-generated commit messages before submission (gt-3wf).
