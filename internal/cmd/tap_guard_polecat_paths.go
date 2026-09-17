@@ -89,11 +89,16 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 	townRoot := currentTownRoot()
 
 	// For file-targeting tools (Edit, Write, NotebookEdit): deny any target
-	// outside the polecat's own worktree.
+	// inside the town but outside the polecat's own worktree. Paths outside
+	// the town are allowed.
 	if isFileTarget {
 		if !isPathInPolecatWorktree(targetPath, polecatWorktreeRoot) {
-			printPolecatPathsBlock(targetPath, "file path outside the polecat's own worktree")
-			return NewSilentExit(2)
+			// Outside the worktree — only block if inside the town.
+			if townRoot != "" && isPathWithinTown(targetPath, townRoot) {
+				printPolecatPathsBlock(targetPath, "file path outside the polecat's own worktree")
+				return NewSilentExit(2)
+			}
+			return nil
 		}
 		return nil
 	}
@@ -334,6 +339,11 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 		return true
 	}
 
+	// Paths directly inside a rig root (one level below town) are blocked.
+	if relParts := strings.Split(rel, string(filepath.Separator)); len(relParts) == 1 {
+		return true
+	}
+
 	// Paths inside a rig directory are blocked (rig roots are the town's
 	// biggest single trees, so anything inside one is hazardous).
 	if firstRel := strings.Split(rel, string(filepath.Separator)); len(firstRel) >= 1 {
@@ -354,6 +364,21 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 	}
 
 	return false
+}
+
+// isPathWithinTown reports whether targetPath is strictly inside the town
+// rooted at townRoot. Returns false when the path is outside the town.
+func isPathWithinTown(targetPath, townRoot string) bool {
+	if townRoot == "" {
+		return false
+	}
+	targetClean := filepath.Clean(targetPath)
+	townClean := filepath.Clean(townRoot)
+	rel, err := filepath.Rel(townClean, targetClean)
+	if err != nil {
+		return false
+	}
+	return isWithinRel(rel)
 }
 
 // isRestrictedTownLevel reports whether a path component names a restricted
