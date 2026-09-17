@@ -86,7 +86,7 @@ func assertPrimeToolCalled(t *testing.T, want string) {
 func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
-  "kv list --json") printf '%s\n' '{"memory.feedback.test":"remembered"}'; exit 0 ;;
+  "kv list --json") printf '%s\n' '{"gt.feedback.test":"remembered"}'; exit 0 ;;
 esac
 `, `
 case "$*" in
@@ -114,7 +114,7 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	survivedPath := filepath.Join(markerDir, "child-survived")
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
-  "kv list --json") printf '%s\n' '{"memory.feedback.test":"remembered"}'; exit 0 ;;
+  "kv list --json") printf '%s\n' '{"gt.feedback.test":"remembered"}'; exit 0 ;;
 esac
 `, `
 case "$*" in

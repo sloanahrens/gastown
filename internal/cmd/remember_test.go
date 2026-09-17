@@ -65,8 +65,8 @@ func TestSanitizeKey(t *testing.T) {
 		},
 		{
 			name: "dots to hyphens",
-			key:  "memory.slug",
-			want: "memory-slug",
+			key:  "gt.slug",
+			want: "gt-slug",
 		},
 		{
 			name: "uppercase to lower",
@@ -109,55 +109,55 @@ func TestParseMemoryKey(t *testing.T) {
 	}{
 		{
 			name:     "typed feedback key",
-			kvKey:    "memory.feedback.dont-mock-db",
+			kvKey:    "gt.feedback.dont-mock-db",
 			wantType: "feedback",
 			wantKey:  "dont-mock-db",
 		},
 		{
 			name:     "typed project key",
-			kvKey:    "memory.project.merge-freeze",
+			kvKey:    "gt.project.merge-freeze",
 			wantType: "project",
 			wantKey:  "merge-freeze",
 		},
 		{
 			name:     "typed user key",
-			kvKey:    "memory.user.senior-go-dev",
+			kvKey:    "gt.user.senior-go-dev",
 			wantType: "user",
 			wantKey:  "senior-go-dev",
 		},
 		{
 			name:     "typed reference key",
-			kvKey:    "memory.reference.grafana-dashboard",
+			kvKey:    "gt.reference.grafana-dashboard",
 			wantType: "reference",
 			wantKey:  "grafana-dashboard",
 		},
 		{
 			name:     "typed general key",
-			kvKey:    "memory.general.some-insight",
+			kvKey:    "gt.general.some-insight",
 			wantType: "general",
 			wantKey:  "some-insight",
 		},
 		{
 			name:     "legacy untyped key",
-			kvKey:    "memory.refinery-worktree",
+			kvKey:    "gt.refinery-worktree",
 			wantType: "general",
 			wantKey:  "refinery-worktree",
 		},
 		{
 			name:     "legacy key with dots in slug",
-			kvKey:    "memory.hooks-package-structure",
+			kvKey:    "gt.hooks-package-structure",
 			wantType: "general",
 			wantKey:  "hooks-package-structure",
 		},
 		{
 			name:     "unknown type treated as legacy",
-			kvKey:    "memory.banana.split",
+			kvKey:    "gt.banana.split",
 			wantType: "general",
 			wantKey:  "banana.split",
 		},
 		{
 			name:     "typed key with hyphens in value",
-			kvKey:    "memory.feedback.always-use-race-flag",
+			kvKey:    "gt.feedback.always-use-race-flag",
 			wantType: "feedback",
 			wantKey:  "always-use-race-flag",
 		},
@@ -193,30 +193,30 @@ func TestMemTypeRank(t *testing.T) {
 
 func TestParseBdKvListJSON(t *testing.T) {
 	got, err := parseBdKvListJSON([]byte(`{
-		"memory.project.note":"keep me",
-		"memory.project.empty":"",
-		"memory.project.count":12,
-		"memory.project.enabled":true,
-		"memory.project.tags":["one"],
-		"memory.project.config":{"nested":"value"},
+		"gt.project.note":"keep me",
+		"gt.project.empty":"",
+		"gt.project.count":12,
+		"gt.project.enabled":true,
+		"gt.project.tags":["one"],
+		"gt.project.config":{"nested":"value"},
 		"schema_version":1,
 		"other":"keep string kvs",
 		"enabled":true,
 		"tags":["one"],
 		"config":{"nested":"value"},
-		"memory.project.null":null
+		"gt.project.null":null
 	}`))
 	if err != nil {
 		t.Fatalf("parseBdKvListJSON() error = %v", err)
 	}
 
 	want := map[string]string{
-		"memory.project.note":    "keep me",
-		"memory.project.empty":   "",
-		"memory.project.count":   "12",
-		"memory.project.enabled": "true",
-		"memory.project.tags":    `["one"]`,
-		"memory.project.config":  `{"nested":"value"}`,
+		"gt.project.note":    "keep me",
+		"gt.project.empty":   "",
+		"gt.project.count":   "12",
+		"gt.project.enabled": "true",
+		"gt.project.tags":    `["one"]`,
+		"gt.project.config":  `{"nested":"value"}`,
 		"other":                  "keep string kvs",
 	}
 	if len(got) != len(want) {
@@ -227,7 +227,7 @@ func TestParseBdKvListJSON(t *testing.T) {
 			t.Errorf("parseBdKvListJSON()[%q] = %q, want %q", k, got[k], wantValue)
 		}
 	}
-	if _, ok := got["memory.project.null"]; ok {
+	if _, ok := got["gt.project.null"]; ok {
 		t.Error("parseBdKvListJSON() kept null memory value")
 	}
 	for _, k := range []string{"schema_version", "enabled", "tags", "config"} {
@@ -238,7 +238,7 @@ func TestParseBdKvListJSON(t *testing.T) {
 }
 
 func TestParseBdKvListJSONMalformed(t *testing.T) {
-	if _, err := parseBdKvListJSON([]byte(`{"memory.project.note":`)); err == nil {
+	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
 		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
 	}
 }
