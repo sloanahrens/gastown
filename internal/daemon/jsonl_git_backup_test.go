@@ -1015,6 +1015,7 @@ exit 1
 	}
 
 	// The file has one JSON object per line; find the escalation_dropped event.
+	// Event struct: {"ts":"...","source":"daemon","type":"escalation_dropped","actor":"daemon","payload":{...}}
 	var found bool
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
@@ -1022,24 +1023,28 @@ exit 1
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			continue
 		}
-		if record["event"] != "escalation_dropped" {
+		if record["type"] != "escalation_dropped" {
 			continue
 		}
 		found = true
 
-		// The message field should contain the full test message.
-		msg, ok := record["message"].(string)
+		// The message is inside the payload map.
+		payload, ok := record["payload"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("expected 'message' field in feed record, got keys: %v", keys(record))
+			t.Fatalf("expected 'payload' field in event record, got keys: %v", keys(record))
+		}
+		msg, ok := payload["message"].(string)
+		if !ok {
+			t.Fatalf("expected 'message' field in payload, got keys: %v", keys(payload))
 		}
 		if msg != testMessage {
 			t.Errorf("event message = %q, want %q", msg, testMessage)
 		}
 
 		// The title should be truncated to the first line.
-		title, ok := record["title"].(string)
+		title, ok := payload["title"].(string)
 		if !ok {
-			t.Fatalf("expected 'title' field in feed record")
+			t.Fatalf("expected 'title' field in payload")
 		}
 		if strings.Contains(title, "\n") {
 			t.Errorf("title should not contain newline: %q", title)
