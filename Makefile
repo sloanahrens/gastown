@@ -192,7 +192,11 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 test: test-makefile
-	go test ./...
+	# -timeout 20m: the 10m default is a per-package budget and internal/cmd
+	# and internal/refinery legitimately run 500-600s under contention, so
+	# every gate against them flapped on the budget rather than a hung test
+	# (gt-g8kr). Shrinking those packages is a follow-up.
+	go test -timeout 20m ./...
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
