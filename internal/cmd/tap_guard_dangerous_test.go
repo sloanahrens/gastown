@@ -112,6 +112,45 @@ func TestMatchesDangerousGitPush(t *testing.T) {
 	}
 }
 
+// TestMatchesDangerousGitReset pins the gt-63sz guard: resetting onto a
+// remote-tracking ref is the squash-onto-a-fresh-base habit that silently
+// encodes a revert of everything merged since the checkout was cut. Every mode
+// is blocked (the implicit --mixed of a bare `git reset origin/main` included);
+// every reset to a local ref or a pathspec still works, since that is the
+// ordinary squash and unstage vocabulary.
+func TestMatchesDangerousGitReset(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Blocked — any reset whose target is a remote-tracking ref.
+		{"reset --soft origin/main", "git reset --soft origin/main", true},
+		{"reset --mixed origin/main", "git reset --mixed origin/main", true},
+		{"reset --hard origin/main", "git reset --hard origin/main", true},
+		{"bare reset origin/main (implicit --mixed)", "git reset origin/main", true},
+		{"reset onto upstream/main", "git reset --soft upstream/main", true},
+		{"reset onto long-form remote ref", "git reset --soft refs/remotes/origin/main", true},
+		{"glued to a shell operator", "git add -A; git reset --soft origin/main", true},
+
+		// Allowed — local targets, pathspecs, and quoted prose.
+		{"soft to a local commit", "git reset --soft HEAD~1", false},
+		{"mixed to a local branch", "git reset --mixed feature/x", false},
+		{"reset a pathspec named like a ref", "git reset -- origin/main", false},
+		{"unstage a file", "git reset HEAD file.go", false},
+		{"no reset at all", "git status", false},
+		{"ref name inside quoted prose", `gt mail send x -s "note" -m "never git reset --soft origin/main"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := matchesDangerousGitReset(lowerTokens(tt.command))
+			if blocked := got != ""; blocked != tt.blocked {
+				t.Errorf("matchesDangerousGitReset(%q) blocked=%v, want %v", tt.command, blocked, tt.blocked)
+			}
+		})
+	}
+}
+
 func TestMatchesSudo(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -222,6 +261,7 @@ func TestNestedShellCommands(t *testing.T) {
 		blocked bool
 	}{
 		{"bash -c wrapped git reset --hard", `bash -c "git reset --hard"`, true},
+		{"bash -c wrapped reset onto origin/main", `bash -c "git reset --soft origin/main"`, true},
 		{"sh -c wrapped sudo", `sh -c "sudo rm -rf /"`, true},
 		{"eval wrapped git clean -fd", `eval "git clean -fd"`, true},
 		{"bash -c safe command", `bash -c "echo hello"`, false},
@@ -556,6 +596,7 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"rm -rf /", "rm -rf /", true},
 		{"git push --force", "git push --force origin main", true},
 		{"git reset --hard", "git reset --hard HEAD~1", true},
+		{"git reset --soft onto origin/main", "git reset --soft origin/main", true},
 		{"git clean -f", "git clean -f", true},
 		{"git clean -fd", "git clean -fd", true},
 		{"drop table", "DROP TABLE users", true},
@@ -566,6 +607,7 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git push --force-with-lease", "git push --force-with-lease origin main", false},
 		{"git push normal", "git push origin main", false},
 		{"git reset soft", "git reset --soft HEAD~1", false},
+		{"git reset -- origin/main", "git reset -- origin/main", false},
 		{"pip install (venv)", "pip install requests", false},
 		{"npm install (local)", "npm install express", false},
 		{"normal command", "ls -la", false},
@@ -581,6 +623,8 @@ func TestDangerousGuard_Integration(t *testing.T) {
 			} else if matchesDangerousRmRf(lower) != "" {
 				blocked = true
 			} else if matchesDangerousGitPush(lower) != "" {
+				blocked = true
+			} else if r, _ := matchesDangerousGitReset(lower); r != "" {
 				blocked = true
 			} else {
 				for _, p := range fragmentPatterns {

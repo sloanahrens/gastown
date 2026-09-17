@@ -197,6 +197,21 @@ If rebase conflicts:
 - Resolve them carefully
 - If stuck, mail Witness
 
+**Integrate ONLY with `git rebase`. Never reset onto the remote.**
+
+`git reset --soft origin/{{base_branch}}` (or `--mixed`/`--hard`) moves HEAD to
+the current remote tip while your index and working tree stay as they were when
+your worktree was cut. The commit you make afterwards then records
+(old tree) - (new tip): a REVERT of every commit merged since you started, plus
+your own change, submitted under a message describing only your change. That is
+how two polecat MRs reached the merge queue with 9 and 17 files of other
+people's work deleted (gt-63sz), and `gt done` now refuses such a branch.
+
+Rebase replays YOUR commits onto the new base and leaves the remote's content
+alone, which is what you want. The same applies to `git stash` + `git reset` +
+`git stash pop` rituals: there is no sequence that needs a reset onto a
+remote-tracking ref.
+
 **6. Run project setup (if configured):**
 
 If setup_command is set, run it to install dependencies:
@@ -537,7 +552,22 @@ that you ran the full gate suite on a rebased branch, enabling fast-path merge.
 without --pre-verified even when gates are configured — the refinery will
 run gates normally.
 
-**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
+**6. Confirm the branch contains only YOUR files:**
+```bash
+git diff --stat origin/{{base_branch}}...HEAD     # three dots
+```
+
+This is the last check before submission, and the one that catches a stale
+tree. Every line of the stat should be a file you meant to touch for
+{{issue}}. A file you have never heard of, or a large negative line count in
+files unrelated to your change, means your tree predates work merged into
+{{base_branch}} — most often because something reset onto origin/{{base_branch}}
+instead of rebasing. Fix it by rebasing your CHANGES (step 1), not by
+reverting anyone's work. `gt done` prints this same stat and refuses a branch
+that undoes merged work.
+
+**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, the
+three-dot stat lists only files you changed, all configured gates pass."""
 
 [[steps]]
 id = "submit-and-exit"

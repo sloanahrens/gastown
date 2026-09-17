@@ -184,6 +184,27 @@ git add <files>                 # Stage changes
 git commit -m "msg (issue)"     # Commit with issue reference
 ```
 
+**Integrating with the remote: `git rebase`, never `git reset`.**
+
+To catch up with the latest main:
+```bash
+git fetch origin
+git rebase origin/main          # replays YOUR commits onto the new base
+```
+
+Never `git reset --soft origin/main` (or `--mixed`/`--hard`). A reset moves
+HEAD to the remote tip while your index and working tree stay as they were when
+your worktree was cut — so the next commit records (old tree) - (new tip), a
+REVERT of every commit merged since you started, hidden inside your own change.
+Two polecat MRs reached the merge queue that way, deleting 9 and 17 files of
+other people's merged work. The command is blocked by the dangerous-command
+guard, and `gt done` refuses a branch that undoes merged work.
+
+Before submitting, the check that catches it is the three-dot stat:
+```bash
+git diff --stat origin/main...HEAD    # must list only files YOU changed
+```
+
 ### Communication
 ```bash
 gt mail inbox                   # Check for messages
@@ -228,7 +249,7 @@ Question: ..."
 
 ## Completion Protocol (MANDATORY)
 
-When your work is done, follow this checklist — **step 4 is REQUIRED**:
+When your work is done, follow this checklist — **the final step is REQUIRED**:
 
 ⚠️ **DO NOT commit if lint or tests fail. Fix issues first.**
 
@@ -238,7 +259,12 @@ When your work is done, follow this checklist — **step 4 is REQUIRED**:
        - Go projects:  go test ./... && go vet ./...
 [ ] 2. Stage changes:     git add <files>
 [ ] 3. Commit changes:    git commit -m "msg (issue-id)"
-[ ] 4. Self-clean:        gt done   ← MANDATORY FINAL STEP
+[ ] 4. Confirm the diff is YOURS:
+       git diff --stat origin/main...HEAD
+       → every file listed is one you changed for this issue. A file you never
+         touched, or a big negative line count, means your tree is stale:
+         rebase your changes (Git Operations) — never reset onto origin/main.
+[ ] 5. Self-clean:        gt done   ← MANDATORY FINAL STEP
 ```
 
 **Quality gates are not optional.** Worktrees may not trigger pre-commit hooks,
