@@ -964,7 +964,7 @@ exit 0
 		t.Fatalf("read counter: %v", err)
 	}
 	if strings.TrimSpace(string(count)) != "3" {
-		t.Errorf("gt called %d times, want 3", strings.TrimSpace(string(count)))
+		t.Errorf("gt called %s times, want 3", strings.TrimSpace(string(count)))
 	}
 }
 
