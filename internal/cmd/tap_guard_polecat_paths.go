@@ -371,38 +371,32 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 		return false
 	}
 
-	town := strings.ToLower(filepath.Clean(townRoot))
+	townLower := strings.ToLower(filepath.Clean(townRoot))
 	targetClean := strings.ToLower(filepath.Clean(target))
 
+	// The polecat's own worktree is always allowed.
+	ownWorktree := strings.ToLower(filepath.Clean(polecatWorktreeRoot))
+	if ownWorktree != "" && (targetClean == ownWorktree ||
+		strings.HasPrefix(targetClean, ownWorktree+string(filepath.Separator))) {
+		return false
+	}
+
 	// Outside the town entirely — allowed.
-	rel, err := filepath.Rel(town, targetClean)
+	rel, err := filepath.Rel(townLower, targetClean)
 	if err != nil || !isWithinRel(rel) {
 		return false
 	}
 
-	// Exactly at the town root — allowed (the polecat's own worktree is under it).
-	if targetClean == town {
-		return false
-	}
-
-	// Rig root itself is blocked.
-	rigRoot := strings.ToLower(filepath.Clean(town))
-	// Derive rig path: the rig is the directory containing /polecats/.
-	// Walk up from town root to find the rig.
-	rigPath := findRigPath(town)
-	if rigPath != "" && targetClean == rigPath {
+	// Rig/town root itself is blocked.
+	if targetClean == townLower {
 		return true
 	}
 
-	// Any path directly under the town root that isn't the polecat's own
-	// worktree is blocked (mayor, deacon, settings, logs, .dolt-data, etc.).
-	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) >= 1 {
-		base := filepath.Base(targetClean)
-		if base == "mayor" || base == "deacon" || base == "settings" ||
-			base == "logs" || base == ".dolt-data" || base == "logs" {
-			return true
-		}
+	// Restricted town-level directories.
+	base := filepath.Base(targetClean)
+	if base == "mayor" || base == "deacon" || base == "settings" ||
+		base == "logs" || base == ".dolt-data" {
+		return true
 	}
 
 	// Sibling polecat worktrees: any /polecats/<name> at any depth.
@@ -410,21 +404,7 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 		return true
 	}
 
-	// The polecat's own worktree is allowed even though it contains /polecats/.
-	ownWorktree := strings.ToLower(filepath.Clean(polecatWorktreeRoot))
-	if ownWorktree != "" && strings.HasPrefix(targetClean, ownWorktree+string(filepath.Separator)) || targetClean == ownWorktree {
-		return false
-	}
-
 	return false
-}
-
-// findRigPath walks up from townRoot to find the directory containing /polecats/.
-// In a typical town layout, the town root IS the rig directory.
-func findRigPath(townRoot string) string {
-	// The town root from workspace.FindFromCwdOrError() is the rig directory
-	// (e.g. ~/gt/gastown). So the rig path is the town root itself.
-	return strings.ToLower(filepath.Clean(townRoot))
 }
 
 // printPolecatPathsBlock prints the block banner to stderr.
