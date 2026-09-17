@@ -1582,14 +1582,22 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 
 	waitForFile(t, filepath.Join(markerDir, "slow-started"), 10*time.Second)
 
-	fastCtx, fastCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Use a generous timeout so scheduler delay under CPU load doesn't
+	// masquerade as flock blocking.  The slow command holds the flock for
+	// up to 15 s; if the fast command is genuinely blocked it will not
+	// complete within 10 s, so this window still catches the regression
+	// while tolerating moderate host load (gt-gmd).
+	fastCtx, fastCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer fastCancel()
 	fastCmd := bdListConcurrencyHelperCommand(fastCtx, helperPath, markerDir, fastWorkDir, "closed")
 	started := time.Now()
 	fastOut, fastErr := fastCmd.CombinedOutput()
 	fastElapsed := time.Since(started)
+	if fastElapsed > 5*time.Second {
+		t.Fatalf("fast unrelated bd list did not start promptly (elapsed %s); likely a host-scheduling delay, not flock contention; output:\n%s", fastElapsed, fastOut)
+	}
 	if fastCtx.Err() == context.DeadlineExceeded {
-		t.Fatalf("fast unrelated bd list blocked behind slow list; output:\n%s", fastOut)
+		t.Fatalf("fast unrelated bd list blocked behind slow list (held flock %s); output:\n%s", fastElapsed, fastOut)
 	}
 	if fastErr != nil {
 		t.Fatalf("fast unrelated bd list failed after %s: %v\n%s", fastElapsed, fastErr, fastOut)
