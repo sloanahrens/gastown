@@ -791,6 +791,29 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 	})
 
+	// gt-pnkd: the default test-verify gate's budgets and command override
+	// must survive the rig-root -> repo -> settings/config.json merge chain,
+	// or a rig that sets them would silently gate under the defaults.
+	t.Run("test-verify settings override", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{
+			TestVerifyRunTimeout:  "45m",
+			TestVerifySlotTimeout: "90m",
+			TestVerifyCommand:     "make test-changed PKGS='{packages}'",
+		}
+		local := &MergeQueueConfig{TestVerifyRunTimeout: "10m"}
+		result := MergeSettingsCommand(repo, local)
+		if result.TestVerifyRunTimeout != "10m" {
+			t.Errorf("test_verify_run_timeout = %q, want the local override", result.TestVerifyRunTimeout)
+		}
+		if result.TestVerifySlotTimeout != "90m" {
+			t.Errorf("test_verify_slot_timeout = %q, want the repo value (not overridden)", result.TestVerifySlotTimeout)
+		}
+		if result.TestVerifyCommand != "make test-changed PKGS='{packages}'" {
+			t.Errorf("test_verify_command = %q, want the repo value (not overridden)", result.TestVerifyCommand)
+		}
+	})
+
 	t.Run("local overrides batch settings", func(t *testing.T) {
 		t.Parallel()
 		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5, BatchMinCount: 3}

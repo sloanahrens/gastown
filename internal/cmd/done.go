@@ -2072,11 +2072,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if !doneSkipVerify && !fullGatesVerified {
 				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
 				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
-				// gt-azmw: this gate can hold the container slot for 20m and
-				// then run for another 10m, all of it silent, while the
-				// heartbeat written at gt done's start ages past every
-				// consumer's stale threshold. Renew it for exactly as long as
-				// this bounded stage can run.
+				// gt-azmw: this gate can hold the container slot for 60m
+				// (defaultTestVerifySlotTimeout) and then run for a scaled run
+				// budget (30m minimum, more with more changed packages), all of
+				// it silent, while the heartbeat written at gt done's start ages
+				// past every consumer's stale threshold. Renew it for exactly as
+				// long as this bounded stage can run. The gate itself now logs
+				// progress lines to the pane and the verify log (gt-pnkd).
 				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
 				verify, verifyErr := runDefaultTestVerification(g, cwd, defaultBranch, target, verifyMQ, townRoot, verifyRole)
 				stopHeartbeat()
@@ -2100,6 +2102,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					}
 					description += "\ntest_verified_exit: 0"
 					description += fmt.Sprintf("\ntest_verified_log: %s", verify.logSHA256)
+					// gt-pnkd: record the budgets the gate actually resolved and
+					// what it actually cost, so a refinery gate flap can be told
+					// apart from a budget that was too tight without re-reading
+					// the polecat's (now nuked) worktree .runtime log.
+					description += fmt.Sprintf("\ntest_verified_run_budget: %s", humanDuration(verify.runBudget))
+					description += fmt.Sprintf("\ntest_verified_slot_cap: %s", humanDuration(verify.slotTimeout))
+					description += fmt.Sprintf("\ntest_verified_slot_wait: %s", verify.slotWait.Round(time.Second))
+					description += fmt.Sprintf("\ntest_verified_elapsed: %s", verify.runElapsed.Round(time.Second))
 				}
 			}
 

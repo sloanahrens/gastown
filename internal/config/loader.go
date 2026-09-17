@@ -369,6 +369,18 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.TestCommand != "" {
 			result.TestCommand = local.TestCommand
 		}
+		// gt done's default test-verify gate budgets and command override
+		// (gt-pnkd): same non-empty-wins rule as the five *_command fields
+		// above.
+		if local.TestVerifyRunTimeout != "" {
+			result.TestVerifyRunTimeout = local.TestVerifyRunTimeout
+		}
+		if local.TestVerifySlotTimeout != "" {
+			result.TestVerifySlotTimeout = local.TestVerifySlotTimeout
+		}
+		if local.TestVerifyCommand != "" {
+			result.TestVerifyCommand = local.TestVerifyCommand
+		}
 		if local.BuildCommand != "" {
 			result.BuildCommand = local.BuildCommand
 		}

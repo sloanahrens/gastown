@@ -25,6 +25,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt done`'s default test-verify gate no longer self-deadlocks** (gt-pnkd)
+  — the gate that runs a polecat's changed packages before an MR bead is
+  created bounded itself with two hardcoded constants, a 20m cap on waiting
+  for the container-gate slot and a 10m budget on the test command itself,
+  both of which were smaller than reality on a loaded host: `internal/cmd`
+  alone measures 505-602s, and up to three suites queue for the one slot. A
+  branch whose tests never ran was therefore refused for infrastructure
+  reasons, and four one-shot `--skip-verify` exceptions had to be granted in
+  24h — including one for the fix to the gate itself. The budgets are now
+  resolved and rig-configurable instead of constant: the slot cap defaults to
+  60m (the container-gate slot's own `gt slot run --timeout` default) and the
+  run budget to the rig's per-package `-timeout` — read out of its Makefile
+  test target with `make -n`, or its `test_command` — scaled by the number of
+  changed packages, floored at 30m. `merge_queue.test_verify_run_timeout`,
+  `test_verify_slot_timeout` and `test_verify_command` (with a `{packages}`
+  placeholder) override them per rig, and the gate inherits the environment
+  prefix of the rig's `test_command` so it cannot diverge from the refinery's
+  suite. Every resolved value is written to the verify log's header before
+  the gate does anything, and both the slot wait and the suite run emit
+  progress lines (elapsed time, budget, log growth, current slot holder) to
+  the pane and the log — a victim of this bug previously had nothing but a
+  frozen 144-byte log and 0% CPU with which to tell slot contention from a
+  test failure. A slot-acquire failure is now reported as slot contention,
+  explicitly not a test failure, and slot wait is never counted against the
+  run budget.
 - **Dangerous-command guard now covers the town tree** (gt-6e2l) — a dog
   session's `grep -R "record-run" -n /Users/sloan/gt` ran unblocked and
   walked every rig, every `.repo.git`, and every worktree in the town (>64 MB
