@@ -850,7 +850,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	defaultPreset := config.GetAgentPresetByName(defaultAgentName)
 	if defaultPreset != nil && defaultPreset.HooksProvider != "" {
 		if err := hooks.InstallForRole(defaultPreset.HooksProvider, polecatsPath, polecatsPath, "polecat",
-			defaultPreset.HooksDir, defaultPreset.HooksSettingsFile, defaultPreset.HooksUseSettingsDir); err != nil {
+			defaultPreset.HooksDir, defaultPreset.HooksSettingsFile, defaultPreset.Command, defaultPreset.HooksUseSettingsDir); err != nil {
 			// Non-fatal: session startup will retry via EnsureSettingsForRole
 			fmt.Printf("  %s Could not scaffold polecat settings: %v\n", "!", err)
 		}

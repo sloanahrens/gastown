@@ -42,7 +42,7 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	if preset := config.GetAgentPresetByName(provider); preset != nil {
 		useSettingsDir = preset.HooksUseSettingsDir
 	}
-	if err := hooks.InstallForRole(provider, settingsDir, workDir, role, rc.Hooks.Dir, rc.Hooks.SettingsFile, useSettingsDir); err != nil {
+	if err := hooks.InstallForRole(provider, settingsDir, workDir, role, rc.Hooks.Dir, rc.Hooks.SettingsFile, rc.Command, useSettingsDir); err != nil {
 		return err
 	}
 	if provider == "gemini" {
