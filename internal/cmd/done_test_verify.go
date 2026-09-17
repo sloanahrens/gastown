@@ -78,11 +78,25 @@ var testVerifyProgressInterval = 2 * time.Minute
 // so this deliberately returns just the release closure rather than a
 // *slot.Handle a fake could not construct.
 var acquireVerifySlot = func(townRoot, role string, timeout time.Duration) (func(), error) {
-	h, err := slot.Acquire(townRoot, role, timeout)
+	h, err := slot.AcquirePool(townRoot, role, timeout, containerGatePool(townRoot))
 	if err != nil {
 		return nil, err
 	}
 	return func() { _ = h.Release() }, nil
+}
+
+// isContainerSuitePackage reports whether importPath is one of the
+// Dolt/testcontainers-backed packages (containerSuitePackages, the same list
+// the container-suite guard enforces). Exact package match on the
+// repo-relative suffix: a sub-package of a listed one is not assumed to spin
+// containers.
+func isContainerSuitePackage(importPath string) bool {
+	for _, p := range containerSuitePackages {
+		if importPath == p || strings.HasSuffix(importPath, "/"+p) {
+			return true
+		}
+	}
+	return false
 }
 
 // runVerifySuite runs one shell command for the gate with the given
@@ -110,9 +124,18 @@ type testVerifyResult struct {
 	ran        bool
 	skipReason string
 
-	success   bool
-	packages  []string // populated when scope == "packages"
-	scope     string   // "packages" (Go rig, changed-package scoped) or "full" (rig test_command)
+	success  bool
+	packages []string // populated when scope == "packages"
+	scope    string   // "packages" (Go rig, changed-package scoped) or "full" (rig test_command)
+	// deferredPackages are changed Dolt/testcontainers-backed packages the
+	// gate did NOT run (gt-yihz): the refinery's gate runs the container
+	// suite once per submission, so gt done leaves them alone and needs no
+	// container-gate slot for what remains. Set whether or not anything
+	// else ran (see skipReason for the all-deferred case).
+	deferredPackages []string
+	// slotUsed is false when the gate ran without a container-gate slot
+	// because nothing in scope spins containers.
+	slotUsed  bool
 	logPath   string
 	logSHA256 string
 
@@ -560,6 +583,36 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		scope = "full"
 	}
 
+	// gt-yihz: the Docker suite runs ONCE per submission, in the refinery's
+	// gate. Unless the rig opts back in, changed packages that spin
+	// Dolt/testcontainers containers are left to the refinery and the gate
+	// tests only the rest — which needs no container-gate slot, so a polecat
+	// never queues behind the refinery (or another polecat) to run tests
+	// that touch no container.
+	var deferred []string
+	includeContainers := mq.TestVerifyIncludeContainerPackages != nil && *mq.TestVerifyIncludeContainerPackages
+	if isGoRig && !includeContainers {
+		var plain []string
+		for _, p := range pkgs {
+			if isContainerSuitePackage(p) {
+				deferred = append(deferred, p)
+			} else {
+				plain = append(plain, p)
+			}
+		}
+		if len(plain) == 0 {
+			return testVerifyResult{
+				skipReason: fmt.Sprintf("every changed package is container-backed (%s) — the refinery's gate runs those once per submission (gt-yihz); nothing for gt done to test without a container slot",
+					strings.Join(deferred, " ")),
+				deferredPackages: deferred,
+			}, nil
+		}
+		pkgs = plain
+	}
+	// A non-Go rig's test_command may spin containers, and so may the
+	// container-backed packages when the rig opted them back in.
+	needsSlot := !isGoRig || includeContainers
+
 	budgets := resolveTestVerifyBudgets(mq, worktree, mq.TestCommand, len(pkgs))
 
 	var testCmd string
@@ -599,20 +652,32 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	fmt.Fprintf(logFile, "command: %s\n", testCmd)
 	fmt.Fprintf(logFile, "run budget: %s (%s)\n", humanDuration(budgets.runTimeout), budgets.runSource)
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
+	if len(deferred) > 0 {
+		fmt.Fprintf(logFile, "deferred to the refinery gate (container-backed): %s\n", strings.Join(deferred, " "))
+	}
+	if !needsSlot {
+		fmt.Fprintf(logFile, "container-gate slot: not needed (no container-backed package in scope)\n")
+	}
 	if len(envPrefix) > 0 {
 		fmt.Fprintf(logFile, "env (inherited from test_command): %s\n", strings.Join(envPrefix, " "))
 	}
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))
 
-	release, slotWait, acquireErr := acquireVerifySlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
-	if acquireErr != nil {
-		return testVerifyResult{}, fmt.Errorf(
-			"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Re-run gt done once the queue drains, or raise merge_queue.test_verify_slot_timeout for this rig; --skip-verify with justification is the last resort",
-			slotWait.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr)
+	var slotWait time.Duration
+	if needsSlot {
+		release, waited, acquireErr := acquireVerifySlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
+		if acquireErr != nil {
+			return testVerifyResult{}, fmt.Errorf(
+				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Re-run gt done once the queue drains, or raise merge_queue.test_verify_slot_timeout for this rig; --skip-verify with justification is the last resort",
+				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr)
+		}
+		defer release()
+		slotWait = waited
+		reportVerifyProgress(logFile, fmt.Sprintf("container-gate slot acquired after %s", slotWait.Round(time.Second)))
+	} else {
+		reportVerifyProgress(logFile, "running without a container-gate slot (no container-backed package in scope)")
 	}
-	defer release()
-	reportVerifyProgress(logFile, fmt.Sprintf("container-gate slot acquired after %s", slotWait.Round(time.Second)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), budgets.runTimeout)
 	defer cancel()
@@ -633,13 +698,15 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	timedOut := ctx.Err() == context.DeadlineExceeded
 
 	result := testVerifyResult{
-		scope:       scope,
-		packages:    pkgs,
-		logPath:     logPath,
-		runBudget:   budgets.runTimeout,
-		slotTimeout: budgets.slotTimeout,
-		slotWait:    slotWait,
-		runElapsed:  runElapsed,
+		scope:            scope,
+		packages:         pkgs,
+		deferredPackages: deferred,
+		slotUsed:         needsSlot,
+		logPath:          logPath,
+		runBudget:        budgets.runTimeout,
+		slotTimeout:      budgets.slotTimeout,
+		slotWait:         slotWait,
+		runElapsed:       runElapsed,
 	}
 
 	if timedOut {

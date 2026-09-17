@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
@@ -389,7 +390,9 @@ func (d *Daemon) runRigGates(ctx context.Context, rigName, commit, workDir strin
 // (gt-hpce, following acquireBatchGateSlot's precedent in
 // internal/cmd/mq_batch.go).
 func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
-	return slot.Acquire(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout)
+	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
+	pool := slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
+	return slot.AcquirePool(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
 }
 
 // commitTested returns the commit SHA checked out in the worktree, or ""

@@ -81,12 +81,13 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Waiting for container-gate slot (role=%s)...\n", role)
-	h, err := slot.Acquire(townRoot, role, slotRunTimeout)
+	pool := containerGatePool(townRoot)
+	h, err := slot.AcquirePool(townRoot, role, slotRunTimeout, pool)
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
 	defer h.Release()
-	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot acquired (role=%s).\n", role)
+	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot %d/%d acquired (role=%s).\n", h.Index, pool.Slots, role)
 
 	sub := exec.Command(args[0], args[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
 	sub.Stdin = os.Stdin
@@ -123,7 +124,7 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	rep, err := slot.Status(townRoot)
+	rep, err := slot.StatusPool(townRoot, containerGatePool(townRoot))
 	if err != nil {
 		return fmt.Errorf("checking container-gate slot: %w", err)
 	}
@@ -132,7 +133,28 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return printSlotStatusJSON(cmd, rep)
 	}
 
-	if rep.Held {
+	if rep.Total > 1 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate pool: %d/%d held (%d reserved for the refinery)\n", rep.HeldCount, rep.Total, rep.Reserved)
+		for _, st := range rep.Slots {
+			label := "free"
+			if st.Held {
+				if st.Owner != nil {
+					label = fmt.Sprintf("held by %s (pid %d, since %s, age %s)", st.Owner.Role, st.Owner.PID,
+						st.Owner.AcquiredAt.Format(time.RFC3339), time.Since(st.Owner.AcquiredAt).Round(time.Second))
+				} else {
+					label = "held (owner metadata unavailable)"
+				}
+			}
+			tag := ""
+			if st.Index < rep.Reserved {
+				tag = " [gate-reserved]"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  slot %d%s: %s\n", st.Index, tag, label)
+		}
+		if rep.HeldCount > 0 {
+			return nil
+		}
+	} else if rep.Held {
 		if rep.Owner != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot: held by %s (pid %d, since %s, age %s)\n",
 				rep.Owner.Role, rep.Owner.PID, rep.Owner.AcquiredAt.Format(time.RFC3339), time.Since(rep.Owner.AcquiredAt).Round(time.Second))
@@ -156,17 +178,24 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	if rep.Total > 1 {
+		return nil
+	}
 	fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: free")
 	return nil
 }
 
 func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 	type jsonOut struct {
-		Held                bool        `json:"held"`
-		Owner               *slot.Owner `json:"owner,omitempty"`
-		Busy                bool        `json:"busy"`
-		UnwrappedContainers []string    `json:"unwrapped_containers,omitempty"`
-		DockerUnknown       bool        `json:"docker_unknown"`
+		Held                bool             `json:"held"`
+		Owner               *slot.Owner      `json:"owner,omitempty"`
+		Busy                bool             `json:"busy"`
+		UnwrappedContainers []string         `json:"unwrapped_containers,omitempty"`
+		DockerUnknown       bool             `json:"docker_unknown"`
+		Slots               []slot.SlotState `json:"slots,omitempty"`
+		HeldCount           int              `json:"held_count"`
+		Total               int              `json:"total"`
+		Reserved            int              `json:"reserved_for_gate"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
@@ -176,5 +205,9 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Busy:                rep.Busy(),
 		UnwrappedContainers: rep.UnwrappedContainers,
 		DockerUnknown:       rep.DockerUnknown,
+		Slots:               rep.Slots,
+		HeldCount:           rep.HeldCount,
+		Total:               rep.Total,
+		Reserved:            rep.Reserved,
 	})
 }

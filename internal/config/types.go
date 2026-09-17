@@ -246,6 +246,24 @@ type OperationalConfig struct {
 
 	// Witness configures witness patrol thresholds.
 	Witness *WitnessThresholds `json:"witness,omitempty"`
+
+	// ContainerGate sizes the town-level container-suite gate pool
+	// (internal/slot): how many Docker-backed suites may run at once on the
+	// host's Docker VM and how many of those slots are reserved for gate-
+	// class callers (refinery, batch gate, main-branch test).
+	ContainerGate *ContainerGateThresholds `json:"container_gate,omitempty"`
+}
+
+// ContainerGateThresholds configures the container-gate slot pool.
+type ContainerGateThresholds struct {
+	// Slots is the total number of concurrently held container-gate slots
+	// (default 1: one Docker-backed suite at a time townwide).
+	Slots *int `json:"slots,omitempty"`
+	// ReservedForGate is how many of the lowest slots only the refinery,
+	// the batch gate and the daemon's main-branch test may take, so the
+	// merge path never waits behind polecat pre-verify suites (default 0).
+	// Clamped to Slots-1; ignored when Slots is 1.
+	ReservedForGate *int `json:"reserved_for_gate,omitempty"`
 }
 
 // SessionThresholds configures session management timeouts.
@@ -1389,6 +1407,15 @@ type MergeQueueConfig struct {
 	// inside a Makefile target rather than in a plain env prefix (gt-fa3s).
 	// On a non-Go rig this field is ignored and test_command runs in full.
 	TestVerifyCommand string `json:"test_verify_command,omitempty"`
+
+	// TestVerifyIncludeContainerPackages restores the pre-gt-yihz behaviour
+	// of gt done's default test-verify gate running the Dolt/testcontainers-
+	// backed packages too (inside the container-gate slot). Nil/false (the
+	// default) leaves those packages to the refinery's gate so the Docker
+	// suite runs once per submission: the polecat gate tests only the
+	// changed packages that spin no containers, and does so without taking
+	// a container-gate slot at all.
+	TestVerifyIncludeContainerPackages *bool `json:"test_verify_include_container_packages,omitempty"`
 
 	// LintCommand is the command to run for linting (used by formulas).
 	LintCommand string `json:"lint_command,omitempty"`

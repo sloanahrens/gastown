@@ -269,7 +269,7 @@ func acquireBatchGateSlot(townRoot, rigName, gateCmd string) (*slot.Handle, erro
 	if gateCmd == "" {
 		return nil, nil
 	}
-	return slot.Acquire(townRoot, rigName+"/refinery-batch", batchSlotTimeout)
+	return slot.AcquirePool(townRoot, rigName+"/refinery-batch", batchSlotTimeout, containerGatePool(townRoot))
 }
 
 func runMQBatchRun(cmd *cobra.Command, args []string) error {

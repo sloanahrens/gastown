@@ -197,14 +197,15 @@ func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
 // rig's suite and says nothing about this polecat's state, so it is not
 // treated as busy here.
 func polecatStopVerificationRunning(townRoot, rigName, polecatName string) (bool, string) {
-	rep, err := slot.Status(townRoot)
-	if err != nil || !rep.Held || rep.Owner == nil {
+	rep, err := slot.StatusPool(townRoot, containerGatePool(townRoot))
+	if err != nil || !rep.Held {
 		return false, ""
 	}
-	if rep.Owner.Role != rigName+"/"+polecatName {
+	mine := rep.HeldBy(rigName + "/" + polecatName)
+	if len(mine) == 0 {
 		return false, ""
 	}
-	return true, fmt.Sprintf("container-gate slot held by %s (verification suite running)", rep.Owner.Role)
+	return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", mine[0].Index, mine[0].Owner.Role)
 }
 
 // polecatStopCommittedWithinGrace reports whether the branch's most recent

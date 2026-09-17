@@ -25,7 +25,6 @@ package slot
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,9 +33,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/atomicfile"
-	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // DefaultPollInterval is how often Acquire retries after a failed
@@ -221,6 +217,9 @@ type Owner struct {
 	Role       string    `json:"role"`
 	PID        int       `json:"pid"`
 	AcquiredAt time.Time `json:"acquired_at"`
+	// Slot is the pool index this owner holds (0 for the original single
+	// slot). Filled in by StatusPool when read back.
+	Slot int `json:"slot"`
 }
 
 // Handle represents a held slot. Call Release exactly once when the
@@ -229,6 +228,8 @@ type Handle struct {
 	townRoot  string
 	unlock    func()
 	reentrant bool // true: this Handle rides an ancestor's real hold; Release is a no-op.
+	// Index is the pool slot this handle holds (0 for the single-slot case).
+	Index int
 }
 
 // Acquire blocks until the container-gate slot is available (or timeout
@@ -255,84 +256,7 @@ type Handle struct {
 // "gastown/refinery" or a rig/MR id) and is recorded in the owner file for
 // `gt status` / `gt doctor` display only; it plays no part in correctness.
 func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
-	lockPath := LockPath(townRoot)
-
-	// Reentrant fast path: a *descendant* process of one that already holds
-	// this exact slot does not compete with its own ancestor — see
-	// reentrantEnvVar's doc comment. The PID check is what keeps this from
-	// also matching an unrelated second caller sharing the same process
-	// (e.g. TestAcquire_MutualExclusion's two calls from one goroutine, or
-	// any future concurrent caller): only a genuinely different process
-	// that inherited the marker takes this path.
-	if holderPath, holderPID, ok := reentrantHolder(); ok && holderPath == lockPath && holderPID != os.Getpid() {
-		return &Handle{townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
-	}
-
-	if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
-		return nil, fmt.Errorf("creating lock directory: %w", err)
-	}
-
-	hasDeadline := timeout > 0
-	deadline := time.Now().Add(timeout)
-
-	// grant hands out the slot: it records display-only owner metadata and
-	// the reentrant marker (both best-effort; the write failing must not
-	// fail the acquire, since the real lock is already held), then returns
-	// the Handle. Shared by the two success paths below (clear docker check,
-	// daemon-refused-connection) so they can't drift out of sync.
-	grant := func(unlock func()) *Handle {
-		h := &Handle{townRoot: townRoot, unlock: unlock}
-		_ = atomicfile.EnsureDirAndWriteJSON(OwnerPath(townRoot), Owner{
-			Role:       role,
-			PID:        os.Getpid(),
-			AcquiredAt: time.Now(),
-		})
-		_ = os.Setenv(reentrantEnvVar, lockPath+"|"+strconv.Itoa(os.Getpid()))
-		return h
-	}
-
-	for {
-		unlock, ok, err := lock.FlockTryAcquire(lockPath)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			containers, containerErr := runningGateContainers()
-			switch {
-			case containerErr != nil && !isDaemonUnreachable(containerErr):
-				// Inconclusive (a wedged daemon that timed out, a
-				// permission-denied socket, or some other exec failure) —
-				// this does NOT license "nothing could be running" the way
-				// isDaemonUnreachable does. Release and keep waiting exactly
-				// as if a real unwrapped container were found.
-				unlock()
-			case containerErr != nil:
-				// The daemon refused the connection: no Docker container can
-				// be running against it either, so there is nothing an
-				// unwrapped suite could be occupying — the flock we already
-				// hold is sufficient on its own. Proceed rather than fail:
-				// om-editorial (attempt 2, gt-tuiy) correctly called out
-				// that failing here turns "Docker Desktop isn't running" —
-				// routine on a dev box — into a town-wide outage for every
-				// gate, including ones that never touch Docker. Status still
-				// reports DockerUnknown/Busy for display; that's a distinct,
-				// more conservative concern from Acquire's "is it safe to
-				// hand out the slot" question.
-				fmt.Fprintf(os.Stderr, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
-				return grant(unlock), nil
-			case len(containers) == 0:
-				return grant(unlock), nil
-			default:
-				// An unwrapped suite already has containers up — not safe to
-				// hand the slot out for, so release and keep waiting.
-				unlock()
-			}
-		}
-		if hasDeadline && time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out after %s waiting for container-gate slot", timeout)
-		}
-		time.Sleep(DefaultPollInterval)
-	}
+	return AcquirePool(townRoot, role, timeout, DefaultPool)
 }
 
 // Release releases the slot: the owner file is removed first (best-effort,
@@ -345,7 +269,7 @@ func (h *Handle) Release() error {
 		// owner file, the flock, and clearing reentrantEnvVar.
 		return nil
 	}
-	_ = os.Remove(OwnerPath(h.townRoot))
+	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
 	h.unlock()
 	_ = os.Unsetenv(reentrantEnvVar)
 	return nil
@@ -373,12 +297,23 @@ type Report struct {
 	// check for running containers, so UnwrappedContainers could not be
 	// determined and must not be treated as "none found".
 	DockerUnknown bool
+
+	// Slots is the per-slot picture when the report came from StatusPool
+	// (Status fills it with the single slot 0). HeldCount/Total summarize
+	// it; Reserved is how many low slots only gate roles may take.
+	Slots     []SlotState
+	HeldCount int
+	Total     int
+	Reserved  int
 }
 
 // Busy reports whether the slot should be treated as unavailable: held by a
 // token holder, occupied by an unwrapped container suite, or unverifiable
 // because the docker daemon is unreachable.
 func (r Report) Busy() bool {
+	if r.Total > 0 {
+		return r.AllHeld() || len(r.UnwrappedContainers) > 0 || r.DockerUnknown
+	}
 	return r.Held || len(r.UnwrappedContainers) > 0 || r.DockerUnknown
 }
 
@@ -390,46 +325,5 @@ func (r Report) Busy() bool {
 // while a live holder exists or "held" once the kernel has released the
 // lock.
 func Status(townRoot string) (Report, error) {
-	var rep Report
-
-	lockPath := LockPath(townRoot)
-	if _, statErr := os.Stat(lockPath); statErr == nil || !os.IsNotExist(statErr) {
-		unlock, ok, err := lock.FlockTryAcquire(lockPath)
-		if err != nil {
-			return Report{}, err
-		}
-		if ok {
-			// Nobody holds it: we just did, briefly. Release immediately and
-			// clean up any leftover owner file from the last holder.
-			unlock()
-			_ = os.Remove(OwnerPath(townRoot))
-		} else {
-			// Held by someone else. The owner file is best-effort decoration.
-			rep.Held = true
-			rep.Owner = readOwner(townRoot)
-		}
-	}
-
-	if !rep.Held {
-		containers, err := runningGateContainers()
-		if err != nil {
-			rep.DockerUnknown = true
-		} else {
-			rep.UnwrappedContainers = containers
-		}
-	}
-
-	return rep, nil
-}
-
-func readOwner(townRoot string) *Owner {
-	data, err := os.ReadFile(OwnerPath(townRoot))
-	if err != nil {
-		return nil
-	}
-	var o Owner
-	if err := json.Unmarshal(data, &o); err != nil {
-		return nil
-	}
-	return &o
+	return StatusPool(townRoot, DefaultPool)
 }

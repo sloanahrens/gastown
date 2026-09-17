@@ -2087,6 +2087,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				}
 				if verify.skipReason != "" {
 					style.PrintWarning("gt done: skipping default test-verify: %s", verify.skipReason)
+					if len(verify.deferredPackages) > 0 {
+						description += fmt.Sprintf("\ntest_verify_deferred_container_packages: %s", strings.Join(verify.deferredPackages, ","))
+					}
 				} else if verify.ran {
 					if verify.scope == "packages" {
 						fmt.Printf("%s Default test-verify passed (packages: %s)\n", style.Bold.Render("✓"), strings.Join(verify.packages, " "))
@@ -2100,6 +2103,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					if len(verify.packages) > 0 {
 						description += fmt.Sprintf("\ntest_verified_packages: %s", strings.Join(verify.packages, ","))
 					}
+					if len(verify.deferredPackages) > 0 {
+						description += fmt.Sprintf("\ntest_verify_deferred_container_packages: %s", strings.Join(verify.deferredPackages, ","))
+					}
+					description += fmt.Sprintf("\ntest_verified_slot_used: %t", verify.slotUsed)
 					description += "\ntest_verified_exit: 0"
 					description += fmt.Sprintf("\ntest_verified_log: %s", verify.logSHA256)
 					// gt-pnkd: record the budgets the gate actually resolved and

@@ -35,20 +35,20 @@ const (
 
 // Daemon defaults.
 const (
-	DefaultMassDeathWindow                 = 30 * time.Second
-	DefaultMassDeathThreshold              = 3
-	DefaultDogIdleSessionTimeout           = 1 * time.Hour
-	DefaultPolecatIdleSessionTimeout       = 15 * time.Minute
-	DefaultDogIdleRemoveTimeout            = 4 * time.Hour
-	DefaultStaleWorkingTimeout             = 2 * time.Hour
-	DefaultMaxDogPoolSize                  = 4
-	DefaultMaxLifecycleMessageAge          = 6 * time.Hour
-	DefaultSyncFailureEscalationThreshold  = 3
-	DefaultDoctorMolCooldown               = 5 * time.Minute
-	DefaultRecoveryHeartbeatInterval       = 3 * time.Minute
-	DefaultBootSpawnCooldown               = 2 * time.Minute
-	DefaultBootIdleSuppression             = 15 * time.Minute
-	DefaultDeaconGracePeriod               = 5 * time.Minute
+	DefaultMassDeathWindow                = 30 * time.Second
+	DefaultMassDeathThreshold             = 3
+	DefaultDogIdleSessionTimeout          = 1 * time.Hour
+	DefaultPolecatIdleSessionTimeout      = 15 * time.Minute
+	DefaultDogIdleRemoveTimeout           = 4 * time.Hour
+	DefaultStaleWorkingTimeout            = 2 * time.Hour
+	DefaultMaxDogPoolSize                 = 4
+	DefaultMaxLifecycleMessageAge         = 6 * time.Hour
+	DefaultSyncFailureEscalationThreshold = 3
+	DefaultDoctorMolCooldown              = 5 * time.Minute
+	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
+	DefaultBootSpawnCooldown              = 2 * time.Minute
+	DefaultBootIdleSuppression            = 15 * time.Minute
+	DefaultDeaconGracePeriod              = 5 * time.Minute
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
@@ -60,21 +60,21 @@ const (
 
 // Deacon defaults.
 const (
-	DefaultDeaconPingTimeout               = 30 * time.Second
-	DefaultDeaconConsecutiveFailures       = 3
-	DefaultDeaconCooldown                  = 5 * time.Minute
-	DefaultDeaconHeartbeatStaleThreshold   = 5 * time.Minute
-	DefaultDeaconHeartbeatVeryStale        = 20 * time.Minute
-	DefaultMaxRedispatches                 = 3
-	DefaultRedispatchCooldown              = 5 * time.Minute
-	DefaultMaxFeedsPerCycle                = 3
-	DefaultFeedCooldown                    = 10 * time.Minute
+	DefaultDeaconPingTimeout             = 30 * time.Second
+	DefaultDeaconConsecutiveFailures     = 3
+	DefaultDeaconCooldown                = 5 * time.Minute
+	DefaultDeaconHeartbeatStaleThreshold = 5 * time.Minute
+	DefaultDeaconHeartbeatVeryStale      = 20 * time.Minute
+	DefaultMaxRedispatches               = 3
+	DefaultRedispatchCooldown            = 5 * time.Minute
+	DefaultMaxFeedsPerCycle              = 3
+	DefaultFeedCooldown                  = 10 * time.Minute
 )
 
 // Polecat defaults.
 const (
-	DefaultPolecatHeartbeatStale = 3 * time.Minute
-	DefaultPolecatDoltMaxRetries = 10
+	DefaultPolecatHeartbeatStale  = 3 * time.Minute
+	DefaultPolecatDoltMaxRetries  = 10
 	DefaultPolecatDoltBaseBackoff = 500 * time.Millisecond
 	DefaultPolecatDoltBackoffMax  = 30 * time.Second
 	DefaultPolecatPendingMaxAge   = 5 * time.Minute
@@ -110,9 +110,15 @@ const (
 	DefaultWitnessStartupStallThreshold  = 90 * time.Second
 	DefaultWitnessStartupActivityGrace   = 60 * time.Second
 	DefaultWitnessMaxBeadRespawns        = 3
-	DefaultWitnessDoneIntentStuckTimeout    = 60 * time.Second
-	DefaultWitnessDoneIntentRecentGrace     = 30 * time.Second
-	DefaultWitnessHeartbeatStartupGrace     = 5 * time.Minute
+	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
+	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
+	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
+)
+
+// Container-gate pool defaults (gt-yihz).
+const (
+	DefaultContainerGateSlots           = 1
+	DefaultContainerGateReservedForGate = 0
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -130,6 +136,31 @@ func LoadOperationalConfig(townRoot string) *OperationalConfig {
 // --- Accessor methods ---
 // Each method reads from config with fallback to the compiled-in default.
 // Nil-safe: works when OperationalConfig or any sub-struct is nil.
+
+// GetContainerGateConfig returns the container-gate pool thresholds, never nil.
+func (c *OperationalConfig) GetContainerGateConfig() *ContainerGateThresholds {
+	if c != nil && c.ContainerGate != nil {
+		return c.ContainerGate
+	}
+	return &ContainerGateThresholds{}
+}
+
+// SlotsV returns the configured or default container-gate pool size.
+func (g *ContainerGateThresholds) SlotsV() int {
+	if g != nil && g.Slots != nil && *g.Slots >= 1 {
+		return *g.Slots
+	}
+	return DefaultContainerGateSlots
+}
+
+// ReservedForGateV returns the configured or default number of slots
+// reserved for gate-class roles.
+func (g *ContainerGateThresholds) ReservedForGateV() int {
+	if g != nil && g.ReservedForGate != nil && *g.ReservedForGate >= 0 {
+		return *g.ReservedForGate
+	}
+	return DefaultContainerGateReservedForGate
+}
 
 // GetSessionConfig returns the session thresholds, never nil.
 func (c *OperationalConfig) GetSessionConfig() *SessionThresholds {
