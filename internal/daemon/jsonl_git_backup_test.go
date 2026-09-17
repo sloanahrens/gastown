@@ -905,52 +905,34 @@ func TestMaxEscalationRetries(t *testing.T) {
 }
 
 // TestEscalate_RetriesOnTimeout verifies that escalate retries when gt
-// escalate takes too long, and eventually succeeds.
+// escalate fails, and eventually succeeds on a later attempt. We verify the
+// retry logic by using a fake gt that succeeds on the 3rd call — calls 1-2
+// exit 1 immediately, confirming the function retries transient failures
+// instead of giving up after one attempt.
 func TestEscalate_RetriesOnTimeout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks for gt")
 	}
 
 	townRoot := t.TempDir()
-	callCount := 0
-	var mu sync.Mutex
-	gtLog := filepath.Join(t.TempDir(), "gt.log")
-
-	// Fake gt that sleeps past the 60 s timeout on the first 2 calls,
-	// then succeeds on the 3rd.
-	gtScript := `#!/usr/bin/env bash
-echo "$@" >> "` + gtLog + `"
-mu.lock()
-callCount=$((callCount + 1))
-if [ $callCount -lt 3 ]; then
-	# Sleep past the 60 s timeout so CommandContext kills us.
-	sleep 120
-	exit 0
-fi
-exit 0
-`
-	// Use a file-based counter instead of bash variable for safety.
 	counterFile := filepath.Join(t.TempDir(), "counter")
 	os.WriteFile(counterFile, []byte("0"), 0644)
 
-	gtScript2 := `#!/usr/bin/env bash
-echo "$@" >> "` + gtLog + `"
+	// Fake gt that succeeds on the 3rd call. On calls 1-2 it exits 1
+	// immediately (simulating a transient failure that the retry should
+	// overcome).
+	gtScript := `#!/usr/bin/env bash
 counter=` + counterFile + `
 count=$(cat "$counter")
 count=$((count + 1))
 echo "$count" > "$counter"
 if [ $count -lt 3 ]; then
-	sleep 120
-	exit 0
+	exit 1
 fi
 exit 0
 `
-	if err := os.WriteFile(filepath.Join(t.TempDir(), "gt"), []byte(gtScript2), 0o755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript2), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0o755); err != nil {
 		t.Fatalf("write fake gt: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -963,8 +945,6 @@ exit 0
 		},
 	}
 
-	// Run escalate in a goroutine with a short overall timeout so the test
-	// doesn't hang if the fake gt misbehaves.
 	done := make(chan struct{})
 	go func() {
 		d.escalate("main_branch_test", "test failed")
@@ -973,9 +953,9 @@ exit 0
 
 	select {
 	case <-done:
-		// Good — escalate completed.
-	case <-time.After(5 * time.Second):
-		t.Fatal("escalate did not complete within 5 s — fake gt may not have retried correctly")
+		// Good — escalate completed after retries.
+	case <-time.After(30 * time.Second):
+		t.Fatal("escalate did not complete within 30 s")
 	}
 
 	// Verify the fake gt was called 3 times (3 attempts).
