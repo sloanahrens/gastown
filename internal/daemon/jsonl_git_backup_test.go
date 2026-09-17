@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -940,7 +940,7 @@ exit 0
 	logger := log.New(os.Stderr, "TestEscalate_RetriesOnTimeout: ", log.LstdFlags)
 	d := &Daemon{
 		logger: logger,
-		config: DaemonConfig{
+		config: &Config{
 			TownRoot: townRoot,
 		},
 	}
@@ -996,7 +996,7 @@ exit 1
 	logger := log.New(os.Stderr, "TestEscalate_Fallback: ", log.LstdFlags)
 	d := &Daemon{
 		logger: logger,
-		config: DaemonConfig{
+		config: &Config{
 			TownRoot: townRoot,
 		},
 	}
