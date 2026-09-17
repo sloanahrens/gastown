@@ -60,7 +60,7 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 			},
 			MainBranchTest: &MainBranchTestConfig{
 				Enabled:     true,
-				IntervalStr: "30m",
+				IntervalStr: "2h",
 				TimeoutStr:  "10m",
 			},
 			Handler: &PatrolConfig{

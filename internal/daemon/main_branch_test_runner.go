@@ -392,6 +392,19 @@ func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
 	return slot.Acquire(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout)
 }
 
+// gtSlotRun wraps a command through `gt slot run` so its Docker containers
+// are visible to the slot's content-based guard as a wrapped suite rather
+// than an "unwrapped" one that collides with other callers.
+//
+// The wrapper is safe to use when the slot is already held: `gt slot run`
+// detects the ancestor's reentrant env marker and returns immediately,
+// so the wrapper is a no-op for slot acquisition — it just ensures the
+// command runs with the slot properly established for container marking.
+func gtSlotRun(rigName, command string) string {
+	return fmt.Sprintf("gt slot run --role %s/main-branch-test --timeout %s -- %s",
+		rigName, mainBranchTestSlotRunTimeout, command)
+}
+
 // commitTested returns the commit SHA checked out in the worktree, or ""
 // if it can't be determined — the escalation body degrades gracefully
 // rather than failing the whole test run over this.
@@ -427,10 +440,18 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDi
 // diagnose the failure (FAIL/panic/build-error lines, not a blind tail that
 // can be all-"ok" noise from later packages), and the log path so the mayor
 // can triage without rerunning (gt-1s2g).
+//
+// The command is wrapped through `gt slot run` so its Docker containers are
+// marked as wrapped (a first-class slot holder, not an "unwrapped suite" that
+// collides with other callers' docker ps checks). Without this, the daemon
+// would occupy the container-gate slot while running invisible to the slot's
+// content-based guard, causing 39-45m starvation for refinery gates and
+// other polecats (gt-uoqg).
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
+	wrapped := gtSlotRun(rigName, command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", wrapped) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
 	util.SetDetachedProcessGroup(cmd)
