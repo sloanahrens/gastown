@@ -37,6 +37,8 @@ var templateFS embed.FS
 //   - workDir: the agent's working directory.
 //   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
+//   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
+//     boot/dog settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -46,7 +48,7 @@ var templateFS embed.FS
 //
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
-func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile string, useSettingsDir bool) error {
+func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return nil
 	}
