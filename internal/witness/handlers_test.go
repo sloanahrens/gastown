@@ -1371,6 +1371,123 @@ func TestExtractDoneIntent_AllExitTypes(t *testing.T) {
 	}
 }
 
+func TestExtractDoneIntent_MultipleLabels_NewestWins(t *testing.T) {
+	t.Parallel()
+	// gt-wmpy: when multiple done-intent labels exist (from repeated gt done
+	// attempts), extractDoneIntent must return the NEWEST one so stale labels
+	// do not cause false stuck-in-done restarts.
+	oldestTs := time.Now().Add(-120 * time.Second).Unix()
+	middleTs := time.Now().Add(-60 * time.Second).Unix()
+	newestTs := time.Now().Add(-10 * time.Second).Unix()
+
+	labels := []string{
+		"gt:agent",
+		fmt.Sprintf("done-intent:COMPLETED:%d", oldestTs),
+		"idle:2",
+		fmt.Sprintf("done-intent:ESCALATED:%d", middleTs),
+		fmt.Sprintf("done-intent:COMPLETED:%d", newestTs),
+	}
+
+	intent := extractDoneIntent(labels)
+	if intent == nil {
+		t.Fatal("extractDoneIntent returned nil for valid labels")
+	}
+	if intent.ExitType != "COMPLETED" {
+		t.Errorf("ExitType = %q, want %q", intent.ExitType, "COMPLETED")
+	}
+	if intent.Timestamp.Unix() != newestTs {
+		t.Errorf("Timestamp = %d, want %d", intent.Timestamp.Unix(), newestTs)
+	}
+
+	// Re-order: newest first — should still return newest.
+	reordered := []string{
+		fmt.Sprintf("done-intent:COMPLETED:%d", newestTs),
+		fmt.Sprintf("done-intent:ESCALATED:%d", middleTs),
+		fmt.Sprintf("done-intent:COMPLETED:%d", oldestTs),
+	}
+	intent2 := extractDoneIntent(reordered)
+	if intent2 == nil || intent2.Timestamp.Unix() != newestTs {
+		t.Errorf("extractDoneIntent reordered = %v, want newest (%d)", intent2, newestTs)
+	}
+
+	// All malformed — should return nil.
+	malformed := []string{
+		"done-intent:COMPLETED",
+		"done-intent:ESCALATED:notanumber",
+	}
+	if intent3 := extractDoneIntent(malformed); intent3 != nil {
+		t.Errorf("extractDoneIntent(malformed) = %+v, want nil", intent3)
+	}
+}
+
+func TestClearAllDoneIntentLabels(t *testing.T) {
+	t.Parallel()
+	// gt-wmpy: verify clearAllDoneIntentLabels removes ALL done-intent labels
+	// and leaves non-done-intent labels intact, using a mock beadUpdater.
+	mock := &mockBeadUpdater{}
+
+	// Empty bead ID — should be a no-op.
+	clearAllDoneIntentLabels(mock, "", &agentBeadSnapshot{Labels: []string{"done-intent:COMPLETED:123"}})
+	if len(mock.calls) != 0 {
+		t.Fatalf("expected no calls for empty bead ID, got %d", len(mock.calls))
+	}
+
+	// Nil snap — should be a no-op.
+	clearAllDoneIntentLabels(mock, "gt-xyz", nil)
+	if len(mock.calls) != 0 {
+		t.Fatalf("expected no calls for nil snap, got %d", len(mock.calls))
+	}
+
+	// No done-intent labels — should be a no-op.
+	clearAllDoneIntentLabels(mock, "gt-xyz", &agentBeadSnapshot{Labels: []string{"gt:agent", "idle:2"}})
+	if len(mock.calls) != 0 {
+		t.Fatalf("expected no calls for no done-intent labels, got %d", len(mock.calls))
+	}
+
+	// Mixed labels — should remove only done-intent labels.
+	clearAllDoneIntentLabels(mock, "gt-123", &agentBeadSnapshot{
+		Labels: []string{
+			"gt:agent",
+			"done-intent:COMPLETED:1700000000",
+			"idle:2",
+			"done-intent:ESCALATED:1700000060",
+		},
+	})
+	if len(mock.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(mock.calls))
+	}
+	if mock.calls[0].ID != "gt-123" {
+		t.Errorf("call ID = %q, want %q", mock.calls[0].ID, "gt-123")
+	}
+	if len(mock.calls[0].RemoveLabels) != 2 {
+		t.Fatalf("expected 2 RemoveLabels, got %d: %v", len(mock.calls[0].RemoveLabels), mock.calls[0].RemoveLabels)
+	}
+	for _, label := range mock.calls[0].RemoveLabels {
+		if !strings.HasPrefix(label, "done-intent:") {
+			t.Errorf("RemoveLabels contains non-done-intent label: %q", label)
+		}
+	}
+}
+
+type mockBeadUpdater struct {
+	calls []beadUpdateCall
+}
+
+type beadUpdateCall struct {
+	ID           string
+	RemoveLabels []string
+}
+
+func (m *mockBeadUpdater) Update(id string, opts beads.UpdateOptions) error {
+	if opts.RemoveLabels != nil {
+		m.calls = append(m.calls, beadUpdateCall{
+			ID:           id,
+			RemoveLabels: opts.RemoveLabels,
+		})
+	}
+	return nil
+}
+
 func TestDetectZombie_DoneIntentDeadSession(t *testing.T) {
 	t.Parallel()
 	// Verify the logic: dead session + done-intent older than 30s → should be treated as zombie
@@ -1639,7 +1756,7 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 		HookBead:   "", // partial spawn: never durably attached a hook_bead
 	}
 
-	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap)
+	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "")
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
 		t.Fatal("expected zombie detection for live session stuck at agent_state=spawning with no hook_bead and no heartbeat")
