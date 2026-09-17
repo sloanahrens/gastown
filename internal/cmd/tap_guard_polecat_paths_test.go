@@ -31,6 +31,11 @@ func makeFakePolecatTown(t *testing.T, town string) string {
 			t.Fatalf("building fake town: %v", err)
 		}
 	}
+	// Create mayor/town.json so workspace.Find() detects the town root
+	// (Find prefers the primary marker mayor/town.json over the secondary mayor/).
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(`{"name":"test-town"}`), 0o644); err != nil {
+		t.Fatalf("writing town.json: %v", err)
+	}
 	return town
 }
 
