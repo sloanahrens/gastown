@@ -2320,15 +2320,23 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	}
 
 	// If explicitly set to false, auto-restart is disabled
-	// Note: GetBool returns false for unset keys, so we need to check if it's explicitly set
-	val := cfg.Get("auto_restart")
-	if val != nil {
-		if autoRestart, ok := val.(bool); ok && !autoRestart {
-			return false, "auto_restart is disabled"
-		}
+	if autoRestartDisabled(cfg.Get("auto_restart")) {
+		return false, "auto_restart is disabled"
 	}
 
 	return true, ""
+}
+
+// autoRestartDisabled reports whether a resolved auto_restart value turns
+// auto-restart off. Note that wisp.Get returns false for unset keys, so nil
+// (never configured) must stay enabled - only an explicit off-switch disables it.
+//
+// The value is coerced rather than type-asserted: wisp values round-trip through
+// JSON, where numbers load back as float64, so a stored 0 (written by hand, by an
+// older `gt rig config set`, or for a key with no declared type) has to read as
+// false instead of being ignored by a `val.(bool)` assertion.
+func autoRestartDisabled(val interface{}) bool {
+	return val != nil && !rig.CoerceBool(val)
 }
 
 // processLifecycleRequests checks for and processes lifecycle requests.

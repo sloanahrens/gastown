@@ -58,6 +58,11 @@ var rigConfigSetCmd = &cobra.Command{
 Use --global to set in the bead layer (persistent, synced globally).
 Use --block to explicitly block a key (prevents inheritance).
 
+Values are parsed according to the key's declared type, so "1" reaches an integer
+key as the number 1 and a boolean key as true. Integer keys (max_polecats,
+priority_adjustment) reject values that are not whole numbers; boolean keys
+(auto_restart, dnd, auto_start_on_up) accept true/false/1/0.
+
 Examples:
   gt rig config set gastown status parked           # Wisp layer
   gt rig config set gastown status docked --global  # Bead layer
@@ -116,7 +121,7 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-25s %-15s %s\n", "---", "-----", "------")
 		for _, key := range allKeys {
 			result := r.GetConfigWithSource(key)
-			valueStr := formatValue(result.Value)
+			valueStr := formatValue(key, result.Value)
 			sourceStr := string(result.Source)
 			if result.Source == rig.SourceBlocked {
 				valueStr = "(blocked)"
@@ -132,7 +137,7 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 			if result.Source == rig.SourceNone {
 				continue // Skip unset keys
 			}
-			valueStr := formatValue(result.Value)
+			valueStr := formatValue(key, result.Value)
 			if result.Source == rig.SourceBlocked {
 				valueStr = "(blocked)"
 			}
@@ -175,26 +180,28 @@ func runRigConfigSet(cmd *cobra.Command, args []string) error {
 
 	value := args[2]
 
+	// Coerce the string into the type the key expects before it is stored.
+	typedValue, err := parseConfigValue(key, value)
+	if err != nil {
+		return err
+	}
+	// What gets stored, in canonical spelling: "TRUE" is saved as true and "01"
+	// as 1, so every reader sees the same value the key's type implies.
+	stored := formatValue(key, typedValue)
+
 	if rigConfigSetGlobal {
 		// Set in bead layer (rig identity bead labels)
-		if err := setBeadLabel(townRoot, r, key, value); err != nil {
+		if err := setBeadLabel(townRoot, r, key, stored); err != nil {
 			return fmt.Errorf("setting bead label: %w", err)
 		}
-		fmt.Printf("%s Set %s=%s in bead layer for rig %s\n", style.Success.Render("✓"), key, value, rigName)
+		fmt.Printf("%s Set %s=%s in bead layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
 	} else {
 		// Set in wisp layer
 		wispCfg := wisp.NewConfig(townRoot, r.Name)
-		// Try to parse as appropriate type
-		var typedValue interface{} = value
-		if b, err := strconv.ParseBool(value); err == nil {
-			typedValue = b
-		} else if i, err := strconv.Atoi(value); err == nil {
-			typedValue = i
-		}
 		if err := wispCfg.Set(key, typedValue); err != nil {
 			return fmt.Errorf("setting %s: %w", key, err)
 		}
-		fmt.Printf("%s Set %s=%s in wisp layer for rig %s\n", style.Success.Render("✓"), key, value, rigName)
+		fmt.Printf("%s Set %s=%s in wisp layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
 		style.PrintWarning("this value is ephemeral and will not survive a rig reset — use --global to persist")
 	}
 
@@ -298,8 +305,65 @@ func setBeadLabel(townRoot string, r *rig.Rig, key, value string) error {
 	})
 }
 
-// formatValue formats a config value for display.
-func formatValue(v interface{}) string {
+// parseConfigValue coerces a value given on the command line into the type its
+// config key expects, using rig.SystemDefaults as the schema for known keys.
+//
+// Inference used to just try strconv.ParseBool before strconv.Atoi, which parsed
+// "1" and "0" as booleans: `gt rig config set <rig> max_polecats 1` stored true,
+// and since an integer key reads a bool as 0 (see rig.CoerceInt) a cap of exactly
+// one could not be expressed. Keys are now typed before values are parsed, so an
+// integer key can never receive a boolean.
+//
+// Values for keys with no declared type are still guessed, numbers before
+// booleans: "1"/"0" are ambiguous and every reader of an undeclared key parses it
+// out of a string anyway, while the unambiguous boolean spellings ("true",
+// "false") are unaffected by the order.
+func parseConfigValue(key, value string) (interface{}, error) {
+	switch rig.SystemDefaults[key].(type) {
+	case int:
+		i, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("%s expects a whole number, got %q", key, value)
+		}
+		return i, nil
+	case bool:
+		b, err := parseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("%s expects a boolean (true/false/1/0), got %q", key, value)
+		}
+		return b, nil
+	case string:
+		return value, nil
+	}
+
+	if i, err := strconv.Atoi(value); err == nil {
+		return i, nil
+	}
+	if b, err := strconv.ParseBool(value); err == nil {
+		return b, nil
+	}
+	return value, nil
+}
+
+// formatValue formats a config value for display, honoring the key's declared
+// type so that the value shown is the one the key's consumers see. A legacy value
+// stored with the wrong type - `max_polecats` saved as true, or `auto_restart` as
+// "0" - displays as its effective value rather than the raw stored one.
+func formatValue(key string, v interface{}) string {
+	switch rig.SystemDefaults[key].(type) {
+	case int:
+		return strconv.Itoa(rig.CoerceInt(v))
+	case bool:
+		if rig.CoerceBool(v) {
+			return "true"
+		}
+		return "false"
+	}
+	return formatRawValue(v)
+}
+
+// formatRawValue formats an untyped config value for display.
+func formatRawValue(v interface{}) string {
 	if v == nil {
 		return "(nil)"
 	}
