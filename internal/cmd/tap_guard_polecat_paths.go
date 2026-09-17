@@ -109,7 +109,12 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 	}
 
 	// Resolve the worktree root for path comparison (case-insensitive on macOS).
-	worktreeLower := strings.ToLower(filepath.Clean(polecatWorktreeRoot))
+	// Resolve through symlinks so the worktree root matches resolved target paths.
+	worktreeResolved := polecatWorktreeRoot
+	if resolved, err := filepath.EvalSymlinks(polecatWorktreeRoot); err == nil {
+		worktreeResolved = resolved
+	}
+	worktreeLower := strings.ToLower(filepath.Clean(worktreeResolved))
 
 	// Collect and resolve all path arguments from the Bash command.
 	if toolName != "" {
@@ -127,7 +132,7 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 			}
 
 			// Outside the worktree — check if it's a blocked town path.
-			if isBlockedTownPath(resolvedClean, townRoot, polecatWorktreeRoot) {
+			if isBlockedTownPath(resolvedClean, townRoot, worktreeResolved) {
 				printPolecatPathsBlock(raw, "target is a sibling worktree or restricted town directory")
 				return NewSilentExit(2)
 			}
@@ -269,7 +274,9 @@ func isPolecatAgentDir(parent, base string) bool {
 }
 
 // isPathInPolecatWorktree reports whether targetPath is inside the polecat's
-// own worktree root. It resolves symlinks but fails CLOSED on error.
+// own worktree root. It resolves symlinks on both target and worktree so
+// that temp-dir symlinks (/var/folders/... vs /private/var/folders/...)
+// compare correctly. Fails CLOSED on error.
 func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 	if targetPath == "" || worktreeRoot == "" {
 		return false
@@ -277,10 +284,16 @@ func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 
 	targetClean := filepath.Clean(targetPath)
 
+	// Resolve the worktree root through symlinks.
+	worktreeResolved := worktreeRoot
+	if resolved, err := filepath.EvalSymlinks(worktreeRoot); err == nil {
+		worktreeResolved = resolved
+	}
+
 	// Try resolving symlinks; fail closed on error.
 	resolved, err := filepath.EvalSymlinks(targetPath)
 	if err == nil {
-		return isPathWithin(resolved, strings.ToLower(filepath.Clean(worktreeRoot)))
+		return isPathWithin(resolved, strings.ToLower(worktreeResolved))
 	}
 
 	// Path doesn't exist — check its parent directory.
@@ -289,13 +302,13 @@ func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 		if _, statErr := os.Stat(parent); statErr == nil {
 			resolvedParent, err := filepath.EvalSymlinks(parent)
 			if err == nil {
-				return isPathWithin(resolvedParent, strings.ToLower(filepath.Clean(worktreeRoot)))
+				return isPathWithin(resolvedParent, strings.ToLower(worktreeResolved))
 			}
 		}
 	}
 
 	// Parent doesn't exist either — use path-prefix check on the given path.
-	return isPathWithin(targetClean, strings.ToLower(filepath.Clean(worktreeRoot)))
+	return isPathWithin(targetClean, strings.ToLower(worktreeResolved))
 }
 
 // isPathWithin reports whether target (both already cleaned/lowercased) is
