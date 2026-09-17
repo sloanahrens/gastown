@@ -2085,6 +2085,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if verifyErr != nil {
 					return verifyErr
 				}
+				if verify.lintRan {
+					fmt.Printf("%s Default lint-verify passed (%s, %s)\n", style.Bold.Render("✓"), verify.lintCommand, verify.lintElapsed.Round(time.Second))
+					description += "\nlint_verified: true"
+					description += fmt.Sprintf("\nlint_verified_command: %s", verify.lintCommand)
+				}
 				if verify.skipReason != "" {
 					style.PrintWarning("gt done: skipping default test-verify: %s", verify.skipReason)
 					if len(verify.deferredPackages) > 0 {

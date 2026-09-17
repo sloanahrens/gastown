@@ -54,6 +54,11 @@ const defaultTestVerifyRunFloor = 30 * time.Minute
 // 10m default); Go's own 10m default is the thing that was too tight.
 const defaultTestVerifyPerPackageTimeout = 20 * time.Minute
 
+// defaultLintVerifyTimeout bounds the rig's lint_command inside gt done's
+// default gate. Lint is static analysis (no Docker, no Dolt, ~7 s on gastown),
+// so this is a safety net against a hung tool, not a budget to tune.
+const defaultLintVerifyTimeout = 10 * time.Minute
+
 // makeDryRunTimeout bounds the `make -n <target>` probe that reads the rig's
 // own per-package -timeout out of its test recipe. `make -n` prints the
 // recipe instead of running it, so this is a read of the operator's own
@@ -137,9 +142,15 @@ type testVerifyResult struct {
 	deferredPackages []string
 	// slotUsed is false when the gate ran without a container-gate slot
 	// because nothing in scope spins containers.
-	slotUsed  bool
-	logPath   string
-	logSHA256 string
+	slotUsed bool
+	// lintRan / lintCommand / lintElapsed record the rig's lint_command run
+	// (gt-yihz follow-up): lint is part of the default gate whenever the rig
+	// configures it, slot-free, before the tests.
+	lintRan     bool
+	lintCommand string
+	lintElapsed time.Duration
+	logPath     string
+	logSHA256   string
 
 	// Budgets and timings, resolved and measured, so the MR bead records what
 	// the gate was actually allowed and what it actually cost (gt-pnkd). The
@@ -602,14 +613,18 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 				plain = append(plain, p)
 			}
 		}
-		if len(plain) == 0 {
-			return testVerifyResult{
-				skipReason: fmt.Sprintf("every changed package is container-backed (%s) — the refinery's gate runs those once per submission (gt-yihz); nothing for gt done to test without a container slot",
-					strings.Join(deferred, " ")),
-				deferredPackages: deferred,
-			}, nil
-		}
 		pkgs = plain
+	}
+	// Every changed package deferred: nothing to test here, but the rig's
+	// lint_command (below) still runs over the tree.
+	allDeferred := isGoRig && !includeContainers && len(pkgs) == 0
+	allDeferredReason := ""
+	if allDeferred {
+		allDeferredReason = fmt.Sprintf("every changed package is container-backed (%s) — the refinery's gate runs those once per submission (gt-yihz); nothing for gt done to test without a container slot",
+			strings.Join(deferred, " "))
+		if strings.TrimSpace(mq.LintCommand) == "" {
+			return testVerifyResult{skipReason: allDeferredReason, deferredPackages: deferred}, nil
+		}
 	}
 	// A non-Go rig's test_command may spin containers, and so may the
 	// container-backed packages when the rig opted them back in.
@@ -619,6 +634,8 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 
 	var testCmd string
 	switch {
+	case allDeferred:
+		testCmd = "" // lint only
 	case isGoRig:
 		if override := strings.TrimSpace(mq.TestVerifyCommand); override != "" {
 			testCmd = strings.ReplaceAll(override, testVerifyPackagesPlaceholder, strings.Join(pkgs, " "))
@@ -652,6 +669,9 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// cap from a test failure).
 	fmt.Fprintf(logFile, "=== gt done default test-verify (scope=%s) ===\n", scope)
 	fmt.Fprintf(logFile, "command: %s\n", testCmd)
+	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
+		fmt.Fprintf(logFile, "lint: %s (budget %s, no container slot)\n", lint, humanDuration(defaultLintVerifyTimeout))
+	}
 	fmt.Fprintf(logFile, "run budget: %s (%s)\n", humanDuration(budgets.runTimeout), budgets.runSource)
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
 	if len(deferred) > 0 {
@@ -665,6 +685,46 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	}
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))
+
+	env := append(os.Environ(), envPrefix...)
+
+	// Lint first: cheap, slot-free, and a lint failure should not cost a
+	// suite run. The rig's lint_command is the same one the batch gate runs.
+	result := testVerifyResult{
+		scope:            scope,
+		packages:         pkgs,
+		deferredPackages: deferred,
+		slotUsed:         needsSlot && !allDeferred,
+		logPath:          logPath,
+		runBudget:        budgets.runTimeout,
+		slotTimeout:      budgets.slotTimeout,
+	}
+	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
+		result.lintCommand = lint
+		reportVerifyProgress(logFile, fmt.Sprintf("lint starting (command: %s)", lint))
+		lintCtx, lintCancel := context.WithTimeout(context.Background(), defaultLintVerifyTimeout)
+		lintStart := time.Now()
+		lintErr := runVerifySuite(lintCtx, worktree, lint, env, logFile)
+		lintCancel()
+		result.lintElapsed = time.Since(lintStart)
+		if lintErr != nil {
+			exitCode := -1
+			var exitErr *exec.ExitError
+			if errors.As(lintErr, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+			fmt.Fprintf(logFile, "=== lint failed (exit %d) ===\n", exitCode)
+			tail := readLogTail(logPath, 4000)
+			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — fix the lint findings before resubmitting (no tests were run; full log: %s):\n%s", exitCode, lint, logPath, tail)
+		}
+		result.lintRan = true
+		reportVerifyProgress(logFile, fmt.Sprintf("lint passed in %s", result.lintElapsed.Round(time.Second)))
+	}
+	if allDeferred {
+		reportVerifyProgress(logFile, "no testable package in scope: "+allDeferredReason)
+		result.skipReason = allDeferredReason
+		return result, nil
+	}
 
 	var slotWait time.Duration
 	if needsSlot {
@@ -684,7 +744,6 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	ctx, cancel := context.WithTimeout(context.Background(), budgets.runTimeout)
 	defer cancel()
 
-	env := append(os.Environ(), envPrefix...)
 	runStart := time.Now()
 	_, runErr := runWithProgress(testVerifyProgressInterval, func() error {
 		return runVerifySuite(ctx, worktree, testCmd, env, logFile)
@@ -699,17 +758,8 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	runElapsed := time.Since(runStart)
 	timedOut := ctx.Err() == context.DeadlineExceeded
 
-	result := testVerifyResult{
-		scope:            scope,
-		packages:         pkgs,
-		deferredPackages: deferred,
-		slotUsed:         needsSlot,
-		logPath:          logPath,
-		runBudget:        budgets.runTimeout,
-		slotTimeout:      budgets.slotTimeout,
-		slotWait:         slotWait,
-		runElapsed:       runElapsed,
-	}
+	result.slotWait = slotWait
+	result.runElapsed = runElapsed
 
 	if timedOut {
 		fmt.Fprintf(logFile, "=== test-verify timed out after %s ===\n", humanDuration(budgets.runTimeout))
