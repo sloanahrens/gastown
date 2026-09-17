@@ -334,10 +334,17 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 		return true
 	}
 
+	// Paths inside a rig directory are blocked (rig roots are the town's
+	// biggest single trees, so anything inside one is hazardous).
+	if firstRel := strings.Split(rel, string(filepath.Separator)); len(firstRel) >= 1 {
+		if isRestrictedTownLevel(firstRel[0]) {
+			return true
+		}
+	}
+
 	// Restricted town-level directories.
 	base := filepath.Base(targetClean)
-	if base == "mayor" || base == "deacon" || base == "settings" ||
-		base == "logs" || base == ".dolt-data" {
+	if isRestrictedTownLevel(base) {
 		return true
 	}
 
@@ -347,6 +354,13 @@ func isBlockedTownPath(target, townRoot, polecatWorktreeRoot string) bool {
 	}
 
 	return false
+}
+
+// isRestrictedTownLevel reports whether a path component names a restricted
+// town-level directory (rig root, mayor, deacon, settings, logs, .dolt-data).
+func isRestrictedTownLevel(name string) bool {
+	return name == "mayor" || name == "deacon" || name == "settings" ||
+		name == "logs" || name == ".dolt-data"
 }
 
 // printPolecatPathsBlock prints the block banner to stderr.
