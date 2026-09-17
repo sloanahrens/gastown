@@ -521,7 +521,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test"}
+		includeContainers := true // slot-path assertions below need the gate to take a slot (gt-yihz)
+		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test", TestVerifyIncludeContainerPackages: &includeContainers}
 		g := git.NewGit(dir)
 		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/budget-role")
 		if err != nil {
@@ -610,7 +611,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifySlotTimeout: "5m"}
+		includeContainers := true // contention only exists when the gate takes a slot (gt-yihz)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifySlotTimeout: "5m", TestVerifyIncludeContainerPackages: &includeContainers}
 		g := git.NewGit(dir)
 		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/contention-role")
 		if err == nil {
@@ -664,7 +666,12 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		// The slot-wait progress path only exists when the gate takes a slot,
+		// which since gt-yihz means the rig opted its container-backed
+		// packages back into gt done's gate (pkga/pkgb spin nothing, so the
+		// default would run them slot-free).
+		includeContainers := true
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyIncludeContainerPackages: &includeContainers}
 		g := git.NewGit(dir)
 		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/progress-role")
 		if err != nil {
