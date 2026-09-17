@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -48,6 +48,9 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-server ./cmd/gt-proxy-server
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
+
+lint:
+	golangci-lint run --timeout=5m
 
 desktop-build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop
