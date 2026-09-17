@@ -5,13 +5,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// pendingWorkGracePeriod bounds how recently the branch's last commit must
+// have landed before polecat-stop-check treats the polecat as still
+// mid-workflow rather than abandoned. Claude Code's Stop event fires at the
+// end of every assistant turn, not only when a session actually ends
+// (gt-couv) — a turn that ends because the agent kicked off a background
+// verification step (build/lint/test) looks identical, from this command's
+// point of view, to an idle polecat that forgot to call gt done. A polecat
+// that just committed is overwhelmingly likely to still be running its
+// formula's post-commit steps, not gone.
+const pendingWorkGracePeriod = 2 * time.Minute
 
 var tapPolecatStopCmd = &cobra.Command{
 	Use:   "polecat-stop-check",
@@ -19,14 +33,19 @@ var tapPolecatStopCmd = &cobra.Command{
 	Long: `Safety net for the "idle polecat" problem: polecats that finish work
 but forget to call gt done before the session ends.
 
-This command is designed to run from a Claude Code Stop hook. It checks:
+This command is designed to run from a Claude Code Stop hook. Stop fires at
+the end of every assistant turn, not only when a session truly ends, so it
+also checks:
 1. Whether this is a polecat session (GT_POLECAT env var)
 2. Whether gt done has already run (heartbeat state is "exiting" or "idle")
 3. Whether the polecat has commits, stashes, or non-runtime dirty work
+4. Whether the polecat's own slot-wrapped verification suite is still
+   running, or its last commit landed within the pending-work grace period —
+   either means this Stop event is a turn boundary, not abandonment
 
-If the polecat has pending work that wasn't submitted, this command
-runs gt done to submit it. If gt done already ran or there's nothing
-to submit, it exits silently.
+If the polecat has pending work that wasn't submitted, and neither of the
+turn-boundary signals above applies, this command runs gt done to submit it.
+If gt done already ran or there's nothing to submit, it exits silently.
 
 Exit codes:
   0 - No action needed (not a polecat, already done, or gt done succeeded)
@@ -103,6 +122,19 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		return nil // Can't check, or no work to submit — don't block session stop
 	}
 
+	// This Stop event may just mark a turn boundary, not a real session end
+	// (gt-couv): the polecat can still be legitimately waiting on a
+	// background verification step. Two independent turn-end signals veto
+	// the auto-run in that case; either is enough to hold off.
+	if busy, busyReason := polecatStopVerificationRunning(townRoot, rigName, polecatName); busy {
+		fmt.Fprintf(os.Stderr, "polecat-stop-check: %s — deferring gt done\n", busyReason)
+		return nil
+	}
+	if recent, commitErr := polecatStopCommittedWithinGrace(cloneDir); commitErr == nil && recent {
+		fmt.Fprintf(os.Stderr, "polecat-stop-check: last commit on %s is under %s old — deferring gt done\n", branch, pendingWorkGracePeriod)
+		return nil
+	}
+
 	// Polecat has pending work! Run gt done as a safety net.
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has pending work on branch %s (%s)\n", polecatName, branch, reason)
@@ -156,4 +188,39 @@ func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
 	}
 
 	return false, "", nil
+}
+
+// polecatStopVerificationRunning reports whether this polecat currently
+// holds the town-level container-gate slot (see internal/slot) — i.e. its
+// own slot-wrapped build/test suite is still running in the background.
+// A held slot whose owner role doesn't match this polecat is some other
+// rig's suite and says nothing about this polecat's state, so it is not
+// treated as busy here.
+func polecatStopVerificationRunning(townRoot, rigName, polecatName string) (bool, string) {
+	rep, err := slot.Status(townRoot)
+	if err != nil || !rep.Held || rep.Owner == nil {
+		return false, ""
+	}
+	if rep.Owner.Role != rigName+"/"+polecatName {
+		return false, ""
+	}
+	return true, fmt.Sprintf("container-gate slot held by %s (verification suite running)", rep.Owner.Role)
+}
+
+// polecatStopCommittedWithinGrace reports whether the branch's most recent
+// commit landed less than pendingWorkGracePeriod ago.
+func polecatStopCommittedWithinGrace(cloneDir string) (bool, error) {
+	out, err := exec.Command("git", "-C", cloneDir, "log", "-1", "--format=%ct").Output()
+	if err != nil {
+		return false, err
+	}
+	tsStr := strings.TrimSpace(string(out))
+	if tsStr == "" {
+		return false, nil
+	}
+	unixSeconds, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	return time.Since(time.Unix(unixSeconds, 0)) < pendingWorkGracePeriod, nil
 }
