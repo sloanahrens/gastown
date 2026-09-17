@@ -338,7 +338,51 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// forget to call gt done before the session ends. The polecat-stop-check
 		// command is idempotent — it checks heartbeat state and branch commits
 		// before deciding whether to run gt done.
+		//
+		// polecat-paths blocks Edit/Write/NotebookEdit targets outside the
+		// polecat's own worktree and Bash commands whose write-capable tools
+		// target sibling worktrees or restricted town directories. It fires on
+		// every PreToolUse (Edit, Write, NotebookEdit, Bash) so the guard
+		// covers all cross-worktree paths, not just Bash.
 		"polecats": {
+			PreToolUse: []HookEntry{
+				{
+					Matcher: "Edit",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "Write",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "NotebookEdit",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+					},
+				},
+			},
 			Stop: []HookEntry{
 				{
 					Matcher: "",
