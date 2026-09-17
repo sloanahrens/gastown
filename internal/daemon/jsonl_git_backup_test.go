@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
 	"log"
@@ -996,7 +997,7 @@ func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
 	}
 
 	townRoot := t.TempDir()
-	feedFile := filepath.Join(townRoot, "feed.jsonl")
+	eventsFile := filepath.Join(townRoot, ".events.jsonl")
 	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
 		t.Fatalf("mkdir daemon: %v", err)
 	}
@@ -1023,40 +1024,53 @@ exit 1
 	testMessage := "main branch test failures:\ngastown: gate \"test\": exit status 1"
 	d.escalate("main_branch_test", testMessage)
 
-	// Verify the feed file received the escalation_dropped event with the
+	// Verify the events file received the escalation_dropped event with the
 	// full message (not just the title).
-	data, err := os.ReadFile(feedFile)
+	data, err := os.ReadFile(eventsFile)
 	if err != nil {
-		t.Fatalf("read feed: %v", err)
+		t.Fatalf("read events: %v", err)
 	}
 	if len(data) == 0 {
-		t.Fatal("expected feed output, got empty file")
+		t.Fatal("expected events output, got empty file")
 	}
 
-	var record map[string]interface{}
-	if err := json.Unmarshal(data, &record); err != nil {
-		t.Fatalf("parse feed record: %v", err)
-	}
+	// The file has one JSON object per line; find the escalation_dropped event.
+	var found bool
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		var record map[string]interface{}
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			continue
+		}
+		if record["event"] != "escalation_dropped" {
+			continue
+		}
+		found = true
 
-	// The message field should contain the full test message.
-	msg, ok := record["message"].(string)
-	if !ok {
-		t.Fatalf("expected 'message' field in feed record, got keys: %v", keys(record))
-	}
-	if msg != testMessage {
-		t.Errorf("feed message = %q, want %q", msg, testMessage)
-	}
+		// The message field should contain the full test message.
+		msg, ok := record["message"].(string)
+		if !ok {
+			t.Fatalf("expected 'message' field in feed record, got keys: %v", keys(record))
+		}
+		if msg != testMessage {
+			t.Errorf("event message = %q, want %q", msg, testMessage)
+		}
 
-	// The title should be truncated to the first line.
-	title, ok := record["title"].(string)
-	if !ok {
-		t.Fatalf("expected 'title' field in feed record")
+		// The title should be truncated to the first line.
+		title, ok := record["title"].(string)
+		if !ok {
+			t.Fatalf("expected 'title' field in feed record")
+		}
+		if strings.Contains(title, "\n") {
+			t.Errorf("title should not contain newline: %q", title)
+		}
+		if title != "main_branch_test: main branch test failures:" {
+			t.Errorf("title = %q, want 'main_branch_test: main branch test failures:'", title)
+		}
+		break
 	}
-	if strings.Contains(title, "\n") {
-		t.Errorf("title should not contain newline: %q", title)
-	}
-	if title != "main_branch_test: main branch test failures:" {
-		t.Errorf("title = %q, want 'main_branch_test: main branch test failures:'", title)
+	if !found {
+		t.Fatal("did not find escalation_dropped event in events file")
 	}
 }
 
