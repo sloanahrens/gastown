@@ -2400,11 +2400,13 @@ func TestIsClaudeAgent(t *testing.T) {
 	}{
 		{"empty provider and command (defaults)", &RuntimeConfig{}, true},
 		{"explicit claude provider", &RuntimeConfig{Provider: "claude", Command: "anything"}, true},
-		{"explicit codex provider", &RuntimeConfig{Provider: "codex", Command: "claude"}, false},
+		{"codex provider + claude command → command wins", &RuntimeConfig{Provider: "codex", Command: "claude"}, true},
+		{"ollama provider + claude command → command wins (local-coder)", &RuntimeConfig{Provider: "ollama", Command: "claude"}, true},
 		{"bare claude command", &RuntimeConfig{Command: "claude"}, true},
 		{"path to claude binary", &RuntimeConfig{Command: "/usr/local/bin/claude"}, true},
 		{"aider command no provider", &RuntimeConfig{Command: "aider"}, false},
 		{"generic provider", &RuntimeConfig{Provider: "generic"}, false},
+		{"codex provider + aider command → provider authoritative", &RuntimeConfig{Provider: "codex", Command: "aider"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -25,7 +25,7 @@ func TestInstallForRole_RoleAware(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", true)
+			err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true)
 			if err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
@@ -60,7 +60,7 @@ func TestInstallForRole_ClaudeSettingsSuppressStartupPrompts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
 
@@ -112,7 +112,7 @@ func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			settingsPath := filepath.Join(dir, ".claude", "settings.json")
-			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("initial InstallForRole: %v", err)
 			}
 
@@ -133,7 +133,7 @@ func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testin
 				t.Fatalf("write settings: %v", err)
 			}
 
-			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("second InstallForRole: %v", err)
 			}
 
@@ -175,7 +175,7 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 				}
 			}
 
-			if err := InstallForRole("claude", dir, dir, "boot", ".claude", "settings.json", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, "boot", ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
 
@@ -232,7 +232,7 @@ func TestInstallForRole_RoleAgnostic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {
 			dir := t.TempDir()
-			err := InstallForRole(tt.provider, dir, dir, "polecat", tt.hooksDir, tt.hooksFile, false)
+			err := InstallForRole(tt.provider, dir, dir, "polecat", tt.hooksDir, tt.hooksFile, tt.provider, false)
 			if err != nil {
 				t.Fatalf("InstallForRole(%s): %v", tt.provider, err)
 			}
@@ -295,7 +295,7 @@ func TestInstallForRole_SkipsExisting(t *testing.T) {
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
 	os.WriteFile(hooksPath, []byte("custom"), 0644)
 
-	err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true)
+	err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", "claude", true)
 	if err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestInstallForRole_UpgradesStaleExportPath(t *testing.T) {
 	// Write a stale file with the legacy "export PATH=" pattern
 	os.WriteFile(hooksPath, []byte(`export PATH=/usr/local/bin:$PATH && gt hook`), 0644)
 
-	err := InstallForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false)
+	err := InstallForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
@@ -340,7 +340,7 @@ export const GasTown = async ({ $ }) => {
   await $`+"`"+`gt prime`+"`"+`
 }`), 0644)
 
-	if err := InstallForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false); err != nil {
+	if err := InstallForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", "opencode", false); err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
 
@@ -379,7 +379,7 @@ func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
 }`
 	os.WriteFile(hooksPath, []byte(stale), 0644)
 
-	if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true); err != nil {
+	if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", "claude", true); err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
 
@@ -422,7 +422,7 @@ func TestSyncForRole_UpdatesStaleContent(t *testing.T) {
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
 	os.WriteFile(hooksPath, []byte("stale-content"), 0644)
 
-	result, err := SyncForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false)
+	result, err := SyncForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err != nil {
 		t.Fatalf("SyncForRole: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSyncForRole_SkipsMatchingContent(t *testing.T) {
 	template, _ := resolveAndSubstitute("opencode", "gastown.js", "crew")
 	os.WriteFile(hooksPath, template, 0644)
 
-	result, err := SyncForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false)
+	result, err := SyncForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err != nil {
 		t.Fatalf("SyncForRole: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestSyncForRole_CreatesNewFile(t *testing.T) {
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 
-	result, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", false)
+	result, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err != nil {
 		t.Fatalf("SyncForRole: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestSyncForRole_CreatesNewFile(t *testing.T) {
 
 func TestSyncForRole_EmptyProvider(t *testing.T) {
 	dir := t.TempDir()
-	result, err := SyncForRole("", dir, dir, "crew", ".opencode/plugins", "gastown.js", false)
+	result, err := SyncForRole("", dir, dir, "crew", ".opencode/plugins", "gastown.js", "", false)
 	if err != nil {
 		t.Fatalf("expected nil error for empty provider, got: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestSyncForRole_EmptyProvider(t *testing.T) {
 
 func TestSyncForRole_InvalidProvider(t *testing.T) {
 	dir := t.TempDir()
-	_, err := SyncForRole("nonexistent-provider", dir, dir, "crew", ".test", "settings.json", false)
+	_, err := SyncForRole("nonexistent-provider", dir, dir, "crew", ".test", "settings.json", "nonexistent-provider", false)
 	if err == nil {
 		t.Error("expected error for invalid provider")
 	}
@@ -511,7 +511,7 @@ func TestSyncForRole_WriteError(t *testing.T) {
 	os.Chmod(readOnlyDir, 0444)
 	defer os.Chmod(readOnlyDir, 0755) // cleanup
 
-	_, err := SyncForRole("opencode", readOnlyDir, readOnlyDir, "crew", ".opencode/plugins", "gastown.js", false)
+	_, err := SyncForRole("opencode", readOnlyDir, readOnlyDir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err == nil {
 		t.Error("expected error when directory is read-only")
 	}
@@ -521,7 +521,7 @@ func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
 	dir := t.TempDir()
 
 	// First, create the file via SyncForRole
-	result, err := SyncForRole("gemini", dir, dir, "crew", ".gemini", "settings.json", false)
+	result, err := SyncForRole("gemini", dir, dir, "crew", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
 		t.Fatalf("initial SyncForRole: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
 	}
 
 	// SyncForRole should treat this as unchanged (structurally equal JSON)
-	result, err = SyncForRole("gemini", dir, dir, "crew", ".gemini", "settings.json", false)
+	result, err = SyncForRole("gemini", dir, dir, "crew", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
 		t.Fatalf("SyncForRole after reformat: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
 func TestSyncForRole_GeminiWithGTBinSubstitution(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := SyncForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", false)
+	result, err := SyncForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
 		t.Fatalf("SyncForRole: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestInstallForRole_SettingsDirVsWorkDir(t *testing.T) {
 	workDir := t.TempDir()
 
 	// Claude uses settingsDir (useSettingsDir=true)
-	err := InstallForRole("claude", settingsDir, workDir, "crew", ".claude", "settings.json", true)
+	err := InstallForRole("claude", settingsDir, workDir, "crew", ".claude", "settings.json", "claude", true)
 	if err != nil {
 		t.Fatalf("InstallForRole (claude): %v", err)
 	}
@@ -605,7 +605,7 @@ func TestInstallForRole_SettingsDirVsWorkDir(t *testing.T) {
 	}
 
 	// OpenCode uses workDir (useSettingsDir=false)
-	err = InstallForRole("opencode", settingsDir, workDir, "polecat", ".opencode/plugins", "gastown.js", false)
+	err = InstallForRole("opencode", settingsDir, workDir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err != nil {
 		t.Fatalf("InstallForRole (opencode): %v", err)
 	}
@@ -616,7 +616,7 @@ func TestInstallForRole_SettingsDirVsWorkDir(t *testing.T) {
 
 func TestInstallForRole_EmptyProvider(t *testing.T) {
 	dir := t.TempDir()
-	err := InstallForRole("", dir, dir, "crew", ".claude", "settings.json", false)
+	err := InstallForRole("", dir, dir, "crew", ".claude", "settings.json", "", false)
 	if err != nil {
 		t.Fatalf("expected nil error for empty provider, got: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestInstallForRole_Permissions(t *testing.T) {
 	dir := t.TempDir()
 
 	// JSON files should get 0600
-	err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true)
+	err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", "claude", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +641,7 @@ func TestInstallForRole_Permissions(t *testing.T) {
 
 	// Non-JSON files should get 0644
 	dir2 := t.TempDir()
-	err = InstallForRole("pi", dir2, dir2, "polecat", ".pi/extensions", "gastown-hooks.js", false)
+	err = InstallForRole("pi", dir2, dir2, "polecat", ".pi/extensions", "gastown-hooks.js", "pi", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestInstallForRole_Permissions(t *testing.T) {
 func TestInstallForRole_CursorRoleAware(t *testing.T) {
 	// Cursor uses hooks-autonomous.json / hooks-interactive.json naming
 	dir := t.TempDir()
-	err := InstallForRole("cursor", dir, dir, "polecat", ".cursor", "hooks.json", false)
+	err := InstallForRole("cursor", dir, dir, "polecat", ".cursor", "hooks.json", "cursor", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(cursor, polecat): %v", err)
 	}
@@ -669,7 +669,7 @@ func TestInstallForRole_CursorRoleAware(t *testing.T) {
 	}
 
 	dir2 := t.TempDir()
-	err = InstallForRole("cursor", dir2, dir2, "crew", ".cursor", "hooks.json", false)
+	err = InstallForRole("cursor", dir2, dir2, "crew", ".cursor", "hooks.json", "cursor", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(cursor, crew): %v", err)
 	}
@@ -686,7 +686,7 @@ func TestInstallForRole_CursorRoleAware(t *testing.T) {
 
 func TestInstallForRole_GeminiRoleAware(t *testing.T) {
 	dir := t.TempDir()
-	err := InstallForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", false)
+	err := InstallForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(gemini, witness): %v", err)
 	}
@@ -705,7 +705,7 @@ func TestInstallForRole_GeminiRoleAware(t *testing.T) {
 
 func TestInstallForRole_CodexRoleAware(t *testing.T) {
 	dir := t.TempDir()
-	err := InstallForRole("codex", dir, dir, "crew", ".codex", "hooks.json", false)
+	err := InstallForRole("codex", dir, dir, "crew", ".codex", "hooks.json", "codex", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(codex, crew): %v", err)
 	}
@@ -723,7 +723,7 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 	}
 
 	dir2 := t.TempDir()
-	err = InstallForRole("codex", dir2, dir2, "polecat", ".codex", "hooks.json", false)
+	err = InstallForRole("codex", dir2, dir2, "polecat", ".codex", "hooks.json", "codex", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(codex, polecat): %v", err)
 	}
@@ -744,7 +744,7 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 func TestInstallForRole_CopilotRoleAware(t *testing.T) {
 	// Copilot uses gastown-autonomous.json / gastown-interactive.json naming
 	dir := t.TempDir()
-	err := InstallForRole("copilot", dir, dir, "polecat", ".github/hooks", "gastown.json", false)
+	err := InstallForRole("copilot", dir, dir, "polecat", ".github/hooks", "gastown.json", "copilot", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(copilot, polecat): %v", err)
 	}
@@ -759,7 +759,7 @@ func TestInstallForRole_CopilotRoleAware(t *testing.T) {
 	}
 
 	dir2 := t.TempDir()
-	err = InstallForRole("copilot", dir2, dir2, "crew", ".github/hooks", "gastown.json", false)
+	err = InstallForRole("copilot", dir2, dir2, "crew", ".github/hooks", "gastown.json", "copilot", false)
 	if err != nil {
 		t.Fatalf("InstallForRole(copilot, crew): %v", err)
 	}
