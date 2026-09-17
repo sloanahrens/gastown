@@ -241,8 +241,13 @@ func AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Hand
 				continue
 			}
 			// We hold slot i. If somebody else holds another slot, any
-			// running gate containers are theirs: grant without the
-			// docker probe.
+			// running gate containers are taken to be theirs and the
+			// docker probe is skipped. Residual gap, accepted for pool
+			// liveness: a holder running a container-free command beside
+			// a third party's UNWRAPPED suite would not be detected here
+			// (the single-slot check could not tell those apart either
+			// once a slot was held). gt slot status still reports unwrapped
+			// containers whenever no slot is held.
 			if othersHeld(townRoot, pool, i) > 0 {
 				return grant(i, unlock), nil
 			}

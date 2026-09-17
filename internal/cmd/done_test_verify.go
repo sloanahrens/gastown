@@ -87,12 +87,14 @@ var acquireVerifySlot = func(townRoot, role string, timeout time.Duration) (func
 
 // isContainerSuitePackage reports whether importPath is one of the
 // Dolt/testcontainers-backed packages (containerSuitePackages, the same list
-// the container-suite guard enforces). Exact package match on the
-// repo-relative suffix: a sub-package of a listed one is not assumed to spin
-// containers.
+// the container-suite guard enforces) or lives under one. Sub-packages are
+// treated as container-backed too, matching the guard's prefix-scope reading
+// (containerSuitePackagesIntersect): erring that way only sends a package to
+// the refinery's gate, erring the other way would run an unwrapped suite.
 func isContainerSuitePackage(importPath string) bool {
 	for _, p := range containerSuitePackages {
-		if importPath == p || strings.HasSuffix(importPath, "/"+p) {
+		if importPath == p || strings.HasSuffix(importPath, "/"+p) ||
+			strings.HasPrefix(importPath, p+"/") || strings.Contains(importPath, "/"+p+"/") {
 			return true
 		}
 	}

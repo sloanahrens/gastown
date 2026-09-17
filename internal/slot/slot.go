@@ -307,9 +307,12 @@ type Report struct {
 	Reserved  int
 }
 
-// Busy reports whether the slot should be treated as unavailable: held by a
-// token holder, occupied by an unwrapped container suite, or unverifiable
-// because the docker daemon is unreachable.
+// Busy reports whether a new suite could NOT be admitted right now: every
+// slot held (a single slot: held at all), an unwrapped container suite
+// occupying the Docker VM, or the docker check unverifiable. With a pool,
+// "held" (Held / HeldCount) and "busy" therefore differ: one of three slots
+// held is Held but not Busy. `gt slot status --json` exposes both, plus
+// "saturated" as an explicit alias for the all-slots-held case.
 func (r Report) Busy() bool {
 	if r.Total > 0 {
 		return r.AllHeld() || len(r.UnwrappedContainers) > 0 || r.DockerUnknown

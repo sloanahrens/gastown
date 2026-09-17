@@ -192,6 +192,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Busy                bool             `json:"busy"`
 		UnwrappedContainers []string         `json:"unwrapped_containers,omitempty"`
 		DockerUnknown       bool             `json:"docker_unknown"`
+		Saturated           bool             `json:"saturated"` // every slot held; busy also covers unwrapped/unknown
 		Slots               []slot.SlotState `json:"slots,omitempty"`
 		HeldCount           int              `json:"held_count"`
 		Total               int              `json:"total"`
@@ -205,6 +206,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Busy:                rep.Busy(),
 		UnwrappedContainers: rep.UnwrappedContainers,
 		DockerUnknown:       rep.DockerUnknown,
+		Saturated:           rep.AllHeld(),
 		Slots:               rep.Slots,
 		HeldCount:           rep.HeldCount,
 		Total:               rep.Total,

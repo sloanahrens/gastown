@@ -147,7 +147,7 @@ func TestIsContainerSuitePackage(t *testing.T) {
 		"github.com/steveyegge/gastown/internal/beads":     true,
 		"internal/refinery":                                true,
 		"github.com/steveyegge/gastown/internal/slot":      false,
-		"github.com/steveyegge/gastown/internal/cmd/extra": false,
+		"github.com/steveyegge/gastown/internal/cmd/extra": true, // sub-packages inherit the container scope
 		"example.test/pkga":                                false,
 	} {
 		if got := isContainerSuitePackage(path); got != want {
