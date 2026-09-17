@@ -1481,7 +1481,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			// A direct-merge convoy is the one sanctioned way a polecat's
+			// session puts work on the default branch, so name it for the
+			// pre-push hook (gt-ibt8) — the strategy and the source issue were
+			// already vetted by doneDirectMergeSkipReason above.
+			directPushErr := g.PushWithEnv("origin", directRefspec, false, []string{git.EnvDoneDirectMerge})
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -1581,7 +1585,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			// Late-detected direct merge: same sanctioned landing as the
+			// primary check above, so it names the same signal (gt-ibt8).
+			directPushErr := g.PushWithEnv("origin", directRefspec, false, []string{git.EnvDoneDirectMerge})
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)

@@ -27,6 +27,9 @@ This guard blocks operations that could cause irreversible damage:
   - gem install           (system-level Ruby installs)
   - rm -rf /             (only blocks root target; rm -rf ./build/ is allowed)
   - git push --force/-f  (--force-with-lease is allowed)
+  - git push to main/master from a polecat session (GT_POLECAT_PATH set):
+    HEAD:main, <sha>:main, :main, refs/heads/main, main, --all, --mirror.
+    Polecat work lands through gt done -> MR -> Refinery (gt-ibt8).
   - git reset --hard
   - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
     onto origin/main etc. reverts everything merged since the checkout was cut
@@ -147,6 +150,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	}
 	if r := matchesDangerousGitPush(lowerTokens); r != "" {
 		return r, ""
+	}
+	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession()); r != "" {
+		return r, alt
 	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
@@ -811,6 +817,98 @@ func matchesDangerousGitPush(tokens []string) string {
 		}
 	}
 	return ""
+}
+
+// polecatMainPushReason and polecatMainPushAlternative are the block banner
+// and its allow-path suggestion for a polecat pushing the default branch.
+const (
+	polecatMainPushReason      = "Polecats never push to main/master (use gt done)"
+	polecatMainPushAlternative = "Alternative: `gt done` pushes your polecat/<name>/<bead> branch and the Refinery " +
+		"merges it to the default branch after verification — a direct push to main skips " +
+		"the MR, the Refinery gate run, and the om review (gt-ibt8)."
+)
+
+// polecatMainPushBranches are the destination branch names a polecat session
+// may never push to. The rig's actual default branch is resolved dynamically
+// by the pre-push hook, which has the remote in front of it; this guard has
+// only the command text, so it protects both conventional names.
+var polecatMainPushBranches = map[string]bool{"main": true, "master": true}
+
+// inPolecatSession reports whether this guard run is inside a polecat's
+// session. The session manager exports GT_POLECAT_PATH at spawn
+// (internal/polecat/session_manager.go), and nothing else in the town sets
+// it, so its presence is a positive polecat signal: crew, refinery, mayor,
+// witness, and the daemon all run without it and keep their unguarded
+// push-to-main paths.
+func inPolecatSession() bool {
+	return os.Getenv("GT_POLECAT_PATH") != ""
+}
+
+// matchesPolecatMainPush blocks a `git push` from a polecat session whose
+// refspec sends work to the default branch (main/master), plus the
+// --all/--mirror forms that carry main along with every other branch.
+//
+// A polecat's work lands through the merge queue: `gt done` pushes
+// polecat/<name>/<bead>, the Refinery gates the stack, and only the Refinery
+// pushes the default branch. Nothing enforced that. On 09-17 a polecat
+// (granite) ran `git push origin HEAD:main` from a detached HEAD after a
+// rebase, landing three raw checkpoint commits on origin/main with no MR, no
+// Refinery gates, and no om review (gt-ibt8) — the pre-push hook's branch
+// allowlist let the default branch through for every caller, and the only
+// main-specific check was integration-branch content. This is the second of
+// three layers: the pre-push role check refuses the push itself, and this
+// stops the attempt before git is even invoked.
+//
+// Deliberately scoped to explicit refspecs. A bare `git push` (no refspec)
+// would also carry main if HEAD were on it, but deciding that needs HEAD's
+// branch name, which a command-text guard does not have — the pre-push hook
+// covers that case, where the repo and the refspec are both in hand.
+//
+// tokens must be lowercased, shell-aware tokens (see shellTokenize);
+// polecatSession is passed in rather than read here so the matcher stays pure
+// and table-testable, with the caller supplying it from the session
+// (inPolecatSession).
+func matchesPolecatMainPush(tokens []string, polecatSession bool) (reason, alternative string) {
+	if !polecatSession {
+		return "", ""
+	}
+	inPush := false
+	for i, f := range tokens {
+		if !inPush {
+			// Same argv shape as matchesDangerousGitPush: a bare
+			// "push" token directly after "git".
+			if f == "push" && i > 0 && tokens[i-1] == "git" {
+				inPush = true
+			}
+			continue
+		}
+		if f == "--all" || f == "--mirror" {
+			return polecatMainPushReason, polecatMainPushAlternative
+		}
+		if strings.HasPrefix(f, "-") {
+			// Flags carry no destination; --delete's target is the bare
+			// branch argument that follows it, which this loop still sees.
+			continue
+		}
+		if polecatMainPushTargetsDefault(f) {
+			return polecatMainPushReason, polecatMainPushAlternative
+		}
+	}
+	return "", ""
+}
+
+// polecatMainPushTargetsDefault reports whether one `git push` argument sends
+// work to main/master. The refspec's DESTINATION decides: "HEAD:main" and
+// ":main" (a delete) do, while "main:polecat/x" only reads from main and is
+// left alone. An argument with no colon is the shorthand form, where the
+// destination is the name itself ("git push origin main").
+func polecatMainPushTargetsDefault(arg string) bool {
+	arg = strings.TrimPrefix(arg, "+") // force prefix: same destination
+	dst := arg
+	if _, after, ok := strings.Cut(arg, ":"); ok {
+		dst = after
+	}
+	return polecatMainPushBranches[strings.TrimPrefix(dst, "refs/heads/")]
 }
 
 // gitResetRemotePrefixes are token prefixes that name a remote-tracking ref:
