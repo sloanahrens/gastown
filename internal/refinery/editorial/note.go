@@ -37,6 +37,16 @@ type Note struct {
 	Attempt    int       `json:"attempt"`
 	ReviewedAt time.Time `json:"reviewed_at"`
 
+	// TimeoutSeconds records a backend-timeout override this review ran
+	// with (ReviewRequest.TimeoutSeconds, the CLI's --timeout flag), so the
+	// override is auditable from refs/notes/om instead of living only in
+	// the invoker's shell history — and specifically so a later reader can
+	// tell a review that used the rig's .om.json default apart from one
+	// that was allowed longer. Omitted from the JSON when zero (no
+	// override), so existing notes and default-path reviews round-trip
+	// unchanged.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+
 	// Followups holds the ids of the follow-up beads filed for major
 	// findings on an approve verdict (DECISION 8: approval never dissolves
 	// a finding). Omitted from the JSON when empty so existing notes

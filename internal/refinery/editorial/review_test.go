@@ -324,6 +324,89 @@ func TestRun_RequestChangesNoReviewedHeadChange(t *testing.T) {
 	}
 }
 
+// TestRun_TimeoutOverrideReachesGateArgsAndNote pins both halves of the
+// ReviewRequest.TimeoutSeconds contract: a set override is appended to the
+// gate-script args (which the gate script forwards to `om review
+// --timeout`) and recorded on the note, and — the half that protects
+// against a regression — an unset override appends NOTHING. The deployed
+// gate script parses its args with a strict case and exits 2 on any
+// unknown argument, so a --timeout that leaked into the default path would
+// turn every ordinary review on an older script into a fail-closed infra
+// failure.
+func TestRun_TimeoutOverrideReachesGateArgsAndNote(t *testing.T) {
+	cases := []struct {
+		name       string
+		timeout    int
+		wantArg    string
+		wantValue  int
+		wantInJSON bool
+	}{
+		{name: "override", timeout: 900, wantArg: "--timeout", wantValue: 900, wantInJSON: true},
+		{name: "default passes no flag", timeout: 0, wantArg: "", wantValue: 0, wantInJSON: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBDForReview(t)
+			fixture := newReviewFixture(t)
+			store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+
+			var gotArgs []string
+			deps := Deps{
+				Git:      git.NewGit(fixture.repoDir),
+				Beads:    beads.NewWithStore(fixture.repoDir, store),
+				Recorder: plugin.NewRecorder(t.TempDir()),
+				Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+					gotArgs = append([]string(nil), args...)
+					writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+					return "", 0, nil
+				},
+			}
+
+			req := fixture.request()
+			req.TimeoutSeconds = tc.timeout
+			result := Run(context.Background(), req, deps)
+			if result.Exit != 0 {
+				t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+			}
+
+			gotValue, gotFlag := "", ""
+			for i, a := range gotArgs {
+				if a == "--timeout" {
+					gotFlag = a
+					if i+1 < len(gotArgs) {
+						gotValue = gotArgs[i+1]
+					}
+				}
+			}
+			if tc.wantArg == "" {
+				if gotFlag != "" {
+					t.Errorf("gate script args contain %q %q, want no timeout flag on the default path (args=%v)", gotFlag, gotValue, gotArgs)
+				}
+			} else if want := fmt.Sprintf("%d", tc.wantValue); gotFlag != tc.wantArg || gotValue != want {
+				t.Errorf("gate script args carry %q %q, want %q %q (args=%v)", gotFlag, gotValue, tc.wantArg, want, gotArgs)
+			}
+
+			if result.Note == nil {
+				t.Fatal("expected a note")
+			}
+			if result.Note.TimeoutSeconds != tc.wantValue {
+				t.Errorf("Note.TimeoutSeconds = %d, want %d", result.Note.TimeoutSeconds, tc.wantValue)
+			}
+
+			// The note on disk is what a later reader audits, so assert the
+			// committed artifact, not just the in-memory struct.
+			raw, err := deps.Git.NotesShow(NotesRef, fixture.head)
+			if err != nil {
+				t.Fatalf("NotesShow: %v", err)
+			}
+			if got := strings.Contains(raw, `"timeout_seconds"`); got != tc.wantInJSON {
+				t.Errorf("note contains timeout_seconds = %v, want %v (note=%s)", got, tc.wantInJSON, raw)
+			}
+		})
+	}
+}
+
 func TestRun_BackendTimeoutRetriesOnceThenFails(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)

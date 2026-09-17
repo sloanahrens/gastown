@@ -21,6 +21,7 @@ var (
 	mqReviewJSON      bool
 	mqReviewForce     bool
 	mqReviewAttempt   int
+	mqReviewTimeout   int
 )
 
 var mqReviewCmd = &cobra.Command{
@@ -36,11 +37,18 @@ receipt bead (aggregation). An approve verdict records
 editorial_reviewed_head on the MR bead; a verdict carrying major findings
 still gets follow-up beads filed even when it approves.
 
+--timeout overrides the rig's .om.json backend timeout for this one review,
+for the case where a diff legitimately needs longer than the rig default
+(a 526-line diff has been measured at 622s wall). The override is passed to
+om and recorded on the note, so it is auditable afterwards rather than
+living only in whoever ran the command.
+
 Exit code: 0 approve, 1 request_changes, 2 infra failure (never an approval).
 
 Examples:
   gt mq review gt-mr-abc123
   gt mq review gt-mr-abc123 --rehearsed temp-branch
+  gt mq review gt-mr-abc123 --timeout 900
   gt mq review gt-mr-abc123 --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMQReview,
@@ -51,10 +59,30 @@ func init() {
 	mqReviewCmd.Flags().BoolVar(&mqReviewJSON, "json", false, "Output the result as JSON")
 	mqReviewCmd.Flags().BoolVar(&mqReviewForce, "force", false, "Review even when merge_queue.editorial.required is false for the rig")
 	mqReviewCmd.Flags().IntVar(&mqReviewAttempt, "attempt", 1, "Resubmit attempt number recorded on the note")
+	mqReviewCmd.Flags().IntVar(&mqReviewTimeout, "timeout", 0, "Override the rig's .om.json backend timeout for this review, in whole seconds (passed to om, recorded on the om note)")
 	mqCmd.AddCommand(mqReviewCmd)
 }
 
 func runMQReview(cmd *cobra.Command, args []string) error {
+	// 0 is the "no override" default; an explicitly-passed non-positive
+	// value is rejected rather than silently ignored, since a
+	// silently-ignored override would look like it had been applied on the
+	// next timeout.
+	//
+	// Reported as exit 2 (infra failure) in the gate's own result shape,
+	// NOT as a RunE error: cobra's error path exits 1, and this command's
+	// contract is "0 approve, 1 request_changes, 2 infra failure" — a
+	// misinvocation reading as request_changes would send the worker off
+	// to fix code that was never reviewed. Same rule the gate script
+	// states for its own usage errors.
+	if cmd.Flags().Changed("timeout") && mqReviewTimeout <= 0 {
+		printMQReviewResult(editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: fmt.Sprintf("--timeout must be a positive number of seconds, got %d", mqReviewTimeout),
+		})
+		return NewSilentExit(2)
+	}
 	result, err := doMQReview(args[0])
 	if err != nil {
 		return err
@@ -121,8 +149,11 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		Branch:        fields.Branch,
 		RehearsedHead: mqReviewRehearsed,
 		Attempt:       mqReviewAttempt,
-		PriorFindings: editorial.BuildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
-		Config:        editorialCfg,
+		// 0 (unset) means "use the rig's .om.json timeout" and passes no
+		// flag — see ReviewRequest.TimeoutSeconds.
+		TimeoutSeconds: mqReviewTimeout,
+		PriorFindings:  editorial.BuildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
+		Config:         editorialCfg,
 	}
 
 	deps := editorial.Deps{
