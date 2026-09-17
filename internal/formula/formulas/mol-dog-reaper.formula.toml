@@ -11,7 +11,9 @@ This is infrastructure cleanup work:
 1. Scan all production databases for candidates
 2. Reap (close) wisps past max_age whose parent is closed/missing, plus step-wisps whose parent molecule is already closed
 3. Purge (delete) closed wisps past purge_age + old closed mail
-4. Auto-close stale issues (>stale_issue_age, not P0/P1, not epics/convoys, no active deps)
+4. Auto-close stale issues (>stale_issue_age, not P0/P1, not infrastructure
+   types/agent beads, no active deps) — dry-run and echo the count first, and
+   skip entirely when auto_close=false
 5. Close completed convoys via `gt convoy check` (tracked-bead status, never staleness)
 6. Report findings and flag anomalies
 
@@ -23,6 +25,7 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
+| auto_close | config | If "false", SKIP the auto-close step entirely (default: run it) |
 | alert_threshold | config | Open wisp count that triggers escalation (default 3000) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
@@ -31,8 +34,23 @@ This is infrastructure cleanup work:
 ## Safety
 
 Reaping closes wisps — reversible (can reopen). Purging deletes rows — irreversible
-but only targets already-closed wisps past retention. Auto-close only targets
-issues that are not P0/P1, not epics, and have no active dependencies.
+but only targets already-closed wisps past retention.
+
+Auto-close is the one destructive step that writes to the durable issue tracker,
+so it carries the whole of the 2026-09-16 mis-close (gt-2qzr, 102 beads) as its
+guard rails. It only targets issues that are not P0/P1, not an infrastructure
+type (epic, convoy, molecule, rig, agent, event), not an agent or infrastructure
+bead by label or id pattern, and have no active dependencies. On top of that:
+
+- `gt reaper auto-close` REFUSES a stale-age below 7d. Never work around a
+  refusal — a refusal IS the designed stop.
+- It REFUSES a run whose candidate count exceeds `--max-closes` (default 20 per
+  database). Nothing is closed on a refusal.
+- daemon.json `patrols.wisp_reaper.auto_close=false` disarms the step. Do not
+  pass `--force`.
+- **Dry run first, every run.** Run `gt reaper auto-close --dry-run` and report
+  the candidate count before running it for real. If the count is a surprise,
+  stop and escalate — do not run it live "to see".
 
 ## Scope Boundary (gt-61x, enforced at runtime since gt-9iv)
 
@@ -179,7 +197,26 @@ needs = ["purge"]
 description = """
 Close issues that have been open with no status change past stale_issue_age.
 
-**1. For each database with stale candidates:**
+**Disarm check, before anything else.** The daemon renders the arm state in
+`auto_close={{auto_close}}` (empty or "true" = armed). If that value is the
+literal "false", **SKIP THIS STEP**: do not run `gt reaper auto-close` in any
+form, report "auto-close disarmed" in the final report, and continue to the
+next step. This is a deliberate setting, not a problem to work around.
+
+**1. DRY RUN FIRST — always, no exceptions:**
+```bash
+gt reaper auto-close --db=<name> \\
+  --stale-age={{stale_issue_age}} \\
+  --db-delay={{db_delay}} --dry-run --json
+```
+
+Echo the candidate count in your report BEFORE the live run. The count is the
+whole point of this step: it is the only chance to notice that the threshold or
+a filter is wrong while nothing has been written. If the count is larger than
+you can account for, or exceeds --max-closes (default 20), STOP and escalate —
+do not run live, and do not reach for --force.
+
+**2. Live run, only after the count has been echoed:**
 ```bash
 gt reaper auto-close --db=<name> \\
   --stale-age={{stale_issue_age}} \\
@@ -187,12 +224,17 @@ gt reaper auto-close --db=<name> \\
   {{#if dry_run}}--dry-run{{/if}} --json
 ```
 
-**2. Inspect results:**
-- Review the count of closed issues
-- Verify exclusions are working (P0/P1, epics, dependency-linked issues
-  should never be auto-closed)
+**3. Inspect results:**
+- Review the count of closed issues against the dry-run count — they should match
+- Verify exclusions held: P0/P1, epics, convoys, molecules, agent beads, and
+  dependency-linked issues must never appear as candidates
+- A "REFUSED" line means the run was blocked and nothing was closed. That is a
+  designed stop, not a bug to work around.
 
-**Exit criteria:** All eligible stale issues auto-closed."""
+{{#if dry_run}}**Dry run is set** — step 2 performs no writes.{{/if}}
+
+**Exit criteria:** Dry-run count echoed; all eligible stale issues auto-closed,
+or the step reported as disarmed."""
 
 [[steps]]
 id = "convoy-check"
@@ -239,7 +281,8 @@ Generate summary and signal completion.
 **Wisps reaped**: (total closed stale open wisps)
 **Wisps purged**: (total deleted old closed wisps)
 **Mail purged**: (total deleted old closed mail)
-**Issues auto-closed**: (stale > stale_issue_age, excl. epics/convoys/P0-P1/deps)
+**Issues auto-closed**: (stale > stale_issue_age, excl. epics/convoys/molecules/P0-P1/deps)
+**Auto-close dry-run count**: (candidates reported before the live run, or "disarmed")
 **Convoys closed**: (all tracked beads closed, via gt convoy check)
 **Open wisps remaining**: (total)
 **Anomalies**: (list any anomalies found)
@@ -262,8 +305,12 @@ description = "Max closed wisp age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
 [vars.stale_issue_age]
-description = "Max issue staleness before auto-close (e.g., '720h' = 30 days)"
+description = "Max issue staleness before auto-close (e.g., '720h' = 30 days; '30d' also accepted)"
 default = "720h"
+
+[vars.auto_close]
+description = "If 'false', skip the auto-close step entirely. Empty (default) means armed."
+default = ""
 
 [vars.mail_delete_age]
 description = "Max closed mail age before purging (e.g., '168h' = 7 days)"

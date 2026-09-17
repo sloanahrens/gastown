@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -78,6 +80,137 @@ func TestDefaultReaperIntervalIsOneHour(t *testing.T) {
 	// Verify the default changed from 30m to 1h per issue gt-caf7.
 	if defaultWispReaperInterval != 1*time.Hour {
 		t.Errorf("expected default interval 1h, got %v", defaultWispReaperInterval)
+	}
+}
+
+// TestDefaultStaleIssueAgeMatchesFormula is the regression guard for gt-2qzr.
+// The daemon used to hardcode 7d and inject it on the dog path, overriding the
+// mol-dog-reaper formula's 720h default; agent beads are idle by design and
+// were 8d old, so the shorter threshold swept every agent bead in the town.
+func TestDefaultStaleIssueAgeMatchesFormula(t *testing.T) {
+	if defaultStaleIssueAge != 30*24*time.Hour {
+		t.Fatalf("defaultStaleIssueAge = %v, want 720h to match the mol-dog-reaper formula default",
+			defaultStaleIssueAge)
+	}
+	if got := wispReaperStaleIssueAge(nil); got != defaultStaleIssueAge {
+		t.Fatalf("wispReaperStaleIssueAge(nil) = %v, want %v", got, defaultStaleIssueAge)
+	}
+}
+
+func TestWispReaperStaleIssueAge(t *testing.T) {
+	config := &DaemonPatrolConfig{
+		Patrols: &PatrolsConfig{
+			WispReaper: &WispReaperConfig{StaleIssueAgeStr: "45d"},
+		},
+	}
+	// The formula renders the default as "30d"; time.ParseDuration rejects that
+	// as "unknown unit d", so the day suffix has to be understood here.
+	if got := wispReaperStaleIssueAge(config); got != 45*24*time.Hour {
+		t.Errorf("expected 45d, got %v", got)
+	}
+
+	config.Patrols.WispReaper.StaleIssueAgeStr = "nope"
+	if got := wispReaperStaleIssueAge(config); got != defaultStaleIssueAge {
+		t.Errorf("expected default for invalid, got %v", got)
+	}
+}
+
+func TestParseAgeDuration(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{in: "30d", want: 30 * 24 * time.Hour},
+		{in: "1d", want: 24 * time.Hour},
+		{in: "720h", want: 720 * time.Hour},
+		{in: "90m", want: 90 * time.Minute},
+		{in: " 7d ", want: 7 * 24 * time.Hour},
+		{in: "d", wantErr: true},
+		{in: "1.5d", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, c := range cases {
+		got, err := ParseAgeDuration(c.in)
+		if (err != nil) != c.wantErr {
+			t.Errorf("ParseAgeDuration(%q) error = %v, wantErr %v", c.in, err, c.wantErr)
+			continue
+		}
+		if !c.wantErr && got != c.want {
+			t.Errorf("ParseAgeDuration(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestWispReaperAutoCloseKnob(t *testing.T) {
+	yes, no := true, false
+
+	// Unset is not disarmed: the knob exists to disarm, so absence must not
+	// silently change behavior.
+	if WispReaperAutoCloseDisarmed(nil) {
+		t.Error("nil config should not be disarmed")
+	}
+	if WispReaperAutoCloseDisarmed(&DaemonPatrolConfig{Patrols: &PatrolsConfig{}}) {
+		t.Error("config without a wisp_reaper section should not be disarmed")
+	}
+
+	unset := &DaemonPatrolConfig{Patrols: &PatrolsConfig{WispReaper: &WispReaperConfig{}}}
+	if WispReaperAutoCloseDisarmed(unset) {
+		t.Error("unset auto_close should not be disarmed")
+	}
+	if !wispReaperAutoCloseEnabled(unset, false) {
+		t.Error("unset auto_close should leave the dog path enabled")
+	}
+	// The inline fallback runs because Dog dispatch FAILED. Turning a dispatch
+	// error into a sweep of the durable issue tracker is the gt-2qzr failure,
+	// so it needs an explicit opt-in.
+	if wispReaperAutoCloseEnabled(unset, true) {
+		t.Error("unset auto_close should leave the inline fallback disarmed")
+	}
+
+	armed := &DaemonPatrolConfig{Patrols: &PatrolsConfig{WispReaper: &WispReaperConfig{AutoClose: &yes}}}
+	if WispReaperAutoCloseDisarmed(armed) {
+		t.Error("auto_close=true should not be disarmed")
+	}
+	if !wispReaperAutoCloseEnabled(armed, false) || !wispReaperAutoCloseEnabled(armed, true) {
+		t.Error("auto_close=true should enable both paths")
+	}
+
+	disarmed := &DaemonPatrolConfig{Patrols: &PatrolsConfig{WispReaper: &WispReaperConfig{AutoClose: &no}}}
+	if !WispReaperAutoCloseDisarmed(disarmed) {
+		t.Error("auto_close=false should be disarmed")
+	}
+	if wispReaperAutoCloseEnabled(disarmed, false) || wispReaperAutoCloseEnabled(disarmed, true) {
+		t.Error("auto_close=false should disarm both paths")
+	}
+}
+
+// TestDispatchReaperDogReportsFailureCause covers the diagnostics gap from
+// gt-2qzr: the log recorded only "exit status 1", which said nothing about why
+// the sweep had moved to the inline fallback, so the cause went unnoticed.
+func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock")
+	}
+
+	binDir := t.TempDir()
+	fakeGT := filepath.Join(binDir, "gt")
+	script := "#!/bin/sh\necho 'sling: no available dogs in deacon/dogs' >&2\nexit 1\n"
+	if err := os.WriteFile(fakeGT, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		gtPath: fakeGT,
+		logger: log.New(io.Discard, "", 0),
+	}
+	err := d.dispatchReaperDog(map[string]string{"max_age": "1h"})
+	if err == nil {
+		t.Fatal("dispatchReaperDog() error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "no available dogs") {
+		t.Errorf("dispatchReaperDog() error = %q, want it to carry the command's stderr", err)
 	}
 }
 
