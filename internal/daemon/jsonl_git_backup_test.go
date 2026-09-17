@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestGitChildEnv_ForwardsExisting(t *testing.T) {
@@ -884,4 +886,185 @@ func TestEscalationTitle_TruncatedToMaxLen(t *testing.T) {
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("truncated title should end with ellipsis, got %q", got)
 	}
+}
+
+// TestDefaultEscalationTimeout verifies the per-attempt timeout is long enough
+// to survive slot-starvation (the condition that produced gt-tlwv drops).
+func TestDefaultEscalationTimeout(t *testing.T) {
+	if defaultEscalationTimeout != 60*time.Second {
+		t.Errorf("defaultEscalationTimeout = %v, want 60s", defaultEscalationTimeout)
+	}
+}
+
+// TestMaxEscalationRetries verifies the retry budget.
+func TestMaxEscalationRetries(t *testing.T) {
+	if maxEscalationRetries != 3 {
+		t.Errorf("maxEscalationRetries = %d, want 3", maxEscalationRetries)
+	}
+}
+
+// TestEscalate_RetriesOnTimeout verifies that escalate retries when gt
+// escalate takes too long, and eventually succeeds.
+func TestEscalate_RetriesOnTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for gt")
+	}
+
+	townRoot := t.TempDir()
+	callCount := 0
+	var mu sync.Mutex
+	gtLog := filepath.Join(t.TempDir(), "gt.log")
+
+	// Fake gt that sleeps past the 60 s timeout on the first 2 calls,
+	// then succeeds on the 3rd.
+	gtScript := `#!/usr/bin/env bash
+echo "$@" >> "` + gtLog + `"
+mu.lock()
+callCount=$((callCount + 1))
+if [ $callCount -lt 3 ]; then
+	# Sleep past the 60 s timeout so CommandContext kills us.
+	sleep 120
+	exit 0
+fi
+exit 0
+`
+	// Use a file-based counter instead of bash variable for safety.
+	counterFile := filepath.Join(t.TempDir(), "counter")
+	os.WriteFile(counterFile, []byte("0"), 0644)
+
+	gtScript2 := `#!/usr/bin/env bash
+echo "$@" >> "` + gtLog + `"
+counter=` + counterFile + `
+count=$(cat "$counter")
+count=$((count + 1))
+echo "$count" > "$counter"
+if [ $count -lt 3 ]; then
+	sleep 120
+	exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(t.TempDir(), "gt"), []byte(gtScript2), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript2), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logger := log.New(os.Stderr, "TestEscalate_RetriesOnTimeout: ", log.LstdFlags)
+	d := &Daemon{
+		logger: logger,
+		config: DaemonConfig{
+			TownRoot: townRoot,
+		},
+	}
+
+	// Run escalate in a goroutine with a short overall timeout so the test
+	// doesn't hang if the fake gt misbehaves.
+	done := make(chan struct{})
+	go func() {
+		d.escalate("main_branch_test", "test failed")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — escalate completed.
+	case <-time.After(5 * time.Second):
+		t.Fatal("escalate did not complete within 5 s — fake gt may not have retried correctly")
+	}
+
+	// Verify the fake gt was called 3 times (3 attempts).
+	count, err := os.ReadFile(counterFile)
+	if err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if strings.TrimSpace(string(count)) != "3" {
+		t.Errorf("gt called %d times, want 3", strings.TrimSpace(string(count)))
+	}
+}
+
+// TestEscalate_FallsBackToFeedOnPermanentFailure verifies that when gt
+// escalate always fails, the full message is logged to the feed (not just
+// the title).
+func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for gt")
+	}
+
+	townRoot := t.TempDir()
+	feedFile := filepath.Join(townRoot, "feed.jsonl")
+	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
+		t.Fatalf("mkdir daemon: %v", err)
+	}
+
+	// Fake gt that always fails with stderr output.
+	gtScript := `#!/usr/bin/env bash
+echo "bd: database not found" >&2
+exit 1
+`
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logger := log.New(os.Stderr, "TestEscalate_Fallback: ", log.LstdFlags)
+	d := &Daemon{
+		logger: logger,
+		config: DaemonConfig{
+			TownRoot: townRoot,
+		},
+	}
+
+	testMessage := "main branch test failures:\ngastown: gate \"test\": exit status 1"
+	d.escalate("main_branch_test", testMessage)
+
+	// Verify the feed file received the escalation_dropped event with the
+	// full message (not just the title).
+	data, err := os.ReadFile(feedFile)
+	if err != nil {
+		t.Fatalf("read feed: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected feed output, got empty file")
+	}
+
+	var record map[string]interface{}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("parse feed record: %v", err)
+	}
+
+	// The message field should contain the full test message.
+	msg, ok := record["message"].(string)
+	if !ok {
+		t.Fatalf("expected 'message' field in feed record, got keys: %v", keys(record))
+	}
+	if msg != testMessage {
+		t.Errorf("feed message = %q, want %q", msg, testMessage)
+	}
+
+	// The title should be truncated to the first line.
+	title, ok := record["title"].(string)
+	if !ok {
+		t.Fatalf("expected 'title' field in feed record")
+	}
+	if strings.Contains(title, "\n") {
+		t.Errorf("title should not contain newline: %q", title)
+	}
+	if title != "main_branch_test: main branch test failures:" {
+		t.Errorf("title = %q, want 'main_branch_test: main branch test failures:'", title)
+	}
+}
+
+// keys returns the map keys for debugging.
+func keys(m map[string]interface{}) []string {
+	var ks []string
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }
