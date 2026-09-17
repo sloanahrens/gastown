@@ -10,10 +10,11 @@ import (
 
 // makeFakePolecatTown builds a minimal on-disk town tree at town, mirroring
 // the real layout so the path classifier can be exercised against a real
-// structure.
+// structure. Includes a .gt marker so workspace.FindFromCwdOrError() finds it.
 func makeFakePolecatTown(t *testing.T, town string) string {
 	t.Helper()
 	for _, d := range []string{
+		".gt",
 		"mayor",
 		"logs",
 		".dolt-data",
