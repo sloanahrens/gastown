@@ -709,7 +709,7 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 // RejectMR manually rejects a merge request.
 // It closes the MR with rejected status and optionally notifies the worker.
 // noRecover skips dead-worker recovery of the source bead entirely — set it
-// for a superseded/duplicate/cancelled MR where the source issue must not be
+// for a superseded/duplicate/canceled MR where the source issue must not be
 // reopened regardless of what its close_reason says (gt-pvwy).
 // Returns the rejected MR for display purposes.
 func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noRecover bool) (*MergeRequest, error) {

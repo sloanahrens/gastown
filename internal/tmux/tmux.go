@@ -1642,7 +1642,7 @@ func (t *Tmux) DetectBlockingQuestionDialog(session string) (string, bool, error
 
 // DismissBlockingQuestionDialog sends Escape to cancel a blocking
 // interactive tool call. Escape cancels the tool invocation cleanly
-// (the tool returns "cancelled") rather than fabricating an answer by
+// (the tool reports the dialog as canceled) rather than fabricating an answer by
 // guessing a menu option — see gt-z83 design note (2).
 func (t *Tmux) DismissBlockingQuestionDialog(session string) error {
 	_, err := t.run("send-keys", "-t", session, "Escape")

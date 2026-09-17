@@ -2835,7 +2835,7 @@ func (m *Manager) lookupHooked(assignee string, batch *beadsBatch) (*beads.Issue
 
 // lookupAgentBead returns the agent bead and its parsed fields for agentID,
 // preferring batch data (see beadsBatch) over a per-polecat bd call.
-func (m *Manager) lookupAgentBead(agentID string, batch *beadsBatch) (*beads.Issue, *beads.AgentFields, error) {
+func (m *Manager) lookupAgentBead(agentID string, batch *beadsBatch) (*beads.Issue, *beads.AgentFields, error) { //nolint:unparam // the issue is part of the lookup API; current callers only need the fields
 	if batch != nil && batch.agentBeadsByID != nil {
 		issue, ok := batch.agentBeadsByID[agentID]
 		if !ok || issue == nil {
@@ -3037,7 +3037,7 @@ func (m *Manager) setupSharedBeads(clonePath string) error {
 	return nil
 }
 
-func (m *Manager) resolveSetupCommand(worktreePath string) string {
+func (m *Manager) resolveSetupCommand(worktreePath string) string { //nolint:unparam // worktreePath kept for the repo-committed settings lookup the tests exercise
 	if result := m.rig.GetConfigWithSource("setup_command"); result.Source != rig.SourceNone && result.Source != rig.SourceSystem {
 		if result.Source == rig.SourceBlocked {
 			return ""

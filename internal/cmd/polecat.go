@@ -1549,7 +1549,7 @@ func activeMRGitSafeForWorktree(worktreePath string) bool {
 	return pushed && unpushed == 0
 }
 
-func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) {
+func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) { //nolint:unparam // blocker is diagnostic output for tests/logging; callers discard it today
 	if hookBead == "" {
 		return true, false, ""
 	}

@@ -27,7 +27,7 @@ func parseIssueTime(s string) time.Time {
 }
 
 // cleanupSeverity orders cleanup_status values for reconciliation:
-// blocking (has_uncommitted, has_stash, has_unpushed, anything unrecognised)
+// blocking (has_uncommitted, has_stash, has_unpushed, anything unrecognized)
 // > unknown (empty or null, which fails closed) > clean. Only 'clean' clears.
 func cleanupSeverity(v string) int {
 	switch v {

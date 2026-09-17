@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint lint-tools
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -49,8 +49,17 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
 
+# golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
+# a stale ~/go/bin/golangci-lint fails every run with "can't load config" (2026-09-17). `make lint-tools`
+# installs the pinned version with the current toolchain.
+GOLANGCI_LINT_VERSION ?= v2.13.2
+
+lint-tools:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
 lint:
-	golangci-lint run --timeout=5m
+	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
+	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 
 desktop-build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop

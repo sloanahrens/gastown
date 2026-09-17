@@ -2383,7 +2383,7 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 // recoverDialogBlockedPolecat implements the gt-z83 recovery sequence for a
 // polecat stuck behind an interactive question/selection dialog:
 //  1. Send Escape to cancel the blocking tool call — the tool returns
-//     "cancelled" so no fabricated answer enters the agent's context.
+//     "canceled" so no fabricated answer enters the agent's context.
 //  2. Nudge the session to decide autonomously, or escalate itself if a
 //     human decision is genuinely required.
 //  3. Escalate MEDIUM to the mayor with the captured question text and
@@ -2399,7 +2399,7 @@ func recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, qu
 
 	dismissErr := t.DismissBlockingQuestionDialog(sessionName)
 
-	nudgeMsg := "Unattended agent — a blocking interactive dialog was detected and cancelled. " +
+	nudgeMsg := "Unattended agent — a blocking interactive dialog was detected and canceled. " +
 		"Decide autonomously and continue. If a human decision is genuinely required, " +
 		`run "gt escalate -s medium '<question>'" instead of waiting on interactive input.`
 	nudgeErr := t.NudgeSession(sessionName, nudgeMsg)

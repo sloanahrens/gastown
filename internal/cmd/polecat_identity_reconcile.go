@@ -182,7 +182,7 @@ func runReconcile(out io.Writer, townRoot, id string, apply, deleteOnly bool) er
 		if len(rows) == 0 {
 			fmt.Fprintln(tw, "(no differing fields; --apply is archive+delete only)")
 		}
-		tw.Flush()
+		_ = tw.Flush()
 	} else {
 		fmt.Fprintln(out, "delete-only: skipping merge; archive + delete + verify only.")
 	}

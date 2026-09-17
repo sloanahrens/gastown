@@ -17,7 +17,7 @@ import (
 // StateCollapseFinding is a single detected "recorded as done, not in force"
 // contradiction: a source issue is closed while the merge-request bead that
 // exists to land its fix is still open. This is the failure signature
-// catalogued in gt-zzd (instances 4 and 6): a bead can be closed
+// cataloged in gt-zzd (instances 4 and 6): a bead can be closed
 // independently of its MR merging, and nothing previously re-checked that
 // after the fact — every prior instance was caught by an agent reading
 // source by hand, never by a mechanism.
@@ -47,7 +47,7 @@ type DetectStateCollapseResult struct {
 // issue only happens alongside closing its MR during a normal merge (see
 // refinery post-merge handling) — a closed issue with a still-open MR is
 // therefore never expected, and is exactly the "trusting a close" failure
-// mode gt-zzd's own catalogue flags as never caught mechanically.
+// mode gt-zzd's own catalog flags as never caught mechanically.
 //
 // Each finding is recorded as a bead comment on the source issue (durable,
 // discoverable via `bd show`) and escalated to the rig's mayor by mail, with

@@ -345,7 +345,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acquiring container-gate slot for batch gate: %w", slotErr)
 	}
 	if h != nil {
-		defer h.Release()
+		defer func() { _ = h.Release() }()
 	}
 
 	result := eng.ProcessBatch(ctx, batch, target, batchCfg)

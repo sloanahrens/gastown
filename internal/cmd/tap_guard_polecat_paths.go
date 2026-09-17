@@ -883,7 +883,7 @@ func redirectTargets(command string) []string {
 	return targets
 }
 
-// readShellWord reads one shell word starting at start, honouring quotes and
+// readShellWord reads one shell word starting at start, honoring quotes and
 // escapes, and returns its unquoted content plus the index just past it.
 func readShellWord(runes []rune, start int) (string, int) {
 	var b strings.Builder

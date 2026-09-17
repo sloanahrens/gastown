@@ -39,7 +39,7 @@ type CommitFileChange struct {
 //
 // Merge commits contribute nothing: git log --raw prints no diff for a merge
 // without -m/-c, and the changes a merge brings in are already reported by the
-// commits it merges, which the same walk visits. That is the behaviour this
+// commits it merges, which the same walk visits. That is the behavior this
 // caller wants — a merge's own patch is not a unit anyone reverts.
 //
 // Paths are read with -z so files with spaces, quotes or newlines in their

@@ -472,7 +472,7 @@ func listCrewWorkers(townRoot, rigName string) []string {
 // addLabelSQL adds a label to a bead via direct SQL INSERT.
 // This bypasses bd's prefix routing, which silently fails for beads with
 // legacy/unroutable prefixes (GH#2127).
-func addLabelSQL(workDir, beadID, label string) error {
+func addLabelSQL(workDir, beadID, label string) error { //nolint:unparam // label is a parameter on purpose; every caller happens to add gt:agent today
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("INSERT IGNORE INTO labels (issue_id, label) VALUES ('%s', '%s')", escapedID, escapedLabel)

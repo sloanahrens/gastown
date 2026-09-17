@@ -471,9 +471,9 @@ func runWithProgress(interval time.Duration, fn func() error, progress func(time
 func reportVerifyProgress(logFile *os.File, msg string) {
 	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05"), msg)
 	if logFile != nil {
-		fmt.Fprint(logFile, line)
+		_, _ = fmt.Fprint(logFile, line)
 	}
-	fmt.Fprint(os.Stdout, line)
+	_, _ = fmt.Fprint(os.Stdout, line)
 }
 
 // currentSlotHolder renders the container-gate slot's current holder for a

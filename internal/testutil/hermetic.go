@@ -541,7 +541,7 @@ func (s *townSnapshot) diff() []string {
 // other town tooling) writes via write-temp-then-rename, so any concurrent
 // bd invocation by any agent during a test window creates and then deletes
 // one of these — indistinguishable from the .lock churn already tolerated
-// below (gt-wdr, the file-entry analogue of gt-ro0's event-actor exemption).
+// below (gt-wdr, the file-entry analog of gt-ro0's event-actor exemption).
 func isAtomicWriteTemp(name string) bool {
 	return strings.HasPrefix(filepath.Base(name), ".~")
 }

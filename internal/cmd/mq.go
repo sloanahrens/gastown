@@ -159,7 +159,7 @@ var mqRejectCmd = &cobra.Command{
 This closes the MR with a 'rejected' status without merging.
 The source issue is NOT closed (work is not done); when the worker can no
 longer act on it, its source bead is reopened for redispatch — unless the
-bead's own close_reason marks it deliberately cancelled/superseded/already
+bead's own close_reason marks it deliberately canceled/superseded/already
 merged, in which case reopening is skipped automatically.
 
 For an MR whose source work is superseded, duplicate, or already landed via

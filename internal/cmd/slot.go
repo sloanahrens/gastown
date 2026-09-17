@@ -86,7 +86,7 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
-	defer h.Release()
+	defer func() { _ = h.Release() }()
 	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot %d/%d acquired (role=%s).\n", h.Index, pool.Slots, role)
 
 	sub := exec.Command(args[0], args[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation

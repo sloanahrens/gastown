@@ -346,7 +346,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
-	defer h.Release()
+	defer func() { _ = h.Release() }()
 
 	// The test-run timeout starts here, after the slot is held, not at the
 	// top of this function — a slot wait can take up to

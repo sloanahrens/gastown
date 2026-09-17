@@ -105,7 +105,7 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 var deliberateTerminalCloseReasonMarkers = []string{
 	"supersede", // matches "superseded", "supersedes"
 	"duplicate",
-	"cancel", // matches "cancelled", "canceled"
+	"cancel", // prefix match: covers both spellings of canceled
 	"wontfix",
 	"won't fix",
 	"not-planned",
@@ -115,7 +115,7 @@ var deliberateTerminalCloseReasonMarkers = []string{
 }
 
 // isDeliberateTerminalCloseReason reports whether a closed bead's close_reason
-// indicates the closure was intentional (cancelled/superseded/duplicate/already
+// indicates the closure was intentional (canceled/superseded/duplicate/already
 // merged elsewhere) rather than "the assigned worker finished the work and
 // closed it themselves" — the only case dead-worker recovery should resurrect.
 func isDeliberateTerminalCloseReason(reason string) bool {
@@ -154,7 +154,7 @@ func isDeliberateTerminalCloseReason(reason string) bool {
 // worker no longer holds it — closed (gt done already ran) or unassigned —
 // and is skipped when a *different* worker plainly owns it now, when this
 // same worker still holds an open bead and its session is confirmed alive,
-// or when a closed bead's own close_reason marks it deliberately cancelled,
+// or when a closed bead's own close_reason marks it deliberately canceled,
 // superseded, or already landed via another MR (gt-pvwy) — reopening those
 // resurrects work an operator or a prior merge already finished.
 //
@@ -186,7 +186,7 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 
 	// A terminal bead is not automatically safe to resurrect: it may be
 	// closed because the worker finished it (reopen is right), but it may
-	// also be closed because an operator deliberately cancelled/superseded
+	// also be closed because an operator deliberately canceled/superseded
 	// it, or because the work already landed via a different MR (gt-pvwy —
 	// the superseded-duplicate case that motivated this check happened for
 	// real: gt-wisp-bakv, closed as superseded, would have been resurrected
@@ -194,7 +194,7 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	// cheap, decisive signal a status/assignee check alone cannot give.
 	if status.IsTerminal() {
 		if reason := strings.TrimSpace(issue.CloseReason); reason != "" && isDeliberateTerminalCloseReason(reason) {
-			logf("[Engineer] Source bead %s closed deliberately (close_reason=%q) — skipping dead-worker recovery to avoid resurrecting cancelled/superseded/already-merged work\n", req.SourceIssue, reason)
+			logf("[Engineer] Source bead %s closed deliberately (close_reason=%q) — skipping dead-worker recovery to avoid resurrecting canceled/superseded/already-merged work\n", req.SourceIssue, reason)
 			return false
 		}
 	}
