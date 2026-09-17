@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -1523,11 +1522,8 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 	// an unblocked command can exceed that window, producing a false failure.
 	// We check the parent process load (not the spawned subprocesses) because
 	// that's the indicator of town-wide saturation.
-	var loadavg [3]float64
-	if _, err := syscall.Getloadavg(); err == nil {
-		if loadavg[0] > 8 {
-			t.Skipf("skipping under high load (%.2f): timing-sensitive assertion", loadavg[0])
-		}
+	if load := getLoadavg(); load > 8 {
+		t.Skipf("skipping under high load (%.2f): timing-sensitive assertion", load)
 	}
 
 	tmp := t.TempDir()
