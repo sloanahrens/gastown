@@ -88,6 +88,11 @@ type Daemon struct {
 	gtPath string
 	bdPath string
 
+	// slotRunner wraps a command through `gt slot run` so its Docker containers
+	// are marked as a first-class slot holder, visible to the slot's content-based
+	// guard (gt-uoqg). When nil, commands run unwrapped (used by tests).
+	slotRunner func(rigName, command string) string
+
 	// wispConfigMissingWarned tracks rigs we've already logged a missing-wisp-config
 	// notice for, so isRigOperational logs it at most once per rig per process
 	// lifetime instead of on every patrol-candidate evaluation (gt-k07).

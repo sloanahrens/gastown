@@ -330,6 +330,9 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: log.New(os.Stderr, "", 0),
+		// No-op slotRunner prevents the daemon from shelling out to `gt slot run`
+		// during hermetic tests (gt-uoqg remedy b: stub the slot runner).
+		slotRunner: func(rigName, command string) string { return command },
 	}
 
 	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
@@ -371,6 +374,7 @@ func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: log.New(os.Stderr, "", 0),
+		slotRunner: func(rigName, command string) string { return command },
 	}
 
 	marker := filepath.Join(workDir, "setup-ran")
@@ -398,6 +402,7 @@ func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: log.New(os.Stderr, "", 0),
+		slotRunner: func(rigName, command string) string { return command },
 	}
 
 	marker := filepath.Join(workDir, "test-ran")
@@ -427,6 +432,7 @@ func TestRunRigGates_MissingSetupCommandUnchanged(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: log.New(os.Stderr, "", 0),
+		slotRunner: func(rigName, command string) string { return command },
 	}
 
 	gateCfg := &rigGateConfig{TestCommand: "exit 0"}
@@ -566,8 +572,8 @@ func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	if !config.Patrols.MainBranchTest.Enabled {
 		t.Error("expected MainBranchTest.Enabled=true")
 	}
-	if config.Patrols.MainBranchTest.IntervalStr != "30m" {
-		t.Errorf("expected interval '30m', got %q", config.Patrols.MainBranchTest.IntervalStr)
+	if config.Patrols.MainBranchTest.IntervalStr != "2h" {
+		t.Errorf("expected interval '2h', got %q", config.Patrols.MainBranchTest.IntervalStr)
 	}
 	if config.Patrols.MainBranchTest.TimeoutStr != "10m" {
 		t.Errorf("expected timeout '10m', got %q", config.Patrols.MainBranchTest.TimeoutStr)

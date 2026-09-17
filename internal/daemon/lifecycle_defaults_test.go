@@ -75,8 +75,8 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 	if p.MainBranchTest == nil || !p.MainBranchTest.Enabled {
 		t.Error("expected main_branch_test to be enabled")
 	}
-	if p.MainBranchTest.IntervalStr != "30m" {
-		t.Errorf("expected main_branch_test interval 30m, got %s", p.MainBranchTest.IntervalStr)
+	if p.MainBranchTest.IntervalStr != "2h" {
+		t.Errorf("expected main_branch_test interval 2h, got %s", p.MainBranchTest.IntervalStr)
 	}
 	if p.MainBranchTest.TimeoutStr != "10m" {
 		t.Errorf("expected main_branch_test timeout 10m, got %s", p.MainBranchTest.TimeoutStr)

@@ -11,7 +11,7 @@ package daemon
 //   - JSONL Git Backup: every 15m
 //   - Dolt Filesystem Backup: every 15m
 //   - Scheduled Maintenance (FLATTEN): daily at 03:00, threshold 1000
-//   - Main Branch Test: every 30m, 10m timeout per rig
+//   - Main Branch Test: every 2h, 10m timeout per rig
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	threshold := 1000
 	scrub := true
@@ -60,7 +60,7 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 			},
 			MainBranchTest: &MainBranchTestConfig{
 				Enabled:     true,
-				IntervalStr: "30m",
+				IntervalStr: "2h",
 				TimeoutStr:  "10m",
 			},
 			Handler: &PatrolConfig{

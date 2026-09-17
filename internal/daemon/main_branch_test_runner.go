@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultMainBranchTestInterval = 30 * time.Minute
+	defaultMainBranchTestInterval = 2 * time.Hour
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 
 	// maxDiagnosticLines bounds how many matching failure lines go into the
@@ -29,6 +29,12 @@ const (
 	// waits for the container-gate slot before giving up on a rig's run,
 	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
 	mainBranchTestSlotTimeout = 60 * time.Minute
+
+	// mainBranchTestSlotRunTimeout is the --timeout passed to `gt slot run`
+	// when wrapping test commands. It is an outer bound longer than the per-rig
+	// test timeout (10m) so the slot wrapper never binds before the parent
+	// context cancels (gt-uoqg).
+	mainBranchTestSlotRunTimeout = 15 * time.Minute
 
 	// mainBranchTestSetupTimeout bounds the git fetch/worktree-add/rev-parse
 	// steps that run before the container-gate slot is acquired. Kept
@@ -93,7 +99,7 @@ type MainBranchTestConfig struct {
 	Rigs []string `json:"rigs,omitempty"`
 }
 
-// mainBranchTestInterval returns the configured interval, or the default (30m).
+// mainBranchTestInterval returns the configured interval, or the default (2h).
 func mainBranchTestInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil {
 		if config.Patrols.MainBranchTest.IntervalStr != "" {
@@ -341,6 +347,13 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	}
 	defer h.Release()
 
+	// Wire the slot runner so runCommandOnWorktree wraps gate commands through
+	// `gt slot run`, making their Docker containers visible to the slot's
+	// content-based guard as a first-class holder (gt-uoqg).
+	d.slotRunner = func(rigName, command string) string {
+		return slotRunWrapper(rigName, command)
+	}
+
 	// The test-run timeout starts here, after the slot is held, not at the
 	// top of this function — a slot wait can take up to
 	// mainBranchTestSlotTimeout (60m), and starting the clock before that
@@ -386,6 +399,18 @@ func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
 	return slot.Acquire(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout)
 }
 
+// slotRunWrapper formats a command for wrapping through `gt slot run` so its
+// Docker containers are visible as a first-class slot holder to the slot's
+// content-based guard (gt-uoqg). The wrapper is safe to use when the slot is
+// already held: `gt slot run` detects the ancestor's reentrant env marker and
+// returns immediately, so the wrapper is a no-op for slot acquisition — it
+// just ensures the command runs with the slot properly established for container
+// marking.
+func slotRunWrapper(rigName, command string) string {
+	return fmt.Sprintf("gt slot run --role %s/main-branch-test --timeout %s -- %s",
+		rigName, mainBranchTestSlotRunTimeout, command)
+}
+
 // commitTested returns the commit SHA checked out in the worktree, or ""
 // if it can't be determined — the escalation body degrades gracefully
 // rather than failing the whole test run over this.
@@ -421,9 +446,17 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDi
 // diagnose the failure (FAIL/panic/build-error lines, not a blind tail that
 // can be all-"ok" noise from later packages), and the log path so the mayor
 // can triage without rerunning (gt-1s2g).
+//
+// If d.slotRunner is set, the command is wrapped through `gt slot run` so its
+// Docker containers are marked as a first-class slot holder, visible to the
+// slot's content-based guard (gt-uoqg). When slotRunner is nil (tests), the
+// command runs unwrapped.
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
 
+	if d.slotRunner != nil {
+		command = d.slotRunner(rigName, command)
+	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
