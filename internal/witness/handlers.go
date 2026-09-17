@@ -1699,13 +1699,13 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 				continue
 			}
 
-			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap); found {
+			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, agentBeadID); found {
 				result.Zombies = append(result.Zombies, zombie)
 			}
 			continue // Either handled or not a zombie
 		}
 
-		if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap); found {
+		if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap, agentBeadID); found {
 			result.Zombies = append(result.Zombies, zombie)
 		}
 	}
@@ -1723,7 +1723,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats, restarts their
 // sessions to preserve worktrees and branches.
-func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot) (ZombieResult, bool) {
+func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot
 	// instead of calling getAgentBeadState multiple times per code path.
 	snapState, snapHook := "", ""
@@ -1782,6 +1782,9 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
+		// Clear ALL done-intent labels before restart so the polecat doesn't
+		// immediately re-trigger stuck-in-done on the next patrol cycle (gt-wmpy).
+		clearAllDoneIntentLabels(bd, workDir, agentBeadID)
 		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
 			zombie.Error = err
 			zombie.Action = fmt.Sprintf("restart-stuck-session-failed: %v", err)
@@ -1960,7 +1963,7 @@ func hasSuccessfulSubmissionEvidence(snap *agentBeadSnapshot) bool {
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats with dead sessions,
 // restarts them to preserve worktrees and branches.
-func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, detectedAt time.Time, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot) (ZombieResult, bool) {
+func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, detectedAt time.Time, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot.
 	snapState, snapHook := "", ""
 	if snap != nil {
@@ -2010,6 +2013,10 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 
 		// gt-dsgp: Restart instead of nuke — the session died during gt done,
 		// restart it so it can retry the exit sequence or pick up new work.
+		// Clear ALL done-intent labels before restart so the polecat doesn't
+		// immediately re-trigger stuck-in-done on the next patrol cycle (gt-wmpy).
+		clearAllDoneIntentLabels(bd, workDir, agentBeadID)
+
 		zombie := ZombieResult{
 			PolecatName:    polecatName,
 			AgentState:     snapState,
@@ -3330,8 +3337,11 @@ type DoneIntent struct {
 }
 
 // extractDoneIntent parses a done-intent:<type>:<unix-ts> label from a label list.
-// Returns nil if no done-intent label is found or if the label is malformed.
+// When multiple done-intent labels exist (from repeated gt done attempts), returns
+// the one with the NEWEST timestamp — the live intent supersedes stale ones.
+// Returns nil if no done-intent label is found or if all are malformed.
 func extractDoneIntent(labels []string) *DoneIntent {
+	var best *DoneIntent
 	for _, label := range labels {
 		if !strings.HasPrefix(label, "done-intent:") {
 			continue
@@ -3339,18 +3349,22 @@ func extractDoneIntent(labels []string) *DoneIntent {
 		// Format: done-intent:<type>:<unix-ts>
 		parts := strings.SplitN(label, ":", 3)
 		if len(parts) != 3 {
-			return nil // Malformed
+			continue // Malformed — skip, don't abort
 		}
 		ts, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return nil // Malformed timestamp
+			continue // Malformed timestamp — skip
 		}
-		return &DoneIntent{
+		candidate := &DoneIntent{
 			ExitType:  parts[1],
 			Timestamp: time.Unix(ts, 0),
 		}
+		// Keep the newest label (largest timestamp).
+		if best == nil || candidate.Timestamp.After(best.Timestamp) {
+			best = candidate
+		}
 	}
-	return nil
+	return best
 }
 
 // sessionRecreated checks whether a tmux session was (re)created after the
@@ -3370,6 +3384,41 @@ func sessionRecreated(t *tmux.Tmux, sessionName string, detectedAt time.Time) bo
 	}
 	return !createdAt.Before(detectedAt)
 }
+
+// clearAllDoneIntentLabels removes ALL done-intent:* labels from the agent bead.
+// Called before RestartPolecatSession to prevent immediate re-trigger on the next
+// patrol cycle (a single polecat can accumulate multiple stale labels from repeated
+// gt done attempts; only clearing the newest one leaves the rest to fire later).
+func clearAllDoneIntentLabels(bd *BdCli, workDir, agentBeadID string) {
+	if agentBeadID == "" {
+		return
+	}
+	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
+	if err != nil || output == "" {
+		return // Bead gone or unreadable
+	}
+	var issues []struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+		return
+	}
+	var toRemove []string
+	for _, label := range issues[0].Labels {
+		if strings.HasPrefix(label, "done-intent:") {
+			toRemove = append(toRemove, label)
+		}
+	}
+	if len(toRemove) == 0 {
+		return // Nothing to clear
+	}
+	for _, label := range toRemove {
+		if err := bd.Run(workDir, "update", agentBeadID, "--remove-label="+label); err != nil {
+			fmt.Fprintf(os.Stderr, "witness: clear done-intent label %q on %s: %v\n", label, agentBeadID, err)
+		}
+	}
+}
+
 
 // findAnyCleanupWisp checks if any cleanup wisp already exists for a polecat,
 // regardless of state. Used to prevent duplicate escalation on repeated patrol
