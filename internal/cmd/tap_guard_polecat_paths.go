@@ -210,9 +210,40 @@ func extractBashTargets(input []byte) []string {
 		if hasGlobMeta(tok) {
 			continue // glob tokens resolved by shell before the walker runs
 		}
+		// Extract file paths from Python open() calls: open('path') or open("path").
+		if path := extractOpenPath(tok); path != "" {
+			targets = append(targets, path)
+			continue
+		}
 		targets = append(targets, tok)
 	}
 	return targets
+}
+
+// extractOpenPath checks if a token is a Python open() call argument and
+// returns the file path inside the quotes, or "" if not an open() call.
+func extractOpenPath(tok string) string {
+	const prefix = "open("
+	if !strings.HasPrefix(tok, prefix) {
+		return ""
+	}
+	inner := strings.TrimPrefix(tok, prefix)
+	// Strip trailing paren/paren-comma if present.
+	inner = strings.TrimSuffix(inner, ")")
+	inner = strings.TrimSuffix(inner, "),")
+	// Extract the first quoted string.
+	if len(inner) < 2 {
+		return ""
+	}
+	quote := inner[0]
+	if quote != '\'' && quote != '"' {
+		return ""
+	}
+	end := strings.IndexByte(inner[1:], quote)
+	if end < 0 {
+		return ""
+	}
+	return inner[1 : 1+end]
 }
 
 // expandAndResolvePath expands ~ / $HOME / ${HOME} prefixes and resolves
