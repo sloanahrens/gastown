@@ -215,6 +215,11 @@ func extractBashTargets(input []byte) []string {
 			targets = append(targets, path)
 			continue
 		}
+		// Extract file paths from Node writeFileSync() calls: writeFileSync('path', ...).
+		if path := extractWriteFileSyncPath(tok); path != "" {
+			targets = append(targets, path)
+			continue
+		}
 		targets = append(targets, tok)
 	}
 	return targets
@@ -224,6 +229,33 @@ func extractBashTargets(input []byte) []string {
 // returns the file path inside the quotes, or "" if not an open() call.
 func extractOpenPath(tok string) string {
 	const prefix = "open("
+	if !strings.HasPrefix(tok, prefix) {
+		return ""
+	}
+	inner := strings.TrimPrefix(tok, prefix)
+	// Strip trailing paren/paren-comma if present.
+	inner = strings.TrimSuffix(inner, ")")
+	inner = strings.TrimSuffix(inner, "),")
+	// Extract the first quoted string.
+	if len(inner) < 2 {
+		return ""
+	}
+	quote := inner[0]
+	if quote != '\'' && quote != '"' {
+		return ""
+	}
+	end := strings.IndexByte(inner[1:], quote)
+	if end < 0 {
+		return ""
+	}
+	return inner[1 : 1+end]
+}
+
+// extractWriteFileSyncPath checks if a token is a Node writeFileSync() call
+// argument (e.g. writeFileSync('path') or writeFileSync("path")) and returns
+// the file path inside the quotes, or "" if not a writeFileSync call.
+func extractWriteFileSyncPath(tok string) string {
+	const prefix = "writeFileSync("
 	if !strings.HasPrefix(tok, prefix) {
 		return ""
 	}
@@ -266,6 +298,16 @@ func expandAndResolvePath(token string) string {
 		}
 		p = filepath.Join(wd, p)
 	}
+
+	// Resolve through symlinks so the Bash guard compares through worktree
+	// symlinks; fall through to the raw path when the target doesn't exist
+	// so downstream town-path checks can still fire.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	// Target doesn't exist — return the cleaned path so downstream
+	// town-path checks (isBlockedTownPath) can still reject sibling
+	// worktrees and restricted town dirs.
 	return filepath.Clean(p)
 }
 
@@ -324,6 +366,10 @@ func isPathInPolecatWorktree(targetPath, worktreeRoot string) bool {
 	// Try resolving symlinks; fail closed on error.
 	resolved, err := filepath.EvalSymlinks(targetPath)
 	if err == nil {
+		// Match the worktree root itself (not just its contents).
+		if strings.ToLower(resolved) == worktreeLower {
+			return true
+		}
 		return isPathWithinCaseInsensitive(resolved, worktreeResolved)
 	}
 
