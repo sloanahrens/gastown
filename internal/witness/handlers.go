@@ -1699,13 +1699,13 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 				continue
 			}
 
-			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap); found {
+			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, agentBeadID); found {
 				result.Zombies = append(result.Zombies, zombie)
 			}
 			continue // Either handled or not a zombie
 		}
 
-		if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap); found {
+		if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap, agentBeadID); found {
 			result.Zombies = append(result.Zombies, zombie)
 		}
 	}
@@ -1723,7 +1723,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats, restarts their
 // sessions to preserve worktrees and branches.
-func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot) (ZombieResult, bool) {
+func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot
 	// instead of calling getAgentBeadState multiple times per code path.
 	snapState, snapHook := "", ""
@@ -1781,6 +1781,12 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		// The session could have exited normally between our initial check and here.
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
+		}
+		// Clear stale done-intent label before restart (gt-wmpy).
+		// A stale label survives the restart and would immediately trigger
+		// another stuck-in-done classification on the next patrol cycle.
+		if agentBeadID != "" {
+			clearStaleDoneIntent(bd, workDir, agentBeadID, doneIntent)
 		}
 		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
 			zombie.Error = err
@@ -1960,7 +1966,7 @@ func hasSuccessfulSubmissionEvidence(snap *agentBeadSnapshot) bool {
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats with dead sessions,
 // restarts them to preserve worktrees and branches.
-func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, detectedAt time.Time, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot) (ZombieResult, bool) {
+func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, detectedAt time.Time, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot.
 	snapState, snapHook := "", ""
 	if snap != nil {
@@ -2017,6 +2023,12 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			HookBead:       snapHook,
 			WasActive:      true,
 			Action:         fmt.Sprintf("restarted (done-intent age=%v, type=%s)", age.Round(time.Second), doneIntent.ExitType),
+		}
+		// Clear stale done-intent label before restart (gt-wmpy).
+		// Without this, the label survives the restart and immediately
+		// triggers another stuck-in-done classification on the next patrol.
+		if agentBeadID != "" {
+			clearStaleDoneIntent(bd, workDir, agentBeadID, doneIntent)
 		}
 		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
 			zombie.Error = err
@@ -3330,8 +3342,11 @@ type DoneIntent struct {
 }
 
 // extractDoneIntent parses a done-intent:<type>:<unix-ts> label from a label list.
-// Returns nil if no done-intent label is found or if the label is malformed.
+// Returns the NEWEST (largest timestamp) matching label, or nil if none found.
+// When multiple done-intent labels exist (e.g., from repeated gt done attempts),
+// the newest label reflects the most recent intent and must win over stale ones.
 func extractDoneIntent(labels []string) *DoneIntent {
+	var best *DoneIntent
 	for _, label := range labels {
 		if !strings.HasPrefix(label, "done-intent:") {
 			continue
@@ -3339,18 +3354,37 @@ func extractDoneIntent(labels []string) *DoneIntent {
 		// Format: done-intent:<type>:<unix-ts>
 		parts := strings.SplitN(label, ":", 3)
 		if len(parts) != 3 {
-			return nil // Malformed
+			continue // Malformed — skip, don't abort
 		}
 		ts, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return nil // Malformed timestamp
+			continue // Malformed timestamp — skip
 		}
-		return &DoneIntent{
+		di := &DoneIntent{
 			ExitType:  parts[1],
 			Timestamp: time.Unix(ts, 0),
 		}
+		if best == nil || di.Timestamp.After(best.Timestamp) {
+			best = di
+		}
 	}
-	return nil
+	return best
+}
+
+// clearStaleDoneIntent removes the specific done-intent label that matches the
+// given DoneIntent from the agent bead, preventing the label from surviving a
+// session restart and immediately re-triggering stuck-in-done detection.
+// Non-fatal: if the label can't be cleared, the stale label will eventually age
+// out on its own; we just prevent the immediate re-trigger.
+func clearStaleDoneIntent(bd *BdCli, workDir, agentBeadID string, intent *DoneIntent) {
+	if agentBeadID == "" || intent == nil {
+		return
+	}
+	label := fmt.Sprintf("done-intent:%s:%d", intent.ExitType, intent.Timestamp.Unix())
+	if err := bd.Run(workDir, "update", agentBeadID, "--remove-label="+label); err != nil {
+		// Non-fatal: the stale label will eventually age out
+		fmt.Fprintf(os.Stderr, "Warning: couldn't clear stale done-intent label on %s: %v\n", agentBeadID, err)
+	}
 }
 
 // sessionRecreated checks whether a tmux session was (re)created after the

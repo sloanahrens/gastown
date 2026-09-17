@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -63,72 +62,6 @@ func heartbeatsDir(townRoot string) string {
 // heartbeatFile returns the path to a heartbeat file for a given session.
 func heartbeatFile(townRoot, sessionName string) string {
 	return filepath.Join(heartbeatsDir(townRoot), sessionName+".json")
-}
-
-// HeartbeatKeepAliveInterval is how often a long-running gt done stage renews
-// the session heartbeat (gt-azmw).
-//
-// Derived from SessionHeartbeatStaleThreshold (3m) — the shortest freshness
-// window any consumer applies — rather than picked as a round number. The
-// witness treats a stale state="exiting" heartbeat as a dead agent and falls
-// through to its done-intent restart (internal/witness/handlers.go), and the
-// daemon's idle-reaper treats a stale heartbeat as an abandoned session and
-// kills it (internal/daemon/daemon.go). Renewing six times per stale window
-// keeps "this polecat is alive and inside gt done" unambiguous in both.
-const HeartbeatKeepAliveInterval = SessionHeartbeatStaleThreshold / 6
-
-// StartExitingHeartbeatKeepAlive renews sessionName's heartbeat with
-// state="exiting" every HeartbeatKeepAliveInterval until the returned stop
-// function is called (safe to call more than once). It returns a no-op stop
-// when the town root or session name is unknown.
-//
-// Why this exists (gt-azmw): gt done writes state="exiting" once at its start
-// and then runs its gate stages, silent the whole way — the container-gate slot
-// wait (20m) plus the changed-package test run (10m) of gt-h9kf's default
-// test-verify, or up to five 10m --pre-verified gates — with
-// no intervening gt subcommand to re-touch the heartbeat through
-// persistentPreRun. Every consumer's staleness threshold is far shorter than
-// that, so a healthy polecat sitting in a gate looked abandoned: on
-// 2026-09-16 the daemon idle-reaper killed gastown/amethyst 19m into a gt done
-// whose gate was still running, taking the process — and the MR it had not yet
-// created — with it.
-//
-// The keep-alive is deliberately scoped by the CALLER to one bounded stage,
-// never to all of gt done: a gt done wedged outside a bounded child (a hung
-// bd/Dolt call, say) must still age out and stay reapable, which is the whole
-// reason the idle-reaper exists. A caller that holds this across an unbounded
-// wait would make a wedged session immortal.
-//
-// The first renewal is written synchronously, so the session is fresh from the
-// instant the stage starts rather than one interval later.
-func StartExitingHeartbeatKeepAlive(townRoot, sessionName, context, bead string) func() {
-	return startHeartbeatKeepAlive(townRoot, sessionName, context, bead, HeartbeatKeepAliveInterval)
-}
-
-// startHeartbeatKeepAlive is StartExitingHeartbeatKeepAlive with an injectable
-// interval, so tests can observe renewal without waiting out the real one.
-func startHeartbeatKeepAlive(townRoot, sessionName, context, bead string, interval time.Duration) func() {
-	if townRoot == "" || sessionName == "" {
-		return func() {}
-	}
-
-	TouchSessionHeartbeatWithState(townRoot, sessionName, HeartbeatExiting, context, bead)
-
-	done := make(chan struct{})
-	var once sync.Once
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				TouchSessionHeartbeatWithState(townRoot, sessionName, HeartbeatExiting, context, bead)
-			}
-		}
-	}()
-	return func() { once.Do(func() { close(done) }) }
 }
 
 // TouchSessionHeartbeat writes or updates the heartbeat file for a polecat session.

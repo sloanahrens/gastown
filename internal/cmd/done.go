@@ -1144,9 +1144,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Tells the witness we're in the gt done flow — trust the agent until
 	// heartbeat goes stale. No timer-based inference needed.
 	// Parallel to done-intent label for backwards compat during migration.
-	heartbeatSession := os.Getenv("GT_SESSION")
-	if heartbeatSession != "" && townRoot != "" {
-		polecat.TouchSessionHeartbeatWithState(townRoot, heartbeatSession, polecat.HeartbeatExiting, "gt done", issueID)
+	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" && townRoot != "" {
+		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 	}
 
 	// Get configured default branch for this rig
@@ -1711,6 +1710,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
 
+		// Renew heartbeat after verify (gt-wmpy): long verify runs can stale the
+		// initial heartbeat; refreshing it prevents false stuck-in-done classification.
+		if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+			renewDoneHeartbeat(townRoot, sessionName, issueID)
+		}
+
 		// Fix cleanup_status after successful push (gt-wcr).
 		// Status was detected before push, so "unpushed" is now stale.
 		doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
@@ -2021,12 +2026,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// shaped hash, so the two values could never agree and the
 				// fast-path never fired (om-gate T8 review, attempt 2).
 				gateSetSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
-				// gt-azmw: renew the exiting heartbeat across this bounded gate
-				// run (up to five 10m gates), exactly as the default test-verify
-				// below does — see StartExitingHeartbeatKeepAlive.
-				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
 				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA)
-				stopHeartbeat()
 				if warning != "" {
 					style.PrintWarning("%s", warning)
 				}
@@ -2053,14 +2053,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if !doneSkipVerify && !fullGatesVerified {
 				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
 				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
-				// gt-azmw: this gate can hold the container slot for 20m and
-				// then run for another 10m, all of it silent, while the
-				// heartbeat written at gt done's start ages past every
-				// consumer's stale threshold. Renew it for exactly as long as
-				// this bounded stage can run.
-				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
 				verify, verifyErr := runDefaultTestVerification(g, cwd, defaultBranch, target, verifyMQ, townRoot, verifyRole)
-				stopHeartbeat()
 				if verifyErr != nil {
 					return verifyErr
 				}
@@ -2191,6 +2184,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 	afterMR:
+		// Renew heartbeat after MR creation (gt-wmpy): MR creation can take minutes
+		// in congested rigs; refreshing the heartbeat prevents false stuck-in-done.
+		if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+			renewDoneHeartbeat(townRoot, sessionName, issueID)
+		}
 		fmt.Printf("  Source: %s\n", branch)
 		fmt.Printf("  Target: %s\n", target)
 		fmt.Printf("  Issue: %s\n", issueID)
@@ -2563,6 +2561,17 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear done checkpoints on %s: %v\n", agentBeadID, err)
 	}
+}
+
+// renewDoneHeartbeat refreshes the heartbeat with state="exiting" to keep it fresh
+// across long gate stages (verify, MR creation, etc.). Without this, the heartbeat
+// can go stale during a 3+ minute test run, causing the witness to fall through to
+// legacy detection and falsely classify a working polecat as stuck-in-done (gt-wmpy).
+func renewDoneHeartbeat(townRoot, sessionName, issueID string) {
+	if sessionName == "" || townRoot == "" {
+		return
+	}
+	polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 }
 
 // updateAgentStateOnDone closes the hooked work bead and reports cleanup status.

@@ -1371,6 +1371,39 @@ func TestExtractDoneIntent_AllExitTypes(t *testing.T) {
 	}
 }
 
+func TestExtractDoneIntent_MultipleLabels_NewestWins(t *testing.T) {
+	t.Parallel()
+	// gt-wmpy: when multiple done-intent labels exist, the newest must win.
+	// Stale labels from previous gt done attempts must not override a live intent.
+	labels := []string{
+		"done-intent:COMPLETED:1000000",   // oldest
+		"done-intent:DEFERRED:1000000000", // middle
+		"done-intent:COMPLETED:2000000000", // newest
+	}
+	intent := extractDoneIntent(labels)
+	if intent == nil {
+		t.Fatal("extractDoneIntent returned nil")
+	}
+	if intent.ExitType != "COMPLETED" {
+		t.Errorf("exitType = %q, want COMPLETED", intent.ExitType)
+	}
+	if !intent.Timestamp.Equal(time.Unix(2000000000, 0)) {
+		t.Errorf("timestamp = %v, want %v", intent.Timestamp, time.Unix(2000000000, 0))
+	}
+	// Verify stale labels are skipped
+	staleLabels := []string{
+		"done-intent:COMPLETED:1000000000", // stale label from 2001
+		"done-intent:ESC:1700000000",       // recent live intent (2023)
+	}
+	intent2 := extractDoneIntent(staleLabels)
+	if intent2 == nil {
+		t.Fatal("extractDoneIntent returned nil for recent label among stale ones")
+	}
+	if !intent2.Timestamp.Equal(time.Unix(1700000000, 0)) {
+		t.Errorf("timestamp = %v, want %v", intent2.Timestamp, time.Unix(1700000000, 0))
+	}
+}
+
 func TestDetectZombie_DoneIntentDeadSession(t *testing.T) {
 	t.Parallel()
 	// Verify the logic: dead session + done-intent older than 30s → should be treated as zombie
@@ -1639,7 +1672,7 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 		HookBead:   "", // partial spawn: never durably attached a hook_bead
 	}
 
-	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap)
+	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "")
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
 		t.Fatal("expected zombie detection for live session stuck at agent_state=spawning with no hook_bead and no heartbeat")
