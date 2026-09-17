@@ -2144,8 +2144,13 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 
 // AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?". In both cases the safe
-// continue option is pre-selected, so Enter accepts the dialog.
+// "Do you trust the contents of this directory?".
+//
+// The dialog is a select list whose option order and default focus are not
+// stable across agent releases, so the option to choose is read from the pane
+// and the cursor is moved onto it (gt-nc1t). Claude Code 2.1.274 focuses
+// "No, exit" first, which makes the previous blind Enter quit Claude and kill
+// the pane.
 //
 // Uses a polling loop instead of a single check to handle the race condition where
 // the agent hasn't rendered the dialog yet when we first check. Exits early if the
@@ -2163,13 +2168,7 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 		// Codex trust screens include a leading ">" banner line, so prompt
 		// detection alone would exit too early.
 		if containsWorkspaceTrustDialog(content) {
-			// Dialog found — accept it (option 1 is pre-selected, just press Enter)
-			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
-				return err
-			}
-			// Wait for dialog to dismiss before proceeding
-			time.Sleep(500 * time.Millisecond)
-			return nil
+			return t.selectTrustDialogOption(session, content)
 		}
 
 		// Early exit: if agent prompt or shell prompt is visible, no trust dialog will appear.
@@ -2184,6 +2183,76 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 
 	// Timeout — no dialog detected, safe to proceed
 	return nil
+}
+
+// selectTrustDialogOption moves the dialog's selection onto the trust-granting
+// option and confirms it.
+//
+// It returns an error, leaving the dialog untouched, when the pane does not show
+// a single focused option and a single trust-granting option: every keypress
+// into an unread dialog is a coin flip between granting trust and exiting the
+// agent, and exiting destroys the session (gt-nc1t). Returning the error instead
+// leaves the pane alive for CheckStartupBlocked to report, which fails the spawn
+// loudly and lets the caller roll back.
+func (t *Tmux) selectTrustDialogOption(session, content string) error {
+	key, presses, err := trustNavigation(content)
+	if err != nil {
+		// Dialog text with a prompt rendered below it is stale output from an
+		// earlier dialog, not a blocking one: there is nothing to select, and
+		// pressing keys would type into whatever is live. This check runs only
+		// on the path that has already decided not to press anything, so a
+		// misjudgement here can never suppress a needed keystroke.
+		if promptAppearsAfterStartupBlocker(content) {
+			return nil
+		}
+		return fmt.Errorf("cannot select the trust option in %s: %w", session, err)
+	}
+
+	for i := 0; i < presses; i++ {
+		if _, err := t.run("send-keys", "-t", session, key); err != nil {
+			return err
+		}
+		time.Sleep(trustKeyInterval)
+	}
+	if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
+		return err
+	}
+
+	return t.verifyDialogDismissed(session, "workspace trust prompt")
+}
+
+// verifyDialogDismissed waits for the named blocking dialog to clear, and reports
+// loudly when the session died instead. Selecting a dialog's exit option is
+// indistinguishable from a successful accept at the moment Enter is sent; the
+// pane's survival is the signal that separates them, and without this check the
+// spawn fails later with an opaque "can't find pane" (gt-nc1t).
+//
+// blocker is the name containsBlockingStartupDialog reports for the dialog, so a
+// different blocking dialog appearing next (the bypass warning, say) counts as
+// progress rather than a stuck dialog.
+func (t *Tmux) verifyDialogDismissed(session, blocker string) error {
+	deadline := time.Now().Add(constants.DialogPollTimeout)
+	for {
+		alive, err := t.HasSession(session)
+		if err == nil && !alive {
+			return fmt.Errorf("session %s died after answering the %s: the dialog's exit option was selected", session, blocker)
+		}
+
+		content, captureErr := t.CapturePane(session, 30)
+		if captureErr == nil {
+			// containsBlockingStartupDialog distinguishes a live dialog from
+			// stale dialog text left in the pane, so only the live case blocks.
+			if current, blocked := containsBlockingStartupDialog(content); !blocked || current != blocker {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s still visible in %s %s after answering it",
+				blocker, session, constants.DialogPollTimeout)
+		}
+		time.Sleep(constants.DialogPollInterval)
+	}
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
@@ -2285,8 +2354,11 @@ func lastPromptIndicatorLine(content string) int {
 }
 
 // AcceptBypassPermissionsWarning dismisses the Claude Code bypass permissions warning dialog.
-// When Claude starts with --dangerously-skip-permissions, it shows a warning dialog that
-// requires pressing Down arrow to select "Yes, I accept" and then Enter to confirm.
+// When Claude starts with --dangerously-skip-permissions, it shows a warning dialog
+// whose options are "Yes, I accept" and "No, exit". The dialog renders cancel first
+// and focused, so the selection has to be moved onto "Yes, I accept" before Enter —
+// and because that order is not guaranteed across Claude Code releases, it is read
+// from the pane rather than assumed (gt-nc1t).
 // This function checks if the warning is present before sending keys to avoid interfering
 // with sessions that don't show the warning (e.g., already accepted or different config).
 //
@@ -2307,15 +2379,25 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 
 		// Look for the characteristic warning text
 		if strings.Contains(content, "Bypass Permissions mode") {
-			// Dialog found — press Down to select "Yes, I accept" then Enter
-			if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
-				return err
+			key, presses, navErr := trustNavigation(content)
+			if navErr != nil {
+				// Unlike the trust dialog, this one has no safe fallback keystroke:
+				// a blind Enter picks whichever option is focused, and today that is
+				// the exit option. Down+Enter is what this function sent before the
+				// option list was read, and it is correct for the current dialog
+				// ordering, so keep it when the pane cannot be read (gt-nc1t).
+				key, presses = "Down", 1
 			}
-			time.Sleep(200 * time.Millisecond)
+			for i := 0; i < presses; i++ {
+				if _, err := t.run("send-keys", "-t", session, key); err != nil {
+					return err
+				}
+				time.Sleep(trustKeyInterval)
+			}
 			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
 				return err
 			}
-			return nil
+			return t.verifyDialogDismissed(session, "bypass permissions prompt")
 		}
 
 		// Early exit: if agent prompt or shell prompt is visible, no dialog will appear
@@ -2331,26 +2413,38 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 }
 
 // DismissStartupDialogsBlind sends the key sequences needed to dismiss all
-// known Claude Code startup dialogs without screen-scraping pane content.
-// This avoids coupling to third-party TUI strings that can change with any update.
+// known Claude Code startup dialogs, reading the pane only for dialogs whose
+// keys depend on which option is focused.
 //
 // The sequence handles (in order):
-//  1. Workspace trust dialog — Enter (option 1 "Yes, I trust this folder" is pre-selected)
+//  1. Workspace trust dialog — move the selection onto "Yes, I trust this folder", then Enter
 //  2. Bypass permissions warning — Down+Enter (select "Yes, I accept" then confirm)
 //
-// Safe to call on sessions where no dialog is showing: Enter sends a blank input
-// to an idle Claude prompt (harmless for a stalled session), and Down+Enter either
-// does nothing or sends another blank input.
+// Step 1 cannot be blind: it used to send Enter to "the pre-selected option",
+// but current Claude Code focuses "No, exit" first, so that Enter quit Claude and
+// killed the pane this function exists to rescue (gt-nc1t). The dialog is read and
+// the selection moved, or nothing is sent.
+//
+// Step 2 stays blind. Down+Enter is what the bypass dialog has always needed and
+// the blind sequence is the point of this function; sending it where no dialog is
+// showing types a blank input into an idle Claude prompt, which is harmless for a
+// stalled session.
 //
 // This is intended for remediation of stalled sessions detected via structured
 // signals (session age + activity). For startup-time dialog handling where
 // precision matters, use AcceptStartupDialogs instead.
 func (t *Tmux) DismissStartupDialogsBlind(session string) error {
-	// Step 1: Send Enter to dismiss trust dialog (if present)
-	if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
-		return fmt.Errorf("sending Enter for trust dialog: %w", err)
+	// Step 1: move onto the trust option and confirm, if the dialog is showing.
+	content, err := t.CapturePane(session, 30)
+	if err != nil {
+		return fmt.Errorf("reading pane for trust dialog: %w", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	if containsWorkspaceTrustDialog(content) {
+		if err := t.selectTrustDialogOption(session, content); err != nil {
+			return err
+		}
+		time.Sleep(trustKeyInterval)
+	}
 
 	// Step 2: Send Down+Enter to dismiss bypass permissions dialog (if present)
 	if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
