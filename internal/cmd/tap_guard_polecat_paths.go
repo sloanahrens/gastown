@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // tapGuardPolecatPathsCmd blocks Edit/Write/NotebookEdit targets outside the
@@ -230,32 +228,6 @@ func expandAndResolvePath(token string) string {
 	return filepath.Clean(p)
 }
 
-// expandHomePath applies the shell's ~ / $HOME / ${HOME} prefix rules to a
-// token, returning it unchanged when it names no home-relative path. ok is
-// false only when the token did reference the home directory but this process
-// cannot see it.
-func expandHomePath(token string) (path string, ok bool) {
-	join := func(rest string) (string, bool) {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			return "", false
-		}
-		return filepath.Join(home, rest), true
-	}
-
-	switch {
-	case token == "~", token == "$HOME", token == "${HOME}":
-		return join("")
-	case strings.HasPrefix(token, "~/"):
-		return join(strings.TrimPrefix(token, "~/"))
-	case strings.HasPrefix(token, "$HOME/"):
-		return join(strings.TrimPrefix(token, "$HOME/"))
-	case strings.HasPrefix(token, "${HOME}/"):
-		return join(strings.TrimPrefix(token, "${HOME}/"))
-	}
-	return token, true
-}
-
 // resolvePolecatWorktreeRoot walks up from cwd to find the polecat's worktree
 // root — the parent of the first /polecats/<name> segment encountered.
 // Returns "" when cwd is not under a Gas Town polecat tree.
@@ -391,27 +363,3 @@ func printPolecatPathsBlock(target, reason string) {
 	fmt.Fprintln(os.Stderr, "")
 }
 
-// currentTownRoot resolves the town root for guard purposes, or "" when not
-// inside a Gas Town workspace. Uses the same resolution as the dangerous
-// command guard.
-func currentTownRoot() string {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return ""
-	}
-	return townRoot
-}
-
-// isWithinRel reports whether a filepath.Rel result names a path strictly
-// inside the reference directory.
-func isWithinRel(rel string) bool {
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return !filepath.IsAbs(rel) && rel != "." && rel != ""
-}
-
-// hasGlobMeta reports whether a token carries shell glob syntax.
-func hasGlobMeta(token string) bool {
-	return strings.ContainsAny(token, "*?[")
-}
