@@ -14,6 +14,29 @@ Each plugin is a directory containing:
 - condition: Metric threshold
 - event: Trigger-based (startup, heartbeat)
 
+## Querying your own run receipts
+
+Plugin run receipts are **ephemeral wisps** (created by `gt plugin record-run`).
+`bd list` hides ephemeral beads by design, so a plain query for them silently
+returns `[]` even when receipts exist:
+
+```bash
+# WRONG — returns [] because the wisps are hidden by default
+bd list --json --all -l type:plugin-run,plugin:<name>
+
+# RIGHT — add --include-infra to surface the wisps
+bd list --json --all --include-infra -l type:plugin-run,plugin:<name>
+```
+
+Prefer `gt plugin history <name> --json`, which already applies the correct
+flags internally (see `internal/plugin/recording.go`).
+
+**An empty result from such a query is not proof that nothing happened.** If a
+plugin's own history shows recent receipts but a Step-1-style query returns `[]`,
+the query is broken — treat that as a failed measurement and escalate; do not
+record it as a clean "no results" success. (Known affected: `compactor-dog`'s
+"last run" check in `plugins/compactor-dog/plugin.md`.)
+
 ## Deployed copy
 
 This `plugins/` directory (checked out at `<town_root>/gastown/mayor/rig/plugins`)

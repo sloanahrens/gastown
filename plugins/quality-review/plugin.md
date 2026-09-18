@@ -25,18 +25,47 @@ alerts on quality breaches.
 
 ## Step 1: Query recent quality-review results
 
-Fetch all quality-review result wisps from the last 24 hours:
+Fetch all quality-review result wisps from the last 24 hours.
+
+**`--include-infra` is required.** These receipts are ephemeral wisps (recorded
+via `gt plugin record-run`, see the reference section below), and `bd list`
+hides ephemeral beads by design. Omitting the flag makes this query silently
+return `[]` even when recent results exist — which is exactly what made every
+run report "No results in last 24h" for days while breaches went unalerted.
+The canonical recorder uses the same flag (`internal/plugin/recording.go`).
 
 ```bash
-bd list --json --all -l type:plugin-run,plugin:quality-review-result --created-after=-24h
+bd list --json --all --include-infra -l type:plugin-run,plugin:quality-review-result --created-after=-24h
 ```
 
-If no results are found, record a run wisp and stop:
+If no results are found, do NOT immediately record a clean success. An empty
+result is ambiguous: it can be a genuine "nothing in the window" OR a broken
+query. Disambiguate with the independent history path:
+
+```bash
+gt plugin history quality-review-result --json
+```
+
+- **Both empty** — the window genuinely has no results. Record a run wisp and stop:
 
 ```bash
 gt plugin record-run --plugin quality-review --result success \
   --title "quality-review: No results in last 24h" \
   --description "No quality-review results in last 24h. Nothing to analyze." >/dev/null 2>&1 || true
+```
+
+- **History non-empty, query empty** — the Step 1 query is broken. A failed
+  measurement must NOT serialize as success. Record a failure and escalate; do
+  not record a clean "success":
+
+```bash
+gt plugin record-run --plugin quality-review --result failure \
+  --title "quality-review: Step 1 query returned [] but history is non-empty" \
+  --description "Step 1 query returned empty while 'gt plugin history quality-review-result' shows recent runs. The query is broken." >/dev/null 2>&1 || true
+
+gt escalate "quality-review: empty-result anomaly" \
+  --severity medium \
+  --reason "Step 1 query returned [] but plugin history shows recent result wisps; the query is broken."
 ```
 
 ## Step 2: Compute per-worker trends
