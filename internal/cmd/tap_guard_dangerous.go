@@ -1007,23 +1007,21 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 	return "", ""
 }
 
-// inCommandPosition reports whether tokens[i] can be the program of a
-// shell command: first in the line, after a separator, after an env
-// assignment prefix, or after a launcher such as sudo/env/exec/nohup/time.
-// This keeps `echo do not git push` (a word, not a command) from matching.
+// inCommandPosition reports whether tokens[i] ("git") is being run rather
+// than mentioned. It fails closed: git counts as a command unless the
+// segment's own program is one that only carries text (echo, printf, gt
+// mail, bd comments/create ...), so `timeout 60 git push`, `eval git push`
+// and `xargs git push` are all refused while `echo do not git push` and a
+// mail body that mentions pushing are not.
 func inCommandPosition(tokens []string, i int) bool {
 	if i == 0 {
 		return true
 	}
-	prev := tokens[i-1]
-	if shellCommandSeparators[prev] || strings.Contains(prev, "=") {
-		return true
+	switch tokens[0] {
+	case "echo", "printf", "gt", "bd", "cat", "grep", "rg":
+		return false
 	}
-	switch prev {
-	case "sudo", "env", "exec", "nohup", "time", "command", "builtin", "-c", "bash", "sh", "zsh":
-		return true
-	}
-	return false
+	return true
 }
 
 // gitOptionsWithValue are git's global options that consume the next token

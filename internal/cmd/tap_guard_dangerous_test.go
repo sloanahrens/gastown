@@ -900,6 +900,11 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 		"cd /x && git push origin HEAD",
 		"GIT_SSH_COMMAND=ssh git push",
 		"env GIT_TRACE=1 git push",
+		"timeout 60 git push origin HEAD",
+		"eval git push origin HEAD",
+		"nice -n 10 git push",
+		"xargs -0 git push",
+		"cd /x && timeout 60 git push origin HEAD",
 	}
 	allowed := []string{
 		"git fetch origin polecat/slate/gt-nkyy+x",
