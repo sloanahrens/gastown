@@ -71,6 +71,14 @@ type TownSettings struct {
 	// Example: {"mayor": "claude-opus", "witness": "claude-haiku", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
+	// PolecatPool, when set, lets `gt sling` choose a polecat's agent from a
+	// bounded local-model pool instead of role_agents.polecat: up to MaxLocal
+	// live polecat sessions run LocalAgent, new local spawns are at least
+	// MinSpawnGap apart (a fresh session's prefill starves every decoding
+	// slot, so spawns are staggered), and everything else runs OverflowAgent
+	// (empty = the role default). An explicit --agent always wins.
+	PolecatPool *PolecatPool `json:"polecat_pool,omitempty"`
+
 	// CrewAgents maps individual crew worker names to agent aliases at the town level.
 	// This allows town-wide per-crew agent assignment without modifying each rig's config.
 	// Resolution: --agent flag > rig WorkerAgents > town CrewAgents > role agents > defaults.
@@ -2010,4 +2018,30 @@ func NewEscalationConfig() *EscalationConfig {
 		StaleThreshold:   "4h",
 		MaxReescalations: intPtr(2),
 	}
+}
+
+// PolecatPool bounds how many polecats run on the local model at once.
+// See TownSettings.PolecatPool.
+type PolecatPool struct {
+	// LocalAgent is the agent alias to use while the pool has room.
+	LocalAgent string `json:"local_agent"`
+	// MaxLocal is the number of live polecat sessions allowed on LocalAgent.
+	MaxLocal int `json:"max_local"`
+	// MinSpawnGap is the minimum time between two local spawns (e.g. "4m").
+	MinSpawnGap string `json:"min_spawn_gap,omitempty"`
+	// OverflowAgent is used when the pool is full or a spawn is too soon.
+	// Empty means the normal role_agents resolution.
+	OverflowAgent string `json:"overflow_agent,omitempty"`
+}
+
+// MinSpawnGapD returns the parsed MinSpawnGap, or zero when unset/invalid.
+func (p *PolecatPool) MinSpawnGapD() time.Duration {
+	if p == nil || p.MinSpawnGap == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(p.MinSpawnGap)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
 }

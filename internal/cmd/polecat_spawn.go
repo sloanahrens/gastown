@@ -132,6 +132,16 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 	}
 
+	// Polecat model pool: with no explicit --agent, the town's polecat_pool
+	// decides between the local model and the overflow agent from the live
+	// polecat sessions (see sling_pool.go).
+	if opts.Agent == "" {
+		if agent, reason := resolvePolecatPoolAgent(townRoot); reason != "" {
+			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
+			opts.Agent = agent
+		}
+	}
+
 	// Load rig config
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)

@@ -226,6 +226,11 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		}
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
+			if opts.Agent == "" {
+				if _, reason := resolvePolecatPoolAgent(opts.TownRoot); reason != "" {
+					fmt.Printf("  %s\n", reason)
+				}
+			}
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
 			result.Pane = "<new-pane>"
 			return result, nil
