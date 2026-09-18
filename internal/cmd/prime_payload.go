@@ -217,7 +217,7 @@ func systemPromptPathFor(ctx RoleContext) string {
 
 // useCompactResumePath decides between the brief compact/resume output and the
 // full dynamic payload. Resume always takes the brief path (the conversation is
-// intact). After compaction the hooked work and checklist have been summarised
+// intact). After compaction the hooked work and checklist have been summarized
 // away; when the static role text lives in the system prompt (which survives
 // compaction) the dynamic payload is small enough to re-send in full, so we do.
 func useCompactResumePath(source, handoffReason string, staticDelivered bool) bool {

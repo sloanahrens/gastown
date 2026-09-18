@@ -623,7 +623,7 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 
 // runPrimeExternalTools runs lightweight memory and mail injection in one go.
 // runPrime renders the two as separate payload sections; this wrapper keeps
-// the combined behaviour for callers and tests.
+// the combined behavior for callers and tests.
 func runPrimeExternalTools(ctx RoleContext, cwd string) {
 	runPrimeMemoryInject(cwd)
 	runPrimeMailInject(ctx, cwd)
