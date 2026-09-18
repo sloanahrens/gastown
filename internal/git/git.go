@@ -2247,6 +2247,36 @@ func (g *Git) RemoteBranchTip(remote, branch string) (string, error) {
 	return parseLSRemoteTip(out, branch), nil
 }
 
+// RemoteRefsContaining returns the remote-tracking branches whose history
+// contains sha (git branch -r --contains <sha>), e.g. "origin/main".
+//
+// Reachability — not tip membership — is what proves a commit survives a
+// delete. Work that was already merged into main is an ancestor of origin/main,
+// so `ls-remote --heads <branch>` finds nothing for the original branch name
+// while the commit is in fact preserved. Callers that need certainty against
+// the remote's current state must Fetch first: these are the local
+// remote-tracking refs.
+func (g *Git) RemoteRefsContaining(sha string) ([]string, error) {
+	if strings.TrimSpace(sha) == "" {
+		return nil, fmt.Errorf("RemoteRefsContaining: empty sha")
+	}
+	out, err := g.run("branch", "-r", "--contains", sha)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		// `git branch -r` also prints the symbolic "origin/HEAD -> origin/main"
+		// entry, which names no branch of its own.
+		if line == "" || strings.Contains(line, "->") {
+			continue
+		}
+		refs = append(refs, line)
+	}
+	return refs, nil
+}
+
 // PushRemoteBranchExists checks if a branch exists on the push target of a remote.
 // With a fork-based or local-bare-repo workflow (pushurl configured), pushes go to
 // the push URL but ls-remote resolves the fetch URL. This method queries the push

@@ -191,6 +191,13 @@ SAFETY CHECKS: The command refuses to nuke a polecat if:
 Use --force to bypass safety checks (LOSES WORK).
 Use --dry-run to see what would happen and safety check status.
 
+PRESERVATION: before deleting anything, nuke pushes the polecat's branch to
+origin (falling back to <branch>-<sha7> when the plain push is rejected as
+non-fast-forward) and refuses to proceed unless a remote ref is confirmed to
+contain the branch tip. --force alone does not override that refusal: it takes
+--force AND GT_NUKE_ACKNOWLEDGE_UNPRESERVED=1 to delete a branch whose only
+copy is local.
+
 Examples:
   gt polecat nuke greenplace/Toast
   gt polecat nuke greenplace/Toast greenplace/Furiosa
@@ -2007,7 +2014,11 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Nuking %s/%s...\n", p.rigName, p.polecatName)
 		}
 
-		if err := nukePolecatFullWithOptions(p.polecatName, p.rigName, p.mgr, p.r, nukePolecatOptions{Force: polecatNukeForce, PurgeClosedEphemerals: !batchPurge}); err != nil {
+		if err := nukePolecatFullWithOptions(p.polecatName, p.rigName, p.mgr, p.r, nukePolecatOptions{
+			Force:                  polecatNukeForce,
+			AcknowledgeUnpreserved: nukeAcknowledgesUnpreserved(),
+			PurgeClosedEphemerals:  !batchPurge,
+		}); err != nil {
 			nukeErrors = append(nukeErrors, fmt.Sprintf("%s/%s: %v", p.rigName, p.polecatName, err))
 			continue
 		}
@@ -2077,6 +2088,132 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 type nukePolecatOptions struct {
 	Force                 bool
 	PurgeClosedEphemerals bool
+	// AcknowledgeUnpreserved is the explicit acknowledgement required, together
+	// with Force, to delete a polecat whose branch tip could not be shown to
+	// exist on the remote. Force alone is NOT enough: an unpreserved branch
+	// looks exactly like a routine nuke from the outside, so the operator has
+	// to name the loss. See EnvNukeAcknowledgeUnpreserved.
+	AcknowledgeUnpreserved bool
+}
+
+// EnvNukeAcknowledgeUnpreserved is the env var that makes
+// nukePolecatOptions.AcknowledgeUnpreserved true on the command line. It is
+// deliberately an env var rather than a flag so that it cannot be reached by
+// repeating a previous --force invocation.
+const EnvNukeAcknowledgeUnpreserved = "GT_NUKE_ACKNOWLEDGE_UNPRESERVED"
+
+// nukeAcknowledgesUnpreserved reports whether the operator has explicitly
+// accepted losing an unpreserved branch.
+func nukeAcknowledgesUnpreserved() bool {
+	return os.Getenv(EnvNukeAcknowledgeUnpreserved) == "1"
+}
+
+// preserveOutcome is the result of the pre-nuke self-preserve push.
+type preserveOutcome struct {
+	// RemoteRef is the remote ref verified to contain the branch tip.
+	RemoteRef string
+	// AlreadyThere is true when the tip was reachable from the remote before
+	// this call pushed anything.
+	AlreadyThere bool
+}
+
+// errBranchNotPreserved means no remote ref could be shown to contain the
+// branch tip, so deleting the local branch would destroy its only copy.
+var errBranchNotPreserved = errors.New("branch not preserved on remote")
+
+// preserveBranchBeforeNuke pushes branch's tip to remote so that the worktree
+// and local branch can be deleted without losing work. It FAILS CLOSED: it
+// returns nil only when a remote ref is confirmed to contain the tip, and the
+// caller must not delete anything otherwise.
+//
+// The old version of this step treated every push failure as non-fatal and
+// still reported the branch as preserved, so a nuke whose self-preserve push
+// was rejected (non-fast-forward: the remote branch had moved on) deleted the
+// worktree and local branch while claiming success. Nothing was lost only
+// because the commits happened to exist on a sibling ref (gt-yxys).
+//
+// Order of checks, each cheaper than the one after it:
+//
+//  1. Fetch, then test REACHABILITY from remote-tracking branches. Tip
+//     membership is not enough: work already merged into main is an ancestor of
+//     origin/main, so grepping `ls-remote` for the branch name finds nothing
+//     even though the commit is preserved.
+//  2. Push branch:branch and verify the remote tip is exactly the branch tip.
+//  3. On a rejected push, push to <branch>-<sha7> instead. That ref cannot
+//     conflict, so a rejection there means the remote is unusable and the work
+//     has nowhere safe to go.
+func preserveBranchBeforeNuke(g *git.Git, branch, remote string) (preserveOutcome, error) {
+	ref := "refs/heads/" + branch
+	tip, err := g.Rev(ref)
+	if err != nil {
+		return preserveOutcome{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	tip = strings.TrimSpace(tip)
+	if tip == "" {
+		return preserveOutcome{}, fmt.Errorf("resolve %s: empty sha", ref)
+	}
+
+	// Refresh remote-tracking refs before deciding anything: every check below
+	// reads the remote's state, and a stale origin/main is how work that exists
+	// only locally gets classified as preserved.
+	if err := g.Fetch(remote); err != nil {
+		return preserveOutcome{}, fmt.Errorf("fetch %s before nuke: %w", remote, err)
+	}
+	if refs, err := g.RemoteRefsContaining(tip); err == nil && len(refs) > 0 {
+		return preserveOutcome{RemoteRef: refs[0], AlreadyThere: true}, nil
+	}
+
+	// Preserve under the branch's own name when possible: the merge queue and
+	// the refinery look for it there.
+	pushTo := branch
+	if err := g.Push(remote, branch+":"+pushTo, false); err != nil {
+		// Non-fast-forward: the remote branch is at a commit this tip is not a
+		// descendant of. A side ref cannot conflict, so it is the fallback —
+		// not a reason to delete the branch anyway.
+		pushTo = branch + "-" + refSuffixSHA(tip)
+		if fallbackErr := g.Push(remote, branch+":"+pushTo, false); fallbackErr != nil {
+			return preserveOutcome{}, fmt.Errorf("%w: push %s:%s failed (%v) and fallback push %s:%s failed (%v)",
+				errBranchNotPreserved, branch, branch, err, branch, pushTo, fallbackErr)
+		}
+	}
+
+	// Never trust the push exit code alone — the entire point of this step is
+	// to know the work is on the remote before deleting the only other copy.
+	if err := g.VerifyPushedCommit(remote, pushTo, tip); err != nil {
+		return preserveOutcome{}, fmt.Errorf("%w: %v", errBranchNotPreserved, err)
+	}
+	return preserveOutcome{RemoteRef: remote + "/" + pushTo}, nil
+}
+
+// refSuffixSHA is the short-sha suffix for a fallback preserve ref
+// (<branch>-<sha7>): enough to identify the commit, short enough to read.
+func refSuffixSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+// preserveFailureBlocker decides whether a nuke may proceed after its
+// self-preserve push failed. It returns nil only for an explicit override:
+// --force AND the acknowledgement env var. Anything else is a hard stop, so a
+// failed preserve can never be mistaken for a successful one.
+func preserveFailureBlocker(rigName, polecatName string, force, acknowledged bool, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if force && acknowledged {
+		return nil
+	}
+	remediation := fmt.Sprintf("  Push %s/%s by hand, or re-run with:\n    %s=1 %s",
+		rigName, polecatName, EnvNukeAcknowledgeUnpreserved, "gt polecat nuke "+rigName+"/"+polecatName+" --force")
+	if force {
+		remediation = fmt.Sprintf("  The %s override is required as well as --force.\n%s",
+			EnvNukeAcknowledgeUnpreserved, remediation)
+	}
+	return fmt.Errorf("refusing to nuke %s/%s: %v\n"+
+		"  The worktree and local branch were NOT deleted.\n%s",
+		rigName, polecatName, cause, remediation)
 }
 
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, opts nukePolecatOptions) error {
@@ -2088,6 +2225,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 
 	// Step 1: Kill tmux session unconditionally to prevent ghost sessions
 	// when IsRunning fails to detect the session.
+	//
+	// The kill runs before the preserve check on purpose: a live polecat keeps
+	// committing, so a branch verified while its session is still running can
+	// grow a new unpushed commit before the worktree is deleted.
 	sessMgr := polecat.NewSessionManager(t, r)
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
@@ -2112,31 +2253,70 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		nukeCleanupMolecules(polecatInfo.Issue, r)
 	}
 
-	// Step 2.75: Best-effort push before nuke (gt-4vr guardrail).
-	// Try to preserve any unpushed commits on the branch. Push failures are
-	// non-fatal because this cleanup path already passed its safety gates.
+	// Step 2.75: Self-preserve push before nuke (gt-4vr guardrail, gt-yxys
+	// fail-closed). The worktree and local branch are about to be destroyed, so
+	// this is the last chance to get unpushed commits onto the remote. A failed
+	// push stops the nuke instead of being reported as "preserved".
+	var preservedRef string
+	// alreadyOnRemote distinguishes "this run pushed the branch" from "the work
+	// was already reachable", which Step 4 reports differently: a merged branch
+	// is not waiting on the refinery.
+	var alreadyOnRemote bool
 	if branchToDelete != "" {
-		var pushGit *git.Git
-		// Try worktree first (may still exist), then bare repo fallback.
+		// Pick a repo that actually holds the branch. The worktree (when it
+		// still exists) is preferred because it has the session's latest
+		// commits; the bare repo is the fallback once the worktree is gone.
 		// Use ClonePath from the polecat record — the worktree lives at
 		// <rig>/polecats/<name>/<rigName>/, not <rig>/polecats/<name>/.
+		var candidates []*git.Git
 		if polecatInfo != nil && polecatInfo.ClonePath != "" {
 			if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
-				pushGit = git.NewGit(polecatInfo.ClonePath)
+				candidates = append(candidates, git.NewGit(polecatInfo.ClonePath))
 			}
 		}
-		if pushGit == nil {
-			bareRepoPath := filepath.Join(r.Path, ".repo.git")
-			if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-				pushGit = git.NewGitWithDir(bareRepoPath, "")
+		bareRepoPath := filepath.Join(r.Path, ".repo.git")
+		if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
+			candidates = append(candidates, git.NewGitWithDir(bareRepoPath, ""))
+		}
+		var pushGit *git.Git
+		for _, candidate := range candidates {
+			if exists, err := candidate.BranchExists(branchToDelete); err == nil && exists {
+				pushGit = candidate
+				break
 			}
 		}
-		if pushGit != nil {
-			refspec := branchToDelete + ":" + branchToDelete
-			if err := pushGit.Push("origin", refspec, false); err != nil {
-				fmt.Printf("  %s best-effort push failed (proceeding): %v\n", style.Dim.Render("○"), err)
-			} else {
-				fmt.Printf("  %s pushed branch %s before nuke\n", style.Success.Render("✓"), branchToDelete)
+
+		switch {
+		case pushGit == nil:
+			// Not in any local ref: there is no committed copy of this branch
+			// to lose, so the nuke can proceed. Uncommitted work in the
+			// worktree is what the safety gates above are for.
+			fmt.Printf("  %s branch %s has no local ref — nothing to preserve\n",
+				style.Dim.Render("○"), branchToDelete)
+		default:
+			outcome, preserveErr := preserveBranchBeforeNuke(pushGit, branchToDelete, "origin")
+			if preserveErr == nil {
+				preservedRef = outcome.RemoteRef
+				alreadyOnRemote = outcome.AlreadyThere
+				if outcome.AlreadyThere {
+					fmt.Printf("  %s %s already reachable from %s — nothing to preserve\n",
+						style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
+				} else {
+					fmt.Printf("  %s preserved branch %s as %s\n", style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
+					if outcome.RemoteRef != "origin/"+branchToDelete {
+						fmt.Printf("  %s origin/%s was not fast-forwardable; work parked on %s instead\n",
+							style.Warning.Render("⚠"), branchToDelete, outcome.RemoteRef)
+					}
+				}
+			}
+
+			if blocker := preserveFailureBlocker(rigName, polecatName, opts.Force, opts.AcknowledgeUnpreserved, preserveErr); blocker != nil {
+				return blocker
+			}
+			if preserveErr != nil {
+				fmt.Printf("  %s %v\n  %s proceeding under --force with %s set — %s will be deleted with no remote copy\n",
+					style.Error.Render("✗"), preserveErr, style.Warning.Render("⚠"),
+					EnvNukeAcknowledgeUnpreserved, branchToDelete)
 			}
 		}
 	}
@@ -2166,7 +2346,21 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		} else {
 			fmt.Printf("  %s deleted local branch %s\n", style.Success.Render("✓"), branchToDelete)
 		}
-		fmt.Printf("  %s remote branch preserved for refinery merge\n", style.Dim.Render("○"))
+		// Only claim preservation for a ref this run actually verified. When the
+		// override let an unpreserved branch through, say so — silence here is
+		// how a nuke reports success after destroying the only copy (gt-yxys).
+		switch {
+		case preservedRef != "" && alreadyOnRemote:
+			fmt.Printf("  %s %s's work already on %s\n", style.Dim.Render("○"), branchToDelete, preservedRef)
+		case preservedRef != "":
+			fmt.Printf("  %s remote ref %s preserved for refinery merge\n", style.Dim.Render("○"), preservedRef)
+		case opts.AcknowledgeUnpreserved:
+			fmt.Printf("  %s %s deleted with no remote copy (%s set)\n",
+				style.Warning.Render("⚠"), branchToDelete, EnvNukeAcknowledgeUnpreserved)
+		default:
+			fmt.Printf("  %s %s had no remote copy to report\n",
+				style.Warning.Render("⚠"), branchToDelete)
+		}
 	}
 
 	// Step 5: Purge closed ephemeral beads (wisps) accumulated during sessions.
@@ -2432,7 +2626,10 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 					continue
 				}
 				fmt.Printf("Nuking %s...\n", info.Name)
-				if err := nukePolecatFullWithOptions(info.Name, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: !batchPurge}); err != nil {
+				if err := nukePolecatFullWithOptions(info.Name, rigName, mgr, r, nukePolecatOptions{
+					AcknowledgeUnpreserved: nukeAcknowledgesUnpreserved(),
+					PurgeClosedEphemerals:  !batchPurge,
+				}); err != nil {
 					fmt.Printf("  %s (%v)\n", style.Error.Render("failed"), err)
 				} else {
 					nuked++
