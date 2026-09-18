@@ -398,3 +398,98 @@ func containsArgPair(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+// The renderer is a package global, so these tests must not run in parallel
+// with each other or with the tests that rely on it being nil.
+func withSystemPromptRenderer(t *testing.T, fn func(role, townRoot, rigPath, agentName, path string) error) {
+	t.Helper()
+	prev := SystemPromptRenderer
+	SystemPromptRenderer = fn
+	t.Cleanup(func() { SystemPromptRenderer = prev })
+}
+
+func hasSystemPromptFlag(rc *RuntimeConfig) (string, bool) {
+	for i, a := range rc.Args {
+		if a == "--append-system-prompt-file" && i+1 < len(rc.Args) {
+			return rc.Args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+	want := SystemPromptFilePath("polecat", town, rig, "nux")
+
+	var calls []string
+	withSystemPromptRenderer(t, func(role, townRoot, rigPath, agentName, path string) error {
+		calls = append(calls, role+"|"+townRoot+"|"+rigPath+"|"+agentName+"|"+path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("rendered at spawn"), 0o644)
+	})
+
+	rc := &RuntimeConfig{Command: "claude", Args: []string{"--dangerously-skip-permissions"}}
+	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
+
+	if len(calls) != 1 || calls[0] != "polecat|"+town+"|"+rig+"|nux|"+want {
+		t.Fatalf("renderer calls = %v, want one call for the polecat file %s", calls, want)
+	}
+	if path, ok := hasSystemPromptFlag(got); !ok || path != want {
+		t.Fatalf("first spawn must carry the flag once the file is rendered; args = %v", got.Args)
+	}
+	if got.Env[EnvSystemPromptFile] != want {
+		t.Fatalf("env %s = %q, want %q", EnvSystemPromptFile, got.Env[EnvSystemPromptFile], want)
+	}
+
+	// The file now exists: a second resolution must not render again.
+	got = withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+	if len(calls) != 1 {
+		t.Fatalf("renderer must not run when the file exists; calls = %v", calls)
+	}
+	if _, ok := hasSystemPromptFlag(got); !ok {
+		t.Fatalf("flag missing on the second spawn: %v", got.Args)
+	}
+}
+
+func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testing.T) {
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+
+	t.Run("error", func(t *testing.T) {
+		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return os.ErrPermission })
+		got := withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
+		if _, ok := hasSystemPromptFlag(got); ok {
+			t.Fatalf("a failing renderer must not add the flag: %v", got.Args)
+		}
+		if _, ok := got.Env[EnvSystemPromptFile]; ok {
+			t.Fatalf("a failing renderer must not set the env: %v", got.Env)
+		}
+	})
+	t.Run("wrote nothing", func(t *testing.T) {
+		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return nil })
+		got := withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+		if _, ok := hasSystemPromptFlag(got); ok {
+			t.Fatalf("a renderer that produced no file must not add the flag: %v", got.Args)
+		}
+	})
+}
+
+func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
+	town := t.TempDir()
+	calls := 0
+	withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { calls++; return nil })
+
+	// Dogs have no system prompt file at all.
+	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "dog", town, "", "alpha")
+	// A polecat without a name has no per-agent file.
+	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
+	// Non-Claude runtimes never get the flag, so nothing to render.
+	withRoleSystemPromptFlag(&RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
+
+	if calls != 0 {
+		t.Fatalf("renderer ran %d times for roles/runtimes that take no system prompt file", calls)
+	}
+}
