@@ -51,11 +51,22 @@ func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 	return filepath.Join(dir, ".claude", name)
 }
 
+// SystemPromptRenderer renders the static role text for role/agentName into
+// path. internal/cmd installs the real renderer at init (the role templates
+// and their rig/session helpers import this package, so config cannot call
+// them directly). nil means "no renderer": the flag is then added only when
+// the file already exists, and gt prime prints the static text itself.
+var SystemPromptRenderer func(role, townRoot, rigPath, agentName, path string) error
+
 // withRoleSystemPromptFlag appends --append-system-prompt-file <path> and sets
-// GT_SYSTEM_PROMPT_FILE for Claude agents when the role's rendered system
-// prompt file exists. When the file is missing (first spawn after install,
-// non-Claude runtime) the config is returned unchanged and gt prime prints the
-// static role text itself, so a missing file degrades to today's behavior
+// GT_SYSTEM_PROMPT_FILE for Claude agents once the role's rendered system
+// prompt file exists. A missing file is rendered first through
+// SystemPromptRenderer, so the FIRST spawn of a polecat name is bounded like
+// every later one; before this, gt prime wrote the file "for the next spawn"
+// and the first session got the full ~26k-char prime, which the Claude Code
+// hook budget truncates to a 2 KB preview (gt-t30p). When no renderer is
+// installed or rendering fails, the config is returned unchanged and gt prime
+// prints the static role text itself, so it degrades to the old behavior
 // rather than a dead session.
 func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
 	if rc == nil || !isClaudeAgent(rc) {
@@ -65,8 +76,13 @@ func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentN
 	if path == "" {
 		return rc
 	}
-	if info, err := os.Stat(path); err != nil || info.IsDir() {
-		return rc
+	if !systemPromptFileReady(path) {
+		if SystemPromptRenderer == nil {
+			return rc
+		}
+		if err := SystemPromptRenderer(role, townRoot, rigPath, agentName, path); err != nil || !systemPromptFileReady(path) {
+			return rc
+		}
 	}
 	for _, arg := range rc.Args {
 		if arg == "--append-system-prompt-file" {
@@ -107,4 +123,10 @@ func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, 
 	}
 	rc = withRoleSettingsFlag(rc, role, rigPath)
 	return withRoleSystemPromptFlag(rc, role, townRoot, rigPath, agentName), nil
+}
+
+// systemPromptFileReady reports whether a rendered system prompt exists at path.
+func systemPromptFileReady(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
