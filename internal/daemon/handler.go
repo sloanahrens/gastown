@@ -396,6 +396,9 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 	// same town database, so the bd subprocess routing/target config is
 	// computed once rather than rebuilt per dog.
 	beadsDir := filepath.Join(townRoot, ".beads")
+	// Per-dispatch-cycle stale-wisp log guard: only log once per dog per cycle
+	// so a stale wisp that survives doesn't spam the log on every tick.
+	staleLogged := make(map[string]bool)
 	for _, d := range dogs {
 		if d.State != dog.StateIdle {
 			continue
@@ -408,10 +411,50 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 		if running {
 			continue
 		}
-		hooked, err := dogHasHookedFormulaFn(townRoot, beadsDir, d.Name)
+		result, err := dogHasHookedFormulaWithIDFn(townRoot, beadsDir, d.Name)
 		if err != nil {
 			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
-		} else if hooked {
+		} else if result.hasHooked {
+			// Check if this is a stale wisp: dog went idle after wisp was created
+			// AND no step progress has been made.
+			wispCreatedAt, parseErr := time.Parse(time.RFC3339, result.wispCreated)
+			if parseErr == nil {
+				// Query wisp steps to check progress
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				queryArgs := []string{"show", "--json", result.wispID}
+				qCmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(queryArgs), queryArgs...)
+				var qOut, qErrBuf bytes.Buffer
+				qCmd.Stdout = &qOut
+				qCmd.Stderr = &qErrBuf
+				if qErr := qCmd.Run(); qErr == nil {
+					var show struct {
+						Children []struct {
+							Status string `json:"status"`
+						} `json:"children,omitempty"`
+					}
+					if sErr := json.Unmarshal(qOut.Bytes(), &show); sErr == nil {
+						allClosed := true
+						for _, c := range show.Children {
+							if c.Status != "closed" {
+								allClosed = false
+								break
+							}
+						}
+						// Dog became idle after wisp was created AND no steps made progress
+						if allClosed && d.LastActive.After(wispCreatedAt) {
+							if !staleLogged[d.Name] {
+								logger.Printf("Handler: dog %s idle wisp %s stale (no progress), closing", d.Name, result.wispID)
+								staleLogged[d.Name] = true
+							}
+							closed := closeStaleWisp(result.wispID, beadsDir)
+							if closed > 0 {
+								logger.Printf("Handler: closed stale wisp %s for idle dog %s", result.wispID, d.Name)
+							}
+						}
+					}
+				}
+				cancel()
+			}
 			logger.Printf("Handler: dog %s is idle but still holds an open hooked formula molecule, skipping dispatch", d.Name)
 			continue
 		}
@@ -435,8 +478,9 @@ var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
 
 // hookedFormulaResult holds the outcome of a hooked-formula check.
 type hookedFormulaResult struct {
-	hasHooked bool
-	wispID    string // non-empty only when hasHooked is true
+	hasHooked   bool
+	wispID      string // non-empty only when hasHooked is true
+	wispCreated string // wisp created_at timestamp (RFC3339), non-empty when hasHooked is true
 }
 
 // dogHasHookedFormula reports whether the dog identified by name currently
@@ -518,7 +562,7 @@ func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormul
 
 	for _, hb := range hookedBeads {
 		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
-			return hookedFormulaResult{hasHooked: true, wispID: hb.ID}, nil
+			return hookedFormulaResult{hasHooked: true, wispID: hb.ID, wispCreated: hb.CreatedAt}, nil
 		}
 	}
 	return hookedFormulaResult{}, nil
@@ -535,6 +579,32 @@ func anyHasAttachedFormula(hookedBeads []*beads.Issue) bool {
 		}
 	}
 	return false
+}
+
+// closeStaleWisp force-closes a formula wisp whose dog has been idle longer
+// than the wisp has existed (no step progress made). Returns the count of
+// wisps closed (always 0 or 1).
+func closeStaleWisp(wispID, beadsDir string) int {
+	bd := beads.New(beadsDir)
+	// Recursively close descendants using Children (mirrors cmd.closeDescendantsImpl).
+	// Children checks the wisp_dependencies table, unlike List which only checks
+	// persistent dependencies and misses ephemeral wisps.
+	children, err := bd.Children(wispID)
+	if err == nil {
+		var idsToClose []string
+		for _, c := range children {
+			if c.Status != "closed" {
+				idsToClose = append(idsToClose, c.ID)
+			}
+		}
+		if len(idsToClose) > 0 {
+			_ = bd.ForceCloseWithReason("abandoned: idle dog, no progress", idsToClose...)
+		}
+	}
+	if err := bd.ForceCloseWithReason("abandoned: idle dog, no progress", wispID); err != nil {
+		return 0
+	}
+	return 1
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
