@@ -377,6 +377,12 @@ type DaemonThresholds struct {
 	// (deacon was healthy). Prevents burning API calls when deacon is running fine (default "15m").
 	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
 
+	// BootMode selects how Boot triage runs: "mechanical" (default) runs
+	// `gt boot triage` as a subprocess on the daemon's own heartbeat with no
+	// model involved; "agent" spawns the Boot Claude session as before. The
+	// agent added nothing over the mechanical triage in practice (gt-fo2k).
+	BootMode string `json:"boot_mode,omitempty"`
+
 	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
 	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
 

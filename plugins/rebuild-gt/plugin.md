@@ -12,6 +12,7 @@ labels = ["plugin:rebuild-gt", "rig:gastown", "category:maintenance"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"

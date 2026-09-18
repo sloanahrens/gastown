@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/dog"
 	"log"
 	"os"
 	"os/exec"
@@ -97,6 +98,13 @@ type Daemon struct {
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
+
+	// scripts tracks script-type plugins whose run.sh is executing
+	// in-process (gt-fo2k). Lazily created; safe for concurrent use.
+	scripts     *scriptRunner
+	scriptsOnce sync.Once
+	// findDogFn overrides dog selection in tests; nil uses the real pack.
+	findDogFn func() *dog.Dog
 
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
@@ -1404,6 +1412,15 @@ func (d *Daemon) ensureBootRunning() {
 		return
 	}
 
+	// Mechanical boot mode (the default, gt-fo2k): run `gt boot triage`
+	// ourselves instead of spawning a Boot agent to run it for us. It is
+	// the same command the agent ran, so warrants, the shutdown check and
+	// the status file all behave as before — minus the ~22k-token session.
+	if d.loadOperationalConfig().GetDaemonConfig().BootModeValue() == agentconfig.BootModeMechanical {
+		d.runMechanicalBootTriage()
+		return
+	}
+
 	// Idle check: run gt-idle-check to see if the system needs waking.
 	// If idle (all rigs parked, no polecats, deacon alive), skip the expensive
 	// Claude Boot session and use degraded mechanical triage instead.
@@ -1472,6 +1489,39 @@ func (d *Daemon) hasActiveWork() bool {
 
 // runDegradedBootTriage performs mechanical Boot logic without AI reasoning.
 // This is for degraded mode when tmux is unavailable.
+// runMechanicalBootTriage runs `gt boot triage` as a subprocess of the
+// daemon (gt-fo2k). It is exactly the command the Boot agent used to run
+// on our behalf, so warrant execution, the shutdown check and the status
+// file that drives idle suppression all behave as before; the difference
+// is no Claude session, no ~22k-token prefill, and no tmux window. The
+// installed gt is used (os.Executable), never a PATH lookup, so a stale
+// PATH cannot pick a different build than the daemon itself.
+func (d *Daemon) runMechanicalBootTriage() {
+	exe, err := os.Executable()
+	if err != nil {
+		d.logger.Printf("Boot: cannot resolve gt binary for mechanical triage: %v; falling back to direct Deacon check", err)
+		d.ensureDeaconRunning()
+		return
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "boot", "triage") //nolint:gosec // G204: our own binary, fixed args
+	cmd.Dir = filepath.Join(d.config.TownRoot, "deacon")
+	cmd.Env = append(os.Environ(), "GT_ROOT="+d.config.TownRoot, "GT_TOWN_ROOT="+d.config.TownRoot, "GT_ROLE=deacon/boot", "BD_ACTOR=boot")
+	util.SetProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
+	summary := strings.TrimSpace(string(out))
+	if len(summary) > 400 {
+		summary = summary[len(summary)-400:]
+	}
+	if err != nil {
+		d.logger.Printf("Boot: mechanical triage failed (%v): %s", err, summary)
+		return
+	}
+	d.bootLastSpawned = time.Now()
+	d.logger.Printf("Boot: mechanical triage: %s", summary)
+}
+
 func (d *Daemon) runDegradedBootTriage(b *boot.Boot) {
 	startTime := time.Now()
 	status := &boot.Status{

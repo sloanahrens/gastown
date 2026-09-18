@@ -12,6 +12,7 @@ labels = ["plugin:gitignore-reconcile", "category:git-hygiene"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "10m"
 notify_on_failure = true
 severity = "low"

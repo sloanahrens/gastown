@@ -12,6 +12,7 @@ labels = ["plugin:tool-updater", "category:maintenance"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "10m"
 notify_on_failure = true
 severity = "medium"

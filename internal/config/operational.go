@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -415,6 +416,22 @@ func (d *DaemonThresholds) BootSpawnCooldownD() time.Duration {
 		return ParseDurationOrDefault(d.BootSpawnCooldown, DefaultBootSpawnCooldown)
 	}
 	return DefaultBootSpawnCooldown
+}
+
+// Boot triage modes (DaemonThresholds.BootMode).
+const (
+	BootModeMechanical = "mechanical"
+	BootModeAgent      = "agent"
+)
+
+// BootModeValue returns the configured boot mode, defaulting to mechanical.
+// Unknown values fall back to mechanical: the cheaper path is also the one
+// that cannot misbehave for want of a model.
+func (d *DaemonThresholds) BootModeValue() string {
+	if d != nil && strings.EqualFold(strings.TrimSpace(d.BootMode), BootModeAgent) {
+		return BootModeAgent
+	}
+	return BootModeMechanical
 }
 
 // BootIdleSuppressionD returns the configured or default boot idle suppression duration.

@@ -12,6 +12,7 @@ labels = ["plugin:dolt-archive", "category:data-safety"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "15m"
 notify_on_failure = true
 severity = "critical"

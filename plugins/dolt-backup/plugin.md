@@ -12,6 +12,7 @@ labels = ["plugin:dolt-backup", "category:data-safety"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "high"

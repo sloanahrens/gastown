@@ -12,6 +12,7 @@ labels = ["plugin:dolt-log-rotate", "category:maintenance"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "2m"
 notify_on_failure = true
 severity = "medium"
