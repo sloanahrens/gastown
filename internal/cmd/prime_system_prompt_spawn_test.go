@@ -66,6 +66,48 @@ func TestRenderSystemPromptFileForSpawn_PolecatMatchesInSessionPrime(t *testing.
 	}
 }
 
+// Every role that has a file must render at spawn time exactly what gt prime
+// renders from inside the session (GT_ROLE plus the session cwd), otherwise
+// prime's refresh rewrites the file on every first run.
+func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T) {
+	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "sloan"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		role  string
+		agent string
+		prime RoleContext // what gt prime derives inside the live session
+	}{
+		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
+		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
+		{"witness", "", RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "witness")}},
+		{"refinery", "", RoleContext{Role: RoleRefinery, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "refinery", "rig")}},
+		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
+		{"deacon", "", RoleContext{Role: RoleDeacon, TownRoot: town, WorkDir: filepath.Join(town, "deacon")}},
+	}
+	for _, tc := range cases {
+		path := config.SystemPromptFilePath(tc.role, town, rigPath, tc.agent)
+		if path == "" {
+			t.Fatalf("%s: no system prompt path", tc.role)
+		}
+		if err := renderSystemPromptFileForSpawn(tc.role, town, rigPath, tc.agent, path); err != nil {
+			t.Fatalf("%s: render: %v", tc.role, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.role, err)
+		}
+		want, fromTemplate, err := staticRoleText(tc.prime)
+		if err != nil || !fromTemplate {
+			t.Fatalf("%s: staticRoleText err=%v fromTemplate=%v", tc.role, err, fromTemplate)
+		}
+		if string(got) != want {
+			t.Errorf("%s: spawn-time render differs from the in-session render", tc.role)
+		}
+	}
+}
+
 func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	cases := []struct {

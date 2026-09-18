@@ -45,8 +45,12 @@ func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path str
 		// the same rule); the hardcoded fallback stays in the hook output.
 		return errors.New("role template unavailable")
 	}
-	_, err = writeSystemPromptFile(path, text)
-	return err
+	wrote, err := writeSystemPromptFile(path, text)
+	if err != nil {
+		return err
+	}
+	explain(wrote, "System prompt: rendered "+path+" before the first spawn")
+	return nil
 }
 
 // spawnRoleContext rebuilds the RoleContext gt prime derives from GT_ROLE and
