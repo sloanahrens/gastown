@@ -89,7 +89,7 @@ func TestListPolecatSessions(t *testing.T) {
 			"hq-mayor":    {"GT_ROLE": "mayor"},
 			"random":      {},
 		},
-		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour), "gt-opal": now},
+		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour)},
 	}
 	got, err := listPolecatSessions(f)
 	if err != nil {
@@ -104,6 +104,12 @@ func TestListPolecatSessions(t *testing.T) {
 	}
 	if agents["gt-marble"] != "local-coder-polecat" || agents["gt-slate"] != "deepseek-flash" || agents["gt-opal"] != "" {
 		t.Errorf("agents: %v", agents)
+	}
+	// A polecat whose creation time tmux cannot report counts as just spawned.
+	for _, s := range got {
+		if s.name == "gt-opal" && time.Since(s.created) > time.Minute {
+			t.Errorf("unknown created time should read as now, got %v", s.created)
+		}
 	}
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "30s", OverflowAgent: "deepseek-flash"}
 	if a, r := choosePoolAgent(pool, got, now); a != "local-coder-polecat" {

@@ -86,7 +86,10 @@ func listPolecatSessions(t sessionLister) ([]poolSession, error) {
 		agent, _ := t.GetEnvironment(n, "GT_AGENT")
 		created, err := t.GetSessionCreatedTime(n)
 		if err != nil {
-			created = time.Time{}
+			// Unknown age counts as "just spawned": it forces the stagger
+			// rather than silently disabling it (a zero time would look
+			// two thousand years old).
+			created = time.Now()
 		}
 		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created})
 	}
