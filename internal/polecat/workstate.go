@@ -174,7 +174,15 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 			return d
 		} else if !in.HasSubmittableWork || in.MQNotRequired {
 			d.MQStatus = "not_required"
-		} else if in.MRSubmitted {
+		} else if in.MRSubmitted || in.AssignedBeadTerminal {
+			// A terminal assigned bead is submission evidence, exactly like a
+			// found MR bead: the work is finished or intentionally superseded,
+			// so there is nothing left to enqueue. This preserves the
+			// applyMQCheck semantics (beadTerminal -> "submitted") that the
+			// aa-55d8 zombie-restart fix established, on the unified
+			// classifier path — a superseded branch is always "ahead", so
+			// commits-ahead can never discriminate; source-issue terminality
+			// is the signal (gt-nkyy).
 			d.MQStatus = "submitted"
 		} else {
 			d.Verdict = WorkstateVerdictNeedsMQSubmit

@@ -204,6 +204,78 @@ func TestApplyMQCheck(t *testing.T) {
 	}
 }
 
+// TestDecideWorkstate_ClosedSourceWithSubmittableWork is the gt-nkyy cmd-level
+// regression: a CLOSED source issue with superseded commits ahead of main must
+// not classify NEEDS_MQ_SUBMIT — source-issue terminality is the submission
+// signal, exactly like a found MR bead. (The work is finished or intentionally
+// superseded, so there is nothing left to submit; the polecat is reusable.)
+func TestDecideWorkstate_ClosedSourceWithSubmittableWork(t *testing.T) {
+	input := polecat.WorkstateInput{
+		State:         polecat.StateIdle,
+		CleanupStatus: polecat.CleanupClean,
+		Branch:        "polecat/coral/gt-gmd+mu5bojgw",
+	}
+	status := RecoveryStatus{Branch: "polecat/coral/gt-gmd+mu5bojgw", Issue: "gt-gmd"}
+
+	// beadTerminal=true (source issue CLOSED), HasSubmittableWork=true via
+	// gitState.UnpushedCommits fallback (no real worktree), no MR lookup needed.
+	// MQNotRequired must come back false so the terminality rule — not the
+	// no-merge-queue escape hatch — is what resolves this case (gt-nkyy).
+	// A nil fake (no issue, no error) exercises exactly that: Show succeeds,
+	// ParseAttachmentFields finds no attachment, so isMQNotRequiredSource is
+	// false. Note the fake is a non-nil interface holding a zero struct; a
+	// typed-nil *beads.Beads would instead reach Show on a nil receiver.
+	bdNone := fakeIssueShower{}
+	applyMQFactsToWorkstateInput(
+		&input,
+		&status,
+		bdNone,         // no attachment → MQNotRequired=false
+		true,           // beadTerminal
+		"/tmp/gt-nkyy-fake-wt", // worktreePath (doesn't exist; fallback path)
+		nil,            // targetRefs
+		false,          // targetRefLookupFailed
+		&GitState{UnpushedCommits: 3}, // triggers HasSubmittableWork via fallback
+		nil,            // gitErr
+		nil,            // mrForBranch
+		nil,            // mrForBranchErr
+	)
+
+	// Core fix: AssignedBeadTerminal is true, so MRSubmitted stays false but
+	// MQCheckRequired/HasSubmittableWork/AssignedBeadTerminal are all true.
+	if !input.MQCheckRequired {
+		t.Fatal("MQCheckRequired must be true")
+	}
+	if !input.AssignedBeadTerminal {
+		t.Fatal("AssignedBeadTerminal must be true")
+	}
+	if !input.HasSubmittableWork {
+		t.Fatal("HasSubmittableWork must be true")
+	}
+	if input.MRSubmitted {
+		t.Fatal("MRSubmitted must be false (early return for terminal bead)")
+	}
+	if input.MQLookupFailed {
+		t.Fatal("MQLookupFailed must be false")
+	}
+
+	d := polecat.DecideWorkstate(input)
+	if d.Verdict != polecat.WorkstateVerdictSafeToNuke {
+		t.Fatalf("verdict = %q, want %q", d.Verdict, polecat.WorkstateVerdictSafeToNuke)
+	}
+	if !d.Reusable || !d.SafeToNuke {
+		t.Fatalf("Reusable/SafeToNuke = %v/%v, want true/true", d.Reusable, d.SafeToNuke)
+	}
+	if d.MQStatus != "submitted" {
+		t.Fatalf("MQStatus = %q, want submitted", d.MQStatus)
+	}
+	if d.NeedsMQSubmit || d.NeedsRecovery {
+		t.Fatalf("NeedsMQSubmit/NeedsRecovery = %v/%v, want false/false", d.NeedsMQSubmit, d.NeedsRecovery)
+	}
+	if d.CountsTowardCapacity {
+		t.Fatal("CountsTowardCapacity must be false")
+	}
+}
+
 func TestIsMQNotRequiredSource(t *testing.T) {
 	tests := []struct {
 		name  string
