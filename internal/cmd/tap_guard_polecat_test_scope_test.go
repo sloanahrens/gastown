@@ -30,6 +30,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
 		{"filtered two heavy packages", "go test ./internal/cmd/ ./internal/polecat/ -run TestFoo -count=1", false},
 		{"filtered heavy package in slot run", "gt slot run --role gastown/flint -- go test ./internal/daemon/ -run TestFeedFirstReady", false},
+		{"filter passed to the test binary after --", "go test ./internal/cmd/ -- -test.run TestFoo", false},
 		{"whole light package", "go test ./internal/git/ -count=1", false},
 		{"whole light packages", "go test ./internal/style/... ./internal/config/", false},
 		{"go vet", "go vet ./internal/cmd/ ./internal/daemon/", false},
@@ -58,6 +59,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 // Through the real hook entry point: a polecat is blocked, the refinery (which
 // must run whole packages) and crew are not.
 func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "")
 	cmd := `{"tool_name":"Bash","tool_input":{"command":"gt slot run --role gastown/flint -- go test ./internal/polecat/ -count=1"}}`
 
 	t.Setenv("GT_POLECAT", "flint")

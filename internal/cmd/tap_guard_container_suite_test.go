@@ -8,6 +8,9 @@ import (
 )
 
 func TestEvaluateContainerSuiteCommand(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	tests := []struct {
 		name    string
 		command string
@@ -153,6 +156,9 @@ func TestIsPolecatOrRefineryContext_CwdFallback(t *testing.T) {
 // must actually exit non-nil (blocking) end-to-end, not just when its
 // internal evaluator is called directly.
 func TestRunTapGuardContainerSuite_BlockedInPolecatContext(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	t.Setenv("GT_POLECAT", "topaz")
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
@@ -171,6 +177,9 @@ func TestRunTapGuardContainerSuite_BlockedInPolecatContext(t *testing.T) {
 // "false positive gone" leg: the same command that gets blocked for a
 // polecat must be allowed for a role this guard doesn't cover (e.g. crew).
 func TestRunTapGuardContainerSuite_AllowedOutsidePolecatOrRefineryContext(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	// Chdir off the polecat worktree this test binary happens to run from —
 	// otherwise the cwd-path fallback (see TestIsPolecatOrRefineryContext_CwdFallback)
 	// would make this a polecat context regardless of env vars.
@@ -193,6 +202,9 @@ func TestRunTapGuardContainerSuite_AllowedOutsidePolecatOrRefineryContext(t *tes
 // exact same target package, wrapped in gt slot run, must be allowed even
 // under a polecat context.
 func TestRunTapGuardContainerSuite_WrappedAllowed(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	t.Setenv("GT_POLECAT", "topaz")
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
@@ -210,6 +222,9 @@ func TestRunTapGuardContainerSuite_WrappedAllowed(t *testing.T) {
 // TestRunTapGuardContainerSuite_RefineryBlocked pins the refinery leg of the
 // guard, not just polecat.
 func TestRunTapGuardContainerSuite_RefineryBlocked(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	t.Setenv("GT_POLECAT", "")
 	t.Setenv("GT_REFINERY", "1")
 	t.Setenv("GT_ROLE", "gastown/refinery")
@@ -228,6 +243,9 @@ func TestRunTapGuardContainerSuite_RefineryBlocked(t *testing.T) {
 // unaffected input still passes" leg: a polecat running tests scoped to a
 // package with no Docker footprint must not be blocked.
 func TestRunTapGuardContainerSuite_NonContainerPackageAllowed(t *testing.T) {
+	// The guard reads the opt-in from its own environment; `make test`
+	// exports it, so pin it off or the "switch off" cases flip under the gate.
+	t.Setenv(dockerTestsEnv, "")
 	t.Setenv("GT_POLECAT", "topaz")
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/topaz")

@@ -70,11 +70,10 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 		return "", nil
 	}
 	rest := tokens[i+2:]
+	// A filter may come as -run before the packages, or as -test.run after
+	// "--" (passed straight to the test binary); either bounds the run.
 	hasRun := false
 	for _, t := range rest {
-		if t == "--" {
-			break
-		}
 		if t == "-run" || strings.HasPrefix(t, "-run=") || t == "-test.run" || strings.HasPrefix(t, "-test.run=") {
 			hasRun = true
 		}
