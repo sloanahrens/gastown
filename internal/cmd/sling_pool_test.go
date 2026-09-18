@@ -71,7 +71,10 @@ func (f *fakeLister) GetEnvironment(session, key string) (string, error) {
 	return v, nil
 }
 func (f *fakeLister) GetSessionCreatedTime(name string) (time.Time, error) {
-	return f.created[name], nil
+	if c, ok := f.created[name]; ok {
+		return c, nil
+	}
+	return time.Time{}, errors.New("no such session")
 }
 
 // Only polecat sessions count, identified by GT_ROLE; witnesses, refineries
