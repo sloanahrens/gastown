@@ -869,13 +869,23 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 			currentAgent = val
 		}
 	}
+	// Polecat and crew system-prompt files are per agent; the identity's
+	// Name is the worker name for those roles and unused for the rest.
+	agentName := ""
+	if simpleRole == "polecat" || simpleRole == "crew" {
+		agentName = identity.Name
+	}
+
 	var runtimeCmd string
 	if currentAgent != "" {
-		var err error
-		runtimeCmd, err = config.GetRuntimeCommandWithPromptAndAgentOverride(rigPath, beacon, currentAgent)
+		// Resolve with the override but still through the role-aware path so
+		// the respawn carries --settings and --append-system-prompt-file
+		// exactly like a daemon spawn would (gt-layt second-session gap).
+		rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, currentAgent, agentName)
 		if err != nil {
 			return "", fmt.Errorf("resolving agent config: %w", err)
 		}
+		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
 		// runtime command via role-aware config (instead of default-agent lookup).
@@ -907,7 +917,9 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		// Otherwise, fall back to role-based resolution.
 		var runtimeConfig *config.RuntimeConfig
 		if currentAgent != "" {
-			rc, _, err := config.ResolveAgentConfigWithOverride(townRoot, rigPath, currentAgent)
+			// Same role-aware resolution as the command above, so the
+			// exported env carries GT_SYSTEM_PROMPT_FILE when the flag does.
+			rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, currentAgent, agentName)
 			if err == nil {
 				runtimeConfig = rc
 			} else {

@@ -83,3 +83,28 @@ func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentN
 	rc.Env = env
 	return rc
 }
+
+// ResolveRoleAgentConfigWithOverride resolves agentOverride for role (falling
+// back to role_agents when agentOverride is empty) and applies the role-level
+// Claude flags that every spawn path must carry: --settings when the role's
+// settings dir differs from its working dir, and --append-system-prompt-file
+// when the role's rendered system prompt exists. agentName is the polecat or
+// crew worker name; other roles pass "".
+//
+// Spawn paths that resolve an explicit agent (GT_AGENT on handoff, --agent on
+// sling) used to call ResolveAgentConfigWithOverride directly and so skipped
+// both flags; the gt-layt second-session gap came from exactly that.
+func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, agentName string) (*RuntimeConfig, error) {
+	var rc *RuntimeConfig
+	if agentOverride == "" {
+		rc = ResolveRoleAgentConfig(role, townRoot, rigPath)
+	} else {
+		var err error
+		rc, _, err = ResolveAgentConfigWithOverride(townRoot, rigPath, agentOverride)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rc = withRoleSettingsFlag(rc, role, rigPath)
+	return withRoleSystemPromptFlag(rc, role, townRoot, rigPath, agentName), nil
+}

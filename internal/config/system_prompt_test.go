@@ -217,3 +217,90 @@ func TestBuildStartupCommand_PolecatUsesPerAgentSystemPrompt(t *testing.T) {
 		t.Fatalf("expected the per-agent file %s in:\n%s", mine, cmd)
 	}
 }
+
+func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	ts := NewTownSettings()
+	ts.DefaultAgent = "claude"
+	ts.Agents = map[string]*RuntimeConfig{
+		"deepseek-flash": {Command: "claude", Args: []string{"--model", "deepseek-flash"}, Provider: "claude"},
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Polecat: per-agent file under the shared polecats settings dir.
+	polecatPath := SystemPromptFilePath("polecat", townRoot, rigPath, "marble")
+	if err := os.MkdirAll(filepath.Dir(polecatPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(polecatPath, []byte("# polecat marble\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, err := ResolveRoleAgentConfigWithOverride("polecat", townRoot, rigPath, "deepseek-flash", "marble")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if rc.ResolvedAgent != "deepseek-flash" && !containsArg(rc.Args, "deepseek-flash") {
+		t.Errorf("override agent not honoured: %+v", rc)
+	}
+	if !containsArgPair(rc.Args, "--append-system-prompt-file", polecatPath) {
+		t.Errorf("polecat override config lacks the per-agent flag: %v", rc.Args)
+	}
+	if rc.Env[EnvSystemPromptFile] != polecatPath {
+		t.Errorf("env %s = %q, want %q", EnvSystemPromptFile, rc.Env[EnvSystemPromptFile], polecatPath)
+	}
+
+	// Deacon: town-level role, empty rigPath, no agent name.
+	deaconPath := SystemPromptFilePath("deacon", townRoot, "", "")
+	if err := os.MkdirAll(filepath.Dir(deaconPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deaconPath, []byte("# deacon\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rc, err = ResolveRoleAgentConfigWithOverride("deacon", townRoot, "", "deepseek-flash", "")
+	if err != nil {
+		t.Fatalf("resolve deacon: %v", err)
+	}
+	if !containsArgPair(rc.Args, "--append-system-prompt-file", deaconPath) {
+		t.Errorf("deacon override config lacks the flag: %v", rc.Args)
+	}
+
+	// Missing file: unchanged config, no error.
+	rc, err = ResolveRoleAgentConfigWithOverride("witness", townRoot, rigPath, "deepseek-flash", "")
+	if err != nil {
+		t.Fatalf("resolve witness: %v", err)
+	}
+	if containsArg(rc.Args, "--append-system-prompt-file") {
+		t.Errorf("witness has no file yet but got the flag: %v", rc.Args)
+	}
+
+	// Unknown agent: error, like ResolveAgentConfigWithOverride.
+	if _, err := ResolveRoleAgentConfigWithOverride("deacon", townRoot, "", "no-such-agent", ""); err == nil {
+		t.Error("expected an error for an unknown agent override")
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsArgPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}

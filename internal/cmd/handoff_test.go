@@ -1050,3 +1050,96 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		}
 	})
 }
+
+// Regression test for the gt-layt second-session gap: when GT_AGENT is set
+// (every role_agents session), buildRestartCommand took the agent-override
+// resolver, which skipped the role-level Claude flags. The respawned session
+// then ran without --append-system-prompt-file even though the role's
+// system-prompt file existed, so gt prime kept printing the static role text
+// inline and the hook output stayed over the 10k cap forever.
+func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+
+	townRoot := t.TempDir()
+
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+	rigPath := filepath.Join(townRoot, "gastown")
+	witnessDir := filepath.Join(rigPath, "witness")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(witnessDir, ".claude"), 0755); err != nil {
+		t.Fatalf("mkdir witness dir: %v", err)
+	}
+	promptPath := config.SystemPromptFilePath("witness", townRoot, rigPath, "")
+	if promptPath == "" {
+		t.Fatal("SystemPromptFilePath returned empty for witness")
+	}
+	if err := os.WriteFile(promptPath, []byte("# witness\n"), 0644); err != nil {
+		t.Fatalf("write system prompt: %v", err)
+	}
+	// buildRestartCommand detects the town root from the resolved cwd, so on
+	// macOS the path comes back through /private/var; compare canonical forms.
+	if real, err := filepath.EvalSymlinks(promptPath); err == nil {
+		promptPath = real
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude-proxy"
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"claude-proxy": {
+			Command: "claude",
+			Args:    []string{"--dangerously-skip-permissions"},
+			Env:     map[string]string{"ANTHROPIC_BASE_URL": "http://localhost:8080"},
+		},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	_ = os.Setenv("GT_AGENT", "claude-proxy")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	if err := os.Chdir(witnessDir); err != nil {
+		t.Fatalf("chdir witness dir: %v", err)
+	}
+
+	cmd, err := buildRestartCommand("gt-witness")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+
+	if !strings.Contains(cmd, "--append-system-prompt-file "+promptPath) {
+		t.Errorf("agent-override restart command lacks --append-system-prompt-file %s\ncmd: %s", promptPath, cmd)
+	}
+	if !strings.Contains(cmd, config.EnvSystemPromptFile+"=") {
+		t.Errorf("agent-override restart command does not export %s\ncmd: %s", config.EnvSystemPromptFile, cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL=") {
+		t.Errorf("agent preset env dropped alongside the flag\ncmd: %s", cmd)
+	}
+	// The role's own --settings flag must ride the same path: the witness
+	// settings dir differs from its working dir only when hooks live above
+	// the worktree, which is not the case here, so we only assert the
+	// command still targets the override agent.
+	if strings.Count(cmd, "--append-system-prompt-file") != 1 {
+		t.Errorf("flag must appear exactly once\ncmd: %s", cmd)
+	}
+}
