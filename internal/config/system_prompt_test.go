@@ -22,15 +22,12 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 		"boot":     "",
 	}
 	for role, want := range cases {
-		if got := SystemPromptFilePath(role, town, rig, ".claude"); got != want {
+		if got := SystemPromptFilePath(role, town, rig); got != want {
 			t.Errorf("SystemPromptFilePath(%s) = %q, want %q", role, got, want)
 		}
 	}
-	if got := SystemPromptFilePath("polecat", town, "", ".claude"); got != "" {
+	if got := SystemPromptFilePath("polecat", town, ""); got != "" {
 		t.Errorf("rig-scoped role without rigPath must return empty, got %q", got)
-	}
-	if got := SystemPromptFilePath("witness", town, rig, ".gemini"); got != "/town/myrig/witness/.gemini/system-prompt.md" {
-		t.Errorf("hooks dir must be honoured, got %q", got)
 	}
 }
 
@@ -50,7 +47,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		t.Fatalf("env must not be set while the file does not exist: %v", got.Env)
 	}
 
-	path := SystemPromptFilePath("polecat", town, rig, ".claude")
+	path := SystemPromptFilePath("polecat", town, rig)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +89,7 @@ func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	rig := filepath.Join(town, "myrig")
-	path := SystemPromptFilePath("polecat", town, rig, ".claude")
+	path := SystemPromptFilePath("polecat", town, rig)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -106,24 +103,6 @@ func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
 	}
 }
 
-func TestWithRoleSystemPromptFlag_HonoursHooksDir(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	rig := filepath.Join(town, "myrig")
-	path := SystemPromptFilePath("witness", town, rig, ".custom")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rc := &RuntimeConfig{Command: "claude", Hooks: &RuntimeHooksConfig{Provider: "claude", Dir: ".custom"}}
-	got := withRoleSystemPromptFlag(rc, "witness", town, rig)
-	if got.Env[EnvSystemPromptFile] != path {
-		t.Fatalf("expected %s, env = %v", path, got.Env)
-	}
-}
-
 func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -134,7 +113,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("witness", town, rig, ".claude")
+	path := SystemPromptFilePath("witness", town, rig)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +146,7 @@ func TestBuildStartupCommand_CarriesSystemPromptFlagAndEnv(t *testing.T) {
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("polecat", town, rig, ".claude")
+	path := SystemPromptFilePath("polecat", town, rig)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}

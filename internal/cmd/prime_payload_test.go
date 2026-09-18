@@ -188,9 +188,12 @@ func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
-	text, err := staticRoleText(ctx)
+	text, fromTemplate, err := staticRoleText(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !fromTemplate {
+		t.Fatal("polecat text must come from the role template")
 	}
 	for _, want := range []string{"Directory Discipline", "OPERATOR CONTEXT LINE"} {
 		if !strings.Contains(text, want) {
@@ -449,7 +452,7 @@ func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: town}
-	want, err := staticRoleText(ctx)
+	want, _, err := staticRoleText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,5 +480,25 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 	}
 	if !strings.Contains(out, "step body truncated") || !strings.Contains(out, "gt prime --step 1 --formula mol-big") {
 		t.Fatalf("truncated body must say so and name the fetch command:\n%s", out[len(out)-400:])
+	}
+}
+
+func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing.T) {
+	town := t.TempDir()
+	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := RoleContext{Role: RoleUnknown, TownRoot: town, WorkDir: town}
+	text, fromTemplate, err := staticRoleText(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromTemplate {
+		t.Fatal("unknown role has no template; fromTemplate must be false")
+	}
+	for _, want := range []string{"Could not determine specific role", "OPERATOR CONTEXT LINE"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("fallback static text missing %q:\n%s", want, text)
+		}
 	}
 }

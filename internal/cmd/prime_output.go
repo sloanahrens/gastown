@@ -24,21 +24,6 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// outputPrimeContext outputs the role-specific context using templates or fallback.
-// Returns the rendered template content (empty string when using fallback path).
-func outputPrimeContext(ctx RoleContext) (string, error) {
-	output, err := renderRoleTemplate(ctx)
-	if err != nil {
-		return "", err
-	}
-	if output == "" {
-		outputPrimeContextFallback(ctx)
-		return "", nil
-	}
-	fmt.Print(output)
-	return output, nil
-}
-
 // renderRoleTemplate renders the static role template for ctx. It returns ""
 // (no error) when templates are unavailable or the role is unknown, in which
 // case callers fall back to the hardcoded context.
@@ -465,21 +450,6 @@ func outputCommandQuickReference(ctx RoleContext) {
 	fmt.Println("- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).")
 	fmt.Println("- `restart/reboot` — Stop then start rig agents.")
 	fmt.Println()
-}
-
-// outputContextFile reads and displays the CONTEXT.md file from the town root.
-// This provides a simple plugin point for operators to inject custom instructions
-// that all agents (including polecats) will see during priming.
-func outputContextFile(ctx RoleContext) {
-	contextPath := filepath.Join(ctx.TownRoot, "CONTEXT.md")
-	data, err := os.ReadFile(contextPath)
-	if err != nil {
-		explain(true, "CONTEXT.md: not found at "+contextPath)
-		return
-	}
-	explain(true, "CONTEXT.md: found at "+contextPath+", injecting contents")
-	fmt.Println()
-	fmt.Print(string(data))
 }
 
 // outputHandoffContent reads and displays the pinned handoff bead for the role.

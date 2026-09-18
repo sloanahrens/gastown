@@ -177,20 +177,32 @@ func writeSystemPromptFile(path, content string) (bool, error) {
 }
 
 // staticRoleText is everything about a role that does not change between
-// sessions: the role template plus the operator's CONTEXT.md. It is what goes
-// into the system-prompt file.
-func staticRoleText(ctx RoleContext) (string, error) {
-	text, err := renderRoleTemplate(ctx)
+// sessions: the role template (or, when templates are unavailable or the role
+// is unknown, the hardcoded fallback context) plus the operator's CONTEXT.md.
+// fromTemplate reports whether the role template rendered; only that text is
+// worth persisting to the system-prompt file.
+func staticRoleText(ctx RoleContext) (text string, fromTemplate bool, err error) {
+	text, err = renderRoleTemplate(ctx)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if data, err := os.ReadFile(filepath.Join(ctx.TownRoot, "CONTEXT.md")); err == nil && len(data) > 0 {
-		text += "\n" + string(data)
-		if !strings.HasSuffix(text, "\n") {
-			text += "\n"
-		}
+	fromTemplate = text != ""
+	if !fromTemplate {
+		explain(true, "Role context: templates unavailable or role unknown, using hardcoded fallback")
+		text = captureOutput(func() { outputPrimeContextFallback(ctx) })
 	}
-	return text, nil
+	contextPath := filepath.Join(ctx.TownRoot, "CONTEXT.md")
+	data, readErr := os.ReadFile(contextPath)
+	if readErr != nil || len(data) == 0 {
+		explain(true, "CONTEXT.md: not found at "+contextPath)
+		return text, fromTemplate, nil
+	}
+	explain(true, "CONTEXT.md: found at "+contextPath+", injecting contents")
+	text += "\n" + string(data)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return text, fromTemplate, nil
 }
 
 // systemPromptPathFor returns the system-prompt file for the priming agent, or
@@ -200,7 +212,7 @@ func systemPromptPathFor(ctx RoleContext) string {
 	if ctx.Rig != "" && ctx.TownRoot != "" {
 		rigPath = filepath.Join(ctx.TownRoot, ctx.Rig)
 	}
-	return config.SystemPromptFilePath(string(ctx.Role), ctx.TownRoot, rigPath, "")
+	return config.SystemPromptFilePath(string(ctx.Role), ctx.TownRoot, rigPath)
 }
 
 // useCompactResumePath decides between the brief compact/resume output and the

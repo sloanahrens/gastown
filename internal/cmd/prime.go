@@ -161,6 +161,12 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
+	// --step is a read-only fetch: no hook handling, no handoff-marker removal,
+	// no session setup.
+	if primeStep > 0 {
+		return runPrimeStep(RoleContext{Role: roleInfo.Role, Rig: roleInfo.Rig, Polecat: roleInfo.Polecat, TownRoot: townRoot, WorkDir: cwd})
+	}
+
 	if primeHookMode {
 		handlePrimeHookMode(townRoot, cwd)
 		// PreCompact stdout is not model context. The session id was persisted
@@ -198,10 +204,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// work state in compressed memory — just confirm identity and inject
 	// any new mail. This keeps PreCompress hooks under 1s for non-Claude
 	// runtimes that have short hook timeouts (Gemini CLI).
-	if primeStep > 0 {
-		return runPrimeStep(ctx)
-	}
-
 	staticDelivered := primeStaticTextDelivered()
 	if useCompactResumePath(primeHookSource, primeHandoffReason, staticDelivered) {
 		runPrimeCompactResume(ctx)
@@ -246,39 +248,39 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// system-prompt file for the NEXT spawn; the runtime passes it back via
 	// --append-system-prompt-file and sets GT_SYSTEM_PROMPT_FILE, and then
 	// this output omits it. Until that file exists the text is printed here.
-	staticText, err := staticRoleText(ctx)
+	staticText, fromTemplate, err := staticRoleText(ctx)
 	if err != nil {
 		return err
 	}
-	if !primeDryRun && staticText != "" {
+	if !primeDryRun && fromTemplate {
 		if _, err := writeSystemPromptFile(systemPromptPathFor(ctx), staticText); err != nil {
 			fmt.Fprintf(os.Stderr, "gt prime: could not refresh system prompt file: %v\n", err)
 		}
 	}
 	includeStatic := !staticDelivered
-	if staticText == "" {
-		// Templates unavailable or unknown role: hardcoded fallback context.
-		staticText = captureOutput(func() { outputPrimeContextFallback(ctx) })
-		includeStatic = true
-	}
 	// Log the rendered role context to OTEL so operators can see exactly what
 	// context each agent started with. Only emitted when GT_OTEL_LOGS_URL is set.
 	telemetry.RecordPrimeContext(context.Background(), staticText, os.Getenv("GT_ROLE"), primeHookMode)
 
 	hasSlungWork := hookedBead != nil
 	explain(hasSlungWork, "Autonomous mode: hooked/in-progress work detected")
+	// Render the hooked work first and on its own: a checkSlungWork error
+	// (refinery safety-stop lookup, formula rendering) must abort before the
+	// side-effecting sections (mail inject, checkpoint cleanup) run.
 	var slungErr error
+	hookedWorkText := captureOutput(func() {
+		_, slungErr = checkSlungWork(ctx, hookedBead)
+		outputAttachmentStatus(ctx)
+	})
+	if slungErr != nil {
+		return slungErr
+	}
 	parts := primeParts{
 		session: func() string {
 			explain(true, "Session metadata: always included for seance discovery")
 			return captureOutput(func() { outputSessionMetadata(ctx) })
 		},
-		hookedWork: func() string {
-			return captureOutput(func() {
-				_, slungErr = checkSlungWork(ctx, hookedBead)
-				outputAttachmentStatus(ctx)
-			})
-		},
+		hookedWork: func() string { return hookedWorkText },
 		molecule:   func() string { return captureOutput(func() { outputMoleculeContext(ctx) }) },
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
 		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
@@ -294,9 +296,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		parts.escalations = func() string { return captureOutput(func() { checkPendingEscalations(ctx) }) }
 	}
 	payload := assemblePrimePayload(parts, staticText, includeStatic, hasSlungWork)
-	if slungErr != nil {
-		return slungErr
-	}
 	// The hook budget only helps when the static text is out of the payload;
 	// with it in, the output exceeds the runtime limit regardless and dropping
 	// the small sections would just lose information.

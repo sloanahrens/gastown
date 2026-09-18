@@ -20,13 +20,11 @@ const SystemPromptFileName = "system-prompt.md"
 // SystemPromptFilePath returns where the static role text for a role lives:
 // one file per role per rig for rig-scoped roles (shared by every polecat of
 // the rig, so the text is byte-identical across sessions), one per town for
-// mayor and deacon. Returns "" for roles that do not use a system-prompt file
-// (dog, boot: their prime already fits the hook budget) or when the scope
-// path needed for the role is missing.
-func SystemPromptFilePath(role, townRoot, rigPath, hooksDir string) string {
-	if hooksDir == "" {
-		hooksDir = ".claude"
-	}
+// mayor and deacon, always under the role's .claude directory next to the
+// Claude hooks settings file (only Claude agents receive the flag). Returns ""
+// for roles that do not use a system-prompt file (dog, boot: their prime
+// already fits the hook budget) or when the scope path for the role is missing.
+func SystemPromptFilePath(role, townRoot, rigPath string) string {
 	var dir string
 	switch role {
 	case constants.RolePolecat, constants.RoleCrew, constants.RoleWitness, constants.RoleRefinery:
@@ -42,7 +40,7 @@ func SystemPromptFilePath(role, townRoot, rigPath, hooksDir string) string {
 	default:
 		return ""
 	}
-	return filepath.Join(dir, hooksDir, SystemPromptFileName)
+	return filepath.Join(dir, ".claude", SystemPromptFileName)
 }
 
 // withRoleSystemPromptFlag appends --append-system-prompt-file <path> and sets
@@ -55,11 +53,7 @@ func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath string)
 	if rc == nil || !isClaudeAgent(rc) {
 		return rc
 	}
-	hooksDir := ""
-	if rc.Hooks != nil {
-		hooksDir = rc.Hooks.Dir
-	}
-	path := SystemPromptFilePath(role, townRoot, rigPath, hooksDir)
+	path := SystemPromptFilePath(role, townRoot, rigPath)
 	if path == "" {
 		return rc
 	}
