@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // dogHookedFormulaCheckTimeout bounds the bd subprocess findDispatchableDog
@@ -374,10 +375,32 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 		if running {
 			continue
 		}
-		hooked, err := dogHasHookedFormulaFn(townRoot, beadsDir, d.Name)
+		result, err := dogHasHookedFormulaWithIDFn(townRoot, beadsDir, d.Name)
 		if err != nil {
 			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
-		} else if hooked {
+		} else if result.hasHooked {
+			// gt-da2x: `gt dog done` can leave the dog idle while its formula
+			// wisp stays hooked. When the wisp was created before the dog went
+			// idle and no step of it has any progress, the wisp is abandoned —
+			// close it so the dog becomes dispatchable again (next tick; the
+			// wisp is gone then, which is also why this WARN is naturally
+			// logged once).
+			tree, treeErr := wispTreeFn(townRoot, result.wispID)
+			if treeErr != nil {
+				// Fail safe: without the tree we cannot tell an abandoned wisp
+				// from a live one, so leave it alone and keep skipping.
+				logger.Printf("Handler: wisp tree read failed for dog %s wisp %s: %v; not closing", d.Name, result.wispID, treeErr)
+			} else if isWispStale(d, result, tree) {
+				closed, closeErr := closeStaleWispFn(townRoot, result.wispID, tree)
+				if closeErr != nil {
+					logger.Printf("Handler: closing abandoned wisp %s for dog %s failed: %v", result.wispID, d.Name, closeErr)
+				} else if closed > 0 {
+					logger.Printf("Handler: WARN: dog %s wisp %s abandoned (idle, zero step progress); closed %d bead(s), dog dispatchable next tick", d.Name, result.wispID, closed)
+					continue
+				}
+				// Close failed; the wisp is still hooked — fall through to the
+				// skip log below so the condition stays visible.
+			}
 			logger.Printf("Handler: dog %s is idle but still holds an open hooked formula molecule, skipping dispatch", d.Name)
 			continue
 		}
@@ -386,17 +409,73 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 	return nil
 }
 
-// dogHasHookedFormulaFn is a seam over dogHasHookedFormula so
-// findDispatchableDog is unit-testable without shelling out to a real bd/Dolt
-// backend. Production code always resolves to dogHasHookedFormula; tests
-// override it to exercise the skip/error-fallback branches deterministically.
-var dogHasHookedFormulaFn = dogHasHookedFormula
+// dogHasHookedFormulaWithIDFn is the production seam for hooked-formula checks
+// that need the wisp root ID (for stale-wisp cleanup). Production code always
+// resolves to dogHasHookedFormulaWithID; tests override it deterministically.
+var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
 
-// dogHasHookedFormula reports whether the dog identified by name currently
-// holds an open (status=hooked) formula molecule wisp — the ephemeral
-// molecule `gt sling` attaches to a dog's hook bead when dispatching
-// formula-driven work such as mol-dog-reaper or mol-dog-backup. See
-// findDispatchableDog.
+// wispTreeFn reads a formula wisp's root plus every descendant. Production
+// code resolves to wispTree; tests override it so findDispatchableDog's
+// abandoned-wisp branch is exercisable without a real bd/Dolt backend.
+var wispTreeFn = wispTree
+
+// closeStaleWispFn closes an abandoned formula wisp and its steps. Production
+// code resolves to closeStaleWisp; tests override it to verify the wisp ID and
+// tree are the ones the handler read without needing a real bd/Dolt backend.
+var closeStaleWispFn = closeStaleWisp
+
+// wispTree reads a formula wisp's root and every descendant under the
+// daemon's read-only routing env (BD_DOLT_AUTO_COMMIT=off / BD_READONLY).
+//
+// The env is the point: findDispatchableDog runs this on every dispatch tick
+// for every idle dog holding a hooked wisp, so a read that auto-commits would
+// reintroduce the gh#3596 connection churn that dogHasHookedFormulaWithID is
+// carefully arranged to avoid.
+func wispTree(townRoot, wispID string) ([]beads.WispStep, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+	return beads.WispTree(ctx, townRoot, bdReadOnlyRoutingEnv(townRoot), wispID)
+}
+
+// isWispStale reports whether an idle dog's hooked formula wisp should be
+// treated as abandoned (gt-da2x): the dog went idle after the wisp was
+// created AND no step of the wisp has any progress (zero in_progress/closed
+// steps — the dog bailed before doing any of the formula).
+//
+// Any uncertainty (unparseable wisp timestamp) resolves to "not stale": a
+// wisp is never closed on a guess, and leaving one hooked costs a wasted dog,
+// while closing a live one throws away the work it carries.
+func isWispStale(d *dog.Dog, result hookedFormulaResult, tree []beads.WispStep) bool {
+	wispCreatedAt := beads.ParseIssueTime(result.wispCreated)
+	if wispCreatedAt.IsZero() {
+		return false
+	}
+	if !d.LastActive.After(wispCreatedAt) {
+		return false // wisp created after the dog went idle: not abandoned
+	}
+	// tree[0] is the wisp root and is the hooked bead itself; only the steps
+	// below it say whether any work happened.
+	for _, step := range tree[1:] {
+		if step.Status == string(beads.StatusInProgress) || step.Status == string(beads.StatusClosed) {
+			return false
+		}
+	}
+	return true
+}
+
+// hookedFormulaResult holds the outcome of a hooked-formula check.
+type hookedFormulaResult struct {
+	hasHooked   bool
+	wispID      string // non-empty only when hasHooked is true
+	wispCreated string // wisp created_at as bd issued it (parsed by beads.ParseIssueTime), non-empty when hasHooked is true
+}
+
+// dogHasHookedFormulaWithID reports whether the dog identified by name
+// currently holds an open (status=hooked) formula molecule wisp — the
+// ephemeral molecule `gt sling` attaches to a dog's hook bead when dispatching
+// formula-driven work such as mol-dog-reaper or mol-dog-backup — and, when it
+// does, returns the wisp root's ID and created_at so callers can evaluate and
+// close it (gt-da2x). See findDispatchableDog.
 //
 // This shells out to bd directly (mirroring dogMol.runBd) rather than going
 // through beads.Beads.List, whose run() always resolves env via
@@ -404,7 +483,7 @@ var dogHasHookedFormulaFn = dogHasHookedFormula
 // that forces BD_DOLT_AUTO_COMMIT=off. findDispatchableDog calls this once
 // per idle dog on every dispatch tick, so without that env every poll opens
 // a fresh connection attempting a no-op auto-commit (gh#3596).
-func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
+func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
 	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
 		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
@@ -414,39 +493,54 @@ func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
 	defer cancel()
 
 	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	// Re-apply the process-group policy: ConfigureCommand installs Setpgid but
+	// no cancellation hook, which would leave the 5s timeout above unable to
+	// release a bd whose descendants hold the stdout pipe open — and this call
+	// runs on every dispatch tick.
+	util.SetProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-			return false, fmt.Errorf("%w: %s", err, errMsg)
+			return hookedFormulaResult{}, fmt.Errorf("%w: %s", err, errMsg)
 		}
-		return false, err
+		return hookedFormulaResult{}, err
 	}
 
 	out := bytes.TrimSpace(stdout.Bytes())
 	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
-		return false, nil
+		return hookedFormulaResult{}, nil
 	}
 
 	var hookedBeads []*beads.Issue
 	if err := json.Unmarshal(out, &hookedBeads); err != nil {
-		return false, fmt.Errorf("parsing bd query output: %w", err)
+		return hookedFormulaResult{}, fmt.Errorf("parsing bd query output: %w", err)
 	}
-	return anyHasAttachedFormula(hookedBeads), nil
+
+	if wisp := beads.FirstFormulaWisp(hookedBeads); wisp != nil {
+		return hookedFormulaResult{hasHooked: true, wispID: wisp.ID, wispCreated: wisp.CreatedAt}, nil
+	}
+	return hookedFormulaResult{}, nil
 }
 
-// anyHasAttachedFormula reports whether any of the given beads carries
-// attached_formula metadata (i.e. is the root or a step of a molecule `gt
-// sling` attached to an agent's hook). Split out from dogHasHookedFormula so
-// the decision logic is unit-testable without a real bd/Dolt backend.
-func anyHasAttachedFormula(hookedBeads []*beads.Issue) bool {
-	for _, hb := range hookedBeads {
-		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
-			return true
-		}
-	}
-	return false
+// wispAbandonedReason is the close reason recorded on wisp steps the daemon
+// force-closes. It names the daemon as the actor so an operator reading the
+// bead later can tell this apart from a dog's own `gt dog done` cleanup.
+const wispAbandonedReason = "abandoned: idle dog, no step progress"
+
+// closeStaleWisp force-closes a formula wisp whose dog has been idle since
+// before the wisp existed and made no step progress, using the daemon's
+// mutation routing env for the writes and closing deepest-first so no parent
+// is closed while a child survives. Returns the number of beads closed.
+//
+// The tree is passed in rather than re-read: findDispatchableDog already read
+// it to make the staleness call, and a second bd round trip per idle dog per
+// tick is exactly the cost gt-da2x's read path is arranged to avoid.
+func closeStaleWisp(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+	return beads.CloseWispTree(ctx, townRoot, bdMutationRoutingEnv(townRoot), wispAbandonedReason, tree)
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
