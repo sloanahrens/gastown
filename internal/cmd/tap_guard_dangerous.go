@@ -154,6 +154,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession()); r != "" {
 		return r, alt
 	}
+	if r, alt := matchesWitnessGitPush(lowerTokens, inWitnessSession()); r != "" {
+		return r, alt
+	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
 	}
@@ -970,4 +973,75 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 		}
 	}
 	return "", ""
+}
+
+// inWitnessSession reports whether the hook runs inside a witness session.
+// GT_ROLE is "<rig>/witness" for rig witnesses; the bare form covers a
+// witness started outside a rig context.
+func inWitnessSession() bool {
+	role, _, _ := parseRoleString(os.Getenv("GT_ROLE"))
+	return role == RoleWitness
+}
+
+const witnessGitPushReason = "git push from a witness session"
+const witnessGitPushAlternative = "Alternative: a witness observes and reports. Pushing a polecat's branch is the " +
+	"polecat's job (gt done) or the refinery's (with the mayor's authority); mail the mayor or the polecat " +
+	"with what you found instead."
+
+// matchesWitnessGitPush blocks every `git push` from a witness session,
+// whatever the refspec. A witness never owns a branch: on 2026-09-18 a
+// local-model witness, acting on a mail about a refinery fast-forward
+// repair, composed `git push origin <branch>:<sha> --force-with-lease` in a
+// polecat's worktree — a push to a branch named by a commit hash — and only
+// the branch-policy pre-push hook stopped it. The rule turns "witnesses do
+// not push" into a check the model cannot misread.
+func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, alternative string) {
+	if !witnessSession {
+		return "", ""
+	}
+	for i, f := range tokens {
+		if f == "git" && inCommandPosition(tokens, i) && gitSubcommand(tokens[i+1:]) == "push" {
+			return witnessGitPushReason, witnessGitPushAlternative
+		}
+	}
+	return "", ""
+}
+
+// inCommandPosition reports whether tokens[i] ("git") is being run rather
+// than mentioned. It fails closed: git counts as a command unless the
+// segment's own program is one that only carries text (echo, printf, gt
+// mail, bd comments/create ...), so `timeout 60 git push`, `eval git push`
+// and `xargs git push` are all refused while `echo do not git push` and a
+// mail body that mentions pushing are not.
+func inCommandPosition(tokens []string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	switch tokens[0] {
+	case "echo", "printf", "gt", "bd", "cat", "grep", "rg":
+		return false
+	}
+	return true
+}
+
+// gitOptionsWithValue are git's global options that consume the next token
+// (space-separated form), so `git -C dir push` still resolves to push.
+var gitOptionsWithValue = map[string]bool{
+	"-c": true, "-C": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--exec-path": true,
+}
+
+// gitSubcommand returns the first non-option token after "git" — the
+// subcommand — skipping global options in both `-C dir` and `--git-dir=x`
+// forms. Returns "" when the tokens end before a subcommand.
+func gitSubcommand(rest []string) string {
+	for i := 0; i < len(rest); i++ {
+		t := rest[i]
+		if !strings.HasPrefix(t, "-") {
+			return t
+		}
+		if gitOptionsWithValue[t] && !strings.Contains(t, "=") {
+			i++ // skip the option's value
+		}
+	}
+	return ""
 }

@@ -207,6 +207,22 @@ func (p *Plugin) Summary() PluginSummary {
 	}
 }
 
+// FormatFailureMailBody is the dispatch body for a dog when the daemon ran
+// a script-type plugin itself and it failed: the dog gets the exit status
+// and the output tail first, then the ordinary instructions, and is asked to
+// judge rather than blindly rerun.
+func (p *Plugin) FormatFailureMailBody(status string, outputTail string) string {
+	var sb strings.Builder
+	sb.WriteString("## Direct run failed\n\n")
+	sb.WriteString(fmt.Sprintf("The daemon ran `%s/run.sh` directly (execution type `script`) and it failed: **%s**.\n\n", p.Path, status))
+	sb.WriteString("Investigate the output below before doing anything. Rerun the script only if the failure looks transient (lock, network, a race with another agent); otherwise record the failure with what you found and escalate per the plugin's instructions.\n\n")
+	sb.WriteString("```\n")
+	sb.WriteString(strings.TrimRight(outputTail, "\n"))
+	sb.WriteString("\n```\n\n---\n\n")
+	sb.WriteString(p.FormatMailBody())
+	return sb.String()
+}
+
 // FormatMailBody formats the plugin as instructions for a dog worker.
 // This is the canonical formatting used by both the daemon dispatcher
 // and the gt dog dispatch command.

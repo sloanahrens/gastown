@@ -12,6 +12,7 @@ labels = ["plugin:submodule-commit", "category:git-hygiene"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "15m"
 notify_on_failure = true
 severity = "low"

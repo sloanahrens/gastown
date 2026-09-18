@@ -294,58 +294,24 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			}
 		}
 
-		// Find an idle dog that doesn't already have a live tmux session.
-		// A leaked session (dog marked idle before its tmux terminated) would
-		// cause sm.Start to fail with "session already running", and since
-		// mgr.List() returns dogs in directory order, GetIdleDog would always
-		// pick the same first idle dog — infinite-looping the same failed
-		// dispatch instead of advancing to the next idle dog in the pack.
-		// See gt-o24.
-		idleDog := findDispatchableDog(mgr, sm, d.config.TownRoot, d.logger)
-		if idleDog == nil {
-			d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
+		// Script-type plugins run in-process: no dog, no model. The run
+		// record is written when the script finishes (with its real result),
+		// and the in-flight guard keeps the next heartbeat from starting a
+		// second copy. A failure hands the plugin to a dog with the output.
+		if runsAsScript(p) {
+			d.startScriptPlugin(p, mgr, sm, router, recorder)
+			continue
+		}
+
+		dogName, noDog := d.dispatchPluginToDog(p, mgr, sm, router, p.FormatMailBody())
+		if noDog {
+			// No dispatchable dog: defer the remaining plugins to the next
+			// heartbeat, as before.
 			return
 		}
-
-		// Assign work and start session.
-		workDesc := fmt.Sprintf("plugin:%s", p.Name)
-		if err := mgr.AssignWork(idleDog.Name, workDesc); err != nil {
-			d.logger.Printf("Handler: failed to assign work to dog %s: %v", idleDog.Name, err)
-			continue
+		if dogName == "" {
+			continue // assignment, mail or session start failed and was rolled back
 		}
-
-		// Send mail with plugin instructions BEFORE starting the session
-		// so the dog finds work in its inbox on first check.
-		msg := mail.NewMessage(
-			"daemon",
-			fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
-			fmt.Sprintf("Plugin: %s", p.Name),
-			p.FormatMailBody(),
-		)
-		msg.Type = mail.TypeTask
-		msg.Timestamp = time.Now()
-		if err := router.Send(msg); err != nil {
-			d.logger.Printf("Handler: failed to send mail to dog %s: %v", idleDog.Name, err)
-			// Roll back assignment — no point starting a session without instructions.
-			if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
-				d.logger.Printf("Handler: failed to clear work after mail failure for dog %s: %v", idleDog.Name, clearErr)
-			}
-			continue
-		}
-
-		if err := sm.Start(idleDog.Name, dog.SessionStartOptions{
-			WorkDesc: workDesc,
-		}); err != nil {
-			d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
-			// Roll back assignment on session start failure.
-			if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
-				d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)
-			}
-			continue
-		}
-
-		d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
-
 		// Record the dispatch immediately so the cooldown gate is satisfied
 		// for the next 1h regardless of what the dog does. Dogs create their
 		// own completion beads but don't reliably use the label convention the
@@ -353,7 +319,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		if _, err := recorder.RecordRun(plugin.PluginRunRecord{
 			PluginName: p.Name,
 			Result:     plugin.ResultSuccess,
-			Body:       fmt.Sprintf("Dispatched to dog %s", idleDog.Name),
+			Body:       fmt.Sprintf("Dispatched to dog %s", dogName),
 		}); err != nil {
 			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)
 		}
@@ -493,4 +459,72 @@ func (d *Daemon) loadRigsConfig() (*config.RigsConfig, error) {
 // Returns a valid (never nil) config — accessors return defaults for nil fields.
 func (d *Daemon) loadOperationalConfig() *config.OperationalConfig {
 	return config.LoadOperationalConfig(d.config.TownRoot)
+}
+
+// dispatchPluginToDog assigns p to an idle dog, mails it body as its
+// instructions and starts its session. It returns the dog's name on
+// success; noDog is true when no dispatchable dog exists (the caller
+// defers). Other failures are logged and rolled back here and return
+// ("", false). The body is a parameter so the script path can hand a
+// failing plugin over with its output attached.
+func (d *Daemon) dispatchPluginToDog(p *plugin.Plugin, mgr dogManager, sm dogSessionStarter, router mailSender, body string) (dogName string, noDog bool) {
+	d.dispatchMu.Lock()
+	defer d.dispatchMu.Unlock()
+	// Find an idle dog that doesn't already have a live tmux session.
+	// A leaked session (dog marked idle before its tmux terminated) would
+	// cause sm.Start to fail with "session already running", and since
+	// mgr.List() returns dogs in directory order, GetIdleDog would always
+	// pick the same first idle dog — infinite-looping the same failed
+	// dispatch instead of advancing to the next idle dog in the pack.
+	// See gt-o24.
+	idleDog := d.findDog(mgr, sm)
+	if idleDog == nil {
+		d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
+		return "", true
+	}
+	workDesc := fmt.Sprintf("plugin:%s", p.Name)
+	if err := mgr.AssignWork(idleDog.Name, workDesc); err != nil {
+		d.logger.Printf("Handler: failed to assign work to dog %s: %v", idleDog.Name, err)
+		return "", false
+	}
+	// Send mail with plugin instructions BEFORE starting the session
+	// so the dog finds work in its inbox on first check.
+	msg := mail.NewMessage(
+		"daemon",
+		fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
+		fmt.Sprintf("Plugin: %s", p.Name),
+		body,
+	)
+	msg.Type = mail.TypeTask
+	msg.Timestamp = time.Now()
+	if err := router.Send(msg); err != nil {
+		d.logger.Printf("Handler: failed to send mail to dog %s: %v", idleDog.Name, err)
+		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
+			d.logger.Printf("Handler: failed to clear work after mail failure for dog %s: %v", idleDog.Name, clearErr)
+		}
+		return "", false
+	}
+	if err := sm.Start(idleDog.Name, dog.SessionStartOptions{WorkDesc: workDesc}); err != nil {
+		d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
+		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
+			d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)
+		}
+		return "", false
+	}
+	d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
+	return idleDog.Name, false
+}
+
+// findDog resolves an idle, dispatchable dog through the real pack when the
+// collaborators are the concrete types, and through the test seam otherwise.
+func (d *Daemon) findDog(mgr dogManager, sm dogSessionStarter) *dog.Dog {
+	if d.findDogFn != nil {
+		return d.findDogFn()
+	}
+	realMgr, ok1 := mgr.(*dog.Manager)
+	realSM, ok2 := sm.(*dog.SessionManager)
+	if !ok1 || !ok2 {
+		return nil
+	}
+	return findDispatchableDog(realMgr, realSM, d.config.TownRoot, d.logger)
 }

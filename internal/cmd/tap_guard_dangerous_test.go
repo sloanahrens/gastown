@@ -881,3 +881,74 @@ func TestUnboundedScanLiteralHomeDir(t *testing.T) {
 		t.Errorf("blocked %d of %d cases, want exactly 6", blockedCount, len(tests))
 	}
 }
+
+// TestMatchesWitnessGitPush: any push from a witness is refused, with the
+// exact shape from the 2026-09-18 incident first; the same commands pass for
+// a polecat (whose branch pushes are its job) and a refinery. Read-only git
+// from a witness stays allowed.
+func TestMatchesWitnessGitPush(t *testing.T) {
+	blocked := []string{
+		"cd /Users/sloan/gt/gastown/polecats/slate/gastown && git push origin polecat/slate/gt-nkyy+x:b43cc157 --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345",
+		"git push origin polecat/slate/gt-nkyy+x --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345",
+		"git push origin main",
+		"git push",
+		"git fetch origin && git push origin HEAD",
+		"git -C /Users/sloan/gt/gastown/polecats/flint/gastown push origin bfe970a:polecat/flint/gt-3qfp+x",
+		"git --no-pager push origin HEAD",
+		"git --git-dir=/x/.git --work-tree /x push",
+		"git -c push.default=current push",
+		"cd /x && git push origin HEAD",
+		"GIT_SSH_COMMAND=ssh git push",
+		"env GIT_TRACE=1 git push",
+		"timeout 60 git push origin HEAD",
+		"eval git push origin HEAD",
+		"nice -n 10 git push",
+		"xargs -0 git push",
+		"cd /x && timeout 60 git push origin HEAD",
+	}
+	allowed := []string{
+		"git fetch origin polecat/slate/gt-nkyy+x",
+		"git log --oneline -5",
+		"git status --porcelain",
+		"gt polecat list gastown",
+		"echo push",
+		"git -C /x log --oneline -3",
+		"git -c color.ui=false status",
+		"echo we should not git push here",
+		"gt mail send mayor -s 'about git push' -m 'the polecat should git push itself'",
+	}
+	for _, c := range blocked {
+		reason, alt := matchesWitnessGitPush(shellTokenize(c), true)
+		if reason == "" || alt == "" {
+			t.Errorf("witness command not blocked (or no alternative): %q", c)
+		}
+		if reason, _ := matchesWitnessGitPush(shellTokenize(c), false); reason != "" {
+			t.Errorf("non-witness command blocked by the witness rule: %q", c)
+		}
+	}
+	for _, c := range allowed {
+		if reason, _ := matchesWitnessGitPush(shellTokenize(c), true); reason != "" {
+			t.Errorf("witness read-only command blocked: %q (%s)", c, reason)
+		}
+	}
+}
+
+// Through evaluateDangerousCommand with the role taken from GT_ROLE, as the
+// hook sees it: the witness is blocked, a polecat pushing its own branch and
+// a refinery are not.
+func TestWitnessGitPushReachesGuard(t *testing.T) {
+	cmd := "git push origin polecat/slate/gt-nkyy+x --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345"
+	t.Setenv("GT_POLECAT_PATH", "")
+	t.Setenv("GT_ROLE", "gastown/witness")
+	if reason, _ := evaluateDangerousCommand(cmd, 0, ""); reason != witnessGitPushReason {
+		t.Errorf("witness: reason = %q, want %q", reason, witnessGitPushReason)
+	}
+	t.Setenv("GT_ROLE", "gastown/polecats/slate")
+	if reason, _ := evaluateDangerousCommand(cmd, 0, ""); reason != "" {
+		t.Errorf("polecat own-branch push blocked: %q", reason)
+	}
+	t.Setenv("GT_ROLE", "gastown/refinery")
+	if reason, _ := evaluateDangerousCommand(cmd, 0, ""); reason != "" {
+		t.Errorf("refinery push blocked: %q", reason)
+	}
+}

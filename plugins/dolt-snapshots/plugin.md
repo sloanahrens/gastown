@@ -12,6 +12,7 @@ labels = ["plugin:dolt-snapshots", "category:data-safety"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "2m"
 notify_on_failure = true
 severity = "low"
