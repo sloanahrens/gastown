@@ -552,32 +552,28 @@ git rebase origin/{{base_branch}}
 
 If rebase conflicts: resolve carefully. If stuck, mail Witness.
 
-**2. Run the full gate suite on the rebased result (pre-verify):**
+**2. Run the cheap gates on the rebased result:**
 
 If build_command is set: run {{build_command}}
 If typecheck_command is set: run {{typecheck_command}}
 If lint_command is set: run {{lint_command}}
 
-If test_command is set:
-
-**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step and
-mol-refinery-patrol's run-tests step — keep all in sync): wrap test_command
-through the container-gate slot only when it spins Docker containers (Dolt,
-testcontainers); run it bare otherwise.** An unwrapped suite that spins
-Dolt/testcontainers collides with any other rig's container-backed suite on
-the shared Docker VM even though `gt slot status` looked free:
+**Do NOT run {{test_command}}** (gt-d7ir): `gt done` lints and tests your
+changed non-container packages itself, and the refinery runs the
+Docker-backed suite once per submission; a polecat running it too only slows
+the refinery's gate on the shared host. If you changed a package that spins
+Dolt/testcontainers and want its signal first, run ONLY that package,
+wrapped (gt-tuiy):
 ```bash
-gt slot run --role <rig>/<your-name> -- {{test_command}}
+gt slot run --role <rig>/<your-name> -- go test ./internal/that/package/
 ```
-Otherwise run {{test_command}} bare.
 
 Skip any empty/unconfigured commands silently.
 
-**3. Submit to merge queue:**
-- If ALL FOUR commands were empty (none configured for this rig): `gt done --target {{base_branch}}` — no `--pre-verified`, you verified nothing.
-- If at least one gate ran and all that ran passed:
+**3. Submit to merge queue** (never `--pre-verified`: it re-runs the full
+gate set under a slot cap and disables the auto-rebase):
 ```bash
-gt done --pre-verified --target {{base_branch}}
+gt done --target {{base_branch}}
 ```
 
 **4. If gates fail:** fix, commit, re-rebase, re-run gates. Do NOT submit broken code.

@@ -481,9 +481,12 @@ id = "pre-verify"
 title = "Pre-merge rebase verification"
 needs = ["build-check"]
 description = """
-Rebase onto the target branch and run the full gate suite. This enables the
-refinery to fast-path merge your MR without re-running gates (~5s merge
-instead of minutes).
+Rebase onto the target branch and run the CHEAP gates. Do not run the test
+suite here: `gt done` itself lints and tests the changed packages that spin
+no containers, and the refinery runs the Docker-backed suite exactly once per
+submission (gt-yihz). A polecat running test_command as well duplicates that
+gate and, on the shared host, slows the refinery's own gate down — three
+concurrent suites tripled a merge gate on 2026-09-17 (gt-d7ir).
 
 **1. Fetch and rebase onto target:**
 ```bash
@@ -496,9 +499,13 @@ If rebase conflicts:
 - Re-run the build to ensure the resolution is correct
 - If stuck, mail Witness
 
-**2. Run the full gate suite on the rebased result:**
+After the rebase, confirm you are on YOUR branch and not a detached HEAD
+(`git status` must not say "HEAD detached"); if it does:
+```bash
+git switch -C <your-branch>
+```
 
-Run ALL configured gates (not just targeted tests — this is the full verification):
+**2. Run the cheap gates on the rebased result:**
 
 If build_command is set:
 ```bash
@@ -510,49 +517,32 @@ If typecheck_command is set:
 {{typecheck_command}}
 ```
 
-If lint_command is set:
+If lint_command is set (gt done runs it again; fixing findings now saves a
+round trip):
 ```bash
 {{lint_command}}
 ```
 
-If test_command is set:
-
-**Rule (gt-tuiy, shared with mol-refinery-patrol's run-tests step and
-mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
-test_command through the container-gate slot only when
-it spins Docker containers (Dolt, testcontainers); run it bare otherwise.**
-An unwrapped suite that spins Dolt/testcontainers collides with any other
-rig's container-backed suite on the shared Docker VM even though
-`gt slot status` looked free — that case must be wrapped:
+**Do NOT run {{test_command}}.** If you changed a package that spins
+Dolt/testcontainers and want its signal before submitting, run ONLY that
+package, wrapped through the container-gate slot (gt-tuiy: an unwrapped
+container suite collides with other suites on the shared Docker VM):
 ```bash
-gt slot run --role <rig>/<your-name> -- {{test_command}}
+gt slot run --role <rig>/<your-name> -- go test ./internal/that/package/
 ```
-Otherwise run it bare. The slot is a townwide lock shared by every rig — only
-suites that actually touch the shared Docker VM need it; wrapping every
-gate run in it regardless serializes unrelated, non-Docker suites against
-each other for no reason (gt-tuiy).
+Never the whole suite, and never bare.
 
 Empty commands mean "not configured" — skip silently.
 
-**3. If any gate fails after rebase:**
-- Fix the issue, commit, and re-run from step 1
-- Do NOT proceed with --pre-verified if gates failed
+**3. If a gate fails after rebase:** fix the issue, commit, and re-run from
+step 1.
 
-**4. If ALL FOUR commands above (build, typecheck, lint, test) are empty:**
-Do NOT use `--pre-verified` — there is nothing you actually verified. This
-holds even if setup_command is configured: this step never runs it, so a rig
-with only setup_command configured has still verified nothing. Use plain
-`gt done` and let the refinery run gates normally (slower but correct).
+**4. Submit with plain `gt done` (next step). Do NOT use `--pre-verified`:**
+it re-runs the full gate set including the container suite under a slot
+cap, disables the auto-rebase, and the refinery's gate is the authority
+either way.
 
-**5. If at least one gate command ran and all that ran passed:**
-You will use `gt done --pre-verified` in the next step. This tells the refinery
-that you ran the full gate suite on a rebased branch, enabling fast-path merge.
-
-**Note:** If this step takes too long, you may skip it and use `gt done`
-without --pre-verified even when gates are configured — the refinery will
-run gates normally.
-
-**6. Confirm the branch contains only YOUR files:**
+**5. Confirm the branch contains only YOUR files:**
 ```bash
 git diff --stat origin/{{base_branch}}...HEAD     # three dots
 ```
@@ -566,8 +556,9 @@ instead of rebasing. Fix it by rebasing your CHANGES (step 1), not by
 reverting anyone's work. `gt done` prints this same stat and refuses a branch
 that undoes merged work.
 
-**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, the
-three-dot stat lists only files you changed, all configured gates pass."""
+**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, on your
+own branch (not detached), the three-dot stat lists only files you changed,
+build/typecheck/lint pass."""
 
 [[steps]]
 id = "submit-and-exit"
@@ -592,10 +583,8 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 
 **Run gt done:**
 ```bash
-# For code tasks with pre-verification (recommended — enables fast-path merge):
-gt done --pre-verified --target {{base_branch}}
-
-# For code tasks without pre-verification (gates skipped or failed):
+# For code tasks (gt done lints and tests your changed non-container packages,
+# then submits; the refinery runs the Docker suite once):
 gt done --target {{base_branch}}
 
 # For report-only tasks (no commits — audits, reviews, research):
