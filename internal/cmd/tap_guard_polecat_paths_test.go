@@ -73,7 +73,7 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 	t.Setenv("GT_RIG", rig)
 	t.Setenv("GT_POLECAT", name)
 	t.Setenv("GT_POLECAT_PATH", worktree)
-	// Keep the live agent config dir out of the scratch allowlist.
+	// $CLAUDE_CONFIG_DIR is now a scratch root (plans/, projects/, todos/).
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude-config"))
 
 	return polecatTestTown{
@@ -145,6 +145,9 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 		{"sibling worktree, new file", "Write", fileInput(filepath.Join(p.sibling, "brand", "new.go")), true},
 		{"sibling worktree via tilde", "Write", fileInput("~/gt/" + p.rig + "/polecats/" + p.other + "/" + p.rig + "/x.go"), true},
 		{"sibling worktree via relative escape", "Write", fileInput("../../../" + p.other + "/" + p.rig + "/x.go"), true},
+		{"CLAUDE_CONFIG_DIR root", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "x.md")), false},
+		{"CLAUDE_CONFIG_DIR/todos", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "todos", "x.md")), false},
+		{"CLAUDE_CONFIG_DIR/projects", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "x.md")), false},
 		{"own rig root", "Write", fileInput(filepath.Join(p.rigRoot, "rig.json")), true},
 		{"town mayor dir", "Write", fileInput(filepath.Join(p.town, "mayor", "proposal.md")), true},
 		{"town deacon dir", "Edit", fileInput(filepath.Join(p.town, "deacon", "state.json")), true},
@@ -281,6 +284,7 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"mkdir inside own worktree", "mkdir -p " + filepath.Join(p.worktree, "internal", "new"), false},
 		{"write to /tmp", "cp a.go /tmp/polecat-paths-probe/x.go", false},
 		{"write to $TMPDIR", "cp a.go $TMPDIR/polecat-paths-probe/x.go", false},
+		{"write to $CLAUDE_CONFIG_DIR/plans", "cp a.go $CLAUDE_CONFIG_DIR/plans/x.md", false},
 		{"write to /dev/null", "make build > /dev/null 2>&1", false},
 		{"file descriptor duplication", "make build 2>&1", false},
 		{"own rig's .repo.git", "git -C " + p.repoGit + " worktree list", false},

@@ -541,8 +541,10 @@ func resolveGuardDir(path string) string {
 }
 
 // scratchRoots lists the directories a session may always write to: the host's
-// temp directories and the transcripts/scratch area the agent runtime keeps
-// outside the worktree (~/.claude/projects, and the town's own .claude-town).
+// temp directories, the session's own CLAUDE_CONFIG_DIR tree (plan mode writes
+// its plans/, projects/, todos/ here), and the transcripts/scratch area the
+// agent runtime keeps outside the worktree (~/.claude/projects, and the town's
+// own .claude-town).
 //
 // The temp entries are the session's own $TMPDIR (os.TempDir — which is where
 // mktemp hands out paths) plus the well-known /tmp and /var/tmp. A blanket
@@ -553,7 +555,7 @@ func resolveGuardDir(path string) string {
 func scratchRoots(townRoot string) []string {
 	candidates := []string{os.TempDir(), "/tmp", "/var/tmp"}
 	if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
-		candidates = append(candidates, filepath.Join(configDir, "projects"))
+		candidates = append(candidates, configDir)
 	}
 	if townRoot != "" {
 		candidates = append(candidates, filepath.Join(townRoot, sessionScratchDir, "projects"))
