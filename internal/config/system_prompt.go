@@ -55,7 +55,7 @@ func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 // GT_SYSTEM_PROMPT_FILE for Claude agents when the role's rendered system
 // prompt file exists. When the file is missing (first spawn after install,
 // non-Claude runtime) the config is returned unchanged and gt prime prints the
-// static role text itself, so a missing file degrades to today's behaviour
+// static role text itself, so a missing file degrades to today's behavior
 // rather than a dead session.
 func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
 	if rc == nil || !isClaudeAgent(rc) {
