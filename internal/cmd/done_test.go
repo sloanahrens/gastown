@@ -1846,38 +1846,61 @@ func TestClearDoneCheckpoints(t *testing.T) {
 	}
 }
 
-// TestCheckpointResumeSkipsPush verifies that when a push checkpoint exists,
-// the push section is skipped on resume.
+// TestCheckpointResumeSkipsPush verifies the guard that lets a resumed gt done
+// skip the push. It calls the helper runDone calls, so the two cannot drift
+// apart: a checkpoint skips the push only for the branch AND commit it was
+// written for (gt-2wqt), never for a branch name alone.
 func TestCheckpointResumeSkipsPush(t *testing.T) {
+	const (
+		branch = "mybranch"
+		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaB   = "c890451bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
 	tests := []struct {
 		name        string
 		checkpoints map[DoneCheckpoint]string
+		head        string
 		wantSkip    bool
 	}{
 		{
 			name:        "no checkpoints - push runs normally",
 			checkpoints: map[DoneCheckpoint]string{},
+			head:        shaA,
 			wantSkip:    false,
 		},
 		{
-			name:        "push checkpoint exists - skip push",
-			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: "mybranch"},
+			name:        "push checkpoint for this commit - skip push",
+			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: pushedCheckpointValue(branch, shaA)},
+			head:        shaA,
 			wantSkip:    true,
 		},
 		{
 			name: "push and MR checkpoints - skip push",
 			checkpoints: map[DoneCheckpoint]string{
-				CheckpointPushed:    "mybranch",
+				CheckpointPushed:    pushedCheckpointValue(branch, shaA),
 				CheckpointMRCreated: "gt-xyz",
 			},
+			head:     shaA,
 			wantSkip: true,
+		},
+		{
+			name:        "checkpoint for an earlier commit on this branch - push again",
+			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: pushedCheckpointValue(branch, shaA)},
+			head:        shaB,
+			wantSkip:    false,
+		},
+		{
+			name:        "legacy branch-only checkpoint - push again",
+			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: branch},
+			head:        shaA,
+			wantSkip:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Replicate the guard condition from runDone
-			skipPush := tt.checkpoints[CheckpointPushed] != ""
+			// The guard from runDone, via the same helper it calls.
+			skipPush := pushedCheckpointMatches(tt.checkpoints[CheckpointPushed], branch, tt.head)
 			if skipPush != tt.wantSkip {
 				t.Errorf("skipPush = %v, want %v", skipPush, tt.wantSkip)
 			}
@@ -2330,6 +2353,12 @@ func TestSyncGuardWithUncommittedChanges(t *testing.T) {
 
 func testRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	// An empty dir runs git in the test process's own cwd — the package
+	// directory inside the real repo — so a stray test would create branches and
+	// objects in the rig's shared ref store.
+	if dir == "" {
+		t.Fatal("testRunGit: empty dir would run git in the test process cwd")
+	}
 	fullArgs := append([]string{"-c", "protocol.file.allow=always"}, args...)
 	cmd := exec.Command("git", fullArgs...)
 	cmd.Dir = dir
