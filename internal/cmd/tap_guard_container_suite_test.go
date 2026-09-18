@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/steveyegge/gastown/internal/testutil"
 	"os"
 	"testing"
 )
@@ -11,14 +12,24 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		command string
 		blocked bool
 	}{
-		// Blocked: bare go test on a testcontainers-backed package.
-		{"go test single container package", "go test ./internal/beads/...", true},
-		{"go test multiple package args, one container", "go test ./internal/daemon/... ./internal/cmd/...", true},
-		{"go test ancestor dir covering container packages", "go test ./internal/...", true},
-		{"go test whole repo wildcard", "go test ./...", true},
-		{"go test bare dots", "go test ...", true},
-		{"GOFLAGS prefixed go test on container package", "GOFLAGS=-p=6 go test ./internal/refinery/...", true},
-		{"go test with -run flag on container package", "go test ./internal/beads/... -run TestFoo -v", true},
+		// Blocked: bare go test on a testcontainers-backed package WITH the
+		// container opt-in switched on (testutil.DockerTestsEnv). Without it
+		// nothing can start a container, so the slot is not required.
+		{"go test single container package", "GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
+		{"go test multiple package args, one container", "GT_TEST_DOCKER=1 go test ./internal/daemon/... ./internal/cmd/...", true},
+		{"go test ancestor dir covering container packages", "GT_TEST_DOCKER=1 go test ./internal/...", true},
+		{"go test whole repo wildcard", "GT_TEST_DOCKER=1 go test ./...", true},
+		{"go test bare dots", "GT_TEST_DOCKER=1 go test ...", true},
+		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/refinery/...", true},
+		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
+		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
+		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
+
+		// Allowed: the same bare runs with the switch off cannot reach Docker.
+		{"bare go test container package, switch off", "go test ./internal/beads/...", false},
+		{"bare go test container package, switch explicitly 0", "GT_TEST_DOCKER=0 go test ./internal/beads/...", false},
+		{"bare filtered go test on internal/cmd, switch off", "go test ./internal/cmd/ -run TestFoo", false},
+		{"bare go test whole repo, switch off", "go test ./...", false},
 
 		// Blocked: bare make test (always runs go test ./... per Makefile).
 		{"make test bare", "make test", true},
@@ -144,13 +155,13 @@ func TestRunTapGuardContainerSuite_BlockedInPolecatContext(t *testing.T) {
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
 
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"go test ./internal/beads/..."}}`
+	hookInput := `{"tool_name":"Bash","tool_input":{"command":"GT_TEST_DOCKER=1 go test ./internal/beads/..."}}`
 	var err error
 	withStdin(t, hookInput, func() {
 		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
 	})
 	if err == nil {
-		t.Error("expected bare go test on a container-backed package to be blocked for a polecat, got nil error")
+		t.Error("expected bare go test on a container-backed package with the switch on to be blocked for a polecat, got nil error")
 	}
 }
 
@@ -226,5 +237,13 @@ func TestRunTapGuardContainerSuite_NonContainerPackageAllowed(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("expected non-container package to be allowed, got error: %v", err)
+	}
+}
+
+// The guard spells the opt-in variable out instead of importing testutil
+// (which would link testcontainers into gt); this pins the two together.
+func TestDockerTestsEnvMatchesTestutil(t *testing.T) {
+	if dockerTestsEnv != testutil.DockerTestsEnv {
+		t.Fatalf("guard dockerTestsEnv %q != testutil.DockerTestsEnv %q", dockerTestsEnv, testutil.DockerTestsEnv)
 	}
 }

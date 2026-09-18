@@ -82,6 +82,12 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 		printContainerSuiteBlock(reason, command, matched)
 		return NewSilentExit(2)
 	}
+	if isPolecatContext() {
+		if reason, matched := evaluatePolecatTestScope(command); reason != "" {
+			printPolecatTestScopeBlock(reason, command, matched)
+			return NewSilentExit(2)
+		}
+	}
 	return nil
 }
 
@@ -120,11 +126,20 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // none is blocked.
 func evaluateContainerSuiteCommand(command string) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(command))
+	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
+	// `go test` of a container-bearing package cannot start a container
+	// unless the command turns the switch on somewhere — as an env prefix,
+	// via env(1), or an earlier `export` on the same line — so only then is
+	// the slot required. `make test` sets it in the Makefile and is judged
+	// unconditionally. The switch is looked for across the WHOLE command,
+	// not per segment, because `export X=1; go test ...` enables it for the
+	// later segment.
+	dockerOn := commandEnablesDockerTests(tokens)
 
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluateContainerSuiteSegment(segment); r != "" {
+			if r, m := evaluateContainerSuiteSegment(segment, dockerOn); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -132,13 +147,31 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 		}
 		segment = append(segment, tok)
 	}
-	return evaluateContainerSuiteSegment(segment)
+	return evaluateContainerSuiteSegment(segment, dockerOn)
+}
+
+// dockerTestsEnv mirrors testutil.DockerTestsEnv. It is spelled out here
+// rather than imported because internal/testutil pulls testcontainers and
+// the Docker client into whatever links it, and this is the gt binary;
+// TestDockerTestsEnvMatchesTestutil keeps the two in step.
+const dockerTestsEnv = "GT_TEST_DOCKER"
+
+// commandEnablesDockerTests reports whether any token sets the container
+// opt-in switch to 1 (GT_TEST_DOCKER=1, bare or as an export/env value).
+func commandEnablesDockerTests(tokens []string) bool {
+	want := dockerTestsEnv + "=1"
+	for _, t := range tokens {
+		if t == want || strings.HasSuffix(t, " "+want) {
+			return true
+		}
+	}
+	return false
 }
 
 // evaluateContainerSuiteSegment judges a single shell segment (tokens
 // between shell operators). tokens is original-case; matching is done on a
 // lowercased copy so "Go Test" and "go test" are treated the same.
-func evaluateContainerSuiteSegment(tokens []string) (reason string, matched []string) {
+func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason string, matched []string) {
 	if len(tokens) == 0 {
 		return "", nil
 	}
@@ -151,7 +184,7 @@ func evaluateContainerSuiteSegment(tokens []string) (reason string, matched []st
 		return "", nil // already wrapped by gt slot run
 	}
 
-	if i := findAdjacentPair(lower, "go", "test"); i >= 0 {
+	if i := findAdjacentPair(lower, "go", "test"); i >= 0 && dockerOn {
 		pkgArgs := goTestPackageArgs(tokens[i+2:])
 		wholeRepo, pkgs := containerSuitePackagesIntersect(pkgArgs)
 		if wholeRepo {
