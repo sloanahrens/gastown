@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ import (
 var (
 	slotRunRole    string
 	slotRunTimeout time.Duration
+	slotRunNice    int
 	slotStatusJSON bool
 )
 
@@ -62,6 +64,7 @@ var slotStatusCmd = &cobra.Command{
 func init() {
 	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id)")
 	slotRunCmd.Flags().DurationVar(&slotRunTimeout, "timeout", 60*time.Minute, "Max time to wait for the slot to free up (0 = wait forever)")
+	slotRunCmd.Flags().IntVar(&slotRunNice, "nice", -1, "CPU niceness for the command (default: 10 for non-gate roles, 0 for refinery/batch/main-branch-test; 0 disables)")
 
 	slotStatusCmd.Flags().BoolVar(&slotStatusJSON, "json", false, "Output as JSON")
 
@@ -97,6 +100,16 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	envAssigns, cmdArgs := splitEnvPrefix(args)
 	if len(cmdArgs) == 0 {
 		return fmt.Errorf("gt slot run: no command after environment assignment(s) %v", envAssigns)
+	}
+	// Gate-class holders (refinery, batch gate, main-branch test) are the
+	// merge path's critical section; a polecat's own suite is optional
+	// verification. When both run at once on a CPU-bound host, three
+	// concurrent suites tripled the refinery's gate (gt-93m1), so non-gate
+	// holders run under nice(1) unless --nice says otherwise.
+	niceness := slotRunNiceness(role, slotRunNice)
+	cmdArgs = withNice(cmdArgs, niceness)
+	if niceness > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Running at nice %d (non-gate holder; --nice 0 to disable).\n", niceness)
 	}
 	sub := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
 	if len(envAssigns) > 0 {
@@ -240,4 +253,35 @@ func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
 		i++
 	}
 	return args[:i], args[i:]
+}
+
+// defaultNonGateNice is the nice(1) increment for non-gate slot holders.
+const defaultNonGateNice = 10
+
+// slotRunNiceness resolves the niceness for a holder: an explicit --nice
+// wins; otherwise gate-class roles (slot.IsGateRole) run at normal priority
+// and everyone else at defaultNonGateNice.
+func slotRunNiceness(role string, flag int) int {
+	if flag >= 0 {
+		return flag
+	}
+	if slot.IsGateRole(role) {
+		return 0
+	}
+	return defaultNonGateNice
+}
+
+// withNice prefixes cmdArgs with nice(1) at the given increment when it is
+// positive and a nice binary exists; otherwise returns cmdArgs unchanged.
+func withNice(cmdArgs []string, niceness int) []string {
+	if niceness <= 0 || len(cmdArgs) == 0 {
+		return cmdArgs
+	}
+	nicePath, err := exec.LookPath("nice")
+	if err != nil {
+		return cmdArgs
+	}
+	out := make([]string, 0, len(cmdArgs)+3)
+	out = append(out, nicePath, "-n", strconv.Itoa(niceness))
+	return append(out, cmdArgs...)
 }
