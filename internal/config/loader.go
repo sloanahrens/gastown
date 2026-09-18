@@ -1443,7 +1443,8 @@ func ResolveRoleAgentConfig(role, townRoot, rigPath string) *RuntimeConfig {
 	resolveConfigMu.Lock()
 	defer resolveConfigMu.Unlock()
 	rc := resolveRoleAgentConfigCore(role, townRoot, rigPath)
-	return withRoleSettingsFlag(rc, role, rigPath)
+	rc = withRoleSettingsFlag(rc, role, rigPath)
+	return withRoleSystemPromptFlag(rc, role, townRoot, rigPath)
 }
 
 // tryResolveNamedAgent attempts to resolve a named agent through the custom agent
@@ -1486,7 +1487,7 @@ func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConf
 				_ = LoadAgentRegistry(DefaultAgentRegistryPath(townRoot))
 				_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
 				if rc := tryResolveNamedAgent(agentName, fmt.Sprintf("worker_agents[%s]", workerName), townSettings, rigSettings); rc != nil {
-					return withRoleSettingsFlag(rc, "crew", rigPath)
+					return withRoleSystemPromptFlag(withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath)
 				}
 			}
 		}
@@ -1506,7 +1507,7 @@ func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConf
 					_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
 				}
 				if rc := tryResolveNamedAgent(agentName, fmt.Sprintf("crew_agents[%s]", workerName), townSettings, rigSettings); rc != nil {
-					return withRoleSettingsFlag(rc, "crew", rigPath)
+					return withRoleSystemPromptFlag(withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath)
 				}
 			}
 		}
@@ -1514,7 +1515,7 @@ func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConf
 
 	// Tier 3: fall back to crew role resolution (already holds lock; use core function)
 	rc := resolveRoleAgentConfigCore("crew", townRoot, rigPath)
-	return withRoleSettingsFlag(rc, "crew", rigPath)
+	return withRoleSystemPromptFlag(withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath)
 }
 
 // ResolveRoleEffort resolves the effort level for a role.
@@ -2635,6 +2636,10 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	// non-override ResolveRoleAgentConfig path included it, causing hooks
 	// to silently not fire for polecats launched with --agent.
 	rc = withRoleSettingsFlag(rc, role, rigPath)
+	// Same for the rendered role system prompt (gt-layt): when the file exists,
+	// Claude gets it via --append-system-prompt-file and gt prime omits the
+	// static role text from its hook output.
+	rc = withRoleSystemPromptFlag(rc, role, townRoot, rigPath)
 
 	// Apply exec wrapper from rig/town settings if not already set on the resolved config.
 	if len(rc.ExecWrapper) == 0 {
