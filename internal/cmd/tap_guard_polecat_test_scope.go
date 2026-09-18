@@ -29,6 +29,12 @@ func isPolecatContext() bool {
 	if os.Getenv("GT_POLECAT") != "" {
 		return true
 	}
+	// GT_ROLE is the signal every spawn carries ("gastown/polecats/topaz");
+	// GT_POLECAT is set by AgentEnv alongside it but a hook that inherited
+	// only the role must still recognise the polecat.
+	if role := os.Getenv("GT_ROLE"); strings.Contains(role, "/polecats/") || role == "polecat" {
+		return true
+	}
 	cwd, err := os.Getwd()
 	return err == nil && strings.Contains(cwd, "/polecats/")
 }

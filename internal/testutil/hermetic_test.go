@@ -338,3 +338,26 @@ func TestStartHermetic_DockerOptInSurvivesScrub(t *testing.T) {
 		t.Errorf("scrubProcessEnv removed %s", DockerTestsEnv)
 	}
 }
+
+// TestStartHermetic_WithDoltWithoutOptIn: with the container opt-in unset,
+// a TestMain that asks for Dolt must still start (no error), with the port
+// left empty so container-dependent tests skip — the contract daemon's and
+// convoy's TestMains rely on, and the reason a bare `go test` of those
+// packages passes in seconds without Docker.
+func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
+	withSavedEnv(t)
+	_ = os.Unsetenv(DockerTestsEnv)
+
+	h, err := StartHermetic(WithDolt())
+	if err != nil {
+		t.Fatalf("StartHermetic(WithDolt) without the opt-in must not fail: %v", err)
+	}
+	defer h.Finish(0)
+
+	if DoltContainerPort() != "" {
+		t.Errorf("DoltContainerPort = %q, want empty (no container may start without %s=1)", DoltContainerPort(), DockerTestsEnv)
+	}
+	if got := os.Getenv("GT_DOLT_PORT"); got != poisonDoltPort {
+		t.Errorf("GT_DOLT_PORT = %q, want the poison port %q", got, poisonDoltPort)
+	}
+}

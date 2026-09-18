@@ -186,6 +186,12 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
 // Sets both GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
+//
+// The only caller is StartHermetic (WithDolt), which logs the error and
+// continues with the port variables left poisoned; every package that opts
+// in then skips its container tests on the empty port (daemon, convoy) or
+// via RequireDoltContainer (cmd). TestStartHermetic_WithDoltWithoutOptIn
+// pins that contract.
 func EnsureDoltContainerForTestMain() error {
 	if !DockerTestsEnabled() {
 		return fmt.Errorf("%s", dockerTestsSkipMsg)

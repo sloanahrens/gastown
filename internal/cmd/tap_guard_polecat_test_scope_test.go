@@ -90,3 +90,30 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 		t.Errorf("crew whole-package run must be allowed, got %v", err)
 	}
 }
+
+// Polecat detection must work from GT_ROLE alone (the signal every spawn
+// carries), from GT_POLECAT, and from a polecats/ cwd — and not fire for
+// other roles.
+func TestIsPolecatContext(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cases := []struct {
+		name, polecat, role string
+		want                bool
+	}{
+		{"GT_ROLE compound", "", "gastown/polecats/topaz", true},
+		{"GT_ROLE bare", "", "polecat", true},
+		{"GT_POLECAT only", "topaz", "", true},
+		{"refinery", "", "gastown/refinery", false},
+		{"crew", "", "gastown/crew/sloan", false},
+		{"nothing", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("GT_POLECAT", c.polecat)
+			t.Setenv("GT_ROLE", c.role)
+			if got := isPolecatContext(); got != c.want {
+				t.Errorf("isPolecatContext() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
