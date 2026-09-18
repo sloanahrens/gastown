@@ -1103,9 +1103,16 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	townSettings.Agents = map[string]*config.RuntimeConfig{
 		"claude-proxy": {
 			Command: "claude",
-			Args:    []string{"--dangerously-skip-permissions"},
+			Args:    []string{"--dangerously-skip-permissions", "--model", "proxy-model"},
 			Env:     map[string]string{"ANTHROPIC_BASE_URL": "http://localhost:8080"},
 		},
+	}
+	// role_agents names a different agent so the assertion below proves the
+	// GT_AGENT override still wins over role resolution.
+	townSettings.RoleAgents = map[string]string{"witness": "claude-proxy-role"}
+	townSettings.Agents["claude-proxy-role"] = &config.RuntimeConfig{
+		Command: "claude",
+		Args:    []string{"--model", "role-model"},
 	}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -1126,6 +1133,9 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
 
+	if !strings.Contains(cmd, "--model proxy-model") || strings.Contains(cmd, "role-model") {
+		t.Errorf("GT_AGENT override no longer selects the override agent\ncmd: %s", cmd)
+	}
 	if !strings.Contains(cmd, "--append-system-prompt-file "+promptPath) {
 		t.Errorf("agent-override restart command lacks --append-system-prompt-file %s\ncmd: %s", promptPath, cmd)
 	}

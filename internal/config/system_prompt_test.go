@@ -348,6 +348,29 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	}
 }
 
+func TestResolveRoleAgentConfigWithOverrideNoRoleAddsNoFlags(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	ts := NewTownSettings()
+	ts.DefaultAgent = "claude"
+	ts.Agents = map[string]*RuntimeConfig{
+		"deepseek-flash": {Command: "claude", Args: []string{"--model", "deepseek-flash"}, Provider: "claude"},
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := ResolveRoleAgentConfigWithOverride("", townRoot, rigPath, "deepseek-flash", "")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if containsArg(rc.Args, "--settings") || containsArg(rc.Args, "--append-system-prompt-file") {
+		t.Errorf("role-less override must add no role flags: %v", rc.Args)
+	}
+}
+
 func countArg(args []string, want string) int {
 	n := 0
 	for _, a := range args {

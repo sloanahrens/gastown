@@ -190,7 +190,17 @@ func isHomeDirScanRoot(resolved string) bool {
 	if err != nil || home == "" {
 		return false
 	}
-	return filepath.Clean(resolved) == filepath.Clean(home)
+	// Case-insensitive filesystems (macOS default) and a $HOME that runs
+	// through a symlink (/var -> /private/var) both name the same directory
+	// under a different spelling; compare the canonical forms.
+	canon := func(p string) string {
+		p = filepath.Clean(p)
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return p
+	}
+	return strings.EqualFold(canon(resolved), canon(home))
 }
 
 func scanRootPath(token string) string {
