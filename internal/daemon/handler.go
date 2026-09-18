@@ -408,10 +408,23 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 		if running {
 			continue
 		}
-		hooked, err := dogHasHookedFormulaFn(townRoot, beadsDir, d.Name)
+		result, err := dogHasHookedFormulaWithIDFn(townRoot, beadsDir, d.Name)
 		if err != nil {
 			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
-		} else if hooked {
+		} else if result.hasHooked {
+			// gt-da2x: `gt dog done` can leave the dog idle while its formula
+			// wisp stays hooked. When the wisp was created before the dog went
+			// idle and no step has any progress, the wisp is abandoned — close
+			// it so the dog becomes dispatchable again (next tick; the wisp is
+			// gone then, which is also why this WARN is naturally logged once).
+			if isWispStale(d, result, beadsDir) {
+				if closed := closeStaleWispFn(result.wispID, beadsDir); closed > 0 {
+					logger.Printf("Handler: WARN: dog %s wisp %s abandoned (idle, zero step progress); closed, dog dispatchable next tick", d.Name, result.wispID)
+					continue
+				}
+				// Close failed; the wisp is still hooked — fall through to the
+				// skip log below so the condition stays visible.
+			}
 			logger.Printf("Handler: dog %s is idle but still holds an open hooked formula molecule, skipping dispatch", d.Name)
 			continue
 		}
@@ -420,17 +433,74 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 	return nil
 }
 
-// dogHasHookedFormulaFn is a seam over dogHasHookedFormula so
-// findDispatchableDog is unit-testable without shelling out to a real bd/Dolt
-// backend. Production code always resolves to dogHasHookedFormula; tests
-// override it to exercise the skip/error-fallback branches deterministically.
-var dogHasHookedFormulaFn = dogHasHookedFormula
+// dogHasHookedFormulaWithIDFn is the production seam for hooked-formula checks
+// that need the wisp root ID (for stale-wisp cleanup). Production code always
+// resolves to dogHasHookedFormulaWithID; tests override it deterministically.
+var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
 
-// dogHasHookedFormula reports whether the dog identified by name currently
-// holds an open (status=hooked) formula molecule wisp — the ephemeral
-// molecule `gt sling` attaches to a dog's hook bead when dispatching
-// formula-driven work such as mol-dog-reaper or mol-dog-backup. See
-// findDispatchableDog.
+// closeStaleWispFn is the seam for closing stale wisps during dispatch.
+// Production code resolves to closeStaleWisp; tests override it to verify
+// the wisp ID is correct without needing a real bd/Dolt backend.
+var closeStaleWispFn = closeStaleWisp
+
+// wispStepProgressFn reports how many steps of the formula wisp identified by
+// wispID have progress (status in_progress or closed). Production code
+// resolves to wispStepProgress; tests override it so findDispatchableDog's
+// stale-wisp branch is exercisable without a real bd/Dolt backend.
+var wispStepProgressFn = wispStepProgress
+
+// wispStepProgress counts the wisp's steps with status in_progress or closed
+// via beads.Children (which checks the wisp_dependencies table, unlike List,
+// so ephemeral wisps are found). gt-da2x.
+func wispStepProgress(wispID, beadsDir string) (int, error) {
+	bd := beads.New(beadsDir)
+	children, err := bd.Children(wispID)
+	if err != nil {
+		return 0, err
+	}
+	progress := 0
+	for _, c := range children {
+		if c.Status == string(beads.StatusInProgress) || c.Status == string(beads.StatusClosed) {
+			progress++
+		}
+	}
+	return progress, nil
+}
+
+// isWispStale reports whether an idle dog's hooked formula wisp should be
+// treated as abandoned (gt-da2x): the dog went idle after the wisp was
+// created AND no step of the wisp has any progress (zero in_progress/closed
+// steps — the dog bailed before doing any of the formula). Any uncertainty
+// (unparseable wisp timestamp, step-progress lookup failure) resolves to
+// "not stale" so a wisp is never closed on a guess.
+func isWispStale(d *dog.Dog, result hookedFormulaResult, beadsDir string) bool {
+	wispCreatedAt, err := time.Parse(time.RFC3339, result.wispCreated)
+	if err != nil {
+		return false
+	}
+	if !d.LastActive.After(wispCreatedAt) {
+		return false // wisp created after the dog went idle: not abandoned
+	}
+	progress, err := wispStepProgressFn(result.wispID, beadsDir)
+	if err != nil {
+		return false
+	}
+	return progress == 0
+}
+
+// hookedFormulaResult holds the outcome of a hooked-formula check.
+type hookedFormulaResult struct {
+	hasHooked   bool
+	wispID      string // non-empty only when hasHooked is true
+	wispCreated string // wisp created_at timestamp (RFC3339), non-empty when hasHooked is true
+}
+
+// dogHasHookedFormulaWithID reports whether the dog identified by name
+// currently holds an open (status=hooked) formula molecule wisp — the
+// ephemeral molecule `gt sling` attaches to a dog's hook bead when dispatching
+// formula-driven work such as mol-dog-reaper or mol-dog-backup — and, when it
+// does, returns the wisp root's ID and created_at so callers can evaluate and
+// close it (gt-da2x). See findDispatchableDog.
 //
 // This shells out to bd directly (mirroring dogMol.runBd) rather than going
 // through beads.Beads.List, whose run() always resolves env via
@@ -438,7 +508,7 @@ var dogHasHookedFormulaFn = dogHasHookedFormula
 // that forces BD_DOLT_AUTO_COMMIT=off. findDispatchableDog calls this once
 // per idle dog on every dispatch tick, so without that env every poll opens
 // a fresh connection attempting a no-op auto-commit (gh#3596).
-func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
+func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
 	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
 		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
@@ -453,34 +523,70 @@ func dogHasHookedFormula(townRoot, beadsDir, dogName string) (bool, error) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-			return false, fmt.Errorf("%w: %s", err, errMsg)
+			return hookedFormulaResult{}, fmt.Errorf("%w: %s", err, errMsg)
 		}
-		return false, err
+		return hookedFormulaResult{}, err
 	}
 
 	out := bytes.TrimSpace(stdout.Bytes())
 	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
-		return false, nil
+		return hookedFormulaResult{}, nil
 	}
 
 	var hookedBeads []*beads.Issue
 	if err := json.Unmarshal(out, &hookedBeads); err != nil {
-		return false, fmt.Errorf("parsing bd query output: %w", err)
+		return hookedFormulaResult{}, fmt.Errorf("parsing bd query output: %w", err)
 	}
-	return anyHasAttachedFormula(hookedBeads), nil
+
+	if wisp := firstFormulaWisp(hookedBeads); wisp != nil {
+		return hookedFormulaResult{hasHooked: true, wispID: wisp.ID, wispCreated: wisp.CreatedAt}, nil
+	}
+	return hookedFormulaResult{}, nil
+}
+
+// firstFormulaWisp returns the first bead carrying attached_formula metadata
+// (i.e. a formula molecule wisp from `gt sling`), or nil if none does.
+func firstFormulaWisp(hookedBeads []*beads.Issue) *beads.Issue {
+	for _, hb := range hookedBeads {
+		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
+			return hb
+		}
+	}
+	return nil
 }
 
 // anyHasAttachedFormula reports whether any of the given beads carries
 // attached_formula metadata (i.e. is the root or a step of a molecule `gt
-// sling` attached to an agent's hook). Split out from dogHasHookedFormula so
-// the decision logic is unit-testable without a real bd/Dolt backend.
+// sling` attached to an agent's hook). Split out from the hooked-formula check
+// so the decision logic is unit-testable without a real bd/Dolt backend.
 func anyHasAttachedFormula(hookedBeads []*beads.Issue) bool {
-	for _, hb := range hookedBeads {
-		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
-			return true
+	return firstFormulaWisp(hookedBeads) != nil
+}
+
+// closeStaleWisp force-closes a formula wisp whose dog has been idle longer
+// than the wisp has existed (no step progress made). Returns the count of
+// wisps closed (always 0 or 1).
+func closeStaleWisp(wispID, beadsDir string) int {
+	bd := beads.New(beadsDir)
+	// Recursively close descendants using Children (mirrors cmd.closeDescendantsImpl).
+	// Children checks the wisp_dependencies table, unlike List which only checks
+	// persistent dependencies and misses ephemeral wisps.
+	children, err := bd.Children(wispID)
+	if err == nil {
+		var idsToClose []string
+		for _, c := range children {
+			if c.Status != "closed" {
+				idsToClose = append(idsToClose, c.ID)
+			}
+		}
+		if len(idsToClose) > 0 {
+			_ = bd.ForceCloseWithReason("abandoned: idle dog, no progress", idsToClose...)
 		}
 	}
-	return false
+	if err := bd.ForceCloseWithReason("abandoned: idle dog, no progress", wispID); err != nil {
+		return 0
+	}
+	return 1
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
@@ -280,6 +281,63 @@ func TestDogDone_NotFound(t *testing.T) {
 	err := m.ClearWork("nonexistent")
 	if err != dog.ErrDogNotFound {
 		t.Errorf("ClearWork() error = %v, want ErrDogNotFound", err)
+	}
+}
+
+// TestFormulaWispIDs_FiltersToAttachedFormula verifies the gt-da2x decision
+// logic behind closeDogFormulaWisps: only hooked beads carrying
+// attached_formula metadata (real `gt sling` formula wisps) are closed.
+// Other hooked ephemeral beads on the dog's hook are unrelated work and must
+// be left alone.
+func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
+	tests := []struct {
+		name  string
+		beads []*beads.Issue
+		want  []string
+	}{
+		{
+			name:  "no hooked beads",
+			beads: nil,
+			want:  nil,
+		},
+		{
+			name: "hooked bead with no attachment metadata is not a wisp",
+			beads: []*beads.Issue{
+				{ID: "hq-task-a", Description: "just a regular hooked task"},
+			},
+			want: nil,
+		},
+		{
+			name: "hooked bead with attached_formula is a wisp",
+			beads: []*beads.Issue{
+				{ID: "wisp-a", Description: "attached_formula: mol-dog-reaper\nattached_molecule: wisp-a\n"},
+			},
+			want: []string{"wisp-a"},
+		},
+		{
+			name: "only formula wisps are selected, in query order",
+			beads: []*beads.Issue{
+				{ID: "hq-task-b", Description: "unrelated work"},
+				{ID: "wisp-b", Description: "attached_formula: mol-dog-backup\n"},
+				{ID: "wisp-c", Description: "attached_molecule: wisp-c\nattached_at: 2026-01-01T00:00:00Z\n"},
+				{ID: "wisp-d", Description: "attached_formula: mol-polecat-work\n"},
+			},
+			want: []string{"wisp-b", "wisp-d"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formulaWispIDs(tt.beads)
+			if len(got) != len(tt.want) {
+				t.Fatalf("formulaWispIDs() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("formulaWispIDs() = %v, want %v", got, tt.want)
+				}
+			}
+		})
 	}
 }
 
