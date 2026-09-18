@@ -880,7 +880,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	if currentAgent != "" {
 		// Resolve with the override but still through the role-aware path so
 		// the respawn carries --settings and --append-system-prompt-file
-		// exactly like a daemon spawn would (gt-layt second-session gap).
+		// exactly like a daemon spawn would.
 		rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, currentAgent, agentName)
 		if err != nil {
 			return "", fmt.Errorf("resolving agent config: %w", err)

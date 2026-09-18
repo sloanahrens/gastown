@@ -285,6 +285,77 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	if _, err := ResolveRoleAgentConfigWithOverride("deacon", townRoot, "", "no-such-agent", ""); err == nil {
 		t.Error("expected an error for an unknown agent override")
 	}
+
+	// The settings flag rides the same path, and applying the resolver's
+	// output a second time must not duplicate either flag.
+	rc, err = ResolveRoleAgentConfigWithOverride("polecat", townRoot, rigPath, "deepseek-flash", "marble")
+	if err != nil {
+		t.Fatalf("resolve polecat again: %v", err)
+	}
+	wantSettings := filepath.Join(RoleSettingsDir("polecat", rigPath), ".claude", "settings.json")
+	if !containsArgPair(rc.Args, "--settings", wantSettings) {
+		t.Errorf("polecat override config lacks --settings %s: %v", wantSettings, rc.Args)
+	}
+	rc = withRoleSettingsFlag(withRoleSystemPromptFlag(rc, "polecat", townRoot, rigPath, "marble"), "polecat", rigPath)
+	if n := countArg(rc.Args, "--settings"); n != 1 {
+		t.Errorf("--settings appears %d times after re-application, want 1: %v", n, rc.Args)
+	}
+	if n := countArg(rc.Args, "--append-system-prompt-file"); n != 1 {
+		t.Errorf("--append-system-prompt-file appears %d times after re-application, want 1: %v", n, rc.Args)
+	}
+
+	// Crew: per-worker file, same as polecat.
+	crewPath := SystemPromptFilePath("crew", townRoot, rigPath, "sloan")
+	if err := os.MkdirAll(filepath.Dir(crewPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crewPath, []byte("# crew sloan\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "deepseek-flash", "sloan")
+	if err != nil {
+		t.Fatalf("resolve crew: %v", err)
+	}
+	if !containsArgPair(rc.Args, "--append-system-prompt-file", crewPath) {
+		t.Errorf("crew override config lacks the per-worker flag: %v", rc.Args)
+	}
+
+	// Empty override: falls back to role_agents and still carries the flags
+	// exactly once (ResolveRoleAgentConfig already applies them).
+	ts.RoleAgents = map[string]string{"witness": "deepseek-flash"}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	witnessPath := SystemPromptFilePath("witness", townRoot, rigPath, "")
+	if err := os.MkdirAll(filepath.Dir(witnessPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(witnessPath, []byte("# witness\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rc, err = ResolveRoleAgentConfigWithOverride("witness", townRoot, rigPath, "", "")
+	if err != nil {
+		t.Fatalf("resolve witness without override: %v", err)
+	}
+	if !containsArg(rc.Args, "deepseek-flash") {
+		t.Errorf("empty override did not fall back to role_agents: %v", rc.Args)
+	}
+	if n := countArg(rc.Args, "--append-system-prompt-file"); n != 1 {
+		t.Errorf("witness flag count %d, want 1: %v", n, rc.Args)
+	}
+	if n := countArg(rc.Args, "--settings"); n != 1 {
+		t.Errorf("witness --settings count %d, want 1: %v", n, rc.Args)
+	}
+}
+
+func countArg(args []string, want string) int {
+	n := 0
+	for _, a := range args {
+		if a == want {
+			n++
+		}
+	}
+	return n
 }
 
 func containsArg(args []string, want string) bool {

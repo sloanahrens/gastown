@@ -93,7 +93,7 @@ func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentN
 //
 // Spawn paths that resolve an explicit agent (GT_AGENT on handoff, --agent on
 // sling) used to call ResolveAgentConfigWithOverride directly and so skipped
-// both flags; the gt-layt second-session gap came from exactly that.
+// both flags, which left self-handoff respawns without the system prompt file.
 func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, agentName string) (*RuntimeConfig, error) {
 	var rc *RuntimeConfig
 	if agentOverride == "" {
