@@ -321,13 +321,41 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 	p.add("directives", 3, false, call(parts.directives))
 	p.add("handoff", 4, false, call(parts.handoff))
 	p.add("checkpoint", 4, false, call(parts.checkpoint))
-	p.add("mail", 5, false, call(parts.mail))
+	// Mail is never dropped: `gt mail check --inject` ACKs deliveries as it
+	// renders them, so dropping the section would lose mail for good.
+	p.add("mail", 5, true, call(parts.mail))
 	p.add("memories", 6, false, call(parts.memories))
 	p.add("escalations", 5, false, call(parts.escalations))
 	if !hasSlungWork {
 		p.add("startup", 9, true, call(parts.startup))
 	}
 	return p
+}
+
+// primeContinuationMode is set for the SessionStart that follows a compaction
+// (source=compact, or a handoff cycle with reason compaction) when the static
+// role text lives in the system prompt. The dynamic payload is re-sent so the
+// agent gets its hooked work back, but with the brief continuation directive
+// instead of AUTONOMOUS WORK MODE, so it does not re-announce or re-run the
+// startup protocol (GH#1965).
+var primeContinuationMode bool
+
+// primeStepVars returns the formula vars for `gt prime --step`: the hooked
+// bead's attachment vars when that is the formula being read, else the role's
+// patrol vars.
+func primeStepVars(ctx RoleContext, hookedBead *beads.Issue, formulaName string) []string {
+	if hookedBead != nil {
+		if att := beads.ParseAttachmentFields(hookedBead); att != nil && att.AttachedFormula == formulaName {
+			return attachmentFormulaVars(att)
+		}
+	}
+	switch ctx.Role {
+	case RoleWitness:
+		return buildWitnessPatrolVars(ctx)
+	case RoleRefinery:
+		return buildRefineryPatrolVars(ctx)
+	}
+	return nil
 }
 
 // primeStepFormulaName resolves which formula `gt prime --step N` reads:

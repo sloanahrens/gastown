@@ -502,3 +502,64 @@ func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing
 		}
 	}
 }
+
+func TestAssemblePrimePayload_MailIsNeverDropped(t *testing.T) {
+	// `gt mail check --inject` ACKs deliveries as a side effect, so the mail
+	// section must survive the budget or the agent loses mail for good.
+	payload := assemblePrimePayload(primeParts{
+		hookedWork: func() string { return strings.Repeat("H", 8000) + "\n" },
+		mail:       func() string { return "## Mail\nMAIL BODY\n" },
+		memories:   func() string { return strings.Repeat("M", 3000) + "\n" },
+	}, "", false, true)
+	out := payload.render(primeHookBudget)
+	if !strings.Contains(out, "MAIL BODY") {
+		t.Fatalf("mail must never be dropped by the budget:\n%s", out[len(out)-300:])
+	}
+	if strings.Contains(out, "MMMM") {
+		t.Fatal("memories should have been dropped before mail")
+	}
+}
+
+func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
+	primeContinuationMode = true
+	t.Cleanup(func() { primeContinuationMode = false })
+	town := t.TempDir()
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+	bead := &beads.Issue{ID: "gt-cont1", Title: "Continue me", Description: "attached_formula: mol-polecat-work\n"}
+	out := captureOutput(func() { _, _ = checkSlungWork(ctx, bead) })
+	if strings.Contains(out, "AUTONOMOUS WORK MODE") || strings.Contains(out, "Announce:") {
+		t.Fatalf("post-compaction prime must not re-announce (GH#1965):\n%s", out[:min(len(out), 800)])
+	}
+	for _, want := range []string{"CONTINUE HOOKED WORK", "gt-cont1", "Step 1:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("continuation output missing %q:\n%s", want, out[:min(len(out), 800)])
+		}
+	}
+}
+
+func TestPrimeStepVars_FollowTheResolvedFormula(t *testing.T) {
+	// A witness whose hooked bead has no attached formula reads its patrol
+	// formula, so the vars must be the patrol vars, not the (empty) attachment vars.
+	ctx := RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: t.TempDir()}
+	bead := &beads.Issue{ID: "gt-x", Description: "no attachment here\n"}
+	name := primeStepFormulaName(ctx, bead, "")
+	if name != constants.MolWitnessPatrol {
+		t.Fatalf("name = %q", name)
+	}
+	vars := primeStepVars(ctx, bead, name)
+	found := false
+	for _, v := range vars {
+		if v == "rig=myrig" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected witness patrol vars (rig=myrig), got %v", vars)
+	}
+	// With an attached formula the attachment vars win.
+	bead2 := &beads.Issue{ID: "gt-y", Description: "attached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-y\"]\n"}
+	vars2 := primeStepVars(RoleContext{Role: RolePolecat}, bead2, "mol-polecat-work")
+	if len(vars2) == 0 || vars2[0] != "issue=gt-y" {
+		t.Fatalf("expected attachment vars, got %v", vars2)
+	}
+}

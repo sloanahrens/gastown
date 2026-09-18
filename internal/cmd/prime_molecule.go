@@ -134,8 +134,9 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 
 // showFormulaStepsFull renders the bounded formula checklist (every title, the
 // body of step 1, and how to fetch the rest). Used for polecat work formulas and
-// patrol formulas; the full-body renderer renderFormulaStepsFull is kept for
-// the Ralph loop prompt, which is written to a file rather than the hook.
+// patrol formulas. The full-body renderer renderFormulaStepsFull remains for the
+// Ralph loop directive, whose /ralph-loop prompt must carry every step inline;
+// Ralph-mode attachments therefore still exceed the hook budget (rare, known).
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides substituted into step descriptions.
 func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) {

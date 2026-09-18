@@ -163,6 +163,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	// --step is a read-only fetch: no hook handling, no handoff-marker removal,
 	// no session setup.
+	if cmd.Flags().Changed("step") && primeStep < 1 {
+		return fmt.Errorf("--step must be a positive step number")
+	}
 	if primeStep > 0 {
 		return runPrimeStep(RoleContext{Role: roleInfo.Role, Rig: roleInfo.Rig, Polecat: roleInfo.Polecat, TownRoot: townRoot, WorkDir: cwd})
 	}
@@ -209,6 +212,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		runPrimeCompactResume(ctx)
 		return nil
 	}
+	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
 
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
@@ -288,6 +292,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(cwd) }) },
 		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
 		startup: func() string {
+			if primeContinuationMode {
+				return "\n---\n\n**Continue your current task.** Context was compacted; your role text is in the system prompt and the sections above are current.\n"
+			}
 			explain(true, "Startup directive: normal mode (no hooked work)")
 			return captureOutput(func() { outputStartupDirective(ctx) })
 		},
@@ -316,16 +323,7 @@ func runPrimeStep(ctx RoleContext) error {
 	if name == "" {
 		return fmt.Errorf("no formula to read: pass --formula <name>")
 	}
-	var vars []string
-	switch {
-	case hookedBead != nil && primeFormula == "":
-		vars = attachmentFormulaVars(beads.ParseAttachmentFields(hookedBead))
-	case ctx.Role == RoleWitness:
-		vars = buildWitnessPatrolVars(ctx)
-	case ctx.Role == RoleRefinery:
-		vars = buildRefineryPatrolVars(ctx)
-	}
-	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, vars)
+	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(ctx, hookedBead, name))
 	if err != nil {
 		return err
 	}
@@ -758,7 +756,11 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	attachment := beads.ParseAttachmentFields(hookedBead)
 	hasWorkflow := hasWorkflowAttachment(attachment)
 
-	outputAutonomousDirective(ctx, hookedBead, hasWorkflow)
+	if primeContinuationMode {
+		outputContinuationDirective(hookedBead, hasWorkflow)
+	} else {
+		outputAutonomousDirective(ctx, hookedBead, hasWorkflow)
+	}
 	outputHookedBeadDetails(hookedBead)
 
 	if hasWorkflow {
