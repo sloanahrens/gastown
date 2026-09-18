@@ -304,3 +304,37 @@ func TestScratchTown_CwdResolvesToScratch(t *testing.T) {
 		t.Errorf("FindFromCwd = %q, want scratch town %q", root, town)
 	}
 }
+
+// TestStartHermetic_DockerOptInSurvivesScrub: DockerTestsEnv is a GT_*
+// variable, so the scrub would wipe the opt-in before WithDolt or
+// RequireDoltContainer could see it. It must survive both the TestMain
+// harness and the per-test HermeticTest scrub.
+func TestStartHermetic_DockerOptInSurvivesScrub(t *testing.T) {
+	withSavedEnv(t)
+	if err := os.Setenv(DockerTestsEnv, "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := StartHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	defer h.Finish(0)
+
+	if !DockerTestsEnabled() {
+		t.Errorf("%s did not survive StartHermetic's scrub", DockerTestsEnv)
+	}
+	HermeticTest(t)
+	if !DockerTestsEnabled() {
+		t.Errorf("%s did not survive HermeticTest's scrub", DockerTestsEnv)
+	}
+	// And the scrub still removes ordinary GT_* context.
+	_ = os.Setenv("GT_ROLE", "gastown/polecats/topaz")
+	scrubProcessEnv(false)
+	if os.Getenv("GT_ROLE") != "" {
+		t.Error("scrubProcessEnv kept GT_ROLE")
+	}
+	if !DockerTestsEnabled() {
+		t.Errorf("scrubProcessEnv removed %s", DockerTestsEnv)
+	}
+}

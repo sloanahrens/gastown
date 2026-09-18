@@ -1,9 +1,10 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/testutil"
 	"os"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestEvaluateContainerSuiteCommand(t *testing.T) {
@@ -24,6 +25,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
 		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
 		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
+		{"switch quoted", `GT_TEST_DOCKER="1" go test ./internal/beads/...`, true},
 
 		// Allowed: the same bare runs with the switch off cannot reach Docker.
 		{"bare go test container package, switch off", "go test ./internal/beads/...", false},
@@ -245,5 +247,18 @@ func TestRunTapGuardContainerSuite_NonContainerPackageAllowed(t *testing.T) {
 func TestDockerTestsEnvMatchesTestutil(t *testing.T) {
 	if dockerTestsEnv != testutil.DockerTestsEnv {
 		t.Fatalf("guard dockerTestsEnv %q != testutil.DockerTestsEnv %q", dockerTestsEnv, testutil.DockerTestsEnv)
+	}
+}
+
+// An opt-in already exported in the session environment reaches the test
+// process without appearing in the command, so the guard reads its own env.
+func TestEvaluateContainerSuiteCommand_EnvOptIn(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "1")
+	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason == "" {
+		t.Error("bare go test on a container package with the opt-in exported in the environment was allowed")
+	}
+	t.Setenv(dockerTestsEnv, "")
+	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason != "" {
+		t.Errorf("bare go test with the opt-in unset was blocked: %s", reason)
 	}
 }

@@ -308,7 +308,13 @@ func (h *Hermetic) Finish(code int) int {
 // town context from the invoking agent session. When keepDolt is true the
 // Dolt passthrough variables survive (an outer runner provided the server).
 func scrubProcessEnv(keepDolt bool) {
-	keep := map[string]bool{}
+	// DockerTestsEnv is the caller's opt-in to container-backed tests, not
+	// live-town context; it is a GT_* variable only by naming convention.
+	// Without this, `GT_TEST_DOCKER=1 go test` would be wiped here before
+	// the WithDolt option or any RequireDoltContainer call could read it,
+	// and the opt-in would be a documented but dead switch (same shape as
+	// the AllowLiveTmuxEnv bounce, gt-yav3).
+	keep := map[string]bool{DockerTestsEnv: true}
 	if keepDolt {
 		for _, k := range doltPassthroughVars {
 			keep[k] = true

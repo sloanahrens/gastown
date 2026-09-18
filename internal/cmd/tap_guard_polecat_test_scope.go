@@ -79,8 +79,17 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 		if norm == "" {
 			return "polecat 'go test' of the whole repo", []string{arg}
 		}
-		if heavyTestPackages[norm] || heavyTestPackages[topTwoPathSegments(norm)] {
+		switch {
+		case heavyTestPackages[norm] || heavyTestPackages[topTwoPathSegments(norm)]:
 			heavy = append(heavy, norm)
+		case strings.HasSuffix(arg, "/...") || strings.HasSuffix(arg, "..."):
+			// An ancestor wildcard (./internal/...) runs every heavy package
+			// beneath it; name them so the message says what it caught.
+			for hp := range heavyTestPackages {
+				if strings.HasPrefix(hp, norm+"/") {
+					heavy = append(heavy, hp)
+				}
+			}
 		}
 	}
 	if len(heavy) > 0 && !hasRun {

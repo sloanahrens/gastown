@@ -23,6 +23,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"heavy package wrapped in slot run", "gt slot run --role gastown/flint -- go test ./internal/polecat/ -count=1", true},
 		{"heavy package after another segment", "gofmt -l . && go test ./internal/refinery/", true},
 		{"subpackage of a heavy package", "go test ./internal/cmd/sub/", true},
+		{"ancestor wildcard covering heavy packages", "go test ./internal/...", true},
+		{"bare ancestor wildcard", "go test internal/...", true},
 
 		{"filtered heavy package", "go test ./internal/cmd/ -run 'TestApplyMQCheck|TestSlingDeadAgent'", false},
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
@@ -48,8 +50,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 9 {
-		t.Errorf("blocked %d of %d cases, want exactly 9", blocked, len(tests))
+	if blocked != 11 {
+		t.Errorf("blocked %d of %d cases, want exactly 11", blocked, len(tests))
 	}
 }
 

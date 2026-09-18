@@ -133,8 +133,9 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 	// the slot required. `make test` sets it in the Makefile and is judged
 	// unconditionally. The switch is looked for across the WHOLE command,
 	// not per segment, because `export X=1; go test ...` enables it for the
-	// later segment.
-	dockerOn := commandEnablesDockerTests(tokens)
+	// later segment. An opt-in already exported in the hook's environment
+	// counts too: the test process inherits it without it being typed.
+	dockerOn := commandEnablesDockerTests(tokens) || os.Getenv(dockerTestsEnv) == "1"
 
 	var segment []string
 	for _, tok := range tokens {
@@ -157,12 +158,18 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 const dockerTestsEnv = "GT_TEST_DOCKER"
 
 // commandEnablesDockerTests reports whether any token sets the container
-// opt-in switch to 1 (GT_TEST_DOCKER=1, bare or as an export/env value).
+// opt-in switch to 1 (GT_TEST_DOCKER=1, bare, quoted, or as an export/env
+// value). The hook's own environment is checked by the caller: an exported
+// GT_TEST_DOCKER=1 in the session reaches `go test` without appearing in
+// the command text.
 func commandEnablesDockerTests(tokens []string) bool {
-	want := dockerTestsEnv + "=1"
+	prefix := dockerTestsEnv + "="
 	for _, t := range tokens {
-		if t == want || strings.HasSuffix(t, " "+want) {
-			return true
+		if i := strings.Index(t, prefix); i >= 0 && (i == 0 || t[i-1] == ' ') {
+			v := strings.Trim(t[i+len(prefix):], `"'`)
+			if v == "1" {
+				return true
+			}
 		}
 	}
 	return false
