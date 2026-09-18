@@ -573,6 +573,126 @@ func cleanupStatusAfterSuccessfulPush(status string) string {
 	return status
 }
 
+// observeCleanupStatus derives the polecat's self-reported cleanup status from
+// the live worktree: uncommitted files, stashes, and whether the branch is
+// pushed to origin. It returns "" when git cannot be read at all.
+//
+// CheckUncommittedWork.UnpushedCommits doesn't work for branches without
+// upstream tracking (common for polecats), so the pushed check goes through the
+// more robust BranchPushedToRemote, which compares against origin/main.
+func observeCleanupStatus(g *git.Git, branch string) string {
+	workStatus, err := g.CheckUncommittedWork()
+	if err != nil {
+		style.PrintWarning("could not auto-detect cleanup status: %v", err)
+		return ""
+	}
+	pushed, unpushedCount, pushErr := g.BranchPushedToRemote(branch, "origin")
+	if pushErr != nil {
+		style.PrintWarning("could not check if branch is pushed: %v", pushErr)
+	}
+	return cleanupStatusFromWorkState(workStatus, pushed, unpushedCount, pushErr)
+}
+
+// resolveDoneAgentIdentity returns the role context gt done writes its
+// agent-bead lifecycle metadata through, plus the actor string it logs under.
+//
+// The polecat identity is already proven by resolveDonePolecatWorktree: gt done
+// refuses to run unless BD_ACTOR and GT_ROLE/GT_RIG/GT_POLECAT agree on one
+// polecat and cwd is that polecat's worktree. Seeding the context from those
+// validated identifiers, and letting env/cwd detection merely refine it, means
+// the agent-bead ID no longer depends on that detection succeeding at all.
+//
+// That dependency was the silent hole: getAgentBeadID returns "" for a
+// RoleUnknown/rig-less context, and every agent-bead write in gt done is
+// guarded by `agentBeadID != ""`. When role detection degraded, gt done skipped
+// the done-intent label, the resume checkpoints, active_mr, the completion
+// metadata, agent_state AND the cleanup_status self-report, then exited 0 and
+// logged "[done]" — leaving a slot that reads cleanup_status=<missing> with no
+// later writer to repair it (see selfReportCleanupStatus and reclaim.go).
+func resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName string) (RoleContext, string) {
+	ctx := RoleContext{
+		Role:     RolePolecat,
+		Rig:      rigName,
+		Polecat:  polecatName,
+		TownRoot: townRoot,
+		WorkDir:  cwd,
+	}
+	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	if err != nil {
+		return ctx, ""
+	}
+	if roleInfo.Role != RoleUnknown {
+		ctx.Role = roleInfo.Role
+	}
+	if roleInfo.Rig != "" {
+		ctx.Rig = roleInfo.Rig
+	}
+	if roleInfo.Polecat != "" {
+		ctx.Polecat = roleInfo.Polecat
+	}
+	// Only a named detection contributes a log actor. ActorString degrades to
+	// the literal "unknown" for a RoleUnknown context, which would otherwise
+	// replace the already-validated BD_ACTOR sender on the "[done]" townlog line
+	// and the feed event.
+	if roleInfo.Role == RoleUnknown {
+		return ctx, ""
+	}
+	return ctx, roleInfo.ActorString()
+}
+
+// resolveCleanupStatusForSelfReport picks the value gt done records on its
+// agent bead: the status the run already computed, else a freshly observed one,
+// else an explicit CleanupUnknown. It is TOTAL — it never returns an empty
+// value, which is the whole point (see selfReportCleanupStatus).
+func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string) polecat.CleanupStatus {
+	if status := parseCleanupStatus(doneCleanupStatus); status != polecat.CleanupUnknown {
+		return status
+	}
+	if status := parseCleanupStatus(observedStatus); status != polecat.CleanupUnknown {
+		return status
+	}
+	return polecat.CleanupUnknown
+}
+
+// selfReportCleanupStatus writes the polecat's cleanup_status to its agent bead.
+// The write is TOTAL by construction: every completed gt done leaves a value.
+//
+// cleanup_status is the durable evidence that decides whether a slot may be
+// reclaimed (nuke, check-recovery, broken-idle reclaim), and nothing else ever
+// fills it in — reclaim.go documents that a missing/unknown status can never
+// become anything else. A path that skips this write therefore strands the slot
+// permanently and drives re-dispatch storms (hq-vx224: flint, granite, shale,
+// agate, basalt ... blocked cleanup rig-wide).
+//
+// Two shapes of skip are closed here:
+//
+//   - A push or MR failure returns early from updateAgentStateAfterSubmission,
+//     which used to take the self-report with it. A failed push is exactly the
+//     case where the witness needs to see "has_unpushed".
+//   - A status that could not be observed stays "" or parses to CleanupUnknown.
+//     Re-observing the live worktree at completion time is the last chance to
+//     record a real value; if even that fails, "unknown" is recorded rather
+//     than nothing. "unknown" is not a clearance — CleanupStatus.IsSafe() is
+//     false for it and workstate.go's gates treat it exactly like an empty
+//     value, so recording it is fail-closed. It only makes "gt done ran and
+//     could not prove the tree was safe" distinguishable from "gt done never
+//     ran", which is what the blocked slots were indistinguishable from.
+func selfReportCleanupStatus(g *git.Git, branch string, updater cleanupStatusUpdater, agentBeadID, doneCleanupStatus string) {
+	if agentBeadID == "" {
+		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
+		return
+	}
+	observed := ""
+	if parseCleanupStatus(doneCleanupStatus) == polecat.CleanupUnknown {
+		observed = observeCleanupStatus(g, branch)
+	}
+	status := resolveCleanupStatusForSelfReport(doneCleanupStatus, observed)
+	if err := updater.UpdateAgentCleanupStatus(agentBeadID, string(status)); err != nil {
+		// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
+	}
+}
+
 func cleanupStatusFromWorkState(workStatus *git.UncommittedWorkStatus, branchPushed bool, unpushedCount int, branchPushedErr error) string {
 	if workStatus == nil {
 		return "unknown"
@@ -915,19 +1035,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
 	if doneCleanupStatus == "" {
-		workStatus, err := g.CheckUncommittedWork()
-		if err != nil {
-			style.PrintWarning("could not auto-detect cleanup status: %v", err)
-		} else {
-			// CheckUncommittedWork.UnpushedCommits doesn't work for branches
-			// without upstream tracking (common for polecats). Use the more
-			// robust BranchPushedToRemote which compares against origin/main.
-			pushed, unpushedCount, pushErr := g.BranchPushedToRemote(branch, "origin")
-			if pushErr != nil {
-				style.PrintWarning("could not check if branch is pushed: %v", pushErr)
-			}
-			doneCleanupStatus = cleanupStatusFromWorkState(workStatus, pushed, unpushedCount, pushErr)
-		}
+		doneCleanupStatus = observeCleanupStatus(g, branch)
 	}
 
 	// SAFETY NET (gt-pvx, stash recovery): If we detected stashes belonging to
@@ -1060,31 +1168,22 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	worker := info.Worker
 
-	// Get agent bead ID for cross-referencing
-	var agentBeadID string
-	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil {
-		if actor := roleInfo.ActorString(); actor != "" {
-			sender = actor
-		}
-		ctx := RoleContext{
-			Role:     roleInfo.Role,
-			Rig:      roleInfo.Rig,
-			Polecat:  roleInfo.Polecat,
-			TownRoot: townRoot,
-			WorkDir:  cwd,
-		}
-		agentBeadID = getAgentBeadID(ctx)
-
-		// Recreate the agent bead if it's missing (hq-xu4p). Done-intent
-		// labels, checkpoints, and active_mr all write to it; when it's gone
-		// every write fails 'issue not found' and witness zombie detection +
-		// done-resume silently degrade. Best-effort: a failed recreate just
-		// leaves the existing warnings.
-		ensureAgentBeadExists(beads.New(cwd).ForAgentBead(), agentBeadID, ctx)
-
-		// Completion now exits the live polecat session after durable handoff.
-		// The agent bead keeps lifecycle metadata for witness/refinery cleanup.
+	// Get agent bead ID for cross-referencing.
+	ctx, actor := resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName)
+	if actor != "" {
+		sender = actor
 	}
+	agentBeadID := getAgentBeadID(ctx)
+
+	// Recreate the agent bead if it's missing (hq-xu4p). Done-intent
+	// labels, checkpoints, and active_mr all write to it; when it's gone
+	// every write fails 'issue not found' and witness zombie detection +
+	// done-resume silently degrade. Best-effort: a failed recreate just
+	// leaves the existing warnings.
+	//
+	// Completion now exits the live polecat session after durable handoff.
+	// The agent bead keeps lifecycle metadata for witness/refinery cleanup.
+	ensureAgentBeadExists(beads.New(cwd).ForAgentBead(), agentBeadID, ctx)
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
 		if assignedIssueIDs == nil && sender != "" {
@@ -2293,6 +2392,17 @@ notifyWitness:
 		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
 	}
 
+	// Self-report cleanup_status (ZFC #10). Deliberately NOT part of
+	// updateAgentStateAfterSubmission below: that call is skipped whenever
+	// push or MR submission failed, which is precisely the case where the
+	// witness needs to see "has_unpushed" on the slot. See
+	// selfReportCleanupStatus for why this write must never be skipped.
+	//
+	// Addressed through the rig directory rather than cwd, matching
+	// updateAgentStateOnDone below: both hit the same database, and the rig path
+	// still resolves if the worktree is already gone.
+	selfReportCleanupStatus(g, branch, beads.New(filepath.Join(townRoot, rigName)).ForAgentBead(), agentBeadID, doneCleanupStatus)
+
 	// Log done event (townlog and activity feed)
 	if err := LogDone(townRoot, sender, issueID); err != nil {
 		style.PrintWarning("could not log done event: %v", err)
@@ -2620,7 +2730,8 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // re-entering the idle reuse pool before witness/refinery cleanup finishes.
 // Escalated/deferred exits use "stuck" because they need recovery.
 //
-// Also self-reports cleanup_status for ZFC compliance (#10).
+// cleanup_status is NOT written here — notifyWitness self-reports it through
+// selfReportCleanupStatus so that failed submissions record it too.
 //
 // BUG FIX (hq-3xaxy): This function must be resilient to working directory deletion.
 // If the polecat's worktree is deleted before gt done finishes, we use env vars as fallback.
@@ -2837,17 +2948,12 @@ doneStateUpdate:
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
 	}
 
-	// ZFC #10: Self-report cleanup status
-	// Agent observes git state and passes cleanup status via --cleanup-status flag
-	if doneCleanupStatus != "" {
-		cleanupStatus := parseCleanupStatus(doneCleanupStatus)
-		if cleanupStatus != polecat.CleanupUnknown {
-			if err := agentBd.UpdateAgentCleanupStatus(agentBeadID, string(cleanupStatus)); err != nil {
-				// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
-				fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
-			}
-		}
-	}
+	// ZFC #10 cleanup_status self-report moved to notifyWitness
+	// (selfReportCleanupStatus): this function only runs when push and MR
+	// submission both succeeded, so a failed submission recorded nothing at
+	// all — the exact case where the witness needs "has_unpushed". The report
+	// also used to be skipped whenever the status was empty/unknown, leaving
+	// cleanup_status=<missing> on a slot that can never be reclaimed.
 
 	// Clear done-intent label and checkpoints on clean exit — gt done completed
 	// successfully. If we don't reach here (crash/stuck), the Witness uses the
