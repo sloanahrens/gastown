@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -497,6 +498,55 @@ func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
 	}
 	if rep.Held {
 		t.Fatalf("slot.Status still reports held after Release: %+v", rep)
+	}
+}
+
+// TestAcquireMainBranchTestSlot_TakesTheRealHold is the gt-off9 regression
+// test: the runner must acquire as a first-class holder — flock, owner file,
+// docker-ps check — even when the daemon's own environment carries a marker
+// naming this very role, which is what a marker inherited from a
+// predecessor daemon process looks like. The kernel drops that process's
+// flock when it dies, but the marker lives on in everything it spawned, so
+// riding it would let every cycle "acquire" a slot nobody holds and run with
+// no flock, no owner file and no docker-ps check: invisible to the refinery
+// gates and gt done verifies it is supposed to queue behind.
+func TestAcquireMainBranchTestSlot_TakesTheRealHold(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	inherited := slot.SlotLockPath(townRoot, 0) + "|" + strconv.Itoa(os.Getpid()+100000) + "|gastown/main-branch-test"
+	t.Setenv(slot.ReentrantEnvVar, inherited)
+
+	h, err := acquireMainBranchTestSlot(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("acquireMainBranchTestSlot: %v", err)
+	}
+
+	rep, err := slot.Status(townRoot)
+	if err != nil {
+		t.Fatalf("slot.Status while held: %v", err)
+	}
+	if !rep.Held {
+		t.Fatalf("no flock taken — the daemon's suite is invisible to every other caller: %+v", rep)
+	}
+	if rep.Owner == nil || rep.Owner.Role != "gastown/main-branch-test" || rep.Owner.PID != os.Getpid() {
+		t.Fatalf("owner file should name the daemon's own hold: %+v", rep.Owner)
+	}
+
+	// The marker the hold arms for its descendants names this runner's role,
+	// overwriting the stale one — which is what keeps it harmless in the
+	// unrelated processes the daemon spawns while holding: only a caller
+	// doing the same role's work may ride it (gt-off9).
+	want := slot.SlotLockPath(townRoot, h.Index) + "|" + strconv.Itoa(os.Getpid()) + "|gastown/main-branch-test"
+	if got := os.Getenv(slot.ReentrantEnvVar); got != want {
+		t.Fatalf("marker armed by the daemon's hold = %q, want %q", got, want)
+	}
+
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if rep, _ = slot.Status(townRoot); rep.Held {
+		t.Fatalf("the hold outlived Release: %+v", rep)
 	}
 }
 

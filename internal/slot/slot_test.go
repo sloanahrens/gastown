@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -520,32 +521,25 @@ func TestAcquire_SameProcessSecondCallStillContends(t *testing.T) {
 
 // TestAcquire_ReentrantChildProcessSkipsFlock proves the deadlock fix: a
 // child process spawned while this process holds the slot inherits the
-// parent's reentrantEnvVar marker (as `gt slot run` does by default, and as
+// parent's ReentrantEnvVar marker (as `gt slot run` does by default, and as
 // a Go call path like runMQBatchRun's spawned formula-driven subprocess
 // would) and takes the reentrant fast path instead of blocking on a flock
 // its own ancestor is still holding — the crux of the runMQBatchRun +
-// formula-wrap nesting gt-tuiy identified.
+// formula-wrap nesting gt-tuiy identified. The child names the SAME role as
+// the holder, which is what scopes the fast path to the holder's own work
+// (gt-off9, see TestAcquire_MarkerRoleScopesTheFastPath for the other half).
 func TestAcquire_ReentrantChildProcessSkipsFlock(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
+	const role = "gastown/coral"
 
-	h, err := Acquire(townRoot, "ancestor", time.Second)
+	h, err := Acquire(townRoot, role, time.Second)
 	if err != nil {
 		t.Fatalf("ancestor Acquire: %v", err)
 	}
 	defer h.Release()
 
-	bin, err := os.Executable()
-	if err != nil {
-		t.Skipf("cannot resolve test binary: %v", err)
-	}
-
-	cmd := exec.Command(bin, "-test.run=TestHelperReentrantAcquire")
-	cmd.Env = append(os.Environ(), "GT_SLOT_REENTRANT_HELPER=1", "GT_SLOT_TOWN_ROOT="+townRoot)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("reentrant child process failed: %v\n%s", err, out)
-	}
+	spawnSlotChild(t, townRoot, role, "fast-path")
 
 	// The ancestor's real hold must be unaffected by the child's Release.
 	rep, err := Status(townRoot)
@@ -557,29 +551,162 @@ func TestAcquire_ReentrantChildProcessSkipsFlock(t *testing.T) {
 	}
 }
 
-// TestHelperReentrantAcquire is not a real test; it is spawned as a
-// subprocess by TestAcquire_ReentrantChildProcessSkipsFlock. It inherits
-// reentrantEnvVar from its parent (set by the parent's own successful
-// Acquire) and must acquire near-instantly via the reentrant fast path
-// rather than blocking on the real flock its parent still holds.
-func TestHelperReentrantAcquire(t *testing.T) {
-	if os.Getenv("GT_SLOT_REENTRANT_HELPER") != "1" {
-		t.Skip("not invoked as reentrant-acquire helper")
+// TestAcquire_MarkerRoleScopesTheFastPath is the regression test for
+// gt-off9. A marker is copied into a child's environment at fork(2) and the
+// holder can never clear it afterwards, so a holder that arms one hands it
+// to everything it spawns for the rest of those processes' lives. Presence
+// alone therefore exempted unrelated work from the lock: while the daemon's
+// main_branch_test hold was up, the agent sessions it spawned carried the
+// marker, and the refinery gates and `gt done` verify suites descending
+// from them ran invisibly beside the very suite they must serialize
+// against. The marker now names the holder's role, and only that role's
+// work skips the lock — everyone else contends and queues.
+func TestAcquire_MarkerRoleScopesTheFastPath(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+	// The role the daemon's main_branch_test runner acquires under, and the
+	// roles of the two callers gt-off9 named as victims.
+	const (
+		daemonRole   = "gastown/main-branch-test"
+		refineryRole = "gastown/refinery"
+	)
+
+	h, err := Acquire(townRoot, daemonRole, time.Second)
+	if err != nil {
+		t.Fatalf("daemon-role Acquire: %v", err)
+	}
+
+	// The holder's own nested work keeps its fast path: gt-tuiy's deadlock
+	// fix has to survive this change, or a suite that spawns a nested
+	// `gt slot run` of its own deadlocks against its ancestor's flock.
+	spawnSlotChild(t, townRoot, daemonRole, "fast-path")
+
+	// A refinery gate descending from the hold is different work. It must
+	// wait for the real lock rather than run alongside the daemon's suite.
+	spawnSlotChild(t, townRoot, refineryRole, "contends")
+
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	// ...and the queue drains as soon as the hold ends.
+	spawnSlotChild(t, townRoot, refineryRole, "acquires")
+}
+
+// spawnSlotChild runs the role-scoped helper below in a fresh process,
+// inheriting this process's environment — including whatever ReentrantEnvVar
+// the parent's own Acquire armed. A real fork, not a simulated one, so the
+// marker travels exactly the way it does in production.
+func spawnSlotChild(t *testing.T, townRoot, role, expect string) {
+	t.Helper()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot resolve test binary: %v", err)
+	}
+	cmd := exec.Command(bin, "-test.run=TestHelperRoleScopedAcquire")
+	cmd.Env = append(os.Environ(),
+		"GT_SLOT_TOWN_ROOT="+townRoot,
+		"GT_SLOT_CHILD_ROLE="+role,
+		"GT_SLOT_CHILD_EXPECT="+expect,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("slot child (role=%s, expect=%s) failed: %v\n%s", role, expect, err, out)
+	}
+}
+
+// TestHelperRoleScopedAcquire is not a real test; it is spawned as a
+// subprocess by the reentrant tests above. It acquires the slot under
+// GT_SLOT_CHILD_ROLE, inheriting whatever marker its parent was carrying,
+// and asserts the outcome GT_SLOT_CHILD_EXPECT calls for:
+//
+//   - "fast-path": the marker names this role, so Acquire must return
+//     near-instantly without touching the ancestor's flock.
+//   - "contends": the marker names different work, so Acquire must block on
+//     that flock for its full timeout and fail rather than slipping past
+//     the hold.
+//   - "acquires": nothing holds the slot any more, so Acquire must take the
+//     real lock.
+func TestHelperRoleScopedAcquire(t *testing.T) {
+	role := os.Getenv("GT_SLOT_CHILD_ROLE")
+	if role == "" {
+		t.Skip("not invoked as a slot-child helper")
 	}
 	stubNoContainers(t)
 	townRoot := os.Getenv("GT_SLOT_TOWN_ROOT")
+	timeout := DefaultPollInterval + 500*time.Millisecond
 
 	start := time.Now()
-	h, err := Acquire(townRoot, "child", 3*time.Second)
+	h, err := Acquire(townRoot, role, timeout)
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("reentrant child Acquire: %v", err)
+
+	switch expect := os.Getenv("GT_SLOT_CHILD_EXPECT"); expect {
+	case "fast-path":
+		if err != nil {
+			t.Fatalf("Acquire(%q) under a same-role marker: %v", role, err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("Acquire(%q) took %s — expected the near-instant reentrant fast path, not a poll/wait", role, elapsed)
+		}
+		if err := h.Release(); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+	case "contends":
+		if err == nil {
+			t.Fatalf("Acquire(%q) succeeded while an ancestor held the slot — it rode the reentrant fast path with a foreign role instead of queueing", role)
+		}
+		if elapsed < timeout {
+			t.Fatalf("Acquire(%q) returned after %s, before its %s timeout — it did not actually contend for the lock", role, elapsed, timeout)
+		}
+	case "acquires":
+		if err != nil {
+			t.Fatalf("Acquire(%q) after the holder released: %v", role, err)
+		}
+		if err := h.Release(); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+	default:
+		t.Fatalf("unknown GT_SLOT_CHILD_EXPECT %q", expect)
 	}
-	if elapsed > time.Second {
-		t.Fatalf("child Acquire took %s — expected the near-instant reentrant fast path, not a poll/wait", elapsed)
+}
+
+// TestReentrantMarkGrants pins the marker-reading rules the fast path is
+// built on (gt-off9): an ancestor's marker exempts a caller doing the same
+// role's work, a legacy marker written before roles were recorded exempts
+// anyone (it cannot be role-checked, and making it contend would deadlock
+// against the very ancestor that wrote it), and everything else contends.
+func TestReentrantMarkGrants(t *testing.T) {
+	townRoot := t.TempDir()
+	foreignPID := strconv.Itoa(os.Getpid() + 100000)
+	lockPath := LockPath(townRoot)
+
+	tests := []struct {
+		name  string
+		value string
+		role  string
+		want  bool
+	}{
+		{"same role", lockPath + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", true},
+		{"different role", lockPath + "|" + foreignPID + "|gastown/main-branch-test", "gastown/refinery", false},
+		{"legacy marker without a role", lockPath + "|" + foreignPID, "gastown/refinery", true},
+		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/refinery", "gastown/refinery", false},
+		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", false},
+		{"not a slot lock path", filepath.Join(LockDir(townRoot), "notes.txt") + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", false},
 	}
-	if err := h.Release(); err != nil {
-		t.Fatalf("child Release: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, ok := parseReentrantMark(tt.value)
+			if !ok {
+				t.Fatalf("parseReentrantMark(%q) failed", tt.value)
+			}
+			if got := m.grants(townRoot, tt.role); got != tt.want {
+				t.Errorf("grants(%q, role=%q) = %v, want %v", tt.value, tt.role, got, tt.want)
+			}
+		})
+	}
+
+	for _, bad := range []string{"", "no-separator", lockPath + "|not-a-pid", lockPath + "|not-a-pid|gastown/refinery"} {
+		if _, ok := parseReentrantMark(bad); ok {
+			t.Errorf("parseReentrantMark(%q) parsed, want failure", bad)
+		}
 	}
 }
 
