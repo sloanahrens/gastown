@@ -650,6 +650,20 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		// IMPORTANT: Stale-hook check must run BEFORE idempotency check so that
 		// a dead polecat with a matching target triggers re-sling, not a no-op.
 		if (info.Status == "hooked" || info.Status == "in_progress") && info.Assignee != "" && isHookedAgentDeadFn(info.Assignee) {
+			// The holder is gone — but that alone does not mean the work is.
+			// A polecat killed mid-work (town halt, operator park, crashed
+			// session) never runs `gt done`, so its branch stays on origin
+			// while the bead still reads as re-slingable. Auto-forcing here
+			// would spawn a second polecat from main on work that already
+			// exists — the spawn storm behind gt-ibt8 (4 polecats) and
+			// gt-da2x (3). Preserved work must be resumed or explicitly
+			// discarded, never silently re-created.
+			if slingResumeBranch == "" {
+				if branch, ok := survivingBranchForBeadFn(townRoot, beadID); ok {
+					return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still exists on origin:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+						beadID, info.Assignee, branch, beadID, branch, beadID)
+				}
+			}
 			fmt.Printf("%s Hooked agent %s has no active session, auto-forcing re-sling...\n",
 				style.Warning.Render("⚠"), info.Assignee)
 			force = true

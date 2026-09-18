@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -76,6 +78,13 @@ type ConvoyManager struct {
 	// Once stores are successfully opened, this is not called again.
 	// May be nil to disable lazy opening (stores must be provided upfront).
 	openStores func() map[string]beadsdk.Storage
+
+	// originBranchesCache caches each rig's origin polecat branch list for the
+	// duration of one stranded scan, so a convoy with many ready issues (or an
+	// unreachable remote) costs at most one ls-remote per rig. Cleared at the
+	// top of every scan by resetOriginBranches. Protected by originBranchesMu.
+	originBranchesCache map[string][]string
+	originBranchesMu    sync.Mutex
 
 	// isRigParked reports whether a rig is currently parked/docked.
 	// Parked rigs are skipped during event polling. May be nil (never parked).
@@ -475,6 +484,9 @@ func (m *ConvoyManager) scan() {
 	m.scanMu.Lock()
 	defer m.scanMu.Unlock()
 
+	// Fresh remote state per scan; see originBranches.
+	m.resetOriginBranches()
+
 	stranded, err := m.findStranded()
 	if err != nil {
 		m.logger("Convoy: stranded scan failed: %s", util.FirstLine(err.Error()))
@@ -581,6 +593,21 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		if branch, ok := m.survivingBranchFor(rig, issueID); ok {
+			// The previous holder is gone, but its branch is still on origin:
+			// the work is preserved — either mid-flight (killed by a town
+			// halt or park, which never runs `gt done`) or already submitted
+			// to the merge queue. Feeding it anyway spawns a second polecat
+			// from main on the same bead, which is the spawn storm this scan
+			// caused on gt-ibt8 (4 polecats) and gt-da2x (3). Skipping keeps
+			// the convoy able to progress on its other ready issues while a
+			// human or the deacon decides; the deacon's redispatch passes
+			// --force explicitly when a live holder really is wanted.
+			m.logger("Convoy %s: %s has surviving branch %s on origin — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
+				c.ID, issueID, branch, issueID, rig, branch)
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot", "--actor=daemon/convoy:" + c.ID}
@@ -602,6 +629,66 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// listOriginBranchesFn is a seam for tests. Production uses
+// polecat.ListOriginPolecatBranches.
+var listOriginBranchesFn = polecat.ListOriginPolecatBranches
+
+// survivingBranchFor reports whether issueID already has a polecat branch on
+// the rig's origin remote, and returns it. A surviving branch means the work
+// is preserved even though the holder's session is gone, so the stranded scan
+// must not feed a fresh polecat for it (gt-ibt8, gt-da2x).
+//
+// Every failure mode — no repo for the rig, unreachable remote, git error —
+// reports false (fail open): an unreadable remote must not stall the stranded
+// scan's normal feeding, which is what keeps convoys moving.
+func (m *ConvoyManager) survivingBranchFor(rig, issueID string) (string, bool) {
+	branches := m.originBranches(rig)
+	if len(branches) == 0 {
+		return "", false
+	}
+	matches := polecat.MatchSurvivingBranches(branches, issueID)
+	if len(matches) == 0 {
+		return "", false
+	}
+	return matches[0], true
+}
+
+// originBranches returns the polecat branches on the rig's origin remote,
+// caching the result for the duration of one stranded scan (see resetOriginBranches).
+//
+// The cache matters: an ls-remote against an unreachable remote blocks for the
+// full query timeout, and scan holds scanMu for the whole cycle, so an
+// uncached lookup per ready issue would stall every other convoy's feed.
+// One ls-remote per rig per scan bounds that to a single timeout.
+func (m *ConvoyManager) originBranches(rig string) []string {
+	m.originBranchesMu.Lock()
+	defer m.originBranchesMu.Unlock()
+
+	if m.originBranchesCache == nil {
+		m.originBranchesCache = make(map[string][]string)
+	}
+	if branches, ok := m.originBranchesCache[rig]; ok {
+		return branches
+	}
+
+	branches, err := listOriginBranchesFn(filepath.Join(m.townRoot, rig))
+	if err != nil {
+		// Fail open, and remember the failure for this scan only so a single
+		// unreachable remote is not retried once per ready issue.
+		branches = nil
+	}
+	m.originBranchesCache[rig] = branches
+	return branches
+}
+
+// resetOriginBranches drops the per-scan branch cache so the next scan sees
+// fresh remote state.
+func (m *ConvoyManager) resetOriginBranches() {
+	m.originBranchesMu.Lock()
+	m.originBranchesCache = nil
+	m.originBranchesMu.Unlock()
 }
 
 // hasRejectionMarker reports whether issueID's notes carry the refinery's

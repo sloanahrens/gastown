@@ -2701,3 +2701,188 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 		})
 	}
 }
+
+// feedTestRig sets up the minimal town fixture feedFirstReady needs: a routes
+// file mapping the gt- prefix to a rig, and a mock `gt` that records sling
+// invocations. Returns the town root, the sling log path, and the log sink.
+func feedTestRig(t *testing.T) (townRoot, slingLogPath string, logged *[]string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	townRoot = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath = filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logged = &[]string{}
+	return townRoot, slingLogPath, logged
+}
+
+// withOriginBranches replaces the origin branch-listing seam for a test.
+func withOriginBranches(t *testing.T, fn func(rigRoot string) ([]string, error)) {
+	t.Helper()
+	orig := listOriginBranchesFn
+	listOriginBranchesFn = fn
+	t.Cleanup(func() { listOriginBranchesFn = orig })
+}
+
+// TestFeedFirstReady_SkipsIssueWithSurvivingBranch is the regression test for
+// gt-3qfp: a bead whose previous holder died mid-work (never ran `gt done`) is
+// still marked ready by the stranded scan, because liveness is judged only by
+// tmux session state. Feeding it spawns a second polecat from main on work
+// that is already preserved on origin — the mechanism behind gt-ibt8's four
+// polecats and gt-da2x's three.
+func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, slingLogPath, logged := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		return []string{
+			"polecat/pearl/gt-stranded1+mu72g5cz",
+			"polecat/agate/gt-other+mtukyuns",
+		}, nil
+	})
+
+	var mu sync.Mutex
+	logger := func(format string, args ...interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Stranded then fresh",
+		ReadyCount:  2,
+		ReadyIssues: []string{"gt-stranded1", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+
+	if strings.Contains(logContent, "gt-stranded1") {
+		t.Errorf("expected no sling for gt-stranded1 (work preserved on origin), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2 after skipping the preserved issue, got: %q", logContent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	foundSkip := false
+	for _, s := range *logged {
+		if strings.Contains(s, "gt-stranded1") &&
+			strings.Contains(s, "surviving branch polecat/pearl/gt-stranded1+mu72g5cz") {
+			foundSkip = true
+			break
+		}
+	}
+	if !foundSkip {
+		t.Errorf("expected a 'surviving branch' skip log naming the branch, got: %v", *logged)
+	}
+}
+
+// TestFeedFirstReady_FeedsWhenBranchLookupFails pins the fail-open contract: an
+// unreadable remote (no repo, network error) must not stall the stranded scan,
+// which is the thing that keeps convoys moving.
+func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, slingLogPath, logged := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	})
+
+	logger := func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Unreadable remote",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue1") {
+		t.Errorf("expected sling for gt-issue1 despite branch-lookup failure, got: %q", string(data))
+	}
+}
+
+// TestOriginBranches_CachesPerScan pins the bound on remote queries: a convoy
+// with many ready issues in one rig must cost a single ls-remote, because each
+// one against an unreachable remote blocks the whole scan for the query
+// timeout.
+func TestOriginBranches_CachesPerScan(t *testing.T) {
+	townRoot, _, _ := feedTestRig(t)
+
+	var calls int32
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return []string{"polecat/pearl/gt-issue1+mu72g5cz"}, nil
+	})
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	for i := 0; i < 5; i++ {
+		m.survivingBranchFor("gt", "gt-issue1")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected 1 origin listing across 5 lookups, got %d", got)
+	}
+
+	// A new scan cycle must re-read the remote.
+	m.resetOriginBranches()
+	m.survivingBranchFor("gt", "gt-issue1")
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("expected 2 origin listings after reset, got %d", got)
+	}
+
+	// Failures are cached for the scan too, so an unreachable remote is not
+	// retried once per ready issue.
+	m.resetOriginBranches()
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, fmt.Errorf("remote unreachable")
+	})
+	for i := 0; i < 5; i++ {
+		if _, ok := m.survivingBranchFor("gt", "gt-issue1"); ok {
+			t.Fatal("expected fail-open (no surviving branch) on lookup error")
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected failed listings to be cached for the scan (3 total), got %d", got)
+	}
+}

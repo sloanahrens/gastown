@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -1269,6 +1270,31 @@ func isHookedAgentDead(assignee string) bool {
 		return false // tmux not available or error, be conservative
 	}
 	return !alive
+}
+
+// survivingBranchForBeadFn is a seam for tests. Production uses
+// survivingBranchForBead.
+var survivingBranchForBeadFn = survivingBranchForBead
+
+// survivingBranchForBead returns the most recent polecat branch still on the
+// rig's origin remote that encodes beadID, or "" when there is none. The
+// second return is false whenever the answer is unknown (no rig route, no git
+// repo, unreachable remote), so callers never read an unreachable remote as
+// "no surviving branch".
+func survivingBranchForBead(townRoot, beadID string) (string, bool) {
+	prefix := beads.ExtractPrefix(beadID)
+	if prefix == "" {
+		return "", false
+	}
+	rigName := beads.GetRigNameForPrefix(townRoot, prefix)
+	if rigName == "" {
+		return "", false
+	}
+	branch, err := polecat.SurvivingBranchForIssue(filepath.Join(townRoot, rigName), beadID)
+	if err != nil || branch == "" {
+		return "", false
+	}
+	return branch, true
 }
 
 // hookBeadWithRetry hooks a bead to a target agent with exponential backoff retry
