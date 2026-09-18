@@ -446,7 +446,7 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, townRoot stri
 								logger.Printf("Handler: dog %s idle wisp %s stale (no progress), closing", d.Name, result.wispID)
 								staleLogged[d.Name] = true
 							}
-							closed := closeStaleWisp(result.wispID, beadsDir)
+							closed := closeStaleWispFn(result.wispID, beadsDir)
 							if closed > 0 {
 								logger.Printf("Handler: closed stale wisp %s for idle dog %s", result.wispID, d.Name)
 							}
@@ -475,6 +475,11 @@ var dogHasHookedFormulaFn = dogHasHookedFormula
 // that need the wisp root ID (for stale-wisp cleanup). Production code always
 // resolves to dogHasHookedFormulaWithID; tests override it deterministically.
 var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
+
+// closeStaleWispFn is the seam for closing stale wisps during dispatch.
+// Production code resolves to closeStaleWisp; tests override it to verify
+// the wisp ID is correct without needing a real bd/Dolt backend.
+var closeStaleWispFn = closeStaleWisp
 
 // hookedFormulaResult holds the outcome of a hooked-formula check.
 type hookedFormulaResult struct {
