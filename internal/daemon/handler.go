@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // dogHookedFormulaCheckTimeout bounds the bd subprocess findDispatchableDog
@@ -526,6 +527,11 @@ func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormul
 	defer cancel()
 
 	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	// Re-apply the process-group policy: ConfigureCommand installs Setpgid but
+	// no cancellation hook, which would leave the 5s timeout above unable to
+	// release a bd whose descendants hold the stdout pipe open — and this call
+	// runs on every dispatch tick.
+	util.SetProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -1096,9 +1096,14 @@ func TestIsWispStale(t *testing.T) {
 // gets an ID it can actually reap.
 func TestDogHasHookedFormulaWithID_RealBody(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "bd.log")
+	// The response goes through a quoted heredoc, not echo: sh's echo
+	// interprets \n, which would turn the JSON escape in the description into
+	// a literal newline and make the payload unparseable.
 	writeFakeBdForHandler(t, t.TempDir(), logPath, `
 if [ "$1" = "query" ]; then
-  echo '[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n","created_at":"2026-09-18T11:31:07.289Z"}]'
+  cat <<'EOF'
+[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n","created_at":"2026-09-18T11:31:07.289Z"}]
+EOF
   exit 0
 fi
 echo '[]'

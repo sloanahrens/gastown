@@ -6,9 +6,32 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
 )
+
+// bdKillGrace bounds how long Wait waits for a bd subprocess's output pipes to
+// close after the context is canceled. util.SetProcessGroup SIGKILLs the
+// whole process group on cancel, so this only comes into play for a descendant
+// that escaped the group (setsid) and still holds the pipe open — without it,
+// Wait would block on that pipe well past the caller's timeout.
+const bdKillGrace = 2 * time.Second
+
+// wispCmd builds a context-bound bd command outside the shared
+// ConfigureCommand policy so the caller can pass the daemon's routing env,
+// while still killing the whole process group on cancellation. That last part
+// is what makes a caller's timeout real: with only Setpgid and no Cancel hook,
+// cancellation kills the immediate child but Wait stays blocked on the stdout
+// pipe until every descendant holding it exits.
+func wispCmd(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.WaitDelay = bdKillGrace
+	util.SetProcessGroup(cmd)
+	return cmd
+}
 
 // Wisp cleanup helpers shared by the daemon dispatch loop (internal/daemon)
 // and `gt dog done` (internal/cmd). Both need to answer the same two
@@ -93,10 +116,7 @@ func WispTree(ctx context.Context, dir string, env []string, rootID string) ([]W
 
 // wispChildren reads one level of a wisp tree.
 func wispChildren(ctx context.Context, dir string, env []string, parentID string) ([]*Issue, error) {
-	cmd := exec.CommandContext(ctx, "bd", "show", parentID, "--children", "--json") //nolint:gosec // G204: args are constructed internally
-	cmd.Dir = dir
-	cmd.Env = env
-	util.SetDetachedProcessGroup(cmd)
+	cmd := wispCmd(ctx, dir, env, "show", parentID, "--children", "--json")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -132,10 +152,7 @@ func CloseWispTree(ctx context.Context, dir string, env []string, reason string,
 
 	args := append([]string{"close"}, ids...)
 	args = append(args, "--force", "--reason", reason)
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
-	cmd.Dir = dir
-	cmd.Env = env
-	util.SetDetachedProcessGroup(cmd)
+	cmd := wispCmd(ctx, dir, env, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

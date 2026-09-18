@@ -382,9 +382,14 @@ func setupDogDoneWispTest(t *testing.T, body string) (logPath string) {
 // real body, not the predicate: it must close the wisp root AND its steps
 // (children first), and leave a plain hooked bead alone.
 func TestCloseDogFormulaWisps_ClosesHookedFormulaWisp(t *testing.T) {
+	// The response goes through a quoted heredoc, not echo: sh's echo
+	// interprets \n, which would turn the JSON escape in the description into
+	// a literal newline and make the payload unparseable.
 	logPath := setupDogDoneWispTest(t, `
 if [ "$1" = "query" ]; then
-  echo '[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n"}]'
+  cat <<'EOF'
+[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n"}]
+EOF
   exit 0
 fi
 if [ "$1" = "show" ]; then
