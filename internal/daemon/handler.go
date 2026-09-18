@@ -449,13 +449,58 @@ var closeStaleWispFn = closeStaleWisp
 // stale-wisp branch is exercisable without a real bd/Dolt backend.
 var wispStepProgressFn = wispStepProgress
 
+// forceCloseDescendants recursively force-closes all descendants of wispID
+// (the wisp root plus every sub-step wisp) and returns the count of IDs
+// encountered (for testability). Uses the wisp_dependencies table via
+// bd children, which finds ephemeral wisps that persistent List misses.
+// gt-da2x; extracted for reuse by both the daemon and cmd packages.
+func forceCloseDescendants(bd beads.Beeper, townRoot, beadsDir, wispID string) (int, []string, error) {
+	var ids []string
+	var queue []string
+	seen := map[string]bool{wispID: true}
+	queue = append(queue, wispID)
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		ids = append(ids, id)
+		children, err := bd.Children(id)
+		if err != nil {
+			continue
+		}
+		for _, c := range children {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				queue = append(queue, c.ID)
+			}
+		}
+	}
+	return len(ids), ids, nil
+}
+
 // wispStepProgress counts the wisp's steps with status in_progress or closed
-// via beads.Children (which checks the wisp_dependencies table, unlike List,
+// via bd children (which checks the wisp_dependencies table, unlike List,
 // so ephemeral wisps are found). gt-da2x.
-func wispStepProgress(wispID, beadsDir string) (int, error) {
-	bd := beads.New(beadsDir)
-	children, err := bd.Children(wispID)
-	if err != nil {
+//
+// Uses beads.CommandContext (mirroring dogHasHookedFormulaWithID) rather than
+// beads.New so the daemon's read-only/mutation bd routing env is respected —
+// avoiding the gh#3596 auto-commit connection churn.
+func wispStepProgress(wispID, townRoot, beadsDir string) (int, error) {
+	args := []string{"children", "--json", wispID}
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return 0, err
+	}
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 {
+		return 0, nil
+	}
+	var children []*beads.Issue
+	if err := json.Unmarshal(out, &children); err != nil {
 		return 0, err
 	}
 	progress := 0
