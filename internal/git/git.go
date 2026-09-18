@@ -1147,9 +1147,26 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	return err
 }
 
+// EnvRefineryMerge and EnvDoneDirectMerge are the two allow signals the
+// pre-push hook accepts for a deliberate, gate-checked push to the default
+// branch made from a polecat's session (gt-ibt8). Every other push to the
+// default branch from a polecat context is refused by that hook, so a landing
+// path that runs inside a polecat session (a direct-merge convoy's `gt done`,
+// or a Refinery merge) MUST pass one of these to PushWithEnv; a plain Push
+// will be refused.
+const (
+	// EnvRefineryMerge marks the Refinery's own merge onto the default branch
+	// (internal/refinery/batch.go, internal/refinery/engineer.go).
+	EnvRefineryMerge = "GT_REFINERY_MERGE=1"
+	// EnvDoneDirectMerge marks `gt done` landing a convoy whose merge_strategy
+	// is "direct" (internal/cmd/done.go).
+	EnvDoneDirectMerge = "GT_DONE_DIRECT_MERGE=1"
+)
+
 // PushWithEnv pushes with additional environment variables.
 // Used by gt mq integration land to set GT_INTEGRATION_LAND=1, which the
-// pre-push hook checks to allow integration branch content landing on main.
+// pre-push hook checks to allow integration branch content landing on main,
+// and by the landing paths named on EnvRefineryMerge/EnvDoneDirectMerge above.
 func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error {
 	if err := g.RefuseForkBackedDefaultPush(remote, branch, g.RemoteDefaultBranch()); err != nil {
 		return err
