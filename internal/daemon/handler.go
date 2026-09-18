@@ -611,27 +611,59 @@ func anyHasAttachedFormula(hookedBeads []*beads.Issue) bool {
 // closeStaleWisp force-closes a formula wisp whose dog has been idle longer
 // than the wisp has existed (no step progress made). Returns the count of
 // wisps closed (always 0 or 1).
-func closeStaleWisp(wispID, beadsDir string) int {
-	bd := beads.New(beadsDir)
-	// Recursively close descendants using Children (mirrors cmd.closeDescendantsImpl).
+//
+// Uses beads.CommandContext (mirroring dogHasHookedFormulaWithID) rather than
+// beads.New so the daemon's read-only/mutation bd routing env is respected.
+func closeStaleWisp(wispID, townRoot, beadsDir string) int {
+	// Recursively collect all descendant wisp IDs via Children (mirrors cmd.forceCloseDescendants).
 	// Children checks the wisp_dependencies table, unlike List which only checks
 	// persistent dependencies and misses ephemeral wisps.
-	children, err := bd.Children(wispID)
-	if err == nil {
-		var idsToClose []string
-		for _, c := range children {
-			if c.Status != "closed" {
-				idsToClose = append(idsToClose, c.ID)
-			}
-		}
-		if len(idsToClose) > 0 {
-			_ = bd.ForceCloseWithReason("abandoned: idle dog, no progress", idsToClose...)
+	args := []string{"children", "--json", wispID}
+	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	defer cancel()
+	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// No children or query failed — still try to close the wisp itself.
+	}
+	var children []*beads.Issue
+	if out := bytes.TrimSpace(stdout.Bytes()); len(out) > 0 {
+		_ = json.Unmarshal(out, &children)
+	}
+
+	// Collect descendants that aren't already closed.
+	var idsToClose []string
+	for _, c := range children {
+		if c.Status != "closed" {
+			idsToClose = append(idsToClose, c.ID)
 		}
 	}
-	if err := bd.ForceCloseWithReason("abandoned: idle dog, no progress", wispID); err != nil {
+	// Close descendants first (depth-first via recursive forceCloseDescendants).
+	if len(idsToClose) > 0 {
+		_ = forceCloseWithReason("abandoned: idle dog, no progress", townRoot, beadsDir, idsToClose...)
+	}
+	if err := forceCloseWithReason("abandoned: idle dog, no progress", townRoot, beadsDir, wispID); err != nil {
 		return 0
 	}
 	return 1
+}
+
+// forceCloseWithReason force-closes the given IDs via bd force-close --json.
+// gt-da2x; mirrors the daemon's CommandContext routing to avoid gh#3596 churn.
+func forceCloseWithReason(reason string, townRoot, beadsDir string, ids ...string) error {
+	bd := beads.New(beadsDir)
+	_, closedIDs, err := forceCloseDescendants(bd, townRoot, beadsDir, ids[0])
+	if err != nil {
+		return err
+	}
+	for _, id := range closedIDs {
+		if err := bd.ForceCloseWithReason(reason, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
