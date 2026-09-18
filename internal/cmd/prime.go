@@ -32,6 +32,8 @@ var primeDryRun bool
 var primeState bool
 var primeStateJSON bool
 var primeExplain bool
+var primeStep int
+var primeFormula string
 var primeStructuredSessionStartOutput bool
 
 // Prime's external injections are best-effort; role context should still
@@ -126,6 +128,10 @@ func init() {
 		"Output state as JSON (requires --state)")
 	primeCmd.Flags().BoolVar(&primeExplain, "explain", false,
 		"Show why each section was included")
+	primeCmd.Flags().IntVar(&primeStep, "step", 0,
+		"Print the title and full body of formula step N (1-based) and exit; use with --formula, else the hooked or patrol formula")
+	primeCmd.Flags().StringVar(&primeFormula, "formula", "",
+		"Formula name for --step (default: the hooked bead's attached formula, or the role's patrol formula)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -157,6 +163,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	if primeHookMode {
 		handlePrimeHookMode(townRoot, cwd)
+		// PreCompact stdout is not model context. The session id was persisted
+		// above; the post-compaction SessionStart (source=compact) re-primes.
+		if primeHookEventName == "PreCompact" {
+			return nil
+		}
 	}
 
 	// Check for handoff marker (prevents handoff loop bug)
@@ -187,7 +198,12 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// work state in compressed memory — just confirm identity and inject
 	// any new mail. This keeps PreCompress hooks under 1s for non-Claude
 	// runtimes that have short hook timeouts (Gemini CLI).
-	if isCompactResume() {
+	if primeStep > 0 {
+		return runPrimeStep(ctx)
+	}
+
+	staticDelivered := primeStaticTextDelivered()
+	if useCompactResumePath(primeHookSource, primeHandoffReason, staticDelivered) {
 		runPrimeCompactResume(ctx)
 		return nil
 	}
@@ -226,34 +242,99 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	injectWorkContext(ctx, hookedBead)
 
-	formula, err := outputRoleContext(ctx)
+	// Static role text (template + CONTEXT.md) goes into the role's
+	// system-prompt file for the NEXT spawn; the runtime passes it back via
+	// --append-system-prompt-file and sets GT_SYSTEM_PROMPT_FILE, and then
+	// this output omits it. Until that file exists the text is printed here.
+	staticText, err := staticRoleText(ctx)
 	if err != nil {
 		return err
 	}
-	// Log the rendered formula to OTEL so it's visible in VictoriaLogs alongside
-	// Claude's API calls, letting operators see exactly what context each agent
-	// started with. Only emitted when GT telemetry is active (GT_OTEL_LOGS_URL set).
-	telemetry.RecordPrimeContext(context.Background(), formula, os.Getenv("GT_ROLE"), primeHookMode)
+	if !primeDryRun && staticText != "" {
+		if _, err := writeSystemPromptFile(systemPromptPathFor(ctx), staticText); err != nil {
+			fmt.Fprintf(os.Stderr, "gt prime: could not refresh system prompt file: %v\n", err)
+		}
+	}
+	includeStatic := !staticDelivered
+	if staticText == "" {
+		// Templates unavailable or unknown role: hardcoded fallback context.
+		staticText = captureOutput(func() { outputPrimeContextFallback(ctx) })
+		includeStatic = true
+	}
+	// Log the rendered role context to OTEL so operators can see exactly what
+	// context each agent started with. Only emitted when GT_OTEL_LOGS_URL is set.
+	telemetry.RecordPrimeContext(context.Background(), staticText, os.Getenv("GT_ROLE"), primeHookMode)
 
-	hasSlungWork, err := checkSlungWork(ctx, hookedBead)
-	if err != nil {
-		return err
-	}
+	hasSlungWork := hookedBead != nil
 	explain(hasSlungWork, "Autonomous mode: hooked/in-progress work detected")
-
-	outputMoleculeContext(ctx)
-	outputCheckpointContext(ctx)
-	runPrimeExternalTools(ctx, cwd)
-
+	var slungErr error
+	parts := primeParts{
+		session: func() string {
+			explain(true, "Session metadata: always included for seance discovery")
+			return captureOutput(func() { outputSessionMetadata(ctx) })
+		},
+		hookedWork: func() string {
+			return captureOutput(func() {
+				_, slungErr = checkSlungWork(ctx, hookedBead)
+				outputAttachmentStatus(ctx)
+			})
+		},
+		molecule:   func() string { return captureOutput(func() { outputMoleculeContext(ctx) }) },
+		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
+		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
+		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
+		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(cwd) }) },
+		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
+		startup: func() string {
+			explain(true, "Startup directive: normal mode (no hooked work)")
+			return captureOutput(func() { outputStartupDirective(ctx) })
+		},
+	}
 	if ctx.Role == RoleMayor {
-		checkPendingEscalations(ctx)
+		parts.escalations = func() string { return captureOutput(func() { checkPendingEscalations(ctx) }) }
 	}
-
-	if !hasSlungWork {
-		explain(true, "Startup directive: normal mode (no hooked work)")
-		outputStartupDirective(ctx)
+	payload := assemblePrimePayload(parts, staticText, includeStatic, hasSlungWork)
+	if slungErr != nil {
+		return slungErr
 	}
+	// The hook budget only helps when the static text is out of the payload;
+	// with it in, the output exceeds the runtime limit regardless and dropping
+	// the small sections would just lose information.
+	budget := 0
+	if primeHookMode && !includeStatic {
+		budget = primeHookBudget
+	}
+	fmt.Print(payload.render(budget))
+	return nil
+}
 
+// runPrimeStep implements `gt prime --step N [--formula NAME]`: print one
+// formula step in full. It reads the hook (to find the attached formula) but
+// performs none of the session side effects of a normal prime.
+func runPrimeStep(ctx RoleContext) error {
+	hookedBead, _ := findAgentWork(ctx)
+	name := primeStepFormulaName(ctx, hookedBead, primeFormula)
+	if name == "" {
+		return fmt.Errorf("no formula to read: pass --formula <name>")
+	}
+	var vars []string
+	switch {
+	case hookedBead != nil && primeFormula == "":
+		vars = attachmentFormulaVars(beads.ParseAttachmentFields(hookedBead))
+	case ctx.Role == RoleWitness:
+		vars = buildWitnessPatrolVars(ctx)
+	case ctx.Role == RoleRefinery:
+		vars = buildRefineryPatrolVars(ctx)
+	}
+	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, vars)
+	if err != nil {
+		return err
+	}
+	out, err := renderFormulaStep(name, f, varMap, primeStep)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
 	return nil
 }
 
@@ -322,6 +403,12 @@ func validatePrimeFlags() error {
 	if primeStateJSON && !primeState {
 		return fmt.Errorf("--json requires --state")
 	}
+	if primeFormula != "" && primeStep == 0 {
+		return fmt.Errorf("--formula requires --step")
+	}
+	if primeStep < 0 {
+		return fmt.Errorf("--step must be a positive step number")
+	}
 	return nil
 }
 
@@ -383,7 +470,7 @@ func handlePrimeHookMode(townRoot, cwd string) {
 // tries to auto-detect JSON, sees the leading '[', and misclassifies the startup
 // stream as JSON instead of plain text metadata.
 func hookSessionBeaconLines(sessionID, source string) []string {
-	if primeStructuredSessionStartOutput {
+	if primeStructuredSessionStartOutput || primeHookEventName == "PreCompact" {
 		return nil
 	}
 	lines := []string{fmt.Sprintf("[session:%s]", sessionID)}
@@ -537,34 +624,29 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 	}
 }
 
-// outputRoleContext emits session metadata and all role/context output sections.
-// Returns the rendered formula content for OTEL telemetry (empty if using fallback path).
-func outputRoleContext(ctx RoleContext) (string, error) {
-	explain(true, "Session metadata: always included for seance discovery")
-	outputSessionMetadata(ctx)
-
-	explain(true, fmt.Sprintf("Role context: detected role is %s", ctx.Role))
-	formula, err := outputPrimeContext(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	outputRoleDirectives(ctx, os.Stdout, primeExplain)
-	outputContextFile(ctx)
-	outputHandoffContent(ctx)
-	outputAttachmentStatus(ctx)
-	return formula, nil
+// runPrimeExternalTools runs lightweight memory and mail injection in one go.
+// runPrime renders the two as separate payload sections; this wrapper keeps
+// the combined behaviour for callers and tests.
+func runPrimeExternalTools(ctx RoleContext, cwd string) {
+	runPrimeMemoryInject(cwd)
+	runPrimeMailInject(ctx, cwd)
 }
 
-// runPrimeExternalTools runs lightweight memory and mail injection.
-// Skipped in dry-run mode with explain output.
-func runPrimeExternalTools(ctx RoleContext, cwd string) {
+// runPrimeMemoryInject renders the memory index section (skipped in dry-run).
+func runPrimeMemoryInject(cwd string) {
 	if primeDryRun {
 		explain(true, "memory injection: skipped in dry-run mode")
-		explain(true, "gt mail check --inject: skipped in dry-run mode")
 		return
 	}
 	runMemoryInject(cwd)
+}
+
+// runPrimeMailInject renders pending mail (skipped in dry-run and for patrol roles).
+func runPrimeMailInject(ctx RoleContext, cwd string) {
+	if primeDryRun {
+		explain(true, "gt mail check --inject: skipped in dry-run mode")
+		return
+	}
 	if shouldSkipStartupMailInject(string(ctx.Role)) {
 		explain(true, fmt.Sprintf("gt mail check --inject: skipped for patrol role %s", ctx.Role))
 		return

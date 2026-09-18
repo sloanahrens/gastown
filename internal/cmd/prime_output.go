@@ -27,11 +27,24 @@ import (
 // outputPrimeContext outputs the role-specific context using templates or fallback.
 // Returns the rendered template content (empty string when using fallback path).
 func outputPrimeContext(ctx RoleContext) (string, error) {
-	// Try to use templates first
+	output, err := renderRoleTemplate(ctx)
+	if err != nil {
+		return "", err
+	}
+	if output == "" {
+		outputPrimeContextFallback(ctx)
+		return "", nil
+	}
+	fmt.Print(output)
+	return output, nil
+}
+
+// renderRoleTemplate renders the static role template for ctx. It returns ""
+// (no error) when templates are unavailable or the role is unknown, in which
+// case callers fall back to the hardcoded context.
+func renderRoleTemplate(ctx RoleContext) (string, error) {
 	tmpl, err := templates.New()
 	if err != nil {
-		// Fall back to hardcoded output if templates fail
-		outputPrimeContextFallback(ctx)
 		return "", nil
 	}
 
@@ -55,8 +68,7 @@ func outputPrimeContext(ctx RoleContext) (string, error) {
 	case RoleDog:
 		roleName = "dog"
 	default:
-		// Unknown role - use fallback
-		outputPrimeContextFallback(ctx)
+		// Unknown role - caller uses fallback
 		return "", nil
 	}
 
@@ -81,13 +93,10 @@ func outputPrimeContext(ctx RoleContext) (string, error) {
 		DeaconSession: session.DeaconSessionName(),
 	}
 
-	// Render and output
 	output, err := tmpl.RenderRole(roleName, data)
 	if err != nil {
 		return "", fmt.Errorf("rendering template: %w", err)
 	}
-
-	fmt.Print(output)
 	return output, nil
 }
 
@@ -170,6 +179,19 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		fmt.Fprintln(w, "## Town Directives (operator policy — overrides formula where they conflict)")
 	}
 	fmt.Fprintln(w)
+	if len(content) > primeDirectiveMaxChars {
+		cut := strings.LastIndexByte(content[:primeDirectiveMaxChars], '\n')
+		if cut <= 0 {
+			cut = primeDirectiveMaxChars
+		}
+		fmt.Fprintln(w, content[:cut])
+		fmt.Fprintf(w, "\n_[prime] directive truncated at %d of %d chars; read the file(s) above in full: %s", cut, len(content), townPath)
+		if rigPath != "" {
+			fmt.Fprintf(w, ", %s", rigPath)
+		}
+		fmt.Fprintln(w, "_")
+		return
+	}
 	fmt.Fprintln(w, content)
 }
 

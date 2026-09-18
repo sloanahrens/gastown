@@ -132,17 +132,19 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 	fmt.Println()
 }
 
-// showFormulaStepsFull renders formula steps with full descriptions.
-// Used for polecat work formulas where step details are the primary instructions.
+// showFormulaStepsFull renders the bounded formula checklist (every title, the
+// body of step 1, and how to fetch the rest). Used for polecat work formulas and
+// patrol formulas; the full-body renderer renderFormulaStepsFull is kept for
+// the Ralph loop prompt, which is written to a file rather than the hook.
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides substituted into step descriptions.
 func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) {
-	rendered, err := renderFormulaStepsFull(formulaName, townRoot, rigName, extraVars...)
+	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
 	if err != nil {
 		style.PrintWarning("%v", err)
 		return
 	}
-	fmt.Print(rendered)
+	fmt.Print(renderFormulaChecklist(formulaName, f, varMap, 1))
 }
 
 func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {

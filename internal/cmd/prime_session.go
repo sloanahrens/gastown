@@ -18,6 +18,11 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
+// primeHookEventName is the hook_event_name from the runtime's stdin JSON
+// (SessionStart, PreCompact, ...). PreCompact output is not model context, so
+// prime prints nothing for it.
+var primeHookEventName string
+
 // hookInput represents the JSON input from LLM runtime hooks.
 // Claude Code sends this on stdin for SessionStart hooks.
 type hookInput struct {
@@ -44,6 +49,7 @@ type hookInput struct {
 //	PreCompress:  "export GT_HOOK_SOURCE=compact && gt prime --hook"
 func readHookSessionID() (sessionID, source string) {
 	primeStructuredSessionStartOutput = false
+	primeHookEventName = ""
 	// Source can come from env (any runtime) or stdin JSON (Claude only).
 	// Check env first so it's available even when stdin provides the session ID.
 	source = os.Getenv("GT_HOOK_SOURCE")
@@ -60,6 +66,7 @@ func readHookSessionID() (sessionID, source string) {
 	//    over a potentially stale .runtime/session_id from a previous session.
 	if input := readStdinJSON(); input != nil {
 		primeStructuredSessionStartOutput = input.HookEventName == "SessionStart"
+		primeHookEventName = input.HookEventName
 		if input.SessionID != "" {
 			// Stdin source overrides env source when both are present
 			if input.Source != "" {
