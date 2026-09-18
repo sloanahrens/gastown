@@ -1,0 +1,48 @@
+package cmd
+
+import (
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+// TestSplitEnvPrefix covers gt-18nx: gt slot run must treat leading VAR=value
+// tokens as environment (env(1) semantics) so the polecat formula's verbatim
+// wrap of an env-prefixed test_command works.
+func TestSplitEnvPrefix(t *testing.T) {
+	cases := []struct {
+		in      []string
+		wantEnv []string
+		wantCmd []string
+	}{
+		{[]string{"make", "test"}, nil, []string{"make", "test"}},
+		{[]string{"GOFLAGS=-p=8", "make", "test"}, []string{"GOFLAGS=-p=8"}, []string{"make", "test"}},
+		{[]string{"A=1", "B=", "go", "test", "./..."}, []string{"A=1", "B="}, []string{"go", "test", "./..."}},
+		{[]string{"go", "test", "-run=X"}, nil, []string{"go", "test", "-run=X"}},
+		{[]string{"--flag=value", "cmd"}, nil, []string{"--flag=value", "cmd"}},
+		{[]string{"1BAD=x", "cmd"}, nil, []string{"1BAD=x", "cmd"}},
+		{[]string{"ONLY=env"}, []string{"ONLY=env"}, nil},
+	}
+	for _, c := range cases {
+		gotEnv, gotCmd := splitEnvPrefix(c.in)
+		if strings.Join(gotEnv, " ") != strings.Join(c.wantEnv, " ") || strings.Join(gotCmd, " ") != strings.Join(c.wantCmd, " ") {
+			t.Errorf("splitEnvPrefix(%v) = (%v, %v), want (%v, %v)", c.in, gotEnv, gotCmd, c.wantEnv, c.wantCmd)
+		}
+	}
+}
+
+// TestSplitEnvPrefix_ChildSeesVariable proves the split is enough for the
+// child to observe the assignment when applied the way runSlotRun applies it.
+func TestSplitEnvPrefix_ChildSeesVariable(t *testing.T) {
+	envAssigns, cmdArgs := splitEnvPrefix([]string{"GT_SLOT_RUN_PROBE=bar", "sh", "-c", "printf %s \"$GT_SLOT_RUN_PROBE\""})
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: fixed test args
+	cmd.Env = append(os.Environ(), envAssigns...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("child: %v", err)
+	}
+	if string(out) != "bar" {
+		t.Fatalf("child saw %q, want %q", out, "bar")
+	}
+}

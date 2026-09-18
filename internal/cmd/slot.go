@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -89,7 +90,18 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	defer func() { _ = h.Release() }()
 	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot %d/%d acquired (role=%s).\n", h.Index, pool.Slots, role)
 
-	sub := exec.Command(args[0], args[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
+	// env(1) semantics: leading VAR=value tokens set the child's environment.
+	// The polecat formula wraps the rig's test_command verbatim
+	// ("gt slot run -- GOFLAGS=-p=8 make test"), and exec'ing "GOFLAGS=-p=8"
+	// as a program fails with "executable file not found" (gt-18nx).
+	envAssigns, cmdArgs := splitEnvPrefix(args)
+	if len(cmdArgs) == 0 {
+		return fmt.Errorf("gt slot run: no command after environment assignment(s) %v", envAssigns)
+	}
+	sub := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
+	if len(envAssigns) > 0 {
+		sub.Env = append(os.Environ(), envAssigns...)
+	}
 	sub.Stdin = os.Stdin
 	sub.Stdout = os.Stdout
 	sub.Stderr = os.Stderr
@@ -113,7 +125,7 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("running %s: %w", args[0], runErr)
+		return fmt.Errorf("running %s: %w", cmdArgs[0], runErr)
 	}
 	return nil
 }
@@ -212,4 +224,20 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Total:               rep.Total,
 		Reserved:            rep.Reserved,
 	})
+}
+
+// envAssignmentRe matches a leading environment assignment token as env(1)
+// accepts it: an identifier, "=", and any value (possibly empty).
+var envAssignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// splitEnvPrefix peels leading VAR=value tokens off args, returning them and
+// the remaining command. A token that merely contains "=" later in the word
+// (e.g. "--flag=value") is part of the command, not an assignment; splitting
+// stops at the first non-assignment token.
+func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
+	i := 0
+	for i < len(args) && envAssignmentRe.MatchString(args[i]) {
+		i++
+	}
+	return args[:i], args[i:]
 }
