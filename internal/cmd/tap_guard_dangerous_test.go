@@ -893,6 +893,10 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 		"git push origin main",
 		"git push",
 		"git fetch origin && git push origin HEAD",
+		"git -C /Users/sloan/gt/gastown/polecats/flint/gastown push origin bfe970a:polecat/flint/gt-3qfp+x",
+		"git --no-pager push origin HEAD",
+		"git --git-dir=/x/.git --work-tree /x push",
+		"git -c push.default=current push",
 	}
 	allowed := []string{
 		"git fetch origin polecat/slate/gt-nkyy+x",
@@ -900,6 +904,8 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 		"git status --porcelain",
 		"gt polecat list gastown",
 		"echo push",
+		"git -C /x log --oneline -3",
+		"git -c color.ui=false status",
 	}
 	for _, c := range blocked {
 		reason, alt := matchesWitnessGitPush(shellTokenize(c), true)

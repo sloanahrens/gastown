@@ -134,6 +134,9 @@ func runPluginScript(ctx context.Context, p *plugin.Plugin, townRoot string, tim
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// SetProcessGroup puts the script in its own group AND installs a Cancel
+	// hook that SIGKILLs the negative pid, so a timeout takes bash and every
+	// child it backgrounded; CommandContext alone would signal only bash.
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 

@@ -1000,9 +1000,31 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 		return "", ""
 	}
 	for i, f := range tokens {
-		if f == "push" && i > 0 && tokens[i-1] == "git" {
+		if f == "git" && gitSubcommand(tokens[i+1:]) == "push" {
 			return witnessGitPushReason, witnessGitPushAlternative
 		}
 	}
 	return "", ""
+}
+
+// gitOptionsWithValue are git's global options that consume the next token
+// (space-separated form), so `git -C dir push` still resolves to push.
+var gitOptionsWithValue = map[string]bool{
+	"-c": true, "-C": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--exec-path": true,
+}
+
+// gitSubcommand returns the first non-option token after "git" — the
+// subcommand — skipping global options in both `-C dir` and `--git-dir=x`
+// forms. Returns "" when the tokens end before a subcommand.
+func gitSubcommand(rest []string) string {
+	for i := 0; i < len(rest); i++ {
+		t := rest[i]
+		if !strings.HasPrefix(t, "-") {
+			return t
+		}
+		if gitOptionsWithValue[t] && !strings.Contains(t, "=") {
+			i++ // skip the option's value
+		}
+	}
+	return ""
 }

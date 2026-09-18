@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/steveyegge/gastown/internal/dog"
 	"log"
 	"os"
 	"os/exec"
@@ -30,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
@@ -105,6 +105,9 @@ type Daemon struct {
 	scriptsOnce sync.Once
 	// findDogFn overrides dog selection in tests; nil uses the real pack.
 	findDogFn func() *dog.Dog
+
+	// bootTriageInFlight is set while a mechanical `gt boot triage` runs.
+	bootTriageInFlight atomic.Bool
 
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
@@ -1416,7 +1419,7 @@ func (d *Daemon) ensureBootRunning() {
 	// ourselves instead of spawning a Boot agent to run it for us. It is
 	// the same command the agent ran, so warrants, the shutdown check and
 	// the status file all behave as before — minus the ~22k-token session.
-	if d.loadOperationalConfig().GetDaemonConfig().BootModeValue() == agentconfig.BootModeMechanical {
+	if d.bootUsesMechanicalTriage() {
 		d.runMechanicalBootTriage()
 		return
 	}
@@ -1497,31 +1500,53 @@ func (d *Daemon) hasActiveWork() bool {
 // installed gt is used (os.Executable), never a PATH lookup, so a stale
 // PATH cannot pick a different build than the daemon itself.
 func (d *Daemon) runMechanicalBootTriage() {
+	// One triage at a time, and never on the heartbeat goroutine: the old
+	// agent spawn returned immediately, and a wedged `gt boot triage` must
+	// not stall plugin dispatch or the deacon checks behind it.
+	if !d.bootTriageInFlight.CompareAndSwap(false, true) {
+		d.logger.Println("Boot: mechanical triage still running, skipping")
+		return
+	}
+	// Count the attempt for the cooldown whether or not it succeeds, so a
+	// failing triage cannot re-run on every heartbeat.
+	d.bootLastSpawned = time.Now()
 	exe, err := os.Executable()
 	if err != nil {
+		d.bootTriageInFlight.Store(false)
 		d.logger.Printf("Boot: cannot resolve gt binary for mechanical triage: %v; falling back to direct Deacon check", err)
 		d.ensureDeaconRunning()
 		return
 	}
-	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "boot", "triage") //nolint:gosec // G204: our own binary, fixed args
-	cmd.Dir = filepath.Join(d.config.TownRoot, "deacon")
-	cmd.Env = append(os.Environ(), "GT_ROOT="+d.config.TownRoot, "GT_TOWN_ROOT="+d.config.TownRoot, "GT_ROLE=deacon/boot", "BD_ACTOR=boot")
-	util.SetProcessGroup(cmd)
-	out, err := cmd.CombinedOutput()
-	summary := strings.TrimSpace(string(out))
-	if len(summary) > 400 {
-		summary = summary[len(summary)-400:]
-	}
-	if err != nil {
-		d.logger.Printf("Boot: mechanical triage failed (%v): %s", err, summary)
-		return
-	}
-	d.bootLastSpawned = time.Now()
-	d.logger.Printf("Boot: mechanical triage: %s", summary)
+	townRoot := d.config.TownRoot
+	go func() {
+		defer d.bootTriageInFlight.Store(false)
+		ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, exe, "boot", "triage") //nolint:gosec // G204: our own binary, fixed args
+		cmd.Dir = filepath.Join(townRoot, "deacon")
+		cmd.Env = append(os.Environ(), "GT_ROOT="+townRoot, "GT_TOWN_ROOT="+townRoot, "GT_ROLE=deacon/boot", "BD_ACTOR=boot")
+		util.SetProcessGroup(cmd) // its Cancel hook kills the whole group on timeout
+		out, err := cmd.CombinedOutput()
+		summary := strings.TrimSpace(string(out))
+		if len(summary) > 400 {
+			summary = summary[len(summary)-400:]
+		}
+		if err != nil {
+			d.logger.Printf("Boot: mechanical triage failed (%v): %s", err, summary)
+			return
+		}
+		d.logger.Printf("Boot: mechanical triage: %s", summary)
+	}()
 }
 
+// bootUsesMechanicalTriage reports whether Boot triage runs in-process
+// (operational.daemon.boot_mode unset or "mechanical") rather than as a
+// spawned Boot agent session ("agent").
+func (d *Daemon) bootUsesMechanicalTriage() bool {
+	return d.loadOperationalConfig().GetDaemonConfig().BootModeValue() == agentconfig.BootModeMechanical
+}
+
+// runDegradedBootTriage performs mechanical Boot logic without AI reasoning.
 func (d *Daemon) runDegradedBootTriage(b *boot.Boot) {
 	startTime := time.Now()
 	status := &boot.Status{
