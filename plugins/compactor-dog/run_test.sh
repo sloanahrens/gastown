@@ -21,12 +21,36 @@ validate_hash() {
 }
 
 # Verify our copy matches run.sh (guard against drift).
-RUN_SH_REGEX=$(sed -n '/^validate_hash/,/^}/p' "$SCRIPT_DIR/run.sh" | grep -oP '\^\[.*\]\+\$')
-TEST_REGEX=$(sed -n '/^validate_hash/,/^}/p' "$0" | grep -oP '\^\[.*\]\+\$')
+# Extract the regex from each file's validate_hash function with POSIX sed:
+# grep -oP is GNU-only and fails on macOS/BSD grep, which is where the dog runs.
+extract_hash_regex() {
+  sed -n '/^validate_hash/,/^}/p' "$1" | sed -n 's/.*=~ \(.*\) \]\];.*/\1/p'
+}
+RUN_SH_REGEX=$(extract_hash_regex "$SCRIPT_DIR/run.sh")
+TEST_REGEX=$(extract_hash_regex "$0")
+if [[ -z "$RUN_SH_REGEX" || -z "$TEST_REGEX" ]]; then
+  echo "FAIL: could not extract validate_hash regex (run.sh='$RUN_SH_REGEX' test='$TEST_REGEX')"
+  echo "      Did the 'if [[ ! \"\$hash\" =~ ... ]]' line change shape?"
+  exit 1
+fi
 if [[ "$RUN_SH_REGEX" != "$TEST_REGEX" ]]; then
   echo "FAIL: validate_hash regex in test ($TEST_REGEX) doesn't match run.sh ($RUN_SH_REGEX)"
   echo "      Update the test to match run.sh"
   exit 1
+fi
+
+# Verify compaction is not the default (gt-e14c). The destructive path
+# (flatten + force-push) must require an explicit --compact flag; a plain
+# `bash run.sh` has to stay monitor-only.
+if ! grep -q '^CHECK_ONLY=true' "$SCRIPT_DIR/run.sh"; then
+  echo "FAIL: run.sh no longer defaults CHECK_ONLY=true — destructive compaction is the default"
+  FAILURES=$((FAILURES + 1))
+fi
+FALSE_SETTERS=$(grep -c 'CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
+COMPACT_FLAG=$(grep -c -- '--compact).*CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
+if [[ "$FALSE_SETTERS" != "$COMPACT_FLAG" ]]; then
+  echo "FAIL: run.sh clears CHECK_ONLY on $FALSE_SETTERS line(s) but only $COMPACT_FLAG is the --compact flag"
+  FAILURES=$((FAILURES + 1))
 fi
 
 assert_valid() {
