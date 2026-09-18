@@ -352,14 +352,46 @@ func getRepoGitForRig(rigPath string) *git.Git {
 // deletePolecatBranch deletes a local git branch for a polecat.
 // Remote branch is never deleted during nuke — the refinery owns remote
 // branch cleanup after successful merge (gt mq post-merge). (gt-v5ku)
+//
+// The branch tip is checked for reachability from a remote ref BEFORE the
+// local branch is deleted: this path never pushes, so the old unconditional
+// "remote branch preserved" line claimed preservation that had never been
+// attempted (gt-yxys). When the tip has no remote copy the local branch is kept
+// and a warning names the commit, so a failed rollback cannot silently destroy
+// the only copy of the work.
 func deletePolecatBranch(branchName string, repoGit *git.Git, hasPendingMR bool) {
 	_ = hasPendingMR // preserved for API compat, no longer consulted
-	if err := repoGit.DeleteBranch(branchName, true); err != nil {
-		fmt.Printf("  %s branch delete: %v\n", style.Dim.Render("○"), err)
-	} else {
-		fmt.Printf("  %s deleted local branch %s\n", style.Success.Render("✓"), branchName)
+
+	exists, existsErr := repoGit.BranchExists(branchName)
+	if existsErr != nil {
+		fmt.Printf("  %s keeping local branch %s: could not check whether it exists\n",
+			style.Warning.Render("⚠"), branchName)
+		return
 	}
-	fmt.Printf("  %s remote branch preserved for refinery merge\n", style.Dim.Render("○"))
+	if !exists {
+		return
+	}
+
+	tip, tipErr := repoGit.Rev("refs/heads/" + branchName)
+	tip = strings.TrimSpace(tip)
+	if tipErr != nil || tip == "" {
+		fmt.Printf("  %s keeping local branch %s: could not resolve its tip to check for a remote copy\n",
+			style.Warning.Render("⚠"), branchName)
+		return
+	}
+
+	if refs, err := repoGit.RemoteRefsContaining(tip); err == nil && len(refs) > 0 {
+		if err := repoGit.DeleteBranch(branchName, true); err != nil {
+			fmt.Printf("  %s branch delete: %v\n", style.Dim.Render("○"), err)
+		} else {
+			fmt.Printf("  %s deleted local branch %s (work on %s)\n",
+				style.Success.Render("✓"), branchName, refs[0])
+		}
+		return
+	}
+
+	fmt.Printf("  %s keeping local branch %s: no remote ref contains %s — delete it manually once the work is safe\n",
+		style.Warning.Render("⚠"), branchName, shortSHA(tip))
 }
 
 // closeConvoy closes a convoy with the given reason.
