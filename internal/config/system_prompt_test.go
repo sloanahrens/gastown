@@ -12,8 +12,6 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	town := "/town"
 	rig := "/town/myrig"
 	cases := map[string]string{
-		"polecat":  "/town/myrig/polecats/.claude/system-prompt.md",
-		"crew":     "/town/myrig/crew/.claude/system-prompt.md",
 		"witness":  "/town/myrig/witness/.claude/system-prompt.md",
 		"refinery": "/town/myrig/refinery/.claude/system-prompt.md",
 		"mayor":    "/town/mayor/.claude/system-prompt.md",
@@ -22,11 +20,11 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 		"boot":     "",
 	}
 	for role, want := range cases {
-		if got := SystemPromptFilePath(role, town, rig); got != want {
+		if got := SystemPromptFilePath(role, town, rig, ""); got != want {
 			t.Errorf("SystemPromptFilePath(%s) = %q, want %q", role, got, want)
 		}
 	}
-	if got := SystemPromptFilePath("polecat", town, ""); got != "" {
+	if got := SystemPromptFilePath("witness", town, "", ""); got != "" {
 		t.Errorf("rig-scoped role without rigPath must return empty, got %q", got)
 	}
 }
@@ -37,7 +35,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 	rig := filepath.Join(town, "myrig")
 
 	rc := &RuntimeConfig{Command: "claude", Args: []string{"--dangerously-skip-permissions"}}
-	got := withRoleSystemPromptFlag(rc, "polecat", town, rig)
+	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
 	for _, a := range got.Args {
 		if a == "--append-system-prompt-file" {
 			t.Fatalf("flag must not be added while the file does not exist: %v", got.Args)
@@ -47,7 +45,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		t.Fatalf("env must not be set while the file does not exist: %v", got.Env)
 	}
 
-	path := SystemPromptFilePath("polecat", town, rig)
+	path := SystemPromptFilePath("polecat", town, rig, "nux")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +53,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got = withRoleSystemPromptFlag(rc, "polecat", town, rig)
+	got = withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
 	found := false
 	for i, a := range got.Args {
 		if a == "--append-system-prompt-file" {
@@ -73,7 +71,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 	}
 
 	// Idempotent: a second call must not add the flag twice.
-	got = withRoleSystemPromptFlag(got, "polecat", town, rig)
+	got = withRoleSystemPromptFlag(got, "polecat", town, rig, "nux")
 	n := 0
 	for _, a := range got.Args {
 		if a == "--append-system-prompt-file" {
@@ -89,7 +87,7 @@ func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	rig := filepath.Join(town, "myrig")
-	path := SystemPromptFilePath("polecat", town, rig)
+	path := SystemPromptFilePath("polecat", town, rig, "nux")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +95,7 @@ func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &RuntimeConfig{Command: "codex", Provider: "codex"}
-	got := withRoleSystemPromptFlag(rc, "polecat", town, rig)
+	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
 	if len(got.Args) != 0 || len(got.Env) != 0 {
 		t.Fatalf("non-Claude agents must be untouched: args=%v env=%v", got.Args, got.Env)
 	}
@@ -113,7 +111,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("witness", town, rig)
+	path := SystemPromptFilePath("witness", town, rig, "")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +144,7 @@ func TestBuildStartupCommand_CarriesSystemPromptFlagAndEnv(t *testing.T) {
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("polecat", town, rig)
+	path := SystemPromptFilePath("polecat", town, rig, "nux")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -162,5 +160,60 @@ func TestBuildStartupCommand_CarriesSystemPromptFlagAndEnv(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("startup command missing %q:\n%s", want, cmd)
 		}
+	}
+}
+
+func TestSystemPromptFilePath_PerAgentForPolecatAndCrew(t *testing.T) {
+	t.Parallel()
+	town, rig := "/town", "/town/myrig"
+	cases := []struct{ role, agent, want string }{
+		{"polecat", "nux", "/town/myrig/polecats/.claude/system-prompt-nux.md"},
+		{"crew", "sloan", "/town/myrig/crew/.claude/system-prompt-sloan.md"},
+		{"polecat", "", ""}, // the template bakes in the agent's name; no shared file
+		{"crew", "", ""},
+		{"witness", "ignored", "/town/myrig/witness/.claude/system-prompt.md"},
+		{"mayor", "", "/town/mayor/.claude/system-prompt.md"},
+	}
+	for _, c := range cases {
+		if got := SystemPromptFilePath(c.role, town, rig, c.agent); got != c.want {
+			t.Errorf("SystemPromptFilePath(%s,%q) = %q, want %q", c.role, c.agent, got, c.want)
+		}
+	}
+}
+
+func TestBuildStartupCommand_PolecatUsesPerAgentSystemPrompt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+	if err := os.MkdirAll(filepath.Join(rig, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
+		t.Fatal(err)
+	}
+	other := SystemPromptFilePath("polecat", town, rig, "other")
+	mine := SystemPromptFilePath("polecat", town, rig, "nux")
+	if err := os.MkdirAll(filepath.Dir(mine), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("someone else"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := BuildStartupCommandFromConfig(AgentEnvConfig{Role: "polecat", Rig: "myrig", AgentName: "nux", TownRoot: town}, rig, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cmd, "--append-system-prompt-file") {
+		t.Fatalf("another polecat's file must not be used:\n%s", cmd)
+	}
+	if err := os.WriteFile(mine, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err = BuildStartupCommandFromConfig(AgentEnvConfig{Role: "polecat", Rig: "myrig", AgentName: "nux", TownRoot: town}, rig, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cmd, mine) {
+		t.Fatalf("expected the per-agent file %s in:\n%s", mine, cmd)
 	}
 }

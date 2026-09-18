@@ -164,7 +164,8 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		fmt.Fprintln(w, "## Town Directives (operator policy — overrides formula where they conflict)")
 	}
 	fmt.Fprintln(w)
-	if len(content) > primeDirectiveMaxChars {
+	// The cap protects the hook budget only; a plain `gt prime` shows it all.
+	if primeHookMode && len(content) > primeDirectiveMaxChars {
 		cut := strings.LastIndexByte(content[:primeDirectiveMaxChars], '\n')
 		if cut <= 0 {
 			cut = primeDirectiveMaxChars

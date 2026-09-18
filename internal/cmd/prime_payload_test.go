@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -350,6 +351,8 @@ func TestOutputRoleDirectives_CapsLongDirective(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "directives", "polecat.md"), []byte(long), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	primeHookMode = true
+	t.Cleanup(func() { primeHookMode = false })
 	var sb strings.Builder
 	outputRoleDirectives(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false)
 	out := sb.String()
@@ -561,5 +564,41 @@ func TestPrimeStepVars_FollowTheResolvedFormula(t *testing.T) {
 	vars2 := primeStepVars(RoleContext{Role: RolePolecat}, bead2, "mol-polecat-work")
 	if len(vars2) == 0 || vars2[0] != "issue=gt-y" {
 		t.Fatalf("expected attachment vars, got %v", vars2)
+	}
+}
+
+func TestSystemPromptPathFor_PolecatIsPerAgent(t *testing.T) {
+	town := t.TempDir()
+	got := systemPromptPathFor(RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town})
+	want := filepath.Join(town, "myrig", "polecats", ".claude", "system-prompt-nux.md")
+	if got != want {
+		t.Fatalf("got %s want %s", got, want)
+	}
+}
+
+func TestOutputRoleDirectives_UncappedOutsideHookMode(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "directives"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("directive line number x\n", 200)
+	if err := os.WriteFile(filepath.Join(town, "directives", "polecat.md"), []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	primeHookMode = false
+	var sb strings.Builder
+	outputRoleDirectives(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false)
+	if strings.Contains(sb.String(), "directive truncated") || len(sb.String()) < len(long) {
+		t.Fatalf("plain gt prime must show the whole directive (%d chars rendered)", len(sb.String()))
+	}
+}
+
+func TestFindAgentWorkWithAttempts_SingleAttemptDoesNotBackOff(t *testing.T) {
+	town := t.TempDir()
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+	start := time.Now()
+	_, _ = findAgentWorkWithAttempts(ctx, 1)
+	if d := time.Since(start); d > 6*time.Second {
+		t.Fatalf("single attempt took %v; the retry backoff must not apply", d)
 	}
 }

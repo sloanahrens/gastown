@@ -212,7 +212,7 @@ func systemPromptPathFor(ctx RoleContext) string {
 	if ctx.Rig != "" && ctx.TownRoot != "" {
 		rigPath = filepath.Join(ctx.TownRoot, ctx.Rig)
 	}
-	return config.SystemPromptFilePath(string(ctx.Role), ctx.TownRoot, rigPath)
+	return config.SystemPromptFilePath(string(ctx.Role), ctx.TownRoot, rigPath, ctx.Polecat)
 }
 
 // useCompactResumePath decides between the brief compact/resume output and the

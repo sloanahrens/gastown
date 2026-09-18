@@ -17,17 +17,25 @@ const EnvSystemPromptFile = "GT_SYSTEM_PROMPT_FILE"
 // next to the role's hooks settings file.
 const SystemPromptFileName = "system-prompt.md"
 
-// SystemPromptFilePath returns where the static role text for a role lives:
-// one file per role per rig for rig-scoped roles (shared by every polecat of
-// the rig, so the text is byte-identical across sessions), one per town for
-// mayor and deacon, always under the role's .claude directory next to the
-// Claude hooks settings file (only Claude agents receive the flag). Returns ""
-// for roles that do not use a system-prompt file (dog, boot: their prime
-// already fits the hook budget) or when the scope path for the role is missing.
-func SystemPromptFilePath(role, townRoot, rigPath string) string {
+// SystemPromptFilePath returns where the static role text for an agent lives,
+// always under the role's .claude directory next to the Claude hooks settings
+// file (only Claude agents receive the flag). Singleton roles (witness,
+// refinery, mayor, deacon) share one file per rig or town. Polecat and crew
+// templates interpolate the agent's own name and worktree, so those roles get
+// one file per agent (system-prompt-<name>.md) and "" when the name is unknown.
+// Returns "" for roles that do not use a system-prompt file (dog, boot: their
+// prime already fits the hook budget) or when the scope path is missing.
+func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 	var dir string
+	name := SystemPromptFileName
 	switch role {
-	case constants.RolePolecat, constants.RoleCrew, constants.RoleWitness, constants.RoleRefinery:
+	case constants.RolePolecat, constants.RoleCrew:
+		if rigPath == "" || agentName == "" {
+			return ""
+		}
+		dir = RoleSettingsDir(role, rigPath)
+		name = "system-prompt-" + agentName + ".md"
+	case constants.RoleWitness, constants.RoleRefinery:
 		if rigPath == "" {
 			return ""
 		}
@@ -40,7 +48,7 @@ func SystemPromptFilePath(role, townRoot, rigPath string) string {
 	default:
 		return ""
 	}
-	return filepath.Join(dir, ".claude", SystemPromptFileName)
+	return filepath.Join(dir, ".claude", name)
 }
 
 // withRoleSystemPromptFlag appends --append-system-prompt-file <path> and sets
@@ -49,11 +57,11 @@ func SystemPromptFilePath(role, townRoot, rigPath string) string {
 // non-Claude runtime) the config is returned unchanged and gt prime prints the
 // static role text itself, so a missing file degrades to today's behaviour
 // rather than a dead session.
-func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath string) *RuntimeConfig {
+func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
 	if rc == nil || !isClaudeAgent(rc) {
 		return rc
 	}
-	path := SystemPromptFilePath(role, townRoot, rigPath)
+	path := SystemPromptFilePath(role, townRoot, rigPath, agentName)
 	if path == "" {
 		return rc
 	}
