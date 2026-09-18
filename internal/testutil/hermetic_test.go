@@ -304,3 +304,60 @@ func TestScratchTown_CwdResolvesToScratch(t *testing.T) {
 		t.Errorf("FindFromCwd = %q, want scratch town %q", root, town)
 	}
 }
+
+// TestStartHermetic_DockerOptInSurvivesScrub: DockerTestsEnv is a GT_*
+// variable, so the scrub would wipe the opt-in before WithDolt or
+// RequireDoltContainer could see it. It must survive both the TestMain
+// harness and the per-test HermeticTest scrub.
+func TestStartHermetic_DockerOptInSurvivesScrub(t *testing.T) {
+	withSavedEnv(t)
+	if err := os.Setenv(DockerTestsEnv, "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := StartHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	defer h.Finish(0)
+
+	if !DockerTestsEnabled() {
+		t.Errorf("%s did not survive StartHermetic's scrub", DockerTestsEnv)
+	}
+	HermeticTest(t)
+	if !DockerTestsEnabled() {
+		t.Errorf("%s did not survive HermeticTest's scrub", DockerTestsEnv)
+	}
+	// And the scrub still removes ordinary GT_* context.
+	_ = os.Setenv("GT_ROLE", "gastown/polecats/topaz")
+	scrubProcessEnv(false)
+	if os.Getenv("GT_ROLE") != "" {
+		t.Error("scrubProcessEnv kept GT_ROLE")
+	}
+	if !DockerTestsEnabled() {
+		t.Errorf("scrubProcessEnv removed %s", DockerTestsEnv)
+	}
+}
+
+// TestStartHermetic_WithDoltWithoutOptIn: with the container opt-in unset,
+// a TestMain that asks for Dolt must still start (no error), with the port
+// left empty so container-dependent tests skip — the contract daemon's and
+// convoy's TestMains rely on, and the reason a bare `go test` of those
+// packages passes in seconds without Docker.
+func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
+	withSavedEnv(t)
+	_ = os.Unsetenv(DockerTestsEnv)
+
+	h, err := StartHermetic(WithDolt())
+	if err != nil {
+		t.Fatalf("StartHermetic(WithDolt) without the opt-in must not fail: %v", err)
+	}
+	defer h.Finish(0)
+
+	if DoltContainerPort() != "" {
+		t.Errorf("DoltContainerPort = %q, want empty (no container may start without %s=1)", DoltContainerPort(), DockerTestsEnv)
+	}
+	if got := os.Getenv("GT_DOLT_PORT"); got != poisonDoltPort {
+		t.Errorf("GT_DOLT_PORT = %q, want the poison port %q", got, poisonDoltPort)
+	}
+}

@@ -208,7 +208,9 @@ test: test-makefile
 	# and internal/refinery legitimately run 500-600s under contention, so
 	# every gate against them flapped on the budget rather than a hung test
 	# (gt-g8kr). Shrinking those packages is a follow-up.
-	go test -timeout 20m ./...
+	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
+	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
+	GT_TEST_DOCKER=1 go test -timeout 20m ./...
 
 test-makefile:
 	bash scripts/check-install-path_test.sh

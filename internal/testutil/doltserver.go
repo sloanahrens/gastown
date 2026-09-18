@@ -33,6 +33,26 @@ var (
 
 // isDockerAvailable returns true if the Docker daemon is reachable.
 // The result is cached after the first call.
+// DockerTestsEnv opts the container-backed tests in. Every entry point that
+// would start a Dolt/testcontainers container skips unless it is "1", so an
+// ordinary `go test ./internal/cmd -run TestFoo` compiles and runs in seconds
+// without touching Docker or the container-gate slot. `make test` (the
+// refinery gate and the daemon's main-branch patrol) sets it; a polecat that
+// wants the container tests sets it explicitly and runs under gt slot run.
+// Measured 2026-09-18 (gt-pxlg): five polecats spent ~81 of 185 agent-minutes
+// queued on the slot for filtered runs Go finished in 4-17s, because any run
+// of a container-bearing package had to take the slot whether or not the
+// filter selected a container test.
+const DockerTestsEnv = "GT_TEST_DOCKER"
+
+// DockerTestsEnabled reports whether container-backed tests may run in this
+// process.
+func DockerTestsEnabled() bool {
+	return os.Getenv(DockerTestsEnv) == "1"
+}
+
+const dockerTestsSkipMsg = "container-backed tests are opt-in: set " + DockerTestsEnv + "=1 (make test does) and run under gt slot run"
+
 func isDockerAvailable() bool {
 	dockerOnce.Do(func() {
 		dockerAvail = exec.Command("docker", "info").Run() == nil
@@ -131,6 +151,9 @@ func startSharedDoltContainer() {
 // The container is terminated automatically when the test finishes.
 func StartIsolatedDoltContainer(t *testing.T) string {
 	t.Helper()
+	if !DockerTestsEnabled() {
+		t.Skip(dockerTestsSkipMsg)
+	}
 	if !isDockerAvailable() {
 		t.Skip("Docker not available, skipping test")
 	}
@@ -163,7 +186,16 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
 // Sets both GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
+//
+// The only caller is StartHermetic (WithDolt), which logs the error and
+// continues with the port variables left poisoned; every package that opts
+// in then skips its container tests on the empty port (daemon, convoy) or
+// via RequireDoltContainer (cmd). TestStartHermetic_WithDoltWithoutOptIn
+// pins that contract.
 func EnsureDoltContainerForTestMain() error {
+	if !DockerTestsEnabled() {
+		return fmt.Errorf("%s", dockerTestsSkipMsg)
+	}
 	if !isDockerAvailable() {
 		return fmt.Errorf("Docker not available")
 	}
@@ -176,6 +208,9 @@ func EnsureDoltContainerForTestMain() error {
 // test if Docker is not available.
 func RequireDoltContainer(t *testing.T) {
 	t.Helper()
+	if !DockerTestsEnabled() {
+		t.Skip(dockerTestsSkipMsg)
+	}
 	if !isDockerAvailable() {
 		t.Skip("Docker not available, skipping test")
 	}
