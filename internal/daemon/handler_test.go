@@ -491,9 +491,9 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaFn
-	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
-	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return false, nil }
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) { return hookedFormulaResult{}, nil }
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
@@ -562,8 +562,8 @@ func TestAnyHasAttachedFormula(t *testing.T) {
 // The decision logic itself (does a set of hooked beads carry
 // attached_formula metadata) is covered by TestAnyHasAttachedFormula. This
 // test exercises findDispatchableDog's dispatch loop via the
-// dogHasHookedFormulaFn seam so it never shells out to a real bd/Dolt
-// backend.
+// dogHasHookedFormulaWithIDFn seam so it never shells out to a real
+// bd/Dolt backend.
 func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
@@ -571,10 +571,13 @@ func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaFn
-	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
-	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
-		return dogName == "alpha", nil
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+		if dogName == "alpha" {
+			return hookedFormulaResult{hasHooked: true, wispID: "wisp-alpha"}, nil
+		}
+		return hookedFormulaResult{}, nil
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
@@ -589,6 +592,106 @@ func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	}
 }
 
+// TestFindDispatchableDog_ClosesStaleWisp covers the gt-da2x recovery path:
+// a dog that went idle while its formula wisp was created BEFORE the idle
+// transition, and whose wisp has zero step progress, is abandoned. The
+// handler must close the wisp (via the closeStaleWispFn seam) and skip the
+// dog for THIS tick — with the wisp gone, the dog is dispatchable on the next
+// tick. A healthy wisp (progress made, or created after the dog went idle)
+// must be left alone and the dog skipped.
+func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	// alpha went idle 10 min ago; its wisp was created 30 min ago (before the
+	// idle transition) with zero step progress — abandoned.
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now().Add(-10*time.Minute))
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+		if dogName == "alpha" {
+			return hookedFormulaResult{
+				hasHooked:   true,
+				wispID:      "wisp-alpha",
+				wispCreated: time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+			}, nil
+		}
+		return hookedFormulaResult{}, nil
+	}
+
+	prevProgress := wispStepProgressFn
+	t.Cleanup(func() { wispStepProgressFn = prevProgress })
+	wispStepProgressFn = func(wispID, beadsDir string) (int, error) { return 0, nil }
+
+	var closedIDs []string
+	prevClose := closeStaleWispFn
+	t.Cleanup(func() { closeStaleWispFn = prevClose })
+	closeStaleWispFn = func(wispID, beadsDir string) int {
+		closedIDs = append(closedIDs, wispID)
+		return 1
+	}
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected bravo to be dispatchable")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (alpha's stale wisp should have been closed and skipped)", got.Name)
+	}
+	if len(closedIDs) != 1 || closedIDs[0] != "wisp-alpha" {
+		t.Errorf("closeStaleWispFn calls = %v, want exactly [wisp-alpha]", closedIDs)
+	}
+}
+
+// TestFindDispatchableDog_KeepsProgressedWisp confirms the converse of
+// ClosesStaleWisp: when the wisp's steps have progress (the dog bailed
+// mid-formula), the wisp is NOT closed — it is left for the reaper/deacon
+// patrol, and the dog is skipped for new plugin dispatch.
+func TestFindDispatchableDog_KeepsProgressedWisp(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now().Add(-10*time.Minute))
+
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+		return hookedFormulaResult{
+			hasHooked:   true,
+			wispID:      "wisp-alpha",
+			wispCreated: time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+		}, nil
+	}
+
+	prevProgress := wispStepProgressFn
+	t.Cleanup(func() { wispStepProgressFn = prevProgress })
+	wispStepProgressFn = func(wispID, beadsDir string) (int, error) { return 2, nil } // mid-formula
+
+	var closedIDs []string
+	prevClose := closeStaleWispFn
+	t.Cleanup(func() { closeStaleWispFn = prevClose })
+	closeStaleWispFn = func(wispID, beadsDir string) int {
+		closedIDs = append(closedIDs, wispID)
+		return 1
+	}
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (alpha's progressed wisp must not be closed or dispatched onto)", got.Name)
+	}
+	if len(closedIDs) != 0 {
+		t.Errorf("closeStaleWispFn calls = %v, want none (wisp has step progress)", closedIDs)
+	}
+}
+
 // TestFindDispatchableDog_NilWhenAllDogsHooked confirms that when every idle
 // dog in the kennel holds an open hooked formula molecule, findDispatchableDog
 // returns nil rather than falling back to picking one anyway.
@@ -599,9 +702,11 @@ func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaFn
-	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
-	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) { return true, nil }
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+		return hookedFormulaResult{hasHooked: true, wispID: "wisp-" + dogName}, nil
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
@@ -613,7 +718,7 @@ func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
 }
 
 // TestFindDispatchableDog_ErrorFallsBackToDispatchable confirms that a
-// dogHasHookedFormulaFn error is treated as "not hooked" rather than
+// dogHasHookedFormulaWithIDFn error is treated as "not hooked" rather than
 // disqualifying the dog — a flaky hook check must not wedge dispatch.
 func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
 	townRoot := t.TempDir()
@@ -621,10 +726,10 @@ func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaFn
-	t.Cleanup(func() { dogHasHookedFormulaFn = prevHooked })
-	dogHasHookedFormulaFn = func(townRoot, beadsDir, dogName string) (bool, error) {
-		return false, fmt.Errorf("simulated bd failure")
+	prevHooked := dogHasHookedFormulaWithIDFn
+	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
+	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+		return hookedFormulaResult{}, fmt.Errorf("simulated bd failure")
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
