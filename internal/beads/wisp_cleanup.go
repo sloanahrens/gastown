@@ -11,6 +11,13 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
+// Wisp cleanup helpers shared by the daemon dispatch loop (internal/daemon)
+// and `gt dog done` (internal/cmd). Both need to answer the same two
+// questions — "which hooked beads are formula wisps?" and "close this wisp and
+// everything under it" — and both must shell out under the same bd
+// subprocess environment policy, so the logic lives here instead of being
+// forked per package and drifting (gt-da2x).
+
 // bdKillGrace bounds how long Wait waits for a bd subprocess's output pipes to
 // close after the context is canceled. util.SetProcessGroup SIGKILLs the
 // whole process group on cancel, so this only comes into play for a descendant
@@ -32,13 +39,6 @@ func wispCmd(ctx context.Context, dir string, env []string, args ...string) *exe
 	util.SetProcessGroup(cmd)
 	return cmd
 }
-
-// Wisp cleanup helpers shared by the daemon dispatch loop (internal/daemon)
-// and `gt dog done` (internal/cmd). Both need to answer the same two
-// questions — "which hooked beads are formula wisps?" and "close this wisp and
-// everything under it" — and both must shell out under the same bd
-// subprocess environment policy, so the logic lives here instead of being
-// forked per package and drifting (gt-da2x).
 
 // FormulaWispIDs returns the IDs of beads carrying attached_formula metadata
 // — the formula molecule wisps `gt sling` attaches to an agent's hook bead —

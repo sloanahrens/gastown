@@ -501,7 +501,7 @@ func isWispStale(d *dog.Dog, result hookedFormulaResult, tree []beads.WispStep) 
 type hookedFormulaResult struct {
 	hasHooked   bool
 	wispID      string // non-empty only when hasHooked is true
-	wispCreated string // wisp created_at timestamp (RFC3339), non-empty when hasHooked is true
+	wispCreated string // wisp created_at as bd issued it (parsed by beads.ParseIssueTime), non-empty when hasHooked is true
 }
 
 // dogHasHookedFormulaWithID reports whether the dog identified by name
