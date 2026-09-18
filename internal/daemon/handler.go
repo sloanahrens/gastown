@@ -468,6 +468,8 @@ func (d *Daemon) loadOperationalConfig() *config.OperationalConfig {
 // ("", false). The body is a parameter so the script path can hand a
 // failing plugin over with its output attached.
 func (d *Daemon) dispatchPluginToDog(p *plugin.Plugin, mgr dogManager, sm dogSessionStarter, router mailSender, body string) (dogName string, noDog bool) {
+	d.dispatchMu.Lock()
+	defer d.dispatchMu.Unlock()
 	// Find an idle dog that doesn't already have a live tmux session.
 	// A leaked session (dog marked idle before its tmux terminated) would
 	// cause sm.Start to fail with "session already running", and since

@@ -109,6 +109,11 @@ type Daemon struct {
 	// bootTriageInFlight is set while a mechanical `gt boot triage` runs.
 	bootTriageInFlight atomic.Bool
 
+	// dispatchMu serializes dog dispatch: the heartbeat's dispatchPlugins and
+	// a script plugin's failure hand-off (a goroutine) both pick an idle dog
+	// and assign it, so they must not interleave.
+	dispatchMu sync.Mutex
+
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
@@ -1490,8 +1495,6 @@ func (d *Daemon) hasActiveWork() bool {
 	return false
 }
 
-// runDegradedBootTriage performs mechanical Boot logic without AI reasoning.
-// This is for degraded mode when tmux is unavailable.
 // runMechanicalBootTriage runs `gt boot triage` as a subprocess of the
 // daemon (gt-fo2k). It is exactly the command the Boot agent used to run
 // on our behalf, so warrant execution, the shutdown check and the status
