@@ -1163,6 +1163,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var pushFailed bool
 	var mrFailed bool
 	var doneErrors []string
+	// pushVerifyErr records a failed "origin is at the commit this MR would
+	// declare" assertion (gt-2wqt). It is returned as gt done's exit status so
+	// the caller cannot mistake a dropped submission for a successful one.
+	var pushVerifyErr error
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	var sourceIssueForNoMerge *beads.Issue
 	var sourceBD *beads.Beads
@@ -1377,7 +1381,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// existing origin/<branch> the same way the commit-message squash
 			// step below already does: as proof this branch was pushed before.
 			_, originHasBranchErr := g.Rev("origin/" + branch)
-			alreadyPushed := checkpoints[CheckpointPushed] == branch || originHasBranchErr == nil
+			alreadyPushed := pushedCheckpointBranch(checkpoints[CheckpointPushed]) == branch || originHasBranchErr == nil
 			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
 			if rebaseErr != nil {
 				return rebaseErr
@@ -1421,7 +1425,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// branch names are session-unique, so an existing origin/<branch>
 		// means this session pushed it) — rewriting history then would break
 		// the later non-force push.
-		if _, revErr := g.Rev("origin/" + branch); checkpoints[CheckpointPushed] != branch && revErr != nil {
+		if _, revErr := g.Rev("origin/" + branch); pushedCheckpointBranch(checkpoints[CheckpointPushed]) != branch && revErr != nil {
 			if squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(sourceIssueForNoMerge, issueID)); squashErr != nil {
 				style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
 			} else if squashed > 0 {
@@ -1644,15 +1648,27 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Resume: skip push if already completed in a previous run (gt-aufru).
 		// Validate checkpoint branch matches current branch (ge-sbo: stale checkpoint
-		// on polecat reassignment causes new work to skip push for old branch).
+		// on polecat reassignment causes new work to skip push for old branch)
+		// AND that the branch has not moved since that push (gt-2wqt: a
+		// branch-only key let a retry after new commits skip the push, so the
+		// MR declared a commit origin never received — the
+		// "gate fails → fix commit → re-run gt done" cycle reproduced it every
+		// time). The verification below still runs on the resume path: a
+		// checkpoint records an intention to push, not proof that origin
+		// received it.
+		checkpointHead, checkpointHeadErr := g.Rev("HEAD")
+		if checkpointHeadErr != nil {
+			return fmt.Errorf("resolving HEAD for push checkpoint: %w", checkpointHeadErr)
+		}
 		if checkpoints[CheckpointPushed] != "" {
-			if checkpoints[CheckpointPushed] == branch {
+			if pushedCheckpointMatches(checkpoints[CheckpointPushed], branch, checkpointHead) {
 				fmt.Printf("%s Branch already pushed (resumed from checkpoint)\n", style.Bold.Render("✓"))
 				goto afterPush
 			}
-			// Stale checkpoint from a previous assignment — discard and push normally.
-			fmt.Printf("→ Discarding stale push checkpoint (was for branch %s, now on %s)\n",
-				checkpoints[CheckpointPushed], branch)
+			// Stale checkpoint — either a previous assignment's branch (ge-sbo) or
+			// this branch at an earlier commit (gt-2wqt) — discard and push normally.
+			fmt.Printf("→ Discarding stale push checkpoint (%s, now on %s@%s)\n",
+				checkpoints[CheckpointPushed], branch, shortSHA(checkpointHead))
 		}
 
 		// CRITICAL: Push branch BEFORE creating MR bead (hq-6dk53, hq-a4ksk)
@@ -1718,37 +1734,52 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 
-		// Verify the pushed branch tip is the exact local commit before creating
-		// any MR bead. Branch-exists checks are insufficient: a stale remote
-		// branch can exist while the new commit never reached origin.
-		if pushedCommitSHA == "" {
-			pushedCommitSHA, _ = g.Rev("HEAD")
-		}
-		if doneSkipVerify {
-			noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
-		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
-			pushFailed = true
-			errMsg := verifyErr.Error()
-			doneErrors = append(doneErrors, errMsg)
-			noteVerifiedPushFailure(sourceBD, cwd, issueID, branch, pushedCommitSHA, verifyErr)
-			style.PrintWarning("%s\nCommits exist locally but verified push failed. Witness will be notified.", errMsg)
-			goto notifyWitness
-		}
-		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
-
-		// Fix cleanup_status after successful push (gt-wcr).
-		// Status was detected before push, so "unpushed" is now stale.
-		doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
-
-		// Write push checkpoint for resume (gt-aufru)
-		if agentBeadID != "" {
-			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-			// legacy town fallback — gt-8we).
-			cpBd := beads.New(cwd).ForAgentBead()
-			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, branch)
-		}
-
 	afterPush:
+
+		// Verify the remote branch tip is the exact commit this run will declare
+		// in the MR before anything downstream trusts the push (gt-2wqt).
+		//
+		// This runs on EVERY path into afterPush — including the checkpoint
+		// resume above — because a checkpoint records an intention to push, not
+		// proof that origin received the commit. The failure it closes: origin
+		// holding an older tip than the commit the MR declares, so the refinery
+		// gates and merges the old tree while the MR looks ready
+		// (gt-wisp-i2vk amber/gt-uoqg, gt-wisp-qjy slate, gt-wisp-yle marble).
+		// A branch-exists check is not enough, and neither is the push's exit
+		// code: "Branch pushed" below is printed from this assertion alone.
+		{
+			if pushedCommitSHA == "" {
+				pushedCommitSHA, _ = g.Rev("HEAD")
+			}
+			if doneSkipVerify {
+				noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
+				fmt.Printf("%s Branch pushed to origin (verification skipped: --skip-verify)\n", style.Bold.Render("✓"))
+			} else if verifyErr := verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
+				pushFailed = true
+				pushVerifyErr = verifyErr
+				errMsg := verifyErr.Error()
+				doneErrors = append(doneErrors, errMsg)
+				noteVerifiedPushFailure(sourceBD, cwd, issueID, branch, pushedCommitSHA, verifyErr)
+				style.PrintWarning("%s\nNo merge request created: it would declare a commit origin does not have. Witness will be notified.", errMsg)
+				goto notifyWitness
+			} else {
+				fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+			}
+
+			// Fix cleanup_status after successful push (gt-wcr).
+			// Status was detected before push, so "unpushed" is now stale.
+			doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
+
+			// Write push checkpoint for resume (gt-aufru), keyed on branch AND
+			// commit (gt-2wqt) and written only once the remote tip is verified,
+			// so a failed verification can never let a retry skip the push.
+			if agentBeadID != "" && pushedCommitSHA != "" {
+				// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
+				// legacy town fallback — gt-8we).
+				cpBd := beads.New(cwd).ForAgentBead()
+				writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, pushedCheckpointValue(branch, pushedCommitSHA))
+			}
+		}
 
 		// Check for no_merge flag - if set, skip merge queue and notify for review
 		{
@@ -2356,6 +2387,14 @@ notifyWitness:
 		}
 	}
 
+	// Fail closed on a push that could not be verified against origin (gt-2wqt):
+	// without a non-zero status the caller cannot tell a dropped submission from
+	// a landed one. Everything above — witness notification, completion
+	// metadata, session preservation — has already run.
+	if pushVerifyErr != nil {
+		return pushVerifyErr
+	}
+
 	return nil
 }
 
@@ -2458,22 +2497,62 @@ func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit
 	_ = bd.AddComment(issueID, msg)
 }
 
-func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
+// verifyPushLandedBeforeMR asserts that the remote branch tip is exactly the
+// commit gt done is about to declare in an MR bead (gt-2wqt). It is the only
+// source of the "Branch pushed" claim: a push that exits 0 while origin keeps
+// an older tip is indistinguishable from success until ls-remote is compared
+// against HEAD.
+//
+// Every error return is fatal to the submission — the caller must create no MR
+// bead, because an MR whose commit_sha origin does not have makes the refinery
+// gate and merge a tree that silently lacks the fix.
+func verifyPushLandedBeforeMR(g *git.Git, townRoot, rigName, branch, commit string) error {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		head, headErr := g.Rev("HEAD")
+		if headErr != nil {
+			return fmt.Errorf("verified_push_failed: cannot resolve HEAD for branch %s: %w", branch, headErr)
+		}
+		commit = strings.TrimSpace(head)
+	}
 	verifyErr := g.VerifyPushedCommit("origin", branch, commit)
 	if verifyErr == nil {
 		return nil
 	}
 
+	// The worktree's git context can be broken (GH #1348), where the ls-remote
+	// above fails to run rather than reporting a mismatch. Retry the same
+	// remote assertion from the rig's bare repo, which shares the object
+	// database.
+	//
+	// gt-2wqt: this fallback used to compare the bare repo's *local*
+	// refs/heads/<branch>, which is the polecat's own HEAD whenever the worktree
+	// is on that branch (worktrees share the ref store) — so it passed on
+	// exactly the unpushed-commit case the guard exists to catch, and gt done
+	// reported a verified push that never happened. A local ref is never
+	// evidence of a remote push; only a query of the remote is.
 	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
-	if _, statErr := os.Stat(bareRepoPath); statErr != nil {
-		return verifyErr
+	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+		bareGit := git.NewGitWithDir(bareRepoPath, "")
+		if bareErr := bareGit.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
+			return nil
+		}
 	}
-	bareGit := git.NewGitWithDir(bareRepoPath, "")
-	tip, tipErr := bareGit.Rev("refs/heads/" + branch)
-	if tipErr == nil && strings.TrimSpace(tip) == strings.TrimSpace(commit) {
-		return nil
+	return describePushVerificationFailure(g, branch, commit, verifyErr)
+}
+
+// describePushVerificationFailure renders a failed push assertion with the full
+// local and remote SHAs (gt-2wqt): the operator has to see both to know how far
+// behind origin is before the work is re-pushed.
+func describePushVerificationFailure(g *git.Git, branch, commit string, cause error) error {
+	remoteTip, tipErr := g.PushRemoteBranchTip("origin", branch)
+	if tipErr != nil || strings.TrimSpace(remoteTip) == "" {
+		remoteTip = "(missing on origin)"
 	}
-	return verifyErr
+	return fmt.Errorf("verified_push_failed: branch %s is not at the commit this merge request would declare; no MR created\n"+
+		"  local HEAD:  %s\n"+
+		"  origin/%s:  %s\n"+
+		"  %v", branch, commit, branch, remoteTip, cause)
 }
 
 // shouldNudgeRefinery reports whether a gt done invocation may wake the
@@ -2548,6 +2627,8 @@ const (
 
 // writeDoneCheckpoint writes a checkpoint label on the agent bead.
 // Format: done-cp:<stage>:<value>:<unix-ts>
+// The pushed stage stores "branch@sha" (see pushedCheckpointValue, gt-2wqt);
+// other stages store their own opaque value.
 // Non-fatal: if this fails, gt done continues without the checkpoint.
 func writeDoneCheckpoint(bd *beads.Beads, agentBeadID string, cp DoneCheckpoint, value string) {
 	if agentBeadID == "" {
@@ -2559,6 +2640,36 @@ func writeDoneCheckpoint(bd *beads.Beads, agentBeadID string, cp DoneCheckpoint,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't write checkpoint %s on %s: %v\n", cp, agentBeadID, err)
 	}
+}
+
+// pushedCheckpointValue encodes the branch AND the commit a push checkpoint was
+// written for (gt-2wqt). The checkpoint originally stored the branch alone,
+// which made "already pushed" a claim about the branch name rather than about
+// the commits on it: a gt done that pushed, failed its gate, and was re-run
+// after a fix commit saw the same branch name, skipped both the push and the
+// push verification, and created an MR declaring a commit origin never had.
+func pushedCheckpointValue(branch, sha string) string {
+	return branch + "@" + strings.TrimSpace(sha)
+}
+
+// pushedCheckpointBranch returns the branch recorded in a push checkpoint
+// value. Values written before gt-2wqt hold the branch alone and still resolve.
+func pushedCheckpointBranch(value string) string {
+	if i := strings.LastIndex(value, "@"); i >= 0 {
+		return value[:i]
+	}
+	return value
+}
+
+// pushedCheckpointMatches reports whether a push checkpoint was written for
+// this exact branch at this exact commit. Anything else — a different branch, a
+// different commit on the same branch, or a value that records no commit at all
+// — is stale, so the push and its verification must run again.
+func pushedCheckpointMatches(value, branch, sha string) bool {
+	if value == "" || strings.TrimSpace(sha) == "" {
+		return false
+	}
+	return value == pushedCheckpointValue(branch, sha)
 }
 
 // readDoneCheckpoints reads all done-cp:* labels from the agent bead.
