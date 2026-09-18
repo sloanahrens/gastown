@@ -29,8 +29,13 @@ type poolSession struct {
 // the live polecat sessions. It returns "" when the pool does not apply
 // (unset, or no local agent) so the caller falls back to role_agents.
 func choosePoolAgent(pool *config.PolecatPool, sessions []poolSession, now time.Time) (agent, reason string) {
-	if pool == nil || pool.LocalAgent == "" || pool.MaxLocal <= 0 {
+	switch {
+	case pool == nil:
 		return "", "no polecat pool configured"
+	case pool.LocalAgent == "":
+		return "", "polecat_pool has no local_agent; using the role default"
+	case pool.MaxLocal <= 0:
+		return "", fmt.Sprintf("polecat_pool max_local is %d; using the role default", pool.MaxLocal)
 	}
 	local := 0
 	var newest time.Time
@@ -99,8 +104,13 @@ func resolvePolecatPoolAgent(townRoot string) (agent, reason string) {
 	sessions, err := listPolecatSessions(newPoolSessionLister())
 	if err != nil {
 		// Without a session count the pool cannot be trusted: fall back to
-		// the overflow agent rather than risk over-filling the GPU.
-		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using overflow"
+		// the overflow agent (or the role default when none is set) rather
+		// than risk over-filling the GPU.
+		fallback := "the role default"
+		if ts.PolecatPool.OverflowAgent != "" {
+			fallback = ts.PolecatPool.OverflowAgent
+		}
+		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback
 	}
 	agent, reason = choosePoolAgent(ts.PolecatPool, sessions, time.Now())
 	return agent, "pool: " + reason

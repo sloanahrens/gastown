@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +29,8 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"one local, too recent -> overflow", pool, []poolSession{s("local-coder-polecat", 90*time.Second)}, "deepseek-flash"},
 		{"pool full -> overflow", pool, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Hour)}, "deepseek-flash"},
 		{"flash sessions do not count", pool, []poolSession{s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute)}, "local-coder-polecat"},
-		{"newest local decides the gap", pool, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Minute)}, "deepseek-flash"},
+		{"newest local decides the gap", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Minute)}, "deepseek-flash"},
+		{"oldest local alone would allow", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour)}, "local-coder-polecat"},
 		{"no gap configured -> local while room", &config.PolecatPool{LocalAgent: "l", MaxLocal: 3}, []poolSession{s("l", time.Second)}, "l"},
 		{"full with no overflow agent -> role default", &config.PolecatPool{LocalAgent: "l", MaxLocal: 1}, []poolSession{s("l", time.Hour)}, ""},
 	}
@@ -104,8 +106,12 @@ func TestListPolecatSessions(t *testing.T) {
 		t.Errorf("agents: %v", agents)
 	}
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "30s", OverflowAgent: "deepseek-flash"}
-	if a, _ := choosePoolAgent(pool, got, now); a != "deepseek-flash" {
-		t.Errorf("marble spawned 1m ago with a 30s gap and room for one more: want local... got %q", a)
+	if a, r := choosePoolAgent(pool, got, now); a != "local-coder-polecat" {
+		t.Errorf("one local (marble, 1m ago) with a 30s gap and room for one more: want local, got %q (%s)", a, r)
+	}
+	pool.MinSpawnGap = "5m"
+	if a, r := choosePoolAgent(pool, got, now); a != "deepseek-flash" {
+		t.Errorf("marble 1m ago with a 5m gap: want overflow, got %q (%s)", a, r)
 	}
 }
 
@@ -138,7 +144,18 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 		t.Errorf("full pool: got %q", a)
 	}
 	newPoolSessionLister = func() sessionLister { return &fakeLister{err: errors.New("no server")} }
-	if a, r := resolvePolecatPoolAgent(townRoot); a != "deepseek-flash" || r == "" {
+	if a, r := resolvePolecatPoolAgent(townRoot); a != "deepseek-flash" || !strings.Contains(r, "cannot list sessions") {
 		t.Errorf("lister failure must fall back to overflow: got %q %q", a, r)
+	}
+	// Misconfigured pool (max_local 0) says so instead of "no pool".
+	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	newPoolSessionLister = func() sessionLister {
+		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
+	}
+	if a, r := resolvePolecatPoolAgent(townRoot); a != "" || !strings.Contains(r, "max_local") {
+		t.Errorf("misconfigured pool: got %q %q", a, r)
 	}
 }
