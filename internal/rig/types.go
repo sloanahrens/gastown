@@ -2,6 +2,9 @@
 package rig
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -95,4 +98,47 @@ func (r *Rig) DefaultBranch() string {
 		return "main"
 	}
 	return cfg.DefaultBranch
+}
+
+// RepoPath returns the absolute path of the rig's git working clone, or ""
+// when the rig has no repository checked out.
+//
+// The rig root is not usually a git worktree: `gt rig add` lays out the clones
+// at <rig>/mayor/rig and <rig>/refinery/rig, while the rig root holds only the
+// .beads/ redirect and the agent directories. Callers that need to run git in
+// the rig's repository (plugins like gitignore-reconcile and git-hygiene, which
+// enumerate rigs through `gt rig list --json`) need one of those clones — the
+// rig root would make `git -C` resolve to the enclosing town repo instead.
+//
+// Candidates are tried in the same order as Manager.detectGitURL: the rig root
+// first (legacy and adopted layouts check the repository out in place), then
+// the mayor and refinery clones. A candidate only counts when it is the root of
+// its own working tree; see isWorkTreeRoot for why that is stricter than
+// `git rev-parse --git-dir`.
+func (r *Rig) RepoPath() string {
+	candidates := []string{
+		r.Path,
+		filepath.Join(r.Path, "mayor", "rig"),
+		filepath.Join(r.Path, "refinery", "rig"),
+	}
+	for _, candidate := range candidates {
+		if isWorkTreeRoot(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// isWorkTreeRoot reports whether path is the root of a git working tree.
+//
+// Both regular clones (.git directory) and linked worktrees (.git file pointing
+// at the shared git directory) qualify, so a plain os.Stat is enough for both.
+// Bare repositories do not qualify — they have no working tree to inspect — and
+// neither does a directory that merely sits inside some other repository, which
+// is the case that matters here: the town root is itself git-tracked, so
+// `git -C <rig>` succeeds by upward search and reports the town repository,
+// not the rig's.
+func isWorkTreeRoot(path string) bool {
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
 }

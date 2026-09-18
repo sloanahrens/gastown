@@ -764,11 +764,16 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	type rigInfo struct {
 		Name        string `json:"name"`
 		BeadsPrefix string `json:"beads_prefix"`
-		Status      string `json:"status"`
-		Witness     string `json:"witness"`
-		Refinery    string `json:"refinery"`
-		Polecats    int    `json:"polecats"`
-		Crew        int    `json:"crew"`
+		// RepoPath is the rig's git working clone (usually <rig>/mayor/rig),
+		// not the rig root. Plugins enumerate rigs through this list to run
+		// git against each repository; an empty value means the rig has no
+		// clone checked out. See rig.Rig.RepoPath.
+		RepoPath string `json:"repo_path"`
+		Status   string `json:"status"`
+		Witness  string `json:"witness"`
+		Refinery string `json:"refinery"`
+		Polecats int    `json:"polecats"`
+		Crew     int    `json:"crew"`
 		// sorting fields (not exported to JSON)
 		sortPrio int
 	}
@@ -804,6 +809,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		rigs = append(rigs, rigInfo{
 			Name:        name,
 			BeadsPrefix: prefix,
+			RepoPath:    r.RepoPath(),
 			Status:      strings.ToLower(opState),
 			Witness:     witnessStatus,
 			Refinery:    refineryStatus,
