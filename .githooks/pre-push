@@ -6,6 +6,15 @@
 # Also enforces integration branch landing guardrails: pushes to the default
 # branch that introduce integration branch content are blocked unless
 # GT_INTEGRATION_LAND=1 is set (only gt mq integration land sets this).
+#
+# Also refuses pushes to the default branch from a polecat (gt-ibt8). The
+# branch allowlist below predates the role check and lets the default branch
+# through for every caller ("crew workers push here directly"), so nothing
+# stopped a polecat from landing work on main past the MR, the Refinery gates,
+# and the om review: granite pushed origin/main -> c2120a9 that way on
+# 09-17 12:08 (HEAD:main from a detached HEAD). Polecat work lands through
+# `gt done` -> MR -> Refinery. See is_polecat_caller and the check in the
+# loop below for the two deliberate pushers that must still get through.
 
 # Detect the rig's default branch dynamically.
 # Fallback chain matches Go implementation (git.RemoteDefaultBranch):
@@ -26,6 +35,48 @@ fi
 #   polecat/*                     - Polecat working branches (Refinery merges these)
 #   integration/*                 - Integration branches (created by gt mq integration)
 
+# is_polecat_caller reports whether the process running this hook belongs to a
+# polecat, as opposed to crew / refinery / mayor / witness / any non-agent
+# caller. Two independent signals, either one is enough:
+#
+#   GT_ROLE - set by the session manager at spawn: "polecat", or the compound
+#             form "<rig>/polecats/<name>".
+#   $PWD    - for a polecat push the hook runs inside the polecat's own
+#             worktree, <town>/<rig>/polecats/<name>/<repo>.
+#
+# GT_POLECAT is deliberately NOT a signal: coordinators can carry a stale
+# GT_POLECAT in their environment (sling treats GT_ROLE as the authoritative
+# polecat check for exactly that reason), and a false positive here would
+# refuse the Refinery's own merge or a crew member's legitimate push.
+is_polecat_caller() {
+  case "${GT_ROLE:-}" in
+    polecat|*/polecats/*) return 0 ;;
+  esac
+  case "${PWD:-}" in
+    */polecats/*) return 0 ;;
+  esac
+  return 1
+}
+
+# is_polecat_main_push_allowed reports whether this particular push to the
+# default branch is one of the deliberate, gate-checked pushes a polecat
+# session is sanctioned to make. Both signals are set by gt code paths that
+# have already decided the push is legitimate - neither is a user override:
+#
+#   GT_REFINERY_MERGE=1    - the Refinery's merge (internal/refinery/batch.go,
+#                            internal/refinery/engineer.go), which owns landing
+#                            verified MRs on the default branch.
+#   GT_DONE_DIRECT_MERGE=1 - `gt done` landing a convoy whose merge_strategy is
+#                            "direct" (internal/cmd/done.go). That strategy
+#                            skips the MR on purpose and is itself gated on the
+#                            source issue (no_merge, review_only, unchecked
+#                            acceptance criteria, merge_strategy=local).
+is_polecat_main_push_allowed() {
+  [[ "${GT_REFINERY_MERGE:-0}" == "1" ]] && return 0
+  [[ "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]] && return 0
+  return 1
+}
+
 while read local_ref local_sha remote_ref remote_sha; do
   # Skip tags - they're allowed for releases
   if [[ "$remote_ref" == refs/tags/* ]]; then
@@ -39,6 +90,29 @@ while read local_ref local_sha remote_ref remote_sha; do
   fi
 
   branch="${remote_ref#refs/heads/}"
+
+  # Polecat main-push refusal (gt-ibt8). Checked before the off-branch guard
+  # below so a polecat's `git push origin main` gets the message that names the
+  # real remedy (gt done) rather than the generic HEAD-mismatch one.
+  if [[ "$branch" == "$default_branch" ]] && is_polecat_caller && ! is_polecat_main_push_allowed; then
+    echo "BLOCKED: polecats never push to '$default_branch'."
+    echo ""
+    echo "A polecat's work lands through the merge queue, never as a direct push -"
+    echo "a direct push to '$default_branch' skips the MR, the Refinery's gate run,"
+    echo "and the om review (gt-ibt8: granite pushed origin/$default_branch from a"
+    echo "detached HEAD this way on 09-17)."
+    echo ""
+    echo "  Right:  gt done          # pushes polecat/<name>/<bead> and submits an MR"
+    echo "  Wrong:  git push origin HEAD:$default_branch"
+    echo ""
+    echo "The Refinery merges to $default_branch after verification."
+    echo "Detected as a polecat via GT_ROLE=${GT_ROLE:-<unset>} and cwd $PWD."
+    echo ""
+    echo "If this push is a legitimate landing (Refinery merge, or a gt done"
+    echo "direct-merge convoy) it must come from that gt code path, which sets"
+    echo "GT_REFINERY_MERGE=1 / GT_DONE_DIRECT_MERGE=1 for this push."
+    exit 1
+  fi
 
   # HEAD-mismatch guard: refuse pushing a branch you are not standing on.
   # `git push origin <B>` pushes the local <B> ref regardless of where HEAD is, so

@@ -395,6 +395,87 @@ func lowerTokens(command string) []string {
 	return out
 }
 
+// TestMatchesPolecatMainPush pins the polecat main-push refusal (gt-ibt8):
+// every refspec shape that sends work to main/master is blocked in a polecat
+// session, the DELETE and --all/--mirror forms included, and every shape that
+// only reads from main or names some other branch is left alone. The same
+// commands must stay allowed for non-polecat sessions (crew, refinery, mayor
+// all push the default branch directly by design).
+func TestMatchesPolecatMainPush(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		polecat bool
+		blocked bool
+	}{
+		// Blocked in a polecat session — destinations that are main/master.
+		{"shorthand main", "git push origin main", true, true},
+		{"shorthand master", "git push origin master", true, true},
+		{"HEAD:main", "git push origin HEAD:main", true, true},
+		{"sha:main", "git push origin 8f2a1b3:main", true, true},
+		{"refs/heads form", "git push origin HEAD:refs/heads/main", true, true},
+		{"full ref source and dest", "git push origin refs/heads/main", true, true},
+		{"delete via empty source", "git push origin :main", true, true},
+		{"delete via flag", "git push origin --delete main", true, true},
+		{"force flag", "git push -f origin main", true, true},
+		{"force-with-lease still targets main", "git push --force-with-lease origin main", true, true},
+		{"leading plus", "git push origin +main", true, true},
+		{"push --all carries main", "git push --all", true, true},
+		{"push --mirror carries main", "git push origin --mirror", true, true},
+		{"uppercase destination", "git push origin HEAD:MAIN", true, true},
+
+		// Allowed in a polecat session — its own branch, or main as a source.
+		{"polecat branch", "git push origin polecat/flint/gt-ibt8", true, false},
+		{"bare HEAD push", "git push origin HEAD", true, false},
+		{"HEAD to polecat branch", "git push origin HEAD:polecat/flint/x", true, false},
+		{"main as source only", "git push origin main:polecat/flint/x", true, false},
+		{"branch name containing main", "git push origin feature/main-fix", true, false},
+		{"integration branch", "git push origin integration/epic-1", true, false},
+		{"notes ref", "git push origin refs/notes/om", true, false},
+		{"tag push", "git push origin v1.0.0", true, false},
+		{"not a push", "git status", true, false},
+		{"gt done", "gt done", true, false},
+
+		// Not a polecat session: direct default-branch pushes stay allowed.
+		{"crew push to main", "git push origin main", false, false},
+		{"crew push --all", "git push --all", false, false},
+		{"crew HEAD:main", "git push origin HEAD:main", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := matchesPolecatMainPush(lowerTokens(tt.command), tt.polecat)
+			if (reason != "") != tt.blocked {
+				t.Errorf("matchesPolecatMainPush(%q, polecat=%v) blocked=%v, want %v", tt.command, tt.polecat, reason != "", tt.blocked)
+			}
+		})
+	}
+}
+
+// TestPolecatMainPushReachesGuard checks the wiring rather than the matcher:
+// GT_POLECAT_PATH is what makes a session a polecat one, and the full
+// evaluateDangerousCommand path must block the incident command (a
+// HEAD:main push, which is how granite landed on origin/main) when it is set
+// and allow it when it is not.
+func TestPolecatMainPushReachesGuard(t *testing.T) {
+	const incident = "git push origin HEAD:main"
+
+	t.Setenv("GT_POLECAT_PATH", "/town/rig/polecats/flint/rig")
+	if reason, _ := evaluateDangerousCommand(incident, 0, ""); reason == "" {
+		t.Fatalf("evaluateDangerousCommand(%q) allowed with GT_POLECAT_PATH set, want blocked", incident)
+	}
+
+	// Nested payloads (bash -c) must be judged the same way.
+	nested := `bash -c "git push origin HEAD:main"`
+	if reason, _ := evaluateDangerousCommand(nested, 0, ""); reason == "" {
+		t.Fatalf("evaluateDangerousCommand(%q) allowed with GT_POLECAT_PATH set, want blocked", nested)
+	}
+
+	t.Setenv("GT_POLECAT_PATH", "")
+	if reason, _ := evaluateDangerousCommand(incident, 0, ""); reason != "" {
+		t.Fatalf("evaluateDangerousCommand(%q) blocked without GT_POLECAT_PATH (reason=%q), want allowed", incident, reason)
+	}
+}
+
 // TestGtMkrjRegressions pins the five exact command texts that false-fired
 // dangerous-command before gt-mkrj: substring matching ("apt" inside
 // "capture"/"adapt") and quote-unaware tokenization (a "//" jq/sed operator

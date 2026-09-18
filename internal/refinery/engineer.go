@@ -808,8 +808,11 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			return eligibility
 		}
 
+		// The pre-push hook refuses default-branch pushes from a polecat
+		// session unless GT_REFINERY_MERGE=1 is set (gt-ibt8); the Refinery
+		// owns landing verified MRs, so it names that signal explicitly.
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
-		if err := e.git.Push("origin", target, false); err != nil {
+		if err := e.git.PushWithEnv("origin", target, false, []string{git.EnvRefineryMerge}); err != nil {
 			// Reset the checked-out target branch to undo the local merge commit.
 			// Without this, the next retry could see stale local state from the failed push.
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
