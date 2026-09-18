@@ -207,9 +207,6 @@ func (p *Plugin) Summary() PluginSummary {
 	}
 }
 
-// FormatMailBody formats the plugin as instructions for a dog worker.
-// This is the canonical formatting used by both the daemon dispatcher
-// and the gt dog dispatch command.
 // FormatFailureMailBody is the dispatch body for a dog when the daemon ran
 // a script-type plugin itself and it failed: the dog gets the exit status
 // and the output tail first, then the ordinary instructions, and is asked to
@@ -226,6 +223,9 @@ func (p *Plugin) FormatFailureMailBody(status string, outputTail string) string 
 	return sb.String()
 }
 
+// FormatMailBody formats the plugin as instructions for a dog worker.
+// This is the canonical formatting used by both the daemon dispatcher
+// and the gt dog dispatch command.
 func (p *Plugin) FormatMailBody() string {
 	if p.HasRunScript {
 		return fmt.Sprintf(

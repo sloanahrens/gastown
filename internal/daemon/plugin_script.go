@@ -129,6 +129,7 @@ func runPluginScript(ctx context.Context, p *plugin.Plugin, townRoot string, tim
 		"GT_TOWN_ROOT="+townRoot,
 		"GT_PLUGIN_NAME="+p.Name,
 		"GT_PLUGIN_RUNNER=daemon",
+		"GT_ROLE=daemon/plugin",
 		"BD_ACTOR=daemon",
 	)
 	var out bytes.Buffer

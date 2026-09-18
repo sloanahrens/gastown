@@ -1000,11 +1000,30 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 		return "", ""
 	}
 	for i, f := range tokens {
-		if f == "git" && gitSubcommand(tokens[i+1:]) == "push" {
+		if f == "git" && inCommandPosition(tokens, i) && gitSubcommand(tokens[i+1:]) == "push" {
 			return witnessGitPushReason, witnessGitPushAlternative
 		}
 	}
 	return "", ""
+}
+
+// inCommandPosition reports whether tokens[i] can be the program of a
+// shell command: first in the line, after a separator, after an env
+// assignment prefix, or after a launcher such as sudo/env/exec/nohup/time.
+// This keeps `echo do not git push` (a word, not a command) from matching.
+func inCommandPosition(tokens []string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	prev := tokens[i-1]
+	if shellCommandSeparators[prev] || strings.Contains(prev, "=") {
+		return true
+	}
+	switch prev {
+	case "sudo", "env", "exec", "nohup", "time", "command", "builtin", "-c", "bash", "sh", "zsh":
+		return true
+	}
+	return false
 }
 
 // gitOptionsWithValue are git's global options that consume the next token

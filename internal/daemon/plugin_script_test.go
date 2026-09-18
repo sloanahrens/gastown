@@ -74,12 +74,12 @@ func TestScriptTimeout(t *testing.T) {
 }
 
 func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
-	p := scriptPlugin(t, "ok", "echo hello; echo root=$GT_TOWN_ROOT name=$GT_PLUGIN_NAME runner=$GT_PLUGIN_RUNNER >&2; pwd\n")
+	p := scriptPlugin(t, "ok", "echo hello; echo root=$GT_TOWN_ROOT name=$GT_PLUGIN_NAME runner=$GT_PLUGIN_RUNNER role=$GT_ROLE >&2; pwd\n")
 	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
 	if !res.ok() {
 		t.Fatalf("expected success, got %+v", res)
 	}
-	for _, want := range []string{"hello", "root=/town", "name=ok", "runner=daemon", p.Path} {
+	for _, want := range []string{"hello", "root=/town", "name=ok", "runner=daemon", "role=daemon/plugin", p.Path} {
 		if !strings.Contains(res.output, want) {
 			t.Errorf("output lacks %q:\n%s", want, res.output)
 		}

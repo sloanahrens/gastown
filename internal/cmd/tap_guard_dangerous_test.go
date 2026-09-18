@@ -897,6 +897,9 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 		"git --no-pager push origin HEAD",
 		"git --git-dir=/x/.git --work-tree /x push",
 		"git -c push.default=current push",
+		"cd /x && git push origin HEAD",
+		"GIT_SSH_COMMAND=ssh git push",
+		"env GIT_TRACE=1 git push",
 	}
 	allowed := []string{
 		"git fetch origin polecat/slate/gt-nkyy+x",
@@ -906,6 +909,8 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 		"echo push",
 		"git -C /x log --oneline -3",
 		"git -c color.ui=false status",
+		"echo we should not git push here",
+		"gt mail send mayor -s 'about git push' -m 'the polecat should git push itself'",
 	}
 	for _, c := range blocked {
 		reason, alt := matchesWitnessGitPush(shellTokenize(c), true)
