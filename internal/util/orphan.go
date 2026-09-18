@@ -416,16 +416,138 @@ func isAgentOrphanCommName(cmdLower string) bool {
 	}
 }
 
+// processEntry is one row of the process table returned by psSnapshot.
+type processEntry struct {
+	PID   int
+	PPID  int
+	TTY   string
+	Comm  string
+	Etime string
+}
+
+// psSnapshot reads the process table with the parent pid included.
+//
+// ppid is what separates an orphan from a live tool's child (gt-h1tq): a
+// TTY-less claude whose parent is still running is that parent's
+// responsibility, never the daemon's. The parent test MUST use this same
+// snapshot — a parent that dies between two ps calls would otherwise flip the
+// child's classification.
+func psSnapshot() ([]processEntry, error) {
+	out, err := exec.Command("ps", "-eo", "pid,ppid,tty,comm,etime").Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	return parseProcessTable(string(out)), nil
+}
+
+// parseProcessTable parses `ps -eo pid,ppid,tty,comm,etime` output, skipping
+// the header and any row that does not parse.
+func parseProcessTable(out string) []processEntry {
+	var entries []processEntry
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue // Header line or invalid PID
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		entries = append(entries, processEntry{
+			PID:   pid,
+			PPID:  ppid,
+			TTY:   fields[2],
+			Comm:  fields[3],
+			Etime: fields[4],
+		})
+	}
+	return entries
+}
+
+// hasLiveParent reports whether the parent is still around to own this
+// process. ppid 1 means reparented to launchd/init and ppid 0 means the
+// kernel — neither is an owner. Any other ppid missing from the table has
+// exited, which is exactly the orphan case the daemon exists to clean up.
+func (e processEntry) hasLiveParent(live map[int]bool) bool {
+	return e.PPID > 1 && live[e.PPID]
+}
+
+// unownedCandidate is a process table row that passed the cheap filters, with
+// its age already parsed.
+type unownedCandidate struct {
+	processEntry
+	Age int // Age in seconds
+}
+
+// unownedCandidates applies the cheap, pure filters shared by both scan paths:
+// TTY-less, a tracked agent comm, older than minOrphanAge, not protected by a
+// tmux/ACP session, and owned by nobody — parent reparented to launchd/init or
+// gone from the table.
+//
+// A headless child of a live parent is deliberately NOT a candidate: the
+// parent spawns, supervises and reaps it. That is the gt-h1tq fix — the
+// daemon's orphan sweep used to SIGTERM `claude -p` children of a running
+// `om review`, because the scan had no parent column to look at.
+//
+// A process whose parent is itself a candidate is also not a candidate: the
+// parent is signaled this cycle, and the child reparents to launchd and is
+// collected on the next one.
+//
+// The expensive per-PID probes (cwd → town root, IDE detection) stay with the
+// callers — they spawn processes and must not run for rows already ruled out.
+func unownedCandidates(entries []processEntry, protected map[int]bool) []unownedCandidate {
+	live := make(map[int]bool, len(entries))
+	for _, e := range entries {
+		live[e.PID] = true
+	}
+
+	var candidates []unownedCandidate
+	for _, e := range entries {
+		// Only look for claude/codex processes without a TTY.
+		// Linux shows "?" for no TTY, macOS shows "??"
+		if e.TTY != "?" && e.TTY != "??" {
+			continue
+		}
+		if !isAgentOrphanCommName(strings.ToLower(e.Comm)) {
+			continue
+		}
+		// Processes in valid Gas Town tmux sessions (and ACP sessions) are
+		// never candidates, even if they show TTY "?" during startup.
+		if protected[e.PID] {
+			continue
+		}
+		// Skip processes younger than minOrphanAge seconds
+		// This prevents killing newly spawned subagents and reduces false positives
+		age, err := parseEtime(e.Etime)
+		if err != nil {
+			continue
+		}
+		if age < minOrphanAge {
+			continue
+		}
+		if e.hasLiveParent(live) {
+			continue
+		}
+		candidates = append(candidates, unownedCandidate{processEntry: e, Age: age})
+	}
+	return candidates
+}
+
 // OrphanedProcess represents a claude process running without a controlling terminal.
 type OrphanedProcess struct {
 	PID      int
+	PPID     int // Parent pid at scan time; 0 or 1 means reparented to launchd/init
 	Cmd      string
 	Age      int    // Age in seconds
 	TownRoot string // Gas Town workspace root, or "" if not in any workspace
 }
 
 // FindOrphanedClaudeProcesses finds Gas Town agent processes (claude/codex/opencode/cursor-agent/copilot, etc.)
-// without a controlling terminal.
+// without a controlling terminal that nobody owns any more.
 // These are typically subagent processes spawned by Claude Code's Task tool that didn't
 // clean up properly after completion.
 //
@@ -434,6 +556,11 @@ type OrphanedProcess struct {
 // - Legitimate terminal sessions always have a TTY (pts/*)
 // - Orphaned subagents have no TTY (?)
 // - Won't accidentally kill user's personal claude instances in terminals
+//
+// Ownership is checked too: the pid is only orphaned when its parent is gone
+// (reparented to launchd/init, or absent from the same process table). A
+// TTY-less child of a live parent — a headless `claude -p` under a running
+// `om review`, say — belongs to that parent and is never signaled (gt-h1tq).
 //
 // Additionally, processes must be older than minOrphanAge seconds to be considered
 // orphaned. This prevents race conditions with newly spawned processes.
@@ -449,62 +576,16 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		protectedPIDs[pid] = true
 	}
 
-	// Use ps to get PID, TTY, command, and elapsed time for all processes
-	// TTY "?" indicates no controlling terminal
-	// etime is elapsed time in [[DD-]HH:]MM:SS format (portable across Linux/macOS)
-	out, err := exec.Command("ps", "-eo", "pid,tty,comm,etime").Output()
+	entries, err := psSnapshot()
 	if err != nil {
-		return nil, fmt.Errorf("listing processes: %w", err)
+		return nil, err
 	}
 
 	var orphans []OrphanedProcess
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue // Header line or invalid PID
-		}
-
-		tty := fields[1]
-		cmd := fields[2]
-		etimeStr := fields[3]
-
-		// Only look for claude/codex processes without a TTY
-		// Linux shows "?" for no TTY, macOS shows "??"
-		if tty != "?" && tty != "??" {
-			continue
-		}
-
-		// Match known agent comm names (claude family, opencode, Cursor, Copilot CLI)
-		cmdLower := strings.ToLower(cmd)
-		if !isAgentOrphanCommName(cmdLower) {
-			continue
-		}
-
-		// Skip processes that belong to valid Gas Town tmux sessions.
-		// This prevents killing witnesses/refineries/deacon during startup
-		// when they may temporarily show TTY "?".
-		if protectedPIDs[pid] {
-			continue
-		}
-
+	for _, c := range unownedCandidates(entries, protectedPIDs) {
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(pid) {
-			continue
-		}
-
-		// Skip processes younger than minOrphanAge seconds
-		// This prevents killing newly spawned subagents and reduces false positives
-		age, err := parseEtime(etimeStr)
-		if err != nil {
-			continue
-		}
-		if age < minOrphanAge {
+		if isIDEClaudeProcess(c.PID) {
 			continue
 		}
 
@@ -512,15 +593,16 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		// Only kill orphaned Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/ (or wherever the workspace is).
-		townRoot := resolveTownRoot(pid)
+		townRoot := resolveTownRoot(c.PID)
 		if townRoot == "" {
 			continue
 		}
 
 		orphans = append(orphans, OrphanedProcess{
-			PID:      pid,
-			Cmd:      cmd,
-			Age:      age,
+			PID:      c.PID,
+			PPID:     c.PPID,
+			Cmd:      c.Comm,
+			Age:      c.Age,
 			TownRoot: townRoot,
 		})
 	}
@@ -538,6 +620,7 @@ type CleanupResult struct {
 // ZombieProcess represents a claude process not in any active tmux session.
 type ZombieProcess struct {
 	PID      int
+	PPID     int // Parent pid at scan time; 0 or 1 means reparented to launchd/init
 	Cmd      string
 	Age      int    // Age in seconds
 	TTY      string // TTY column from ps (may be "?" or a session like "s024")
@@ -548,6 +631,11 @@ type ZombieProcess struct {
 // any active tmux session. This catches "zombie" processes whose tmux session
 // has died. Processes with a real TTY (e.g. pts/*) are skipped because those
 // are interactive terminal sessions, not zombies.
+//
+// Like FindOrphanedClaudeProcesses, this requires that nobody owns the
+// process: a TTY-less child of a live parent belongs to that parent, not to
+// us (gt-h1tq — deacon patrol runs this scan automatically, so without the
+// ownership test it signaled the same headless `om review` backends).
 func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 	// Get ALL valid PIDs (panes + their children) from active tmux sessions
 	validPIDs := getTmuxSessionPIDs()
@@ -572,57 +660,16 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 		return nil, nil
 	}
 
-	// Use ps to get PID, TTY, command, and elapsed time for all claude processes
-	out, err := exec.Command("ps", "-eo", "pid,tty,comm,etime").Output()
+	entries, err := psSnapshot()
 	if err != nil {
-		return nil, fmt.Errorf("listing processes: %w", err)
+		return nil, err
 	}
 
 	var zombies []ZombieProcess
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue // Header line or invalid PID
-		}
-
-		tty := fields[1]
-		cmd := fields[2]
-		etimeStr := fields[3]
-
-		cmdLower := strings.ToLower(cmd)
-		if !isAgentOrphanCommName(cmdLower) {
-			continue
-		}
-
-		// Skip processes that belong to valid Gas Town tmux sessions
-		if validPIDs[pid] {
-			continue
-		}
-
-		// Skip processes with a real TTY that are NOT in any tmux session.
-		// These are interactive terminal sessions (e.g. user running claude
-		// in a regular terminal), not zombies from dead tmux sessions.
-		if tty != "?" && tty != "??" {
-			continue
-		}
-
+	for _, c := range unownedCandidates(entries, validPIDs) {
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(pid) {
-			continue
-		}
-
-		// Skip processes younger than minOrphanAge seconds
-		age, err := parseEtime(etimeStr)
-		if err != nil {
-			continue
-		}
-		if age < minOrphanAge {
+		if isIDEClaudeProcess(c.PID) {
 			continue
 		}
 
@@ -630,17 +677,18 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 		// Only kill zombie Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/.
-		townRoot := resolveTownRoot(pid)
+		townRoot := resolveTownRoot(c.PID)
 		if townRoot == "" {
 			continue
 		}
 
-		// This process is NOT in any active tmux session - it's a zombie
+		// Nobody owns it and it's not in any active tmux session - it's a zombie
 		zombies = append(zombies, ZombieProcess{
-			PID:      pid,
-			Cmd:      cmd,
-			Age:      age,
-			TTY:      tty,
+			PID:      c.PID,
+			PPID:     c.PPID,
+			Cmd:      c.Comm,
+			Age:      c.Age,
+			TTY:      c.TTY,
 			TownRoot: townRoot,
 		})
 	}
@@ -688,8 +736,10 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 	var lastErr error
 
 	activeZombies := make(map[int]bool)
+	zombieByPID := make(map[int]ZombieProcess, len(zombies))
 	for _, z := range zombies {
 		activeZombies[z.PID] = true
+		zombieByPID[z.PID] = z
 	}
 
 	// Check state for PIDs that died or need escalation
@@ -703,7 +753,7 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 
 		if s.Signal == "SIGKILL" {
 			results = append(results, ZombieCleanupResult{
-				Process: ZombieProcess{PID: pid, Cmd: "claude"},
+				Process: zombieRecord(pid, zombieByPID),
 				Signal:  "UNKILLABLE",
 				Error:   fmt.Errorf("process %d survived SIGKILL", pid),
 			})
@@ -723,7 +773,7 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 			}
 			state[pid] = signalState{Signal: "SIGKILL", Timestamp: now}
 			results = append(results, ZombieCleanupResult{
-				Process: ZombieProcess{PID: pid, Cmd: "claude"},
+				Process: zombieRecord(pid, zombieByPID),
 				Signal:  "SIGKILL",
 			})
 			delete(activeZombies, pid)
@@ -768,6 +818,28 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 	return results, lastErr
 }
 
+// zombieRecord returns the scan's record for pid. Escalation results are built
+// from the state file's pids, so without this they would log a bare "claude"
+// placeholder with no parent — exactly the attribution gt-h1tq asks for.
+// A pid the current scan no longer lists (it died between cycles) falls back
+// to the placeholder.
+func zombieRecord(pid int, byPID map[int]ZombieProcess) ZombieProcess {
+	if z, ok := byPID[pid]; ok {
+		return z
+	}
+	return ZombieProcess{PID: pid, Cmd: "claude"}
+}
+
+// orphanRecord is zombieRecord for the orphan scan: escalation results built
+// from state-file pids keep the comm and ppid their SIGTERM was sent with,
+// falling back to a placeholder for a pid the current scan no longer lists.
+func orphanRecord(pid int, byPID map[int]OrphanedProcess) OrphanedProcess {
+	if o, ok := byPID[pid]; ok {
+		return o
+	}
+	return OrphanedProcess{PID: pid, Cmd: "claude"}
+}
+
 // CleanupOrphanedClaudeProcesses finds and kills orphaned claude/codex processes.
 //
 // Uses a state machine to escalate signals:
@@ -791,8 +863,10 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 
 	// Track which PIDs we're still working on
 	activeOrphans := make(map[int]bool)
+	orphanByPID := make(map[int]OrphanedProcess, len(orphans))
 	for _, o := range orphans {
 		activeOrphans[o.PID] = true
+		orphanByPID[o.PID] = o
 	}
 
 	// First pass: check state for PIDs that died (cleanup) or need escalation
@@ -809,7 +883,7 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 		if s.Signal == "SIGKILL" {
 			// Already sent SIGKILL and it's still alive - unkillable
 			results = append(results, CleanupResult{
-				Process: OrphanedProcess{PID: pid, Cmd: "claude"},
+				Process: orphanRecord(pid, orphanByPID),
 				Signal:  "UNKILLABLE",
 				Error:   fmt.Errorf("process %d survived SIGKILL", pid),
 			})
@@ -830,7 +904,7 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 			}
 			state[pid] = signalState{Signal: "SIGKILL", Timestamp: now}
 			results = append(results, CleanupResult{
-				Process: OrphanedProcess{PID: pid, Cmd: "claude"},
+				Process: orphanRecord(pid, orphanByPID),
 				Signal:  "SIGKILL",
 			})
 			delete(activeOrphans, pid)

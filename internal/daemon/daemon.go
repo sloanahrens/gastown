@@ -3117,10 +3117,13 @@ func (d *Daemon) cleanupOrphanedProcesses() {
 	if len(results) > 0 {
 		d.logger.Printf("Orphan cleanup: processed %d process(es)", len(results))
 		for _, r := range results {
+			// ppid makes the kill attributable: ppid 0/1 is a genuine orphan
+			// reparented to launchd/init, anything else means the parent died
+			// between the scan and the signal (gt-h1tq).
 			if r.Signal == "UNKILLABLE" {
-				d.logger.Printf("  WARNING: PID %d (%s) survived SIGKILL", r.Process.PID, r.Process.Cmd)
+				d.logger.Printf("  WARNING: PID %d (%s) ppid=%d survived SIGKILL", r.Process.PID, r.Process.Cmd, r.Process.PPID)
 			} else {
-				d.logger.Printf("  Sent %s to PID %d (%s)", r.Signal, r.Process.PID, r.Process.Cmd)
+				d.logger.Printf("  Sent %s to PID %d (%s) ppid=%d", r.Signal, r.Process.PID, r.Process.Cmd, r.Process.PPID)
 			}
 		}
 	}
