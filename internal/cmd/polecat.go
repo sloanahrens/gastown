@@ -1421,7 +1421,13 @@ func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath s
 // every gt:merge-request bead in the rig's Dolt db, so reusing it here instead
 // of querying again saves a second full scan on every check-recovery call for
 // a branch with submittable work (gt-ct3).
-func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error, mrForBranch *beads.Issue, mrForBranchErr error) {
+//
+// bd is taken as issueShower rather than *beads.Beads because that is all this
+// needs (one Show call): a nil *beads.Beads converts to a NON-nil interface and
+// then reaches isMQNotRequiredSource's nil guard as a live pointer, so the
+// guard passes and Show is called on a nil receiver. Narrowing the parameter to
+// the interface keeps that guard meaningful and lets tests inject a fake.
+func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd issueShower, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error, mrForBranch *beads.Issue, mrForBranchErr error) {
 	if status.Branch == "" {
 		return
 	}

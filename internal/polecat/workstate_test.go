@@ -49,9 +49,16 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, MQStatus: "submitted", ReuseStatus: "idle-preserved"},
 		},
 		{
-			name: "terminal source alone does not prove mq submitted",
+			// gt-nkyy: a CLOSED source issue with superseded commits ahead of
+			// main used to classify NEEDS_MQ_SUBMIT/not_submitted here,
+			// holding done polecats out of reuse and counting them toward
+			// capacity. Source-issue terminality IS the submission signal
+			// (same semantics as the aa-xtee/aa-55d8 applyMQCheck case):
+			// the work landed or was intentionally superseded, so there is
+			// nothing left to submit.
+			name: "terminal source with submittable work resolves submitted",
 			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", MQCheckRequired: true, HasSubmittableWork: true, AssignedBeadTerminal: true},
-			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsMQSubmit, Reason: "mq-not-submitted", NeedsRecovery: true, NeedsMQSubmit: true, MQStatus: "not_submitted", CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, MQStatus: "submitted", ReuseStatus: "idle-preserved"},
 		},
 		{
 			name: "dirty worktree blocks terminal source",
