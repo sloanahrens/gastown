@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # compactor-dog/run.sh — Executable compaction script for agent dogs.
 #
-# Discovers production databases on the Dolt server, compacts (flattens)
-# databases exceeding the commit threshold, verifies data integrity,
-# runs dolt_gc, and reports results.
+# Monitors commit growth across the production databases on the Dolt server and
+# reports which ones exceed the commit threshold. With --compact it also
+# flattens those databases, verifies data integrity, runs dolt_gc, and reports
+# results.
 #
 # This is the agent-executable counterpart to compactor_dog.go. The Go
 # daemon uses database/sql connections; this script uses `dolt sql` CLI
 # to achieve the same flatten algorithm.
 #
 # Modes:
-#   --check-only   Monitor and report only (matches plugin.md philosophy)
-#   (default)      Perform compaction on databases exceeding threshold
+#   (default)      Monitor and report only (check-only; matches plugin.md
+#                  philosophy). No data is modified.
+#   --compact      Perform compaction on databases exceeding threshold.
+#                 OPERATOR-ONLY: rewrites commit history (flatten) and
+#                 force-pushes to remotes. Requires judgment — see plugin.md.
+#   --check-only   Explicit alias for the default (monitor-only).
 #
-# Usage: ./run.sh [--threshold N] [--databases db1,db2,...] [--dry-run] [--check-only]
+# Usage: ./run.sh [--threshold N] [--databases db1,db2,...] [--dry-run]
+#                [--check-only] [--compact]
 
 set -euo pipefail
 
@@ -22,12 +28,12 @@ set -euo pipefail
 DOLT_HOST="${GT_DOLT_HOST:-${DOLT_HOST:-127.0.0.1}}"
 DOLT_PORT="${GT_DOLT_PORT:-${DOLT_PORT:-3307}}"
 DOLT_USER="${DOLT_USER:-root}"
-COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-2000}"
+COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-500}"
 # Default: auto-discover production databases via SHOW DATABASES.
 # Override with --databases db1,db2,... for an explicit list.
 DEFAULT_DBS="auto"
 DRY_RUN=false
-CHECK_ONLY=false
+CHECK_ONLY=true # default: monitor-only (matches plugin.md). Use --compact for the destructive path.
 LOGFILE=""
 LOCKFILE="/tmp/compactor-dog.lock"
 
@@ -39,12 +45,21 @@ while [[ $# -gt 0 ]]; do
     --databases)   DEFAULT_DBS="$2"; shift 2 ;;
     --dry-run)     DRY_RUN=true; shift ;;
     --check-only)  CHECK_ONLY=true; shift ;;
+    --compact)     CHECK_ONLY=false; shift ;;
     --help|-h)
-      echo "Usage: $0 [--threshold N] [--databases db1,db2,...] [--dry-run] [--check-only]"
-      echo "  --threshold N        Commit count before compaction (default: 2000)"
+      echo "Usage: $0 [--threshold N] [--databases db1,db2,...] [--dry-run]"
+      echo "       [--check-only] [--compact]"
+      echo ""
+      echo "Modes:"
+      echo "  (default)            Monitor and report only (check-only). No data modified."
+      echo "  --threshold N        Commit count that triggers a compaction recommendation"
+      echo "                       (default: 500, matches plugin.md escalate line)"
       echo "  --databases db1,...  Comma-separated database list (default: auto-discover)"
-      echo "  --dry-run            Report only, don't compact"
-      echo "  --check-only         Monitor and report only (no compaction)"
+      echo "  --dry-run            With --compact: report candidates, don't compact"
+      echo "  --check-only         Monitor and report only (default; explicit alias)"
+      echo "  --compact            OPERATOR-ONLY: perform compaction (flatten + force-push)."
+      echo "                       Rewrites commit history. Requires judgment"
+      echo "                       (see plugin.md for thresholds and escalation rules)."
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;

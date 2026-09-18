@@ -76,7 +76,10 @@ func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultCompactorDogInterval
 }
 
-// compactorDogThreshold returns the configured commit threshold, or the default (500).
+// compactorDogThreshold returns the configured commit threshold, or
+// defaultCompactorCommitThreshold (2000). Note this daemon patrol compacts on
+// its own; it does not share the agent-facing plugin's 500/1000 escalation
+// policy — see plugins/compactor-dog/plugin.md.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
 	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
 		if config.Patrols.CompactorDog.Threshold > 0 {

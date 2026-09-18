@@ -42,6 +42,35 @@ DOLT_DATA_DIR="$HOME/gt/.dolt-data"
 STATE_FILE="$HOME/gt/.dolt-data/.compactor-state.json"
 ```
 
+## Compaction is operator-only
+
+`run.sh` defaults to **monitor-only** (check-only) mode. No data is modified.
+
+Compaction requires the explicit `--compact` flag and is **never** the default:
+it rewrites commit history (flatten) and force-pushes to the DB's remotes. The
+dog must not pass `--compact` on its own initiative — it escalates, and the
+operator decides.
+
+```bash
+# Monitor only (default, safe to run automatically)
+bash plugins/compactor-dog/run.sh
+
+# Monitor with a different recommendation threshold
+bash plugins/compactor-dog/run.sh --threshold 1000
+
+# Preview what compaction would do — dry-run only takes effect with --compact
+bash plugins/compactor-dog/run.sh --compact --dry-run
+
+# Operator-only: actually compact (DESTRUCTIVE — flatten + force-push)
+bash plugins/compactor-dog/run.sh --compact
+```
+
+`run.sh`'s default threshold (500) is the "Escalate" column in Step 6, so the
+script's candidate list and this doc's escalation rule are the same rule: if
+the script reports no candidates, every DB is under 500 and no escalation is
+due. A DB over the 1000 hard line is always a candidate. Do not pass
+`--threshold` to quiet a real signal.
+
 ## Step 1: Discover production databases
 
 Find all active production databases on the Dolt server:
@@ -63,6 +92,14 @@ fi
 
 echo "Production databases: $(echo "$PROD_DBS" | tr '\n' ' ')"
 ```
+
+**Keep this list in sync with the town.** This grep blocklist is a name-pattern
+heuristic. `gt dolt list` derives the production set from each rig's
+`metadata.json`, and `gt dolt cleanup` treats anything *not* in that set as an
+orphan — so a database can be "production" here and "orphan" there. That is how
+`beads` was counted as production here while `gt dolt status` called it an
+orphan; the rig is now named `be`. When a rig is added or renamed, update this
+pattern to match, and cross-check against `gt dolt list`.
 
 ## Step 2: Count commits per database
 
@@ -205,10 +242,14 @@ gathered above and decide whether to escalate.
 | Daily growth rate | <100/day | 100-300/day | >300/day |
 | Time since flatten | <2 weeks | 2-4 weeks | >4 weeks |
 
+**Hard escalate line (no judgment override): any DB over 1000 commits.**
+The script's default threshold (500) matches the "Escalate" column above.
+The "Getting warm" band (200-500) is informational — the dog may monitor
+without escalating if context justifies it.
+
 **But override the table if context warrants it:**
 - 400 commits after a 10-polecat swarm = normal, will settle
 - 200 commits growing at 50/hr with no swarm = something's wrong
-- Any DB over 1000 commits = escalate regardless
 
 **If you judge maintenance is needed:**
 
