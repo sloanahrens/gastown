@@ -10,10 +10,16 @@ type ReconcileRow struct {
 	Winner string // "rig", "town", "clear", or a severity-qualified variant
 }
 
-// parseIssueTime parses an Issue.UpdatedAt string, trying RFC3339Nano then
-// RFC3339. An unparseable or empty value returns the zero time, which loses
-// every recency comparison — the safer default when we can't tell.
-func parseIssueTime(s string) time.Time {
+// ParseIssueTime parses a timestamp string as issued by bd/Dolt, trying
+// RFC3339Nano then RFC3339. An unparseable or empty value returns the zero
+// time, which loses every recency comparison — the safer default when we
+// can't tell.
+//
+// RFC3339Nano is tried first because bd-issued timestamps can carry
+// fractional seconds, which plain RFC3339 rejects. Callers use this to gate
+// recovery paths, so a format mismatch that returned an error (instead of
+// the zero time) would silently disable them.
+func ParseIssueTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
@@ -60,7 +66,7 @@ func MergeLegacyAgentBead(rig, town *Issue, beadExists func(id string) bool) (Ag
 	if r == nil || t == nil {
 		return updates, rows
 	}
-	townNewer := parseIssueTime(town.UpdatedAt).After(parseIssueTime(rig.UpdatedAt))
+	townNewer := ParseIssueTime(town.UpdatedAt).After(ParseIssueTime(rig.UpdatedAt))
 
 	pick := func(field, rigVal, townVal string, dst **string, isRef bool) {
 		if rigVal == townVal {

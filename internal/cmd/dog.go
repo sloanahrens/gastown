@@ -791,14 +791,17 @@ func closePluginMails(dogName string) {
 	}
 }
 
-// closeDogFormulaWisps finds and force-closes every formula wisp (molecule-type
-// ephemeral bead with attached_formula metadata) currently hooked to the dog's
-// hook bead. Returns the count of wisps closed.
+// closeDogFormulaWisps finds and force-closes every formula wisp
+// (molecule-type ephemeral bead with attached_formula metadata) currently
+// hooked to the dog's hook bead. Returns the count of beads closed.
 //
-// This shells out to bd directly (mirroring dogHasHookedFormula in handler.go)
-// rather than going through beads.Beads.List, whose run() always resolves env via
-// buildRunEnv/BuildPinnedBDEnv — never the daemon's read-only routing env that
-// forces BD_DOLT_AUTO_COMMIT=off.
+// Reads go through the read-only routing env and writes through the mutation
+// routing env (beads.EnvForSubprocessMode) rather than beads.New, whose run()
+// resolves env via buildRunEnv/BuildPinnedBDEnv — which never sets
+// BD_DOLT_AUTO_COMMIT=off, so every read here would open a connection
+// attempting a no-op auto-commit (gh#3596). The predicate and the wisp walk
+// themselves are shared with the daemon's dispatch path in internal/beads so
+// the two cleanup routes cannot drift (gt-da2x).
 func closeDogFormulaWisps(dogName string) (int, error) {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
@@ -838,34 +841,24 @@ func closeDogFormulaWisps(dogName string) (int, error) {
 		return 0, fmt.Errorf("parsing bd query output: %w", err)
 	}
 
+	readEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.ReadOnlyRouting)
+	mutateEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.MutationRouting)
+
 	closed := 0
-	for _, wispID := range formulaWispIDs(hookedBeads) {
-		bd := beads.New(workDir)
-		if _, err := forceCloseDescendants(bd, wispID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not close descendants of wisp %s: %v\n", wispID, err)
+	for _, wispID := range beads.FormulaWispIDs(hookedBeads) {
+		tree, err := beads.WispTree(ctx, workDir, readEnv, wispID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not read wisp %s: %v\n", wispID, err)
+			continue
 		}
-		if err := bd.ForceCloseWithReason("dog done", wispID); err != nil {
+		n, err := beads.CloseWispTree(ctx, workDir, mutateEnv, "dog done", tree)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not close wisp %s: %v\n", wispID, err)
 			continue
 		}
-		closed++
+		closed += n
 	}
 	return closed, nil
-}
-
-// formulaWispIDs returns the IDs of the beads carrying attached_formula
-// metadata (i.e. formula molecule wisps from `gt sling`), in query order.
-// Hooked ephemeral beads that are NOT formula wisps are excluded — closing
-// those would destroy unrelated work on the dog's hook. Split out as a pure
-// function so the decision logic is unit-testable without a bd/Dolt backend.
-func formulaWispIDs(hookedBeads []*beads.Issue) []string {
-	var ids []string
-	for _, hb := range hookedBeads {
-		if fields := beads.ParseAttachmentFields(hb); fields != nil && fields.AttachedFormula != "" {
-			ids = append(ids, hb.ID)
-		}
-	}
-	return ids
 }
 
 func runDogStatus(cmd *cobra.Command, args []string) error {
