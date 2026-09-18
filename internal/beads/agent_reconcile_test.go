@@ -13,6 +13,55 @@ func agentIssue(desc string, updated time.Time) *Issue {
 	}
 }
 
+// TestParseIssueTime covers the formats bd/Dolt actually emit. Fractional
+// seconds matter beyond reconciliation: the daemon's abandoned-wisp recovery
+// (gt-da2x) gates on this parse, and returning the zero time for a value it
+// rejects silently disables that path. The tests that masked this built their
+// timestamps with second-precision RFC3339, which is the one shape that never
+// exercises the RFC3339Nano branch.
+func TestParseIssueTime(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want time.Time
+	}{
+		{
+			name: "fractional seconds",
+			in:   "2026-09-18T11:31:07.123456789Z",
+			want: time.Date(2026, 9, 18, 11, 31, 7, 123456789, time.UTC),
+		},
+		{
+			name: "millisecond precision with offset",
+			in:   "2026-09-18T06:31:07.289-05:00",
+			want: time.Date(2026, 9, 18, 6, 31, 7, 289000000, time.FixedZone("", -5*3600)),
+		},
+		{
+			name: "whole seconds",
+			in:   "2026-09-18T11:31:07Z",
+			want: time.Date(2026, 9, 18, 11, 31, 7, 0, time.UTC),
+		},
+		{
+			name: "empty",
+			in:   "",
+			want: time.Time{},
+		},
+		{
+			name: "unparseable",
+			in:   "not a timestamp",
+			want: time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseIssueTime(tt.in)
+			if !got.Equal(tt.want) {
+				t.Errorf("ParseIssueTime(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // cleanup_status is deliberately excluded here — it reconciles by severity,
 // not recency (see TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency).
 func TestMergeLegacyAgentBead_NewerRowWinsPerField(t *testing.T) {
