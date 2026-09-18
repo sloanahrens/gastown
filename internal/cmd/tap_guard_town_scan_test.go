@@ -244,7 +244,7 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 		{"scan of a rig directory with no checkouts", `grep -rn TODO ` + filepath.Join(rig, "settings"), false},
 		{"find in an unrelated temp dir", `find ` + other + ` -name x`, false},
 		{"grep for a pattern that collides with a town directory name", `grep -rn logs ` + other, false},
-		{"scan of the town's parent", `grep -rn TODO ` + home, false},
+		{"scan of a sibling of the town", `grep -rn TODO ` + filepath.Join(home, "elsewhere"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,7 +286,7 @@ func TestNestedTownScanPayloadIsBlocked(t *testing.T) {
 
 		// Allowed — the same wrappers around a bounded root.
 		{"wrapped scan of one worktree", `bash -c "grep -rn TODO ."`, false},
-		{"wrapped scan outside the town", `bash -c "grep -rn TODO ` + home + `"`, false},
+		{"wrapped scan outside the town", `bash -c "grep -rn TODO ` + filepath.Join(home, "elsewhere") + `"`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -331,7 +331,8 @@ func TestRunTapGuardDangerousBlocksTownScan(t *testing.T) {
 		{"grep -R over a rig's polecats", `grep -R TODO ` + filepath.Join(town, fakeRigName, "polecats"), true},
 		{"town root reached through a shell wrapper", `bash -c "rg TODO ` + town + `"`, true},
 		{"scan of this one worktree stays allowed", `grep -rn TODO .`, false},
-		{"scan outside the town stays allowed", `grep -rn TODO ` + home, false},
+		{"scan outside the town stays allowed", `grep -rn TODO ` + filepath.Join(home, "elsewhere"), false},
+		{"scan of the literal home directory is blocked", `grep -rn TODO ` + home, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

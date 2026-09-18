@@ -175,6 +175,24 @@ func isWithinRel(rel string) bool {
 // because they cannot be stat'd — the shell turns them into many roots
 // before the walker ever runs, which is exactly the case worth blocking.
 // Existence is one stat(2), never a walk.
+// isHomeDirScanRoot reports whether a resolved scan root IS the home
+// directory. scanRootDenylist catches the shell spellings (~, $HOME, /Users),
+// but an agent that writes the expanded path (/Users/me) has named the same
+// root; a dog did exactly that on 2026-09-18 (`find /Users/sloan -maxdepth 3
+// -name .git`) and walked Documents/Desktop/Music, firing macOS privacy
+// prompts at the operator. Only the exact home path is denied — /Users/me/
+// project stays bounded, consistent with the rest of the denylist.
+func isHomeDirScanRoot(resolved string) bool {
+	if resolved == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	return filepath.Clean(resolved) == filepath.Clean(home)
+}
+
 func scanRootPath(token string) string {
 	if token == "" || strings.HasPrefix(token, "-") {
 		return ""

@@ -546,9 +546,18 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 					"or a search rooted inside the repo/rig instead of the whole filesystem."
 				return reason, alternative
 			}
+			root := scanRootPath(resolved)
+			// The expanded home directory names the same root as ~ / $HOME.
+			if isHomeDirScanRoot(root) {
+				reason = fmt.Sprintf("Unbounded scan (%s rooted at the home directory %s)", base, arg)
+				alternative = "Alternative: search inside the repo/rig you are working in; the home " +
+					"directory holds every checkout plus Documents/Desktop/Music and walking it " +
+					"pegs the host and trips macOS privacy prompts."
+				return reason, alternative
+			}
 			// The same walkers rooted at the town tree: the town root, a rig
 			// root, a rig's worktree directory, or a .repo.git (gt-6e2l).
-			if hazard := townScanHazard(scanRootPath(resolved), townRoot); hazard != "" {
+			if hazard := townScanHazard(root, townRoot); hazard != "" {
 				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, hazard)
 				alternative = townScanAlternative
 				return reason, alternative

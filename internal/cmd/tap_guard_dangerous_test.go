@@ -363,7 +363,7 @@ func TestMatchesUnboundedScan(t *testing.T) {
 		{"find .", "find . -name x", false},
 		{"find relative", "find src -name x", false},
 		{"find /tmp", "find /tmp -name x", false},
-		{"find /Users/sloan", "find /Users/sloan -name x", false},
+		{"find another user's home", "find /Users/someone-else -name x", false},
 		{"grep without -r", "grep TODO file.go", false},
 		{"ls -r reverse sort, not recursive", "ls -r /", false},
 		{"ls plain", "ls /", false},
@@ -831,5 +831,53 @@ func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUnboundedScanLiteralHomeDir: the denylist catches the shell spellings
+// of the home directory (~, $HOME, /Users) but an agent that writes the
+// EXPANDED path names the same root and walked through unblocked — dog alpha
+// ran `find /Users/sloan -maxdepth 3 -name .git` on 2026-09-18 and macOS
+// privacy prompts for Documents/Desktop/Music landed on the operator. The
+// literal home path must block exactly like ~; a path one level below it
+// must stay allowed, or the fix is just "block scans" wearing a home check.
+func TestUnboundedScanLiteralHomeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"find literal home with -maxdepth", "find " + home + " -maxdepth 3 -name .git -type d", true},
+		{"find literal home trailing slash", "find " + home + "/ -name x", true},
+		{"grep -r literal home", "grep -r foo " + home, true},
+		{"du literal home", "du -sh " + home, true},
+		{"rg literal home", "rg pattern " + home, true},
+		{"find path below home", "find " + home + "/project -name x", false},
+		{"ls literal home (not recursive)", "ls -la " + home, false},
+		{"find ~ still blocked", "find ~ -name x", true},
+	}
+	blockedCount := 0
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), "")
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if got {
+				blockedCount++
+				if alternative == "" {
+					t.Errorf("matchesUnboundedScan(%q) blocked but returned no alternative text", tt.command)
+				}
+			}
+		})
+	}
+	// Count assertion: a version of the rule that blocks nothing, or blocks
+	// everything, fails here even if every per-case check were rewritten.
+	if blockedCount != 6 {
+		t.Errorf("blocked %d of %d cases, want exactly 6", blockedCount, len(tests))
 	}
 }
