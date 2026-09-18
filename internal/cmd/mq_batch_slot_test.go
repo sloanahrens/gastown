@@ -136,6 +136,13 @@ const (
 // deadlock against its own ancestor's flock — it inherits the reentrant
 // marker acquireBatchGateSlot's underlying slot.Acquire call sets, and takes
 // the fast path instead of blocking for the full batchSlotTimeout.
+//
+// The child acquires under the SAME role as the holder, which is what the
+// fast path admits since gt-off9: the marker names the holder's role, so
+// only the holder's own work rides it (a caller naming different work
+// contends instead — see internal/slot's TestAcquire_MarkerRoleScopesTheFastPath,
+// and the `--role` flag's doc in slot.go). A gate-command subprocess that
+// nests its own `gt slot run` must pass this role to stay reentrant.
 func TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
@@ -176,9 +183,10 @@ func TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock(t *testing.T) {
 // TestHelperMQBatchReentrantAcquire is not a real test; it is spawned as a
 // subprocess by TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock. It
 // inherits the reentrant marker from its parent's successful
-// acquireBatchGateSlot call and must acquire near-instantly via the
-// reentrant fast path rather than blocking on the flock its parent still
-// holds.
+// acquireBatchGateSlot call — the same rig, so the same
+// "<rig>/refinery-batch" role the marker names — and must acquire
+// near-instantly via the reentrant fast path rather than blocking on the
+// flock its parent still holds.
 func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 	if os.Getenv(mqBatchReentrantHelperEnvVar) != "1" {
 		t.Skip("not invoked as mq-batch reentrant-acquire helper")
@@ -191,7 +199,7 @@ func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 	townRoot := os.Getenv(mqBatchReentrantTownRootEnvVar)
 
 	start := time.Now()
-	h, err := acquireBatchGateSlot(townRoot, "gastown-child", "make test")
+	h, err := acquireBatchGateSlot(townRoot, "gastown", "make test")
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("reentrant child acquireBatchGateSlot: %v", err)
