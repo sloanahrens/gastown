@@ -1513,11 +1513,18 @@ func (d *Daemon) runMechanicalBootTriage() {
 	// Count the attempt for the cooldown whether or not it succeeds, so a
 	// failing triage cannot re-run on every heartbeat.
 	d.bootLastSpawned = time.Now()
-	exe, err := os.Executable()
+	exe, err := bootTriageExecutable()
 	if err != nil {
 		d.bootTriageInFlight.Store(false)
 		d.logger.Printf("Boot: cannot resolve gt binary for mechanical triage: %v; falling back to direct Deacon check", err)
 		d.ensureDeaconRunning()
+		return
+	}
+	if strings.HasSuffix(exe, ".test") {
+		// Under `go test` the executable is the test binary; exec'ing it
+		// with "boot triage" would run the whole suite again, recursively.
+		d.bootTriageInFlight.Store(false)
+		d.logger.Printf("Boot: mechanical triage skipped: executable %s is a test binary", filepath.Base(exe))
 		return
 	}
 	townRoot := d.config.TownRoot
@@ -1541,6 +1548,10 @@ func (d *Daemon) runMechanicalBootTriage() {
 		d.logger.Printf("Boot: mechanical triage: %s", summary)
 	}()
 }
+
+// bootTriageExecutable resolves the gt binary that runs `boot triage` in
+// mechanical mode. A variable so tests can point it at a stub.
+var bootTriageExecutable = os.Executable
 
 // bootUsesMechanicalTriage reports whether Boot triage runs in-process
 // (operational.daemon.boot_mode unset or "mechanical") rather than as a

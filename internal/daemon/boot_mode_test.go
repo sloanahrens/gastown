@@ -6,7 +6,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // The daemon-level decision: boot_mode unset or "mechanical" runs triage
@@ -48,5 +53,71 @@ func TestRunMechanicalBootTriage_InFlightGuardAndCooldownStamp(t *testing.T) {
 	d.runMechanicalBootTriage()
 	if !d.bootLastSpawned.IsZero() {
 		t.Error("a skipped (in-flight) triage must not move the cooldown stamp")
+	}
+}
+
+// Default (mechanical) mode end to end: ensureBootRunning runs the stub
+// `gt boot triage` instead of opening a tmux session, and stamps the
+// cooldown. The stub records its argv so we know what would have run.
+func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binaries need bash")
+	}
+	townRoot := t.TempDir()
+	fakeBinDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeTmux(t, fakeBinDir)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", tmuxLog)
+	t.Setenv("GT_DEGRADED", "false")
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	stub := filepath.Join(fakeBinDir, "gt")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho \"$@\" >> "+argvLog+"\necho 'Triage complete: nothing'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := bootTriageExecutable
+	bootTriageExecutable = func() (string, error) { return stub, nil }
+	t.Cleanup(func() { bootTriageExecutable = orig })
+
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
+	d.ensureBootRunning()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, _ := os.ReadFile(argvLog); strings.Contains(string(b), "boot triage") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(argvLog)
+	if !strings.Contains(string(b), "boot triage") {
+		t.Fatalf("mechanical mode did not run `gt boot triage`; argv log: %q", string(b))
+	}
+	if d.bootLastSpawned.IsZero() {
+		t.Error("cooldown stamp not set by mechanical triage")
+	}
+	data, _ := os.ReadFile(tmuxLog)
+	if strings.Contains(string(data), "new-session") {
+		t.Errorf("mechanical mode must not open a Boot tmux session; tmux log: %s", data)
+	}
+}
+
+// Under go test the executable is the test binary; the mechanical path must
+// refuse to exec it (that would re-run the suite recursively).
+func TestRunMechanicalBootTriage_RefusesTestBinary(t *testing.T) {
+	orig := bootTriageExecutable
+	bootTriageExecutable = func() (string, error) { return "/tmp/daemon.test", nil }
+	t.Cleanup(func() { bootTriageExecutable = orig })
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), ctx: context.Background()}
+	d.runMechanicalBootTriage()
+	if d.bootTriageInFlight.Load() {
+		t.Error("in-flight flag left set after refusing a test binary")
 	}
 }

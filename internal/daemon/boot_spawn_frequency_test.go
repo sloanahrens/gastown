@@ -76,6 +76,7 @@ func TestEnsureBootRunning_DoesNotSpawnEveryTick(t *testing.T) {
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", tmuxLog)
 	t.Setenv("GT_DEGRADED", "false")
+	useAgentBootMode(t, townRoot)
 
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
@@ -122,6 +123,7 @@ func TestEnsureBootRunning_SuppressesWhenDeaconHealthy(t *testing.T) {
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", tmuxLog)
 	t.Setenv("GT_DEGRADED", "false")
+	useAgentBootMode(t, townRoot)
 
 	// Write a boot-status.json indicating deacon was healthy ("nothing") recently.
 	b := boot.New(townRoot)
@@ -175,6 +177,7 @@ func TestEnsureBootRunning_SpawnsWhenDeaconUnhealthy(t *testing.T) {
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", tmuxLog)
 	t.Setenv("GT_DEGRADED", "false")
+	useAgentBootMode(t, townRoot)
 
 	// Write a boot-status.json indicating Boot had to wake deacon recently.
 	b := boot.New(townRoot)
@@ -209,5 +212,18 @@ func TestEnsureBootRunning_SpawnsWhenDeaconUnhealthy(t *testing.T) {
 	}
 	if spawns != 1 {
 		t.Fatalf("boot spawn count = %d, want 1 (should spawn when deacon was unhealthy)", spawns)
+	}
+}
+
+// useAgentBootMode opts a test town into boot_mode=agent, so tests that
+// assert on Boot tmux spawns keep exercising the agent path now that the
+// default is mechanical (gt-fo2k).
+func useAgentBootMode(t *testing.T, townRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte(`{"operational":{"daemon":{"boot_mode":"agent"}}}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
