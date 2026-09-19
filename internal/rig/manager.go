@@ -20,7 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -1282,11 +1281,8 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
 
 	// Check if source repo has tracked .beads/ (cloned into mayor/rig).
-	// We detect this by checking for metadata.json (a real beads database marker),
-	// not just the directory existence. This avoids false positives when we
-	// create mayorRigBeads for the untracked case (just a redirect container).
-	mayorRigMetadata := filepath.Join(mayorRigBeads, "metadata.json")
-	if _, err := os.Stat(mayorRigMetadata); err == nil {
+	// If so, create a redirect file instead of a new database.
+	if _, err := os.Stat(mayorRigBeads); err == nil {
 		// Tracked beads exist - create redirect to mayor/rig/.beads
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
 			return err
@@ -1389,28 +1385,11 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// Ensure database has repository fingerprint (GH #25).
 	// This is idempotent - safe on both new and legacy (pre-0.17.5) databases.
 	// Without fingerprint, the bd daemon fails to start silently.
-	fingerprintCmd := exec.Command("bd", "migrate", "--update-repo-id")
-	fingerprintCmd.Dir = rigPath
-	fingerprintCmd.Env = filteredEnv
+	migrateCmd := exec.Command("bd", "migrate", "--update-repo-id")
+	migrateCmd.Dir = rigPath
+	migrateCmd.Env = filteredEnv
 	// Ignore errors - fingerprint is optional for functionality
-	_, _ = fingerprintCmd.CombinedOutput()
-
-	// Ensure .local_version file exists with current bd version string.
-	// This file is required for Dolt server compatibility - without it, bd
-	// reports "legacy Dolt server workspace detected; explicit migration is required".
-	// Derive the version from the installed bd binary at runtime to avoid
-	// hardcoding and potential drift from the actual installed version.
-	localVersionPath := filepath.Join(beadsDir, ".local_version")
-	if bdStatus, bdVersion := deps.CheckBeads(); bdStatus == deps.BeadsOK {
-		if err := os.WriteFile(localVersionPath, []byte(bdVersion+"\n"), 0644); err != nil {
-			return fmt.Errorf("writing .local_version: %w", err)
-		}
-	} else {
-		// bd not found or version undetermined - write a placeholder
-		// This allows the rig to function, but bd may report a compatibility warning
-		// until a compatible bd is installed.
-		fmt.Fprintf(os.Stderr, "Warning: Could not determine bd version for .local_version\n")
-	}
+	_, _ = migrateCmd.CombinedOutput()
 
 	// NOTE: We intentionally do NOT create routes.jsonl in rig beads.
 	// bd's routing walks up to find town root (via mayor/town.json) and uses
