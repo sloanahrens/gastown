@@ -1273,6 +1273,48 @@ func (g *Git) NotesCopy(ref, from, to string) error {
 	return err
 }
 
+// NoteEntry pairs a note's annotated object with its content under a notes ref.
+type NoteEntry struct {
+	// Annotated is the object (usually a commit) the note is attached to.
+	Annotated string
+	// Content is the note's content.
+	Content string
+}
+
+// NotesList returns every note in ref as (annotated object, content) pairs.
+//
+// Unlike reading a note on a known sha, this finds notes whose annotated
+// object is not reachable from any branch — a review can be keyed to a
+// rehearsal commit that was later discarded, and that note is exactly what a
+// backfill needs to find. So it reads the notes ref directly (git notes
+// --ref <ref> list) instead of walking history.
+//
+// An absent notes ref is not an error: it yields an empty list, so callers
+// treat "no notes at all" and "no matching note" the same way.
+func (g *Git) NotesList(ref string) ([]NoteEntry, error) {
+	out, err := g.run("notes", "--ref", ref, "list")
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]NoteEntry, 0, len(out)/48)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		annotated := fields[1]
+		content, err := g.NotesShow(ref, annotated)
+		if err != nil {
+			if errors.Is(err, ErrNoNote) {
+				continue
+			}
+			return nil, fmt.Errorf("read note on %s: %w", annotated, err)
+		}
+		entries = append(entries, NoteEntry{Annotated: annotated, Content: content})
+	}
+	return entries, nil
+}
+
 // PushNotes pushes the notes ref to remote (git push <remote> refs/notes/<ref>),
 // with the same hang-prevention timeout as Push.
 func (g *Git) PushNotes(remote, ref string) error {
@@ -2475,6 +2517,21 @@ func (g *Git) CleanForce() error {
 // Rev returns the commit hash for the given ref.
 func (g *Git) Rev(ref string) (string, error) {
 	return g.run("rev-parse", ref)
+}
+
+// Parents returns the parent shas of commit, in order (git rev-list
+// --parents -n 1). A merge commit's second parent is parents[1], which is the
+// polecat head a merge queue merge brought in.
+func (g *Git) Parents(commit string) ([]string, error) {
+	out, err := g.run("rev-list", "--parents", "-n", "1", commit)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("resolve commit %s: no such object", commit)
+	}
+	return fields[1:], nil
 }
 
 // IsAncestor checks if ancestor is an ancestor of descendant.
