@@ -1551,6 +1551,12 @@ func stripStdoutWarnings(data []byte) []byte {
 	return bytes.Join(cleaned, []byte("\n"))
 }
 
+// IsJSONBytes reports whether b holds JSON rather than plain text, by its
+// first non-whitespace byte. Callers that parse bd output use it to tell an
+// empty result ("No issues found.") from a real payload, instead of reporting
+// a parse error for a query that simply matched nothing.
+func IsJSONBytes(b []byte) bool { return isJSONBytes(b) }
+
 // isJSONBytes returns true if the byte slice starts with [ or { (after whitespace).
 // bd list --json may return plain text like "No issues found." instead of JSON
 // when there are no results.

@@ -132,6 +132,10 @@ type PatrolsConfig struct {
 	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
 	QuotaResume            *QuotaDogConfig                `json:"quota_resume,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
+
+	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
+	// per run; the open bead is the double-dispatch guard (gt-nj23).
+	ScheduledSlings *ScheduledSlingsConfig `json:"scheduled_slings,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -254,6 +258,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.DoltRemotes.Enabled
+	}
+	if patrol == "scheduled_slings" {
+		if config == nil || config.Patrols == nil || config.Patrols.ScheduledSlings == nil {
+			return false
+		}
+		return config.Patrols.ScheduledSlings.Enabled
 	}
 	if patrol == "dolt_backup" {
 		if config == nil || config.Patrols == nil || config.Patrols.DoltBackup == nil {
