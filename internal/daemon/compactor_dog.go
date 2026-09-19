@@ -56,12 +56,6 @@ type CompactorDogConfig struct {
 	// Databases lists specific database names to check.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
 	Databases []string `json:"databases,omitempty"`
-	// Mode is deprecated: compactor_dog no longer auto-flattens.
-	// Kept for config compatibility; any value is ignored.
-	Mode string `json:"mode,omitempty"`
-	// KeepRecent is deprecated: compactor_dog no longer auto-flattens.
-	// Kept for config compatibility; any value is ignored.
-	KeepRecent int `json:"keep_recent,omitempty"`
 }
 
 // compactorDogInterval returns the configured interval, or the default (24h).
@@ -91,26 +85,6 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 		}
 	}
 	return defaultCompactorCommitThreshold
-}
-
-// compactorDogMode returns the configured compaction mode ("flatten" or "surgical").
-func compactorDogMode(config *DaemonPatrolConfig) string {
-	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
-		if config.Patrols.CompactorDog.Mode == "surgical" {
-			return "surgical"
-		}
-	}
-	return "flatten"
-}
-
-// compactorDogKeepRecent returns the configured keep-recent count, or the default (50).
-func compactorDogKeepRecent(config *DaemonPatrolConfig) int {
-	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
-		if config.Patrols.CompactorDog.KeepRecent > 0 {
-			return config.Patrols.CompactorDog.KeepRecent
-		}
-	}
-	return 50
 }
 
 // runCompactorDog checks each production database's commit count and escalates
