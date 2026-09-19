@@ -48,19 +48,19 @@ const (
 type CompactorDogConfig struct {
 	Enabled     bool     `json:"enabled"`
 	IntervalStr string   `json:"interval,omitempty"`
-	// Threshold is the minimum commit count before compaction triggers.
-	// Defaults to 2000 if not set.
+	// Threshold is the minimum commit count before escalation triggers.
+	// The daemon monitors and escalates (does not auto-flatten) when threshold
+	// is exceeded. The default (2000) prevents escalation feedback loops.
+	// See plugins/compactor-dog/plugin.md for the 500/1000 escalation policy.
 	Threshold int `json:"threshold,omitempty"`
-	// Databases lists specific database names to compact.
+	// Databases lists specific database names to check.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
 	Databases []string `json:"databases,omitempty"`
-	// Mode selects the compaction strategy: "flatten" (default) or "surgical".
-	// Flatten squashes all history into 1 commit. Surgical keeps recent
-	// commits individual while squashing old ones via interactive rebase.
+	// Mode is deprecated: compactor_dog no longer auto-flattens.
+	// Kept for config compatibility; any value is ignored.
 	Mode string `json:"mode,omitempty"`
-	// KeepRecent is the number of recent commits to preserve as individual
-	// picks during surgical rebase. Only used when Mode is "surgical".
-	// Defaults to 50 if not set.
+	// KeepRecent is deprecated: compactor_dog no longer auto-flattens.
+	// Kept for config compatibility; any value is ignored.
 	KeepRecent int `json:"keep_recent,omitempty"`
 }
 
@@ -77,9 +77,13 @@ func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // compactorDogThreshold returns the configured commit threshold, or
-// defaultCompactorCommitThreshold (2000). Note this daemon patrol compacts on
-// its own; it does not share the agent-facing plugin's 500/1000 escalation
-// policy — see plugins/compactor-dog/plugin.md.
+// defaultCompactorCommitThreshold (2000). This daemon patrol escalates
+// (monitors only, no auto-flatten) when threshold exceeded, reconciling with
+// the agent-facing plugin's 500/1000 escalation policy. The 2000 default
+// prevents the escalation feedback loop: each compaction failure at 500
+// creates more commits than the compactor can drain, which would re-trigger
+// compaction every 24h cycle. The plugin's 500/1000 thresholds are the
+// escalation signals; the daemon's 2000 is the guard against feedback.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
 	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
 		if config.Patrols.CompactorDog.Threshold > 0 {
@@ -109,16 +113,14 @@ func compactorDogKeepRecent(config *DaemonPatrolConfig) int {
 	return 50
 }
 
-// runCompactorDog checks each production database's commit count and compacts
-// any that exceed the threshold. Two modes:
+// runCompactorDog checks each production database's commit count and escalates
+// (monitors only, no auto-flatten) when threshold exceeded. This reconciles
+// with the agent-facing plugin's 500/1000 escalation policy: the daemon runs
+// daily and uses a higher threshold (2000) to prevent escalation feedback loops.
 //
-// Flatten mode (default): soft-resets to root commit on main, commits all data
-// as a single commit. Safe with concurrent writes.
-//
-// Surgical mode: interactive rebase that squashes old commits while preserving
-// recent N as individual picks. NOT safe with concurrent writes — retries once.
-//
-// After successful compaction, runs dolt gc to reclaim unreferenced chunks.
+// The feedback loop guard: each compaction failure at 500 commits creates more
+// beads/commits than the compactor can drain, which would re-trigger compaction
+// every 24h cycle. The 2000 threshold provides buffer against this.
 //
 // ZFC Exemption: This dog executes imperatively in Go rather than via agent-driven
 // formula execution. The mol-dog-compactor formula is used for observability
@@ -133,26 +135,22 @@ func (d *Daemon) runCompactorDog() {
 	}
 
 	threshold := compactorDogThreshold(d.patrolConfig)
-	mode := compactorDogMode(d.patrolConfig)
-	d.logger.Printf("compactor_dog: starting compaction cycle (threshold=%d, mode=%s)", threshold, mode)
-	if mode == "surgical" {
-		d.logger.Printf("compactor_dog: WARNING: surgical mode uses DOLT_REBASE which is not safe with concurrent writes — will retry on graph-change errors")
-	}
+	d.logger.Printf("compactor_dog: starting monitoring cycle (threshold=%d)", threshold)
 
 	mol := d.pourDogMolecule(constants.MolDogCompactor, nil)
 	defer mol.close()
 
 	databases := d.compactorDatabases()
 	if len(databases) == 0 {
-		d.logger.Printf("compactor_dog: no databases to compact")
+		d.logger.Printf("compactor_dog: no databases to check")
 		mol.failStep("inspect", "no databases found")
 		return
 	}
 
 	mol.closeStep("inspect")
 
-	compacted := 0
-	skipped := 0
+	aboveThreshold := 0
+	belowThreshold := 0
 	errors := 0
 
 	for _, dbName := range databases {
@@ -163,70 +161,28 @@ func (d *Daemon) runCompactorDog() {
 			continue
 		}
 
-		if commitCount < threshold {
-			d.logger.Printf("compactor_dog: %s: %d commits (below threshold %d), skipping",
+		if commitCount >= threshold {
+			d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — ESCALATING",
 				dbName, commitCount, threshold)
-			skipped++
-			continue
-		}
-
-		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — compacting (mode=%s)",
-			dbName, commitCount, threshold, mode)
-
-		// Pre-flight: fetch from remote and verify local ≥ remote before
-		// compacting. Flatten rewrites the commit graph, so force-push after
-		// compaction would overwrite any remote-only commits. Skip compaction
-		// if the remote has diverged.
-		diverged, fetchErr := d.compactorFetchAndVerify(dbName)
-		if fetchErr != nil {
-			d.logger.Printf("compactor_dog: %s: pre-flight fetch failed: %v (skipping)", dbName, fetchErr)
-			skipped++
-			continue
-		}
-		if diverged {
-			d.logger.Printf("compactor_dog: %s: remote has diverged — skipping compaction to avoid data loss", dbName)
-			skipped++
-			continue
-		}
-
-		var compactErr error
-		if mode == "surgical" {
-			keepRecent := compactorDogKeepRecent(d.patrolConfig)
-			compactErr = d.surgicalRebase(dbName, keepRecent)
+			d.escalate("compactor_dog", fmt.Sprintf("Commit threshold exceeded for %s: %d commits (threshold %d). Compaction is operator-only via plugins/compactor-dog/run.sh --compact. See plugin.md for escalation policy.", dbName, commitCount, threshold))
+			aboveThreshold++
 		} else {
-			compactErr = d.compactDatabase(dbName)
-		}
-		if compactErr != nil {
-			d.logger.Printf("compactor_dog: %s: compaction FAILED: %v", dbName, compactErr)
-			d.escalate("compactor_dog", fmt.Sprintf("Compaction failed for %s: %v", dbName, compactErr))
-			errors++
-		} else {
-			compacted++
-			// Run gc after successful compaction to reclaim unreferenced chunks.
-			// Order matters: rebase first (compactDatabase), gc second.
-			if err := d.compactorRunGC(dbName); err != nil {
-				d.logger.Printf("compactor_dog: %s: gc after compaction failed: %v", dbName, err)
-			}
-			// Force-push to DoltHub remote after compaction. Flatten rewrites
-			// the commit graph, so standard push always fails with non-fast-forward.
-			// Safe because compactorFetchAndVerify confirmed local ≥ remote
-			// before compaction, and compactDatabase verified integrity.
-			if err := d.compactorForcePush(dbName); err != nil {
-				d.logger.Printf("compactor_dog: %s: force-push failed: %v", dbName, err)
-			}
+			d.logger.Printf("compactor_dog: %s: %d commits (below threshold %d), OK",
+				dbName, commitCount, threshold)
+			belowThreshold++
 		}
 	}
 
 	if errors > 0 {
-		mol.failStep("compact", fmt.Sprintf("%d databases had errors", errors))
+		mol.failStep("inspect", fmt.Sprintf("%d databases had errors", errors))
 	} else {
-		mol.closeStep("compact")
+		mol.closeStep("inspect")
 	}
 
 	mol.closeStep("verify")
 
-	d.logger.Printf("compactor_dog: cycle complete — compacted=%d skipped=%d errors=%d",
-		compacted, skipped, errors)
+	d.logger.Printf("compactor_dog: cycle complete — above_threshold=%d below_threshold=%d errors=%d",
+		aboveThreshold, belowThreshold, errors)
 	mol.closeStep("report")
 }
 
