@@ -747,6 +747,20 @@ func (s *fakeReaperState) moleculeStepCandidatesLocked() []string {
 	return ids
 }
 
+func (s *fakeReaperState) absentParentCandidatesLocked() []string {
+	var ids []string
+	for id, w := range s.wisps {
+		if !isOpenWispStatus(w.status) || w.issueType == "agent" {
+			continue
+		}
+		if s.hasAbsentParentLocked(id) && !s.hasOpenParentLocked(id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func (s *fakeReaperState) isMoleculeStepCandidateLocked(id string) bool {
 	w := s.wisps[id]
 	if w == nil || !isOpenWispStatus(w.status) || w.issueType == "agent" {
@@ -862,6 +876,18 @@ func (s *fakeReaperState) hasOpenParentLocked(id string) bool {
 	return false
 }
 
+func (s *fakeReaperState) hasAbsentParentLocked(id string) bool {
+	for _, dep := range s.deps {
+		if dep.issueID != id || dep.depType != "parent-child" {
+			continue
+		}
+		if dep.dependsOnID != "" && s.wisps[dep.dependsOnID] == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *fakeReaperState) openCountLocked() int {
 	count := 0
 	for _, w := range s.wisps {
@@ -925,6 +951,12 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM issues"):
 		return fakeCountRows(0), nil
+	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisp_dependencies wd") && strings.Contains(normalized, "pm.id IS NULL"):
+		// absent-parent molecule count
+		return fakeCountRows(len(c.state.absentParentCandidatesLocked())), nil
+	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "INNER JOIN wisp_dependencies wd") && strings.Contains(normalized, "pm.id IS NULL"):
+		// absent-parent molecule step ID query
+		return fakeIDRows(c.state.absentParentCandidatesLocked()), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisp_dependencies wd"):
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "created_at <"):

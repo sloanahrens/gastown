@@ -588,6 +588,26 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	}
 	result.MoleculeStepsClosed = moleculeStepsClosed
 
+	// Close wisps whose parent molecule record was purged (absent parent).
+	// These are molecule step-wisps that the reaper should reap but the closedMoleculeStep
+	// subquery misses because INNER JOIN wisps pm requires the parent row to exist.
+	absentParentIDQuery := fmt.Sprintf(
+		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
+		"INNER JOIN wisp_dependencies wd ON wd.issue_id = w.id LEFT JOIN wisps pm ON pm.id = wd.depends_on_wisp_id",
+		"wd.type = 'parent-child' AND (wd.depends_on_wisp_id IS NOT NULL OR wd.depends_on_issue_id IS NOT NULL) AND pm.id IS NULL"+
+			" AND NOT EXISTS ("+
+			"  SELECT 1 FROM wisp_dependencies open_dep"+
+			"  LEFT JOIN wisps open_pw ON open_pw.id = open_dep.depends_on_wisp_id"+
+			"  LEFT JOIN issues open_pi ON open_pi.id = open_dep.depends_on_issue_id"+
+			"  WHERE open_dep.issue_id = wd.issue_id"+
+			"  AND open_dep.type = 'parent-child'"+
+			"  AND (open_pw.status IN ('open', 'hooked', 'in_progress') OR open_pi.status IN ('open', 'hooked', 'in_progress') OR open_dep.depends_on_external IS NOT NULL)"+
+			") AND w.issue_type != 'agent'", DefaultBatchSize)
+	absentParentClosed, err := closeWispsInBatches(ctx, conn, absentParentIDQuery, nil, "absent-parent molecule steps")
+	if err != nil {
+		return nil, err
+	}
+
 	// Batch UPDATE: select IDs in chunks, update each chunk.
 	// This avoids holding a write lock on the entire table for minutes.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
@@ -601,7 +621,7 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	}
 
 	result.Reaped = totalReaped
-	totalClosed := totalReaped + moleculeStepsClosed
+	totalClosed := totalReaped + moleculeStepsClosed + absentParentClosed
 
 	if totalClosed > 0 {
 		// Flush the SQL transaction to the Dolt working set before DOLT_COMMIT.
