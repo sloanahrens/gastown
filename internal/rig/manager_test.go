@@ -565,14 +565,14 @@ func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	// pointing to mayor/rig/.beads instead of creating a local database.
 	rigPath := t.TempDir()
 
-	// Simulate tracked beads in the cloned repo
+	// Simulate tracked beads in the cloned repo (metadata.json is the marker)
 	mayorBeadsDir := filepath.Join(rigPath, "mayor", "rig", ".beads")
 	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
 		t.Fatalf("mkdir mayor beads: %v", err)
 	}
-	// Create a config file to simulate a real beads directory
-	if err := os.WriteFile(filepath.Join(mayorBeadsDir, "config.yaml"), []byte("prefix: gt\n"), 0644); err != nil {
-		t.Fatalf("write mayor config: %v", err)
+	// Create metadata.json to simulate a real beads database
+	if err := os.WriteFile(filepath.Join(mayorBeadsDir, "metadata.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("write mayor metadata.json: %v", err)
 	}
 
 	manager := &Manager{}
