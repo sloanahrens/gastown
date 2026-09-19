@@ -227,6 +227,9 @@ test-makefile:
 	bash -n plugins/compactor-dog/run.sh
 	bash -n plugins/compactor-dog/run_test.sh
 	bash plugins/compactor-dog/run_test.sh
+	bash -n plugins/rebuild-gt/run.sh
+	bash -n plugins/rebuild-gt/run_test.sh
+	bash plugins/rebuild-gt/run_test.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:
