@@ -290,8 +290,8 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 
 	var issues []*beads.Issue
 	if escalateListAll {
-		// List all (open and closed)
-		out, err := bd.Run("list", "--label=gt:escalation", "--status=all", "--include-infra", "--json")
+		// List all (open and closed) - use RunWithRouting to query all rigs
+		out, err := bd.RunWithRouting("list", "--label=gt:escalation", "--status=all", "--include-infra", "--json")
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}

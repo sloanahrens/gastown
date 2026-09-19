@@ -305,8 +305,10 @@ func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) 
 // hides by default. Without --include-infra this silently returned zero
 // results while escalations sat open and unseen — the same bug class as
 // gt-4mnd.
+//
+// Uses runWithRouting to query across all rigs (not just the current database).
 func (b *Beads) ListEscalations() ([]*Issue, error) {
-	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
+	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -320,11 +322,13 @@ func (b *Beads) ListEscalations() ([]*Issue, error) {
 }
 
 // ListEscalationsByFingerprint returns open escalation beads matching a stable fingerprint label.
+//
+// Uses runWithRouting to query across all rigs (not just the current database).
 func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue, error) {
 	if fingerprintLabel == "" {
 		return nil, nil
 	}
-	out, err := b.run("list",
+	out, err := b.runWithRouting("list",
 		"--label=gt:escalation",
 		"--label="+fingerprintLabel,
 		"--status=open",
@@ -344,8 +348,10 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 }
 
 // ListEscalationsBySeverity returns open escalation beads filtered by severity.
+//
+// Uses runWithRouting to query across all rigs (not just the current database).
 func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
-	out, err := b.run("list",
+	out, err := b.runWithRouting("list",
 		"--label=gt:escalation",
 		"--label=severity:"+severity,
 		"--status=open",

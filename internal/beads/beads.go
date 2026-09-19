@@ -1108,8 +1108,18 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 // Run executes a bd command and returns stdout.
 // This is a public wrapper around the internal run method for cases where
 // callers need to run arbitrary bd commands.
+//
+// Note: This uses BEADS_DIR routing, so it only queries the current database.
+// For cross-rig queries, use RunWithRouting().
 func (b *Beads) Run(args ...string) ([]byte, error) {
 	return b.run(args...)
+}
+
+// RunWithRouting executes a bd command with native routing enabled.
+// This strips BEADS_DIR so bd uses its prefix-based routing to query all databases.
+// Use this for list operations that need to see escalations across all rigs.
+func (b *Beads) RunWithRouting(args ...string) ([]byte, error) {
+	return b.runWithRouting(args...)
 }
 
 // wrapError wraps bd errors with context.
