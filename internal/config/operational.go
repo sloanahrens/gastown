@@ -114,6 +114,11 @@ const (
 	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
 	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
+	// DefaultWitnessComposerStallFrozenFor is how long a session must produce
+	// no output while holding unsubmitted composer input before the witness
+	// treats it as stalled (gt-hkhu). It matches the interim threshold the
+	// operators applied by hand during the 2026-09-18 refinery stalls.
+	DefaultWitnessComposerStallFrozenFor = 5 * time.Minute
 )
 
 // Container-gate pool defaults (gt-yihz).
@@ -766,6 +771,16 @@ func (wt *WitnessThresholds) StartupActivityGraceD() time.Duration {
 		return ParseDurationOrDefault(wt.StartupActivityGrace, DefaultWitnessStartupActivityGrace)
 	}
 	return DefaultWitnessStartupActivityGrace
+}
+
+// ComposerStallFrozenForD returns the configured or default window a session
+// must produce no output while holding unsubmitted composer input before the
+// witness treats it as stalled (gt-hkhu).
+func (wt *WitnessThresholds) ComposerStallFrozenForD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.ComposerStallFrozenFor, DefaultWitnessComposerStallFrozenFor)
+	}
+	return DefaultWitnessComposerStallFrozenFor
 }
 
 // MaxBeadRespawnsV returns the configured or default max bead respawns.
