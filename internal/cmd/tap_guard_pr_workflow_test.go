@@ -169,3 +169,47 @@ func TestPRWorkflowGuard_Integration(t *testing.T) {
 		})
 	}
 }
+
+	// Regression tests for gt-3mp1: the if-glob evaluator in Claude Code
+	// has a bug where it treats certain shell patterns as "match any pattern
+	// starting with *" when it cannot statically resolve them. This caused
+	// every if-gated deny hook to fire on unrelated commands.
+
+	t.Run("brace-group with quoted string does not false-fire", func(t *testing.T) {
+		// Pattern (a): Commands with { brace group containing a quoted string
+		// trip the if-glob evaluator, which then matches any leading-* glob
+		commands := []string{
+			`echo x{'a'}y`,
+			`echo x{"a"}y`,
+			`python3 - <<'EOF'
+print({'a'})
+EOF`,
+		}
+		for _, cmd := range commands {
+			t.Run("", func(t *testing.T) {
+				code, _ := run(t, cmd, false) // outside agent context
+				if code != 0 {
+					t.Errorf("exit code = %d, want 0 (brace-group with quoted string should not trip the guard)", code)
+				}
+			})
+		}
+	})
+
+	t.Run("command substitution with bare $VAR does not false-fire", func(t *testing.T) {
+		// Pattern (b): Variable assigned from command substitution in the same
+		// command line, then used as a bare double-quoted argument trips hooks
+		commands := []string{
+			`M=$(echo abc); echo "$M"`,
+			`ID=$(gt mail inbox --json 2>/dev/null | python3 -c "import json,sys; m=json.load(sys.stdin); print(m[0]['id'] if m else '')"); gt mail read "$ID"`,
+			`MAIN=$(git ls-remote --heads origin main | cut -f1); git cat-file -e "$MAIN"`,
+		}
+		for _, cmd := range commands {
+			t.Run("", func(t *testing.T) {
+				code, _ := run(t, cmd, false) // outside agent context
+				if code != 0 {
+					t.Errorf("exit code = %d, want 0 (command substitution with bare $VAR should not trip the guard)", code)
+				}
+			})
+		}
+	})
+}
