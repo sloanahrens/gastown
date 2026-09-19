@@ -185,7 +185,18 @@ func (s polecatPathScope) checkFileTarget(raw, tool string) string {
 	if s.isWorktreePath(target) || s.isScratchPath(target) {
 		return ""
 	}
-	return fmt.Sprintf("%s target is outside your worktree: %s (yours: %s). Polecats edit only their own worktree; use /tmp for scratch files.", tool, target, s.worktree)
+	// List the allowed scratch locations for the error message.
+	scratchDirs := make([]string, 0, len(s.scratch))
+	for _, root := range s.scratch {
+		// Show the path relative to HOME if possible for readability
+		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(root, home+string(filepath.Separator)) {
+			rel := strings.TrimPrefix(root, home+string(filepath.Separator))
+			scratchDirs = append(scratchDirs, "~/"+rel)
+		} else {
+			scratchDirs = append(scratchDirs, root)
+		}
+	}
+	return fmt.Sprintf("%s target is outside your worktree: %s (yours: %s). Allowed scratch locations: %s", tool, target, s.worktree, strings.Join(scratchDirs, ", "))
 }
 
 // checkBashCommand reports why a Bash command must be blocked, or "". depth
