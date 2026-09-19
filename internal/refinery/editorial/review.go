@@ -371,9 +371,9 @@ func captureRawOutput(tmpDir, stderr string) string {
 	return output
 }
 
-func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr string, retries int) ReviewResult {
-	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, retries)
-	return ReviewResult{Exit: 2, Class: class, Retries: retries, Stderr: stderr}
+func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr string, _ int) ReviewResult {
+	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, 0)
+	return ReviewResult{Exit: 2, Class: class, Retries: 0, Stderr: stderr}
 }
 
 // failureResultWithRawOutput is like failureResult but captures the raw backend
