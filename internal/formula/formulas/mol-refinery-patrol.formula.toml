@@ -629,11 +629,13 @@ run the exact configured test_command (e.g. `make test`), never your own
 substitute.
 
 **Run the gate in the foreground and wait for it.** One Bash call with a
-timeout of 2700000 ms (this role's preset raises the Bash ceiling to an
-hour), capturing the log with tee so a red run stays inspectable:
+timeout of 2700000 ms (45 minutes; this role's preset allows up to
+3600000 ms, use that if the suite legitimately needs it), writing the log
+to a file so a red run stays inspectable. No pipeline: the exit code must
+come straight from the gate, and PIPESTATUS does not exist in zsh:
 
 ```bash
-gt slot run --role {{rig}}/refinery -- {{test_command}} 2>&1 | tee /tmp/<mr-id>-gate.log | tail -40; echo "GATE_EXIT=${PIPESTATUS[0]}"
+gt slot run --role {{rig}}/refinery -- {{test_command}} > /tmp/<mr-bead-id>-gate.log 2>&1; echo "GATE_EXIT=$?"; tail -40 /tmp/<mr-bead-id>-gate.log
 ```
 
 Never run the gate in the background and sleep-poll it: the call returns
