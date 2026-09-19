@@ -1169,11 +1169,16 @@ gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --j
   walking the rest of the queue through process-branch costs one full
   container suite per MR; a batch is one suite for up to {{batch_max}}.
 - Fewer: return to process-branch with the next branch.
-- A rubric-changing MR (diff touches .om.json) never goes into a batch:
-  land it alone via process-branch (the town directive for this role says
-  how the manifest is re-stamped afterwards), then batch the rest. If
-  isolating it leaves fewer than {{batch_min_count}} candidates, the
-  remainder goes through process-branch too.
+- A rubric-changing MR never goes into a batch. Check each candidate:
+
+  ```bash
+  git diff --name-only origin/<merge-target>...origin/<polecat-branch> | grep -qx '.om.json' && echo RUBRIC
+  ```
+
+  Land a RUBRIC candidate alone via process-branch (the town directive for
+  this role says how the manifest is re-stamped afterwards), then batch
+  the rest. If isolating it leaves fewer than {{batch_min_count}}
+  candidates, the remainder goes through process-branch too.
 
 If no: Continue to generate-summary.
 
