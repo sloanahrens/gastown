@@ -131,6 +131,10 @@ func compactorDogCheckOnly(config *DaemonPatrolConfig) bool {
 //
 // After successful compaction, runs dolt gc to reclaim unreferenced chunks.
 //
+// By default (check_only=true), the daemon only reports commit counts and
+// escalates if above threshold - no destructive compaction occurs. Set
+// check_only=false in daemon.json to enable auto-compaction.
+//
 // ZFC Exemption: This dog executes imperatively in Go rather than via agent-driven
 // formula execution. The mol-dog-compactor formula is used for observability
 // tracking only (pourDogMolecule + closeStep/failStep). Agent execution is
