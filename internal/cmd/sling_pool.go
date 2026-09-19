@@ -146,7 +146,6 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 			newest = s.created
 		}
 	}
-<<<<<<< HEAD
 	gap := pool.MinSpawnGapD()
 	// The prefill guard. Every fresh local session spends 20-25k tokens of
 	// prefill during which the decoding slots starve, so two local spawns
@@ -212,7 +211,6 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 	// 4. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
 	//    count alone decides, as it did before B1.
 	return seat("type=" + beadTypeLabel(bead))
-}
 }
 
 // sessionLister is the slice of tmux the pool reads; a var so tests can
@@ -313,7 +311,11 @@ func poolRoute(townRoot, beadID string, attachLabel bool) (agent, reason string)
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather
 		// than risk over-filling the GPU.
-		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + ") -> " + poolAgentLabel(ts.PolecatPool.OverflowAgent)
+		fallback := "the role default"
+		if ts.PolecatPool.OverflowAgent != "" {
+			fallback = ts.PolecatPool.OverflowAgent
+		}
+		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback
 	}
 	agent, reason = choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now())
 	if beadErr != nil {
