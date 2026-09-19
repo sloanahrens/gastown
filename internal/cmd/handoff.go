@@ -869,10 +869,12 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 			currentAgent = val
 		}
 	}
-	// Polecat and crew system-prompt files are per agent; the identity's
-	// Name is the worker name for those roles and unused for the rest.
+	// Polecat, crew and dog system-prompt files are per agent; the identity's
+	// Name is the worker name for those roles and unused for the rest. Without
+	// the dog name a dog's respawn lost --append-system-prompt-file and printed
+	// its ~8.5 KB static role text into the prime hook (gt-h7e5).
 	agentName := ""
-	if simpleRole == "polecat" || simpleRole == "crew" {
+	if simpleRole == constants.RolePolecat || simpleRole == constants.RoleCrew || simpleRole == constants.RoleDog {
 		agentName = identity.Name
 	}
 
@@ -889,7 +891,13 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
 		// runtime command via role-aware config (instead of default-agent lookup).
-		runtimeCmd = config.ResolveRoleAgentConfig(simpleRole, townRoot, rigPath).BuildCommandWithPrompt(beacon)
+		// Still resolved through the *WithOverride path (empty override) so the
+		// per-agent roles keep --append-system-prompt-file on a plain handoff.
+		rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, "", agentName)
+		if err != nil {
+			return "", fmt.Errorf("resolving agent config: %w", err)
+		}
+		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else {
 		runtimeCmd = config.GetRuntimeCommandWithPrompt(rigPath, beacon)
 	}
@@ -926,7 +934,14 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 				runtimeConfig = config.ResolveRoleAgentConfig(simpleRole, townRoot, rigPath)
 			}
 		} else if simpleRole != "" {
-			runtimeConfig = config.ResolveRoleAgentConfig(simpleRole, townRoot, rigPath)
+			// Same role-aware resolution as above (empty override), so the
+			// exported env carries GT_SYSTEM_PROMPT_FILE when the flag does.
+			rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, "", agentName)
+			if err == nil {
+				runtimeConfig = rc
+			} else {
+				runtimeConfig = config.ResolveRoleAgentConfig(simpleRole, townRoot, rigPath)
+			}
 		} else {
 			runtimeConfig = config.ResolveAgentConfig(townRoot, rigPath)
 		}
