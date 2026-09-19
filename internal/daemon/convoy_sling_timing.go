@@ -18,3 +18,19 @@ func slingTimingLines(stderr string) []string {
 	}
 	return lines
 }
+
+// slingErrorLine is the one-line summary of a failed sling's stderr: the
+// first line that is not a timing line, falling back to the first line so a
+// failure is never logged as an empty string.
+func slingErrorLine(stderr string) string {
+	first := ""
+	for i, l := range strings.Split(stderr, "\n") {
+		if i == 0 {
+			first = l
+		}
+		if l != "" && !strings.HasPrefix(l, slingStepPrefix) {
+			return l
+		}
+	}
+	return first
+}

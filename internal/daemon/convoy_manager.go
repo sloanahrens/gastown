@@ -634,12 +634,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 
-		if err := cmd.Run(); err != nil {
-			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, util.FirstLine(stderr.String()))
-			continue
-		}
+		runErr := cmd.Run()
+		// Timing lines ride on stderr in both outcomes (gt-llg8): a failed sling
+		// is the one most worth attributing.
 		for _, l := range slingTimingLines(stderr.String()) {
 			m.logger("Convoy %s: sling %s: %s", c.ID, issueID, l)
+		}
+		if runErr != nil {
+			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(stderr.String()))
+			continue
 		}
 		return // Successfully dispatched one issue
 	}
