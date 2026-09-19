@@ -117,7 +117,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 25
+version = 26
 
 [vars]
 [vars.wisp_type]
@@ -628,6 +628,22 @@ go-icu-regex with "unicode/regex.h file not found", producing ~21 packages
 run the exact configured test_command (e.g. `make test`), never your own
 substitute.
 
+**Run the gate in the foreground and wait for it.** One Bash call with a
+timeout of 2700000 ms (this role's preset raises the Bash ceiling to an
+hour), capturing the log with tee so a red run stays inspectable:
+
+```bash
+gt slot run --role {{rig}}/refinery -- {{test_command}} 2>&1 | tee /tmp/<mr-id>-gate.log | tail -40; echo "GATE_EXIT=${PIPESTATUS[0]}"
+```
+
+Never run the gate in the background and sleep-poll it: the call returns
+the instant the suite exits, while a `sleep 290` poll loop leaves the
+refinery idle for up to five minutes after the suite is already done
+(measured 4m52s, 2m43s and 1m26s on three consecutive MRs on 2026-09-19).
+If the foreground call is refused because the Bash ceiling is still the
+default (preset not yet applied to this session), background it and check
+every 30 seconds at most.
+
 Track results: pass count, fail count, specific failures."""
 
 [[steps]]
@@ -670,6 +686,11 @@ notes.
 REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json)
 REVIEW_EXIT=$?
 ```
+
+Run it in the foreground and wait: a review takes about five minutes,
+well inside any Bash ceiling, so there is nothing to background. A
+`sleep 290` poll after a backgrounded review adds up to five idle minutes
+per MR for no reason.
 
 **Step 2: Branch on the exit code**
 
