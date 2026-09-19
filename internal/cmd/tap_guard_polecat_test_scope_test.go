@@ -33,6 +33,10 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"make test with jobs flag", "make -j4 test", true},
 		{"make test with long flag", "make --jobs=4 test", true},
 		{"make test with directory flag and value", "make -C . test", true},
+		{"make test with valueless flags", "make -e -w -i test", true},
+		{"make test with bare jobs flag", "make -j test", true},
+		{"make test with spaced jobs value", "make -j 4 test", true},
+		{"make test with keep-going and load flags", "make -k -l test", true},
 
 		{"filtered heavy package", "go test ./internal/cmd/ -run 'TestApplyMQCheck|TestSlingDeadAgent'", false},
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
@@ -59,8 +63,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 17 {
-		t.Errorf("blocked %d of %d cases, want exactly 17", blocked, len(tests))
+	if blocked != 21 {
+		t.Errorf("blocked %d of %d cases, want exactly 21", blocked, len(tests))
 	}
 }
 

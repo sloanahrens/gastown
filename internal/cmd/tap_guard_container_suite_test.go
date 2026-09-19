@@ -41,6 +41,9 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"GOFLAGS prefixed make test", "GOFLAGS=-p=6 make test", true},
 		{"make test with jobs flag", "make -j4 test", true},
 		{"make test with directory flag and value", "make -C . test", true},
+		{"make test with valueless flags", "make -e -w -i test", true},
+		{"make test with bare jobs flag", "make -j test", true},
+		{"make test with spaced jobs value", "make -j 4 test", true},
 
 		// Allowed: wrapped in gt slot run.
 		{"go test wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/beads/...", false},

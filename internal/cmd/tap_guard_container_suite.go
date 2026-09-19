@@ -239,17 +239,21 @@ func containsSubsequence(tokens, want []string) bool {
 	return false
 }
 
-// makeValueFlags are make(1) short options that take their value as the NEXT
-// token when written with a space ("-C dir", "-j 4"); the flag scan must
-// step over that value so "make -C . test" is still seen as "make test".
-var makeValueFlags = map[string]bool{
-	"-c": true, "-f": true, "-j": true, "-l": true, "-o": true, "-w": true, "-i": true, "-e": true,
-}
+// makeValueFlags are the make(1) short options whose value is mandatory and
+// may be the NEXT token ("-C dir", "-f file", "-o file", "-W file", "-I
+// dir"); tokens reach here lowercased, so -W and -I appear as -w and -i,
+// which is why the valueless -w/-i are absent from the map: a lowercased
+// token cannot tell them apart, and the safe reading is "the next token may
+// be a value". -j and -l take an OPTIONAL value, so the next token is a
+// value only when it looks like one (all digits). No branch ever swallows
+// the target "test" itself.
+var makeValueFlags = map[string]bool{"-c": true, "-f": true, "-o": true, "-w": true, "-i": true}
+var makeOptionalNumberFlags = map[string]bool{"-j": true, "-l": true}
 
 // findTestInvocation returns the index of the first "<tool> test" invocation
 // in tokens (already lowercased) — "go test" or "make test" — or -1. For
 // make, options may sit between the program and the target ("make -j4
-// test", "make --jobs=4 test", "make -C . test") and are stepped over: the
+// test", "make -e -w test", "make -C . test") and are stepped over: the
 // target is what decides what runs, not the flags in front of it.
 func findTestInvocation(tokens []string, tool string) int {
 	for i := 0; i+1 < len(tokens); i++ {
@@ -259,10 +263,14 @@ func findTestInvocation(tokens []string, tool string) int {
 		j := i + 1
 		if tool == "make" {
 			for j < len(tokens) && strings.HasPrefix(tokens[j], "-") {
-				if makeValueFlags[tokens[j]] {
+				flag := tokens[j]
+				j++
+				if j >= len(tokens) || tokens[j] == "test" {
+					continue
+				}
+				if makeValueFlags[flag] || (makeOptionalNumberFlags[flag] && isAllDigits(tokens[j])) {
 					j++
 				}
-				j++
 			}
 		}
 		if j < len(tokens) && tokens[j] == "test" {
@@ -270,6 +278,18 @@ func findTestInvocation(tokens []string, tool string) int {
 		}
 	}
 	return -1
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // goTestValueFlags are go test flags that consume the NEXT token as their
