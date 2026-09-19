@@ -240,11 +240,12 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 
 	// Parallelism is forced, not observed: the first ReviewParallelism
 	// reviews block at a one-shot barrier until all of them are inside, so
-	// the count they see together is exactly the bound when the semaphore is
-	// right, fewer than the bound is impossible, and more than the bound
-	// (a semaphore that leaks) shows as a fourth arrival while three wait.
-	// Watching for ">=2 at some instant" instead flapped whenever the host
-	// scheduler ran the goroutines one after another (gt-kyct, gt-bzkt).
+	// a peak below the bound is impossible whatever the scheduler does.
+	// The upper side stays an observation (a leaking semaphore is caught
+	// only when the extra review overlaps the three at the barrier), which
+	// is fine: an observed excess is never a false alarm. Watching for
+	// ">=2 at some instant" instead flapped whenever a loaded host ran the
+	// goroutines one after another.
 	barrier := newReviewBarrier(3)
 	e.editorialExec = func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 		barrier.arrive()
