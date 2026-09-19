@@ -349,6 +349,10 @@ a permanent Dolt commit. You contribute to Dolt health by:
 
 See `docs/dolt-health-guide.md` for the full picture.
 
+## Docs and comments
+
+Before writing or editing any comment, directive, formula, plugin.md, or doc: if the repo has docs/writing-for-agents.md, read it. The merge gate reviews against it.
+
 ## Do NOT
 
 - Push to main (Refinery does this)

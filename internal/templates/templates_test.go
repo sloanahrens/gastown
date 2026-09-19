@@ -1139,3 +1139,18 @@ func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
 		t.Fatal("gt done instructions not found after re-creation")
 	}
 }
+
+func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := CreatePolecatCLAUDEmd(dir, "gastown", "agate"); err != nil {
+		t.Fatalf("CreatePolecatCLAUDEmd: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read rendered CLAUDE.md: %v", err)
+	}
+	want := "if the repo has docs/writing-for-agents.md, read it"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("rendered CLAUDE.md lacks the writing-for-agents pointer %q", want)
+	}
+}
