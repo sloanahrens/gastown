@@ -70,7 +70,7 @@ source of truth.
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
 | batch_min_age | 1h | Minimum queue age for an MR to be batch-eligible |
 | batch_max | 12 | Maximum number of MRs in a single batch |
-| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in |
+| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in; `gt mq batch run` enforces this itself and exits without batching when fewer are eligible |
 
 ## Target Resolution Rule
 
@@ -373,9 +373,11 @@ description = """
 Rebasing, gating, and pushing one ready MR at a time costs a full test suite
 run per MR (often ~10 min). When several MRs have queued up, batch them:
 stack them onto one rebase, gate once, and land them all in one push — or
-bisect to isolate a single red MR if the suite fails. P0/P1 MRs are never
+bisect to isolate a single red MR if the suite fails. P0 MRs are never
 batched; they always take the single-MR path first so critical fixes aren't
-held up waiting for a batch to assemble.
+held up waiting for a batch to assemble. P1 MRs batch alongside P2 — the
+P1 exclusion was removed on 2026-09-19 because most of this town's work is
+filed at P1, so excluding them meant batching never engaged at all.
 
 **Step 1: Check how many MRs are batch-eligible**
 
@@ -383,12 +385,15 @@ held up waiting for a batch to assemble.
 gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
 ```
 
-This excludes P0/P1 MRs and anything younger than batch_min_age, sorts by
+This excludes P0 MRs and anything younger than batch_min_age, sorts by
 priority score, and caps at batch_max. Read `.eligible_total` from the output.
 
 **If `.eligible_total` < {{batch_min_count}}: SKIP the rest of this step,
 proceed to process-branch.** Not enough has queued up to be worth batching
-this cycle — the single-MR path will process what's ready.
+this cycle — the single-MR path will process what's ready. (This is only a
+courtesy check to save a call; `gt mq batch run` enforces the same threshold
+itself and exits without batching, so skipping the call and running it are
+both safe.)
 
 **Step 2: `gt mq batch run` reviews every candidate itself (T7, gt-2liq, on main since 2026-09-11)**
 
@@ -437,15 +442,15 @@ other ready MR (see Step 6).
 
 **Step 6: Continue to the single-MR path — do NOT skip it**
 
-`gt mq batch run` only ever touches non-P0/P1 MRs older than batch_min_age,
-capped at batch_max. P0/P1 MRs are never batched (by design, so critical
-fixes aren't held up assembling a batch), and any MR beyond batch_max or
-younger than batch_min_age was left untouched too. All of those are still
-sitting in the tracked MR list from queue-scan.
+`gt mq batch run` only ever touches non-P0 MRs older than batch_min_age,
+capped at batch_max. P0 MRs are never batched (by design, so critical fixes
+aren't held up assembling a batch), and any MR beyond batch_max or younger
+than batch_min_age was left untouched too. All of those are still sitting in
+the tracked MR list from queue-scan.
 
 **Do NOT skip to loop-check.** Continue forward in DAG order to process-branch
 as normal, exactly as you would if batch-scan had been skipped (empty
-eligible_total) — this is what prevents P0/P1 fixes from starving behind a
+eligible_total) — this is what prevents P0 fixes from starving behind a
 batch run. MRs the batch already merged are closed and gone from the queue,
 so process-branch will not see them again; MRs left in `.culprits[]` or
 `.conflicts[]` remain ready and are handled by process-branch's existing
