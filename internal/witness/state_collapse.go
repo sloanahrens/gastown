@@ -2,9 +2,11 @@ package witness
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
@@ -165,6 +167,11 @@ force — reopen it and re-route the MR.`, f.IssueID, f.MRID, f.MRStatus, f.Bran
 // gt-zzd case DetectStateCollapse catches: there, an open MR sits in the
 // queue as a reminder; here nothing in the system will ever merge the
 // branch and there is no queue entry pointing at it.
+//
+// The "no MR" half of that claim is only made after DetectStrandedBranches
+// has actually resolved the rig's open merge-request queue (gt-akap): a
+// finding means no open MR covers this issue, not that the lookup was
+// skipped.
 type BranchStrandFinding struct {
 	IssueID     string // The closed source issue
 	Branch      string // The polecat branch name (e.g. "polecat/pyrite/gt-hsg+mttuo7sf")
@@ -173,14 +180,23 @@ type BranchStrandFinding struct {
 
 // DetectStrandedBranchesResult holds the aggregate result of a stranded-branch scan.
 type DetectStrandedBranchesResult struct {
-	Checked  int // number of closed-issue polecat branches examined
-	Findings []BranchStrandFinding
-	Errors   []error
+	Checked     int  // number of closed-issue polecat branches examined
+	MRLookupRan bool // whether the open merge-request queue was successfully resolved
+	OpenMRsSeen int  // number of open MRs in the resolved queue
+	Findings    []BranchStrandFinding
+	Errors      []error
 }
 
-// BranchRefSource abstracts the git remote queries DetectStrandedBranches
-// needs, so the scan is unit-testable without a live git remote. Production
-// code uses DefaultBranchRefSource; tests provide a fake.
+// errNoMRLookup is reported when DetectStrandedBranches is wired without an
+// open-MR source. Without the lookup the scan cannot assert that a branch
+// "has no MR", so it produces no findings at all rather than unqualified
+// ones (gt-akap).
+var errNoMRLookup = errors.New("open merge-request lookup unavailable: cannot assert a branch has no MR")
+
+// BranchRefSource abstracts the git remote and merge-queue queries
+// DetectStrandedBranches needs, so the scan is unit-testable without a live
+// git remote or Dolt. Production code uses DefaultBranchRefSource plus a
+// ListOpenMRs wired from the rig's beads database; tests provide a fake.
 type BranchRefSource struct {
 	// ListPolecatBranches returns polecat branch names present on the rig's
 	// remote (e.g. "polecat/pyrite/gt-hsg+mttuo7sf", without the
@@ -190,6 +206,112 @@ type BranchRefSource struct {
 	// the target branch's remote-tracking ref mentions issueID in its
 	// message.
 	TargetHasCommitReferencing func(target, issueID string) (bool, error)
+	// ListOpenMRs returns the merge-request beads currently open in the
+	// rig's queue, used to suppress the false strand (gt-akap): a polecat
+	// that closes its source issue with "pending_mr: <mr>" while the MR
+	// waits in the queue leaves exactly the on-disk signature of a strand.
+	// Required — see DetectStrandedBranches for why a nil/erroring lookup
+	// produces no findings rather than unqualified ones.
+	ListOpenMRs func() ([]OpenMRRef, error)
+}
+
+// OpenMRRef is one open merge-request bead as the branch-strand scan needs
+// to see it: the MR's id, and the two identities other beads record for it
+// (beads.ParseMRFields), either of which may be absent on old MR beads.
+type OpenMRRef struct {
+	ID          string
+	SourceIssue string // source_issue field of the MR description, if any
+	Branch      string // branch field of the MR description, if any
+}
+
+// OpenMRSet is a rig's open merge-request queue indexed by every identity a
+// stranded-branch candidate can be matched on. Its only job is to answer
+// "is this closed issue's fix still in flight?" before the scan calls it
+// stranded (gt-akap).
+type OpenMRSet struct {
+	byIssue  map[string]string
+	byBranch map[string]string
+	byID     map[string]bool
+}
+
+// NewOpenMRSet indexes open MRs for lookup. First MR wins per key, so the
+// reported MR id is at least deterministic.
+func NewOpenMRSet(mrs []OpenMRRef) *OpenMRSet {
+	s := &OpenMRSet{
+		byIssue:  make(map[string]string, len(mrs)),
+		byBranch: make(map[string]string, len(mrs)),
+		byID:     make(map[string]bool, len(mrs)),
+	}
+	for _, mr := range mrs {
+		mr.ID = strings.TrimSpace(mr.ID)
+		if mr.ID == "" {
+			continue
+		}
+		s.byID[mr.ID] = true
+		if issue := strings.TrimSpace(mr.SourceIssue); issue != "" {
+			if _, seen := s.byIssue[issue]; !seen {
+				s.byIssue[issue] = mr.ID
+			}
+		}
+		if branch := normalizeBranchRef(mr.Branch); branch != "" {
+			if _, seen := s.byBranch[branch]; !seen {
+				s.byBranch[branch] = mr.ID
+			}
+		}
+	}
+	return s
+}
+
+// covers returns the id of an open MR that will land the fix of a candidate
+// identified by issueID, branch, and close reason, or "" if none does. A
+// pending_mr close reason is honored only when the MR it names is in fact
+// open — a close reason is a claim about the queue, not the queue itself, so
+// a purged or merged-but-closed MR named there must not suppress a finding.
+func (s *OpenMRSet) covers(issueID, branch, closeReason string) string {
+	if s == nil {
+		return ""
+	}
+	if mrID, ok := s.byIssue[strings.TrimSpace(issueID)]; ok {
+		return mrID
+	}
+	if mrID, ok := s.byBranch[normalizeBranchRef(branch)]; ok {
+		return mrID
+	}
+	if mrID := pendingMRFromCloseReason(closeReason); mrID != "" && s.byID[mrID] {
+		return mrID
+	}
+	return ""
+}
+
+// normalizeBranchRef canonicalizes a branch name for comparison: MR beads
+// record the short form the polecat pushed, but a stored value may carry a
+// refs/heads/ prefix or stray whitespace.
+func normalizeBranchRef(branch string) string {
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	return branch
+}
+
+// pendingMRFromCloseReason returns the MR id named by a "pending_mr: <id>"
+// close reason (beads.PendingMergeCloseReason, the reason gt done writes
+// when it self-closes a source issue immediately after submitting its MR),
+// or "" for any other reason.
+func pendingMRFromCloseReason(closeReason string) string {
+	const prefix = "pending_mr:"
+	trimmed := strings.TrimSpace(closeReason)
+	if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+		return ""
+	}
+	// Only a bare id: gt done writes nothing after it, so interior prose or a
+	// second line means this is not that shape and must not be matched.
+	// Surrounding whitespace is trimmed, which keeps the parse equivalent to
+	// beads.IsPendingMergeCloseReason's exact-equality test (that one trims
+	// the whole reason before comparing).
+	mrID := strings.TrimSpace(trimmed[len(prefix):])
+	if mrID == "" || strings.IndexFunc(mrID, unicode.IsSpace) >= 0 {
+		return ""
+	}
+	return mrID
 }
 
 // DefaultBranchRefSource returns a BranchRefSource backed by a real git
@@ -223,7 +345,7 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 // membership: for every polecat branch on the remote whose issue bead is
 // CLOSED, it checks whether the fix actually reached the target.
 //
-// Two false-positive classes were measured against the live gastown branch
+// Three false-positive classes were measured against the live gastown branch
 // set before shipping this (see gt-3ii comment history: the first proposed
 // shape flagged 12/12 unmerged branches, 12/12 of them false) and are
 // filtered explicitly rather than inferred from ancestry:
@@ -239,6 +361,20 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 //     its branch rather than pushing a duplicate MR. That leaves the same
 //     on-disk signature as a genuine strand, so the close reason must be
 //     read, not just the status.
+//   - Queued MRs (gt-akap): the ordinary healthy workflow closes the source
+//     issue as soon as the polecat submits — "pending_mr: <mr>" — while the
+//     MR waits in the queue, so a closed issue with an unmerged branch and
+//     a queued MR is indistinguishable from a strand unless the MR queue is
+//     consulted. The first shipped version never consulted it, and duly
+//     reported "has no MR" for 11 of 13 findings against the live rig, every
+//     one of them an MR sitting in the open queue.
+//
+// Because the finding asserts the absence of an MR, an unavailable MR
+// lookup cannot produce a finding at all: refs.ListOpenMRs is required, and
+// if it is missing or fails, the scan reports the error and returns
+// MRLookupRan=false with no findings rather than unqualified ones. Callers
+// must surface that state (see `gt patrol state-collapse`) — an empty
+// finding list from a scan that never ran the lookup is not an all-clear.
 func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, targetBranch string, router *mail.Router) *DetectStrandedBranchesResult {
 	result := &DetectStrandedBranchesResult{}
 	if bd == nil || refs == nil || refs.ListPolecatBranches == nil || refs.TargetHasCommitReferencing == nil {
@@ -247,6 +383,19 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 	if targetBranch == "" {
 		targetBranch = "main"
 	}
+
+	if refs.ListOpenMRs == nil {
+		result.Errors = append(result.Errors, errNoMRLookup)
+		return result
+	}
+	openMRRefs, err := refs.ListOpenMRs()
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("listing open merge requests: %w", err))
+		return result
+	}
+	openMRs := NewOpenMRSet(openMRRefs)
+	result.MRLookupRan = true
+	result.OpenMRsSeen = len(openMRs.byID)
 
 	branches, err := refs.ListPolecatBranches()
 	if err != nil {
@@ -270,6 +419,14 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			continue // closed with an explicit "no-changes:" abandonment, not a strand
 		}
 
+		// The fix may still be in flight: an open MR that names this issue,
+		// carries this branch, or is named by a pending_mr close reason means
+		// the landing vehicle exists and the branch is simply not merged yet
+		// (gt-akap). Reported as a strand only if the queue does not cover it.
+		if mrID := openMRs.covers(meta.Issue, branch, closeReason); mrID != "" {
+			continue
+		}
+
 		landed, err := refs.TargetHasCommitReferencing(targetBranch, meta.Issue)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("checking %s against origin/%s: %w", meta.Issue, targetBranch, err))
@@ -285,7 +442,7 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			CloseReason: closeReason,
 		}
 		result.Findings = append(result.Findings, finding)
-		reportBranchStrand(bd, workDir, rigName, targetBranch, finding, router)
+		reportBranchStrand(bd, workDir, rigName, targetBranch, finding, result.OpenMRsSeen, router)
 	}
 
 	return result
@@ -305,6 +462,15 @@ func isDeliberateDiscard(closeReason string) bool {
 // true if the lookup succeeded. Mirrors getBeadStatus but also surfaces
 // close_reason, needed to distinguish a genuine strand from a deliberate
 // discard (gt-3ii).
+//
+// Observed 2026-09-19 against the live town: the installed bd's `show --json`
+// omits close_reason entirely (with and without --long), so closeReason
+// comes back empty and both close-reason filters here — isDeliberateDiscard
+// and the pending_mr fallback in OpenMRSet.covers — are inert on this
+// version, even though `bd list --status=closed --json` does return the
+// field. An empty reason is treated as "unknown", never as evidence, so the
+// scan degrades to status+git review rather than mis-reporting; the gap is
+// filed as gt-n899 rather than papered over here.
 func getBeadStatusAndCloseReason(bd *BdCli, workDir, beadID string) (status, closeReason string, ok bool) {
 	if beadID == "" {
 		return "", "", false
@@ -327,12 +493,18 @@ func getBeadStatusAndCloseReason(bd *BdCli, workDir, beadID string) (status, clo
 // reportBranchStrand persists a branch-strand finding to the source issue
 // (bead comment) and escalates it to the rig's mayor by mail, falling back
 // to a tmux nudge if mail delivery fails. Mirrors reportStateCollapse.
-func reportBranchStrand(bd *BdCli, workDir, rigName, targetBranch string, f BranchStrandFinding, router *mail.Router) {
+//
+// openMRsSeen is the size of the open MR queue the scan resolved before
+// concluding no MR covers this issue; it is quoted in both the comment and
+// the escalation so the reader can tell an absence-of-MR that was actually
+// established from one that was assumed (gt-akap).
+func reportBranchStrand(bd *BdCli, workDir, rigName, targetBranch string, f BranchStrandFinding, openMRsSeen int, router *mail.Router) {
 	comment := fmt.Sprintf(
 		"STATE-COLLAPSE (stranded branch): this issue is closed but branch %q was never merged into origin/%s "+
-			"and no merge-request bead was ever created for it. The fix is recorded as done but may not be in "+
-			"force — verify at source (git fetch + git log origin/%s --grep=%s -F) before trusting this close.",
-		f.Branch, targetBranch, targetBranch, f.IssueID,
+			"and no open merge-request covers it (checked against the rig's open MR queue: %d MR(s)). "+
+			"The fix is recorded as done but may not be in force — verify at source "+
+			"(git fetch + git log origin/%s --grep=%s -F) before trusting this close.",
+		f.Branch, targetBranch, openMRsSeen, targetBranch, f.IssueID,
 	)
 	if err := bd.Run(workDir, "comments", "add", f.IssueID, comment); err != nil {
 		fmt.Fprintf(os.Stderr, "witness: failed to comment branch-strand on %s: %v\n", f.IssueID, err)
@@ -344,7 +516,9 @@ func reportBranchStrand(bd *BdCli, workDir, rigName, targetBranch string, f Bran
 
 	subject := fmt.Sprintf("STATE_COLLAPSE %s closed, branch %s never merged", f.IssueID, f.Branch)
 	body := fmt.Sprintf(`Issue %s is CLOSED but its branch %s was never merged into origin/%s — no commit there
-references it, and no merge-request bead exists for it either.
+references it, and none of the %d open merge request(s) in the queue covers
+it (no MR names this issue as source_issue, carries this branch, or is named
+by this issue's close reason).
 
 This is the gt-3ii branch-driven state-collapse pattern: strictly worse than
 the MR-driven case (gt-zzd), because there is no queue entry to catch it — if
@@ -353,7 +527,7 @@ Confirm at source before trusting the close:
   git fetch origin && git log origin/%s --grep=%s -F
 
 If nothing is found, the issue was closed with the fix NOT in force — reopen
-it and re-dispatch.`, f.IssueID, f.Branch, targetBranch, targetBranch, f.IssueID)
+it and re-dispatch.`, f.IssueID, f.Branch, targetBranch, openMRsSeen, targetBranch, f.IssueID)
 
 	msg := &mail.Message{
 		From:     fmt.Sprintf("%s/witness", rigName),
