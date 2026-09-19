@@ -4,19 +4,21 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestClaudeProjectDirFor(t *testing.T) {
-	// The project hash replaces '/' with '-', so the leading slash becomes '-'.
-	// e.g., /some/work/dir → $HOME/.claude/projects/-some-work-dir
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("getting home dir: %v", err)
-	}
+	// The config dir is resolved from CLAUDE_CONFIG_DIR when set, so the test
+	// owns it rather than inheriting whatever the environment carries.
+	configDir := filepath.Join(t.TempDir(), "claude-town")
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 
-	input := "/some/work/dir"
-	wantSuffix := "-some-work-dir"
-	wantDir := filepath.Join(home, claudeProjectsDir, wantSuffix)
+	// Every non-alphanumeric character becomes '-', so the leading slash does,
+	// and so do the dots and underscores Claude Code encodes that way.
+	// e.g., /some/work/.dir_name → <config>/projects/-some-work--dir-name
+	input := "/some/work/.dir_name"
+	wantSuffix := "-some-work--dir-name"
+	wantDir := filepath.Join(configDir, claudeProjectsSubdir, wantSuffix)
 
 	got, err := claudeProjectDirFor(input)
 	if err != nil {
@@ -24,6 +26,75 @@ func TestClaudeProjectDirFor(t *testing.T) {
 	}
 	if got != wantDir {
 		t.Errorf("claudeProjectDirFor(%q) = %q, want %q", input, got, wantDir)
+	}
+}
+
+// TestClaudeProjectHash pins the encoding against directory names observed on
+// disk, including the dot-bearing one Gas Town itself creates (.repo.git).
+func TestClaudeProjectHash(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/Users/me/gt", "-Users-me-gt"},
+		{"/Users/me/.claude", "-Users-me--claude"},
+		{"/Users/me/gt/gastown/.repo.git", "-Users-me-gt-gastown--repo-git"},
+		{"/Users/me/gt/gastown/polecats/topaz/gastown", "-Users-me-gt-gastown-polecats-topaz-gastown"},
+	}
+	for _, tt := range tests {
+		if got := claudeProjectHash(tt.path); got != tt.want {
+			t.Errorf("claudeProjectHash(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestLatestTranscript_ResolvesAgainstConfigDir is the gt-xb27 regression:
+// with CLAUDE_CONFIG_DIR set (as Gas Town sets it town-wide), the transcript
+// must be found there rather than in ~/.claude, or every live agent looks
+// undated.
+func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	workDir := filepath.Join(t.TempDir(), "polecats", "topaz", "gastown")
+	projectDir := filepath.Join(configDir, claudeProjectsSubdir, claudeProjectHash(filepath.ToSlash(workDir)))
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("creating project dir: %v", err)
+	}
+
+	older := filepath.Join(projectDir, "aaaaaaaa-0000-0000-0000-000000000000.jsonl")
+	newer := filepath.Join(projectDir, "bbbbbbbb-1111-1111-1111-111111111111.jsonl")
+	for _, path := range []string{older, newer} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+			t.Fatalf("writing transcript: %v", err)
+		}
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatalf("aging transcript: %v", err)
+	}
+
+	got, err := LatestTranscript(workDir)
+	if err != nil {
+		t.Fatalf("LatestTranscript: %v", err)
+	}
+	if got != newer {
+		t.Errorf("LatestTranscript() = %q, want the newest transcript %q", got, newer)
+	}
+}
+
+// TestLatestTranscript_NoTranscriptIsEmptyNotAnError keeps the absent case
+// distinguishable from a failure: callers report "last activity unknown"
+// rather than acting on it.
+func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+
+	got, err := LatestTranscript(filepath.Join(t.TempDir(), "nothing-here"))
+	if err != nil {
+		t.Fatalf("LatestTranscript: %v", err)
+	}
+	if got != "" {
+		t.Errorf("LatestTranscript() = %q, want empty", got)
 	}
 }
 
