@@ -10,11 +10,19 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 const (
-	// claudeProjectsDir is the path under $HOME where Claude Code stores projects.
+	// claudeProjectsDir is the path under $HOME where Claude Code stores
+	// projects — the pre-CLAUDE_CONFIG_DIR location, kept for fallback lookups.
 	claudeProjectsDir = ".claude/projects"
+
+	// claudeProjectsSubdir is the projects directory inside the resolved Claude
+	// config dir (config.ClaudeConfigDir(), i.e. $CLAUDE_CONFIG_DIR or ~/.claude).
+	claudeProjectsSubdir = "projects"
 
 	// watchPollInterval is how often we poll for new JSONL content or files.
 	watchPollInterval = 500 * time.Millisecond
@@ -95,10 +103,19 @@ func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionID, workDir string
 }
 
 // claudeProjectDirFor returns the Claude Code project directory for workDir.
-// Formula: $HOME/.claude/projects/<hash> where hash = workDir with '/' → '-'.
-// On Windows, backslashes are converted to forward slashes and the drive
-// letter (e.g. "C:") is stripped before hashing, matching Claude Code's
-// cross-platform behavior.
+// Formula: <config-dir>/projects/<hash>, where <hash> is the absolute path with
+// every non-alphanumeric character replaced by '-'. Claude Code encodes "."
+// and "_" as well as "/" this way — /Users/me/.claude becomes
+// -Users-me--claude, and <town>/gastown/.repo.git becomes
+// -…-gastown--repo-git. On Windows, backslashes are converted to forward
+// slashes and the drive letter (e.g. "C:") is stripped before hashing,
+// matching Claude Code's cross-platform behavior.
+//
+// The config dir comes from config.ClaudeConfigDir(), which honors
+// CLAUDE_CONFIG_DIR. Gas Town sets that variable town-wide (…/gt/.claude-town),
+// so resolving against ~/.claude here landed on a directory holding only
+// pre-migration transcripts: every live agent looked undated, which silently
+// disables transcript-based liveness checks (gt-xb27).
 func claudeProjectDirFor(workDir string) (string, error) {
 	abs, err := filepath.Abs(workDir)
 	if err != nil {
@@ -111,12 +128,64 @@ func claudeProjectDirFor(workDir string) (string, error) {
 	if len(normalized) >= 2 && normalized[1] == ':' {
 		normalized = normalized[2:]
 	}
-	hash := strings.ReplaceAll(normalized, "/", "-")
-	home, err := os.UserHomeDir()
+	configDir, err := config.ClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("getting home dir: %w", err)
+		return "", fmt.Errorf("resolving Claude config dir: %w", err)
 	}
-	return filepath.Join(home, claudeProjectsDir, hash), nil
+	return filepath.Join(configDir, claudeProjectsSubdir, claudeProjectHash(normalized)), nil
+}
+
+// claudeProjectHash encodes an absolute path the way Claude Code names its
+// project directories: every character that is not a letter or digit becomes
+// '-'.
+func claudeProjectHash(normalizedPath string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return '-'
+	}, normalizedPath)
+}
+
+// ClaudeProjectDirFor returns the Claude Code project directory that holds the
+// transcripts for workDir. Exported for callers that need to inspect an agent's
+// conversation log directly (e.g. witness liveness checks, gt-xb27).
+func ClaudeProjectDirFor(workDir string) (string, error) {
+	return claudeProjectDirFor(workDir)
+}
+
+// LatestTranscript returns the most recently modified transcript (JSONL) for
+// workDir, or "" when no directory for it holds any. The modification time of
+// this file is the authoritative "last real work" timestamp for a Claude Code
+// session: Claude appends to it on conversation events (tool calls, file
+// writes, assistant messages) and not on terminal redraws, so it distinguishes
+// a long turn from a stall — unlike pane scraping (gt-xb27).
+//
+// The historical ~/.claude location is searched as a fallback. Callers that
+// judge staleness must still check that the transcript they get postdates the
+// session they are judging, since a fallback hit can be a transcript from an
+// earlier session in the same working directory.
+func LatestTranscript(workDir string) (string, error) {
+	projectDir, err := claudeProjectDirFor(workDir)
+	if err != nil {
+		return "", err
+	}
+	if path, ok := newestJSONLIn(projectDir, time.Time{}); ok {
+		return path, nil
+	}
+
+	// Fallback: the pre-CLAUDE_CONFIG_DIR location. Harmless when it holds
+	// nothing, and its hits are filtered by mtime against session start.
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if abs, aerr := filepath.Abs(workDir); aerr == nil {
+			legacyDir := filepath.Join(home, claudeProjectsDir, claudeProjectHash(filepath.ToSlash(abs)))
+			if path, ok := newestJSONLIn(legacyDir, time.Time{}); ok {
+				return path, nil
+			}
+		}
+	}
+
+	return "", nil
 }
 
 // waitForNewestJSONL polls projectDir until a qualifying .jsonl file appears.

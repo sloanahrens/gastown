@@ -111,6 +111,7 @@ func TestDoMerge_EditorialRequired_NoNote_RefusesPush(t *testing.T) {
 // covers the ok path: an approve note whose patch-id matches lets the push
 // through, and the notes ref is pushed alongside the target branch.
 func TestDoMerge_EditorialRequired_ApproveMatchingNote_PushesAndPublishesNote(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -176,6 +177,7 @@ func TestDoMerge_EditorialRequired_ApproveMatchingNote_PushesAndPublishesNote(t 
 // ends up readable at the commit that actually landed on origin/main —
 // not at the submitted branch tip, which never carries it.
 func TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopied(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 

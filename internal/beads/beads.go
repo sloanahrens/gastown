@@ -175,6 +175,27 @@ func InjectFlatForListJSON(args []string) []string {
 	return args
 }
 
+// stripFlatFlag returns args without --flat, for retrying a bd command that
+// rejected the flag as unknown. Callers must decide whether to retry with
+// bdRejectedFlat first.
+func stripFlatFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != "--flat" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// bdRejectedFlat reports whether bd's stderr says it does not understand
+// --flat (bd < v0.59 and some forks), meaning the command should be retried
+// without it. Every run path must apply this same fallback: InjectFlatForListJSON
+// adds the flag unconditionally, so without the retry an older bd fails outright.
+func bdRejectedFlat(stderr string) bool {
+	return strings.Contains(stderr, "unknown flag: --flat")
+}
+
 // ExtractIssueID strips the external:prefix:id wrapper from bead IDs.
 // bd dep add wraps cross-rig IDs as "external:prefix:id" for routing,
 // but consumers need the raw bead ID for display and lookups.
@@ -974,6 +995,27 @@ func resolveBdSubprocessTimeout() time.Duration {
 	return bdSubprocessTimeout
 }
 
+// newBDCmd builds a bd subprocess with the wiring every run path shares: bd on
+// PATH, a detached process group, the caller's working directory and
+// environment (plus OTEL vars), and captured stdout/stderr. stdinData, when
+// non-nil, is piped to bd's stdin.
+//
+// Building the command in one place keeps the pinned (run/runWithStdin) and
+// routed (runWithRouting) paths from drifting — notably so both get --flat
+// handling, since bd v0.59+ ignores --json on "list" without it.
+func newBDCmd(ctx context.Context, workDir string, env []string, stdinData []byte, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Dir = workDir
+	cmd.Env = append(append([]string{}, env...), telemetry.OTELEnvForSubprocess()...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if stdinData != nil {
+		cmd.Stdin = bytes.NewReader(stdinData)
+	}
+	return cmd
+}
+
 // run executes a bd command and returns stdout.
 func (b *Beads) run(args ...string) ([]byte, error) {
 	return b.runWithStdin(nil, args...)
@@ -998,6 +1040,10 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
+	//
+	// Always explicitly set BEADS_DIR to prevent inherited env vars from
+	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
+	// resolve from working directory.
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
@@ -1008,47 +1054,15 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
 	defer cancel()
 
-	// Always explicitly set BEADS_DIR to prevent inherited env vars from
-	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
-	// resolve from working directory.
-	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = b.workDir
-
-	cmd.Env = runEnv
-	cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if stdinData != nil {
-		cmd.Stdin = bytes.NewReader(stdinData)
-	}
-
-	err := cmd.Run()
+	err := newBDCmd(ctx, b.workDir, runEnv, stdinData, fullArgs, &stdout, &stderr).Run()
 
 	// If bd doesn't support --flat, retry without it. The retry is done here
 	// (not in callers like List) so that InjectFlatForListJSON doesn't re-add
 	// --flat on the retry path.
-	if err != nil && strings.Contains(stderr.String(), "unknown flag: --flat") {
-		retryArgs := make([]string, 0, len(fullArgs))
-		for _, a := range fullArgs {
-			if a != "--flat" {
-				retryArgs = append(retryArgs, a)
-			}
-		}
+	if err != nil && bdRejectedFlat(stderr.String()) {
 		stdout.Reset()
 		stderr.Reset()
-		cmd = exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-		util.SetDetachedProcessGroup(cmd)
-		cmd.Dir = b.workDir
-		cmd.Env = runEnv
-		cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if stdinData != nil {
-			cmd.Stdin = bytes.NewReader(stdinData)
-		}
-		err = cmd.Run()
+		err = newBDCmd(ctx, b.workDir, runEnv, stdinData, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
 	}
 
 	if err != nil {
@@ -1076,6 +1090,12 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	defer func() {
 		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
 	}()
+	// Same --flat handling as run/runWithStdin: routed call sites are "list ...
+	// --json" queries too, and bd v0.59+ emits tree text for those without
+	// --flat, so omitting the injection here fails json.Unmarshal outright.
+	// Inject before the --allow-stale prepend, which changes args[0].
+	args = InjectFlatForListJSON(args)
+
 	runEnv := b.buildRoutingEnv()
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
@@ -1083,17 +1103,15 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = b.workDir
+	err := newBDCmd(ctx, b.workDir, runEnv, nil, fullArgs, &stdout, &stderr).Run()
 
-	cmd.Env = runEnv
-	cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	// bd < v0.59 rejects --flat as an unknown flag; retry without it, matching
+	// the pinned paths.
+	if err != nil && bdRejectedFlat(stderr.String()) {
+		stdout.Reset()
+		stderr.Reset()
+		err = newBDCmd(ctx, b.workDir, runEnv, nil, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
+	}
 	if err != nil {
 		return nil, b.wrapError(err, stderr.String(), args)
 	}
@@ -1108,6 +1126,11 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 // Run executes a bd command and returns stdout.
 // This is a public wrapper around the internal run method for cases where
 // callers need to run arbitrary bd commands.
+//
+// Note: This pins BEADS_DIR, so it only queries the current database. Callers
+// that need bd's cross-rig prefix routing should reach for a typed method built
+// on runWithRouting (e.g. ListEscalationsAcrossRigs) rather than passing raw
+// argv, so the --flat handling on that path stays in one place.
 func (b *Beads) Run(args ...string) ([]byte, error) {
 	return b.run(args...)
 }

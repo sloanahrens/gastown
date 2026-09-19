@@ -52,6 +52,38 @@ type Note struct {
 	// a finding). Omitted from the JSON when empty so existing notes
 	// without this field still round-trip.
 	Followups []string `json:"followups,omitempty"`
+
+	// The fields below are written only by the auditable backfill (gt mq
+	// rekey-note), never by gt mq review: they record that this note was
+	// copied onto a different commit than the one the review wrote it on,
+	// and why that copy was legitimate. A note without Backfill is a
+	// first-hand verdict; one with Backfill is a re-keyed copy whose
+	// patch-id was recomputed and verified equal before the copy. All are
+	// omitted when empty, so review-written notes and pre-existing
+	// backfilled notes round-trip unchanged.
+
+	// RekeyedFrom is the commit the source note was attached to — the
+	// reviewed head, or a rehearsal head the merge queue discarded.
+	RekeyedFrom string `json:"rekeyed_from,omitempty"`
+	// Backfill marks a note created by the backfill command rather than by
+	// a review of this commit.
+	Backfill bool `json:"backfill,omitempty"`
+	// BackfillReason is the operator's justification for the copy, plus the
+	// patch-id verification the command performed automatically.
+	BackfillReason string `json:"backfill_reason,omitempty"`
+	// BackfilledBy is who ran the backfill (git user.name by default).
+	BackfilledBy string `json:"backfilled_by,omitempty"`
+	// BackfilledAt is when the backfill ran. A pointer so a review-written
+	// note omits the field entirely rather than stamping the zero time.
+	BackfilledAt *time.Time `json:"backfilled_at,omitempty"`
+	// RequestedBy names who asked for the backfill, when the operator knows
+	// (e.g. an overseer bead id).
+	RequestedBy string `json:"requested_by,omitempty"`
+	// PatchIDVerified is set on every backfilled note: the command
+	// recomputed patch-id(git diff <target>^ <target>) and confirmed it
+	// equals PatchID before copying, which is what makes the note reachable
+	// proof on that commit.
+	PatchIDVerified bool `json:"patch_id_verified,omitempty"`
 }
 
 // WriteNote marshals n and attaches it as a git note on n.HeadSHA under

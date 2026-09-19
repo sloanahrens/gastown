@@ -70,6 +70,7 @@ func TestManager_SessionName(t *testing.T) {
 }
 
 func TestSafetyStopFromIssue(t *testing.T) {
+	t.Parallel()
 	stop := safetyStopFromIssue("", &beads.Issue{
 		ID:     "gt-testrig-refinery",
 		Labels: []string{"gt:agent", "safety_stop:hq-vmrwr"},
@@ -504,6 +505,7 @@ func TestManager_Retry_Deprecated(t *testing.T) {
 }
 
 func TestCompareScoredIssues_UsesDeterministicIDTieBreaker(t *testing.T) {
+	t.Parallel()
 	t.Helper()
 
 	first := scoredIssue{

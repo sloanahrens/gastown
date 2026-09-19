@@ -15,6 +15,7 @@ import (
 )
 
 func TestAcquireMainPushSlot_ImmediateAcquire(t *testing.T) {
+	t.Parallel()
 	e := &Engineer{
 		rig:    &rig.Rig{Name: "testrig"},
 		output: io.Discard,
@@ -40,6 +41,7 @@ func TestAcquireMainPushSlot_ImmediateAcquire(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_RetrySuccess(t *testing.T) {
+	t.Parallel()
 	var attempts int
 
 	e := &Engineer{
@@ -73,6 +75,7 @@ func TestAcquireMainPushSlot_RetrySuccess(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_MaxRetriesExceeded(t *testing.T) {
+	t.Parallel()
 	e := &Engineer{
 		rig:                   &rig.Rig{Name: "testrig"},
 		output:                io.Discard,
@@ -97,6 +100,7 @@ func TestAcquireMainPushSlot_MaxRetriesExceeded(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_SelfConflictHolderBypass(t *testing.T) {
+	t.Parallel()
 	// When the slot is held by our own rig's conflict-resolution holder,
 	// acquireMainPushSlot should proceed without acquiring (returns empty holder).
 	e := &Engineer{
@@ -122,6 +126,7 @@ func TestAcquireMainPushSlot_SelfConflictHolderBypass(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Engineer{
@@ -161,6 +166,7 @@ func TestAcquireMainPushSlot_ContextCancellation(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_ConcurrentSingleWriter(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	currentHolder := ""
 
@@ -244,6 +250,7 @@ func TestAcquireMainPushSlot_ConcurrentSingleWriter(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_BackoffConverges(t *testing.T) {
+	t.Parallel()
 	var attempts int
 
 	e := &Engineer{
@@ -276,6 +283,7 @@ func TestAcquireMainPushSlot_BackoffConverges(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_EnsureExistsError_NotTimeout(t *testing.T) {
+	t.Parallel()
 	// Infrastructure errors from mergeSlotEnsureExists must NOT be
 	// errMergeSlotTimeout — they indicate beads is down, not contention.
 	e := &Engineer{
@@ -301,6 +309,7 @@ func TestAcquireMainPushSlot_EnsureExistsError_NotTimeout(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_AcquireError_NotTimeout(t *testing.T) {
+	t.Parallel()
 	// Infrastructure errors from mergeSlotAcquire (e.g., permission denied)
 	// must NOT be errMergeSlotTimeout.
 	e := &Engineer{
@@ -325,6 +334,7 @@ func TestAcquireMainPushSlot_AcquireError_NotTimeout(t *testing.T) {
 }
 
 func TestAcquireMainPushSlot_NilStatus_NotTimeout(t *testing.T) {
+	t.Parallel()
 	// Nil status from mergeSlotAcquire is an infrastructure anomaly,
 	// not contention — must NOT be errMergeSlotTimeout.
 	e := &Engineer{

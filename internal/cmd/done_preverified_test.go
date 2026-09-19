@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
@@ -101,6 +103,39 @@ func TestRunPreVerificationGates(t *testing.T) {
 		}
 		if string(got) != "setup\n" {
 			t.Errorf("expected only setup to have run, got %q", string(got))
+		}
+	})
+
+	// gt-xsty: the pre-verified path runs the same rig lint_command as the
+	// default gate, so a concurrent golangci-lint must be waited out here
+	// too — otherwise the submission silently loses its stamp to a lock
+	// collision instead of to anything about the branch.
+	t.Run("lint lock held once: retried, then the stamp is earned", func(t *testing.T) {
+		dir := t.TempDir()
+		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+
+		counter := filepath.Join(dir, "lint-attempts")
+		lint := fmt.Sprintf(`n=$(grep -c . %q 2>/dev/null || echo 0); echo x >> %q; `+
+			`if [ "$n" -lt 1 ]; then echo 'Error: parallel golangci-lint is running' >&2; exit 2; fi`,
+			counter, counter)
+		mq := &config.MergeQueueConfig{LintCommand: lint, TestCommand: "true"}
+
+		result, err := runPreVerificationGates(dir, mq)
+		if err != nil {
+			t.Fatalf("runPreVerificationGates: %v", err)
+		}
+		if !result.success {
+			t.Fatalf("success = false after the lock was released: failedGate=%q exitCode=%d", result.failedGate, result.exitCode)
+		}
+		if result.logSHA256 == "" {
+			t.Error("logSHA256 is empty: the retried run produced no stamp-worthy log")
+		}
+		log, readErr := os.ReadFile(filepath.Join(dir, ".runtime", "gt-preverify.log"))
+		if readErr != nil {
+			t.Fatalf("reading pre-verification log: %v", readErr)
+		}
+		if !strings.Contains(string(log), "another golangci-lint holds the lock (attempt 1/3)") {
+			t.Errorf("pre-verification log does not attribute the retry wait:\n%s", log)
 		}
 	})
 

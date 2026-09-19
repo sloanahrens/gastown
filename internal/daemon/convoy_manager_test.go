@@ -597,7 +597,7 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 }
 
 func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
-	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"]}]`
+	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
 	var result []strandedConvoyInfo
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -611,6 +611,11 @@ func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
 	}
 	if len(c.ReadyIssues) != 2 || c.ReadyIssues[0] != "gt-a" || c.ReadyIssues[1] != "gt-b" {
 		t.Errorf("unexpected ready_issues: %v", c.ReadyIssues)
+	}
+	// The agent recorded by `gt convoy stranded --json` must survive decoding:
+	// dropping it here is how the feeder lost the sling-time --agent (gt-yg24).
+	if c.Agent != "deepseek-flash" {
+		t.Errorf("Agent = %q, want %q", c.Agent, "deepseek-flash")
 	}
 }
 
@@ -1243,6 +1248,106 @@ exit 0
 
 	if !strings.Contains(logContent, "--actor=daemon/convoy:hq-cv-xprwe") {
 		t.Errorf("expected daemon-originated sling to record actor daemon/convoy:hq-cv-xprwe, got: %q", logContent)
+	}
+}
+
+// TestFeedFirstReady_PassesConvoyAgent is the regression test for gt-yg24: a
+// convoy that recorded the sling-time --agent must re-feed with that agent.
+// Without it the daemon re-dispatched with the rig default, silently
+// overriding every per-bead routing decision whenever a first sling failed.
+func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, slingLogPath, logged := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var mu sync.Mutex
+	logger := func(format string, args ...interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-agent1",
+		Title:       "Agent passthrough",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+		Agent:       "deepseek-flash",
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+
+	if !strings.Contains(logContent, "--agent=deepseek-flash") {
+		t.Errorf("expected re-feed to pass the convoy's agent, got: %q", logContent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, s := range *logged {
+		if strings.Contains(s, `agent "deepseek-flash" recorded on convoy`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected feed log to name the recorded agent, got: %v", *logged)
+	}
+}
+
+// TestFeedFirstReady_NoAgent_LogsRigDefault guards the other half of gt-yg24:
+// when no agent was recorded the feed falls back to gt sling's own resolution,
+// but it must name the rig default it expects instead of applying it silently.
+func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, slingLogPath, logged := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var mu sync.Mutex
+	logger := func(format string, args ...interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-noagent",
+		Title:       "No recorded agent",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if strings.Contains(string(data), "--agent=") {
+		t.Errorf("expected no --agent when none was recorded, got: %q", string(data))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, s := range *logged {
+		if strings.Contains(s, "rig default agent") && strings.Contains(s, "no --agent recorded on convoy") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected feed log to name the rig default fallback, got: %v", *logged)
 	}
 }
 

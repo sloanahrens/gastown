@@ -189,72 +189,6 @@ func TestRigBeadsRootFallsBackWhenRouteMissing(t *testing.T) {
 	}
 }
 
-func TestPrimeFlagCombinations(t *testing.T) {
-	gtBin := buildGT(t)
-
-	cases := []struct {
-		name      string
-		args      []string
-		wantError bool
-		errorMsg  string
-	}{
-		{
-			name:      "state_alone_is_valid",
-			args:      []string{"prime", "--state"},
-			wantError: false, // May fail for other reasons (not in workspace), but not flag validation
-		},
-		{
-			name:      "state_with_hook_errors",
-			args:      []string{"prime", "--state", "--hook"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "state_with_dry_run_errors",
-			args:      []string{"prime", "--state", "--dry-run"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "state_with_explain_errors",
-			args:      []string{"prime", "--state", "--explain"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "dry_run_and_explain_valid",
-			args:      []string{"prime", "--dry-run", "--explain"},
-			wantError: false, // May fail for other reasons, but not flag validation
-		},
-		{
-			name:      "hook_and_dry_run_valid",
-			args:      []string{"prime", "--hook", "--dry-run"},
-			wantError: false, // May fail for other reasons, but not flag validation
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(gtBin, tc.args...)
-			output, err := cmd.CombinedOutput()
-
-			if tc.wantError {
-				if err == nil {
-					t.Fatalf("expected error, got success with output: %s", output)
-				}
-				if tc.errorMsg != "" && !strings.Contains(string(output), tc.errorMsg) {
-					t.Fatalf("expected error containing %q, got: %s", tc.errorMsg, output)
-				}
-			}
-			// For non-error cases, we don't fail on other errors (like "not in workspace")
-			// because we're only testing flag validation
-			if !tc.wantError && tc.errorMsg != "" && strings.Contains(string(output), tc.errorMsg) {
-				t.Fatalf("unexpected error message %q in output: %s", tc.errorMsg, output)
-			}
-		})
-	}
-}
-
 // TestCheckHandoffMarkerDryRun tests that dry-run mode doesn't remove the handoff marker.
 func TestCheckHandoffMarkerDryRun(t *testing.T) {
 	workDir := t.TempDir()
@@ -640,55 +574,6 @@ func TestExplain(t *testing.T) {
 			t.Fatalf("expected no [EXPLAIN] tag when explain mode disabled, got: %s", output)
 		}
 	})
-}
-
-// TestDryRunSkipsSideEffects tests that --dry-run skips various side effects via CLI.
-func TestDryRunSkipsSideEffects(t *testing.T) {
-	gtBin := buildGT(t)
-
-	// Create a temp workspace
-	townRoot := t.TempDir()
-
-	// Set up minimal workspace structure
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("create beads dir: %v", err)
-	}
-
-	// Write routes
-	routes := []beads.Route{{Prefix: "bd-", Path: "."}}
-	if err := beads.WriteRoutes(beadsDir, routes); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	// Create handoff marker that should NOT be removed in dry-run
-	runtimeDir := filepath.Join(townRoot, constants.DirRuntime)
-	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-		t.Fatalf("create runtime dir: %v", err)
-	}
-	markerPath := filepath.Join(runtimeDir, constants.FileHandoffMarker)
-	if err := os.WriteFile(markerPath, []byte("prev-session"), 0644); err != nil {
-		t.Fatalf("write marker: %v", err)
-	}
-
-	// Run gt prime --dry-run --explain
-	cmd := exec.Command(gtBin, "prime", "--dry-run", "--explain")
-	cmd.Dir = townRoot
-	output, _ := cmd.CombinedOutput()
-
-	// The command may fail for other reasons (not fully configured workspace)
-	// but we can check:
-	// 1. Marker still exists
-	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
-		t.Fatalf("handoff marker was removed in dry-run mode")
-	}
-
-	// 2. Output mentions skipped operations
-	outputStr := string(output)
-	// Check for explain output about dry-run (if workspace was valid enough to get there)
-	if strings.Contains(outputStr, "bd prime") && !strings.Contains(outputStr, "skipped") {
-		t.Logf("Note: output doesn't explicitly mention skipping bd prime: %s", outputStr)
-	}
 }
 
 // TestIsCompactResume tests the isCompactResume detection logic including

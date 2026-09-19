@@ -56,6 +56,7 @@ func setupPreserveRepo(t *testing.T) (repo, remote, branch string) {
 // nowhere on origin — the old code printed "remote branch preserved" and
 // deleted the branch anyway.
 func TestPreserveBranchBeforeNukeFallsBackToSideRefWhenPushRejected(t *testing.T) {
+	t.Parallel()
 	repo, _, branch := setupPreserveRepo(t)
 	g := git.NewGit(repo)
 
@@ -92,6 +93,7 @@ func TestPreserveBranchBeforeNukeFallsBackToSideRefWhenPushRejected(t *testing.T
 // two heads that are ancestors of main where `ls-remote` on the branch name
 // found nothing.
 func TestPreserveBranchBeforeNukeRecognizesWorkAlreadyMergedToMain(t *testing.T) {
+	t.Parallel()
 	repo, remote, branch := setupPreserveRepo(t)
 	g := git.NewGit(repo)
 
@@ -121,6 +123,7 @@ func TestPreserveBranchBeforeNukeRecognizesWorkAlreadyMergedToMain(t *testing.T)
 // there is nowhere safe for the work to go. The preserve step must say so
 // instead of letting the caller delete the branch.
 func TestPreserveBranchBeforeNukeFailsClosedWhenNoRemoteRefCanHoldTheTip(t *testing.T) {
+	t.Parallel()
 	repo, _, branch := setupPreserveRepo(t)
 	g := git.NewGit(repo)
 
@@ -134,6 +137,7 @@ func TestPreserveBranchBeforeNukeFailsClosedWhenNoRemoteRefCanHoldTheTip(t *test
 }
 
 func TestPreserveFailureBlockerRequiresForceAndAcknowledgement(t *testing.T) {
+	t.Parallel()
 	cause := fmt.Errorf("%w: push rejected", errBranchNotPreserved)
 
 	cases := []struct {
@@ -172,6 +176,7 @@ func TestPreserveFailureBlockerRequiresForceAndAcknowledgement(t *testing.T) {
 // The sling-rollback path never pushes, so it must not claim preservation. A
 // tip with no remote copy stays local rather than being deleted.
 func TestDeletePolecatBranchKeepsLocalBranchWithoutRemoteCopy(t *testing.T) {
+	t.Parallel()
 	repo, _, branch := setupPreserveRepo(t)
 	g := git.NewGit(repo)
 	// Production deletes the branch from the bare repo, after the worktree that
@@ -186,6 +191,7 @@ func TestDeletePolecatBranchKeepsLocalBranchWithoutRemoteCopy(t *testing.T) {
 }
 
 func TestDeletePolecatBranchDeletesWhenWorkIsOnRemote(t *testing.T) {
+	t.Parallel()
 	repo, remote, branch := setupPreserveRepo(t)
 	g := git.NewGit(repo)
 	runGitCmd(t, repo, "push", "origin", branch)

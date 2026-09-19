@@ -247,6 +247,7 @@ exit 0
 // TestCreateBatchConvoy_EmptyBeadIDs verifies that createBatchConvoy returns
 // an error when called with no bead IDs.
 func TestCreateBatchConvoy_EmptyBeadIDs(t *testing.T) {
+	t.Parallel()
 	_, _, err := createBatchConvoy(nil, "gastown", false, "", "")
 	if err == nil {
 		t.Fatal("expected error for empty bead IDs, got nil")
@@ -416,6 +417,7 @@ exit 0
 // is stored in each bead's fieldUpdates.ConvoyID. This was a bug where ConvoyID and
 // MergeStrategy were never persisted in batch mode.
 func TestBatchSling_ConvoyIDStoredInBeadFieldUpdates(t *testing.T) {
+	t.Parallel()
 	// This test verifies the data flow: batchConvoyID is set in fieldUpdates.ConvoyID
 	// for each bead in the loop. We test this at the unit level by checking the
 	// beadFieldUpdates struct construction.
@@ -557,6 +559,7 @@ exit 0
 // TestAllBeadIDs_TrueWhenAllBeadIDs verifies that allBeadIDs returns true
 // when every argument looks like a bead ID.
 func TestAllBeadIDs_TrueWhenAllBeadIDs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string
@@ -583,6 +586,7 @@ func TestAllBeadIDs_TrueWhenAllBeadIDs(t *testing.T) {
 // TestResolveRigFromBeadIDs_AllSamePrefix verifies that resolveRigFromBeadIDs
 // resolves the rig when all beads share the same prefix.
 func TestResolveRigFromBeadIDs_AllSamePrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -607,6 +611,7 @@ func TestResolveRigFromBeadIDs_AllSamePrefix(t *testing.T) {
 // TestResolveRigFromBeadIDs_MixedPrefixes_Errors verifies that beads from
 // different rigs produce an error with suggested actions.
 func TestResolveRigFromBeadIDs_MixedPrefixes_Errors(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -639,6 +644,7 @@ func TestResolveRigFromBeadIDs_MixedPrefixes_Errors(t *testing.T) {
 // TestResolveRigFromBeadIDs_UnmappedPrefix_Errors verifies that a bead whose
 // prefix has no route mapping produces an error with suggested actions.
 func TestResolveRigFromBeadIDs_UnmappedPrefix_Errors(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -667,6 +673,7 @@ func TestResolveRigFromBeadIDs_UnmappedPrefix_Errors(t *testing.T) {
 // TestResolveRigFromBeadIDs_TownLevelPrefix_Errors verifies that a bead with
 // a town-level prefix (path=".") produces an error because it has no rig.
 func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -807,6 +814,7 @@ exit 0
 // TestSlingGenerateShortID_Format verifies the generated ID is 5 lowercase
 // base32 characters.
 func TestSlingGenerateShortID_Format(t *testing.T) {
+	t.Parallel()
 	id := slingGenerateShortID()
 	if len(id) != 5 {
 		t.Fatalf("expected 5-char ID, got %d chars: %q", len(id), id)
@@ -821,6 +829,7 @@ func TestSlingGenerateShortID_Format(t *testing.T) {
 
 // TestSlingGenerateShortID_Unique verifies successive calls produce different IDs.
 func TestSlingGenerateShortID_Unique(t *testing.T) {
+	t.Parallel()
 	a := slingGenerateShortID()
 	b := slingGenerateShortID()
 	if a == b {
@@ -833,6 +842,7 @@ func TestSlingGenerateShortID_Unique(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConvoyInfo_IsOwnedDirect(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		info *ConvoyInfo
@@ -963,9 +973,66 @@ exit 0
 	}
 }
 
+// TestCreateAutoConvoy_RecordsRequestedAgent is the regression test for
+// gt-yg24: the --agent a sling was dispatched with is persisted on the convoy,
+// so a convoy feeder re-dispatching the bead after a failed sling re-uses it
+// instead of quietly falling back to the rig default.
+func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	bdScript := `#!/bin/sh
+echo "CMD:$*" >> "LOGPATH"
+exit 0
+`
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript = strings.ReplaceAll(bdScript, "LOGPATH", logPath)
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	oldAddTracking := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error { return nil }
+	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
+
+	if _, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash"); err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	logContent := string(logBytes)
+	if !strings.Contains(logContent, "agent: deepseek-flash") {
+		t.Errorf("convoy description should record the requested agent:\n%s", logContent)
+	}
+	if !strings.Contains(logContent, "base_branch: main") {
+		t.Errorf("convoy description should still record base_branch:\n%s", logContent)
+	}
+
+	// No agent requested: nothing recorded, so feeders fall back to the rig
+	// default (and log it) rather than pinning a stray value.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("reset bd log: %v", err)
+	}
+	if _, err := createAutoConvoy("gt-bbb", "Another task", false, "", ""); err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+	logBytes, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if strings.Contains(string(logBytes), "agent:") {
+		t.Errorf("convoy description should omit agent when none requested:\n%s", string(logBytes))
+	}
+}
+
 // TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
+	t.Parallel()
 	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
@@ -1399,6 +1466,7 @@ exit 0
 // Review finding: --force suggestion is unreachable because resolveRigFromBeadIDs
 // runs before --force is checked.
 func TestResolveRigFromBeadIDs_MixedPrefixes_DoesNotSuggestForce(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -1434,6 +1502,7 @@ func TestResolveRigFromBeadIDs_MixedPrefixes_DoesNotSuggestForce(t *testing.T) {
 // continuing with empty ConvoyID (which silently regresses to pre-fix behavior).
 // Review finding: convoy creation failure silently regresses.
 func TestBatchSling_ConvoyCreationFailureIsHardError(t *testing.T) {
+	t.Parallel()
 	// Verify the contract: when convoy creation fails and --no-convoy is not set,
 	// the batch should NOT proceed. We test this by checking that runBatchSling
 	// would return an error rather than continuing with empty batchConvoyID.
@@ -1461,6 +1530,7 @@ func TestBatchSling_ConvoyCreationFailureIsHardError(t *testing.T) {
 // error message does not mutate the input beadIDs slice via append.
 // Review finding: append(beadIDs, rigName) mutates shared backing array.
 func TestBatchSling_SliceAliasingInCrossRigGuard(t *testing.T) {
+	t.Parallel()
 	// Simulate the slice aliasing scenario:
 	// args = ["gt-aaa", "bd-bbb", "gastown"]
 	// beadIDs = args[:2] → shares backing array with args
@@ -1838,6 +1908,7 @@ exit 0
 // TestGetConvoyInfoFromIssue_EmptyIssueID verifies that passing an empty
 // issueID returns nil immediately (line 207).
 func TestGetConvoyInfoFromIssue_EmptyIssueID(t *testing.T) {
+	t.Parallel()
 	got := getConvoyInfoFromIssue("", "/tmp")
 	if got != nil {
 		t.Errorf("getConvoyInfoFromIssue(\"\", ...) = %+v, want nil", got)

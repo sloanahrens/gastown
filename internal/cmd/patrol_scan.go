@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -16,10 +17,11 @@ import (
 )
 
 var (
-	patrolScanJSON    bool
-	patrolScanNotify  bool
-	patrolScanRig     string
-	patrolScanVerbose bool
+	patrolScanJSON              bool
+	patrolScanNotify            bool
+	patrolScanRig               string
+	patrolScanVerbose           bool
+	patrolScanActivityThreshold time.Duration
 )
 
 var patrolScanCmd = &cobra.Command{
@@ -37,11 +39,20 @@ Detections:
   - Refinery stall: A live refinery holding unsubmitted composer input while
     producing no output (gt-hkhu). Queued input is submitted on detection.
   - Completions: Agent bead metadata indicating gt done was called
+  - Activity: Real work recency per live session, from the agent's transcript
+    and pane content — NOT from the pane's rendered spinner/elapsed label
 
 Actions taken automatically:
   - Zombie restart: Sessions are restarted (not nuked) to preserve worktrees
   - Cleanup wisps: Created for dirty state tracking
   - Completion routing: MR cleanup wisps created, refinery nudged
+
+The activity section is report-only: it never restarts anything. It exists so
+that a "hung session" judgement can be backed by evidence. To act on it, take
+two scans at least --activity-threshold apart and compare the pane_signature
+and last_activity_age_seconds of the same polecat; only if BOTH are unchanged
+is there a positive stall signal (gt-xb27). A polecat deep inside one long turn
+looks busy on every other signal and must be left alone.
 
 Use --notify to send mail when zombies with active work are detected.
 Long-running scan phases emit progress diagnostics to stderr so JSON stdout
@@ -60,6 +71,8 @@ func init() {
 	patrolScanCmd.Flags().BoolVar(&patrolScanNotify, "notify", false, "Send mail to witness/mayor when active-work zombies are detected")
 	patrolScanCmd.Flags().StringVar(&patrolScanRig, "rig", "", "Rig to scan (default: infer from cwd or GT_RIG)")
 	patrolScanCmd.Flags().BoolVarP(&patrolScanVerbose, "verbose", "v", false, "Verbose output")
+	patrolScanCmd.Flags().DurationVar(&patrolScanActivityThreshold, "activity-threshold", constants.HungSessionThreshold,
+		"Age of last real activity that marks a polecat as a stall candidate (report-only)")
 
 	patrolCmd.AddCommand(patrolScanCmd)
 }
@@ -74,6 +87,7 @@ type PatrolScanOutput struct {
 	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
 	Refinery    *PatrolScanRefineryOutput `json:"refinery,omitempty"`
 	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
+	Activity    *PatrolScanActivityOutput `json:"activity,omitempty"`
 	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
 }
 
@@ -150,6 +164,37 @@ type PatrolScanCompleteItem struct {
 	CompletionTime string `json:"completion_time,omitempty"`
 }
 
+// PatrolScanActivityOutput holds real-activity observations for live sessions.
+// Report-only: no restart is ever driven by this section alone (gt-xb27).
+type PatrolScanActivityOutput struct {
+	Checked         int                      `json:"checked"`
+	Threshold       string                   `json:"threshold"`
+	StaleCandidates int                      `json:"stale_candidates"`
+	Items           []PatrolScanActivityItem `json:"items,omitempty"`
+}
+
+// PatrolScanActivityItem is one live session's real-activity snapshot.
+//
+// last_activity_age_seconds and pane_signature are the two signals a caller may
+// compare across scans. If a later scan shows a larger age AND an identical
+// pane_signature for the same session, that is positive stall evidence.
+// agent_alive must be true for a stall verdict to mean anything, and anything
+// other than activity_source="transcript" means "last activity unknown" — a
+// missing transcript is never evidence of a stall.
+type PatrolScanActivityItem struct {
+	Polecat                string   `json:"polecat"`
+	Session                string   `json:"session"`
+	AgentAlive             bool     `json:"agent_alive"`
+	LastActivityAgeSeconds *float64 `json:"last_activity_age_seconds,omitempty"`
+	ActivitySource         string   `json:"activity_source"`
+	Transcript             string   `json:"transcript,omitempty"`
+	TranscriptBytes        int64    `json:"transcript_bytes,omitempty"`
+	PaneSignature          string   `json:"pane_signature,omitempty"`
+	StallCandidate         bool     `json:"stall_candidate"`
+	Note                   string   `json:"note,omitempty"`
+	Errors                 []string `json:"errors,omitempty"`
+}
+
 func runPatrolScan(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -196,6 +241,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	completionResult := runPatrolScanPhase(diagnostics, "completion discovery", func() *witness.DiscoverCompletionsResult {
 		return witness.DiscoverCompletions(bd, workDir, rigName, router)
 	})
+	// Observed last so it reflects the state after the automatic actions above.
+	activityResult := runPatrolScanPhase(diagnostics, "real-activity observation", func() []witness.RealActivity {
+		return witness.ObserveRigRealActivity(workDir, rigName)
+	})
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
@@ -212,10 +261,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts)
 }
 
 func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
@@ -314,7 +363,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -416,12 +465,49 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.Completions = co
 	}
 
+	// Activity
+	output.Activity = buildActivityOutput(activityResult, time.Now())
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
+// buildActivityOutput projects real-activity snapshots into scan output.
+// now is a parameter so callers and tests agree on the reference instant.
+func buildActivityOutput(observed []witness.RealActivity, now time.Time) *PatrolScanActivityOutput {
+	out := &PatrolScanActivityOutput{
+		Checked:   len(observed),
+		Threshold: patrolScanActivityThreshold.String(),
+	}
+	for _, act := range observed {
+		item := PatrolScanActivityItem{
+			Polecat:         act.Polecat,
+			Session:         act.Session,
+			AgentAlive:      act.AgentAlive,
+			ActivitySource:  act.ActivitySource,
+			Transcript:      act.TranscriptPath,
+			TranscriptBytes: act.TranscriptBytes,
+			PaneSignature:   act.PaneSignature,
+			StallCandidate:  act.IsStaleCandidate(now, patrolScanActivityThreshold),
+			Errors:          act.Errors,
+		}
+		if age, ok := act.Age(now); ok {
+			seconds := age.Seconds()
+			item.LastActivityAgeSeconds = &seconds
+		}
+		if item.StallCandidate {
+			item.Note = "candidate only — re-scan after the full threshold and require an unchanged pane_signature before any restart"
+		}
+		out.Items = append(out.Items, item)
+		if item.StallCandidate {
+			out.StaleCandidates++
+		}
+	}
+	return out
+}
+
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -532,6 +618,32 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// Activity (report-only — never a restart trigger on its own)
+	now := time.Now()
+	if len(activityResult) > 0 {
+		fmt.Printf("%s Real Activity: %d live session(s), threshold %s\n",
+			style.Bold.Render("⏱"), len(activityResult), patrolScanActivityThreshold)
+
+		for _, act := range activityResult {
+			candidate := act.IsStaleCandidate(now, patrolScanActivityThreshold)
+			icon := "●"
+			if candidate {
+				icon = "⚠"
+			}
+			fmt.Printf("  %s %s: %s\n", icon, act.Polecat, act.Describe(now))
+			if candidate {
+				fmt.Printf("      %s\n", style.Dim.Render(
+					"candidate only — re-scan after the full threshold and require an unchanged pane signature before any restart"))
+			}
+			if len(act.Errors) > 0 && patrolScanVerbose {
+				for _, e := range act.Errors {
+					fmt.Printf("      %s\n", style.Dim.Render(e))
+				}
+			}
+		}
+		fmt.Println()
+	}
+
 	// Summary
 	zombieCount := 0
 	activeCount := 0
@@ -547,6 +659,12 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 	if completionResult != nil {
 		completionCount = len(completionResult.Discovered)
 	}
+	staleCandidates := 0
+	for _, act := range activityResult {
+		if act.IsStaleCandidate(now, patrolScanActivityThreshold) {
+			staleCandidates++
+		}
+	}
 	refineryStallCount := 0
 	if refineryResult != nil {
 		refineryStallCount = len(refineryResult.Stalls)
@@ -555,8 +673,8 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 	if zombieCount == 0 && stallCount == 0 && refineryStallCount == 0 && completionCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s)\n",
-			zombieCount, activeCount, stallCount, refineryStallCount, completionCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s), %d activity candidate(s)\n",
+			zombieCount, activeCount, stallCount, refineryStallCount, completionCount, staleCandidates)
 	}
 
 	return nil

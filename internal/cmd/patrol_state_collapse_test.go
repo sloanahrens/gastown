@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/witness"
@@ -9,8 +10,11 @@ import (
 
 func TestPatrolStateCollapseOutputJSON(t *testing.T) {
 	output := PatrolStateCollapseOutput{
-		Rig:     "gastown",
-		Checked: 2,
+		Rig:            "gastown",
+		Checked:        2,
+		BranchChecked:  3,
+		BranchMRLookup: true,
+		BranchOpenMRs:  4,
 		Findings: []witness.StateCollapseFinding{
 			{
 				IssueID:  "gt-wdr",
@@ -46,6 +50,23 @@ func TestPatrolStateCollapseOutputJSON(t *testing.T) {
 	}
 	if parsed.Findings[0].MRID != "gt-wisp-shks" {
 		t.Errorf("Findings[0].MRID = %q, want gt-wisp-shks", parsed.Findings[0].MRID)
+	}
+	// A machine consumer must be able to tell a clean branch scan from one
+	// that never resolved the MR queue (gt-akap).
+	if !parsed.BranchMRLookup {
+		t.Error("BranchMRLookup = false, want true")
+	}
+	if parsed.BranchOpenMRs != 4 {
+		t.Errorf("BranchOpenMRs = %d, want 4", parsed.BranchOpenMRs)
+	}
+
+	notRun := PatrolStateCollapseOutput{Rig: "gastown"}
+	data, err = json.Marshal(notRun)
+	if err != nil {
+		t.Fatalf("failed to marshal output: %v", err)
+	}
+	if !strings.Contains(string(data), `"branch_mr_lookup_ran":false`) {
+		t.Errorf("skipped MR lookup must be explicit in JSON, got %s", data)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 // run normally. skipGates never reaches the editorial precondition — that
 // always runs regardless (T6) — this only governs the mechanical gates.
 func TestResolveFastPath(t *testing.T) {
+	t.Parallel()
 	t.Run("not pre-verified", func(t *testing.T) {
 		workDir, g, cleanup := testGitRepo(t)
 		defer cleanup()

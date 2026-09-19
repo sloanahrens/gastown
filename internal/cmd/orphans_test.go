@@ -293,6 +293,7 @@ func TestFindOrphanPolecatBranches_RebaseMerged(t *testing.T) {
 // TestFindOrphanPolecatBranches_NoPolecatsDir verifies graceful handling when
 // there is no polecats directory.
 func TestFindOrphanPolecatBranches_NoPolecatsDir(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	branches, skipped, err := findOrphanPolecatBranches(rigDir, "testrig", "main")
 	if err != nil {

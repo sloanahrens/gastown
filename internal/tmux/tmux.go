@@ -4,6 +4,8 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -2679,11 +2681,29 @@ func (z ZombieStatus) IsZombie() bool {
 // It performs three levels of checking:
 //  1. Session existence (tmux has-session)
 //  2. Agent process liveness (IsAgentAlive — checks process tree)
-//  3. Activity staleness (GetSessionActivity — checks tmux output timestamp)
+//  3. Activity staleness (GetWindowActivity — checks tmux pane output timestamp)
 //
 // The maxInactivity parameter controls how long a session can be idle before
 // being considered hung. Pass 0 to skip activity checking (only check process
-// liveness). A reasonable default for production is 10-15 minutes.
+// liveness).
+//
+// WARNING — level 3 is a "the pane is still redrawing" check, NOT a
+// "the agent is still doing work" check. Agent TUIs redraw constantly
+// (spinners, elapsed-time counters, status chrome), so a pane that has been
+// redrawing for hours may still belong to a wedged agent, and a session that
+// reports AgentHung here is only a CANDIDATE stall. Never restart on this
+// signal alone: confirm with content recency (see
+// witness.ObserveRealActivity) and the live-process check at level 2.
+// gt-xb27: the same warning applies in the other direction — do not reach for
+// a pane's rendered elapsed label ("Imagining... (8h 54m)") as evidence either;
+// that label measures one turn, not time since output.
+//
+// gt-xb27: this used to read #{session_activity}, which tmux only advances for
+// ATTACHED sessions. Every agent session is unattended, so that field froze at
+// session creation and the check above silently collapsed to "session age >
+// maxInactivity" — reporting every session older than the threshold as
+// agent-hung. #{window_activity} advances on real pane output for unattached
+// sessions too (see GetWindowActivity, gt-2sln).
 //
 // This is the preferred unified method for zombie detection across all agent types.
 func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) ZombieStatus {
@@ -2700,7 +2720,7 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 
 	// Level 3: Has there been recent activity? (optional)
 	if maxInactivity > 0 {
-		lastActivity, err := t.GetSessionActivity(session)
+		lastActivity, err := t.GetWindowActivity(session)
 		if err == nil && !lastActivity.IsZero() {
 			if time.Since(lastActivity) > maxInactivity {
 				return AgentHung
@@ -2884,9 +2904,90 @@ func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	return t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 }
 
+// PaneCurrentPath returns the working directory of the session's active pane.
+// Callers use this to locate things that live outside the repo — most notably
+// the agent's Claude Code transcript, which is keyed by working directory
+// (gt-xb27).
+func (t *Tmux) PaneCurrentPath(session string) (string, error) {
+	out, err := t.run("display-message", "-t", session, "-p", "#{pane_current_path}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // CapturePaneAll captures all scrollback history.
 func (t *Tmux) CapturePaneAll(session string) (string, error) {
 	return t.run("capture-pane", "-p", "-t", session, "-S", "-")
+}
+
+// paneVolatileGlyphs are the animation frames agent TUIs cycle through while a
+// turn is in flight. A line carrying one of these is chrome, not work output.
+const paneVolatileGlyphs = `✻✢✳✶✷✸✹✺✽✾✱✲✴⏺◐◓◑◒◜◝◞◟◰◱◲◳⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·`
+
+var (
+	// paneDurationRe matches a parenthesized elapsed-time counter, e.g.
+	// "(8h 54m 38s)" or "(45s · ↓ 1.2k tokens)". These tick on a timer while a
+	// turn is in flight, so they change without any work happening (gt-xb27).
+	paneDurationRe = regexp.MustCompile(`\(\s*\d+[hms][\d\s·↑↓a-zA-Z.,%]*\)`)
+	// paneSpinnerRe matches a bare spinner line: an animation glyph, a status
+	// word, and an ellipsis ("✻ Imagining…", "· Churning…"). The ellipsis is
+	// required so ordinary prose and markdown bullets are left alone.
+	paneSpinnerRe = regexp.MustCompile(`^\s*[` + paneVolatileGlyphs + `]\s+\S+\s*(…|\.\.\.)\s*$`)
+	// paneProgressRe matches progress/percentage chrome, e.g. "72%".
+	paneProgressRe = regexp.MustCompile(`\b\d{1,3}%`)
+	// paneInterruptHintRe matches the "esc to interrupt" affordance that appears
+	// and disappears with whatever is on screen.
+	paneInterruptHintRe = regexp.MustCompile(`(?i)^\s*(esc|ctrl-c)\s+to\s+interrupt\s*$`)
+)
+
+// isVolatilePaneLine reports whether a captured pane line redraws on a timer
+// rather than in response to work. Such lines must not be treated as output
+// when judging whether an agent is stalled (gt-xb27): Claude Code's per-turn
+// spinner renders "Imagining… (8h 54m)" for a turn that is a few minutes old in
+// wall-clock terms, and any detector that reads it as "no output for 8h" kills
+// healthy agents.
+func isVolatilePaneLine(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return true
+	}
+	return paneDurationRe.MatchString(line) ||
+		paneSpinnerRe.MatchString(line) ||
+		paneProgressRe.MatchString(line) ||
+		paneInterruptHintRe.MatchString(line)
+}
+
+// paneContentSignature returns a stable digest of the non-volatile content of a
+// captured pane. Two captures with the same signature show the same screen,
+// spinner chrome aside.
+func paneContentSignature(captured string) string {
+	kept := make([]string, 0, 64)
+	for _, line := range strings.Split(captured, "\n") {
+		if isVolatilePaneLine(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(kept, "\n")))
+	return hex.EncodeToString(sum[:8])
+}
+
+// PaneContentSignature returns a digest of the pane's non-volatile content:
+// spinner lines, elapsed-time counters, progress percentages and the
+// "esc to interrupt" hint are stripped before hashing (see isVolatilePaneLine).
+//
+// This is the correct "did the screen change?" signal for an unattended agent
+// (gt-xb27) — unlike the rendered elapsed labels themselves, which measure a
+// single turn. Compare signatures from two captures at least a full stall
+// window apart; equal signatures plus a stale transcript is positive evidence
+// of a stall. An unchanged signature ALONE is not: agents legitimately sit on
+// one screen for many minutes while a long tool call runs.
+func (t *Tmux) PaneContentSignature(session string, lines int) (string, error) {
+	out, err := t.CapturePane(session, lines)
+	if err != nil {
+		return "", err
+	}
+	return paneContentSignature(out), nil
 }
 
 // CapturePaneLines captures the last N lines of a pane as a slice.

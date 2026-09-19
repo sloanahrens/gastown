@@ -76,6 +76,7 @@ func (f fakeIssueMapShower) Show(issueID string) (*beads.Issue, error) {
 }
 
 func TestCheckNukeActiveMRSafety(t *testing.T) {
+	t.Parallel()
 	checker := &fakeActiveMRRemovalChecker{activeMR: "gt-mr", blocker: "active_mr=gt-mr status=in_progress"}
 	err := checkNukeActiveMRSafety(checker, "toast", "gastown", false)
 	if err == nil {
@@ -106,6 +107,7 @@ func TestCheckNukeActiveMRSafety(t *testing.T) {
 }
 
 func TestApplyMQCheck(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		finder         mrFinder
@@ -210,6 +212,7 @@ func TestApplyMQCheck(t *testing.T) {
 // signal, exactly like a found MR bead. (The work is finished or intentionally
 // superseded, so there is nothing left to submit; the polecat is reusable.)
 func TestDecideWorkstate_ClosedSourceWithSubmittableWork(t *testing.T) {
+	t.Parallel()
 	input := polecat.WorkstateInput{
 		State:         polecat.StateIdle,
 		CleanupStatus: polecat.CleanupClean,
@@ -277,6 +280,7 @@ func TestDecideWorkstate_ClosedSourceWithSubmittableWork(t *testing.T) {
 }
 
 func TestIsMQNotRequiredSource(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		issue *beads.Issue
@@ -324,6 +328,7 @@ func TestIsMQNotRequiredSource(t *testing.T) {
 // feed event nuke now emits needs an actor string per role so the audit
 // trail is legible, not just present.
 func TestFormatActorIdentity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		info RoleInfo
@@ -346,6 +351,7 @@ func TestFormatActorIdentity(t *testing.T) {
 }
 
 func TestCleanupStatusBlocker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status string
 		want   string
@@ -368,6 +374,7 @@ func TestCleanupStatusBlocker(t *testing.T) {
 }
 
 func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		status       polecat.CleanupStatus
@@ -391,6 +398,7 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 }
 
 func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		status       polecat.CleanupStatus
@@ -492,6 +500,7 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 }
 
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
+	t.Parallel()
 	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
 		t.Run(string(previous), func(t *testing.T) {
 			status := &RecoveryStatus{
@@ -520,6 +529,7 @@ func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 }
 
 func TestReconcileCleanupStatusIfSafe_FailsClosed(t *testing.T) {
+	t.Parallel()
 	status := &RecoveryStatus{
 		CleanupStatus: polecat.CleanupUnpushed,
 		Verdict:       "SAFE_TO_NUKE",
@@ -540,6 +550,7 @@ func TestReconcileCleanupStatusIfSafe_FailsClosed(t *testing.T) {
 }
 
 func TestCleanupStatusReconcileCandidateRequiresStrictPredicates(t *testing.T) {
+	t.Parallel()
 	baseStatus := &RecoveryStatus{Verdict: "SAFE_TO_NUKE", Branch: "polecat/nitro", MQStatus: "submitted"}
 	basePolecat := &polecat.Polecat{State: polecat.StateIdle}
 	baseFields := &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupUnpushed)}
@@ -567,6 +578,7 @@ func TestCleanupStatusReconcileCandidateRequiresStrictPredicates(t *testing.T) {
 }
 
 func TestHookBeadSafeForCleanup(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		hookBead     string
@@ -614,6 +626,7 @@ func (f fakeAssignedIssueLookup) GetAssignedIssue(assignee string) (*beads.Issue
 }
 
 func TestRecoveryHookBeadFallsBackToCanonicalIssue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		bd         assignedIssueLookup
@@ -692,6 +705,7 @@ func TestRecoveryHookBeadFallsBackToCanonicalIssue(t *testing.T) {
 // unit tests, would tell an operator or sweep this polecat is safe to nuke
 // while it is actively working.
 func TestCheckRecoveryNeverClearsAHookedWorkingPolecatWithEmptyCleanupStatus(t *testing.T) {
+	t.Parallel()
 	p := &polecat.Polecat{State: polecat.StateWorking, Issue: "gt-x8y"}
 	fields := &beads.AgentFields{} // legacy hook_bead unset, cleanup_status empty — the amber fixture
 
@@ -719,6 +733,7 @@ func TestCheckRecoveryNeverClearsAHookedWorkingPolecatWithEmptyCleanupStatus(t *
 // a still-open hook bead must independently force NEEDS_RECOVERY. cleanup_status
 // is left empty, matching the refinery's second requirement.
 func TestCheckRecoveryHookBeadBlocksIndependentlyOfState(t *testing.T) {
+	t.Parallel()
 	input := polecat.WorkstateInput{
 		State:         polecat.StateIdle,
 		CleanupStatus: "", // empty — the state that produces the bug
@@ -736,6 +751,7 @@ func TestCheckRecoveryHookBeadBlocksIndependentlyOfState(t *testing.T) {
 // SAFE_TO_NUKE. An active-MR blocker must be sufficient on its own to keep a
 // polecat off SAFE_TO_NUKE even with no other blocker present.
 func TestCheckRecoveryActiveMRBlocksIndependentlyWithEmptyCleanupStatus(t *testing.T) {
+	t.Parallel()
 	input := polecat.WorkstateInput{
 		State:           polecat.StateIdle,
 		CleanupStatus:   "", // empty — the state that produces the bug
@@ -755,6 +771,7 @@ func TestCheckRecoveryActiveMRBlocksIndependentlyWithEmptyCleanupStatus(t *testi
 // a blanket NEEDS_RECOVERY would satisfy every test above while stranding
 // the rig at its polecat cap.
 func TestCheckRecoveryRealisticCleanPolecatStillClears(t *testing.T) {
+	t.Parallel()
 	p := &polecat.Polecat{State: polecat.StateIdle}
 	fields := &beads.AgentFields{CleanupStatus: string(polecat.CleanupClean)}
 
@@ -813,6 +830,7 @@ func (f fakeRecoveryBackend) GetAssignedIssue(assignee string) (*beads.Issue, er
 // hook-bead signal as the ONLY thing standing between this fixture and a
 // false SAFE_TO_NUKE.
 func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.T) {
+	t.Parallel()
 	const assignee = "gastown/polecats/amethyst"
 	hookedIssue := &beads.Issue{ID: "gt-ido", Status: beads.StatusHooked, Assignee: assignee}
 	bd := fakeRecoveryBackend{showIssue: hookedIssue, assignedIssue: hookedIssue}
@@ -883,6 +901,7 @@ func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.
 // can't be resolved, that must block recovery (GitCheckFailed), not silently
 // pass through as clean the way the pre-fix "no agent bead" branch did.
 func TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure(t *testing.T) {
+	t.Parallel()
 	facts := polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, HookBeadSafe: true}
 	gitState := &GitState{Clean: false, PreservationCheckFailed: true, PreservationCheckFailure: "no target/custody refs resolved"}
 
@@ -911,6 +930,7 @@ func TestApplyGitStateToWorkstateInputFailsClosedOnPreservationCheckFailure(t *t
 // text agrees with what --json would report", the invariant the bug report
 // asked to be pinned rather than either surface alone.
 func TestCheckRecoveryTextMatchesJSONForWorkingPolecat(t *testing.T) {
+	t.Parallel()
 	input := polecat.WorkstateInput{
 		State:    polecat.StateWorking,
 		HookBead: "gt-axh",

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -141,6 +142,110 @@ func TestNotesShow_NoNoteReturnsErrNoNote(t *testing.T) {
 	_, err = g.NotesShow("om", head)
 	if !errors.Is(err, ErrNoNote) {
 		t.Fatalf("expected ErrNoNote, got %v", err)
+	}
+}
+
+// currentBranchName reports the branch initTestRepo left checked out, so
+// these tests do not depend on git's configured default branch name.
+func currentBranchName(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse --abbrev-ref HEAD: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestNotesList_ReturnsNotesOnUnreachableCommits(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	root, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	branch := currentBranchName(t, dir)
+
+	// A note keyed to a commit nothing references any more: the shape a
+	// discarded rehearsal head leaves behind, and the reason the backfill
+	// reads the notes ref instead of walking history.
+	runGit(t, dir, "checkout", "-q", "-b", "rehearsal")
+	orphan := commitFile(t, dir, "feature.txt", "hello\n", "rehearsal head")
+	runGit(t, dir, "checkout", "-q", branch)
+	runGit(t, dir, "branch", "-D", "rehearsal")
+
+	if err := g.NotesAdd("om", orphan, "orphan note"); err != nil {
+		t.Fatalf("NotesAdd orphan: %v", err)
+	}
+	if err := g.NotesAdd("om", root, "root note"); err != nil {
+		t.Fatalf("NotesAdd root: %v", err)
+	}
+
+	entries, err := g.NotesList("om")
+	if err != nil {
+		t.Fatalf("NotesList: %v", err)
+	}
+	got := make(map[string]string, len(entries))
+	for _, e := range entries {
+		got[e.Annotated] = e.Content
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 notes, got %d: %+v", len(got), entries)
+	}
+	if got[orphan] != "orphan note" {
+		t.Fatalf("unreachable commit's note missing: %+v", got)
+	}
+	if got[root] != "root note" {
+		t.Fatalf("reachable commit's note missing: %+v", got)
+	}
+}
+
+func TestNotesList_AbsentRefIsEmpty(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	entries, err := g.NotesList("om")
+	if err != nil {
+		t.Fatalf("NotesList on an absent ref: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no notes, got %+v", entries)
+	}
+}
+
+func TestParents_OfRootAndMerge(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	root, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	branch := currentBranchName(t, dir)
+
+	parents, err := g.Parents(root)
+	if err != nil {
+		t.Fatalf("Parents(root): %v", err)
+	}
+	if len(parents) != 0 {
+		t.Fatalf("root commit has parents %v", parents)
+	}
+
+	runGit(t, dir, "checkout", "-q", "-b", "feature")
+	featureHead := commitFile(t, dir, "feature.txt", "hello\n", "add feature")
+	runGit(t, dir, "checkout", "-q", branch)
+	runGit(t, dir, "merge", "--no-ff", "-m", "merge feature", "feature")
+	merged, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev merge: %v", err)
+	}
+
+	parents, err = g.Parents(merged)
+	if err != nil {
+		t.Fatalf("Parents(merge): %v", err)
+	}
+	if len(parents) != 2 || parents[0] != root || parents[1] != featureHead {
+		t.Fatalf("merge parents = %v, want [%s %s]", parents, root, featureHead)
 	}
 }
 

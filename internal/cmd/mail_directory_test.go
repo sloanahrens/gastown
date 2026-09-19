@@ -157,6 +157,7 @@ func TestRunMailDirectory_SortOrder(t *testing.T) {
 }
 
 func TestDirectoryEntry_JSONTags(t *testing.T) {
+	t.Parallel()
 	e := DirectoryEntry{Address: "mayor/", Type: "well-known"}
 	data, err := json.Marshal(e)
 	if err != nil {

@@ -44,6 +44,11 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string  `json:"ready_issues"`
 	CreatedAt    time.Time `json:"created_at"`
 	BaseBranch   string    `json:"base_branch,omitempty"`
+	// Agent is the runtime agent requested when the convoy's beads were slung
+	// (--agent). Re-feeding must use it: without it the daemon re-dispatches
+	// with the rig default, silently overriding the routing decision that put
+	// the bead on a specific agent (gt-yg24).
+	Agent string `json:"agent,omitempty"`
 	// Owned reports whether the convoy carries the gt:owned label. Owned
 	// convoys have a designated owner responsible for their own dispatch
 	// cadence; the stranded scan must not auto-feed them (gt-qw4u).
@@ -608,11 +613,19 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
+		// Re-dispatch with the agent the bead was slung with, never the rig
+		// default: the rig default is what silently re-routed mayor-ruled
+		// beads after a failed sling (gt-yg24).
+		agent, agentDesc := convoy.FeedDispatchAgent(c.Agent, m.townRoot, rig)
+
+		m.logger("Convoy %s: feeding %s to %s (%s)", c.ID, issueID, rig, agentDesc)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot", "--actor=daemon/convoy:" + c.ID}
 		if c.BaseBranch != "" {
 			slingArgs = append(slingArgs, "--base-branch="+c.BaseBranch)
+		}
+		if agent != "" {
+			slingArgs = append(slingArgs, "--agent="+agent)
 		}
 		cmd := exec.CommandContext(m.ctx, m.gtPath, slingArgs...)
 		cmd.Dir = m.townRoot

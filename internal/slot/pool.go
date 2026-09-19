@@ -192,17 +192,55 @@ func othersHeld(townRoot string, pool Pool, exclude int) int {
 // is allowed to take (Pool.candidates) with a non-blocking flock and holds
 // the first free one. All of Acquire's semantics carry over — kernel flock
 // is the only source of truth, the owner file is decoration, a descendant
-// of a holder is reentrant — with one refinement to the gt-tuiy
-// unwrapped-container check: running gate containers only block a grant
-// when NO slot is held by anyone, because once any slot is held, containers
-// are exactly what that holder is expected to be running.
+// of a holder doing the same role's work is reentrant — with one refinement
+// to the gt-tuiy unwrapped-container check: running gate containers only
+// block a grant when NO slot is held by anyone, because once any slot is
+// held, containers are exactly what that holder is expected to be running.
+//
+// On success this process's environment is armed with ReentrantEnvVar so
+// its descendants inherit the fast path. AcquirePoolReal is the same
+// acquire for a caller that must be visible to everyone instead.
 func AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
+	return acquirePool(townRoot, role, timeout, pool, false)
+}
+
+// AcquirePoolReal acquires a slot as a first-class holder: it always takes
+// the real flock, writes the owner file and runs the `docker ps` check, and
+// never takes the reentrant fast path, even when the caller's own role is
+// the one a marker it inherited names.
+//
+// The daemon's main_branch_test runner uses this (gt-off9). The daemon
+// outlives every hold it takes, so riding a marker is the wrong move for it:
+// a marker naming that very role can be inherited from a predecessor daemon
+// process — the kernel drops the predecessor's flock when it dies, but a
+// marker it armed lives on in the environment of everything it spawned, so
+// every one of the successor's cycles would report "acquired" and run
+// invisibly, with no flock, no owner file and no `docker ps` check. That is
+// exactly the hole this package exists to close.
+//
+// It arms ReentrantEnvVar like AcquirePool does, so a suite that nests its
+// own `gt slot run` (or another in-process holder) inside this run keeps the
+// fast path instead of deadlocking against the hold. The marker still
+// reaches everything else the daemon spawns while the run is in flight —
+// agent sessions, dogs and plugins, whose environments are fixed at spawn
+// and cannot be repaired when the hold ends — which is why the marker names
+// the holder's role: grants admits only a caller doing the same role's work,
+// so their gate commands and verifies queue behind this hold rather than
+// skipping its lock (gt-off9).
+func AcquirePoolReal(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
+	return acquirePool(townRoot, role, timeout, pool, true)
+}
+
+// acquirePool implements AcquirePool (firstClass false) and AcquirePoolReal
+// (firstClass true).
+func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstClass bool) (*Handle, error) {
 	pool = pool.normalized()
 
-	// Reentrant fast path (see reentrantEnvVar): a descendant of a process
-	// holding ANY slot of this town does not compete with its ancestor.
-	if holderPath, holderPID, ok := reentrantHolder(); ok && holderPID != os.Getpid() {
-		if _, isSlot := slotIndexFromLockPath(townRoot, holderPath); isSlot {
+	// Reentrant fast path (see ReentrantEnvVar): a descendant of a process
+	// holding ANY slot of this town, doing the same role's work, does not
+	// compete with its ancestor. A first-class holder never takes it.
+	if !firstClass {
+		if m, ok := reentrantHolder(); ok && m.grants(townRoot, role) {
 			return &Handle{townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
 		}
 	}
@@ -227,7 +265,9 @@ func AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Hand
 			AcquiredAt: time.Now(),
 			Slot:       i,
 		})
-		_ = os.Setenv(reentrantEnvVar, SlotLockPath(townRoot, i)+"|"+strconv.Itoa(os.Getpid()))
+		// Both acquire paths arm the marker for their own descendants; only
+		// the fast path differs between them (see AcquirePoolReal).
+		_ = os.Setenv(ReentrantEnvVar, reentrantEnvValue(townRoot, i, role, os.Getpid()))
 		return h
 	}
 

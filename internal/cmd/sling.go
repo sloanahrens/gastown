@@ -876,7 +876,11 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			existingConvoy := isTrackedByConvoy(beadID)
 			if existingConvoy == "" {
 				var err error
-				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch)
+				// Record the requested runtime agent on the convoy: if this sling
+				// fails after the convoy exists, the convoy feeder re-dispatches
+				// the bead and must re-use this agent rather than the rig default
+				// (gt-yg24).
+				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch, slingAgent)
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)

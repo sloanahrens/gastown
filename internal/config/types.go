@@ -329,6 +329,16 @@ type NudgeThresholds struct {
 	// StaleClaimThreshold is how long a .claimed file must be untouched
 	// before treated as orphan (default "5m").
 	StaleClaimThreshold string `json:"stale_claim_threshold,omitempty"`
+
+	// MaxDeliveryAttempts caps how many times a nudge may be requeued after a
+	// failed injection before it is dropped (default 3). Bounds the
+	// re-injection loop described in gt-tmlu.
+	MaxDeliveryAttempts *int `json:"max_delivery_attempts,omitempty"`
+
+	// RequeueBackoff is the minimum delay before a requeued nudge becomes
+	// eligible for delivery again (default "30s"). Spaces out retries so a
+	// persistently failing injection cannot re-inject at the poll interval.
+	RequeueBackoff string `json:"requeue_backoff,omitempty"`
 }
 
 // DaemonThresholds configures daemon lifecycle and patrol thresholds.

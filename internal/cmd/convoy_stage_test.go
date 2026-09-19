@@ -16,6 +16,7 @@ import (
 
 // U-01: Simple 2-node cycle A→B→A
 func TestDetectCycles_Simple2NodeCycle(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", BlockedBy: []string{"b"}, Blocks: []string{"b"}},
 		"b": {ID: "b", BlockedBy: []string{"a"}, Blocks: []string{"a"}},
@@ -32,6 +33,7 @@ func TestDetectCycles_Simple2NodeCycle(t *testing.T) {
 
 // U-02: No cycle - linear chain A→B→C
 func TestDetectCycles_NoCycleLinearChain(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Blocks: []string{"b"}},
 		"b": {ID: "b", BlockedBy: []string{"a"}, Blocks: []string{"c"}},
@@ -45,6 +47,7 @@ func TestDetectCycles_NoCycleLinearChain(t *testing.T) {
 
 // U-03: Self-loop A blocks A
 func TestDetectCycles_SelfLoop(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", BlockedBy: []string{"a"}, Blocks: []string{"a"}},
 	}}
@@ -56,6 +59,7 @@ func TestDetectCycles_SelfLoop(t *testing.T) {
 
 // U-04: Diamond shape (no cycle) - A→B, A→C, B→D, C→D
 func TestDetectCycles_DiamondNoCycle(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Blocks: []string{"b", "c"}},
 		"b": {ID: "b", BlockedBy: []string{"a"}, Blocks: []string{"d"}},
@@ -70,6 +74,7 @@ func TestDetectCycles_DiamondNoCycle(t *testing.T) {
 
 // U-05: Long chain with back-edge - A→B→C→D→B (cycle: B→C→D→B)
 func TestDetectCycles_LongChainWithBackEdge(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Blocks: []string{"b"}},
 		"b": {ID: "b", BlockedBy: []string{"a", "d"}, Blocks: []string{"c"}},
@@ -113,6 +118,7 @@ func waveOf(waves []Wave, taskID string) int {
 
 // U-06: 3 independent tasks (no deps) → all Wave 1
 func TestComputeWaves_AllIndependent(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task"},
 		"b": {ID: "b", Type: "task"},
@@ -142,6 +148,7 @@ func TestComputeWaves_AllIndependent(t *testing.T) {
 
 // U-07: Linear chain A→B→C → 3 waves
 func TestComputeWaves_LinearChain(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Blocks: []string{"b"}},
 		"b": {ID: "b", Type: "task", BlockedBy: []string{"a"}, Blocks: []string{"c"}},
@@ -176,6 +183,7 @@ func TestComputeWaves_LinearChain(t *testing.T) {
 
 // U-08: Diamond deps → correct waves. A→B, A→C, B→D, C→D = 3 waves: [A], [B,C], [D]
 func TestComputeWaves_Diamond(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Blocks: []string{"b", "c"}},
 		"b": {ID: "b", Type: "task", BlockedBy: []string{"a"}, Blocks: []string{"d"}},
@@ -203,6 +211,7 @@ func TestComputeWaves_Diamond(t *testing.T) {
 
 // U-09: Mixed parallel + serial. A→B, C (independent), B→D = waves: [A,C], [B], [D]
 func TestComputeWaves_MixedParallelSerial(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Blocks: []string{"b"}},
 		"b": {ID: "b", Type: "task", BlockedBy: []string{"a"}, Blocks: []string{"d"}},
@@ -230,6 +239,7 @@ func TestComputeWaves_MixedParallelSerial(t *testing.T) {
 
 // U-11: Excludes epics from waves
 func TestComputeWaves_ExcludesEpics(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Type: "epic"},
 		"task-1": {ID: "task-1", Type: "task"},
@@ -252,6 +262,7 @@ func TestComputeWaves_ExcludesEpics(t *testing.T) {
 
 // U-12: Excludes non-slingable types (decision, epic, etc.)
 func TestComputeWaves_ExcludesNonSlingable(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"d1":     {ID: "d1", Type: "decision"},
 		"e1":     {ID: "e1", Type: "epic"},
@@ -283,6 +294,7 @@ func TestComputeWaves_ExcludesNonSlingable(t *testing.T) {
 // #2141: decision beads block downstream tasks even though decisions aren't slingable.
 // A task blocked by an open decision must NOT appear in Wave 1.
 func TestComputeWaves_DecisionBlocksTask(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"d1":     {ID: "d1", Type: "decision", Status: "open", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"d1"}},
@@ -324,6 +336,7 @@ func TestComputeWaves_DecisionBlocksTask(t *testing.T) {
 
 // #2141: closed decision beads do NOT block downstream tasks.
 func TestComputeWaves_ClosedDecisionDoesNotBlock(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"d1":     {ID: "d1", Type: "decision", Status: "closed", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"d1"}},
@@ -342,6 +355,7 @@ func TestComputeWaves_ClosedDecisionDoesNotBlock(t *testing.T) {
 
 // U-13: parent-child deps don't create execution edges
 func TestComputeWaves_ParentChildNotExecution(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Type: "epic", Children: []string{"task-1", "task-2"}},
 		"task-1": {ID: "task-1", Type: "task", Parent: "epic-1"},
@@ -366,6 +380,7 @@ func TestComputeWaves_ParentChildNotExecution(t *testing.T) {
 
 // U-14: Empty DAG (no slingable tasks) → error
 func TestComputeWaves_EmptyDAG(t *testing.T) {
+	t.Parallel()
 	// Completely empty
 	dag1 := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{}}
 	_, _, err := computeWaves(dag1)
@@ -390,6 +405,7 @@ func TestComputeWaves_EmptyDAG(t *testing.T) {
 
 // Task blocked by open decision → excluded from waves, returned as gated.
 func TestComputeWaves_GatedByDecision(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "open", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}},
@@ -413,6 +429,7 @@ func TestComputeWaves_GatedByDecision(t *testing.T) {
 
 // task-A gated by decision, task-B depends on task-A → both gated.
 func TestComputeWaves_GatedTransitive(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "open", Blocks: []string{"task-a"}},
 		"task-a": {ID: "task-a", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}, Blocks: []string{"task-b"}},
@@ -450,6 +467,7 @@ func TestComputeWaves_GatedTransitive(t *testing.T) {
 
 // Task blocked by closed decision → in waves (gate resolved).
 func TestComputeWaves_ResolvedDecision(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "closed", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}},
@@ -468,6 +486,7 @@ func TestComputeWaves_ResolvedDecision(t *testing.T) {
 
 // Task blocked by tombstoned decision → in waves.
 func TestComputeWaves_TombstoneDecision(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "tombstone", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}},
@@ -486,6 +505,7 @@ func TestComputeWaves_TombstoneDecision(t *testing.T) {
 
 // Task blocked by open epic → gated.
 func TestComputeWaves_GatedByEpic(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Type: "epic", Status: "open", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"epic-1"}},
@@ -505,6 +525,7 @@ func TestComputeWaves_GatedByEpic(t *testing.T) {
 
 // All slingable tasks gated → empty waves, all returned as gated.
 func TestComputeWaves_AllGated(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "open", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}},
@@ -523,6 +544,7 @@ func TestComputeWaves_AllGated(t *testing.T) {
 
 // merge-blocks creates execution edge in DAG.
 func TestBuildConvoyDAG_MergeBlocks(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "mr-1", Title: "MR", Type: "task", Status: "open"},
 		{ID: "task-1", Title: "Task", Type: "task", Status: "open"},
@@ -546,6 +568,7 @@ func TestBuildConvoyDAG_MergeBlocks(t *testing.T) {
 
 // Task blocked by decision → not flagged as orphan.
 func TestDetectOrphans_DecisionGatedNotOrphan(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"dec-1":  {ID: "dec-1", Type: "decision", Status: "open", Blocks: []string{"task-1"}},
 		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"dec-1"}},
@@ -565,6 +588,7 @@ func TestDetectOrphans_DecisionGatedNotOrphan(t *testing.T) {
 
 // TestConvoyStageInput_EmptyArgs verifies empty args are rejected.
 func TestConvoyStageInput_EmptyArgs(t *testing.T) {
+	t.Parallel()
 	err := validateStageArgs([]string{})
 	if err == nil {
 		t.Fatal("expected error for empty args")
@@ -573,6 +597,7 @@ func TestConvoyStageInput_EmptyArgs(t *testing.T) {
 
 // TestConvoyStageInput_FlagLikeArg verifies flag-like args are rejected.
 func TestConvoyStageInput_FlagLikeArg(t *testing.T) {
+	t.Parallel()
 	err := validateStageArgs([]string{"--verbose"})
 	if err == nil {
 		t.Fatal("expected error for flag-like arg")
@@ -584,6 +609,7 @@ func TestConvoyStageInput_FlagLikeArg(t *testing.T) {
 
 // TestConvoyStageInput_ValidSingleArg verifies a single bead ID passes.
 func TestConvoyStageInput_ValidSingleArg(t *testing.T) {
+	t.Parallel()
 	err := validateStageArgs([]string{"gt-abc"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -592,6 +618,7 @@ func TestConvoyStageInput_ValidSingleArg(t *testing.T) {
 
 // TestConvoyStageInput_ValidMultipleArgs verifies multiple bead IDs pass.
 func TestConvoyStageInput_ValidMultipleArgs(t *testing.T) {
+	t.Parallel()
 	err := validateStageArgs([]string{"gt-abc", "gt-def", "gt-ghi"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -600,6 +627,7 @@ func TestConvoyStageInput_ValidMultipleArgs(t *testing.T) {
 
 // TestConvoyStageInput_ClassifyEpic verifies epic type classification.
 func TestConvoyStageInput_ClassifyEpic(t *testing.T) {
+	t.Parallel()
 	kind := classifyBeadType("epic")
 	if kind != StageInputEpic {
 		t.Errorf("expected StageInputEpic, got %v", kind)
@@ -608,6 +636,7 @@ func TestConvoyStageInput_ClassifyEpic(t *testing.T) {
 
 // TestConvoyStageInput_ClassifyConvoy verifies convoy type classification.
 func TestConvoyStageInput_ClassifyConvoy(t *testing.T) {
+	t.Parallel()
 	kind := classifyBeadType("convoy")
 	if kind != StageInputConvoy {
 		t.Errorf("expected StageInputConvoy, got %v", kind)
@@ -616,6 +645,7 @@ func TestConvoyStageInput_ClassifyConvoy(t *testing.T) {
 
 // TestConvoyStageInput_ClassifyTask verifies task-like types are classified as StageInputTasks.
 func TestConvoyStageInput_ClassifyTask(t *testing.T) {
+	t.Parallel()
 	for _, typ := range []string{"task", "bug", "feature", "chore"} {
 		kind := classifyBeadType(typ)
 		if kind != StageInputTasks {
@@ -626,6 +656,7 @@ func TestConvoyStageInput_ClassifyTask(t *testing.T) {
 
 // TestConvoyStageInput_MixedTypes verifies mixed input types are rejected.
 func TestConvoyStageInput_MixedTypes(t *testing.T) {
+	t.Parallel()
 	types := map[string]string{"gt-epic": "epic", "gt-task": "task"}
 	_, err := resolveInputKind(types)
 	if err == nil {
@@ -638,6 +669,7 @@ func TestConvoyStageInput_MixedTypes(t *testing.T) {
 
 // TestConvoyStageInput_MultipleEpicsError verifies multiple epics are rejected.
 func TestConvoyStageInput_MultipleEpicsError(t *testing.T) {
+	t.Parallel()
 	types := map[string]string{"gt-epic1": "epic", "gt-epic2": "epic"}
 	_, err := resolveInputKind(types)
 	if err == nil {
@@ -647,6 +679,7 @@ func TestConvoyStageInput_MultipleEpicsError(t *testing.T) {
 
 // TestConvoyStageInput_SingleEpicOK verifies a single epic is accepted.
 func TestConvoyStageInput_SingleEpicOK(t *testing.T) {
+	t.Parallel()
 	types := map[string]string{"gt-epic": "epic"}
 	input, err := resolveInputKind(types)
 	if err != nil {
@@ -659,6 +692,7 @@ func TestConvoyStageInput_SingleEpicOK(t *testing.T) {
 
 // TestConvoyStageInput_MultipleTasksOK verifies multiple tasks are accepted.
 func TestConvoyStageInput_MultipleTasksOK(t *testing.T) {
+	t.Parallel()
 	types := map[string]string{"gt-a": "task", "gt-b": "task", "gt-c": "bug"}
 	input, err := resolveInputKind(types)
 	if err != nil {
@@ -685,6 +719,7 @@ func sliceContains(ss []string, val string) bool {
 
 // U-15: blocks deps create execution edges
 func TestBuildDAG_BlocksCreateEdges(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "a", Title: "Task A", Type: "task", Status: "open"},
 		{ID: "b", Title: "Task B", Type: "task", Status: "open"},
@@ -711,6 +746,7 @@ func TestBuildDAG_BlocksCreateEdges(t *testing.T) {
 
 // U-16: conditional-blocks create execution edges (same as blocks for DAG purposes)
 func TestBuildDAG_ConditionalBlocksCreateEdges(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "a", Title: "Task A", Type: "task", Status: "open"},
 		{ID: "b", Title: "Task B", Type: "task", Status: "open"},
@@ -731,6 +767,7 @@ func TestBuildDAG_ConditionalBlocksCreateEdges(t *testing.T) {
 
 // U-17: waits-for creates execution edges
 func TestBuildDAG_WaitsForCreateEdges(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "x", Title: "Task X", Type: "task", Status: "open"},
 		{ID: "y", Title: "Task Y", Type: "task", Status: "open"},
@@ -751,6 +788,7 @@ func TestBuildDAG_WaitsForCreateEdges(t *testing.T) {
 
 // U-18: parent-child recorded as hierarchy but NO execution edge
 func TestBuildDAG_ParentChildNoExecutionEdge(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "epic-1", Title: "Root", Type: "epic", Status: "open"},
 		{ID: "task-1", Title: "Child", Type: "task", Status: "open"},
@@ -779,6 +817,7 @@ func TestBuildDAG_ParentChildNoExecutionEdge(t *testing.T) {
 
 // U-19: related/tracks deps ignored entirely
 func TestBuildDAG_RelatedTracksIgnored(t *testing.T) {
+	t.Parallel()
 	beads := []BeadInfo{
 		{ID: "a", Title: "A", Type: "task", Status: "open"},
 		{ID: "b", Title: "B", Type: "task", Status: "open"},
@@ -1005,6 +1044,7 @@ func TestEpicWalk_CollectsDeps(t *testing.T) {
 
 // U-30: Wave table includes blockers column
 func TestRenderWaveTable_IncludesBlockers(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "Task A", Type: "task", Rig: "gastown", Blocks: []string{"gt-b"}},
 		"gt-b": {ID: "gt-b", Title: "Task B", Type: "task", Rig: "gastown", BlockedBy: []string{"gt-a"}},
@@ -1026,6 +1066,7 @@ func TestRenderWaveTable_IncludesBlockers(t *testing.T) {
 
 // U-38: Summary line shows totals
 func TestRenderWaveTable_SummaryLine(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Title: "A", Type: "task", Rig: "gst"},
 		"b": {ID: "b", Title: "B", Type: "task", Rig: "gst"},
@@ -1049,6 +1090,7 @@ func TestRenderWaveTable_SummaryLine(t *testing.T) {
 
 // Test empty waves
 func TestRenderWaveTable_Empty(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{}}
 	output := renderWaveTable(nil, dag)
 	if !strings.Contains(output, "0 tasks") {
@@ -1058,6 +1100,7 @@ func TestRenderWaveTable_Empty(t *testing.T) {
 
 // Test wave table with multiple rigs
 func TestRenderWaveTable_MultipleRigs(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "Task A", Type: "task", Rig: "gastown"},
 		"bd-b": {ID: "bd-b", Title: "Task B", Type: "task", Rig: "beads"},
@@ -1078,6 +1121,7 @@ func TestRenderWaveTable_MultipleRigs(t *testing.T) {
 // Regression test: byte-based truncation split em-dashes (U+2014, 3 bytes)
 // mid-character, producing mojibake like "â" in the wave table output.
 func TestRenderWaveTable_UTF8Truncation(t *testing.T) {
+	t.Parallel()
 	// Title with em-dash that would be split by byte-based title[:28]
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "F.2: Beads for Optuna rig \u2014 extra", Type: "task", Rig: "gst"},
@@ -1115,6 +1159,7 @@ func TestRenderWaveTable_UTF8Truncation(t *testing.T) {
 
 // U-20: Cycle is categorized as error, not warning
 func TestCategorize_CycleIsError(t *testing.T) {
+	t.Parallel()
 	findings := []StagingFinding{
 		{Severity: "error", Category: "cycle", BeadIDs: []string{"a", "b"}, Message: "cycle"},
 	}
@@ -1129,6 +1174,7 @@ func TestCategorize_CycleIsError(t *testing.T) {
 
 // U-21: No-rig is categorized as error
 func TestCategorize_NoRigIsError(t *testing.T) {
+	t.Parallel()
 	findings := []StagingFinding{
 		{Severity: "error", Category: "no-rig", BeadIDs: []string{"gt-xyz"}, Message: "no rig"},
 	}
@@ -1143,6 +1189,7 @@ func TestCategorize_NoRigIsError(t *testing.T) {
 
 // U-25: No errors + no warnings → staged_ready
 func TestChooseStatus_Ready(t *testing.T) {
+	t.Parallel()
 	status := chooseStatus(nil, nil)
 	if status != "staged_ready" {
 		t.Errorf("expected staged_ready, got %q", status)
@@ -1151,6 +1198,7 @@ func TestChooseStatus_Ready(t *testing.T) {
 
 // U-26: Warnings only → staged_warnings
 func TestChooseStatus_Warnings(t *testing.T) {
+	t.Parallel()
 	warns := []StagingFinding{{Severity: "warning", Category: "blocked-rig"}}
 	status := chooseStatus(nil, warns)
 	if status != "staged_warnings" {
@@ -1160,6 +1208,7 @@ func TestChooseStatus_Warnings(t *testing.T) {
 
 // U-27: Any errors → no creation (empty string)
 func TestChooseStatus_Errors(t *testing.T) {
+	t.Parallel()
 	errs := []StagingFinding{{Severity: "error", Category: "cycle"}}
 	status := chooseStatus(errs, nil)
 	if status != "" {
@@ -1169,6 +1218,7 @@ func TestChooseStatus_Errors(t *testing.T) {
 
 // U-39: Error output includes bead IDs and suggested fix
 func TestRenderErrors_IncludesFixAndIDs(t *testing.T) {
+	t.Parallel()
 	findings := []StagingFinding{
 		{Severity: "error", Category: "cycle", BeadIDs: []string{"a", "b"},
 			Message:      "cycle detected: a → b → a",
@@ -1188,6 +1238,7 @@ func TestRenderErrors_IncludesFixAndIDs(t *testing.T) {
 
 // Test detectErrors with cycle
 func TestErrorDetection_CycleDetected(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Rig: "gastown", Blocks: []string{"b"}, BlockedBy: []string{"b"}},
 		"b": {ID: "b", Type: "task", Rig: "gastown", BlockedBy: []string{"a"}, Blocks: []string{"a"}},
@@ -1205,6 +1256,7 @@ func TestErrorDetection_CycleDetected(t *testing.T) {
 
 // Test detectErrors with no rig
 func TestErrorDetection_NoRig(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Rig: ""}, // no rig!
 	}}
@@ -1220,6 +1272,7 @@ func TestErrorDetection_NoRig(t *testing.T) {
 
 // Test detectErrors clean DAG → no errors
 func TestErrorDetection_Clean(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Type: "task", Rig: "gastown", Blocks: []string{"b"}},
 		"b": {ID: "b", Type: "task", Rig: "gastown", BlockedBy: []string{"a"}},
@@ -1236,6 +1289,7 @@ func TestErrorDetection_Clean(t *testing.T) {
 
 // U-28: Task-list input renders flat list
 func TestRenderDAGTree_TaskListFlat(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "Task A", Type: "task", Status: "open", Rig: "gastown"},
 		"gt-b": {ID: "gt-b", Title: "Task B", Type: "task", Status: "open", Rig: "gastown"},
@@ -1259,6 +1313,7 @@ func TestRenderDAGTree_TaskListFlat(t *testing.T) {
 
 // U-29: Epic input renders full tree with indentation
 func TestRenderDAGTree_EpicTree(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"root-epic": {ID: "root-epic", Title: "Root Epic", Type: "epic", Status: "open",
 			Children: []string{"sub-epic", "task-1"}},
@@ -1318,6 +1373,7 @@ func TestRenderDAGTree_EpicTree(t *testing.T) {
 
 // U-36: Each node shows ID, type, title, rig, status
 func TestRenderDAGTree_NodeInfo(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-abc": {ID: "gt-abc", Title: "My Task", Type: "task", Status: "open", Rig: "gastown"},
 	}}
@@ -1334,6 +1390,7 @@ func TestRenderDAGTree_NodeInfo(t *testing.T) {
 
 // U-37: Blocked tasks show blockers inline
 func TestRenderDAGTree_BlockedShowsBlockers(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"task-a": {ID: "task-a", Title: "Task A", Type: "task", Status: "open", Rig: "gastown",
 			Blocks: []string{"task-b"}},
@@ -1358,6 +1415,7 @@ func TestRenderDAGTree_BlockedShowsBlockers(t *testing.T) {
 
 // SN-01: Full tree for nested epic structure (3-level deep)
 func TestRenderDAGTree_NestedEpic(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"root-epic": {ID: "root-epic", Title: "Root", Type: "epic", Status: "open",
 			Children: []string{"sub-epic"}},
@@ -1406,6 +1464,7 @@ func TestRenderDAGTree_NestedEpic(t *testing.T) {
 
 // IT-40: Tree displayed before wave table (ordering contract)
 func TestRenderDAGTree_OutputOrdering(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "Task A", Type: "task", Status: "open", Rig: "gastown",
 			Blocks: []string{"gt-b"}},
@@ -1558,6 +1617,7 @@ func TestDetectWarnings_DockedRig(t *testing.T) {
 
 // U-23: Orphan detection for epic input
 func TestDetectWarnings_OrphanEpicInput(t *testing.T) {
+	t.Parallel()
 	// 3 tasks under an epic: A blocks B (connected), C is isolated.
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Type: "epic", Children: []string{"gt-a", "gt-b", "gt-c"}},
@@ -1584,6 +1644,7 @@ func TestDetectWarnings_OrphanEpicInput(t *testing.T) {
 
 // U-24: Missing integration branch warning
 func TestDetectWarnings_MissingBranch(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"root-epic": {ID: "root-epic", Type: "epic", Children: []string{"sub-epic"}},
 		"sub-epic":  {ID: "sub-epic", Type: "epic", Parent: "root-epic", Children: []string{"gt-a", "gt-b"}},
@@ -1616,6 +1677,7 @@ func TestDetectWarnings_MissingBranch(t *testing.T) {
 
 // U-34: Cross-rig routing mismatch warned
 func TestDetectWarnings_CrossRig(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Type: "task", Rig: "gastown"},
 		"gt-b": {ID: "gt-b", Type: "task", Rig: "gastown"},
@@ -1647,6 +1709,7 @@ func TestDetectWarnings_CrossRig(t *testing.T) {
 
 // U-35: Capacity estimation
 func TestDetectWarnings_Capacity(t *testing.T) {
+	t.Parallel()
 	// Create a DAG where wave 1 has 6 independent tasks (all in-degree 0).
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"t1": {ID: "t1", Type: "task", Rig: "gastown"},
@@ -1692,6 +1755,7 @@ func TestDetectWarnings_Capacity(t *testing.T) {
 
 // IT-43: Orphan detection skipped for task-list input
 func TestDetectWarnings_NoOrphansForTaskList(t *testing.T) {
+	t.Parallel()
 	// Same DAG as orphan test but with task-list input.
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Type: "task", Rig: "gastown", Blocks: []string{"gt-b"}},
@@ -1710,6 +1774,7 @@ func TestDetectWarnings_NoOrphansForTaskList(t *testing.T) {
 
 // Test renderWarnings output format
 func TestRenderWarnings_Format(t *testing.T) {
+	t.Parallel()
 	findings := []StagingFinding{
 		{
 			Severity:     "warning",
@@ -1788,6 +1853,7 @@ func TestDetectWarnings_Clean(t *testing.T) {
 
 // Test renderWarnings with empty findings
 func TestRenderWarnings_Empty(t *testing.T) {
+	t.Parallel()
 	output := renderWarnings(nil)
 	if output != "" {
 		t.Errorf("expected empty string for nil findings, got %q", output)
@@ -2236,6 +2302,7 @@ func TestRestageConvoy_UpdatesStatusToWarnings(t *testing.T) {
 // Build a clean DAG (no errors, no warnings), call the JSON rendering
 // function, verify valid JSON with all fields.
 func TestJSONOutput_ValidWithAllFields(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Title: "Task A", Type: "task", Status: "open", Rig: "gastown",
 			Blocks: []string{"gt-b"}},
@@ -2322,6 +2389,7 @@ func TestJSONOutput_ValidWithAllFields(t *testing.T) {
 // U-32: JSON output: errors array populated on failure.
 // Build a DAG with a cycle, verify the errors array has the cycle finding.
 func TestJSONOutput_ErrorsPopulatedOnCycle(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-a": {ID: "gt-a", Type: "task", Rig: "gastown",
 			Blocks: []string{"gt-b"}, BlockedBy: []string{"gt-b"}},
@@ -2379,6 +2447,7 @@ func TestJSONOutput_ErrorsPopulatedOnCycle(t *testing.T) {
 
 // U-33: JSON output: convoy_id empty when errors found.
 func TestJSONOutput_ConvoyIDEmptyOnErrors(t *testing.T) {
+	t.Parallel()
 	result := StageResult{
 		Status:   "error",
 		ConvoyID: "", // no convoy created
@@ -2411,6 +2480,7 @@ func TestJSONOutput_ConvoyIDEmptyOnErrors(t *testing.T) {
 // IT-21: --json flag outputs valid JSON to stdout.
 // Verifies the flag is registered on the command.
 func TestJSONFlag_RegisteredOnCommand(t *testing.T) {
+	t.Parallel()
 	flag := convoyStageCmd.Flags().Lookup("json")
 	if flag == nil {
 		t.Fatal("--json flag not registered on convoyStageCmd")
@@ -2640,6 +2710,7 @@ func TestJSONOutput_ErrorsReturnNonZeroExit(t *testing.T) {
 // Build a representative DAG and verify the full JSON output structure
 // matches expected field names, nesting, and types.
 func TestJSONOutput_FullStructureSnapshot(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Title: "Root Epic", Type: "epic", Status: "open",
 			Children: []string{"gt-a", "gt-b"}},
@@ -2750,6 +2821,7 @@ func TestJSONOutput_FullStructureSnapshot(t *testing.T) {
 
 // Test buildTreeJSON for flat (task-list) input.
 func TestBuildTreeJSON_FlatInput(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-x": {ID: "gt-x", Title: "X", Type: "task", Status: "open", Rig: "gastown"},
 		"gt-y": {ID: "gt-y", Title: "Y", Type: "bug", Status: "open", Rig: "beads"},
@@ -2777,6 +2849,7 @@ func TestBuildTreeJSON_FlatInput(t *testing.T) {
 
 // Test buildTreeJSON for epic input with nested children.
 func TestBuildTreeJSON_EpicInput(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Title: "Root", Type: "epic", Status: "open",
 			Children: []string{"sub-epic", "task-1"}},
@@ -2822,6 +2895,7 @@ func TestBuildTreeJSON_EpicInput(t *testing.T) {
 
 // Test buildFindingsJSON with empty input.
 func TestBuildFindingsJSON_Empty(t *testing.T) {
+	t.Parallel()
 	out := buildFindingsJSON(nil)
 	if out == nil {
 		t.Fatal("buildFindingsJSON(nil) should return empty slice, not nil")
@@ -2833,6 +2907,7 @@ func TestBuildFindingsJSON_Empty(t *testing.T) {
 
 // Test buildWavesJSON with task details.
 func TestBuildWavesJSON_TaskDetails(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", Title: "A", Type: "task", Rig: "gst",
 			Blocks: []string{"b"}},
@@ -2988,6 +3063,7 @@ func TestAppendValidationWave_CreatesCapstoneWave(t *testing.T) {
 // TestAppendValidationWave_NoSlingableBeads verifies that appendValidationWave
 // returns early when there are no slingable beads (e.g., epic-only DAG).
 func TestAppendValidationWave_NoSlingableBeads(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"epic-1": {ID: "epic-1", Title: "Test Epic", Type: "epic", Status: "open"},
 	}}

@@ -14,6 +14,7 @@ import (
 // longer applies. The fields should be cleared so a later fast-path never
 // skips gates against a stale base.
 func TestRecordConflictTaskOnMR_ClearsStalePreVerified(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 
 	mrIssue := prepushMRIssue("gt-mr-1", "polecat/nux/gt-real", "main", "gt-real")
@@ -59,6 +60,7 @@ func TestRecordConflictTaskOnMR_ClearsStalePreVerified(t *testing.T) {
 // resolution in progress, no conflict task is created and no error is
 // returned — the MR simply retries next cycle.
 func TestRecordConflict_DeferredWhenSlotBusy(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 
 	mrIssue := prepushMRIssue("gt-mr-2", "polecat/nux/gt-real2", "main", "gt-real2")

@@ -6,6 +6,7 @@ import (
 )
 
 func TestScoreMR_PriorityClamping(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	config := DefaultScoreConfig()
 
