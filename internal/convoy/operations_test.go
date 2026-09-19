@@ -1170,7 +1170,7 @@ func TestDispatchIssue_Success(t *testing.T) {
 	townRoot := t.TempDir()
 	gtPath, logPath := makeGTStub(t, 0)
 
-	err := dispatchIssue(context.Background(), townRoot, "test-abc", "myrig", gtPath, "")
+	err := dispatchIssue(context.Background(), townRoot, "test-abc", "myrig", gtPath, "", "")
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
@@ -1186,6 +1186,73 @@ func TestDispatchIssue_Success(t *testing.T) {
 	}
 }
 
+// TestDispatchIssue_PassesAgent is the regression test for gt-yg24: a bead
+// slung with --agent must be re-dispatched with the same agent, or the feed
+// silently re-routes it to the rig default.
+func TestDispatchIssue_PassesAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	gtPath, logPath := makeGTStub(t, 0)
+
+	err := dispatchIssue(context.Background(), townRoot, "test-agent", "myrig", gtPath, "", "deepseek-flash")
+	if err != nil {
+		t.Fatalf("dispatchIssue returned error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub log not written: %v", err)
+	}
+	logStr := strings.TrimSpace(string(logData))
+	expected := "sling test-agent myrig --no-boot --agent=deepseek-flash"
+	if logStr != expected {
+		t.Errorf("gt stub called with %q, want %q", logStr, expected)
+	}
+}
+
+// TestFeedDispatchAgent covers the feeder's agent choice: a recorded agent is
+// passed through verbatim, and the no-agent fallback stays with gt sling while
+// naming the rig default it expects (gt-yg24).
+func TestFeedDispatchAgent(t *testing.T) {
+	townRoot := t.TempDir()
+
+	t.Run("recorded agent wins", func(t *testing.T) {
+		agent, desc := FeedDispatchAgent("deepseek-flash", townRoot, "gastown")
+		if agent != "deepseek-flash" {
+			t.Errorf("agent = %q, want %q", agent, "deepseek-flash")
+		}
+		if !strings.Contains(desc, "recorded on convoy") {
+			t.Errorf("description %q should say the agent was recorded on the convoy", desc)
+		}
+	})
+
+	t.Run("whitespace-only agent counts as unset", func(t *testing.T) {
+		agent, desc := FeedDispatchAgent("  ", townRoot, "gastown")
+		if agent != "" {
+			t.Errorf("agent = %q, want empty (left to gt sling)", agent)
+		}
+		if !strings.Contains(desc, "rig default") {
+			t.Errorf("description %q should report the rig default fallback", desc)
+		}
+	})
+
+	t.Run("no agent falls back to rig default and says so", func(t *testing.T) {
+		agent, desc := FeedDispatchAgent("", townRoot, "gastown")
+		if agent != "" {
+			t.Errorf("agent = %q, want empty (left to gt sling)", agent)
+		}
+		// The town has no settings in a temp root, so resolution lands on the
+		// built-in default. What matters here is that the fallback is named in
+		// the log line rather than applied invisibly.
+		if !strings.Contains(desc, "no --agent recorded on convoy") {
+			t.Errorf("description %q should explain why the default is used", desc)
+		}
+	})
+}
+
 func TestDispatchIssue_Failure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
@@ -1194,7 +1261,7 @@ func TestDispatchIssue_Failure(t *testing.T) {
 	townRoot := t.TempDir()
 	gtPath, _ := makeGTStub(t, 1)
 
-	err := dispatchIssue(context.Background(), townRoot, "test-fail", "myrig", gtPath, "")
+	err := dispatchIssue(context.Background(), townRoot, "test-fail", "myrig", gtPath, "", "")
 	if err == nil {
 		t.Fatal("dispatchIssue should return error when gt exits 1")
 	}

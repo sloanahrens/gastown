@@ -291,13 +291,23 @@ func printConvoyConflict(beadID, convoyID string) {
 	fmt.Println()
 }
 
+// optionalAgent unwraps the optional agent argument of createAutoConvoy and
+// createBatchConvoy (empty when the caller did not request one).
+func optionalAgent(agent []string) string {
+	if len(agent) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(agent[0])
+}
+
 // createBatchConvoy creates a single auto-convoy that tracks all beads in a batch sling.
 // Returns the convoy ID and the list of bead IDs that were successfully tracked.
 // Callers should only stamp ConvoyID on beads in the tracked set — a bead whose
 // dep add failed should not reference a convoy that has no knowledge of it.
 // If owned is true, the convoy is marked with gt:owned label.
+// agent is optional (variadic so existing callers are unaffected); see createAutoConvoy.
 // beadIDs must be non-empty. The convoy title uses the rig name and bead count.
-func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrategy, baseBranch string) (string, []string, error) {
+func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrategy, baseBranch string, agent ...string) (string, []string, error) {
 	if len(beadIDs) == 0 {
 		return "", nil, fmt.Errorf("no beads to track")
 	}
@@ -316,6 +326,7 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
 		Merge:      mergeStrategy,
 		BaseBranch: baseBranch,
+		Agent:      optionalAgent(agent),
 	})
 
 	createArgs := []string{
@@ -354,8 +365,12 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 // createAutoConvoy creates an auto-convoy for a single issue and tracks it.
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
+// agent is optional (variadic so existing callers are unaffected): the runtime
+// agent requested with --agent at sling time. It is persisted on the convoy so
+// that a convoy feeder re-dispatching this bead after a failed sling re-uses
+// the same agent instead of the rig default (gt-yg24).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string) (_ string, retErr error) {
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string, agent ...string) (_ string, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
@@ -379,6 +394,7 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
 		Merge:      mergeStrategy,
 		BaseBranch: baseBranch,
+		Agent:      optionalAgent(agent),
 	})
 
 	createArgs := []string{

@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -288,11 +290,12 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		return
 	}
 
-	// Extract base_branch from convoy description fields
-	var baseBranch string
+	// Extract base_branch and agent from convoy description fields
+	var baseBranch, convoyAgent string
 	if convoy, err := store.GetIssue(ctx, convoyID); err == nil && convoy != nil {
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
+			convoyAgent = cf.Agent
 		}
 	}
 
@@ -338,8 +341,9 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
-		logger("%s: convoy %s: feeding next ready issue %s to %s", caller, convoyID, issue.ID, rig)
-		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch); err != nil {
+		agent, agentDesc := FeedDispatchAgent(convoyAgent, townRoot, rig)
+		logger("%s: convoy %s: feeding next ready issue %s to %s (%s)", caller, convoyID, issue.ID, rig, agentDesc)
+		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch, agent); err != nil {
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
 			continue // Try next issue on dispatch failure
 		}
@@ -606,13 +610,41 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 	}
 }
 
+// FeedDispatchAgent decides which runtime agent a convoy feeder should
+// re-dispatch an issue with. It returns the value for --agent (empty means
+// "leave the choice to gt sling") and a human-readable description of where
+// the choice came from, for logging.
+//
+// A convoy that recorded an agent at sling time re-feeds with that same agent:
+// the routing decision belongs to whoever slung the bead, and falling back to
+// the rig default silently overrides it (gt-yg24). With no recorded agent the
+// feeder passes nothing and reports the rig default it expects gt sling to
+// resolve — the fallback is logged because an invisible one is what made the
+// original defect hard to see, and it is not pinned as a flag because gt
+// sling's own resolution also accounts for runtime cost-tier overrides.
+func FeedDispatchAgent(convoyAgent, townRoot, rig string) (agent, description string) {
+	if a := strings.TrimSpace(convoyAgent); a != "" {
+		return a, fmt.Sprintf("agent %q recorded on convoy at sling time", a)
+	}
+	if rig == "" {
+		return "", "rig default agent (rig unresolved, left to gt sling)"
+	}
+	name, _ := config.ResolveRoleAgentName("polecat", townRoot, filepath.Join(townRoot, rig))
+	return "", fmt.Sprintf("rig default agent %q (no --agent recorded on convoy)", name)
+}
+
 // dispatchIssue dispatches an issue to a rig via gt sling.
 // The context parameter enables cancellation on daemon shutdown.
 // gtPath is the resolved path to the gt binary.
-func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch string) error {
+// agent is the runtime agent to re-dispatch with; empty leaves the choice to
+// gt sling's own resolution.
+func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch, agent string) error {
 	args := []string{"sling", issueID, rig, "--no-boot"}
 	if baseBranch != "" {
 		args = append(args, "--base-branch="+baseBranch)
+	}
+	if agent != "" {
+		args = append(args, "--agent="+agent)
 	}
 	cmd := exec.CommandContext(ctx, gtPath, args...)
 	cmd.Dir = townRoot
