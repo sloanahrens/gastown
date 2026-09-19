@@ -50,7 +50,11 @@ run_plugin() {
   # Capture the exit code without set -e aborting the test script on non-zero
   # (om review of gt-htx3: with set -e the rc assertions could never fire).
   local town="$1" rc=0
-  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" PATH="$town/bin:$PATH"; bash "$RUN_SH" ) > "$town/run.out" 2>&1 || rc=$?
+  # PATH is rebuilt from the stub dir plus system dirs only: the real gt lives
+  # in ~/.local/bin and must be unreachable, so a stub miss fails loudly
+  # ("gt: command not found") instead of writing a real plugin-run receipt
+  # into the town's beads (one such stray receipt was seen on 2026-09-19).
+  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" PATH="$town/bin:/opt/homebrew/bin:/usr/bin:/bin"; bash "$RUN_SH" ) > "$town/run.out" 2>&1 || rc=$?
   echo "$rc"
 }
 
