@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,7 +72,42 @@ func init() {
 type maintainDBInfo struct {
 	name        string
 	commitCount int
-	hasBackup   bool
+	// countKnown is false when maintainCountCommits failed. commitCount is then
+	// meaningless — not a zero — and must not be read as one (gt-racu).
+	countKnown bool
+	countErr   error
+	hasBackup  bool
+}
+
+// needsFlatten reports whether the flatten phase should process this database.
+//
+// An unknown commit count must not be read as a legitimate zero: a failed
+// measurement is not evidence that a database is quiet. Skipping on that basis
+// is silent, because the plan would render a count failure and a genuinely idle
+// database identically. An unknown count therefore flattens rather than skips.
+func (db maintainDBInfo) needsFlatten(threshold int) bool {
+	return !db.countKnown || db.commitCount >= threshold
+}
+
+// countText renders the commit count for the plan line, keeping an unknown
+// count distinguishable from a legitimate zero.
+func (db maintainDBInfo) countText() string {
+	if !db.countKnown {
+		if db.countErr != nil {
+			return fmt.Sprintf("commits unknown (%v)", db.countErr)
+		}
+		return "commits unknown"
+	}
+	return fmt.Sprintf("%d commits", db.commitCount)
+}
+
+// countLabel renders the bare commit count for the flatten result line
+// ("608 → 3"). A failed measurement prints "unknown", never 0.
+func (db maintainDBInfo) countLabel() string {
+	if !db.countKnown {
+		return "unknown"
+	}
+	return strconv.Itoa(db.commitCount)
 }
 
 func runMaintain(cmd *cobra.Command, args []string) error {
@@ -106,8 +142,14 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	dbInfos := make([]maintainDBInfo, 0, len(databases))
 	for _, dbName := range databases {
 		info := maintainDBInfo{name: dbName}
-		if count, err := maintainCountCommits(config, dbName); err == nil {
+		count, err := maintainCountCommits(config, dbName)
+		if err != nil {
+			// Keep the error instead of discarding it: a bare zero would read
+			// as a quiet database and silently skip it (gt-racu).
+			info.countErr = err
+		} else {
 			info.commitCount = count
+			info.countKnown = true
 		}
 		info.hasBackup = maintainHasBackup(config.DataDir, dbName)
 		dbInfos = append(dbInfos, info)
@@ -116,23 +158,32 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	// Display plan.
 	flattenCount := 0
 	backupCount := 0
+	unknownCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
 	for _, db := range dbInfos {
 		tags := ""
-		if db.commitCount >= maintainThreshold {
-			tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"))
+		if db.needsFlatten(maintainThreshold) {
+			reason := ""
+			if !db.countKnown {
+				reason = " (count unknown)"
+				unknownCount++
+			}
+			tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
 			flattenCount++
 		}
 		if db.hasBackup {
 			tags += fmt.Sprintf(" %s", style.Dim.Render("[backup]"))
 			backupCount++
 		}
-		fmt.Printf("  %s: %d commits%s\n", db.name, db.commitCount, tags)
+		fmt.Printf("  %s: %s%s\n", db.name, db.countText(), tags)
 	}
 	fmt.Printf("\n  Databases: %d\n", len(dbInfos))
 	fmt.Printf("  Will backup: %d\n", backupCount)
 	fmt.Printf("  Will flatten: %d (threshold: %d commits)\n", flattenCount, maintainThreshold)
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
+	if unknownCount > 0 {
+		fmt.Printf("  Unknown commit counts: %d (flattened, not skipped)\n", unknownCount)
+	}
 
 	if maintainDryRun {
 		fmt.Printf("\n%s Dry run complete — no changes made\n", style.Dim.Render("ℹ"))
@@ -192,15 +243,21 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	if flattenCount > 0 {
 		fmt.Printf("\n%s Flattening databases...\n", style.Bold.Render("●"))
 		for _, db := range dbInfos {
-			if db.commitCount < maintainThreshold {
+			if !db.needsFlatten(maintainThreshold) {
 				continue
 			}
-			preCount := db.commitCount
 			if err := maintainFlattenDB(config, db.name); err != nil {
 				fmt.Printf("  %s %s: flatten failed: %v\n", style.Bold.Render("✗"), db.name, err)
 			} else {
-				postCount, _ := maintainCountCommits(config, db.name)
-				fmt.Printf("  %s %s: %d → %d commits\n", style.Bold.Render("✓"), db.name, preCount, postCount)
+				post := maintainDBInfo{name: db.name}
+				if postCount, err := maintainCountCommits(config, db.name); err != nil {
+					post.countErr = err
+				} else {
+					post.commitCount = postCount
+					post.countKnown = true
+				}
+				fmt.Printf("  %s %s: %s → %s commits\n",
+					style.Bold.Render("✓"), db.name, db.countLabel(), post.countLabel())
 				totalFlattened++
 			}
 		}
