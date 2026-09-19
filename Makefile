@@ -124,9 +124,10 @@ check-install-path:
 	fi
 
 install: check-up-to-date build
-	@mkdir -p $(INSTALL_DIR)
-	@rm -f $(INSTALL_DIR)/$(BINARY)
-	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:
+	# that leaves the live path missing or holding a partial binary, and
+	# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
+	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
 		if [ -f "$$bad" ]; then \
@@ -155,10 +156,10 @@ install: check-up-to-date build
 # Use this for automated rebuilds (e.g., rebuild-gt plugin). Sessions pick up
 # the new binary on their next natural cycle/handoff.
 safe-install: check-up-to-date check-forward-only build
-	@mkdir -p $(INSTALL_DIR)
-	@# Atomic-ish replace: copy to temp then move (move is atomic on same filesystem)
-	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY).new
-	@mv $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)
+	@# Atomic replace, shared with `install`. The temp file is created with a
+	@# unique name in the destination directory, so concurrent installs cannot
+	@# interleave into one another's copy (gt-0het).
+	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
 		if [ -f "$$bad" ]; then \
@@ -219,6 +220,7 @@ test: test-makefile
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
+	bash scripts/install-binary_test.sh
 	bash -n plugins/stuck-agent-dog/run.sh
 	bash -n plugins/stuck-agent-dog/run_test.sh
 	bash plugins/stuck-agent-dog/run_test.sh
