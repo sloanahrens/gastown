@@ -1303,19 +1303,6 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		return err
 	}
 
-	// Create redirect file in mayor/rig/.beads pointing to rig/.beads.
-	// This allows bd commands from the mayor clone's working directory to find
-	// the beads database. We create only the redirect file (not the DB directory)
-	// to avoid interfering with the tracked-beads detection logic.
-	// The directory must exist for WriteFile to create the redirect file.
-	if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
-		return fmt.Errorf("creating mayor/rig/.beads directory: %w", err)
-	}
-	mayorRedirectPath := filepath.Join(mayorRigBeads, "redirect")
-	if err := os.WriteFile(mayorRedirectPath, []byte("../../.beads\n"), 0644); err != nil {
-		return fmt.Errorf("creating mayor redirect file: %w", err)
-	}
-
 	// Pin bd to the intended .beads directory/database through the shared
 	// hardened env builder so stale shell selectors cannot leak into rig init.
 	filteredEnv := bdSubprocessEnv(beadsDir, rigName)
