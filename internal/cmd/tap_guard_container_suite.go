@@ -247,7 +247,11 @@ func containsSubsequence(tokens, want []string) bool {
 // be a value". -j and -l take an OPTIONAL value, so the next token is a
 // value only when it looks like one (all digits). No branch ever swallows
 // the target "test" itself.
-var makeValueFlags = map[string]bool{"-c": true, "-f": true, "-o": true, "-w": true, "-i": true}
+var makeValueFlags = map[string]bool{
+	"-c": true, "-f": true, "-o": true, "-w": true, "-i": true,
+	"--directory": true, "--file": true, "--makefile": true, "--old-file": true, "--assume-old": true,
+	"--what-if": true, "--new-file": true, "--assume-new": true, "--include-dir": true,
+}
 var makeOptionalNumberFlags = map[string]bool{"-j": true, "-l": true}
 
 // findTestInvocation returns the index of the first "<tool> test" invocation
