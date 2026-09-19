@@ -970,7 +970,13 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 	// after our nudge, the agent is alive and processing — even if it hasn't
 	// updated its bead (e.g., witness agents that respond in prose rather than
 	// via a structured bead-update channel).
-	baselineActivity, activityErr := t.GetSessionActivity(sessionName)
+	//
+	// gt-xb27: read #{window_activity}, not #{session_activity}. tmux only
+	// advances session_activity for ATTACHED sessions, and these agents are all
+	// unattached, so the baseline never moved and the "newActivity.After" test
+	// below could never fire — silently disabling this signal and reporting
+	// prose-responding agents as unresponsive.
+	baselineActivity, activityErr := t.GetWindowActivity(sessionName)
 
 	fmt.Printf("%s Sent HEALTH_CHECK to %s, waiting %s...\n",
 		style.Bold.Render("→"), agent, healthCheckTimeout)
@@ -1000,9 +1006,10 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 			// Secondary signal: tmux session activity (prose/command response)
 			// Agents like the Witness respond to HEALTH_CHECK by running commands
 			// in their session, producing output, but may not update their bead.
-			// Session activity is a reliable liveness signal for these agents.
+			// Pane output is a reliable liveness signal for these agents (gt-xb27:
+			// window activity, not session activity — see the baseline above).
 			if activityErr == nil {
-				newActivity, err := t.GetSessionActivity(sessionName)
+				newActivity, err := t.GetWindowActivity(sessionName)
 				if err == nil && newActivity.After(baselineActivity) {
 					responded = true
 					goto Done
