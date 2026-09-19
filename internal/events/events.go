@@ -55,6 +55,11 @@ const (
 	TypeSessionDeath = "session_death" // Feed-visible session termination
 	TypeMassDeath    = "mass_death"    // Multiple sessions died in short window
 
+	// TypeRefineryRestartDecision records why a refinery session that already
+	// existed was kept or killed. Restarts used to be silent on the daemon-log
+	// side, which is why the gt-uj9k respawn burst went unexplained.
+	TypeRefineryRestartDecision = "refinery_restart_decision"
+
 	// Witness patrol events
 	TypePatrolStarted    = "patrol_started"
 	TypePolecatChecked   = "polecat_checked"
@@ -383,22 +388,46 @@ func MassDeathPayload(count int, window string, sessions []string, possibleCause
 	return p
 }
 
+// SessionStartInfo describes a session_start event: which session started,
+// and — the part that was missing before gt-uj9k — why and at whose request.
+type SessionStartInfo struct {
+	// SessionID is the Claude Code session UUID.
+	SessionID string
+	// Role is the Gas Town role (e.g., "gastown/crew/joe", "deacon").
+	Role string
+	// Topic is what the session is working on, if known.
+	Topic string
+	// Cwd is the working directory.
+	Cwd string
+	// Reason is why this session started. Values come from the hook source
+	// (startup/resume/clear/compact) or from GT_SESSION_START_REASON when a
+	// spawner sets it explicitly (e.g. "daemon-heartbeat", "install").
+	Reason string
+	// Caller is who requested the start: the role or subsystem that spawned
+	// this session, from GT_SESSION_START_CALLER. "unknown" when the start
+	// did not come through an instrumented spawner.
+	Caller string
+}
+
 // SessionPayload creates a payload for session start/end events.
-// sessionID: Claude Code session UUID
-// role: Gas Town role (e.g., "gastown/crew/joe", "deacon")
-// topic: What the session is working on
-// cwd: Working directory
-func SessionPayload(sessionID, role, topic, cwd string) map[string]interface{} {
+//
+// reason and caller are always emitted, even when empty-resolved, so a burst
+// of session_starts can be attributed without cross-referencing process PIDs
+// (gt-uj9k). "who requested it and why" is the field pair that was missing
+// when 4-8 unlogged refinery respawns went unexplained.
+func SessionPayload(info SessionStartInfo) map[string]interface{} {
 	p := map[string]interface{}{
-		"session_id": sessionID,
-		"role":       role,
-		"actor_pid":  fmt.Sprintf("%s-%d", role, os.Getpid()),
+		"session_id": info.SessionID,
+		"role":       info.Role,
+		"actor_pid":  fmt.Sprintf("%s-%d", info.Role, os.Getpid()),
+		"reason":     info.Reason,
+		"caller":     info.Caller,
 	}
-	if topic != "" {
-		p["topic"] = topic
+	if info.Topic != "" {
+		p["topic"] = info.Topic
 	}
-	if cwd != "" {
-		p["cwd"] = cwd
+	if info.Cwd != "" {
+		p["cwd"] = info.Cwd
 	}
 	return p
 }

@@ -39,6 +39,27 @@ const (
 	// starting agent appears dead but is actually initializing.
 	ZombieKillGracePeriod = 500 * time.Millisecond
 
+	// SessionBootGracePeriod is how long a just-created session is presumed to
+	// be mid-boot, so a second caller arriving during bootstrap must not tear it
+	// down as a "zombie". Claude's process tree is not detectable for the whole
+	// bootstrap window (ClaudeStartTimeout, up to 180s while the first turn's
+	// API round-trip runs), so any liveness probe in that window reports "dead"
+	// for a perfectly healthy session. Without this, concurrent start paths
+	// (daemon heartbeat, gt up, gt start --all, boot/deacon patrol formulas)
+	// each kill the session the previous one just created — the refinery
+	// respawn burst of gt-uj9k.
+	SessionBootGracePeriod = 60 * time.Second
+
+	// EnvSessionStartReason is set by a spawner to record why it started an
+	// agent session. Read by `gt prime --hook` when it emits the session_start
+	// event, so every start can be attributed (gt-uj9k).
+	EnvSessionStartReason = "GT_SESSION_START_REASON"
+
+	// EnvSessionStartCaller is set by a spawner to record who requested the
+	// session start (role or subsystem). Read by `gt prime --hook` alongside
+	// EnvSessionStartReason.
+	EnvSessionStartCaller = "GT_SESSION_START_CALLER"
+
 	// GracefulShutdownTimeout is how long to wait after sending Ctrl-C before
 	// forcefully killing a session.
 	// Configurable via operational.session.graceful_shutdown_timeout.

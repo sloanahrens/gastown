@@ -2302,8 +2302,14 @@ func findTownRootFromCwd() (string, error) {
 // GT_ROLE can be:
 //   - Simple: "mayor", "deacon"
 //   - Compound: "rig/witness", "rig/refinery", "rig/crew/name", "rig/polecats/name"
+//   - Dog address: "deacon/dogs/<name>" (session.AgentIdentity.Address)
 //
-// For compound format, returns the role segment (second part).
+// For compound format, returns the role segment (second part), mapping the
+// plural collection segments to their role: "polecats" → polecat and "dogs" →
+// dog. Without the dog mapping a handoff read its own GT_ROLE as "dogs" and
+// resolved no role config at all — no role_agents.dog, no rendered system
+// prompt file, so the respawned dog dumped its static role text back into the
+// prime hook (gt-h7e5).
 // For simple format, returns the role as-is.
 func ExtractSimpleRole(gtRole string) string {
 	if gtRole == "" {
@@ -2322,6 +2328,13 @@ func ExtractSimpleRole(gtRole string) string {
 		role := parts[1]
 		if role == "polecats" {
 			return constants.RolePolecat
+		}
+		if role == "dogs" {
+			// "deacon/dogs/boot" is the boot watchdog, its own role.
+			if parts[2] == constants.RoleBoot {
+				return constants.RoleBoot
+			}
+			return constants.RoleDog
 		}
 		return role
 	default:
@@ -2638,11 +2651,14 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	rc = withRoleSettingsFlag(rc, role, rigPath)
 	// Same for the rendered role system prompt: when the agent's file exists,
 	// Claude gets it via --append-system-prompt-file and gt prime omits the
-	// static role text from its hook output. Polecat and crew files are per
-	// agent, so the name comes from the identity env vars.
+	// static role text from its hook output. Polecat, crew and dog files are
+	// per agent, so the name comes from the identity env vars.
 	agentName := envVars["GT_POLECAT"]
 	if agentName == "" {
 		agentName = envVars["GT_CREW"]
+	}
+	if agentName == "" {
+		agentName = envVars["GT_DOG_NAME"]
 	}
 	rc = withRoleSystemPromptFlag(rc, role, townRoot, rigPath, agentName)
 

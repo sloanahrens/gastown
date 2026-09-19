@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/protocol"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -114,7 +115,25 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting message: %w", err)
 	}
 
-	// Build reply subject
+	// Refuse to mint a duplicate protocol payload. A reply body that is a
+	// verbatim copy of the original's protocol payload is never the prose the
+	// caller meant to send — it means -m was dropped, substituted, or mangled
+	// upstream — and the original was a dispatch/redispatch request that
+	// automation acts on. See gt-8sex: a prose ack of a RECOVERED_BEAD thread
+	// went out as the RECOVERED_BEAD template, which a deacon could have
+	// parsed as a second redispatch request for the same bead.
+	if replyDuplicatesProtocolPayload(original.Body, messageBody) {
+		return fmt.Errorf("refusing to send: reply body is a verbatim copy of the protocol payload in %s (%q)\n"+
+			"Protocol payloads are acted on by automation, so replaying one mints a duplicate request;\n"+
+			"-m was probably dropped or substituted before reaching gt.\n"+
+			"To acknowledge or comment on that message, send prose instead — a plain body, or "+
+			"`gt mail send %s -s %q -m <text> --reply-to %s` if you really mean to re-send the payload",
+			msgID, original.Subject, original.From, "Re: "+original.Subject, msgID)
+	}
+
+	// Build the reply. The body is exactly the caller's text: the original is
+	// consulted for threading metadata (sender, subject, thread) only, never
+	// for content.
 	subject := mailReplySubject
 	if subject == "" {
 		if strings.HasPrefix(original.Subject, "Re: ") {
@@ -124,17 +143,7 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create reply message
-	reply := &mail.Message{
-		From:     from,
-		To:       original.From, // Reply to sender
-		Subject:  subject,
-		Body:     messageBody,
-		Type:     mail.TypeReply,
-		Priority: mail.PriorityNormal,
-		ReplyTo:  msgID,
-		ThreadID: original.ThreadID,
-	}
+	reply := newReplyMessage(from, original, subject, messageBody)
 
 	// If original has no thread ID, create one
 	if reply.ThreadID == "" {
@@ -157,4 +166,38 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// newReplyMessage builds the reply to original.
+//
+// Contract: the reply carries exactly the caller's body. The original is read
+// for threading metadata only (sender, id, thread) — its body is never
+// copied, quoted, or inherited. Anything else would let a reply on a protocol
+// thread re-emit that protocol's payload (gt-8sex).
+func newReplyMessage(from string, original *mail.Message, subject, body string) *mail.Message {
+	return &mail.Message{
+		From:     from,
+		To:       original.From, // Reply to sender
+		Subject:  subject,
+		Body:     body,
+		Type:     mail.TypeReply,
+		Priority: mail.PriorityNormal,
+		ReplyTo:  original.ID,
+		ThreadID: original.ThreadID,
+	}
+}
+
+// replyDuplicatesProtocolPayload reports whether sending replyBody as a reply
+// to a message whose body is parentBody would re-mint a protocol payload
+// verbatim. Both sides must be the same text modulo surrounding whitespace,
+// and the parent must be shaped like a payload — so ordinary prose replies,
+// and replies that merely quote a payload, are unaffected.
+func replyDuplicatesProtocolPayload(parentBody, replyBody string) bool {
+	if strings.TrimSpace(replyBody) == "" {
+		return false
+	}
+	if strings.TrimSpace(parentBody) != strings.TrimSpace(replyBody) {
+		return false
+	}
+	return protocol.LooksLikeProtocolPayload(parentBody)
 }

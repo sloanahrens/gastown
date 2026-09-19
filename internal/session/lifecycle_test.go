@@ -1,6 +1,9 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -91,6 +94,42 @@ func TestBuildCommand_DefaultAgent(t *testing.T) {
 	}
 	if cmd == "" {
 		t.Fatal("expected non-empty command")
+	}
+}
+
+// A dog's kennel is reachable only through its name, so the startup command
+// must carry GT_DOG_NAME — that is what lets the spawn path resolve the dog's
+// per-agent system prompt file and add --append-system-prompt-file. Session
+// config (not the config package's renderer) is all this test needs: the file
+// already exists here, so no renderer has to be installed (gt-h7e5).
+func TestBuildCommand_DogCarriesItsName(t *testing.T) {
+	town := t.TempDir()
+	path := config.SystemPromptFilePath("dog", town, "", "alpha")
+	if path == "" {
+		t.Fatal("dog must have a per-agent system prompt path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("dog role text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := buildCommand(SessionConfig{
+		SessionID: "hq-dog-alpha",
+		WorkDir:   filepath.Join(town, "deacon", "dogs", "alpha"),
+		Role:      "dog",
+		AgentName: "alpha",
+		TownRoot:  town,
+	}, "test prompt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(cmd, "GT_DOG_NAME=alpha") {
+		t.Errorf("dog command does not carry GT_DOG_NAME:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "--append-system-prompt-file") || !strings.Contains(cmd, path) {
+		t.Errorf("dog command does not carry its system prompt file %s:\n%s", path, cmd)
 	}
 }
 

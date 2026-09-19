@@ -100,3 +100,79 @@ func TestReadHookSessionID_AutoGeneratesFallback(t *testing.T) {
 		t.Errorf("auto-generated id %q doesn't look like a UUID (len=%d)", id, len(id))
 	}
 }
+
+// --- gt-uj9k: session_start attribution -------------------------------------
+
+// withPrimeHookVars sets the package-level hook state that sessionStartReason
+// reads, restoring it afterwards so these tests cannot leak into each other.
+func withPrimeHookVars(t *testing.T, source, eventName string) {
+	t.Helper()
+	prevSource, prevEvent := primeHookSource, primeHookEventName
+	t.Cleanup(func() {
+		primeHookSource, primeHookEventName = prevSource, prevEvent
+	})
+	primeHookSource, primeHookEventName = source, eventName
+}
+
+// TestSessionStartReason_SpawnerAttributionWins pins the contract that lets a
+// burst be traced to a caller: an explicit spawner reason outranks the runtime's
+// own hook source, because only the spawner knows a start was a deliberate
+// restart rather than a fresh boot.
+func TestSessionStartReason_SpawnerAttributionWins(t *testing.T) {
+	t.Setenv("GT_SESSION_START_REASON", "daemon-heartbeat")
+	withPrimeHookVars(t, "startup", "SessionStart")
+
+	if got := sessionStartReason(); got != "daemon-heartbeat" {
+		t.Errorf("sessionStartReason() = %q, want daemon-heartbeat", got)
+	}
+}
+
+// TestSessionStartReason_FallsBackToHookSource covers the un-instrumented
+// spawners: without a spawner reason, the runtime's hook source is the best
+// available "why".
+func TestSessionStartReason_FallsBackToHookSource(t *testing.T) {
+	t.Setenv("GT_SESSION_START_REASON", "")
+	withPrimeHookVars(t, "compact", "PreCompact")
+
+	if got := sessionStartReason(); got != "compact" {
+		t.Errorf("sessionStartReason() = %q, want compact", got)
+	}
+}
+
+// TestSessionStartReason_FallsBackToHookEventName covers runtimes that report
+// the event but no source.
+func TestSessionStartReason_FallsBackToHookEventName(t *testing.T) {
+	t.Setenv("GT_SESSION_START_REASON", "")
+	withPrimeHookVars(t, "", "SessionStart")
+
+	if got := sessionStartReason(); got != "SessionStart" {
+		t.Errorf("sessionStartReason() = %q, want SessionStart", got)
+	}
+}
+
+// TestSessionStartReason_UnknownIsExplicit pins that an unattributable start is
+// labelled "unknown" rather than emitted with an empty reason. "unknown" is
+// itself the finding: it marks a start that came through neither an
+// instrumented spawner nor a runtime hook, which is exactly the case that went
+// unexplained before gt-uj9k.
+func TestSessionStartReason_UnknownIsExplicit(t *testing.T) {
+	t.Setenv("GT_SESSION_START_REASON", "")
+	withPrimeHookVars(t, "", "")
+
+	if got := sessionStartReason(); got != "unknown" {
+		t.Errorf("sessionStartReason() = %q, want unknown", got)
+	}
+}
+
+// TestSessionStartCaller covers the "who requested it" half of the pair.
+func TestSessionStartCaller(t *testing.T) {
+	t.Setenv("GT_SESSION_START_CALLER", "daemon")
+	if got := sessionStartCaller(); got != "daemon" {
+		t.Errorf("sessionStartCaller() = %q, want daemon", got)
+	}
+
+	t.Setenv("GT_SESSION_START_CALLER", "")
+	if got := sessionStartCaller(); got != "unknown" {
+		t.Errorf("sessionStartCaller() = %q, want unknown when unset", got)
+	}
+}

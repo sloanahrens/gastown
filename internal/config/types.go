@@ -534,6 +534,13 @@ type WitnessThresholds struct {
 	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
 	// The witness exposes the signal; patrol formula decides whether to escalate.
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
+
+	// ComposerStallFrozenFor is how long a session must produce no pane output
+	// while holding unsubmitted composer input before it counts as stalled
+	// (default "5m"). This is the guard that separates a genuinely wedged
+	// agent from a working or idle-await one carrying a queued nudge — see
+	// tmux.DetectComposerStall (gt-hkhu).
+	ComposerStallFrozenFor string `json:"composer_stall_frozen_for,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

@@ -17,12 +17,14 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -69,6 +71,14 @@ type Manager struct {
 	output            io.Writer    // Output destination for user-facing messages
 	router            *mail.Router // Mail router for RECOVERED_BEAD notices on manual reject (gt-2usm)
 	recoverDeadWorker func(deadWorkerRecoveryRequest) bool
+
+	// startReason/startCaller are stamped into the spawned session's env so the
+	// session_start event this start produces says why, and at whose request,
+	// it happened (gt-uj9k). Defaults identify this manager; callers that know
+	// their own intent (daemon heartbeat, gt up, install) override via
+	// SetStartAttribution.
+	startReason string
+	startCaller string
 }
 
 type scoredIssue struct {
@@ -79,10 +89,12 @@ type scoredIssue struct {
 // NewManager creates a new refinery manager for a rig.
 func NewManager(r *rig.Rig) *Manager {
 	m := &Manager{
-		rig:     r,
-		workDir: r.Path,
-		output:  os.Stdout,
-		router:  mail.NewRouter(r.Path),
+		rig:         r,
+		workDir:     r.Path,
+		output:      os.Stdout,
+		router:      mail.NewRouter(r.Path),
+		startReason: "refinery-start",
+		startCaller: "refinery-manager",
 	}
 	// Read m.router/m.output fresh on each call (SetOutput may run after
 	// construction) — matching the Engineer's wiring so a redirected output
@@ -98,6 +110,21 @@ func NewManager(r *rig.Rig) *Manager {
 // This is useful for testing or redirecting output.
 func (m *Manager) SetOutput(w io.Writer) {
 	m.output = w
+}
+
+// SetStartAttribution records why this manager is starting a refinery and who
+// asked for it. Both values are stamped into the spawned session's environment
+// and surface on that session's session_start event, so a burst of restarts can
+// be attributed without correlating process PIDs (gt-uj9k).
+//
+// Empty values are ignored, keeping the constructor defaults.
+func (m *Manager) SetStartAttribution(reason, caller string) {
+	if reason != "" {
+		m.startReason = reason
+	}
+	if caller != "" {
+		m.startCaller = caller
+	}
 }
 
 // SessionName returns the tmux session name for this refinery.
@@ -192,14 +219,12 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
-		// Session exists - check if agent is actually running (healthy vs zombie)
-		if t.IsAgentAlive(sessionID) {
-			return ErrAlreadyRunning
+		skip, err := m.reconcileExistingSession(t, sessionID, townRoot)
+		if err != nil {
+			return err
 		}
-		// Zombie - tmux alive but agent dead. Kill and recreate.
-		_, _ = fmt.Fprintln(m.output, "⚠ Detected zombie session (tmux alive, agent dead). Recreating...")
-		if err := t.KillSession(sessionID); err != nil {
-			return fmt.Errorf("killing zombie session: %w", err)
+		if skip {
+			return ErrAlreadyRunning
 		}
 	}
 
@@ -297,6 +322,12 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 	envVars = session.MergeRuntimeLivenessEnv(envVars, runtimeConfig)
 	envVars["GT_REFINERY"] = "1"
 
+	// Attribute the session_start this spawn will emit (gt-uj9k). Set on the
+	// session env rather than passed to prime, because the emitter is the
+	// SessionStart hook (`gt prime --hook`), which reads the session env.
+	envVars[constants.EnvSessionStartReason] = m.startReason
+	envVars[constants.EnvSessionStartCaller] = m.startCaller
+
 	// Generate the GASTA run ID for this refinery session.
 	runID := uuid.New().String()
 	envVars["GT_RUN"] = runID
@@ -351,6 +382,243 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 		"refinery", "refinery", sessionID, m.rig.Name, townRoot, "", refineryRigDir)
 
 	return nil
+}
+
+// reconcileExistingSession decides what to do with a refinery session that
+// already exists, and kills it only when it is safe to do so.
+//
+// It returns skip=true when the caller must treat this as ErrAlreadyRunning
+// (leave the session alone) and skip=false when the session was killed and the
+// caller should create a fresh one.
+//
+// The previous implementation was a single `IsAgentAlive` check followed
+// immediately by kill-and-recreate. That is unsafe in three ways, all of which
+// combine to produce the respawn burst of gt-uj9k (4-8 refinery session_starts
+// in ~90s, unlogged, killing any gate suite mid-run):
+//
+//  1. IsAgentAlive swallows its own query errors. A transient tmux failure —
+//     likely right after a binary swap, when gt subprocesses race the new
+//     binary — reports a healthy session as dead, and the caller then kills it.
+//     IsAgentAliveChecked exists precisely for callers that must not treat
+//     unknown state as confirmed death; use it here.
+//  2. Claude's process tree is undetectable for the whole bootstrap window.
+//     A second caller arriving while the first is still booting sees "zombie"
+//     and tears down a session that is seconds old and perfectly healthy.
+//     Concurrent start paths (daemon heartbeat, `gt up`, `gt start --all`, the
+//     boot/deacon patrol formulas) make that the common case, not a race.
+//  3. Killing the session kills whatever is running inside it, including a
+//     container-backed gate suite holding the town slot. A restart must never
+//     land mid-gate.
+//
+// Every decision is logged to the events stream, because the old path only
+// wrote to m.output — which the daemon discards, which is why the burst was
+// invisible in daemon.log.
+func (m *Manager) reconcileExistingSession(t *tmux.Tmux, sessionID, townRoot string) (skip bool, err error) {
+	facts := SessionReconcileFacts{}
+
+	// Probe liveness. An error here means the state is unknown, which
+	// DecideSessionReconcile refuses to read as death.
+	alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+	if aliveErr != nil {
+		facts.LivenessDetail = aliveErr.Error()
+	} else {
+		facts.LivenessKnown = true
+		facts.Alive = alive
+	}
+
+	// A session older than the boot grace may be a genuine zombie; a younger
+	// one is presumed mid-boot and left alone.
+	if createdAt, ageErr := t.GetSessionCreatedUnix(sessionID); ageErr == nil && createdAt > 0 {
+		facts.SessionAgeKnown = true
+		facts.SessionAge = time.Since(time.Unix(createdAt, 0))
+		facts.sessionCreatedAt = createdAt
+	}
+
+	// Cheap probes done. If they already decide "keep", return before touching
+	// the container gate: slot.Status shells out to `docker ps`, and this runs
+	// per rig on every daemon heartbeat, so the common healthy path must not
+	// pay for it.
+	if outcome, reason, detail := DecideSessionReconcile(facts); outcome == reconcileKeep {
+		m.recordNoteworthyDecision(townRoot, sessionID, reason, detail)
+		return true, nil
+	}
+
+	// Gate-awareness: we are otherwise willing to kill, so now it matters
+	// whether a container-backed suite holds the slot — the kill would land
+	// mid-suite and lose the run. A status error leaves SuiteBusy false,
+	// matching the pre-existing fail-open behavior of the safety checks above.
+	if rep, stErr := slot.Status(townRoot); stErr == nil && rep.Busy() {
+		facts.SuiteBusy = true
+		facts.SuiteDetail = slotBusyReason(rep)
+		outcome, reason, detail := DecideSessionReconcile(facts)
+		m.recordNoteworthyDecision(townRoot, sessionID, reason, detail)
+		if outcome == reconcileKeep {
+			return true, nil
+		}
+	}
+
+	// Re-verify after the grace period before an irreversible kill — the agent
+	// may have become healthy, or another caller may have already replaced the
+	// session (mirrors the witness's TOCTOU mitigation).
+	time.Sleep(constants.ZombieKillGracePeriod)
+	if alive, checkErr := t.IsAgentAliveChecked(sessionID); checkErr == nil && alive {
+		facts.AliveAfterGrace = true
+	}
+	if createdAtNow, ageErr := t.GetSessionCreatedUnix(sessionID); ageErr == nil &&
+		facts.sessionCreatedAt > 0 && createdAtNow != facts.sessionCreatedAt {
+		facts.SessionReplaced = true
+	}
+
+	outcome, reason, detail := DecideSessionReconcile(facts)
+	// Always record the outcome of the expensive path: this is the branch that
+	// either kills a session or refuses to, and both are worth attributing.
+	m.recordRefineryDecision(townRoot, sessionID, reason, detail)
+	if outcome == reconcileKeep {
+		return true, nil
+	}
+
+	_, _ = fmt.Fprintln(m.output, "⚠ Detected zombie session (tmux alive, agent dead). Recreating...")
+	if err := t.KillSession(sessionID); err != nil {
+		return false, fmt.Errorf("killing zombie session: %w", err)
+	}
+	return false, nil
+}
+
+// SessionReconcileFacts are the observable inputs to the keep-or-kill decision
+// for a refinery session that already exists. Kept as plain data so the policy
+// is unit-testable without tmux or a slot lock.
+type SessionReconcileFacts struct {
+	// LivenessKnown is false when the liveness probe errored. Unknown state is
+	// never evidence of death.
+	LivenessKnown bool
+	// Alive reports whether the agent process is running; meaningful only when
+	// LivenessKnown is true.
+	Alive bool
+	// LivenessDetail carries the probe error for the decision log.
+	LivenessDetail string
+	// SessionAgeKnown is false when the session's creation time was unreadable.
+	SessionAgeKnown bool
+	// SessionAge is how long ago the tmux session was created.
+	SessionAge time.Duration
+	// SuiteBusy reports whether a container-backed gate suite holds the slot.
+	SuiteBusy bool
+	// SuiteDetail describes why the slot is busy.
+	SuiteDetail string
+	// AliveAfterGrace reports liveness at the post-grace re-check.
+	AliveAfterGrace bool
+	// SessionReplaced reports that the session was replaced by another caller
+	// between the first probe and the post-grace re-check.
+	SessionReplaced bool
+
+	// sessionCreatedAt is the creation stamp of the first probe, compared
+	// against the post-grace read to detect replacement.
+	sessionCreatedAt int64
+}
+
+// reconcileOutcome is what to do with an existing refinery session.
+type reconcileOutcome int
+
+const (
+	// reconcileKeep leaves the session alone; the caller reports ErrAlreadyRunning.
+	reconcileKeep reconcileOutcome = iota
+	// reconcileKill tears the session down so the caller spawns a fresh one.
+	reconcileKill
+)
+
+// Decision reasons, emitted on the refinery_restart_decision event. Named so
+// the policy and the "is this worth logging?" filter cannot drift apart.
+const (
+	reasonKeepAlive           = "keep-alive"            // session healthy
+	reasonKeepLivenessUnknown = "keep-liveness-unknown" // probe errored; unknown is not death
+	reasonKeepBooting         = "keep-booting"          // inside the boot grace window
+	reasonKeepSuiteRunning    = "keep-suite-running"    // container-gate slot held
+	reasonKeepRecovered       = "keep-recovered"        // agent came up during the grace period
+	reasonKeepSessionReplaced = "keep-session-replaced" // another caller already replaced it
+	reasonKillZombie          = "kill-zombie"           // confirmed dead, safe to replace
+)
+
+// DecideSessionReconcile is the keep-or-kill policy for an existing refinery
+// session. It is pure: same facts, same answer.
+//
+// The bias is deliberately toward keeping. A wrongly-kept zombie costs one
+// failed merge cycle that the next heartbeat retries; a wrongly-killed healthy
+// session costs a full Claude boot, loses whatever the session was doing — and,
+// when it lands during a gate suite, loses the whole run. That asymmetry is the
+// gt-uj9k fix: the old policy killed on a single non-error-aware probe.
+func DecideSessionReconcile(f SessionReconcileFacts) (reconcileOutcome, string, string) {
+	// 1. A liveness query that errors is not evidence of death.
+	if !f.LivenessKnown {
+		detail := f.LivenessDetail
+		if detail == "" {
+			detail = "liveness probe did not resolve"
+		}
+		return reconcileKeep, reasonKeepLivenessUnknown, detail
+	}
+	// 2. Healthy: nothing to do.
+	if f.Alive {
+		return reconcileKeep, reasonKeepAlive, ""
+	}
+	// 3. A session this young is mid-boot, not a zombie. Another caller owns it.
+	if f.SessionAgeKnown && f.SessionAge < constants.SessionBootGracePeriod {
+		return reconcileKeep, reasonKeepBooting,
+			fmt.Sprintf("session is %s old, within boot grace %s",
+				f.SessionAge.Round(time.Second), constants.SessionBootGracePeriod)
+	}
+	// 4. Never restart a refinery while a container-backed suite holds the gate
+	//    slot: the kill would land mid-suite and lose the run.
+	if f.SuiteBusy {
+		return reconcileKeep, reasonKeepSuiteRunning, f.SuiteDetail
+	}
+	// 5. Post-grace re-check: the agent may have become healthy, or another
+	//    caller may already have replaced the session.
+	if f.AliveAfterGrace {
+		return reconcileKeep, reasonKeepRecovered, "agent became healthy during the grace period"
+	}
+	if f.SessionReplaced {
+		return reconcileKeep, reasonKeepSessionReplaced,
+			"session was replaced by another caller during the grace period"
+	}
+	return reconcileKill, reasonKillZombie, "tmux session alive, agent confirmed dead"
+}
+
+// recordNoteworthyDecision logs a decision unless it is the routine
+// "session is healthy" case. That case fires for every live refinery on every
+// daemon heartbeat, so logging it would bury the decisions that actually
+// explain a restart burst under thousands of unremarkable lines a day.
+func (m *Manager) recordNoteworthyDecision(townRoot, sessionID, decision, detail string) {
+	if decision == reasonKeepAlive {
+		return
+	}
+	m.recordRefineryDecision(townRoot, sessionID, decision, detail)
+}
+
+// recordRefineryDecision logs a refinery session-start decision to the events
+// stream so restarts are attributable after the fact. Best-effort: events must
+// never fail a lifecycle operation.
+func (m *Manager) recordRefineryDecision(townRoot, sessionID, decision, detail string) {
+	_ = events.LogAuditTo(townRoot, events.TypeRefineryRestartDecision, "refinery", map[string]interface{}{
+		"rig":        m.rig.Name,
+		"session":    sessionID,
+		"decision":   decision,
+		"detail":     detail,
+		"caller":     m.startCaller,
+		"caller_pid": os.Getpid(),
+	})
+}
+
+// slotBusyReason describes why the container-gate slot is unavailable, for the
+// decision log.
+func slotBusyReason(rep slot.Report) string {
+	switch {
+	case rep.DockerUnknown:
+		return "container-gate slot state unknown (docker unreachable)"
+	case len(rep.UnwrappedContainers) > 0:
+		return fmt.Sprintf("unwrapped container suite running (%d container(s))", len(rep.UnwrappedContainers))
+	case rep.Owner != nil:
+		return fmt.Sprintf("container-gate slot held by %s", rep.Owner.Role)
+	default:
+		return "container-gate slot busy"
+	}
 }
 
 // ForkRigStartError returns ErrForkRig when the rig config has upstream_url.
