@@ -222,6 +222,33 @@ type preVerificationResult struct {
 // single generous fixed bound instead.
 const preVerificationGateTimeout = 10 * time.Minute
 
+// preVerificationGateOutcome is one pre-verification gate command's result:
+// the run error (nil on success) and whether it was the gate's timeout that
+// ended it, which the caller reports distinctly from a failing exit code.
+type preVerificationGateOutcome struct {
+	err      error
+	timedOut bool
+}
+
+// runPreVerificationGate runs one gate command in worktree, streaming combined
+// output to logFile. Split out of runPreVerificationGates' loop so the lint
+// gate can be run more than once when golangci-lint's lock is held (gt-xsty),
+// which is also why the caller owns ctx: every attempt of one gate draws on
+// that gate's single preVerificationGateTimeout budget, rather than a retry
+// getting a fresh one.
+func runPreVerificationGate(ctx context.Context, worktree, script string, logFile *os.File) preVerificationGateOutcome {
+	// Trust boundary: gate commands come from rig config.json (operator-
+	// controlled infrastructure config), not from PR branches or user
+	// input — same trust boundary as the refinery's own gate runner.
+	cmd := exec.CommandContext(ctx, "sh", "-c", script) //nolint:gosec // G204: command is from trusted rig config
+	cmd.Dir = worktree
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	util.SetDetachedProcessGroup(cmd)
+	err := cmd.Run()
+	return preVerificationGateOutcome{err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
+}
+
 // runPreVerificationGates performs the verification `gt done --pre-verified`
 // stamps: it runs each of the rig's configured gate commands, in
 // setup/typecheck/lint/build/test order, in worktree, streaming combined
@@ -267,18 +294,25 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 	for _, ng := range gates {
 		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
 		ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
-		// Trust boundary: gate commands come from rig config.json (operator-
-		// controlled infrastructure config), not from PR branches or user
-		// input — same trust boundary as the refinery's own gate runner.
-		cmd := exec.CommandContext(ctx, "sh", "-c", ng.cmd) //nolint:gosec // G204: command is from trusted rig config
-		cmd.Dir = worktree
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		util.SetDetachedProcessGroup(cmd)
-		runErr := cmd.Run()
-		timedOut := ctx.Err() == context.DeadlineExceeded
+		var got preVerificationGateOutcome
+		runGate := func() lintAttempt {
+			from := fileSize(logFile)
+			got = runPreVerificationGate(ctx, worktree, ng.cmd, logFile)
+			return lintAttempt{err: got.err, output: readLogFrom(logPath, from)}
+		}
+		if ng.name == "lint" {
+			// gt-xsty: lint is the only gate with a cross-process lock
+			// (golangci-lint's), so a concurrent lint is waited out rather
+			// than costing the submission its pre-verified stamp. This gate's
+			// own 10m bound is the retry budget.
+			_ = retryLintLockContention(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
+				fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
+			})
+		} else {
+			runGate()
+		}
 		cancel()
-		if timedOut {
+		if got.timedOut {
 			// A hung gate (e.g. a test waiting on a port) must not wedge gt
 			// done indefinitely at a point where the branch is already
 			// pushed but no MR bead exists yet — degrade to "no stamp"
@@ -286,10 +320,10 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, preVerificationGateTimeout)
 			return preVerificationResult{success: false, failedGate: ng.name, exitCode: -1, logPath: logPath}, nil
 		}
-		if runErr != nil {
+		if got.err != nil {
 			exitCode := -1
 			var exitErr *exec.ExitError
-			if errors.As(runErr, &exitErr) {
+			if errors.As(got.err, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
 			return preVerificationResult{success: false, failedGate: ng.name, exitCode: exitCode, logPath: logPath}, nil
