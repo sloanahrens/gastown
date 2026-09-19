@@ -646,9 +646,13 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
 
+	// Debug: print the expected beadsDir
+	t.Logf("Expected beadsDir: %s", beadsDir)
+
 	script := `#!/usr/bin/env bash
 set -e
 if [[ -n "$BEADS_DIR_LOG" ]]; then
+  echo "DEBUG: BEADS_DIR=$BEADS_DIR" >> "$BEADS_DIR_LOG"
   echo "${BEADS_DIR:-<unset>}" >> "$BEADS_DIR_LOG"
 fi
 cmd="$1"
@@ -667,7 +671,7 @@ fi
 echo "unexpected command: $cmd" >&2
 exit 1
 `
-	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nif \"%1\"==\"migrate\" (\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"version\" (\r\n  echo bd version 1.2.3\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
+	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo DEBUG: BEADS_DIR=%BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo DEBUG: BEADS_DIR=<unset>>\"%BEADS_DIR_LOG%\"\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nif \"%1\"==\"migrate\" (\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"version\" (\r\n  echo bd version 1.2.3\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
 
 	binDir := writeFakeBD(t, script, windowsScript)
 	beadsDirLog := filepath.Join(t.TempDir(), "beads-dir.log")
