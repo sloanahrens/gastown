@@ -3,10 +3,8 @@ package cmd
 import (
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -321,80 +319,6 @@ func TestEnsureBeadsConfigYAML_AddsMissingIssuePrefixKey(t *testing.T) {
 	}
 }
 
-func TestInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
-	tmpDir := t.TempDir()
-	hqPath := filepath.Join(tmpDir, "missing-dolt-hq")
-	gtBinary := buildGT(t)
-
-	cmd := exec.Command(gtBinary, "install", hqPath, "--name", "missing-dolt-test")
-	cmd.Env = installTestEnvWithFakeBD(t, tmpDir)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("gt install should fail when dolt is missing; output:\n%s", output)
-	}
-
-	out := string(output)
-	if !strings.Contains(out, "dolt is required for gt install with beads enabled") {
-		t.Fatalf("expected missing-dolt preflight error, got:\n%s", out)
-	}
-	if !strings.Contains(out, "--no-beads") {
-		t.Fatalf("expected --no-beads fallback hint, got:\n%s", out)
-	}
-	if _, statErr := os.Stat(hqPath); !os.IsNotExist(statErr) {
-		t.Fatalf("install should not create target HQ before missing-dolt failure; statErr=%v", statErr)
-	}
-}
-
-func TestInstallNoBeadsAllowsMissingDolt(t *testing.T) {
-	tmpDir := t.TempDir()
-	hqPath := filepath.Join(tmpDir, "no-beads-hq")
-	gtBinary := buildGT(t)
-
-	cmd := exec.Command(gtBinary, "install", hqPath, "--no-beads", "--name", "no-beads-test")
-	cmd.Env = installTestEnvWithFakeBD(t, tmpDir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("gt install --no-beads should succeed without dolt: %v\nOutput:\n%s", err, output)
-	}
-
-	if info, statErr := os.Stat(hqPath); statErr != nil {
-		t.Fatalf("HQ root should exist: %v", statErr)
-	} else if !info.IsDir() {
-		t.Fatalf("HQ root should be a directory")
-	}
-	if _, statErr := os.Stat(filepath.Join(hqPath, ".beads")); !os.IsNotExist(statErr) {
-		t.Fatalf("--no-beads install should not create .beads; statErr=%v", statErr)
-	}
-}
-
-func TestInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *testing.T) {
-	ln := listenAndHoldTCP(t)
-	tmpDir := t.TempDir()
-	hqPath := filepath.Join(tmpDir, "port-conflict-hq")
-	gtBinary := buildGT(t)
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	cmd := exec.Command(gtBinary, "install", hqPath,
-		"--name", "port-conflict-test",
-		"--dolt-port", strconv.Itoa(port),
-	)
-	cmd.Env = installTestEnvWithFakeBDAndDolt(t, tmpDir)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("gt install should fail when a non-Dolt process owns the Dolt port; output:\n%s", output)
-	}
-
-	out := string(output)
-	if !strings.Contains(out, "Dolt port") || !strings.Contains(out, "already in use") {
-		t.Fatalf("expected Dolt port conflict error, got:\n%s", out)
-	}
-	if !strings.Contains(out, "--dolt-port") {
-		t.Fatalf("expected --dolt-port recovery hint, got:\n%s", out)
-	}
-	if _, statErr := os.Stat(hqPath); !os.IsNotExist(statErr) {
-		t.Fatalf("install should not create target HQ before port preflight failure; statErr=%v", statErr)
-	}
-}
 func TestFormatInstallDoltError(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -5,6 +5,7 @@ import (
 )
 
 func TestValidateTestCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		cmd     string
@@ -53,6 +54,7 @@ func TestValidateTestCommand(t *testing.T) {
 }
 
 func TestRunTests_EmptyCommand(t *testing.T) {
+	t.Parallel()
 	// Verify that runTests returns a failure when TestCommand is empty,
 	// rather than silently succeeding or executing a blank shell command.
 	e := &Engineer{
@@ -71,6 +73,7 @@ func TestRunTests_EmptyCommand(t *testing.T) {
 }
 
 func TestRunTests_WhitespaceCommand(t *testing.T) {
+	t.Parallel()
 	e := &Engineer{
 		config: &MergeQueueConfig{
 			TestCommand: "   ",

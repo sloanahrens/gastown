@@ -8,6 +8,7 @@ import (
 )
 
 func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
 	worktree := filepath.Join(dir, "other")
@@ -70,6 +71,7 @@ func TestGetGitStateDistinguishesSharedStashes(t *testing.T) {
 }
 
 func TestGetGitStateUsesUpstreamInsteadOfOriginMain(t *testing.T) {
+	t.Parallel()
 	repo := setupGitStateRemoteRepo(t)
 
 	runGitCmd(t, repo, "switch", "integration/test")
@@ -93,6 +95,7 @@ func TestGetGitStateUsesUpstreamInsteadOfOriginMain(t *testing.T) {
 }
 
 func TestGetGitStateCountsAheadOfUpstream(t *testing.T) {
+	t.Parallel()
 	repo := setupGitStateRemoteRepo(t)
 	runGitCmd(t, repo, "switch", "-c", "polecat/test")
 	runGitCmd(t, repo, "branch", "--set-upstream-to=origin/integration/test")
@@ -113,6 +116,7 @@ func TestGetGitStateCountsAheadOfUpstream(t *testing.T) {
 }
 
 func TestGetGitStateTreatsPushedSourceBranchAsClean(t *testing.T) {
+	t.Parallel()
 	repo := setupGitStateRemoteRepo(t)
 	runGitCmd(t, repo, "switch", "-c", "polecat/pushed")
 	writeTestFile(t, filepath.Join(repo, "pushed.txt"), "pushed\n")
@@ -141,6 +145,7 @@ func TestGetGitStateTreatsPushedSourceBranchAsClean(t *testing.T) {
 // exactly the gitSafe-implies-clean promotion gt-7kr removed from the
 // decision layer but that survived in this CLI-only git-state builder.
 func TestGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
 	runGitCmd(t, "", "init", repo)
@@ -165,6 +170,7 @@ func TestGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable(t *testing.T)
 }
 
 func TestGetGitStateIgnoresOpenCodeRuntimeArtifacts(t *testing.T) {
+	t.Parallel()
 	repo := setupGitStateRemoteRepo(t)
 	runGitCmd(t, repo, "switch", "-c", "polecat/opencode-runtime")
 

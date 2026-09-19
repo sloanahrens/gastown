@@ -16,6 +16,7 @@ import (
 // TestExtractRoleFromIdentity verifies that role names are correctly extracted
 // from agent identity strings, including trailing slashes and compound paths.
 func TestExtractRoleFromIdentity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target string
 		want   string

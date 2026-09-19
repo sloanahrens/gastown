@@ -8,6 +8,7 @@ import (
 )
 
 func TestValidateTerminalMRCloseSnapshotRejectsDrift(t *testing.T) {
+	t.Parallel()
 	expected := &MergeRequest{
 		ID:           "gt-mr-proof",
 		Branch:       "polecat/test/proof",
@@ -29,6 +30,7 @@ func TestValidateTerminalMRCloseSnapshotRejectsDrift(t *testing.T) {
 }
 
 func TestValidateTerminalMRCloseSnapshotAllowsMatchingSnapshot(t *testing.T) {
+	t.Parallel()
 	expected := &MergeRequest{
 		ID:           "gt-mr-proof",
 		Branch:       "polecat/test/proof",

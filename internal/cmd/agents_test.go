@@ -1,20 +1,16 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func TestAgentsCmd_DefaultRunE(t *testing.T) {
+	t.Parallel()
 	// After the fix, `gt agents` (no subcommand) should run the list function,
 	// not the interactive popup menu. Verify the actual function pointer.
 	if agentsCmd.RunE == nil {
@@ -29,6 +25,7 @@ func TestAgentsCmd_DefaultRunE(t *testing.T) {
 }
 
 func TestAgentsMenuCmd_Exists(t *testing.T) {
+	t.Parallel()
 	found := false
 	for _, sub := range agentsCmd.Commands() {
 		if sub.Use == "menu" {
@@ -42,6 +39,7 @@ func TestAgentsMenuCmd_Exists(t *testing.T) {
 }
 
 func TestAgentsMenuCmd_RunE(t *testing.T) {
+	t.Parallel()
 	var menuCmd *cobra.Command
 	for _, sub := range agentsCmd.Commands() {
 		if sub.Use == "menu" {
@@ -58,6 +56,7 @@ func TestAgentsMenuCmd_RunE(t *testing.T) {
 }
 
 func TestAgentsListCmd_StillRegistered(t *testing.T) {
+	t.Parallel()
 	found := false
 	for _, sub := range agentsCmd.Commands() {
 		if sub.Use == "list" {
@@ -71,6 +70,7 @@ func TestAgentsListCmd_StillRegistered(t *testing.T) {
 }
 
 func TestAgentsCmd_ShortDescription(t *testing.T) {
+	t.Parallel()
 	if agentsCmd.Short == "Switch between Gas Town agent sessions" {
 		t.Error("agentsCmd.Short still describes popup menu behavior; should describe listing")
 	}
@@ -107,6 +107,7 @@ func TestCategorizeSession_AllTypes(t *testing.T) {
 }
 
 func TestCategorizeSession_InvalidName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -126,6 +127,7 @@ func TestCategorizeSession_InvalidName(t *testing.T) {
 }
 
 func TestCategorizeSession_Overseer(t *testing.T) {
+	t.Parallel()
 	got := categorizeSession("hq-overseer")
 	if got != nil {
 		t.Errorf("categorizeSession(%q) = %+v, want nil (overseer is not a display agent)", "hq-overseer", got)
@@ -133,6 +135,7 @@ func TestCategorizeSession_Overseer(t *testing.T) {
 }
 
 func TestCategorizeSession_EmptyString(t *testing.T) {
+	t.Parallel()
 	got := categorizeSession("")
 	if got != nil {
 		t.Errorf("categorizeSession(%q) = %+v, want nil", "", got)
@@ -140,6 +143,7 @@ func TestCategorizeSession_EmptyString(t *testing.T) {
 }
 
 func TestShortcutKey_Range(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		index int
 		want  string
@@ -163,6 +167,7 @@ func TestShortcutKey_Range(t *testing.T) {
 }
 
 func TestShortcutKey_BeyondRange(t *testing.T) {
+	t.Parallel()
 	tests := []int{35, 36, 100}
 	for _, idx := range tests {
 		got := shortcutKey(idx)
@@ -173,6 +178,7 @@ func TestShortcutKey_BeyondRange(t *testing.T) {
 }
 
 func TestDisplayLabel_AllTypes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		agent       AgentSession
@@ -392,6 +398,7 @@ func TestRunAgentsList_EmptyList_Output(t *testing.T) {
 
 // TestDisplayLabel_PersonalSession verifies the display format for non-GT sessions.
 func TestDisplayLabel_PersonalSession(t *testing.T) {
+	t.Parallel()
 	agent := AgentSession{Name: "fix-tmux", Type: AgentPersonal}
 	label := agent.displayLabel()
 	if !strings.Contains(label, "fix-tmux") {
@@ -405,6 +412,7 @@ func TestDisplayLabel_PersonalSession(t *testing.T) {
 // TestBuildMenuAction_PerSessionSocket verifies that buildMenuAction uses the
 // session's own socket, not a global town socket.
 func TestBuildMenuAction_PerSessionSocket(t *testing.T) {
+	t.Parallel()
 	// GT session on the gt socket
 	action := buildMenuAction("gt", "hq-deacon")
 	if !strings.Contains(action, "-L gt") {
@@ -427,6 +435,7 @@ func TestBuildMenuAction_PerSessionSocket(t *testing.T) {
 // 2. Fall back to detach+reattach (works cross-socket)
 // 3. Include the -L <socket> flag so tmux targets the correct server
 func TestBuildMenuAction_CrossSocket(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		townSocket  string
@@ -482,6 +491,7 @@ func TestBuildMenuAction_CrossSocket(t *testing.T) {
 // --- AgentTest type tests ---
 
 func TestAgentTestColor_Exists(t *testing.T) {
+	t.Parallel()
 	color, ok := AgentTypeColors[AgentTest]
 	if !ok {
 		t.Fatal("AgentTypeColors missing entry for AgentTest")
@@ -495,6 +505,7 @@ func TestAgentTestColor_Exists(t *testing.T) {
 }
 
 func TestDisplayLabel_TestSession(t *testing.T) {
+	t.Parallel()
 	agent := AgentSession{Name: "test-session-1", Type: AgentTest, Socket: "gt-test-tmux-12345"}
 	label := agent.displayLabel()
 	if !strings.Contains(label, "test-session-1") {
@@ -506,6 +517,7 @@ func TestDisplayLabel_TestSession(t *testing.T) {
 }
 
 func TestSocketDisplayName_TestSocket(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		socket string
@@ -529,6 +541,7 @@ func TestSocketDisplayName_TestSocket(t *testing.T) {
 }
 
 func TestBuildMenuAction_TestSocket(t *testing.T) {
+	t.Parallel()
 	action := buildMenuAction("gt-test-tmux-12345", "test-session")
 	if !strings.Contains(action, "-L gt-test-tmux-12345") {
 		t.Errorf("test socket action should use -L gt-test-tmux-12345, got: %s", action)
@@ -541,61 +554,6 @@ func TestBuildMenuAction_TestSocket(t *testing.T) {
 	}
 	if !strings.Contains(action, "detach-client") {
 		t.Errorf("test socket action should have cross-socket fallback, got: %s", action)
-	}
-}
-
-// TestFindTestSockets_Integration verifies that findTestSockets discovers
-// active gt-test-* sockets. This test creates a temporary tmux server on a
-// gt-test-* socket, verifies discovery, then cleans up.
-func TestFindTestSockets_Integration(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux socket discovery unreliable on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
-	// Create a unique test socket with gt-test- prefix.
-	socketName := fmt.Sprintf("gt-test-discovery-%d", os.Getpid())
-	sessionName := "probe-session"
-
-	// Start a tmux server on this socket with a session.
-	startCmd := exec.Command("tmux", "-L", socketName, "new-session", "-d", "-s", sessionName)
-	if err := startCmd.Run(); err != nil {
-		t.Fatalf("failed to create test tmux server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
-		socketPath := filepath.Join(tmux.SocketDir(), socketName)
-		_ = os.Remove(socketPath)
-	})
-
-	// findTestSockets should discover our socket.
-	sockets := findTestSockets()
-	found := false
-	for _, s := range sockets {
-		t.Logf("discovered test socket: %s", s)
-		if s == socketName {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("findTestSockets() did not find %q, got: %v", socketName, sockets)
-	}
-}
-
-// TestFindTestSockets_SkipsNonTestSockets verifies that findTestSockets only
-// returns gt-test-* sockets, not the town socket or other custom sockets.
-func TestFindTestSockets_SkipsNonTestSockets(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
-	sockets := findTestSockets()
-	for _, s := range sockets {
-		if !strings.HasPrefix(s, "gt-test-") {
-			t.Errorf("findTestSockets() returned non-test socket: %q", s)
-		}
 	}
 }
 

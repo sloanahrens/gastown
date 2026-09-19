@@ -41,6 +41,7 @@ func (p *recordingPRProvider) MergePR(_ *gitpkg.PullRequestInfo, method string) 
 }
 
 func TestEngineer_LoadConfig_MergeStrategyPR(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	requireReview := true
@@ -74,6 +75,7 @@ func TestEngineer_LoadConfig_MergeStrategyPR(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_MergeStrategyDefault(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	config := map[string]interface{}{
@@ -103,6 +105,7 @@ func TestEngineer_LoadConfig_MergeStrategyDefault(t *testing.T) {
 }
 
 func TestDoMerge_PRStrategy_RoutesToPRPath(t *testing.T) {
+	t.Parallel()
 	// When merge_strategy=pr, doMerge should attempt the PR merge path.
 	// Without a real GitHub repo, FindPRNumber will fail — that's the expected
 	// behavior we test: the code routes to doMergePR and fails gracefully.
@@ -126,6 +129,7 @@ func TestDoMerge_PRStrategy_RoutesToPRPath(t *testing.T) {
 }
 
 func TestDoMerge_DirectStrategy_SkipsPRPath(t *testing.T) {
+	t.Parallel()
 	// When merge_strategy is empty (direct), doMerge should use the normal path.
 	workDir, g, _ := testGitRepo(t)
 	e := newTestEngineer(t, workDir, g)
@@ -147,6 +151,7 @@ func TestDoMerge_DirectStrategy_SkipsPRPath(t *testing.T) {
 }
 
 func TestDoMerge_DirectStrategy_BlocksForkBackedDefaultPush(t *testing.T) {
+	t.Parallel()
 	workDir, g, _ := testGitRepo(t)
 	addDistinctUpstreamRemote(t, workDir, g)
 	e := newTestEngineer(t, workDir, g)
@@ -175,6 +180,7 @@ func addDistinctUpstreamRemote(t *testing.T, workDir string, g *gitpkg.Git) {
 }
 
 func TestDoMergePR_NoPR_ReturnsError(t *testing.T) {
+	t.Parallel()
 	// doMergePR should return an error when no PR exists for the branch.
 	workDir, g, _ := testGitRepo(t)
 	e := newTestEngineer(t, workDir, g)
@@ -193,6 +199,7 @@ func TestDoMergePR_NoPR_ReturnsError(t *testing.T) {
 }
 
 func TestDoMergePR_UsesMergeCommitAndPreservesSubmittedHead(t *testing.T) {
+	t.Parallel()
 	workDir, g, _ := testGitRepo(t)
 	branch := "feat/pr-merge"
 	createFeatureBranch(t, workDir, branch, "pr.txt", "hello")
@@ -223,6 +230,7 @@ func TestDoMergePR_UsesMergeCommitAndPreservesSubmittedHead(t *testing.T) {
 }
 
 func TestDoMergePR_RejectsAdvancedPRHead(t *testing.T) {
+	t.Parallel()
 	workDir, g, _ := testGitRepo(t)
 	branch := "feat/pr-advanced"
 	createFeatureBranch(t, workDir, branch, "pr.txt", "hello")
@@ -254,6 +262,7 @@ func TestDoMergePR_RejectsAdvancedPRHead(t *testing.T) {
 }
 
 func TestProcessResult_NeedsApproval(t *testing.T) {
+	t.Parallel()
 	// Verify NeedsApproval field works on ProcessResult.
 	r := ProcessResult{
 		Success:       false,
@@ -270,6 +279,7 @@ func TestProcessResult_NeedsApproval(t *testing.T) {
 }
 
 func TestHandleMRInfoFailure_NeedsApproval_StaysInQueue(t *testing.T) {
+	t.Parallel()
 	// When NeedsApproval is true, the MR should stay in queue without
 	// sending failure notifications to polecats or mayor.
 	workDir := t.TempDir()
@@ -310,6 +320,7 @@ func TestHandleMRInfoFailure_NeedsApproval_StaysInQueue(t *testing.T) {
 }
 
 func TestDoMergePR_RequireReview_NoApproval(t *testing.T) {
+	t.Parallel()
 	// When require_review is true and the PR is not approved,
 	// doMergePR should return NeedsApproval=true.
 	// This test is tricky since it requires gh CLI — skip if not available.

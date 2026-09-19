@@ -101,6 +101,7 @@ func staleResetOntoMain(t *testing.T, polecat string) {
 // origin/main with a current merge-base, so every ancestry-based check in gt
 // done passes it; only the content check may refuse it.
 func TestDetectRevertedMerges_StaleResetOverFreshBase(t *testing.T) {
+	t.Parallel()
 	s := newRevertScenario(t)
 	commitPolecat(t, s.polecat, map[string]string{
 		"shared.txt": "base\npolecat line\n",
@@ -162,6 +163,7 @@ func TestDetectRevertedMerges_StaleResetOverFreshBase(t *testing.T) {
 // tree is NOT stale. None may be refused — every one of these is ordinary work
 // that the merge would land correctly.
 func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		edits map[string]string
@@ -219,6 +221,7 @@ func assertNoRevertedMerges(t *testing.T, repo string) {
 // downstream — and this check exists precisely because that silence is how
 // reverted work reached the merge queue.
 func TestDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testing.T) {
+	t.Parallel()
 	s := newRevertScenario(t)
 	commitPolecat(t, s.polecat, map[string]string{"fix.txt": "the fix\n"}, "feat: work (gt-test)")
 
@@ -232,6 +235,7 @@ func TestDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testing.T) {
 // a refusal, with the undone commit named and the rebase remedy stated, and the
 // branch's diff stat printed so the polecat can see whose files are in its diff.
 func TestReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
+	t.Parallel()
 	s := newRevertScenario(t)
 	commitPolecat(t, s.polecat, map[string]string{
 		"shared.txt": "base\npolecat line\n",

@@ -125,6 +125,7 @@ func TestHookRejectsNonBeadArg(t *testing.T) {
 }
 
 func TestNormalizeHookShowTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		target string

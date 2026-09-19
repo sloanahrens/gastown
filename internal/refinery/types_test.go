@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateTransition(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		from    MRStatus
@@ -95,6 +96,7 @@ func TestValidateTransition(t *testing.T) {
 }
 
 func TestMergeRequest_Claim(t *testing.T) {
+	t.Parallel()
 	t.Run("claim from open succeeds", func(t *testing.T) {
 		mr := &MergeRequest{Status: MROpen}
 		err := mr.Claim()
@@ -127,6 +129,7 @@ func TestMergeRequest_Claim(t *testing.T) {
 }
 
 func TestMergeRequest_Close(t *testing.T) {
+	t.Parallel()
 	t.Run("close from in_progress succeeds", func(t *testing.T) {
 		mr := &MergeRequest{Status: MRInProgress}
 		err := mr.Close(CloseReasonMerged)
@@ -165,6 +168,7 @@ func TestMergeRequest_Close(t *testing.T) {
 }
 
 func TestMergeRequest_Reopen(t *testing.T) {
+	t.Parallel()
 	t.Run("reopen from in_progress succeeds", func(t *testing.T) {
 		mr := &MergeRequest{Status: MRInProgress}
 		err := mr.Reopen()
@@ -208,6 +212,7 @@ func TestMergeRequest_Reopen(t *testing.T) {
 }
 
 func TestMergeRequest_SetStatus(t *testing.T) {
+	t.Parallel()
 	t.Run("valid transition succeeds", func(t *testing.T) {
 		mr := &MergeRequest{Status: MROpen}
 		err := mr.SetStatus(MRInProgress)
@@ -229,6 +234,7 @@ func TestMergeRequest_SetStatus(t *testing.T) {
 }
 
 func TestMergeRequest_StatusChecks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status       MRStatus
 		isClosed     bool
@@ -257,6 +263,7 @@ func TestMergeRequest_StatusChecks(t *testing.T) {
 }
 
 func TestFailureType_FailureLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		failureType FailureType
 		wantLabel   string
@@ -282,6 +289,7 @@ func TestFailureType_FailureLabel(t *testing.T) {
 }
 
 func TestFailureType_ShouldAssignToWorker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		failureType FailureType
 		wantAssign  bool

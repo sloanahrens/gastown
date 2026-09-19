@@ -8,6 +8,7 @@ import (
 )
 
 func TestDetectQueueAnomalies_StaleClaim(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 2, 10, 12, 0, 0, 0, time.UTC)
 	issues := []*beads.Issue{
 		{
@@ -56,6 +57,7 @@ worker: nux`,
 }
 
 func TestDetectQueueAnomalies_OrphanedBranch(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 2, 10, 12, 0, 0, 0, time.UTC)
 	issues := []*beads.Issue{
 		{

@@ -72,6 +72,7 @@ func initBareRigRepo(t *testing.T, townRoot, rig, remote string) string {
 // proved nothing about origin. The test keeps that ref at the unpushed commit
 // on purpose: it must no longer satisfy the guard.
 func TestVerifyPushLandedBeforeMRFailsClosedOnRejectingRemote(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := writeRejectingRemote(t, tmp, "remote.git")
 	const branch = "polecat/garnet/gt-2wqt"
@@ -122,6 +123,7 @@ func TestVerifyPushLandedBeforeMRFailsClosedOnRejectingRemote(t *testing.T) {
 // control: a real push must still verify, or the guard would block every
 // submission.
 func TestVerifyPushLandedBeforeMRPassesWhenOriginHasCommit(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
@@ -144,6 +146,7 @@ func TestVerifyPushLandedBeforeMRPassesWhenOriginHasCommit(t *testing.T) {
 // same remote assertion. The fallback must answer from origin, not from a local
 // ref, so a bare repo whose branch ref points at an unpushed commit still fails.
 func TestVerifyPushLandedBeforeMRBareFallbackStillQueriesRemote(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
@@ -189,6 +192,7 @@ func TestVerifyPushLandedBeforeMRBareFallbackStillQueriesRemote(t *testing.T) {
 // moved — the "gate fails → fix commit → re-run gt done" cycle that produced an
 // MR declaring a commit origin never had.
 func TestPushedCheckpointRequiresMatchingCommit(t *testing.T) {
+	t.Parallel()
 	const (
 		branch = "polecat/garnet/gt-2wqt"
 		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -22,6 +22,7 @@ import (
 // the resume branch, but this guard is unconditional: whatever upstream
 // source produced a self-target, resolveMRTarget refuses it.
 func TestResolveMRTarget(t *testing.T) {
+	t.Parallel()
 	t.Run("normal target passes through unchanged", func(t *testing.T) {
 		got, err := resolveMRTarget("main", "polecat/jasper/gt-a8i3+xyz", "main")
 		if err != nil {
@@ -75,6 +76,7 @@ func TestResolveMRTarget(t *testing.T) {
 //
 // Both must use ResolveBeadsDir to properly handle redirects.
 func TestDoneUsesResolveBeadsDir(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory structure simulating polecat worktree with redirect
 	tmpDir := t.TempDir()
 
@@ -134,6 +136,7 @@ func TestDoneUsesResolveBeadsDir(t *testing.T) {
 // TestAutoSaveSquashTitle verifies the descriptive subject built for squashed
 // auto-save/WIP commits (gt-3wf).
 func TestAutoSaveSquashTitle(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		issue   *beads.Issue
@@ -187,6 +190,7 @@ func TestAutoSaveSquashTitle(t *testing.T) {
 }
 
 func TestForceCloseIssueWithRetryClosesNoMergeIssue(t *testing.T) {
+	t.Parallel()
 	var gotReason string
 	var gotIDs []string
 	calls := 0
@@ -212,6 +216,7 @@ func TestForceCloseIssueWithRetryClosesNoMergeIssue(t *testing.T) {
 }
 
 func TestForceCloseIssueWithRetryReturnsFinalError(t *testing.T) {
+	t.Parallel()
 	wantErr := errors.New("dolt locked")
 	calls := 0
 
@@ -228,6 +233,7 @@ func TestForceCloseIssueWithRetryReturnsFinalError(t *testing.T) {
 }
 
 func TestReviewOnlyCloseRequiresEvidence(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-review",
 		Description: "review_only: true\n",
@@ -246,6 +252,7 @@ func TestReviewOnlyCloseRequiresEvidence(t *testing.T) {
 }
 
 func TestReviewOnlyCloseRejectsNotesAndDesignEvidence(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-review",
 		Description: "review_only: true\nattached_at: 2026-07-01T12:00:00Z\n",
@@ -261,6 +268,7 @@ func TestReviewOnlyCloseRejectsNotesAndDesignEvidence(t *testing.T) {
 }
 
 func TestReviewOnlyCloseAllowsFreshEvidenceComment(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-review",
 		Description: "review_only: true\nattached_at: 2026-07-01T12:00:00Z\n",
@@ -281,6 +289,7 @@ func TestReviewOnlyCloseAllowsFreshEvidenceComment(t *testing.T) {
 }
 
 func TestReviewOnlyGeneratedCommentsDoNotCountAsEvidence(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-review",
 		Description: "review_only: true\nattached_at: 2026-07-01T12:00:00Z\n",
@@ -298,6 +307,7 @@ func TestReviewOnlyGeneratedCommentsDoNotCountAsEvidence(t *testing.T) {
 }
 
 func TestReviewOnlyCloseRejectsStaleComment(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		createdAt string
@@ -327,6 +337,7 @@ func TestReviewOnlyCloseRejectsStaleComment(t *testing.T) {
 }
 
 func TestReviewOnlyCloseRejectsWrongAuthorOrHead(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		author  string
@@ -362,6 +373,7 @@ func TestReviewOnlyCloseRejectsWrongAuthorOrHead(t *testing.T) {
 }
 
 func TestReviewOnlyCloseRejectsMissingAssigneeOrInvalidCommentTime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		assignee  string
@@ -391,6 +403,7 @@ func TestReviewOnlyCloseRejectsMissingAssigneeOrInvalidCommentTime(t *testing.T)
 }
 
 func TestNonReviewOnlyCloseDoesNotRequireEvidence(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-review",
 		Description: "no_merge: true\n",
@@ -403,6 +416,7 @@ func TestNonReviewOnlyCloseDoesNotRequireEvidence(t *testing.T) {
 }
 
 func TestNonReviewOnlyReviewGateDoesNotChangeCriteriaHandling(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:                 "gt-review",
 		Description:        "no_merge: true\n",
@@ -419,6 +433,7 @@ func TestNonReviewOnlyReviewGateDoesNotChangeCriteriaHandling(t *testing.T) {
 }
 
 func TestSourceCloseRejectsNonConcreteIssue(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:     "gt-mr",
 		Labels: []string{"gt:merge-request"},
@@ -434,6 +449,7 @@ func TestSourceCloseRejectsNonConcreteIssue(t *testing.T) {
 }
 
 func TestSourceCloseRejectsLocalMergeStrategy(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{
 		ID:          "gt-work",
 		Type:        "task",
@@ -450,6 +466,7 @@ func TestSourceCloseRejectsLocalMergeStrategy(t *testing.T) {
 }
 
 func TestDirectMergeRejectsUnsafeSourceBeforePush(t *testing.T) {
+	t.Parallel()
 	freshEvidenceReviewOnly := &beads.Issue{
 		ID:          "gt-review",
 		Type:        "task",
@@ -528,6 +545,7 @@ func TestDirectMergeRejectsUnsafeSourceBeforePush(t *testing.T) {
 }
 
 func TestSourceValidationRejectsInternalIssues(t *testing.T) {
+	t.Parallel()
 	if err := validateConcreteSourceIssue("gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err != nil {
 		t.Fatalf("concrete source rejected: %v", err)
 	}
@@ -537,6 +555,7 @@ func TestSourceValidationRejectsInternalIssues(t *testing.T) {
 }
 
 func TestValidateMergeRequestSourceRejectsMissingAndMismatchedSource(t *testing.T) {
+	t.Parallel()
 	missing := &beads.Issue{ID: "gt-mr", Description: "branch: polecat/test/gt-work\n"}
 	if err := validateMergeRequestSource(missing, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "missing source_issue") {
 		t.Fatalf("missing source validation error = %v, want missing source_issue", err)
@@ -551,6 +570,7 @@ func TestValidateMergeRequestSourceRejectsMissingAndMismatchedSource(t *testing.
 // TestDoneBeadsInitWithoutRedirect verifies that beads initialization works
 // normally when no redirect file exists.
 func TestDoneBeadsInitWithoutRedirect(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a simple .beads directory without redirect (like mayor/rig)
@@ -580,6 +600,7 @@ func TestDoneBeadsInitWithoutRedirect(t *testing.T) {
 // This test verifies the pattern by demonstrating that the resolved directory
 // is used consistently for different operations.
 func TestDoneBeadsInitBothCodePaths(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Setup: crew directory with redirect to mayor/rig/.beads
@@ -636,6 +657,7 @@ func TestDoneBeadsInitBothCodePaths(t *testing.T) {
 // SetupRedirect avoids creating chains (bd CLI doesn't support them), but if
 // chains exist we follow them to the final destination.
 func TestDoneRedirectChain(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create chain: worktree -> intermediate -> canonical
@@ -677,6 +699,7 @@ func TestDoneRedirectChain(t *testing.T) {
 // TestDoneEmptyRedirectFallback verifies that an empty or whitespace-only
 // redirect file falls back to the local .beads directory.
 func TestDoneEmptyRedirectFallback(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -700,6 +723,7 @@ func TestDoneEmptyRedirectFallback(t *testing.T) {
 // TestDoneCircularRedirectProtection verifies that circular redirects
 // are detected and handled safely.
 func TestDoneCircularRedirectProtection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -725,6 +749,7 @@ func TestDoneCircularRedirectProtection(t *testing.T) {
 // This is critical because branch names like "polecat/furiosa-mkb0vq9f" don't
 // contain the actual issue ID (test-845.1), but the status query finds it.
 func TestFindHookedBeadForAgent(t *testing.T) {
+	t.Parallel()
 	// Skip: bd CLI 0.47.2 has a bug where database writes don't commit
 	// ("sql: database is closed" during auto-flush). This blocks tests
 	// that need to create issues. See internal issue for tracking.
@@ -826,6 +851,7 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 }
 
 func TestSelectAssignedIssue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		branchIssue string
@@ -886,6 +912,7 @@ func TestSelectAssignedIssue(t *testing.T) {
 // branch-derived issue id is overridden only when it conflicts with the
 // hooked bead and is not a subtask of it.
 func TestIsStaleBranchIssue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		branchIssue string
@@ -912,6 +939,7 @@ func TestIsStaleBranchIssue(t *testing.T) {
 // TestIsPolecatActor verifies that isPolecatActor correctly identifies
 // polecat actors vs other roles based on the BD_ACTOR format.
 func TestIsPolecatActor(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		actor string
 		want  bool
@@ -952,6 +980,7 @@ func TestIsPolecatActor(t *testing.T) {
 // TestDoneIntentLabelFormat verifies the done-intent label format matches
 // the expected pattern: done-intent:<type>:<unix-ts>
 func TestDoneIntentLabelFormat(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	tests := []struct {
 		exitType string
@@ -991,6 +1020,7 @@ func TestDoneIntentLabelFormat(t *testing.T) {
 // must never emit MQ_SUBMIT, even if an mrID is somehow populated. The
 // "stray MR" cases guard against a regression to a bare `mrID != ""` check.
 func TestShouldNudgeRefinery(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		exitType string
@@ -1016,6 +1046,7 @@ func TestShouldNudgeRefinery(t *testing.T) {
 }
 
 func TestShouldUpdateAgentStateOnDone(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		pushFailed bool
@@ -1066,6 +1097,7 @@ func TestUpdateAgentStateAfterSubmissionSkipsFailedSubmissions(t *testing.T) {
 }
 
 func TestShouldRetirePolecatSessionAfterDone(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		exitType      string
@@ -1157,6 +1189,7 @@ func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
 }
 
 func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status string
 		want   string
@@ -1179,6 +1212,7 @@ func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
 }
 
 func TestCleanupStatusFromWorkState(t *testing.T) {
+	t.Parallel()
 	pushErr := errors.New("remote unavailable")
 	tests := []struct {
 		name          string
@@ -1241,6 +1275,7 @@ func TestCleanupStatusFromWorkState(t *testing.T) {
 // TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
 // only done-intent labels while preserving other labels.
 func TestClearDoneIntentLabel(t *testing.T) {
+	t.Parallel()
 	// We can't easily test the full clearDoneIntentLabel function without
 	// a running bd instance, but we can verify the filtering logic.
 	// The function reads labels, filters out done-intent:*, and writes back.
@@ -1288,6 +1323,7 @@ func TestClearDoneIntentLabel(t *testing.T) {
 // a "successful" bd.Create that didn't actually persist would allow the
 // worktree nuke to proceed, losing the polecat's work.
 func TestMRVerificationSetsMRFailed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		createErr    error // error from bd.Create
@@ -1359,6 +1395,7 @@ func TestMRVerificationSetsMRFailed(t *testing.T) {
 // rig's database — not the town-level database where the source bead lives.
 // Without this, the refinery never finds the MR and the branch sits unmerged.
 func TestMRBeadCreationUsesRig(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		issueID string
@@ -1406,6 +1443,7 @@ func TestMRBeadCreationUsesRig(t *testing.T) {
 // wrong role). The sessionCleanupNeeded flag must only be set after role detection
 // confirms this is a polecat.
 func TestDeferredKillNotOnValidationError(t *testing.T) {
+	t.Parallel()
 	// Simulate the flag lifecycle:
 	// 1. sessionCleanupNeeded starts false
 	// 2. Set true only after role detection confirms polecat
@@ -1440,6 +1478,7 @@ func TestDeferredKillNotOnValidationError(t *testing.T) {
 // after cwd/worktree ownership is unavailable. The command must fail closed
 // before branch detection instead of reconstructing authority from env.
 func TestBranchDetectionGuard(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		cwdAvailable bool
@@ -1501,6 +1540,7 @@ func TestBranchDetectionGuard(t *testing.T) {
 // TestBranchDetectionCleanupOnError verifies that deleted-worktree branch
 // recovery is no longer considered a cleanup path for gt done.
 func TestBranchDetectionCleanupOnError(t *testing.T) {
+	t.Parallel()
 	// Simulate the deleted-worktree guard before branch detection.
 	cwdAvailable := false
 	gtBranch := ""
@@ -1524,6 +1564,7 @@ func TestBranchDetectionCleanupOnError(t *testing.T) {
 // TestConvoyMergeStrategyBranching verifies that the merge strategy branching
 // logic in runDone correctly routes to the right code path for each strategy.
 func TestConvoyMergeStrategyBranching(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		mergeStrategy string
@@ -1595,6 +1636,7 @@ func TestConvoyMergeStrategyBranching(t *testing.T) {
 // TestConvoyMergeStrategyNotification verifies that the merge strategy
 // is included in the witness notification body when set to non-default values.
 func TestConvoyMergeStrategyNotification(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		mergeStrategy string
@@ -1629,6 +1671,7 @@ func TestConvoyMergeStrategyNotification(t *testing.T) {
 // TestConvoyMergeFromFields verifies that convoyMergeFromFields correctly
 // extracts the merge strategy from convoy descriptions using typed ConvoyFields.
 func TestConvoyMergeFromFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -1679,6 +1722,7 @@ func TestConvoyMergeFromFields(t *testing.T) {
 // TestDoneCheckpointLabelFormat verifies the done-cp label format matches
 // the expected pattern: done-cp:<stage>:<value>:<unix-ts>
 func TestDoneCheckpointLabelFormat(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	tests := []struct {
 		checkpoint DoneCheckpoint
@@ -1718,6 +1762,7 @@ func TestDoneCheckpointLabelFormat(t *testing.T) {
 // TestReadDoneCheckpoints verifies that readDoneCheckpoints correctly
 // parses checkpoint labels from an issue's label list.
 func TestReadDoneCheckpoints(t *testing.T) {
+	t.Parallel()
 	// Test the parsing logic directly by simulating what readDoneCheckpoints does
 	tests := []struct {
 		name   string
@@ -1801,6 +1846,7 @@ func TestReadDoneCheckpoints(t *testing.T) {
 // TestClearDoneCheckpoints verifies that clearDoneCheckpoints removes
 // only done-cp labels while preserving other labels.
 func TestClearDoneCheckpoints(t *testing.T) {
+	t.Parallel()
 	allLabels := []string{
 		"gt:agent",
 		"idle:3",
@@ -1851,6 +1897,7 @@ func TestClearDoneCheckpoints(t *testing.T) {
 // apart: a checkpoint skips the push only for the branch AND commit it was
 // written for (gt-2wqt), never for a branch name alone.
 func TestCheckpointResumeSkipsPush(t *testing.T) {
+	t.Parallel()
 	const (
 		branch = "mybranch"
 		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1911,6 +1958,7 @@ func TestCheckpointResumeSkipsPush(t *testing.T) {
 // TestCheckpointNilMapSafe verifies that reading from a nil/empty checkpoint
 // map returns zero values and doesn't panic.
 func TestCheckpointNilMapSafe(t *testing.T) {
+	t.Parallel()
 	// Nil map - should not panic
 	var nilMap map[DoneCheckpoint]string
 	if nilMap[CheckpointPushed] != "" {
@@ -1928,6 +1976,7 @@ func TestCheckpointNilMapSafe(t *testing.T) {
 // first, then falls back to dep-based convoy lookup. This is the fix for gt-7b6wf:
 // convoy merge=direct was not propagated because cross-rig dep resolution failed.
 func TestConvoyInfoFallbackChain(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		attachmentInfo *ConvoyInfo // Result from getConvoyInfoFromIssue
@@ -1999,6 +2048,7 @@ func TestConvoyInfoFallbackChain(t *testing.T) {
 // work bead to in_progress during work, so the old exact-match check skipped
 // closing and caused infinite dispatch loops.
 func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		status    string
@@ -2116,6 +2166,7 @@ func TestPushSubmoduleChanges_Integration(t *testing.T) {
 // TestPushSubmoduleChanges_NoSubmodules verifies pushSubmoduleChanges is a no-op
 // for repos without submodules (gt-dzs).
 func TestPushSubmoduleChanges_NoSubmodules(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	// Create a simple repo with a remote
@@ -2149,6 +2200,7 @@ func TestPushSubmoduleChanges_NoSubmodules(t *testing.T) {
 // (gt-pvx) correctly detects uncommitted implementation work and auto-commits it.
 // This tests the git-level operations that underpin the safety net in done.go.
 func TestAutoCommitSafetyNet(t *testing.T) {
+	t.Parallel()
 	// Set up a git repo with uncommitted changes
 	dir := t.TempDir()
 	testRunGit(t, dir, "init")
@@ -2315,6 +2367,7 @@ func TestAutoCommitSafetyNet(t *testing.T) {
 // TestSyncGuardWithUncommittedChanges verifies that the worktree sync guard
 // (gt-pvx) prevents switching branches when uncommitted changes remain.
 func TestSyncGuardWithUncommittedChanges(t *testing.T) {
+	t.Parallel()
 	// This tests the logic: if auto-commit fails, we should NOT sync to main
 	dir := t.TempDir()
 	testRunGit(t, dir, "init")
@@ -2372,6 +2425,7 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 // writes must be gated on the same gate-command binding gt sling reads, so it
 // can never be true when the rig has nothing configured to verify.
 func TestResolvePreVerifiedClaim(t *testing.T) {
+	t.Parallel()
 	t.Run("not requested", func(t *testing.T) {
 		honor, warning := resolvePreVerifiedClaim(false, t.TempDir(), "gastown")
 		if honor {
