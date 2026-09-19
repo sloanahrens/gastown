@@ -1156,21 +1156,24 @@ More branches to process?
 - Normal: After successful merge-push
 - Conflict-skip: After process-branch created conflict-resolution task
 
-If yes, pick the path by what is left in the queue:
+If yes, pick the path by what is left in the queue, using the same
+candidates call batch-scan Step 1 makes (same vars: batch_min_age,
+batch_max, batch_min_count from the config table above):
 
 ```bash
 gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
 ```
 
 - Eligible candidates >= {{batch_min_count}}: return to **batch-scan** and
-  land them as one batch. Batching once per cycle and then walking the
-  rest of the queue one gate at a time serialised a 14-deep queue on
-  2026-09-19 even after P1s became batchable (gt-aljo); each single gate
-  is a full container suite, a batch is one suite for up to
-  {{batch_max}} MRs.
+  land them as one batch. Visiting batch-scan only once per cycle and then
+  walking the rest of the queue through process-branch costs one full
+  container suite per MR; a batch is one suite for up to {{batch_max}}.
 - Fewer: return to process-branch with the next branch.
 - A rubric-changing MR (diff touches .om.json) never goes into a batch:
-  land it alone via process-branch, then re-stamp, then batch the rest.
+  land it alone via process-branch (the town directive for this role says
+  how the manifest is re-stamped afterwards), then batch the rest. If
+  isolating it leaves fewer than {{batch_min_count}} candidates, the
+  remainder goes through process-branch too.
 
 If no: Continue to generate-summary.
 
