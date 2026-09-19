@@ -509,6 +509,7 @@ func runRefineryAttach(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	mgr.SetStartAttribution("gt-refinery-start", "gt refinery start")
 
 	// Session name follows the same pattern as refinery manager
 	sessionID := session.RefinerySessionName(session.PrefixFor(rigName))
@@ -556,6 +557,7 @@ func runRefineryRestart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	mgr.SetStartAttribution("gt-refinery-restart", "gt refinery restart")
 
 	if err := checkRigNotParkedOrDocked(rigName); err != nil {
 		return err

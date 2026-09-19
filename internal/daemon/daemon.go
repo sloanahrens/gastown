@@ -2015,6 +2015,9 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		Path: filepath.Join(d.config.TownRoot, rigName),
 	}
 	mgr := refinery.NewManager(r)
+	// Attribute the spawn to the daemon heartbeat (gt-uj9k), so a session_start
+	// burst can be traced to this caller rather than guessed at from timings.
+	mgr.SetStartAttribution("daemon-heartbeat", "daemon")
 
 	// NOTE: Hung session detection removed for refineries (serial killer bug).
 	// Idle refineries legitimately produce no tmux output while waiting for MRs.

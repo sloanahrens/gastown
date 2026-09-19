@@ -757,6 +757,7 @@ func upStartRefinery(rigName string, r *rig.Rig) agentStartResult {
 	}
 
 	mgr := refinery.NewManager(r)
+	mgr.SetStartAttribution("gt-up", "gt up")
 	if err := mgr.Start(false, ""); err != nil {
 		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			return agentStartResult{name: name, ok: true, detail: mgr.SessionName()}
