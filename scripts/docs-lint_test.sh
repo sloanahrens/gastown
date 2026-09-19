@@ -48,7 +48,7 @@ actual="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>&1)"; rc=$?
 set -e
 expected="docs/guides/guide.md:4: dead-link: ../missing.md does not exist
 docs/guides/guide.md:6: dead-make-target: make nope is not a Makefile target
-docs/plans/old-plan.md:1: status-header: first non-blank line must start with "> Status:"
+docs/plans/old-plan.md:1: status-header: first non-blank line must start with \"> Status:\"
 plugins/p/plugin.md:1: word-ceiling: 2102 words, ceiling 2000"
 assert_eq "finding lines" "$expected" "$actual"
 assert_eq "exit 1 on findings" "1" "$rc"

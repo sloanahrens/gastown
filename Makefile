@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint lint-tools
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -60,6 +60,11 @@ lint-tools:
 lint:
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+
+# Deterministic docs and comments checks (docs/writing-for-agents.md).
+# Also the tier lists the weekly doc audit slices from.
+docs-lint:
+	bash scripts/docs-lint.sh
 
 desktop-build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop
