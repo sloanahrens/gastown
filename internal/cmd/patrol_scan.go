@@ -34,6 +34,8 @@ Detections:
   - Zombies: Dead sessions with active agent state, dead agent processes,
     stuck done-intent, closed beads with live sessions
   - Stalls: Agents stuck at startup prompts
+  - Refinery stall: A live refinery holding unsubmitted composer input while
+    producing no output (gt-hkhu). Queued input is submitted on detection.
   - Completions: Agent bead metadata indicating gt done was called
 
 Actions taken automatically:
@@ -70,8 +72,28 @@ type PatrolScanOutput struct {
 	Timestamp   string                    `json:"timestamp"`
 	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
 	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
+	Refinery    *PatrolScanRefineryOutput `json:"refinery,omitempty"`
 	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
 	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
+}
+
+// PatrolScanRefineryOutput holds the refinery composer-stall check (gt-hkhu).
+type PatrolScanRefineryOutput struct {
+	Checked int                      `json:"checked"`
+	Found   int                      `json:"found"`
+	Stalls  []PatrolScanRefineryItem `json:"stalls,omitempty"`
+	Errors  []string                 `json:"errors,omitempty"`
+}
+
+// PatrolScanRefineryItem is a single refinery stall in scan output.
+type PatrolScanRefineryItem struct {
+	Session           string  `json:"session"`
+	Agent             string  `json:"agent"`
+	StallType         string  `json:"stall_type"`
+	State             string  `json:"state"`
+	InactivitySeconds float64 `json:"inactivity_seconds"`
+	Action            string  `json:"action"`
+	Error             string  `json:"error,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -153,7 +175,7 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 
-	// Run all three detection passes.
+	// Run all four detection passes.
 	// Note: DetectZombiePolecats takes a router param but does NOT send mail
 	// internally — it only uses the router for workspace context. Notifications
 	// are sent exclusively below via --notify, avoiding double-send.
@@ -163,6 +185,13 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	})
 	stallResult := runPatrolScanPhase(diagnostics, "stall detection", func() *witness.DetectStalledPolecatsResult {
 		return witness.DetectStalledPolecats(workDir, rigName)
+	})
+	// Separate from stall detection: the refinery is not a polecat and has no
+	// heartbeat, so the polecat sweep never looks at it. A refinery holding a
+	// composed-but-unsubmitted instruction reads as running to every other
+	// check while MRs age behind it (gt-hkhu).
+	refineryResult := runPatrolScanPhase(diagnostics, "refinery stall detection", func() *witness.DetectRefineryStallResult {
+		return witness.DetectStalledRefinery(workDir, rigName)
 	})
 	completionResult := runPatrolScanPhase(diagnostics, "completion discovery", func() *witness.DiscoverCompletionsResult {
 		return witness.DiscoverCompletions(bd, workDir, rigName, router)
@@ -183,10 +212,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, receipts)
 }
 
 func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
@@ -285,7 +314,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -339,6 +368,32 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.Stalls = so
 	}
 
+	// Refinery composer stall
+	if refineryResult != nil {
+		ro := &PatrolScanRefineryOutput{
+			Checked: refineryResult.Checked,
+			Found:   len(refineryResult.Stalls),
+		}
+		for _, s := range refineryResult.Stalls {
+			item := PatrolScanRefineryItem{
+				Session:           s.Session,
+				Agent:             s.Agent,
+				StallType:         s.StallType,
+				State:             s.State,
+				InactivitySeconds: s.Inactivity.Seconds(),
+				Action:            s.Action,
+			}
+			if s.Error != nil {
+				item.Error = s.Error.Error()
+			}
+			ro.Stalls = append(ro.Stalls, item)
+		}
+		for _, e := range refineryResult.Errors {
+			ro.Errors = append(ro.Errors, e.Error())
+		}
+		output.Refinery = ro
+	}
+
 	// Completions
 	if completionResult != nil {
 		co := &PatrolScanCompleteOutput{
@@ -366,7 +421,7 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -429,6 +484,31 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// Refinery composer stall (gt-hkhu)
+	if refineryResult != nil && (len(refineryResult.Stalls) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Refinery Stall Detection: checked %d session(s)\n",
+			style.Bold.Render("🏭"), refineryResult.Checked)
+
+		if len(refineryResult.Stalls) == 0 {
+			fmt.Printf("  %s\n", style.Dim.Render("No composer stalls detected"))
+		} else {
+			for _, s := range refineryResult.Stalls {
+				fmt.Printf("  ⚠ %s: %s (composer %s, silent %s) → %s\n",
+					s.Agent, s.StallType, s.State,
+					s.Inactivity.Round(time.Second), s.Action)
+				if s.Error != nil {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
+				}
+			}
+		}
+		if len(refineryResult.Errors) > 0 && patrolScanVerbose {
+			for _, e := range refineryResult.Errors {
+				fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", e)))
+			}
+		}
+		fmt.Println()
+	}
+
 	// Completions
 	if completionResult != nil && (len(completionResult.Discovered) > 0 || patrolScanVerbose) {
 		fmt.Printf("%s Completion Discovery: checked %d polecat(s)\n",
@@ -467,12 +547,16 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 	if completionResult != nil {
 		completionCount = len(completionResult.Discovered)
 	}
+	refineryStallCount := 0
+	if refineryResult != nil {
+		refineryStallCount = len(refineryResult.Stalls)
+	}
 
-	if zombieCount == 0 && stallCount == 0 && completionCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && refineryStallCount == 0 && completionCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s)\n",
-			zombieCount, activeCount, stallCount, completionCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s)\n",
+			zombieCount, activeCount, stallCount, refineryStallCount, completionCount)
 	}
 
 	return nil
