@@ -30,6 +30,9 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"make test", "make test", true},
 		{"make test with env prefix", "GOFLAGS=-p=8 make test", true},
 		{"make test wrapped in slot run", "gt slot run --role gastown/zircon -- GOFLAGS=-p=8 make test", true},
+		{"make test with jobs flag", "make -j4 test", true},
+		{"make test with long flag", "make --jobs=4 test", true},
+		{"make test with directory flag and value", "make -C . test", true},
 
 		{"filtered heavy package", "go test ./internal/cmd/ -run 'TestApplyMQCheck|TestSlingDeadAgent'", false},
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
@@ -56,8 +59,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 14 {
-		t.Errorf("blocked %d of %d cases, want exactly 14", blocked, len(tests))
+	if blocked != 17 {
+		t.Errorf("blocked %d of %d cases, want exactly 17", blocked, len(tests))
 	}
 }
 
@@ -75,7 +78,8 @@ func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 	t.Setenv("GT_POLECAT", "zircon")
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/zircon")
-	for name, input := range map[string]string{"bare": bare, "wrapped": wrapped} {
+	wholeRepo := `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`
+	for name, input := range map[string]string{"bare": bare, "wrapped": wrapped, "go test whole repo": wholeRepo} {
 		var err error
 		stderr := captureStderr(t, func() {
 			withStdin(t, input, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })

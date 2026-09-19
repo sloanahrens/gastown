@@ -39,6 +39,8 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		// Blocked: bare make test (always runs go test ./... per Makefile).
 		{"make test bare", "make test", true},
 		{"GOFLAGS prefixed make test", "GOFLAGS=-p=6 make test", true},
+		{"make test with jobs flag", "make -j4 test", true},
+		{"make test with directory flag and value", "make -C . test", true},
 
 		// Allowed: wrapped in gt slot run.
 		{"go test wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/beads/...", false},

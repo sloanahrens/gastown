@@ -239,11 +239,33 @@ func containsSubsequence(tokens, want []string) bool {
 	return false
 }
 
-// findTestInvocation returns the index of the first "<tool> test" pair in
-// tokens (already lowercased) — "go test" or "make test" — or -1.
+// makeValueFlags are make(1) short options that take their value as the NEXT
+// token when written with a space ("-C dir", "-j 4"); the flag scan must
+// step over that value so "make -C . test" is still seen as "make test".
+var makeValueFlags = map[string]bool{
+	"-c": true, "-f": true, "-j": true, "-l": true, "-o": true, "-w": true, "-i": true, "-e": true,
+}
+
+// findTestInvocation returns the index of the first "<tool> test" invocation
+// in tokens (already lowercased) — "go test" or "make test" — or -1. For
+// make, options may sit between the program and the target ("make -j4
+// test", "make --jobs=4 test", "make -C . test") and are stepped over: the
+// target is what decides what runs, not the flags in front of it.
 func findTestInvocation(tokens []string, tool string) int {
 	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] == tool && tokens[i+1] == "test" {
+		if tokens[i] != tool {
+			continue
+		}
+		j := i + 1
+		if tool == "make" {
+			for j < len(tokens) && strings.HasPrefix(tokens[j], "-") {
+				if makeValueFlags[tokens[j]] {
+					j++
+				}
+				j++
+			}
+		}
+		if j < len(tokens) && tokens[j] == "test" {
 			return i
 		}
 	}
