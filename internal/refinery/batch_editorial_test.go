@@ -160,6 +160,7 @@ func mrIDFromArgs(args []string) string {
 // must see the batch pass through untouched, exactly like before this
 // feature existed.
 func TestReviewBatchCandidates_NotRequired_NoOp(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -184,6 +185,7 @@ func TestReviewBatchCandidates_NotRequired_NoOp(t *testing.T) {
 // TestReviewBatchCandidates_RequiredFalse_NoOp covers the same pass-through
 // when Editorial is explicitly configured but Required is false.
 func TestReviewBatchCandidates_RequiredFalse_NoOp(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.config.Editorial = &config.EditorialConfig{Required: false}
@@ -304,6 +306,7 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 // --- ejectPatchIDChanged tests ---
 
 func TestEjectPatchIDChanged_NotRequired_NoOp(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -318,6 +321,7 @@ func TestEjectPatchIDChanged_NotRequired_NoOp(t *testing.T) {
 }
 
 func TestEjectPatchIDChanged_MatchingPatchIDs_KeepsAll(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -371,6 +375,7 @@ func TestEjectPatchIDChanged_MatchingPatchIDs_KeepsAll(t *testing.T) {
 }
 
 func TestEjectPatchIDChanged_MismatchedPatchID_Ejects(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 

@@ -20,6 +20,7 @@ import (
 // same as production, where "gt mq review" reviewed the branch tip before
 // the refinery merged it. The note must end up on MR2's landed merge commit.
 func TestDoMerge_SecondSequentialMerge_OntoPriorMergeCommit_NoteReachesLandedCommit(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 

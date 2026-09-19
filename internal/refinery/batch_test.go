@@ -122,6 +122,7 @@ func failMarkerGateCmd() string {
 // --- DefaultBatchConfig tests ---
 
 func TestDefaultBatchConfig(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultBatchConfig()
 	if cfg.MaxBatchSize != 5 {
 		t.Errorf("expected MaxBatchSize 5, got %d", cfg.MaxBatchSize)
@@ -135,6 +136,7 @@ func TestDefaultBatchConfig(t *testing.T) {
 }
 
 func TestFastForwardBatch_BlocksForkBackedDefaultPush(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	addDistinctUpstreamRemote(t, workDir, g)
@@ -155,6 +157,7 @@ func TestFastForwardBatch_BlocksForkBackedDefaultPush(t *testing.T) {
 // --- AssembleBatch tests ---
 
 func TestAssembleBatch_EmptyQueue(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -165,6 +168,7 @@ func TestAssembleBatch_EmptyQueue(t *testing.T) {
 }
 
 func TestAssembleBatch_LessThanMax(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -180,6 +184,7 @@ func TestAssembleBatch_LessThanMax(t *testing.T) {
 }
 
 func TestAssembleBatch_CapsAtMax(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -195,6 +200,7 @@ func TestAssembleBatch_CapsAtMax(t *testing.T) {
 }
 
 func TestAssembleBatch_SkipsBlockedMRs(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -214,6 +220,7 @@ func TestAssembleBatch_SkipsBlockedMRs(t *testing.T) {
 }
 
 func TestAssembleBatch_IncludesBlockedByBatchMember(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -229,6 +236,7 @@ func TestAssembleBatch_IncludesBlockedByBatchMember(t *testing.T) {
 }
 
 func TestAssembleBatch_NilConfig(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 
@@ -245,6 +253,7 @@ func TestAssembleBatch_NilConfig(t *testing.T) {
 // --- BuildRebaseStack tests (require real git) ---
 
 func TestBuildRebaseStack_SingleMR(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -276,6 +285,7 @@ func TestBuildRebaseStack_SingleMR(t *testing.T) {
 }
 
 func TestBuildRebaseStack_MultipleMRs(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -310,6 +320,7 @@ func TestBuildRebaseStack_MultipleMRs(t *testing.T) {
 }
 
 func TestBuildRebaseStack_ConflictRemovesMR(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -342,6 +353,7 @@ func TestBuildRebaseStack_ConflictRemovesMR(t *testing.T) {
 }
 
 func TestBuildRebaseStack_EmptyBatch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -356,6 +368,7 @@ func TestBuildRebaseStack_EmptyBatch(t *testing.T) {
 }
 
 func TestBuildRebaseStack_MissingBranch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -380,6 +393,7 @@ func TestBuildRebaseStack_MissingBranch(t *testing.T) {
 }
 
 func TestBuildRebaseStack_RejectsAdvancedSourceBranch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -412,6 +426,7 @@ func TestBuildRebaseStack_RejectsAdvancedSourceBranch(t *testing.T) {
 // --- ProcessBatch tests ---
 
 func TestProcessBatch_EmptyBatch(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.output = &bytes.Buffer{}
@@ -426,6 +441,7 @@ func TestProcessBatch_EmptyBatch(t *testing.T) {
 }
 
 func TestProcessBatch_SingleMR_Success(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -448,6 +464,7 @@ func TestProcessBatch_SingleMR_Success(t *testing.T) {
 }
 
 func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -483,6 +500,7 @@ func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
 }
 
 func TestProcessBatch_MergeStrategyPR_RefusesMultiMRBatch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -517,6 +535,7 @@ func TestProcessBatch_MergeStrategyPR_RefusesMultiMRBatch(t *testing.T) {
 }
 
 func TestProcessBatch_MergeStrategyPR_AllowsSingleMR(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -536,6 +555,7 @@ func TestProcessBatch_MergeStrategyPR_AllowsSingleMR(t *testing.T) {
 }
 
 func TestProcessBatch_WithConflict(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -564,6 +584,7 @@ func TestProcessBatch_WithConflict(t *testing.T) {
 }
 
 func TestProcessBatch_GateFailure_BisectsToFindCulprit(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -607,6 +628,7 @@ func TestProcessBatch_GateFailure_BisectsToFindCulprit(t *testing.T) {
 }
 
 func TestProcessBatch_RetryOnFlaky(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -635,6 +657,7 @@ func TestProcessBatch_RetryOnFlaky(t *testing.T) {
 }
 
 func TestProcessBatch_RetryOnFlaky_MultipleMRs(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -669,6 +692,7 @@ func TestProcessBatch_RetryOnFlaky_MultipleMRs(t *testing.T) {
 }
 
 func TestProcessBatch_AllConflict(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -702,6 +726,7 @@ func TestProcessBatch_AllConflict(t *testing.T) {
 // --- Bisection tests ---
 
 func TestBisectBatch_SingleMR(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -724,6 +749,7 @@ func TestBisectBatch_SingleMR(t *testing.T) {
 }
 
 func TestBisectBatch_TwoMRs_SecondBad(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -750,6 +776,7 @@ func TestBisectBatch_TwoMRs_SecondBad(t *testing.T) {
 }
 
 func TestBisectBatch_TwoMRs_FirstBad(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -776,6 +803,7 @@ func TestBisectBatch_TwoMRs_FirstBad(t *testing.T) {
 }
 
 func TestBisectBatch_FourMRs_ThirdBad(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -811,6 +839,7 @@ func TestBisectBatch_FourMRs_ThirdBad(t *testing.T) {
 // --- Integration: ProcessBatch end-to-end with push ---
 
 func TestProcessBatch_PushesAndLands(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -844,6 +873,7 @@ func TestProcessBatch_PushesAndLands(t *testing.T) {
 }
 
 func TestProcessBatch_BisectAndMergeGood(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -894,6 +924,7 @@ func TestProcessBatch_BisectAndMergeGood(t *testing.T) {
 // --- getMergeMessage tests ---
 
 func TestGetMergeMessage_FromBranch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -913,6 +944,7 @@ func TestGetMergeMessage_FromBranch(t *testing.T) {
 }
 
 func TestGetMergeMessage_Fallback(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.output = &bytes.Buffer{}
@@ -936,6 +968,7 @@ func TestGetMergeMessage_Fallback(t *testing.T) {
 // TestProcessBatch_SingleMR_BranchNotFound verifies that a missing branch is treated as a
 // skippable condition (added to Conflicts) rather than a fatal infrastructure error.
 func TestProcessBatch_SingleMR_BranchNotFound(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 

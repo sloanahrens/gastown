@@ -186,6 +186,7 @@ func assertOriginMainUnchangedAndReset(t *testing.T, workDir, before string) {
 }
 
 func TestRecheckMRStillMergeable_RejectsMissingSourceField(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	store := newPrepushStore(prepushMRIssue("gt-mr", "feature", "main", ""))
@@ -201,6 +202,7 @@ func TestRecheckMRStillMergeable_RejectsMissingSourceField(t *testing.T) {
 }
 
 func TestRecheckMRStillMergeable_RejectsMissingSourceIssue(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	store := newPrepushStore(prepushMRIssue("gt-mr", "feature", "main", "gt-missing"))
@@ -217,6 +219,7 @@ func TestRecheckMRStillMergeable_RejectsMissingSourceIssue(t *testing.T) {
 }
 
 func TestRecheckMRStillMergeable_RejectsNonConcreteSource(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		label string
@@ -247,6 +250,7 @@ func TestRecheckMRStillMergeable_RejectsNonConcreteSource(t *testing.T) {
 }
 
 func TestRecheckMRStillMergeable_RejectsClosedSource(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	source := prepushIssue("gt-src", "")
@@ -273,6 +277,7 @@ func TestRecheckMRStillMergeable_RejectsClosedSource(t *testing.T) {
 // its source issue seconds after creating the MR and well before the MR
 // reaches the merge queue.
 func TestRecheckMRStillMergeable_ToleratesPendingMergeSelfClose(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	source := prepushIssue("gt-src", "")
@@ -299,6 +304,7 @@ func TestRecheckMRStillMergeable_ToleratesPendingMergeSelfClose(t *testing.T) {
 // polecat was re-dispatched and created a second MR) still rejects, since
 // tolerating any pending_mr reason would defeat the point of naming the MR.
 func TestRecheckMRStillMergeable_RejectsClosedSourceForDifferentMR(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	source := prepushIssue("gt-src", "")
@@ -317,6 +323,7 @@ func TestRecheckMRStillMergeable_RejectsClosedSourceForDifferentMR(t *testing.T)
 }
 
 func TestRecheckMRStillMergeable_RejectsUncheckedSourceCriteria(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	source := prepushIssue("gt-src", "")
@@ -335,6 +342,7 @@ func TestRecheckMRStillMergeable_RejectsUncheckedSourceCriteria(t *testing.T) {
 }
 
 func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -381,6 +389,7 @@ func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
 }
 
 func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -443,6 +452,7 @@ func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
 }
 
 func TestDoMergePR_RechecksSourceBeforeMergeAPI(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	commit := "abc123def456"
@@ -467,6 +477,7 @@ func TestDoMergePR_RechecksSourceBeforeMergeAPI(t *testing.T) {
 }
 
 func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
@@ -527,6 +538,7 @@ func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
 // the ineligible member's MR bead even though an eligibility miss this
 // early is not yet a verdict (gt-di2t).
 func TestProcessBatch_IneligibleMemberDoesNotAbortRestOfBatch(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
@@ -581,6 +593,7 @@ func TestProcessBatch_IneligibleMemberDoesNotAbortRestOfBatch(t *testing.T) {
 // the rest of the batch runs gates normally and lands (gt-di2t: this used
 // to abort the whole batch instead of continuing with gt-mr-a).
 func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
@@ -621,6 +634,7 @@ func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 }
 
 func TestProcessBatch_RechecksMRCloseReasonBeforePush(t *testing.T) {
+	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")

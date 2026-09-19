@@ -20,6 +20,7 @@ import (
 )
 
 func TestDefaultMergeQueueConfig(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultMergeQueueConfig()
 
 	if !cfg.Enabled {
@@ -43,6 +44,7 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 }
 
 func TestIsConflictTaskForMR(t *testing.T) {
+	t.Parallel()
 	task := &beads.Issue{Description: `Resolve merge conflicts for branch polecat/nux/gt-real
 
 ## Metadata
@@ -70,6 +72,7 @@ func TestIsConflictTaskForMR(t *testing.T) {
 }
 
 func TestEngineerFirstOpenBlockerUsesDependencySemantics(t *testing.T) {
+	t.Parallel()
 	e := &Engineer{}
 	tests := []struct {
 		name  string
@@ -336,6 +339,7 @@ func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *
 }
 
 func TestEngineer_LoadConfig_NoFile(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory without config.json
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
@@ -362,6 +366,7 @@ func TestEngineer_LoadConfig_NoFile(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_WithMergeQueue(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory with config.json
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
@@ -431,6 +436,7 @@ func TestEngineer_LoadConfig_WithMergeQueue(t *testing.T) {
 // (gt-wsg7): a config.json editorial block with only "required" set must
 // come back through LoadConfig with the other fields defaulted.
 func TestEngineer_LoadConfig_Editorial(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -483,6 +489,7 @@ func TestEngineer_LoadConfig_Editorial(t *testing.T) {
 // TestEngineer_LoadConfig_NoEditorial guards the omitted case: a rig with
 // no editorial block leaves Editorial nil (upstream behavior unchanged).
 func TestEngineer_LoadConfig_NoEditorial(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -516,6 +523,7 @@ func TestEngineer_LoadConfig_NoEditorial(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_AutoPushDisabled(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -552,6 +560,7 @@ func TestEngineer_LoadConfig_AutoPushDisabled(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_NoMergeQueueSection(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory with config.json without merge_queue
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
@@ -589,6 +598,7 @@ func TestEngineer_LoadConfig_NoMergeQueueSection(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_InvalidPollInterval(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -620,6 +630,7 @@ func TestEngineer_LoadConfig_InvalidPollInterval(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_InvalidStaleClaimTimeout(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -664,6 +675,7 @@ func TestEngineer_LoadConfig_InvalidStaleClaimTimeout(t *testing.T) {
 }
 
 func TestNewEngineer(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: "/tmp/test-rig",
@@ -686,6 +698,7 @@ func TestNewEngineer(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_WithGates(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-gates-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -744,6 +757,7 @@ func TestEngineer_LoadConfig_WithGates(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_GateInvalidTimeout(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "engineer-gates-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -788,6 +802,7 @@ func TestEngineer_LoadConfig_GateInvalidTimeout(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_GatePhase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	config := map[string]interface{}{
@@ -833,6 +848,7 @@ func TestEngineer_LoadConfig_GatePhase(t *testing.T) {
 }
 
 func TestEngineer_LoadConfig_GateInvalidPhase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	config := map[string]interface{}{
@@ -864,6 +880,7 @@ func TestEngineer_LoadConfig_GateInvalidPhase(t *testing.T) {
 }
 
 func TestRunGatesForPhase_FiltersCorrectly(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell commands")
 	}
@@ -892,6 +909,7 @@ func TestRunGatesForPhase_FiltersCorrectly(t *testing.T) {
 }
 
 func TestRunGate_Success(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -909,6 +927,7 @@ func TestRunGate_Success(t *testing.T) {
 }
 
 func TestRunGate_Failure(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -926,6 +945,7 @@ func TestRunGate_Failure(t *testing.T) {
 }
 
 func TestRunGate_EmptyCmd(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -940,6 +960,7 @@ func TestRunGate_EmptyCmd(t *testing.T) {
 }
 
 func TestRunGate_Timeout(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -958,6 +979,7 @@ func TestRunGate_Timeout(t *testing.T) {
 }
 
 func TestRunGates_Sequential_AllPass(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -976,6 +998,7 @@ func TestRunGates_Sequential_AllPass(t *testing.T) {
 }
 
 func TestRunGates_Sequential_StopsOnFirstFailure(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("gate commands run via sh -c; touch with Windows paths breaks under MSYS2 shell")
 	}
@@ -1009,6 +1032,7 @@ func TestRunGates_Sequential_StopsOnFirstFailure(t *testing.T) {
 }
 
 func TestRunGates_Parallel_AllPass(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -1027,6 +1051,7 @@ func TestRunGates_Parallel_AllPass(t *testing.T) {
 }
 
 func TestRunGates_Parallel_AnyFailure(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -1051,6 +1076,7 @@ func TestRunGates_Parallel_AnyFailure(t *testing.T) {
 }
 
 func TestRunGates_Empty(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
 	e := NewEngineer(r)
 	e.workDir = t.TempDir()
@@ -1064,6 +1090,7 @@ func TestRunGates_Empty(t *testing.T) {
 }
 
 func TestEngineer_DeleteMergedBranchesConfig(t *testing.T) {
+	t.Parallel()
 	// Test that DeleteMergedBranches is true by default
 	cfg := DefaultMergeQueueConfig()
 	if !cfg.DeleteMergedBranches {
@@ -1072,6 +1099,7 @@ func TestEngineer_DeleteMergedBranchesConfig(t *testing.T) {
 }
 
 func TestPolecatBranchAlwaysDeletedAfterMerge(t *testing.T) {
+	t.Parallel()
 	// Polecat branches should be cleaned up regardless of DeleteMergedBranches config.
 	// Non-polecat branches should only be deleted locally, never from the remote,
 	// because the remote may be a contributor's fork with open upstream PRs. (GH#2669)
@@ -1107,6 +1135,7 @@ func TestPolecatBranchAlwaysDeletedAfterMerge(t *testing.T) {
 }
 
 func TestPostMergeConvoyCheck_NoTownBeads(t *testing.T) {
+	t.Parallel()
 	// postMergeConvoyCheck should silently return when town-level beads doesn't exist
 	tmpDir, err := os.MkdirTemp("", "engineer-convoy-test-*")
 	if err != nil {
@@ -1144,6 +1173,7 @@ func TestPostMergeConvoyCheck_NoTownBeads(t *testing.T) {
 }
 
 func TestHandleMRInfoSuccess_ProofFailurePreservesRemoteBranch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -1233,6 +1263,7 @@ func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
 }
 
 func TestDoMergeDirectRejectsAdvancedSourceBranch(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -1424,6 +1455,7 @@ esac
 }
 
 func TestNotifyDeaconConvoyFeeding_SkipsWhenNoConvoyID(t *testing.T) {
+	t.Parallel()
 	// notifyDeaconConvoyFeeding should skip when MR has no ConvoyID
 	tmpDir, err := os.MkdirTemp("", "engineer-notify-test-*")
 	if err != nil {
@@ -1459,6 +1491,7 @@ func TestNotifyDeaconConvoyFeeding_SkipsWhenNoConvoyID(t *testing.T) {
 }
 
 func TestNotifyDeaconConvoyFeeding_AttemptsWhenConvoyID(t *testing.T) {
+	t.Parallel()
 	// notifyDeaconConvoyFeeding should attempt to send mail when ConvoyID is set.
 	// The send will fail (no beads setup in tmpdir) but we verify the attempt via output.
 	tmpDir, err := os.MkdirTemp("", "engineer-notify-test-*")
@@ -1496,6 +1529,7 @@ func TestNotifyDeaconConvoyFeeding_AttemptsWhenConvoyID(t *testing.T) {
 }
 
 func TestConvoyInfoDescriptionParsing(t *testing.T) {
+	t.Parallel()
 	// Test that landConvoySwarm correctly parses Molecule from description
 	tests := []struct {
 		name        string
@@ -1534,6 +1568,7 @@ func TestConvoyInfoDescriptionParsing(t *testing.T) {
 }
 
 func TestNotifyConvoyCompletionParsing(t *testing.T) {
+	t.Parallel()
 	// Test that ParseConvoyFields.NotificationAddresses correctly extracts Owner/Notify
 	tests := []struct {
 		name        string
@@ -1665,6 +1700,7 @@ exit 0
 }
 
 func TestIsClaimStale(t *testing.T) {
+	t.Parallel()
 	timeout := DefaultStaleClaimTimeout
 
 	tests := []struct {

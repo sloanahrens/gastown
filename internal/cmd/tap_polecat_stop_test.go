@@ -14,6 +14,7 @@ import (
 const polecatStopTestBranch = "polecat/test/gt-ksnv@abc123"
 
 func TestPolecatStopPendingWork(t *testing.T) {
+	t.Parallel()
 	t.Run("clean feature branch has no pending work", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
 
@@ -126,6 +127,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 // running" as abandonment, but a slot held by an unrelated polecat/rig must
 // not falsely suppress the auto-done either.
 func TestPolecatStopVerificationRunning(t *testing.T) {
+	t.Parallel()
 	t.Run("no slot held", func(t *testing.T) {
 		townRoot := t.TempDir()
 
@@ -178,6 +180,7 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 // still mid-formula (about to build/lint/test), while an old commit carries
 // no such signal.
 func TestPolecatStopCommittedWithinGrace(t *testing.T) {
+	t.Parallel()
 	t.Run("fresh commit is within grace", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
 

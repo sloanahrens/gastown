@@ -56,6 +56,7 @@ func deadSession(string) (bool, error) { return false, nil }
 func liveSession(string) (bool, error) { return true, nil }
 
 func TestRecoverRejectedMRDeadWorker_ReopensAndMailsDeacon(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
 		ID:     "gt-src1",
 		Status: "closed",
@@ -137,6 +138,7 @@ func parseRecoveredSubject(subject string) (string, bool) {
 // tmux session. Session liveness must NOT gate recovery here — the bead's
 // own closed status is what proves the worker no longer holds it.
 func TestRecoverRejectedMRDeadWorker_ClosedSourceIssue_AliveSession_StillRecovers(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
@@ -167,6 +169,7 @@ func TestRecoverRejectedMRDeadWorker_ClosedSourceIssue_AliveSession_StillRecover
 // resurrected by 'gt mq reject' even though it reads as "closed, unassigned"
 // exactly like the "worker finished it" case this recovery targets.
 func TestRecoverRejectedMRDeadWorker_SupersededCloseReason_NoAction(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
 		ID:          "gt-src1",
 		Status:      "closed",
@@ -189,6 +192,7 @@ func TestRecoverRejectedMRDeadWorker_SupersededCloseReason_NoAction(t *testing.T
 // close_reason shapes an operator or another MR's success can leave behind,
 // all of which must skip recovery the same way superseded does.
 func TestRecoverRejectedMRDeadWorker_DeliberateCloseReasons(t *testing.T) {
+	t.Parallel()
 	reasons := []string{
 		"Duplicate of gt-abc1",
 		"cancelled: no longer needed",
@@ -222,6 +226,7 @@ func TestRecoverRejectedMRDeadWorker_DeliberateCloseReasons(t *testing.T) {
 // is still the "worker finished it" case and must keep recovering — the
 // close_reason gate only fires for markers that signal deliberate closure.
 func TestRecoverRejectedMRDeadWorker_ClosedNoReason_StillRecovers(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
@@ -242,6 +247,7 @@ func TestRecoverRejectedMRDeadWorker_ClosedNoReason_StillRecovers(t *testing.T) 
 // finding on the source bead notes, in the format the T5 prior-findings
 // builder parses.
 func TestFormatMergeRejectionNote_FindingsAppendIDLines(t *testing.T) {
+	t.Parallel()
 	req := deadWorkerReq()
 	req.Findings = []RejectionFinding{
 		{ID: "abc123def456", Severity: "major", Path: "internal/foo.go", Line: 42, Title: "missing nil check"},
@@ -267,6 +273,7 @@ func TestFormatMergeRejectionNote_FindingsAppendIDLines(t *testing.T) {
 // (build/test failure) path: no findings means no '- id:' lines are added,
 // preserving the original note format exactly.
 func TestFormatMergeRejectionNote_NoFindings_NoIDLines(t *testing.T) {
+	t.Parallel()
 	note := formatMergeRejectionNote(deadWorkerReq())
 	if strings.Contains(note, "- id:") {
 		t.Errorf("expected no finding lines when Findings is empty, got:\n%s", note)
@@ -278,6 +285,7 @@ func TestFormatMergeRejectionNote_NoFindings_NoIDLines(t *testing.T) {
 // two '- id:' lines on the source bead notes, and the RECOVERED_BEAD mail
 // body carries both ids under 'Rejection-Findings:' plus 'Rejection-Summary:'.
 func TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
@@ -320,6 +328,7 @@ func TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail(t *testing.T) 
 // the non-editorial path: mail body carries no Rejection-Findings/-Summary
 // lines when the rejection has none.
 func TestRecoverRejectedMRDeadWorker_NoFindings_NoRejectionLinesInMail(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
@@ -340,6 +349,7 @@ func TestRecoverRejectedMRDeadWorker_NoFindings_NoRejectionLinesInMail(t *testin
 }
 
 func TestIsDeliberateTerminalCloseReason(t *testing.T) {
+	t.Parallel()
 	cases := map[string]bool{
 		"":                             false,
 		"finished":                     false,
@@ -368,6 +378,7 @@ func TestIsDeliberateTerminalCloseReason(t *testing.T) {
 // same worker still holds it, and its session is confirmed alive. Session
 // liveness is the correct tiebreaker only here.
 func TestRecoverRejectedMRDeadWorker_OpenAndStillAssigned_AliveSession_NoAction(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
 		ID:       "gt-src1",
 		Status:   "hooked",
@@ -387,6 +398,7 @@ func TestRecoverRejectedMRDeadWorker_OpenAndStillAssigned_AliveSession_NoAction(
 }
 
 func TestRecoverRejectedMRDeadWorker_LivenessError_NoAction(t *testing.T) {
+	t.Parallel()
 	// Ambiguous case only: open bead, still assigned to this worker, but we
 	// can't tell if it's alive. Liveness only gates this specific case.
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
@@ -406,6 +418,7 @@ func TestRecoverRejectedMRDeadWorker_LivenessError_NoAction(t *testing.T) {
 }
 
 func TestRecoverRejectedMRDeadWorker_ReassignedBead_NoAction(t *testing.T) {
+	t.Parallel()
 	// The bead was already re-slung to another polecat: leave it alone.
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
 		ID:       "gt-src1",
@@ -422,6 +435,7 @@ func TestRecoverRejectedMRDeadWorker_ReassignedBead_NoAction(t *testing.T) {
 }
 
 func TestRecoverRejectedMRDeadWorker_DeadWorkerStillAssigned_Recovers(t *testing.T) {
+	t.Parallel()
 	// Bead still hooked to the dead worker itself: reset it.
 	bd := &fakeRejectedBeads{issue: &beads.Issue{
 		ID:       "gt-src1",
@@ -448,6 +462,7 @@ func TestRecoverRejectedMRDeadWorker_DeadWorkerStillAssigned_Recovers(t *testing
 // the "still assigned, check liveness" path applies, so recovery must still
 // proceed and reopen/re-notify.
 func TestRecoverRejectedMRDeadWorker_OpenAndUnassigned_Recovers(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open", Assignee: ""}}
 	var sent []*mail.Message
 	sendMail := func(m *mail.Message) error {
@@ -467,6 +482,7 @@ func TestRecoverRejectedMRDeadWorker_OpenAndUnassigned_Recovers(t *testing.T) {
 }
 
 func TestRecoverRejectedMRDeadWorker_MissingFields_NoAction(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 
 	req := deadWorkerReq()
@@ -483,6 +499,7 @@ func TestRecoverRejectedMRDeadWorker_MissingFields_NoAction(t *testing.T) {
 }
 
 func TestRecoverRejectedMRDeadWorker_MailFailure_ReturnsFalse(t *testing.T) {
+	t.Parallel()
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 	sendMail := func(m *mail.Message) error { return fmt.Errorf("router down") }
 	var out bytes.Buffer
@@ -498,6 +515,7 @@ func TestRecoverRejectedMRDeadWorker_MailFailure_ReturnsFalse(t *testing.T) {
 }
 
 func TestRecoverRejectedMRDeadWorker_DuplicateNote_NotAppended(t *testing.T) {
+	t.Parallel()
 	// The refinery re-gates an unchanged branch on every poll until the
 	// redispatch lands; the identical rejection must not pile up in notes.
 	req := deadWorkerReq()
@@ -517,6 +535,7 @@ func TestRecoverRejectedMRDeadWorker_DuplicateNote_NotAppended(t *testing.T) {
 }
 
 func TestWorkerNameFromMR(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"nux":                  "nux",
 		"polecats/nux":         "nux",
@@ -538,6 +557,7 @@ func TestWorkerNameFromMR(t *testing.T) {
 // one recovery actually calls, provable because it flows through to a
 // mutation that only the fake would record correctly.
 func TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{Name: "testrig", Path: t.TempDir()}
 	fake := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
 
@@ -553,6 +573,7 @@ func TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient(t *testing.T) {
 }
 
 func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
+	t.Parallel()
 	// A non-conflict branch failure must consult the dead-worker recovery
 	// seam; conflict failures must not (they get a conflict-resolution task).
 	workDir := t.TempDir()
@@ -593,6 +614,7 @@ func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
 }
 
 func TestHandleMRInfoFailure_SlotTimeout_NoRecovery(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	r := &rig.Rig{Name: "test-rig", Path: workDir}
 	e := NewEngineer(r)

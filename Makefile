@@ -207,7 +207,12 @@ test: test-makefile
 	# -timeout 20m: the 10m default is a per-package budget and internal/cmd
 	# and internal/refinery legitimately run 500-600s under contention, so
 	# every gate against them flapped on the budget rather than a hung test
-	# (gt-g8kr). Shrinking those packages is a follow-up.
+	# (gt-g8kr). gt-fo3h shrank those packages instead of leaning on the
+	# budget: both ran their tests serially, so their wall clock was the sum
+	# of their tests' runtimes; they now parallelize (651s -> 264s and
+	# 429s -> 126s, back to back at matched load). The budget stays where
+	# gt-g8kr put it — it still has to absorb a loaded host, and a budget
+	# tightened against an idle host is not a hang detector.
 	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
 	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
 	GT_TEST_DOCKER=1 go test -timeout 20m ./...

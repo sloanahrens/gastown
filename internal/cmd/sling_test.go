@@ -188,6 +188,7 @@ func containsVarArg(line, key, value string) bool {
 }
 
 func TestParseWispIDFromJSON(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		json    string
@@ -240,6 +241,7 @@ func TestParseWispIDFromJSON(t *testing.T) {
 }
 
 func TestExtractIssueID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		id   string
@@ -1404,6 +1406,7 @@ func TestBatchSlingRejectsMissingTargetRigDatabaseBeforeSpawn(t *testing.T) {
 }
 
 func TestSchedulerRejectsReviewOnlyForEpicConvoy(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("review-only", false, "")
 	if err := cmd.Flags().Set("review-only", "true"); err != nil {
@@ -1568,6 +1571,7 @@ func TestResolveTargetCreateDoesNotSpawnCrewShorthandWhenPaneMissing(t *testing.
 }
 
 func TestTargetRigDatabaseLookupFailsClosedWithoutTownRoot(t *testing.T) {
+	t.Parallel()
 	err := verifyBeadExistsInTargetRigDatabase("gt-r2405", "gastown", "")
 	if err == nil {
 		t.Fatal("expected fail-closed error without town root")
@@ -2841,6 +2845,7 @@ exit /b 1
 // So "mol-release" matches the pattern but won't be treated as bead in practice
 // because it would be caught by formula verification first.
 func TestLooksLikeBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  bool
@@ -3312,6 +3317,7 @@ exit /b 0
 // to gastown polecats, which cannot fix code in a different rig's repo.
 // Fixes: gt-myecw
 func TestCheckCrossRigGuard(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -3403,6 +3409,7 @@ func TestCheckCrossRigGuard(t *testing.T) {
 }
 
 func TestIsHookedAgentDead_UnknownFormat(t *testing.T) {
+	t.Parallel()
 	// Unknown assignee formats should return false (conservative)
 	tests := []struct {
 		name     string
@@ -3422,6 +3429,7 @@ func TestIsHookedAgentDead_UnknownFormat(t *testing.T) {
 }
 
 func TestIsHookedAgentDead_NoTmuxSession(t *testing.T) {
+	t.Parallel()
 	// For a known assignee format where no tmux session exists,
 	// isHookedAgentDead should return true (session is dead).
 	// Use a highly unlikely polecat name to ensure no collision with real sessions.
@@ -3573,6 +3581,7 @@ exit /b 0
 }
 
 func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
+	t.Parallel()
 	got := buildSlingFieldUpdates(
 		"mayor",
 		"review this",
@@ -3631,6 +3640,7 @@ func TestStoreFieldsInBeadConvoyFields(t *testing.T) {
 }
 
 func TestBeadFieldModeUpdateCanClearStaleRalphMode(t *testing.T) {
+	t.Parallel()
 	issue := &beads.Issue{Description: "attached_formula: mol-polecat-work\nmode: ralph"}
 	fields := beads.ParseAttachmentFields(issue)
 	if fields == nil {

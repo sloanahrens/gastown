@@ -33,6 +33,7 @@ func (f *fakeRebaseGit) AbortRebase() error {
 // matrix (gh#3400). The behavior under test is the *decision*, not the actual
 // git mechanics — those are exercised separately below against a real repo.
 func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		behind        int
@@ -116,6 +117,7 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 // TestAutoRebaseOnTarget_ConflictAborts verifies that a rebase failure causes
 // AbortRebase to fire and the returned error includes remediation guidance.
 func TestAutoRebaseOnTarget_ConflictAborts(t *testing.T) {
+	t.Parallel()
 	fake := &fakeRebaseGit{rebaseErr: errors.New("CONFLICT (content): merge conflict in foo.txt")}
 
 	rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", 1, false, false)
@@ -151,6 +153,7 @@ func TestAutoRebaseOnTarget_ConflictAborts(t *testing.T) {
 // git working tree to confirm the wiring (Rebase call) actually replays the
 // branch onto a moved base. (gh#3400, scenario (a) from the bead notes.)
 func TestAutoRebaseOnTarget_RealRepoSuccess(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", repo)
@@ -200,6 +203,7 @@ func TestAutoRebaseOnTarget_RealRepoSuccess(t *testing.T) {
 // rebase fails with a CONFLICT, and AbortRebase must restore the working tree
 // so the polecat can address the conflict manually. (gh#3400, scenario (b).)
 func TestAutoRebaseOnTarget_RealRepoConflictAborts(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", repo)
@@ -313,6 +317,7 @@ func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, exp
 }
 
 func TestRecoverDivergedPush_FetchFailsAborts(t *testing.T) {
+	t.Parallel()
 	f := &fakeDivergedPushGit{fetchErr: errors.New("network unreachable")}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
 	if recovered {
@@ -330,6 +335,7 @@ func TestRecoverDivergedPush_FetchFailsAborts(t *testing.T) {
 }
 
 func TestRecoverDivergedPush_OriginMissingBranch(t *testing.T) {
+	t.Parallel()
 	f := &fakeDivergedPushGit{
 		revErrs: map[string]error{"origin/feature": errors.New("unknown revision")},
 	}
@@ -349,6 +355,7 @@ func TestRecoverDivergedPush_OriginMissingBranch(t *testing.T) {
 }
 
 func TestRecoverDivergedPush_PatchIdenticalRecovers(t *testing.T) {
+	t.Parallel()
 	f := &fakeDivergedPushGit{
 		revs: map[string]string{
 			"origin/feature": "origSHA",
@@ -383,6 +390,7 @@ func TestRecoverDivergedPush_PatchIdenticalRecovers(t *testing.T) {
 }
 
 func TestRecoverDivergedPush_RealDivergenceRefuses(t *testing.T) {
+	t.Parallel()
 	f := &fakeDivergedPushGit{
 		revs: map[string]string{
 			"origin/feature": "origSHA",
@@ -409,6 +417,7 @@ func TestRecoverDivergedPush_RealDivergenceRefuses(t *testing.T) {
 }
 
 func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
+	t.Parallel()
 	f := &fakeDivergedPushGit{
 		revs: map[string]string{
 			"origin/feature": "origSHA",
@@ -442,6 +451,7 @@ func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
 // non-fast-forward. Recovery must land the rebased tip on origin without
 // losing either commit's content. (gt-bf5x)
 func TestRecoverDivergedPush_RealRepo(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
@@ -516,6 +526,7 @@ func TestRecoverDivergedPush_RealRepo(t *testing.T) {
 // rebased), recovery must refuse and leave origin untouched rather than
 // clobber it.
 func TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)

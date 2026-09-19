@@ -12,6 +12,7 @@ import (
 )
 
 func TestRoutedIssueBeadsUsesTownRoutesForCustomPrefix(t *testing.T) {
+	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 
 	_, gotCurrent, gotRouted := routedIssueBeads(workDir, "bd-source")
@@ -24,6 +25,7 @@ func TestRoutedIssueBeadsUsesTownRoutesForCustomPrefix(t *testing.T) {
 }
 
 func TestSourceRouteContextNamesCurrentAndRoutedDB(t *testing.T) {
+	t.Parallel()
 	context := sourceRouteContext("/town/gastown/.beads", "/town/beads/.beads")
 	for _, want := range []string{"current_db=/town/gastown/.beads", "routed_db=/town/beads/.beads"} {
 		if !strings.Contains(context, want) {
@@ -65,6 +67,7 @@ func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
 }
 
 func TestValidateMergeRequestSourceUsesPreResolvedSource(t *testing.T) {
+	t.Parallel()
 	mr := &beads.Issue{ID: "gt-mr", Description: "source_issue: bd-source\n"}
 	if err := validateMergeRequestSource(mr, "bd-source", nil); err == nil || !strings.Contains(err.Error(), "pre-resolved") {
 		t.Fatalf("validateMergeRequestSource without source = %v, want pre-resolved error", err)

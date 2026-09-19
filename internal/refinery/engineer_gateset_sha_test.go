@@ -14,6 +14,7 @@ import (
 // loaded merge_queue.gates map must change what resolveFastPath compares
 // PreVerifiedGates against.
 func TestCurrentGateSetSHAFn_IncludesRefineryGates(t *testing.T) {
+	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	e := newTestEngineer(t, workDir, g)
@@ -50,6 +51,7 @@ func TestCurrentGateSetSHAFn_IncludesRefineryGates(t *testing.T) {
 // currentGateSetSHAFn() agrees exactly — a compile-time guarantee that both
 // sides call the identical config.CombineGateSetSHA algorithm.
 func TestGateSetSHA_ProducerConsumerAgree(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(townRoot, rigName)

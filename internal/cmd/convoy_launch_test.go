@@ -124,6 +124,7 @@ func TestTransitionConvoyToOpen_AlreadyOpen(t *testing.T) {
 // TestConvoySubcommandRegistration verifies that convoyStageCmd and
 // convoyLaunchCmd are registered as subcommands of convoyCmd.
 func TestConvoySubcommandRegistration(t *testing.T) {
+	t.Parallel()
 	// Verify convoyStageCmd exists and has the expected Use string.
 	if convoyStageCmd == nil {
 		t.Fatal("convoyStageCmd is nil")
@@ -162,6 +163,7 @@ func TestConvoySubcommandRegistration(t *testing.T) {
 
 // TestConvoyStageLaunchFlag verifies that the --launch flag exists on convoyStageCmd.
 func TestConvoyStageLaunchFlag(t *testing.T) {
+	t.Parallel()
 	flag := convoyStageCmd.Flags().Lookup("launch")
 	if flag == nil {
 		t.Fatal("convoyStageCmd should have --launch flag")
@@ -456,6 +458,7 @@ func TestDispatchWave1_ContinuesOnFailure(t *testing.T) {
 
 // IT-29: Output contains convoy ID and gt convoy status <id> command.
 func TestRenderLaunchOutput_ConvoyIDAndMonitor(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-task-1": {ID: "gt-task-1", Title: "Task One", Type: "task", Rig: "gastown"},
 	}}
@@ -481,6 +484,7 @@ func TestRenderLaunchOutput_ConvoyIDAndMonitor(t *testing.T) {
 
 // IT-30: Each dispatched task shows bead ID, title, and rig.
 func TestRenderLaunchOutput_DispatchedTasksWithRig(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-task-1": {ID: "gt-task-1", Title: "Task One", Type: "task", Rig: "gastown"},
 		"gt-task-2": {ID: "gt-task-2", Title: "Task Two", Type: "task", Rig: "beads"},
@@ -515,6 +519,7 @@ func TestRenderLaunchOutput_DispatchedTasksWithRig(t *testing.T) {
 
 // IT-31: Output contains gt convoy -i TUI hint.
 func TestRenderLaunchOutput_TUIHint(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-task-1": {ID: "gt-task-1", Title: "Task One", Type: "task", Rig: "gastown"},
 	}}
@@ -537,6 +542,7 @@ func TestRenderLaunchOutput_TUIHint(t *testing.T) {
 
 // IT-32: Output contains daemon explanation about automatic subsequent wave dispatch.
 func TestRenderLaunchOutput_DaemonExplanation(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-task-1": {ID: "gt-task-1", Title: "Task One", Type: "task", Rig: "gastown"},
 		"gt-task-2": {ID: "gt-task-2", Title: "Task Two", Type: "task", Rig: "gastown", BlockedBy: []string{"gt-task-1"}},
@@ -564,6 +570,7 @@ func TestRenderLaunchOutput_DaemonExplanation(t *testing.T) {
 
 // SN-03: Full output snapshot test with 2 waves, 3 tasks, some failed dispatches.
 func TestRenderLaunchOutput_Snapshot(t *testing.T) {
+	t.Parallel()
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"gt-task-1": {ID: "gt-task-1", Title: "Task One", Type: "task", Rig: "gastown", Blocks: []string{"gt-task-3"}},
 		"gt-task-2": {ID: "gt-task-2", Title: "Task Two", Type: "task", Rig: "gastown"},

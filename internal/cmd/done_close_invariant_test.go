@@ -38,6 +38,7 @@ func (f fakeCloseTimeMRTracker) Show(id string) (*beads.Issue, error) {
 // (a): a branch with zero commits the target lacks may always close, even
 // with no MR and no override reason.
 func TestCloseTimeInvariantSkipReason_ZeroCommitsAllowed(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 0}
 	tracker := fakeCloseTimeMRTracker{} // no pending MR
 
@@ -51,6 +52,7 @@ func TestCloseTimeInvariantSkipReason_ZeroCommitsAllowed(t *testing.T) {
 // gt-6hmz exit (b) — this is the "gt done's own close passes because the MR
 // exists" case: real unmerged commits, but the pending MR bead is open.
 func TestCloseTimeInvariantSkipReason_AllowsCloseWhenOpenMRTracksIssue(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 3}
 	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
 		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "open"},
@@ -68,6 +70,7 @@ func TestCloseTimeInvariantSkipReason_AllowsCloseWhenOpenMRTracksIssue(t *testin
 // (internal/refinery/types.go:183), between MR creation and this close
 // check. in_progress must still count as "tracking", not "gone".
 func TestCloseTimeInvariantSkipReason_AllowsCloseWhenMRClaimedInProgress(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 3}
 	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
 		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "in_progress"},
@@ -83,6 +86,7 @@ func TestCloseTimeInvariantSkipReason_AllowsCloseWhenMRClaimedInProgress(t *test
 // pendingMRID pointing at an already-terminal MR (closed/tombstone) does not
 // count as tracking — that MR no longer protects the unmerged commits.
 func TestCloseTimeInvariantSkipReason_RefusesWhenPendingMRClosed(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 3}
 	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
 		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "closed"},
@@ -98,6 +102,7 @@ func TestCloseTimeInvariantSkipReason_RefusesWhenPendingMRClosed(t *testing.T) {
 // exit (c): an explicit operator override bypasses the git/MR checks
 // entirely, even when they would otherwise refuse.
 func TestCloseTimeInvariantSkipReason_SupersedePrefixAllowed(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 9} // would refuse on its own
 	tracker := fakeCloseTimeMRTracker{}             // no pending MR — would refuse on its own
 
@@ -110,6 +115,7 @@ func TestCloseTimeInvariantSkipReason_SupersedePrefixAllowed(t *testing.T) {
 // TestCloseTimeInvariantSkipReason_CancelPrefixAllowed mirrors the
 // supersede test for the "cancel:" override spelling.
 func TestCloseTimeInvariantSkipReason_CancelPrefixAllowed(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 9}
 	tracker := fakeCloseTimeMRTracker{}
 
@@ -124,6 +130,7 @@ func TestCloseTimeInvariantSkipReason_CancelPrefixAllowed(t *testing.T) {
 // message must name the branch and the exact unmerged commit count so a
 // human reviewing the skip warning knows what to look at.
 func TestCloseTimeInvariantSkipReason_RefusedWhenNoneHold(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 5}
 	tracker := fakeCloseTimeMRTracker{}
 
@@ -144,6 +151,7 @@ func TestCloseTimeInvariantSkipReason_RefusedWhenNoneHold(t *testing.T) {
 // error resolving the pending MR must not be treated the same as it being
 // open.
 func TestCloseTimeInvariantSkipReason_MRLookupErrorTreatedAsNotTracking(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 2}
 	tracker := fakeCloseTimeMRTracker{err: errPlaceholder}
 
@@ -159,6 +167,7 @@ func TestCloseTimeInvariantSkipReason_MRLookupErrorTreatedAsNotTracking(t *testi
 // unrelated close on an inconclusive read, matching every other skip-reason
 // helper's contract in this file.
 func TestCloseTimeInvariantSkipReason_CommitsAheadErrorFailsOpen(t *testing.T) {
+	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{err: errPlaceholder}
 	tracker := fakeCloseTimeMRTracker{}
 
@@ -170,6 +179,7 @@ func TestCloseTimeInvariantSkipReason_CommitsAheadErrorFailsOpen(t *testing.T) {
 
 // TestHasOperatorOverridePrefix pins the exact set of accepted prefixes.
 func TestHasOperatorOverridePrefix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		reason string
 		want   bool
@@ -194,6 +204,7 @@ func TestHasOperatorOverridePrefix(t *testing.T) {
 // (a) — without needing a live bd server: aheadCount==0 short-circuits
 // before the wrapper's beads client is ever asked about the pending MR.
 func TestDoneCloseTimeInvariantSkipReason_ZeroCommitsAgainstRealGit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	testRunGit(t, dir, "init", "-b", "main")
 	testRunGit(t, dir, "config", "user.email", "test@test.com")
@@ -218,6 +229,7 @@ func TestDoneCloseTimeInvariantSkipReason_ZeroCommitsAgainstRealGit(t *testing.T
 // the wrapper doesn't try to compare a branch against itself when the
 // current branch IS the rig's default branch (e.g. a non-polecat context).
 func TestDoneCloseTimeInvariantSkipReason_OnDefaultBranchAllowsClose(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	testRunGit(t, dir, "init", "-b", "main")
 	testRunGit(t, dir, "config", "user.email", "test@test.com")
@@ -245,6 +257,7 @@ func TestDoneCloseTimeInvariantSkipReason_OnDefaultBranchAllowsClose(t *testing.
 // against origin/main, not local main. This must fail before the fix (it
 // compared bare "main") and pass after.
 func TestDoneCloseTimeInvariantSkipReason_StaleLocalMainAllowsZeroCommitClose(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)

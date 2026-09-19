@@ -62,6 +62,7 @@ func agentIssue(id string, desc string) *beads.Issue {
 }
 
 func TestCloseMergedWorkBead_SourceIssueWinsOverAgentFallback(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusOpen)))
 	work.add(workIssue("gt-agent-hint", string(beads.StatusOpen)))
@@ -89,6 +90,7 @@ func TestCloseMergedWorkBead_SourceIssueWinsOverAgentFallback(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_FallsBackToVerifiedAgentSource(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusOpen)))
 	agent := newFakeWorkBeadStore()
@@ -110,6 +112,7 @@ func TestCloseMergedWorkBead_FallsBackToVerifiedAgentSource(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_FallsBackToCompletionMRID(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusOpen)))
 	agent := newFakeWorkBeadStore()
@@ -127,6 +130,7 @@ func TestCloseMergedWorkBead_FallsBackToCompletionMRID(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_RejectsUnverifiedAgentFallbacks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		agentDesc     string
@@ -167,6 +171,7 @@ func TestCloseMergedWorkBead_RejectsUnverifiedAgentFallbacks(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_RejectsNonConcreteTarget(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(&beads.Issue{ID: "gt-mr-target", Title: "MR target", Type: "merge-request", Labels: []string{"gt:merge-request"}, Status: string(beads.StatusOpen)})
 	agent := newFakeWorkBeadStore()
@@ -183,6 +188,7 @@ func TestCloseMergedWorkBead_RejectsNonConcreteTarget(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_RejectsNonMergeableTargets(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -212,6 +218,7 @@ func TestCloseMergedWorkBead_RejectsNonMergeableTargets(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_AlreadyTerminalConcreteTargetIsNoop(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusClosed)))
 
@@ -226,6 +233,7 @@ func TestCloseMergedWorkBead_AlreadyTerminalConcreteTargetIsNoop(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_CloseErrorLeavesWorkOpen(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusOpen)))
 	work.closeErr = errors.New("dolt unavailable")
@@ -241,6 +249,7 @@ func TestCloseMergedWorkBead_CloseErrorLeavesWorkOpen(t *testing.T) {
 }
 
 func TestCloseMergedWorkBead_CloseErrorThenTerminalRaceSucceeds(t *testing.T) {
+	t.Parallel()
 	work := newFakeWorkBeadStore()
 	work.add(workIssue("gt-source", string(beads.StatusOpen)))
 	work.closeErr = errors.New("lost close race")

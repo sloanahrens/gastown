@@ -134,6 +134,7 @@ func TestCalculateEventTimeout(t *testing.T) {
 }
 
 func TestAwaitEventResult(t *testing.T) {
+	t.Parallel()
 	result := AwaitEventResult{
 		Reason:  "event",
 		Elapsed: 5 * time.Second,
@@ -175,6 +176,7 @@ func TestAwaitEventResult(t *testing.T) {
 }
 
 func TestReadPendingEvents(t *testing.T) {
+	t.Parallel()
 	t.Run("empty directory", func(t *testing.T) {
 		dir := t.TempDir()
 		events, err := readPendingEvents(dir)
@@ -263,6 +265,7 @@ func TestReadPendingEvents(t *testing.T) {
 }
 
 func TestValidChannelName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -290,6 +293,7 @@ func TestValidChannelName(t *testing.T) {
 }
 
 func TestWaitForEventFilesPolling(t *testing.T) {
+	t.Parallel()
 	// Test that polling picks up events written after the wait starts.
 	dir := t.TempDir()
 
@@ -326,6 +330,7 @@ func TestWaitForEventFilesPolling(t *testing.T) {
 }
 
 func TestWaitForEventFilesWithPending(t *testing.T) {
+	t.Parallel()
 	// When events already exist, waitForEventFiles should return immediately.
 	dir := t.TempDir()
 	content := `{"type":"PATROL_WAKE","channel":"refinery"}`
@@ -347,6 +352,7 @@ func TestWaitForEventFilesWithPending(t *testing.T) {
 }
 
 func TestWaitForEventFilesTimeout(t *testing.T) {
+	t.Parallel()
 	// With no events and an expired context, should return timeout.
 	dir := t.TempDir()
 
@@ -363,6 +369,7 @@ func TestWaitForEventFilesTimeout(t *testing.T) {
 }
 
 func TestWaitForEventFilesNoDeadline(t *testing.T) {
+	t.Parallel()
 	// With a context that has no deadline, should return timeout immediately.
 	dir := t.TempDir()
 
@@ -376,6 +383,7 @@ func TestWaitForEventFilesNoDeadline(t *testing.T) {
 }
 
 func TestWaitForEventFilesTimeoutWithPolling(t *testing.T) {
+	t.Parallel()
 	// Regression test for gt-x2lc: the ticker-driven poll must honor
 	// ctx cancellation even if events never arrive. Previously the wait
 	// could stall past the deadline if readPendingEvents was slow.
@@ -402,6 +410,7 @@ func TestWaitForEventFilesTimeoutWithPolling(t *testing.T) {
 }
 
 func TestReadPendingEventsBoundedFinishes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.event"), []byte(`{"type":"X"}`), 0644)
 
@@ -412,6 +421,7 @@ func TestReadPendingEventsBoundedFinishes(t *testing.T) {
 }
 
 func TestReadPendingEventsBoundedCtxDone(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Even when ctx is already done, the bounded read should return
 	// promptly (within the grace window) rather than hang.
@@ -427,6 +437,7 @@ func TestReadPendingEventsBoundedCtxDone(t *testing.T) {
 }
 
 func TestWaitForEventFilesContextYield(t *testing.T) {
+	t.Parallel()
 	// Regression test for #3870: --context-check-interval must cause an early
 	// return with reason "context-yield" before the full backoff timeout expires.
 	dir := t.TempDir()
@@ -457,6 +468,7 @@ func TestWaitForEventFilesContextYield(t *testing.T) {
 }
 
 func TestWaitForEventFilesContextYieldEventWins(t *testing.T) {
+	t.Parallel()
 	// When an event arrives before the context-yield interval, the event
 	// result takes priority.
 	dir := t.TempDir()
@@ -484,6 +496,7 @@ func TestWaitForEventFilesContextYieldEventWins(t *testing.T) {
 }
 
 func TestWaitForEventFilesContextYieldTimeoutWins(t *testing.T) {
+	t.Parallel()
 	// When the backoff timeout is shorter than the yield interval, timeout
 	// fires first and the result is "timeout", not "context-yield".
 	dir := t.TempDir()
@@ -504,6 +517,7 @@ func TestWaitForEventFilesContextYieldTimeoutWins(t *testing.T) {
 }
 
 func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
+	t.Parallel()
 	// When contextCheckAfter is 0 (not set), behavior is unchanged:
 	// the wait runs to the full timeout without yielding.
 	dir := t.TempDir()
@@ -661,6 +675,7 @@ func updateLines(log string) []string {
 }
 
 func TestEffortLevelContextYield(t *testing.T) {
+	t.Parallel()
 	// context-yield must produce EffortLevel "full" so context-check is
 	// not abbreviated.
 	result := &AwaitEventResult{
@@ -681,6 +696,7 @@ func TestEffortLevelContextYield(t *testing.T) {
 }
 
 func TestEventFileStruct(t *testing.T) {
+	t.Parallel()
 	ef := EventFile{
 		Path:    "/home/gt/events/refinery/12345.event",
 		Content: json.RawMessage(`{"type":"MQ_SUBMIT","payload":{"branch":"feat/test"}}`),

@@ -287,6 +287,7 @@ func TestRunDoneRejectsMayorRigBeforeAutosave(t *testing.T) {
 }
 
 func TestIsDoneCommand(t *testing.T) {
+	t.Parallel()
 	done := &cobra.Command{Use: "done"}
 	root := &cobra.Command{Use: "gt"}
 	root.AddCommand(done)
