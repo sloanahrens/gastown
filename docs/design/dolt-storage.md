@@ -260,11 +260,14 @@ CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
 | CREATE | Any agent | Continuous | `bd create`, `bd mol wisp create` |
 | CLOSE | Agent or patrol | Per-task | `bd close`, `gt done` |
 | DECAY | Reaper Dog | Daily | `DELETE FROM wisps WHERE status='closed' AND age > 7d` |
-| COMPACT | Compactor Dog | Daily | `DOLT_RESET --soft` + `DOLT_COMMIT` (safe on running server) |
-| FLATTEN | Compactor Dog | Daily | Same as COMPACT — no downtime, no maintenance window |
+| COMPACT | Compactor Dog (monitor) | Daily | Counts commits, escalates at threshold — does not rewrite history |
+| FLATTEN | Operator, on that escalation | Manual | `plugins/compactor-dog/run.sh --compact` — `DOLT_RESET --soft` + `DOLT_COMMIT` + force-push |
 
 All six stages are implemented in code. DECAY runs in the Reaper Dog
-(wisp_reaper.go), COMPACT/FLATTEN run in the Compactor Dog (compactor_dog.go).
+(wisp_reaper.go). COMPACT runs in the Compactor Dog (compactor_dog.go), which
+monitors and escalates; FLATTEN is the operator-invoked destructive step that
+follows the escalation, and it lives in exactly one place — the plugin's
+`--compact` flag, whose escalation policy is `plugins/compactor-dog/plugin.md`.
 All lifecycle tickers are enabled by default via `EnsureLifecycleDefaults()`
 (lifecycle_defaults.go), which auto-populates daemon.json with sensible
 defaults on `gt init` or `gt up`. Explicitly disabled patrols are preserved.
@@ -277,13 +280,14 @@ EPHEMERAL (wisps, patrol data)          PERMANENT (issues, molecules, agents)
   → work                                  → work
   → CLOSE (>24h)                          → CLOSE
   → DELETE rows (Reaper)                  → JSONL export (scrubbed)
-  → REBASE history (Compactor)            → git push to GitHub
-  → gc unreferenced chunks (Compactor)    → COMPACT/FLATTEN daily (no downtime)
+  → REBASE history (Operator, on          → git push to GitHub
+    Compactor Dog escalation)             → COMPACT/FLATTEN on escalation
+  → gc unreferenced chunks                  (no downtime)
 ```
 
 **Ephemeral data** (wisps, wisp_events, wisp_labels, wisp_deps) is
 high-volume patrol exhaust. Valuable in real-time, worthless after 24h.
-The Reaper Dog DELETES the rows. The Compactor Dog flattens the commits
+The Reaper Dog DELETES the rows. History compaction flattens the commits
 that wrote them out of history. Without both, storage grows without bound.
 
 **Permanent data** (issues, molecules, agents, dependencies, labels) is
@@ -293,7 +297,22 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 
 ### History Compaction Operations
 
-**Daily compaction** (Compactor Dog or Dolt scheduled event):
+**Who compacts.** Compaction rewrites the commit graph and force-pushes the
+result, so it is never unattended. The Compactor Dog patrol counts commits and
+escalates when a database crosses its threshold; an operator then runs one of
+two commands:
+
+| Command | Algorithm | Keeps recent history? |
+|---------|-----------|----------------------|
+| `plugins/compactor-dog/run.sh --compact` | Flatten — squash all history into 1 commit, then force-push | No |
+| `gt dolt rebase <database>` | Surgical — interactive rebase squash, preserve recent N | Yes |
+
+The daemon patrol used to run the flatten path itself. It no longer does
+(gt-nfu7): an unattended path that rewrites history and force-pushes to the
+remotes is the same failure mode gt-e14c fixed in the plugin, and the daemon's
+escalation threshold is deliberately set well above the plugin's so that a
+busy cycle's escalations cannot re-trigger the patrol on their own output.
+Compaction itself is unchanged SQL — see below.
 
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):
@@ -330,11 +349,13 @@ so the merge succeeds.
 
 Unlike flatten (which squashes everything), interactive rebase lets you
 keep recent individual commits while squashing old history. Runs on a
-live server. Based on Jason Fulghum's rebase implementation.
+live server. Based on Jason Fulghum's rebase implementation. Operator-invoked
+via `gt dolt rebase <database>` (internal/cmd/dolt_rebase.go); the plugin's
+`--compact` flag and the daemon patrol do not implement it.
 
 **Concurrent write hazard**: DOLT_REBASE is NOT safe with concurrent writes
 (Tim Sehn, 2026-02-28). If agents commit to the database during rebase, Dolt
-detects the graph change and errors. The Compactor Dog retries once on such
+detects the graph change and errors. `gt dolt rebase` retries once on such
 errors. Flatten mode (DOLT_RESET --soft) is unaffected — concurrent writes
 are safe there because the merge base shifts but the diff is just the txn.
 
@@ -430,23 +451,21 @@ Reference: https://www.dolthub.com/blog/2023-10-02-scheduled-events/
 
 **Can scheduled events replace the Compactor Dog?**
 
-**No.** The Compactor Dog's 10-step flatten algorithm requires safety features
-that SQL events cannot provide:
-- Threshold checking (only compact when commit count exceeds N)
-- Integrity verification (row count comparison pre/post)
-- Concurrency abort (detects if main HEAD moved during compaction)
-- Error escalation (notifies Mayor on failure)
-- Cross-database iteration (single patrol handles all DBs)
+**No.** The Compactor Dog's job is monitoring and escalation, and escalation is
+the part SQL events cannot provide:
+- Threshold checking (only escalate when commit count exceeds N)
+- Per-database iteration (one patrol covers all DBs)
+- Escalation on breach (files a bead the Mayor sees)
 - Daemon-level logging and observability
 
-A stored procedure could implement the raw flatten SQL, but lacks escalation,
-observability, and integration with the daemon lifecycle.
+A stored procedure could count commits, but it has nowhere to escalate to and
+no place in the daemon lifecycle.
 
 **What scheduled events CAN do:**
-- Supplement the Compactor Dog with explicit `dolt_gc()` scheduling
+- Supplement compaction with explicit `dolt_gc()` scheduling
 - But auto-gc is already ON by default since Dolt 1.75.0, making this redundant
 
-**Recommendation:** Keep the Compactor Dog for flatten. Auto-gc handles chunk
+**Recommendation:** Keep the Compactor Dog for monitoring. Auto-gc handles chunk
 reclamation. Scheduled events add no value beyond what we already have.
 
 ### Pollution Prevention
@@ -465,7 +484,7 @@ Prevention is layered:
 - **Prompting**: Agents prefer `gt nudge` over `gt mail send` (zero commits)
 - **Firewall** (store.go): refuses test-prefixed CREATE DATABASE on port 3307
 - **Reaper Dog**: DELETEs closed wisps, auto-closes stale issues
-- **Compactor Dog**: flattens old commits to compress history, runs gc after
+- **Compactor Dog**: monitors commit growth, escalates when a DB crosses threshold
 - **Doctor Dog**: kills zombie servers, detects orphan DBs, monitors health
 - **JSONL Dog**: scrubs exports, rejects pollution, spike-detects before commit
 
