@@ -735,17 +735,6 @@ func (d *Daemon) Run() (err error) {
 		mainBranchTestChan = mainBranchTestTicker.C
 		defer mainBranchTestTicker.Stop()
 		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
-
-	// Start the scheduled_slings ticker if configured. Each tick evaluates
-	// every entry; the decision function decides due-ness, so a coarse tick
-	// is enough (gt-nj23).
-	var scheduledSlingsTicker *time.Ticker
-	var scheduledSlingsChan <-chan time.Time
-	if d.isPatrolActive("scheduled_slings") {
-		scheduledSlingsTicker = time.NewTicker(scheduledSlingsTickInterval)
-		scheduledSlingsChan = scheduledSlingsTicker.C
-		defer scheduledSlingsTicker.Stop()
-		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
 	}
 
 	// Start quota dog ticker if configured.

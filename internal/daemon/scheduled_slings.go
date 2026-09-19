@@ -5,6 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"bytes"
+	"context"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -137,4 +143,163 @@ func parseCreatedBeadID(data []byte) (string, error) {
 		return arr[0].ID, nil
 	}
 	return "", errors.New("bd create output has no id")
+}
+
+// scheduledSlingRunner is the side-effect boundary: bd list, bd create, gt sling.
+type scheduledSlingRunner interface {
+	listBeads(ctx context.Context, rig, label string) ([]scheduledBead, error)
+	createBead(ctx context.Context, rig, title, label, description string, priority int) (string, error)
+	sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error
+}
+
+const (
+	scheduledSlingsTickInterval  = 15 * time.Minute
+	scheduledSlingCommandTimeout = 5 * time.Minute
+	scheduledSlingEscalateAfter  = 3
+)
+
+type execScheduledSlingRunner struct {
+	townRoot, bdPath, gtPath string
+}
+
+func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, r.bdPath, args...)
+	// ConfigureCommand sets cmd.Dir to the rig dir, so bd's cwd routing lands
+	// on the rig database (never --repo: see the bd-create-repo memory).
+	rigDir := filepath.Join(r.townRoot, rig)
+	beads.ConfigureCommand(cmd, rigDir, filepath.Join(rigDir, ".beads"), beads.SubprocessModeForArgs(args))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func (r *execScheduledSlingRunner) listBeads(ctx context.Context, rig, label string) ([]scheduledBead, error) {
+	out, err := r.runBd(ctx, rig, "list", "--label", label, "--json", "--limit", "0", "--brief")
+	if err != nil {
+		return nil, err
+	}
+	return parseScheduledBeads(out)
+}
+
+func (r *execScheduledSlingRunner) createBead(ctx context.Context, rig, title, label, description string, priority int) (string, error) {
+	out, err := r.runBd(ctx, rig, "create", "--title", title, "--type", "task",
+		"--priority", fmt.Sprint(priority), "--labels", label, "--description", description, "--json")
+	if err != nil {
+		return "", err
+	}
+	return parseCreatedBeadID(out)
+}
+
+func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntry) []string {
+	args := []string{"sling", beadID, e.Rig, "--formula=" + e.Formula}
+	if e.Agent != "" {
+		args = append(args, "--agent="+e.Agent)
+	}
+	args = append(args, "--actor=daemon/scheduled:"+e.Name, "--no-boot")
+	keys := make([]string, 0, len(e.Vars))
+	for k := range e.Vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--var", k+"="+e.Vars[k])
+	}
+	return args
+}
+
+func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
+	cmd := exec.CommandContext(ctx, r.gtPath, r.slingArgs(beadID, e)...)
+	cmd.Dir = r.townRoot
+	cmd.Env = bdMutationRoutingEnv(r.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(stderr.String()))
+	}
+	return nil
+}
+
+func (d *Daemon) scheduledRunner() scheduledSlingRunner {
+	if d.scheduledSlingRunner == nil {
+		d.scheduledSlingRunner = &execScheduledSlingRunner{townRoot: d.config.TownRoot, bdPath: d.bdPath, gtPath: d.gtPath}
+	}
+	return d.scheduledSlingRunner
+}
+
+// triggerScheduledSlings starts a cycle on its own goroutine; an overlapping
+// tick is skipped. Returns true if a cycle started.
+func (d *Daemon) triggerScheduledSlings() bool {
+	if !d.scheduledSlingsRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("scheduled_slings: previous cycle still running, skipping this tick")
+		return false
+	}
+	go func() {
+		defer d.scheduledSlingsRunning.Store(false)
+		d.runScheduledSlings()
+	}()
+	return true
+}
+
+func (d *Daemon) runScheduledSlings() {
+	if !d.isPatrolActive("scheduled_slings") {
+		return
+	}
+	cfg := d.patrolConfig.Patrols.ScheduledSlings
+	if d.scheduledSlingFailures == nil {
+		d.scheduledSlingFailures = map[string]int{}
+	}
+	if d.scheduledSlingEscalate == nil {
+		d.scheduledSlingEscalate = d.escalate
+	}
+	now := time.Now()
+	for _, e := range cfg.Entries {
+		if err := e.validate(); err != nil {
+			d.logger.Printf("scheduled_slings: %v (entry skipped)", err)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), scheduledSlingCommandTimeout)
+		err := d.runScheduledSlingEntry(ctx, e, now)
+		cancel()
+		if err == nil {
+			d.scheduledSlingFailures[e.Name] = 0
+			continue
+		}
+		d.scheduledSlingFailures[e.Name]++
+		n := d.scheduledSlingFailures[e.Name]
+		d.logger.Printf("scheduled_slings: %s: failure %d: %v", e.Name, n, err)
+		if n == scheduledSlingEscalateAfter {
+			d.scheduledSlingEscalate("scheduled_slings",
+				fmt.Sprintf("scheduled sling %s (%s on %s) failed %d ticks in a row; last error: %v",
+					e.Name, e.Formula, e.Rig, n, err))
+		}
+	}
+}
+
+// runScheduledSlingEntry evaluates one entry and dispatches when due.
+func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEntry, now time.Time) error {
+	r := d.scheduledRunner()
+	beadsForLabel, err := r.listBeads(ctx, e.Rig, e.label())
+	if err != nil {
+		return err
+	}
+	action := decideScheduledSling(beadsForLabel, e.interval(), now)
+	if action != scheduledDispatch {
+		d.logger.Printf("scheduled_slings: %s: %s", e.Name, action)
+		return nil
+	}
+	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))
+	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, e.label())
+	id, err := r.createBead(ctx, e.Rig, title, e.label(), desc, e.priority())
+	if err != nil {
+		return err
+	}
+	d.logger.Printf("scheduled_slings: %s: created %s, slinging %s to %s (agent %q)", e.Name, id, e.Formula, e.Rig, e.Agent)
+	if err := r.sling(ctx, id, e); err != nil {
+		return err
+	}
+	return nil
 }

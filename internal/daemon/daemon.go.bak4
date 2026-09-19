@@ -165,6 +165,19 @@ type Daemon struct {
 	// dog ticks for hours — gt-uvxy). A tick that arrives while the previous
 	// cycle is still running is skipped rather than piling up concurrently.
 	mainBranchTestRunning atomic.Bool
+
+	// scheduledSlingsRunning is the single-flight guard for the
+	// scheduled_slings patrol, on its own goroutine like main_branch_test so a
+	// slow sling never blocks the select loop (gt-nj23).
+	scheduledSlingsRunning atomic.Bool
+	// scheduledSlingRunner is nil in production (an exec runner is built on
+	// first use) and a fake in tests.
+	scheduledSlingRunner scheduledSlingRunner
+	// scheduledSlingFailures counts consecutive failures per entry name; the
+	// third escalates once, success resets. Touched only by the patrol goroutine.
+	scheduledSlingFailures map[string]int
+	// scheduledSlingEscalate defaults to d.escalate; tests capture it.
+	scheduledSlingEscalate func(source, message string)
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -734,7 +747,6 @@ func (d *Daemon) Run() (err error) {
 		mainBranchTestTicker = time.NewTicker(interval)
 		mainBranchTestChan = mainBranchTestTicker.C
 		defer mainBranchTestTicker.Stop()
-		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
 
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
@@ -746,6 +758,8 @@ func (d *Daemon) Run() (err error) {
 		scheduledSlingsChan = scheduledSlingsTicker.C
 		defer scheduledSlingsTicker.Stop()
 		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
+	}
+		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
 	}
 
 	// Start quota dog ticker if configured.
