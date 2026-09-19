@@ -10,7 +10,7 @@ FIXTURE="$SCRIPT_DIR/testdata/docs-lint"
 TMP=""
 PASS=0
 FAIL=0
-cleanup() { [[ -n "$TMP" && -d "$TMP" ]] && rm -rf "$TMP"; }
+cleanup() { [[ -n "$TMP" && -d "$TMP" ]] && rm -rf "$TMP"; true; }
 trap cleanup EXIT
 
 assert_eq() {
