@@ -147,25 +147,6 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 		}
 	}
 <<<<<<< HEAD
-	if local >= pool.MaxLocal {
-		return pool.OverflowAgent, fmt.Sprintf("local full (%d/%d) -> overflow %s", local, pool.MaxLocal, poolAgentLabel(pool.OverflowAgent))
-	}
-	if gap := pool.MinSpawnGapD(); gap > 0 && local > 0 && now.Sub(newest) < gap {
-		return pool.OverflowAgent, fmt.Sprintf("local stagger (last spawn %s ago < %s gap, %d/%d) -> overflow %s",
-			now.Sub(newest).Round(time.Second), gap, local, pool.MaxLocal, poolAgentLabel(pool.OverflowAgent))
-	}
-	return pool.LocalAgent, fmt.Sprintf("local seat %d/%d -> %s", local+1, pool.MaxLocal, pool.LocalAgent)
-}
-
-// poolAgentLabel names the agent a routing decision picked. The pool lines
-// must always end with the chosen agent, so an unset overflow agent has to
-// say "role default" rather than trail off into an empty string.
-func poolAgentLabel(agent string) string {
-	if agent == "" {
-		return "role default"
-	}
-	return agent
-=======
 	gap := pool.MinSpawnGapD()
 	// The prefill guard. Every fresh local session spends 20-25k tokens of
 	// prefill during which the decoding slots starve, so two local spawns
@@ -231,7 +212,7 @@ func poolAgentLabel(agent string) string {
 	// 4. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
 	//    count alone decides, as it did before B1.
 	return seat("type=" + beadTypeLabel(bead))
->>>>>>> origin/main
+}
 }
 
 // sessionLister is the slice of tmux the pool reads; a var so tests can

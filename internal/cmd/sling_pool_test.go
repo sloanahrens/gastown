@@ -31,22 +31,6 @@ func TestChoosePoolAgent(t *testing.T) {
 		bead     poolBead
 		sessions []poolSession
 		want     string
-<<<<<<< HEAD
-		wantLine string // exact reason; "" means only check it is non-empty
-	}{
-		{"no pool", nil, nil, "", "no polecat pool configured"},
-		{"pool without local agent", &config.PolecatPool{MaxLocal: 2}, nil, "", "polecat_pool has no local_agent; using the role default"},
-		{"pool with max 0", &config.PolecatPool{LocalAgent: "l", MaxLocal: 0}, nil, "", "polecat_pool max_local is 0; using the role default"},
-		{"empty town -> local", pool, nil, "local-coder-polecat", "local seat 1/2 -> local-coder-polecat"},
-		{"one local, old enough -> local", pool, []poolSession{s("local-coder-polecat", 10*time.Minute)}, "local-coder-polecat", "local seat 2/2 -> local-coder-polecat"},
-		{"one local, too recent -> overflow", pool, []poolSession{s("local-coder-polecat", 90*time.Second)}, "deepseek-flash", "local stagger (last spawn 1m30s ago < 4m0s gap, 1/2) -> overflow deepseek-flash"},
-		{"pool full -> overflow", pool, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Hour)}, "deepseek-flash", "local full (2/2) -> overflow deepseek-flash"},
-		{"flash sessions do not count", pool, []poolSession{s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute)}, "local-coder-polecat", ""},
-		{"newest local decides the gap", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Minute)}, "deepseek-flash", ""},
-		{"oldest local alone would allow", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour)}, "local-coder-polecat", ""},
-		{"no gap configured -> local while room", &config.PolecatPool{LocalAgent: "l", MaxLocal: 3}, []poolSession{s("l", time.Second)}, "l", ""},
-		{"full with no overflow agent -> role default", &config.PolecatPool{LocalAgent: "l", MaxLocal: 1}, []poolSession{s("l", time.Hour)}, "", "local full (1/1) -> overflow role default"},
-=======
 		wantWhy  string
 	}{
 		{"no pool", nil, poolBead{}, nil, "", "pool: no polecat pool configured"},
@@ -76,7 +60,6 @@ func TestChoosePoolAgent(t *testing.T) {
 		// bug bead falls through to the shape branch and names the empty
 		// overflow_agent as the role default rather than printing "-> ".
 		{"overflow with no overflow agent -> role default", &config.PolecatPool{LocalAgent: "l", MaxLocal: 1}, poolBead{Type: "bug"}, []poolSession{s("l", time.Hour)}, "", "pool: overflow -> the role default (type=bug)"},
->>>>>>> origin/main
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
