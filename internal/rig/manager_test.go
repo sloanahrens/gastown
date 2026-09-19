@@ -651,12 +651,13 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 
 	script := `#!/usr/bin/env bash
 set -e
-if [[ -n "$BEADS_DIR_LOG" ]]; then
-  echo "${BEADS_DIR:-<unset>}" >> "$BEADS_DIR_LOG"
-fi
 cmd="$1"
 shift
 if [[ "$cmd" == "init" ]]; then
+  # Log BEADS_DIR only for the init command (the one we're testing)
+  if [[ -n "$BEADS_DIR_LOG" && -n "$BEADS_DIR" ]]; then
+    echo "${BEADS_DIR}" >> "$BEADS_DIR_LOG"
+  fi
   echo "bd init failed" >&2
   exit 1
 elif [[ "$cmd" == "migrate" ]]; then
