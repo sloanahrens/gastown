@@ -176,14 +176,24 @@ func (e *fakeError) Error() string { return e.msg }
 
 // fakeBranchRefSource builds a BranchRefSource from static test fixtures:
 // branches on the remote, and which issue ids have a referencing commit on
-// the target branch.
+// the target branch. The open MR queue is empty — tests that need a queued
+// MR use fakeBranchRefSourceWithMRs.
 func fakeBranchRefSource(branches []string, referenced map[string]bool) *BranchRefSource {
+	return fakeBranchRefSourceWithMRs(branches, referenced, nil)
+}
+
+// fakeBranchRefSourceWithMRs adds a fixed set of open merge requests, the
+// state the scan must consult before calling a branch stranded (gt-akap).
+func fakeBranchRefSourceWithMRs(branches []string, referenced map[string]bool, openMRs []OpenMRRef) *BranchRefSource {
 	return &BranchRefSource{
 		ListPolecatBranches: func() ([]string, error) {
 			return branches, nil
 		},
 		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
 			return referenced[issueID], nil
+		},
+		ListOpenMRs: func() ([]OpenMRRef, error) {
+			return openMRs, nil
 		},
 	}
 }
@@ -353,6 +363,7 @@ func TestDetectStrandedBranches_ListError(t *testing.T) {
 		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
 			return false, nil
 		},
+		ListOpenMRs: func() ([]OpenMRRef, error) { return nil, nil },
 	}
 
 	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
@@ -361,6 +372,240 @@ func TestDetectStrandedBranches_ListError(t *testing.T) {
 	}
 	if result.Checked != 0 || len(result.Findings) != 0 {
 		t.Errorf("expected no findings on list error, got %+v", result)
+	}
+}
+
+// TestDetectStrandedBranches_OpenMRForSourceIssueNotFlagged is the core
+// regression for gt-akap: the live scan reported "has no MR" for 11 of 13
+// findings, every one of them an MR sitting open in the queue. A closed
+// issue whose MR is queued is the ordinary polecat self-close workflow and
+// must not be reported as a strand.
+func TestDetectStrandedBranches_OpenMRForSourceIssueNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/coral/gt-off9+mu7h074n"
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-off9" {
+				return `[{"status":"closed","close_reason":"pending_mr: gt-wisp-6okk"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "gt-wisp-6okk", SourceIssue: "gt-off9", Branch: branch},
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if !result.MRLookupRan {
+		t.Error("MRLookupRan = false, want true")
+	}
+	if result.OpenMRsSeen != 1 {
+		t.Errorf("OpenMRsSeen = %d, want 1", result.OpenMRsSeen)
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings for an issue with an open MR, got %+v", result.Findings)
+	}
+	// The closed-issue branch was still examined; suppression is a verdict,
+	// not a skip of candidacy.
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "comments add gt-off9") {
+		t.Errorf("should not comment on an issue whose MR is queued; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStrandedBranches_OpenMRByBranchOnlyNotFlagged covers the MR
+// whose source_issue field is absent or names a different bead: the branch
+// it will land is still unambiguous, so it must suppress the finding too.
+func TestDetectStrandedBranches_OpenMRByBranchOnlyNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/jasper/gt-624w+mu6t81zz"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-624w" {
+				return `[{"status":"closed","close_reason":"pending_mr: gt-wisp-33p"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "gt-wisp-33p", Branch: branch}, // no SourceIssue recorded
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings when an open MR carries the branch, got %+v", result.Findings)
+	}
+}
+
+// TestDetectStrandedBranches_OpenMRByPendingCloseReasonNotFlagged covers the
+// gh-akap workflow shape directly: the close reason names the MR, and that
+// MR is open. Even if neither the source_issue nor the branch fields match,
+// the named MR is in the queue and the fix is in flight.
+func TestDetectStrandedBranches_OpenMRByPendingCloseReasonNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/topaz/gt-wdr+abc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr" {
+				return `[{"status":"closed","close_reason":"pending_mr: gt-wisp-tmki"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "gt-wisp-tmki"}, // neither field recorded — only the reason names it
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings when the close reason names an open MR, got %+v", result.Findings)
+	}
+}
+
+// TestDetectStrandedBranches_ClosedMRSameSourceIssueStillFlagged is the
+// guard the other way: a close reason is a claim about the queue, not the
+// queue itself. A source issue closed as pending_mr for an MR that is NOT
+// open (purged, or closed without merging) is still a strand candidate and
+// must be reported.
+func TestDetectStrandedBranches_ClosedMRSameSourceIssueStillFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/quartz/gt-tlwv+mu5a11bc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-tlwv" {
+				return `[{"status":"closed","close_reason":"pending_mr: gt-wisp-jww"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// gt-wisp-jww is absent from the open queue (the live gt-tlwv case).
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "gt-wisp-unrelated", SourceIssue: "gt-something-else"},
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+	if result.Findings[0].IssueID != "gt-tlwv" {
+		t.Errorf("IssueID = %q, want gt-tlwv", result.Findings[0].IssueID)
+	}
+}
+
+// TestDetectStrandedBranches_MRLookupUnavailable pins the honesty rule: the
+// finding asserts "no MR", so a scan that never resolved the queue must
+// produce no findings at all rather than findings it cannot support.
+func TestDetectStrandedBranches_MRLookupUnavailable(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-hsg" {
+				return `[{"status":"closed","close_reason":"fixed the gate"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{"polecat/pyrite/gt-hsg+mttuo7sf"}, nil)
+	refs.ListOpenMRs = nil
+
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.MRLookupRan {
+		t.Error("MRLookupRan = true, want false")
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1", len(result.Errors))
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings without an MR lookup, got %+v", result.Findings)
+	}
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "comments add gt-hsg") {
+		t.Errorf("must not comment an unsupported strand; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStrandedBranches_MRLookupError is the other half: the lookup
+// exists but fails, so again nothing may be asserted.
+func TestDetectStrandedBranches_MRLookupError(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-hsg" {
+				return `[{"status":"closed","close_reason":"fixed the gate"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{"polecat/pyrite/gt-hsg+mttuo7sf"}, nil)
+	refs.ListOpenMRs = func() ([]OpenMRRef, error) { return nil, errFakeListFailure }
+
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.MRLookupRan {
+		t.Error("MRLookupRan = true, want false")
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1", len(result.Errors))
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings when the MR lookup fails, got %+v", result.Findings)
+	}
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "comments add gt-hsg") {
+		t.Errorf("must not comment an unsupported strand; log:\n%s", logStr)
+	}
+}
+
+func TestOpenMRSetCovers(t *testing.T) {
+	t.Parallel()
+	set := NewOpenMRSet([]OpenMRRef{
+		{ID: "gt-wisp-1", SourceIssue: "gt-a", Branch: "polecat/x/gt-a+1"},
+		{ID: "gt-wisp-2", Branch: "refs/heads/polecat/y/gt-b+2"}, // prefix + whitespace tolerated
+		{ID: "gt-wisp-3"},
+		{ID: "  "}, // unreferenceable, dropped
+	})
+
+	cases := []struct {
+		name        string
+		issue       string
+		branch      string
+		closeReason string
+		want        string
+	}{
+		{"by source issue", "gt-a", "", "", "gt-wisp-1"},
+		{"by branch", "", "polecat/x/gt-a+1", "", "gt-wisp-1"},
+		{"branch with refs/heads prefix", "", "polecat/y/gt-b+2", "", "gt-wisp-2"},
+		{"by pending_mr close reason", "gt-z", "polecat/z/gt-z+3", "pending_mr: gt-wisp-3", "gt-wisp-3"},
+		{"pending_mr naming a closed/absent MR does not cover", "gt-z", "polecat/z/gt-z+3", "pending_mr: gt-wisp-99", ""},
+		{"unrelated", "gt-z", "polecat/z/gt-z+3", "pending_mr: gt-wisp-3 extra prose", ""},
+		{"unrelated even with prose reason", "gt-z", "polecat/z/gt-z+3", "no-changes: covered elsewhere", ""},
+	}
+	for _, c := range cases {
+		if got := set.covers(c.issue, c.branch, c.closeReason); got != c.want {
+			t.Errorf("%s: covers(%q, %q, %q) = %q, want %q",
+				c.name, c.issue, c.branch, c.closeReason, got, c.want)
+		}
+	}
+
+	var nilSet *OpenMRSet
+	if got := nilSet.covers("gt-a", "polecat/x/gt-a+1", "pending_mr: gt-wisp-1"); got != "" {
+		t.Errorf("nil set covers = %q, want empty", got)
 	}
 }
 
