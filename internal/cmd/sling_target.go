@@ -227,7 +227,8 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
 			if opts.Agent == "" {
-				if _, reason := resolvePolecatPoolAgent(opts.TownRoot); reason != "" {
+				rigPath := filepath.Join(townRoot, rigName)
+				if _, reason := resolvePolecatPoolAgent(townRoot, rigPath); reason != "" {
 					fmt.Printf("  %s\n", reason)
 				}
 			}
