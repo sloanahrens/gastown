@@ -239,9 +239,49 @@ func emitSessionEvent(ctx RoleContext) {
 		topic = "patrol"
 	}
 
-	// Emit the event
-	payload := events.SessionPayload(sessionID, actor, topic, ctx.WorkDir)
+	// Emit the event, attributed with why and at whose request (gt-uj9k).
+	payload := events.SessionPayload(events.SessionStartInfo{
+		SessionID: sessionID,
+		Role:      actor,
+		Topic:     topic,
+		Cwd:       ctx.WorkDir,
+		Reason:    sessionStartReason(),
+		Caller:    sessionStartCaller(),
+	})
 	_ = events.LogFeed(events.TypeSessionStart, actor, payload)
+}
+
+// sessionStartReason reports why this session started.
+//
+// A spawner that knows its own intent wins (GT_SESSION_START_REASON, e.g.
+// "daemon-heartbeat" or "install"): that is the only signal that can tell a
+// deliberate restart apart from a burst. Otherwise fall back to the runtime's
+// own hook source — startup/resume/clear/compact, resolved into primeHookSource
+// by prime's source handling — and finally to the hook event name. A bare
+// `gt prime --hook` with no stdin and no GT_HOOK_SOURCE resolves to "unknown",
+// which is itself diagnostic: it marks a start that did not come through an
+// instrumented spawner or a runtime hook.
+func sessionStartReason() string {
+	if r := os.Getenv(constants.EnvSessionStartReason); r != "" {
+		return r
+	}
+	if primeHookSource != "" {
+		return primeHookSource
+	}
+	if primeHookEventName != "" {
+		return primeHookEventName
+	}
+	return "unknown"
+}
+
+// sessionStartCaller reports who requested this session start, or "unknown"
+// when the start did not come through an instrumented spawner. Callers are
+// expected to also set Reason; this identifies the actor, that one the intent.
+func sessionStartCaller() string {
+	if c := os.Getenv(constants.EnvSessionStartCaller); c != "" {
+		return c
+	}
+	return "unknown"
 }
 
 // outputSessionMetadata prints a structured metadata line for seance discovery.

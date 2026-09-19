@@ -296,7 +296,14 @@ func TestMassDeathPayload_NoCause(t *testing.T) {
 }
 
 func TestSessionPayload_Full(t *testing.T) {
-	p := SessionPayload("uuid-123", "gastown/crew/tester", "fixing bugs", "/some/dir")
+	p := SessionPayload(SessionStartInfo{
+		SessionID: "uuid-123",
+		Role:      "gastown/crew/tester",
+		Topic:     "fixing bugs",
+		Cwd:       "/some/dir",
+		Reason:    "startup",
+		Caller:    "daemon",
+	})
 	if p["session_id"] != "uuid-123" {
 		t.Errorf("session_id = %v", p["session_id"])
 	}
@@ -309,14 +316,38 @@ func TestSessionPayload_Full(t *testing.T) {
 	if p["cwd"] != "/some/dir" {
 		t.Errorf("cwd = %v", p["cwd"])
 	}
+	if p["reason"] != "startup" {
+		t.Errorf("reason = %v", p["reason"])
+	}
+	if p["caller"] != "daemon" {
+		t.Errorf("caller = %v", p["caller"])
+	}
 }
 
 func TestSessionPayload_Minimal(t *testing.T) {
-	p := SessionPayload("uuid-456", "deacon", "", "")
+	p := SessionPayload(SessionStartInfo{SessionID: "uuid-456", Role: "deacon"})
 	if _, ok := p["topic"]; ok {
 		t.Error("expected no topic key when empty")
 	}
 	if _, ok := p["cwd"]; ok {
 		t.Error("expected no cwd key when empty")
+	}
+}
+
+// TestSessionPayload_ReasonAndCallerAlwaysPresent pins the gt-uj9k contract:
+// reason and caller are emitted even when empty-resolved. A burst of
+// session_starts is only attributable if every event carries both keys —
+// omitting them on the unresolved path would hide exactly the starts that
+// could not be explained.
+func TestSessionPayload_ReasonAndCallerAlwaysPresent(t *testing.T) {
+	p := SessionPayload(SessionStartInfo{SessionID: "uuid-789", Role: "gastown/refinery"})
+	for _, key := range []string{"reason", "caller"} {
+		v, ok := p[key]
+		if !ok {
+			t.Fatalf("expected %q key to be present even when unset", key)
+		}
+		if v != "" {
+			t.Errorf("%s = %v, want empty string", key, v)
+		}
 	}
 }
