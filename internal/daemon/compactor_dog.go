@@ -25,10 +25,8 @@ func shortHash(hash string) string {
 const (
 	defaultCompactorDogInterval = 24 * time.Hour
 	// defaultCompactorCommitThreshold is the minimum commit count before compaction triggers.
-	// 2000 commits prevents the escalation feedback loop where each compaction
-	// failure creates beads/escalations that add more commits than the compactor
-	// can drain at 500. Configurable via daemon.json.
-	defaultCompactorCommitThreshold = 2000
+	// 500 commits matches the plugin's escalation threshold. Configurable via daemon.json.
+	defaultCompactorCommitThreshold = 500
 	// compactorQueryTimeout is the timeout for individual SQL queries during compaction.
 	compactorQueryTimeout = 30 * time.Second
 	// compactorGCTimeout is the timeout for CALL dolt_gc() after compaction.
@@ -49,7 +47,7 @@ type CompactorDogConfig struct {
 	Enabled     bool     `json:"enabled"`
 	IntervalStr string   `json:"interval,omitempty"`
 	// Threshold is the minimum commit count before compaction triggers.
-	// Defaults to 2000 if not set.
+	// Defaults to 500 if not set (matches plugin escalation policy).
 	Threshold int `json:"threshold,omitempty"`
 	// Databases lists specific database names to compact.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
@@ -62,6 +60,10 @@ type CompactorDogConfig struct {
 	// picks during surgical rebase. Only used when Mode is "surgical".
 	// Defaults to 50 if not set.
 	KeepRecent int `json:"keep_recent,omitempty"`
+	// CheckOnly defaults to true (monitor-only). When true, the daemon
+	// only reports commit counts and escalates if above threshold.
+	// Set to false to enable auto-compaction (destructive).
+	CheckOnly bool `json:"check_only,omitempty"`
 }
 
 // compactorDogInterval returns the configured interval, or the default (24h).
@@ -77,9 +79,8 @@ func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // compactorDogThreshold returns the configured commit threshold, or
-// defaultCompactorCommitThreshold (2000). Note this daemon patrol compacts on
-// its own; it does not share the agent-facing plugin's 500/1000 escalation
-// policy — see plugins/compactor-dog/plugin.md.
+// defaultCompactorCommitThreshold (500). The daemon follows the plugin's
+// escalation policy: reports at 500, hard-escalate at 1000.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
 	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
 		if config.Patrols.CompactorDog.Threshold > 0 {
@@ -109,6 +110,16 @@ func compactorDogKeepRecent(config *DaemonPatrolConfig) int {
 	return 50
 }
 
+// compactorDogCheckOnly returns the configured check-only mode.
+// Defaults to true (monitor-only, no destructive compaction).
+// When true, the daemon only reports and escalates - it does not compact.
+func compactorDogCheckOnly(config *DaemonPatrolConfig) bool {
+	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {
+		return config.Patrols.CompactorDog.CheckOnly
+	}
+	return true // default to monitor-only (check_only=true)
+}
+
 // runCompactorDog checks each production database's commit count and compacts
 // any that exceed the threshold. Two modes:
 //
@@ -134,7 +145,9 @@ func (d *Daemon) runCompactorDog() {
 
 	threshold := compactorDogThreshold(d.patrolConfig)
 	mode := compactorDogMode(d.patrolConfig)
-	d.logger.Printf("compactor_dog: starting compaction cycle (threshold=%d, mode=%s)", threshold, mode)
+	checkOnly := compactorDogCheckOnly(d.patrolConfig)
+
+	d.logger.Printf("compactor_dog: starting cycle (threshold=%d, mode=%s, check_only=%v)", threshold, mode, checkOnly)
 	if mode == "surgical" {
 		d.logger.Printf("compactor_dog: WARNING: surgical mode uses DOLT_REBASE which is not safe with concurrent writes — will retry on graph-change errors")
 	}
@@ -154,6 +167,7 @@ func (d *Daemon) runCompactorDog() {
 	compacted := 0
 	skipped := 0
 	errors := 0
+	needsEscalation := false
 
 	for _, dbName := range databases {
 		commitCount, err := d.compactorCountCommits(dbName)
@@ -170,8 +184,16 @@ func (d *Daemon) runCompactorDog() {
 			continue
 		}
 
-		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — compacting (mode=%s)",
-			dbName, commitCount, threshold, mode)
+		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — above threshold",
+			dbName, commitCount, threshold)
+
+		// In check-only mode, just report and escalate - do not compact.
+		if checkOnly {
+			d.logger.Printf("compactor_dog: %s: check_only=true, escalating for operator review", dbName)
+			needsEscalation = true
+			skipped++
+			continue
+		}
 
 		// Pre-flight: fetch from remote and verify local ≥ remote before
 		// compacting. Flatten rewrites the commit graph, so force-push after
@@ -215,6 +237,11 @@ func (d *Daemon) runCompactorDog() {
 				d.logger.Printf("compactor_dog: %s: force-push failed: %v", dbName, err)
 			}
 		}
+	}
+
+	// Escalate if any DB exceeded threshold in check-only mode
+	if needsEscalation {
+		d.escalate("compactor_dog", fmt.Sprintf("Commit threshold exceeded: %d databases need compaction. Set check_only=false in daemon.json to enable auto-compaction.", skipped-errors))
 	}
 
 	if errors > 0 {
