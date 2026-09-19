@@ -176,7 +176,11 @@ Deliver digest to the Mayor.
 
 **1. Send via mail:**
 ```bash
-gt mail send mayor/ -s "Gas Town Digest: {{date}}" -m "$(cat <<EOF
+SUBJECT=$(cat <<'EOF'
+Gas Town Digest: {{date}}
+EOF
+)
+gt mail send mayor/ -s "$SUBJECT" -m "$(cat <<'EOF'
 {{formatted_digest}}
 EOF
 )"

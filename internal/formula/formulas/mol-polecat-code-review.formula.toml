@@ -181,10 +181,12 @@ Group by priority, then by category.
 
 **2. For P0 issues:**
 ```bash
-gt mail send {{rig}}/witness -s "CRITICAL: Security issue found" -m "Scope: {{scope}}
+gt mail send {{rig}}/witness -s "CRITICAL: Security issue found" --stdin <<'BODY'
+Scope: {{scope}}
 Issue: {{issue}}
 Finding: <description of critical issue>
-Location: <file:line>"
+Location: <file:line>
+BODY
 ```
 
 **3. Prepare bead descriptions:**

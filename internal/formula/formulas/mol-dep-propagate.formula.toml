@@ -117,7 +117,11 @@ Send notifications to Witnesses of affected rigs.
 
 **2. For each affected rig, send notification:**
 ```bash
-gt mail send <rig>/witness -s "Dependency resolved: {{resolved_issue}}" -m "$(cat <<EOF
+SUBJECT=$(cat <<'EOF'
+Dependency resolved: {{resolved_issue}}
+EOF
+)
+gt mail send <rig>/witness -s "$SUBJECT" -m "$(cat <<'EOF'
 External dependency has closed, unblocking work in your rig.
 
 ## Resolved Issue
