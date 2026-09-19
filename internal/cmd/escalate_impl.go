@@ -288,18 +288,18 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
 
+	// Both branches query across rigs: escalations live in the database of the
+	// rig that filed them, so a single-database list reports "No escalations
+	// found" while other rigs' escalations sit open (gt-wbxb).
 	var issues []*beads.Issue
 	if escalateListAll {
-		// List all (open and closed) - use RunWithRouting to query all rigs
-		out, err := bd.RunWithRouting("list", "--label=gt:escalation", "--status=all", "--include-infra", "--json")
+		// List all (open and closed)
+		issues, err = bd.ListAllEscalationsAcrossRigs()
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}
-		if err := json.Unmarshal(out, &issues); err != nil {
-			return fmt.Errorf("parsing escalations: %w", err)
-		}
 	} else {
-		issues, err = bd.ListEscalations()
+		issues, err = bd.ListEscalationsAcrossRigs()
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}

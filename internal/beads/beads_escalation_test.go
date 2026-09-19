@@ -400,6 +400,180 @@ exit 0
 	}
 }
 
+// escalationStubPayload is what the stub bd prints for a successful list --json.
+// It carries one plain escalation and one gt:message carrier so the tests can
+// tell the open-only view (which filters messages) from the --all view (which
+// does not).
+const escalationStubPayload = `[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation","severity:critical"],"ephemeral":true,"wisp_type":"escalation"},{"id":"hq-msg1","title":"escalation mail","status":"open","priority":3,"labels":["gt:escalation","gt:message"],"ephemeral":true,"wisp_type":"message"}]`
+
+// escalationBDStub puts a fake bd on PATH that models the bd behaviours these
+// tests depend on instead of just recording argv, and logs each invocation's
+// argv plus BEADS_DIR. It returns the log path.
+//
+// rejectFlat selects which bd is modelled:
+//   - false (bd v0.59+): `list --json` emits human-readable tree text unless
+//     --flat is passed, so a caller that drops the injection cannot parse.
+//   - true (bd < v0.59): --flat is an unknown flag, so a caller that injects it
+//     without the remove-and-retry fallback fails outright.
+//
+// Either way the stub only returns JSON to a caller that got the flag handling
+// right, which is what makes these tests fail on the regressions they cover.
+func escalationBDStub(t *testing.T, rejectFlat bool) string {
+	t.Helper()
+
+	withFlat := "echo '" + escalationStubPayload + "'"
+	withoutFlat := "echo 'hq-wisp1  [open] Dolt: server unreachable'  # tree text, not JSON"
+	if rejectFlat {
+		withFlat = "echo 'unknown flag: --flat' >&2; exit 1"
+		withoutFlat = "echo '" + escalationStubPayload + "'"
+	}
+
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	stubScript := `#!/bin/sh
+{
+  printf 'env BEADS_DIR=%s\n' "${BEADS_DIR-<unset>}"
+  for a in "$@"; do printf 'arg %s\n' "$a"; done
+} >> "` + logPath + `"
+
+# Probe for --allow-stale support; report unsupported so args[0] stays "list".
+if [ "$1" = "--allow-stale" ]; then
+  exit 1
+fi
+
+has_flat=0
+for a in "$@"; do
+  if [ "$a" = "--flat" ]; then has_flat=1; fi
+done
+
+if [ "$has_flat" = 1 ]; then
+  ` + withFlat + `
+else
+  ` + withoutFlat + `
+fi
+exit 0
+`
+
+	stubDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ResetBdAllowStaleCacheForTest()
+	return logPath
+}
+
+func readEscalationStubLog(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd stub log: %v", err)
+	}
+	return string(data)
+}
+
+// TestListEscalationsAcrossRigsInjectsFlatAndRoutes covers the two independent
+// ways the routed display path could fail while looking correct.
+//
+//  1. bd v0.59+ ignores --json on `list` without --flat and emits tree text, so
+//     json.Unmarshal fails. The stub models that, meaning a regression that
+//     drops the injection fails here the way it would against a real bd.
+//  2. Cross-rig routing only engages when BEADS_DIR is left unset. The stub
+//     records the variable, and the test requires it absent — otherwise the
+//     query is silently pinned to one database again, which is the original
+//     gt-wbxb "No escalations found" symptom.
+//
+// Regression test for the review of MR gt-wisp-nysy, where runWithRouting had
+// neither the --flat injection nor the retry that run/runWithStdin perform.
+func TestListEscalationsAcrossRigsInjectsFlatAndRoutes(t *testing.T) {
+	logPath := escalationBDStub(t, false)
+	b := New(t.TempDir())
+
+	escalations, err := b.ListEscalationsAcrossRigs()
+	if err != nil {
+		t.Fatalf("ListEscalationsAcrossRigs: %v", err)
+	}
+	if len(escalations) != 1 || escalations[0].ID != "hq-wisp1" {
+		t.Fatalf("ListEscalationsAcrossRigs() = %#v, want only the hq-wisp1 escalation", escalations)
+	}
+
+	log := readEscalationStubLog(t, logPath)
+	if !strings.Contains(log, "arg --flat") {
+		t.Errorf("routed list query did not pass --flat, so bd would emit tree text:\n%s", log)
+	}
+	if !strings.Contains(log, "env BEADS_DIR=<unset>") {
+		t.Errorf("routed list query pinned BEADS_DIR, so it cannot see other rigs' escalations:\n%s", log)
+	}
+}
+
+// TestListEscalationsAcrossRigsRetriesWithoutFlatOnOldBd covers the other half
+// of the --flat handling: bd < v0.59 rejects the flag as unknown, so the routed
+// path needs the same remove-and-retry that run/runWithStdin have. Without it,
+// adding the injection above would break older bd instead of fixing newer bd.
+func TestListEscalationsAcrossRigsRetriesWithoutFlatOnOldBd(t *testing.T) {
+	logPath := escalationBDStub(t, true)
+	b := New(t.TempDir())
+
+	escalations, err := b.ListEscalationsAcrossRigs()
+	if err != nil {
+		t.Fatalf("ListEscalationsAcrossRigs against a pre---flat bd: %v", err)
+	}
+	if len(escalations) != 1 || escalations[0].ID != "hq-wisp1" {
+		t.Fatalf("ListEscalationsAcrossRigs() = %#v, want only the hq-wisp1 escalation", escalations)
+	}
+
+	// The first attempt must have carried --flat (so it exercised the retry),
+	// and a later attempt must have run without it.
+	log := readEscalationStubLog(t, logPath)
+	if !strings.Contains(log, "arg --flat") {
+		t.Errorf("expected an initial attempt carrying --flat before the retry:\n%s", log)
+	}
+}
+
+// TestListEscalationsStaysPinnedToCurrentDatabase pins the scope decision made
+// for gt-wbxb: only the display path routes across rigs. ListEscalations feeds
+// ListStaleEscalations (which reescalates and sends mail) and shares its query
+// shape with the fingerprint dedup in runEscalate, so it must keep querying the
+// one database it always has.
+func TestListEscalationsStaysPinnedToCurrentDatabase(t *testing.T) {
+	logPath := escalationBDStub(t, false)
+	b := New(t.TempDir())
+
+	if _, err := b.ListEscalations(); err != nil {
+		t.Fatalf("ListEscalations: %v", err)
+	}
+
+	log := readEscalationStubLog(t, logPath)
+	if strings.Contains(log, "env BEADS_DIR=<unset>") {
+		t.Errorf("ListEscalations must stay pinned to a single database, but it ran without BEADS_DIR — "+
+			"that widens the mutating flows built on it (stale re-escalation, fingerprint dedup):\n%s", log)
+	}
+}
+
+// TestListAllEscalationsAcrossRigsKeepsMessages checks that the --all display
+// view stays cross-rig but does not pick up the open-only view's gt:message
+// filtering, which would silently change `gt escalate list --all` output.
+func TestListAllEscalationsAcrossRigsKeepsMessages(t *testing.T) {
+	logPath := escalationBDStub(t, false)
+	b := New(t.TempDir())
+
+	escalations, err := b.ListAllEscalationsAcrossRigs()
+	if err != nil {
+		t.Fatalf("ListAllEscalationsAcrossRigs: %v", err)
+	}
+	if len(escalations) != 2 {
+		t.Fatalf("ListAllEscalationsAcrossRigs() returned %d entries, want 2 (message carriers are kept): %#v",
+			len(escalations), escalations)
+	}
+
+	log := readEscalationStubLog(t, logPath)
+	if !strings.Contains(log, "arg --status=all") {
+		t.Errorf("--all view did not query --status=all:\n%s", log)
+	}
+	if !strings.Contains(log, "env BEADS_DIR=<unset>") {
+		t.Errorf("--all view pinned BEADS_DIR, so it cannot see other rigs' escalations:\n%s", log)
+	}
+}
+
 func TestBumpSeverity(t *testing.T) {
 	tests := []struct {
 		input string

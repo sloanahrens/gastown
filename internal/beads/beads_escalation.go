@@ -299,16 +299,21 @@ func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) 
 	return issue, fields, nil
 }
 
-// ListEscalations returns all open escalation beads.
+// ListEscalations returns all open escalation beads in the current database.
 //
 // Escalations are created as ephemeral wisps (gt-fcsf), which `bd list`
 // hides by default. Without --include-infra this silently returned zero
 // results while escalations sat open and unseen — the same bug class as
 // gt-4mnd.
 //
-// Uses runWithRouting to query across all rigs (not just the current database).
+// This is deliberately single-database. ListEscalations is not only a display
+// path: ListStaleEscalations consumes it to reescalate and send mail, and
+// ListEscalationsByFingerprint consumes the same query shape for the duplicate
+// suppression in runEscalate. Widening those to every rig would change what
+// "stale" and "duplicate" mean for two mutating flows. For the display path see
+// ListEscalationsAcrossRigs, which is cross-rig by design.
 func (b *Beads) ListEscalations() ([]*Issue, error) {
-	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
+	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -321,14 +326,55 @@ func (b *Beads) ListEscalations() ([]*Issue, error) {
 	return filterEscalationRecords(issues), nil
 }
 
+// ListEscalationsAcrossRigs returns all open escalation beads visible to bd's
+// cross-rig prefix routing, rather than only those in the current database.
+//
+// This is the query behind `gt escalate list`. Escalations created inside a rig
+// (whose beads carry that rig's prefix, e.g. gt-*) live in that rig's database,
+// so a query pinned to a single BEADS_DIR silently hides them and the command
+// answers "No escalations found" while escalations sit open — the symptom of
+// gt-wbxb (refiled from hq-f1f2y).
+//
+// Kept separate from ListEscalations, which the mutating escalation flows rely
+// on being local; see the note there. Message carriers (gt:message) are
+// excluded, matching the open-only display path.
+func (b *Beads) ListEscalationsAcrossRigs() ([]*Issue, error) {
+	return b.listEscalationsAcrossRigs("open")
+}
+
+// ListAllEscalationsAcrossRigs is ListEscalationsAcrossRigs without the
+// --status=open filter, for `gt escalate list --all`. It keeps gt:message
+// carriers, matching that flag's long-standing output.
+func (b *Beads) ListAllEscalationsAcrossRigs() ([]*Issue, error) {
+	return b.listEscalationsAcrossRigs("all")
+}
+
+func (b *Beads) listEscalationsAcrossRigs(status string) ([]*Issue, error) {
+	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd list output: %w", err)
+	}
+
+	if status == "open" {
+		return filterEscalationRecords(issues), nil
+	}
+	return issues, nil
+}
+
 // ListEscalationsByFingerprint returns open escalation beads matching a stable fingerprint label.
 //
-// Uses runWithRouting to query across all rigs (not just the current database).
+// Single-database by design: this backs the duplicate suppression in
+// runEscalate, which must agree with where the escalation would be created.
 func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue, error) {
 	if fingerprintLabel == "" {
 		return nil, nil
 	}
-	out, err := b.runWithRouting("list",
+	out, err := b.run("list",
 		"--label=gt:escalation",
 		"--label="+fingerprintLabel,
 		"--status=open",
@@ -349,9 +395,10 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 
 // ListEscalationsBySeverity returns open escalation beads filtered by severity.
 //
-// Uses runWithRouting to query across all rigs (not just the current database).
+// Single-database: no caller needs a cross-rig severity view. A display path
+// that does should query ListEscalationsAcrossRigs and filter locally.
 func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
-	out, err := b.runWithRouting("list",
+	out, err := b.run("list",
 		"--label=gt:escalation",
 		"--label=severity:"+severity,
 		"--status=open",
