@@ -638,6 +638,9 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, util.FirstLine(stderr.String()))
 			continue
 		}
+		for _, l := range slingTimingLines(stderr.String()) {
+			m.logger("Convoy %s: sling %s: %s", c.ID, issueID, l)
+		}
 		return // Successfully dispatched one issue
 	}
 
