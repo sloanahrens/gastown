@@ -165,6 +165,22 @@ type Daemon struct {
 	// dog ticks for hours — gt-uvxy). A tick that arrives while the previous
 	// cycle is still running is skipped rather than piling up concurrently.
 	mainBranchTestRunning atomic.Bool
+
+	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
+	// patrol, on its own goroutine like mainBranchTest so a slow sling never
+	// blocks the select loop (gt-nj23).
+	scheduledSlingsRunning atomic.Bool
+
+	// scheduledSlingRunner is nil in production (an exec runner is built on
+	// first use) and a fake in tests.
+	scheduledSlingRunner scheduledSlingRunner
+
+	// scheduledSlingFailures counts consecutive failures per entry name; the
+	// third escalates once, success resets. Touched only by the patrol goroutine.
+	scheduledSlingFailures map[string]int
+
+	// scheduledSlingEscalate defaults to d.escalate; tests capture it.
+	scheduledSlingEscalate func(source, message string)
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -735,6 +751,7 @@ func (d *Daemon) Run() (err error) {
 		mainBranchTestChan = mainBranchTestTicker.C
 		defer mainBranchTestTicker.Stop()
 		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
+	}
 
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
@@ -878,6 +895,14 @@ func (d *Daemon) Run() (err error) {
 			// waited (gt-uvxy).
 			if !d.isShutdownInProgress() {
 				d.triggerMainBranchTests()
+			}
+
+		case <-scheduledSlingsChan:
+			// Scheduled slings — dispatches formula runs on an interval.
+			// Each entry is evaluated independently; the decision function
+			// decides due-ness, so a coarse tick is sufficient (gt-nj23).
+			if !d.isShutdownInProgress() {
+				d.triggerScheduledSlings()
 			}
 
 		case <-quotaDogChan:
