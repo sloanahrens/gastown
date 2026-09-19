@@ -117,7 +117,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 27
+version = 28
 
 [vars]
 [vars.wisp_type]
@@ -1156,7 +1156,22 @@ More branches to process?
 - Normal: After successful merge-push
 - Conflict-skip: After process-branch created conflict-resolution task
 
-If yes: Return to process-branch with next branch.
+If yes, pick the path by what is left in the queue:
+
+```bash
+gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
+```
+
+- Eligible candidates >= {{batch_min_count}}: return to **batch-scan** and
+  land them as one batch. Batching once per cycle and then walking the
+  rest of the queue one gate at a time serialised a 14-deep queue on
+  2026-09-19 even after P1s became batchable (gt-aljo); each single gate
+  is a full container suite, a batch is one suite for up to
+  {{batch_max}} MRs.
+- Fewer: return to process-branch with the next branch.
+- A rubric-changing MR (diff touches .om.json) never goes into a batch:
+  land it alone via process-branch, then re-stamp, then batch the rest.
+
 If no: Continue to generate-summary.
 
 **Track for this cycle:**
