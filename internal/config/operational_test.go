@@ -87,6 +87,44 @@ func TestNudgeThresholds_Defaults(t *testing.T) {
 	if got := nudge.StaleClaimThresholdD(); got != DefaultNudgeStaleClaimTimeout {
 		t.Errorf("StaleClaimThreshold: got %v, want %v", got, DefaultNudgeStaleClaimTimeout)
 	}
+	if got := nudge.MaxDeliveryAttemptsV(); got != DefaultNudgeMaxDeliveryAttempts {
+		t.Errorf("MaxDeliveryAttempts: got %v, want %v", got, DefaultNudgeMaxDeliveryAttempts)
+	}
+	if got := nudge.RequeueBackoffD(); got != DefaultNudgeRequeueBackoff {
+		t.Errorf("RequeueBackoff: got %v, want %v", got, DefaultNudgeRequeueBackoff)
+	}
+}
+
+func TestNudgeThresholds_RequeueOverrides(t *testing.T) {
+	t.Parallel()
+
+	// A non-positive MaxDeliveryAttempts is meaningless (a nudge could never
+	// be requeued at all), so it falls back to the default; zero backoff is
+	// valid and disables retry spacing.
+	zero, negative := 0, -1
+	cases := []struct {
+		name         string
+		thresholds   *NudgeThresholds
+		wantAttempts int
+		wantBackoff  time.Duration
+	}{
+		{"nil", nil, DefaultNudgeMaxDeliveryAttempts, DefaultNudgeRequeueBackoff},
+		{"zero attempts", &NudgeThresholds{MaxDeliveryAttempts: &zero}, DefaultNudgeMaxDeliveryAttempts, DefaultNudgeRequeueBackoff},
+		{"negative attempts", &NudgeThresholds{MaxDeliveryAttempts: &negative}, DefaultNudgeMaxDeliveryAttempts, DefaultNudgeRequeueBackoff},
+		{"explicit", &NudgeThresholds{MaxDeliveryAttempts: intPtr(1), RequeueBackoff: "0s"}, 1, 0},
+		{"invalid backoff", &NudgeThresholds{RequeueBackoff: "banana"}, DefaultNudgeMaxDeliveryAttempts, DefaultNudgeRequeueBackoff},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.thresholds.MaxDeliveryAttemptsV(); got != tc.wantAttempts {
+				t.Errorf("MaxDeliveryAttemptsV: got %v, want %v", got, tc.wantAttempts)
+			}
+			if got := tc.thresholds.RequeueBackoffD(); got != tc.wantBackoff {
+				t.Errorf("RequeueBackoffD: got %v, want %v", got, tc.wantBackoff)
+			}
+		})
+	}
 }
 
 func TestDaemonThresholds_Defaults(t *testing.T) {
