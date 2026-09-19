@@ -26,6 +26,11 @@
       "name": "tests",
       "weight": 2,
       "guidance": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes."
+    },
+    {
+      "name": "fail-open-branch",
+      "weight": 2,
+      "guidance": "Any check, gate, guard, or measurement whose failure path emits the same value as its success path is a finding, even when the local change is correct."
     }
   ]
 }
