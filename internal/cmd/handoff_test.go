@@ -1153,3 +1153,76 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		t.Errorf("flag must appear exactly once\ncmd: %s", cmd)
 	}
 }
+
+// A dog's respawn must keep riding its kennel's system-prompt file. A dog's
+// GT_ROLE is its address ("deacon/dogs/<name>"), which handoff used to read as
+// the role "dogs" and resolve with no agent name at all — so the respawned dog
+// printed its ~8.5 KB static role text into the prime hook and Claude Code
+// truncated the payload (gt-h7e5). This is the plain self-handoff branch: no
+// GT_AGENT override.
+func TestBuildRestartCommand_DogCarriesKennelSystemPromptFile(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origGTDogName := os.Getenv("GT_DOG_NAME")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_DOG_NAME", origGTDogName)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	kennelDir := filepath.Join(townRoot, "deacon", "dogs", "alpha")
+	if err := os.MkdirAll(kennelDir, 0755); err != nil {
+		t.Fatalf("mkdir kennel: %v", err)
+	}
+
+	// Empty (not unset): the tmux fallback would otherwise query a live server.
+	_ = os.Setenv("GT_AGENT", "")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	if err := os.Chdir(kennelDir); err != nil {
+		t.Fatalf("chdir kennel: %v", err)
+	}
+
+	cmd, err := buildRestartCommand("hq-dog-alpha")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+	if !strings.Contains(cmd, "claude") {
+		t.Skipf("default runtime here is not Claude, the flag applies to Claude agents only: %s", cmd)
+	}
+
+	// buildRestartCommand detects the town root from the resolved cwd, so on
+	// macOS the path comes back through /private/var; compare canonical forms.
+	promptPath := config.SystemPromptFilePath("dog", townRoot, "", "alpha")
+	if promptPath == "" {
+		t.Fatal("SystemPromptFilePath returned empty for dog alpha")
+	}
+	if real, err := filepath.EvalSymlinks(promptPath); err == nil {
+		promptPath = real
+	}
+	if !strings.Contains(cmd, "--append-system-prompt-file "+promptPath) {
+		t.Errorf("dog restart command lacks --append-system-prompt-file %s\ncmd: %s", promptPath, cmd)
+	}
+	if !strings.Contains(cmd, config.EnvSystemPromptFile+"=") {
+		t.Errorf("dog restart command does not export %s\ncmd: %s", config.EnvSystemPromptFile, cmd)
+	}
+	if strings.Count(cmd, "--append-system-prompt-file") != 1 {
+		t.Errorf("flag must appear exactly once\ncmd: %s", cmd)
+	}
+	if info, err := os.Stat(promptPath); err != nil || info.Size() == 0 {
+		t.Fatalf("dog system prompt must have been rendered at resolve time: %v", err)
+	}
+}

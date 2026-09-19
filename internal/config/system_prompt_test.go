@@ -16,7 +16,7 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 		"refinery": "/town/myrig/refinery/.claude/system-prompt.md",
 		"mayor":    "/town/mayor/.claude/system-prompt.md",
 		"deacon":   "/town/deacon/.claude/system-prompt.md",
-		"dog":      "",
+		"dog":      "", // per agent: needs a name, see below
 		"boot":     "",
 	}
 	for role, want := range cases {
@@ -26,6 +26,15 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	}
 	if got := SystemPromptFilePath("witness", town, "", ""); got != "" {
 		t.Errorf("rig-scoped role without rigPath must return empty, got %q", got)
+	}
+	// The dog template interpolates the dog's name and kennel, so each dog gets
+	// its own file inside its own kennel (gt-h7e5).
+	if got, want := SystemPromptFilePath("dog", town, rig, "alpha"),
+		"/town/deacon/dogs/alpha/.claude/system-prompt-alpha.md"; got != want {
+		t.Errorf("SystemPromptFilePath(dog, alpha) = %q, want %q", got, want)
+	}
+	if got := SystemPromptFilePath("dog", "", "", "alpha"); got != "" {
+		t.Errorf("dog without a town root must return empty, got %q", got)
 	}
 }
 
@@ -482,8 +491,10 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 	calls := 0
 	withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { calls++; return nil })
 
-	// Dogs have no system prompt file at all.
-	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "dog", town, "", "alpha")
+	// A dog without a name has no per-agent file (and no kennel to put it in).
+	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "dog", town, "", "")
+	// Boot has no system prompt file at all.
+	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "boot", town, "", "")
 	// A polecat without a name has no per-agent file.
 	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
 	// Non-Claude runtimes never get the flag, so nothing to render.

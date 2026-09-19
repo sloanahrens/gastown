@@ -85,6 +85,9 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 		{"refinery", "", RoleContext{Role: RoleRefinery, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "refinery", "rig")}},
 		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
 		{"deacon", "", RoleContext{Role: RoleDeacon, TownRoot: town, WorkDir: filepath.Join(town, "deacon")}},
+		// gt prime inside a dog session derives the dog from its kennel cwd
+		// (roleContextFromDir) and never sets Rig.
+		{"dog", "alpha", RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}},
 	}
 	for _, tc := range cases {
 		path := config.SystemPromptFilePath(tc.role, town, rigPath, tc.agent)
@@ -119,6 +122,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 		{"refinery", "", filepath.Join(rigPath, "refinery", "rig")},
 		{"mayor", "", filepath.Join(town, "mayor")},
 		{"deacon", "", filepath.Join(town, "deacon")},
+		{"dog", "alpha", filepath.Join(town, "deacon", "dogs", "alpha")},
 	}
 	for _, tc := range cases {
 		ctx, err := spawnRoleContext(tc.role, town, rigPath, tc.agent)
@@ -149,7 +153,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	for _, tc := range []struct{ role, rig, agent string }{
-		{"dog", "", "alpha"},
+		{"dog", "", ""}, // no kennel name, no file
 		{"boot", "", ""},
 		{"polecat", rigPath, ""},
 		{"witness", "", ""},
@@ -199,5 +203,47 @@ func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *test
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
 		t.Fatalf("file must have been rendered at resolve time: %v", err)
+	}
+}
+
+// The dog shape of gt-t30p (gt-h7e5): the dog role template is ~8.5 KB, so a
+// dog session that prints it in the hook pushes the prime past Claude Code's
+// 10,000-character hook budget and gets truncated to a preview. This walks the
+// real spawn path — AgentEnv (GT_DOG_NAME) → role config → renderer → command —
+// and requires the flag on the FIRST spawn, before any file exists.
+func TestBuildStartupCommand_FirstDogSpawnCarriesSystemPromptFlag(t *testing.T) {
+	town, _ := newSpawnRenderTown(t, "myrig", "nux")
+	path := config.SystemPromptFilePath("dog", town, "", "alpha")
+	if path == "" {
+		t.Fatal("dog must have a per-agent system prompt path")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("precondition: file must not exist yet (%v)", err)
+	}
+
+	cmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
+		Role:      "dog",
+		AgentName: "alpha",
+		TownRoot:  town,
+		Prompt:    "check your hook",
+	}, "", "check your hook", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cmd, "GT_DOG_NAME=alpha") {
+		t.Fatalf("dog command must carry its name (the only handle on its kennel):\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "--append-system-prompt-file") {
+		t.Fatalf("first dog spawn must carry the system prompt flag:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, config.EnvSystemPromptFile+"=") || !strings.Contains(cmd, path) {
+		t.Fatalf("dog command must export %s=%s:\n%s", config.EnvSystemPromptFile, path, cmd)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || len(got) == 0 {
+		t.Fatalf("file must have been rendered at spawn time: %v", err)
+	}
+	if !strings.Contains(string(got), "alpha") {
+		t.Fatalf("rendered dog text does not name the dog:\n%.200s", got)
 	}
 }

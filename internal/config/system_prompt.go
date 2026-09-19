@@ -21,11 +21,13 @@ const SystemPromptFileName = "system-prompt.md"
 // SystemPromptFilePath returns where the static role text for an agent lives,
 // always under the role's .claude directory next to the Claude hooks settings
 // file (only Claude agents receive the flag). Singleton roles (witness,
-// refinery, mayor, deacon) share one file per rig or town. Polecat and crew
+// refinery, mayor, deacon) share one file per rig or town. Polecat, crew and dog
 // templates interpolate the agent's own name and worktree, so those roles get
 // one file per agent (system-prompt-<name>.md) and "" when the name is unknown.
-// Returns "" for roles that do not use a system-prompt file (dog, boot: their
-// prime already fits the hook budget) or when the scope path is missing.
+// Dog files live in the dog's own kennel (deacon/dogs/<name>/.claude), which is
+// also where its hooks settings file is written.
+// Returns "" for roles that do not use a system-prompt file (boot: its prime
+// already fits the hook budget) or when the scope path is missing.
 func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 	var dir string
 	name := SystemPromptFileName
@@ -46,6 +48,12 @@ func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 			return ""
 		}
 		dir = filepath.Join(townRoot, role)
+	case constants.RoleDog:
+		if townRoot == "" || agentName == "" {
+			return ""
+		}
+		dir = filepath.Join(townRoot, "deacon", "dogs", agentName)
+		name = "system-prompt-" + agentName + ".md"
 	default:
 		return ""
 	}

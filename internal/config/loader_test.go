@@ -1489,6 +1489,36 @@ func TestBuildAgentStartupCommand(t *testing.T) {
 	}
 }
 
+// A dog's address is "deacon/dogs/<name>" (AgentIdentity.Address) and handoff
+// feeds that straight into role resolution. Reading it as "dogs" resolved no
+// role at all there — no role_agents.dog, no per-agent system prompt file — so
+// the respawned dog dumped its whole static role text back into the prime hook
+// (gt-h7e5).
+func TestExtractSimpleRole(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"":                       "",
+		"mayor":                  "mayor",
+		"deacon":                 "deacon",
+		"deacon/boot":            "boot",
+		"gastown/witness":        "witness",
+		"gastown/refinery":       "refinery",
+		"gastown/crew/sloan":     "crew",
+		"gastown/polecats/pearl": constants.RolePolecat,
+		"deacon/dogs/alpha":      constants.RoleDog,
+		"deacon/dogs/my-dog":     constants.RoleDog,
+		// The kennel also hosts the boot watchdog, which is its own role.
+		"deacon/dogs/boot": constants.RoleBoot,
+		// Unknown shapes pass through untouched.
+		"too/many/parts/here": "too/many/parts/here",
+	}
+	for in, want := range cases {
+		if got := ExtractSimpleRole(in); got != want {
+			t.Errorf("ExtractSimpleRole(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestBuildPolecatStartupCommand(t *testing.T) {
 	t.Parallel()
 	cmd := BuildPolecatStartupCommand("gastown", "toast", "", "")

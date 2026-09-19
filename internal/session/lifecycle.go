@@ -470,13 +470,21 @@ func buildPrompt(cfg SessionConfig) string {
 }
 
 // buildCommand creates the startup command using the config package.
+//
+// The agent's own name rides along as GT_POLECAT / GT_CREW / GT_DOG_NAME. The
+// per-agent roles resolve their rendered system-prompt file from that name at
+// spawn time (config.withRoleSystemPromptFlag), so a dog's FIRST session gets
+// --append-system-prompt-file rather than a full static prime; the dog kennel
+// is only reachable through the name. Roles with no per-agent identity ignore
+// the field.
 func buildCommand(cfg SessionConfig, prompt string) (string, error) {
-	if cfg.AgentOverride != "" {
-		return config.BuildAgentStartupCommandWithAgentOverride(
-			cfg.Role, cfg.RigName, cfg.TownRoot, cfg.RigPath, prompt, cfg.AgentOverride)
-	}
-	return config.BuildAgentStartupCommand(
-		cfg.Role, cfg.RigName, cfg.TownRoot, cfg.RigPath, prompt), nil
+	return config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
+		Role:      cfg.Role,
+		Rig:       cfg.RigName,
+		AgentName: cfg.AgentName,
+		TownRoot:  cfg.TownRoot,
+		Prompt:    prompt,
+	}, cfg.RigPath, prompt, cfg.AgentOverride)
 }
 
 // ShutdownDelay is the standard delay after session creation.
