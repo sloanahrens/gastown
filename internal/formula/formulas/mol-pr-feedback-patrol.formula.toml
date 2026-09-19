@@ -312,7 +312,11 @@ bd mol step respawn --target list-open-prs
 **Context filling:** If the session is near context capacity, use `gt handoff` to
 cycle to a fresh session rather than respawning:
 ```bash
-gt handoff -s "PR feedback patrol cycling" -m "Next cycle: scan {{repo}} for PR feedback and CI failures."
+REPO=$(cat <<'EOF'
+{{repo}}
+EOF
+)
+gt handoff -s "PR feedback patrol cycling" -m "Next cycle: scan $REPO for PR feedback and CI failures."
 ```
 
 **Exit criteria:** Next patrol cycle initiated (either via respawn or handoff).

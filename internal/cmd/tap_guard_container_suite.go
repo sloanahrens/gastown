@@ -78,15 +78,20 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if reason, matched := evaluateContainerSuiteCommand(command); reason != "" {
-		printContainerSuiteBlock(reason, command, matched)
-		return NewSilentExit(2)
-	}
+	// The scope rule answers first for a polecat: its advice is "iterate with
+	// -run", and it must win over the container-suite rule's "run it wrapped"
+	// line, which for a whole-suite command is exactly the run the scope rule
+	// forbids (gt-v6se: three polecats followed that line into full suites
+	// beside the refinery's gate).
 	if isPolecatContext() {
 		if reason, matched := evaluatePolecatTestScope(command); reason != "" {
 			printPolecatTestScopeBlock(reason, command, matched)
 			return NewSilentExit(2)
 		}
+	}
+	if reason, matched := evaluateContainerSuiteCommand(command); reason != "" {
+		printContainerSuiteBlock(reason, command, matched)
+		return NewSilentExit(2)
 	}
 	return nil
 }
@@ -191,7 +196,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 		return "", nil // already wrapped by gt slot run
 	}
 
-	if i := findAdjacentPair(lower, "go", "test"); i >= 0 && dockerOn {
+	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
 		pkgArgs := goTestPackageArgs(tokens[i+2:])
 		wholeRepo, pkgs := containerSuitePackagesIntersect(pkgArgs)
 		if wholeRepo {
@@ -203,7 +208,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 		return "", nil
 	}
 
-	if i := findAdjacentPair(lower, "make", "test"); i >= 0 {
+	if i := findTestInvocation(lower, "make"); i >= 0 {
 		// The Makefile's "test" target unconditionally runs "go test ./..."
 		// after its shell-script checks — there is no scoped form of "make
 		// test", so it always touches every testcontainers-backed package.
@@ -234,15 +239,61 @@ func containsSubsequence(tokens, want []string) bool {
 	return false
 }
 
-// findAdjacentPair returns the index of the first occurrence of a
-// immediately followed by b in tokens (already lowercased), or -1.
-func findAdjacentPair(tokens []string, a, b string) int {
+// makeValueFlags are the make(1) short options whose value is mandatory and
+// may be the NEXT token ("-C dir", "-f file", "-o file", "-W file", "-I
+// dir"); tokens reach here lowercased, so -W and -I appear as -w and -i,
+// which is why the valueless -w/-i are absent from the map: a lowercased
+// token cannot tell them apart, and the safe reading is "the next token may
+// be a value". -j and -l take an OPTIONAL value, so the next token is a
+// value only when it looks like one (all digits). No branch ever swallows
+// the target "test" itself.
+var makeValueFlags = map[string]bool{
+	"-c": true, "-f": true, "-o": true, "-w": true, "-i": true,
+	"--directory": true, "--file": true, "--makefile": true, "--old-file": true, "--assume-old": true,
+	"--what-if": true, "--new-file": true, "--assume-new": true, "--include-dir": true,
+}
+var makeOptionalNumberFlags = map[string]bool{"-j": true, "-l": true}
+
+// findTestInvocation returns the index of the first "<tool> test" invocation
+// in tokens (already lowercased) — "go test" or "make test" — or -1. For
+// make, options may sit between the program and the target ("make -j4
+// test", "make -e -w test", "make -C . test") and are stepped over: the
+// target is what decides what runs, not the flags in front of it.
+func findTestInvocation(tokens []string, tool string) int {
 	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] == a && tokens[i+1] == b {
+		if tokens[i] != tool {
+			continue
+		}
+		j := i + 1
+		if tool == "make" {
+			for j < len(tokens) && strings.HasPrefix(tokens[j], "-") {
+				flag := tokens[j]
+				j++
+				if j >= len(tokens) || tokens[j] == "test" {
+					continue
+				}
+				if makeValueFlags[flag] || (makeOptionalNumberFlags[flag] && isAllDigits(tokens[j])) {
+					j++
+				}
+			}
+		}
+		if j < len(tokens) && tokens[j] == "test" {
 			return i
 		}
 	}
 	return -1
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // goTestValueFlags are go test flags that consume the NEXT token as their

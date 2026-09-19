@@ -175,16 +175,20 @@ The contributor should be able to act on your feedback.
 
 **3. If NEEDS_DISCUSSION:**
 ```bash
-gt mail send {{rig}}/witness -s "PR review needs discussion" -m "PR: {{pr_url}}
+gt mail send {{rig}}/witness -s "PR review needs discussion" --stdin <<'BODY'
+PR: {{pr_url}}
 Issue: {{issue}}
-Question: <what needs clarification>"
+Question: <what needs clarification>
+BODY
 ```
 
 **4. If BLOCK (security):**
 ```bash
-gt mail send {{rig}}/witness -s "SECURITY: PR blocked" -m "PR: {{pr_url}}
+gt mail send {{rig}}/witness -s "SECURITY: PR blocked" --stdin <<'BODY'
+PR: {{pr_url}}
 Issue: {{issue}}
-Concern: <security issue found>"
+Concern: <security issue found>
+BODY
 ```
 
 **Exit criteria:** You've made a clear decision with rationale."""

@@ -25,6 +25,19 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"subpackage of a heavy package", "go test ./internal/cmd/sub/", true},
 		{"ancestor wildcard covering heavy packages", "go test ./internal/...", true},
 		{"bare ancestor wildcard", "go test internal/...", true},
+		// make test is `go test ./...` by another name; the wrapper and an env
+		// prefix change nothing about the host CPU it burns (gt-v6se).
+		{"make test", "make test", true},
+		{"make test with env prefix", "GOFLAGS=-p=8 make test", true},
+		{"make test wrapped in slot run", "gt slot run --role gastown/zircon -- GOFLAGS=-p=8 make test", true},
+		{"make test with jobs flag", "make -j4 test", true},
+		{"make test with long flag", "make --jobs=4 test", true},
+		{"make test with directory flag and value", "make -C . test", true},
+		{"make test with valueless flags", "make -e -w -i test", true},
+		{"make test with bare jobs flag", "make -j test", true},
+		{"make test with spaced jobs value", "make -j 4 test", true},
+		{"make test with keep-going and load flags", "make -k -l test", true},
+		{"make test with long directory option and spaced value", "make --directory . test", true},
 
 		{"filtered heavy package", "go test ./internal/cmd/ -run 'TestApplyMQCheck|TestSlingDeadAgent'", false},
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
@@ -51,8 +64,56 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 11 {
-		t.Errorf("blocked %d of %d cases, want exactly 11", blocked, len(tests))
+	if blocked != 22 {
+		t.Errorf("blocked %d of %d cases, want exactly 22", blocked, len(tests))
+	}
+}
+
+// A polecat that runs the suite gets the scope rule's answer (iterate with
+// -run), never the container-suite rule's "run it wrapped" line: that advice
+// is what sent zircon, coral and lapis into full 77-package runs beside the
+// refinery's gate, doubling its wall time (gt-v6se). The wrapped form is then
+// blocked too. The refinery keeps both: bare make test blocked with the
+// wrapped advice, wrapped make test allowed.
+func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "")
+	bare := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
+	wrapped := `{"tool_name":"Bash","tool_input":{"command":"gt slot run --role gastown/zircon -- GOFLAGS=-p=8 make test"}}`
+
+	t.Setenv("GT_POLECAT", "zircon")
+	t.Setenv("GT_REFINERY", "")
+	t.Setenv("GT_ROLE", "gastown/polecats/zircon")
+	wholeRepo := `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`
+	for name, input := range map[string]string{"bare": bare, "wrapped": wrapped, "go test whole repo": wholeRepo} {
+		var err error
+		stderr := captureStderr(t, func() {
+			withStdin(t, input, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
+		})
+		if err == nil {
+			t.Errorf("%s: polecat make test was allowed", name)
+		}
+		if !strings.Contains(stderr, "TEST SCOPE") || !strings.Contains(stderr, "-run") {
+			t.Errorf("%s: block must be the scope rule with the -run alternative, got: %s", name, stderr)
+		}
+		if strings.Contains(stderr, "Run it wrapped") {
+			t.Errorf("%s: block must not tell a polecat to run the suite wrapped, got: %s", name, stderr)
+		}
+	}
+
+	t.Setenv("GT_POLECAT", "")
+	t.Setenv("GT_REFINERY", "1")
+	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Chdir(t.TempDir())
+	var err error
+	stderr := captureStderr(t, func() {
+		withStdin(t, bare, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
+	})
+	if err == nil || !strings.Contains(stderr, "Run it wrapped") {
+		t.Errorf("refinery bare make test must still be blocked with the wrapped advice, err=%v stderr=%s", err, stderr)
+	}
+	withStdin(t, wrapped, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
+	if err != nil {
+		t.Errorf("refinery wrapped make test must be allowed, got %v", err)
 	}
 }
 

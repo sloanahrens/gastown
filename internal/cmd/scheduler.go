@@ -124,6 +124,13 @@ type scheduledBeadInfo struct {
 	Status    string `json:"status"`
 	TargetRig string `json:"target_rig"`
 	Blocked   bool   `json:"blocked,omitempty"`
+	// MergePending is set when the bead is held not because a blocker is open
+	// but because a blocker was submitted and its merge request has not landed.
+	// Operators need to distinguish the two: the first is normal waiting, the
+	// second means "look at the merge queue" (gt-0r0z).
+	MergePending bool `json:"merge_pending,omitempty"`
+	// BlockerMR is the open merge request holding the bead back, when known.
+	BlockerMR string `json:"blocker_mr,omitempty"`
 }
 
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
@@ -247,7 +254,18 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 			if b.Blocked {
 				indicator = "⏸"
 			}
-			fmt.Printf("    %s %s: %s\n", indicator, b.ID, b.Title)
+			detail := ""
+			if b.MergePending {
+				// Distinguish "waiting on unlanded work" from ordinary
+				// blocking: a blocked-on-queue bead is unblocked by a merge,
+				// not by anything the scheduler does.
+				detail = " (waiting on merge"
+				if b.BlockerMR != "" {
+					detail += " " + b.BlockerMR
+				}
+				detail += ")"
+			}
+			fmt.Printf("    %s %s: %s%s\n", indicator, b.ID, b.Title, detail)
 		}
 		fmt.Println()
 	}
@@ -394,6 +412,8 @@ func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment)
 		if !ok {
 			continue
 		}
+		bead.MergePending = assessment.mergePending
+		bead.BlockerMR = assessment.mergePendingMR
 		result = append(result, bead)
 	}
 

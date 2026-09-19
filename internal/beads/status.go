@@ -62,6 +62,16 @@ func (s AgentState) IsActive() bool {
 	}
 }
 
+// IsSpawning reports whether the agent bead still reads as mid-dispatch:
+// gt sling writes agent_state=spawning before the session and worktree are up,
+// and the first heartbeat moves it on to working. Only this state earns the
+// startup grace that keeps a just-slung polecat from being reported stalled
+// (gt-yteq) — a bead that already says working with a dead session is a crash
+// mid-work, which is exactly what stalled means.
+func (s AgentState) IsSpawning() bool {
+	return s == AgentStateSpawning
+}
+
 // IssueStatus represents the lifecycle status of a beads issue.
 // These values are stored in the status field and govern issue workflow transitions.
 //

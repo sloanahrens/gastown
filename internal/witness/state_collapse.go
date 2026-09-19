@@ -33,10 +33,20 @@ type StateCollapseFinding struct {
 
 // DetectStateCollapseResult holds the aggregate result of a state-collapse scan.
 type DetectStateCollapseResult struct {
-	Checked  int // number of open MR beads examined
-	Findings []StateCollapseFinding
-	Errors   []error
+	Checked     int  // number of open MR beads examined
+	MRLookupRan bool // whether the open merge-request queue was successfully resolved
+	OpenMRsSeen int  // number of open MRs the resolved queue returned
+	Findings    []StateCollapseFinding
+	Errors      []error
 }
+
+// errNoOpenMRSource is reported when DetectStateCollapse is wired without an
+// open-MR source. The scan is defined over the open MR queue, so without the
+// source there is nothing to examine: it reports the error and returns
+// MRLookupRan=false rather than an empty finding list that reads as an
+// all-clear (gt-92ry, same honesty rule DetectStrandedBranches follows for
+// its MR lookup after gt-akap).
+var errNoOpenMRSource = errors.New("open merge-request lookup unavailable: cannot examine the MR queue for state collapse")
 
 // DetectStateCollapse finds issues recorded as done (bead closed) while the
 // fix they describe is not verified to be in force: the merge-request bead
@@ -45,51 +55,66 @@ type DetectStateCollapseResult struct {
 // This is scoped to the current open MR queue (bounded by queue depth), not
 // a scan of closed-bead history: every open MR already names its source
 // issue via the "source_issue:" field (beads.ParseMRFields), so checking
-// whether that issue already closed is the cheap direction. Closing a source
-// issue only happens alongside closing its MR during a normal merge (see
-// refinery post-merge handling) — a closed issue with a still-open MR is
-// therefore never expected, and is exactly the "trusting a close" failure
-// mode gt-zzd's own catalog flags as never caught mechanically.
+// whether that issue already closed is the cheap direction. A closed issue
+// with a still-open MR is the "trusting a close" failure mode gt-zzd's own
+// catalog flags as never caught mechanically — against the live gastown rig
+// the first un-blinded run found 8 of 10 queued MRs in that state.
+//
+// Most of those are NOT collapses: gt done self-closes the source issue as
+// "pending_mr: <mr>" at submit time, so an issue closed with a claim of work
+// in flight, naming an MR that really is in the queue, is the ordinary
+// healthy path and is suppressed. What remains — an issue closed as done
+// (any other reason, or none) while the MR meant to land its fix still sits
+// open — is the contradiction this scan reports.
 //
 // Each finding is recorded as a bead comment on the source issue (durable,
 // discoverable via `bd show`) and escalated to the rig's mayor by mail, with
 // a tmux nudge fallback if the mail send fails — mirroring the pattern used
 // by resetAbandonedBead for SPAWN_BLOCKED/RECOVERED_BEAD notifications.
 //
+// The queue is read through refs.ListOpenMRs, the same injected source
+// DetectStrandedBranches uses, and not through `bd list --label=gt:merge-request`.
+// Merge-request beads are created as wisps (gt mq submit, GH#2446), which
+// `bd list` does not return — the plain-list version of this scan was
+// structurally blind to the entire queue and reported "No state collapse
+// found (0 open MRs)" for it, i.e. a failure that serialized as success
+// (gt-92ry; the gt-akap fix on the sibling branch detector). Because the
+// scan's whole subject matter arrives through that source, a missing or
+// failing source sets MRLookupRan=false and yields no findings rather than
+// an empty list that reads as an all-clear — callers must surface that
+// state (see StateCollapseSummary).
+//
 // This check only proves the contradiction at the bead-state level (closed
 // issue, open MR). It intentionally does not also re-verify the MR's branch
 // against a re-fetched origin/<target> via git — that is a stronger, more
 // expensive corroboration (see gt-zzd's "verify at source" method note) left
 // for a follow-up rather than folded into this scan.
-func DetectStateCollapse(bd *BdCli, workDir, rigName string, router *mail.Router) *DetectStateCollapseResult {
+func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName string, router *mail.Router) *DetectStateCollapseResult {
 	result := &DetectStateCollapseResult{}
 	if bd == nil {
 		return result
 	}
+	if refs == nil || refs.ListOpenMRs == nil {
+		result.Errors = append(result.Errors, errNoOpenMRSource)
+		return result
+	}
 
-	output, err := bd.Exec(workDir, "list", "--label=gt:merge-request", "--status=open", "--json", "--limit=0")
+	mrs, err := refs.ListOpenMRs()
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("listing open MRs: %w", err))
+		result.Errors = append(result.Errors, fmt.Errorf("open merge-request lookup unavailable: %w", err))
 		return result
 	}
-	if output == "" {
-		return result
-	}
-
-	var mrs []*beads.Issue
-	if err := json.Unmarshal([]byte(output), &mrs); err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("parsing open MRs: %w", err))
-		return result
-	}
+	result.MRLookupRan = true
+	result.OpenMRsSeen = len(mrs)
+	openMRs := NewOpenMRSet(mrs)
 
 	for _, mr := range mrs {
-		fields := beads.ParseMRFields(mr)
-		if fields == nil || fields.SourceIssue == "" {
+		if mr.SourceIssue == "" {
 			continue
 		}
 		result.Checked++
 
-		status, ok := getBeadStatus(bd, workDir, fields.SourceIssue)
+		status, closeReason, ok := getBeadStatusAndCloseReason(bd, workDir, mr.SourceIssue)
 		if !ok || status == "" {
 			continue // source issue not found/unreachable — can't assert collapse
 		}
@@ -97,12 +122,37 @@ func DetectStateCollapse(bd *BdCli, workDir, rigName string, router *mail.Router
 			continue // still open, or a non-close terminal state (e.g. tombstone) — no collapse
 		}
 
+		// gt done closes the source issue as "pending_mr: <mr>" the moment it
+		// submits (beads.PendingMergeCloseReason), so a closed issue naming an
+		// MR that is still open in the queue is the ordinary in-flight
+		// workflow, not a collapse — the same false-positive class gt-akap
+		// fixed on the branch-driven side, and the dominant one here: the
+		// first un-blinded run against the live gastown rig flagged 7 of 10
+		// queued MRs this way, every one of them a healthy submit.
+		//
+		// The claim is honored only when the MR it names is actually open. A
+		// close reason is a claim about the queue, not the queue itself, so a
+		// pending_mr naming a purged or already-closed MR leaves the issue
+		// closed with nothing in flight — still a collapse candidate, exactly
+		// as for the branch-driven scan.
+		if named := pendingMRFromCloseReason(closeReason); named != "" && openMRs.byID[named] {
+			continue
+		}
+
+		mrStatus := mr.Status
+		if mrStatus == "" {
+			// The source is defined as the rig's *open* queue, so a ref that
+			// names no status is open by construction — say so rather than
+			// printing an empty state into the finding.
+			mrStatus = string(beads.StatusOpen)
+		}
+
 		finding := StateCollapseFinding{
-			IssueID:  fields.SourceIssue,
+			IssueID:  mr.SourceIssue,
 			MRID:     mr.ID,
-			MRStatus: mr.Status,
-			Branch:   fields.Branch,
-			Target:   fields.Target,
+			MRStatus: mrStatus,
+			Branch:   mr.Branch,
+			Target:   mr.Target,
 		}
 		result.Findings = append(result.Findings, finding)
 		reportStateCollapse(bd, workDir, rigName, finding, router)
@@ -215,13 +265,15 @@ type BranchRefSource struct {
 	ListOpenMRs func() ([]OpenMRRef, error)
 }
 
-// OpenMRRef is one open merge-request bead as the branch-strand scan needs
-// to see it: the MR's id, and the two identities other beads record for it
-// (beads.ParseMRFields), either of which may be absent on old MR beads.
+// OpenMRRef is one open merge-request bead as the MR-driven scans need to
+// see it: the MR's id and status, and the identities other beads record for
+// it (beads.ParseMRFields), any of which may be absent on old MR beads.
 type OpenMRRef struct {
 	ID          string
+	Status      string // MR bead status (e.g. "open"); empty means open by construction
 	SourceIssue string // source_issue field of the MR description, if any
 	Branch      string // branch field of the MR description, if any
+	Target      string // target field of the MR description, if any
 }
 
 // OpenMRSet is a rig's open merge-request queue indexed by every identity a
@@ -544,4 +596,50 @@ it and re-dispatch.`, f.IssueID, f.Branch, targetBranch, openMRsSeen, targetBran
 			fmt.Fprintf(os.Stderr, "witness: nudge fallback to mayor also failed for %s: %v\n", f.IssueID, nudgeErr)
 		}
 	}
+}
+
+// StateCollapseSummary renders the one-line verdict for a completed
+// state-collapse scan, and reports whether it is an all-clear.
+//
+// The all-clear is deliberately conjunctive: zero findings only means "no
+// state collapse found" when both detectors actually ran. Both detectors
+// reason over the rig's open merge-request queue, and a scan that never
+// resolved that queue examined nothing — reporting it as "no state collapse
+// found" is precisely the failure this scan exists to catch, a failure
+// serializing as success (gt-92ry for the MR-driven half, gt-akap for the
+// branch-driven half, where the same wording mistake reported "has no MR"
+// for 11 of 13 live findings). allClear=false therefore means "do not trust
+// this as a clean bill of health", and the summary names which lookup was
+// missing so the operator can tell "checked and clean" from "never ran".
+func StateCollapseSummary(mr *DetectStateCollapseResult, branches *DetectStrandedBranchesResult, rigName string) (summary string, allClear bool) {
+	mrChecked, mrRan, findings := 0, false, 0
+	if mr != nil {
+		mrChecked, mrRan = mr.Checked, mr.MRLookupRan
+		findings += len(mr.Findings)
+	}
+	branchChecked, branchRan := 0, false
+	if branches != nil {
+		branchChecked, branchRan = branches.Checked, branches.MRLookupRan
+		findings += len(branches.Findings)
+	}
+
+	if findings > 0 {
+		return fmt.Sprintf("Found %d state collapse(s) in %s (%d open MR(s), %d closed-issue branch(es) checked)",
+			findings, rigName, mrChecked, branchChecked), false
+	}
+	switch {
+	case !mrRan && !branchRan:
+		return fmt.Sprintf("No all-clear for %s: MR lookup unavailable — the open merge-request queue could not be resolved, "+
+			"so neither check examined anything. Unchecked is not a clean result.", rigName), false
+	case !mrRan:
+		return fmt.Sprintf("No all-clear for %s: MR lookup unavailable — the open merge-request queue could not be resolved, "+
+			"so the MR-driven check examined nothing (%d closed-issue branch(es) were checked by the branch-driven check). "+
+			"Unchecked is not a clean result.", rigName, branchChecked), false
+	case !branchRan:
+		return fmt.Sprintf("No all-clear for %s: MR lookup unavailable — the open merge-request queue could not be resolved, "+
+			"so the branch-driven check judged no branch (%d open MR(s) were checked by the MR-driven check). "+
+			"Unchecked is not a clean result.", rigName, mrChecked), false
+	}
+	return fmt.Sprintf("No state collapse found (checked %d open MR(s) — lookup ran; %d closed-issue branch(es) checked in %s)",
+		mrChecked, branchChecked, rigName), true
 }

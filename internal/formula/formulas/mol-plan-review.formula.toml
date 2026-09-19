@@ -293,7 +293,11 @@ All leg reviews from: {{.output.directory}}/
 
 **After writing the file, mail the coordinator (whoever poured this formula):**
 ```bash
-gt mail send --human -s "Plan Review Complete: {{.problem}}" -m "
+SUBJECT=$(cat <<'EOF'
+Plan Review Complete: {{.problem}}
+EOF
+)
+gt mail send --human -s "$SUBJECT" --stdin <<'BODY'
 Review is ready: {{.output.directory}}/plan-review.md
 
 Overall verdict: <GO / GO WITH FIXES / NO-GO>
@@ -303,7 +307,7 @@ Overall verdict: <GO / GO WITH FIXES / NO-GO>
 
 ## Must-Fix Items
 <paste any blocking issues, or 'None — ready to proceed'>
-"
+BODY
 ```
 """
 depends_on = ["completeness", "sequencing", "risk", "scope-creep", "testability"]

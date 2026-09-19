@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -28,10 +29,11 @@ var (
 	mqBatchCandidatesMax    int
 	mqBatchCandidatesJSON   bool
 
-	mqBatchRunMinAge string
-	mqBatchRunMax    int
-	mqBatchRunOnly   []string
-	mqBatchRunJSON   bool
+	mqBatchRunMinAge   string
+	mqBatchRunMax      int
+	mqBatchRunMinCount int
+	mqBatchRunOnly     []string
+	mqBatchRunJSON     bool
 )
 
 var mqBatchCmd = &cobra.Command{
@@ -46,8 +48,10 @@ branch, runs the full gate suite once, and — if green — fast-forwards all
 of them to the target branch in one push. If the suite is red, it bisects
 the stack to isolate the culprit MR(s) and lands the rest.
 
-P0/P1 MRs are never batched — they always process individually so critical
-fixes aren't held up waiting for a batch to assemble.
+P0 MRs are never batched — they always process individually so critical fixes
+aren't held up waiting for a batch to assemble. P1 MRs batch alongside P2
+since 2026-09-19: on a town that files nearly all of its work at P1,
+excluding them meant batching (enabled, min_count 3) never engaged at all.
 
 Typical formula usage:
   gt mq batch candidates gastown --min-age 1h   # how many are eligible?
@@ -57,7 +61,7 @@ Typical formula usage:
 var mqBatchCandidatesCmd = &cobra.Command{
 	Use:   "candidates <rig>",
 	Short: "List ready MRs eligible for batching",
-	Long: `List ready, non-P0/P1 MRs old enough to be batch-eligible, sorted by
+	Long: `List ready, non-P0 MRs old enough to be batch-eligible, sorted by
 priority score (highest first) and capped at --max.
 
 Read-only — makes no git or bead changes. Use this to decide whether enough
@@ -70,11 +74,16 @@ in parallel before calling 'gt mq batch run'.`,
 var mqBatchRunCmd = &cobra.Command{
 	Use:   "run <rig>",
 	Short: "Assemble, gate, and land a batch of ready MRs",
-	Long: `Assembles a batch from ready, non-P0/P1, min-age-eligible MRs (same
+	Long: `Assembles a batch from ready, non-P0, min-age-eligible MRs (same
 selection as 'gt mq batch candidates'), stacks them via ancestry-preserving
 merges, runs the configured gate commands once, and either fast-forwards
 the whole batch to the target branch or bisects to isolate a red MR and
 lands the rest.
+
+When fewer than batch_min_count MRs are eligible, this exits without
+batching (exit 0, nothing touched) so the single-MR path picks them up
+instead of paying a batch's overhead for one or two MRs. The threshold is
+enforced here, not just in the refinery formula's prose.
 
 Use --only to restrict the batch to a specific MR-ID subset (e.g. after
 dropping any MR that an external per-MR review rejected).
@@ -93,6 +102,7 @@ func init() {
 
 	mqBatchRunCmd.Flags().StringVar(&mqBatchRunMinAge, "min-age", "", "Minimum queue age to be batch-eligible (e.g. 1h, 30m). Default: rig's merge_queue.batch_min_age, or 1h")
 	mqBatchRunCmd.Flags().IntVar(&mqBatchRunMax, "max", 0, "Maximum batch size. Default: rig's merge_queue.batch_max, or 12")
+	mqBatchRunCmd.Flags().IntVar(&mqBatchRunMinCount, "min-count", 0, "Minimum number of eligible MRs required to batch at all; below it the run exits without batching. Default: rig's merge_queue.batch_min_count, or 4")
 	mqBatchRunCmd.Flags().StringSliceVar(&mqBatchRunOnly, "only", nil, "Restrict the batch to these MR IDs (comma-separated)")
 	mqBatchRunCmd.Flags().BoolVar(&mqBatchRunJSON, "json", false, "Output as JSON")
 
@@ -131,11 +141,40 @@ func resolveBatchMax(flagValue int, mq *config.MergeQueueConfig) int {
 	return 12
 }
 
-// selectBatchCandidates returns ready MRs eligible for batching: P0/P1 MRs
-// are excluded (they always process individually, first), MRs younger than
-// minAge are excluded, and the result is sorted by priority score, highest
-// first. No size cap is applied here — use Engineer.AssembleBatch for that,
-// since it also knows how to skip MRs blocked by something not in the batch.
+// resolveBatchMinCount resolves the --min-count flag, falling back to the
+// rig's configured batch_min_count (or its own default of 4) when the flag is
+// <= 0. Parallel to resolveBatchMax: a non-positive flag means "unset", since
+// GetBatchMinCount already treats zero as "use the default".
+func resolveBatchMinCount(flagValue int, mq *config.MergeQueueConfig) int {
+	if flagValue > 0 {
+		return flagValue
+	}
+	if mq != nil {
+		return mq.GetBatchMinCount()
+	}
+	return 4
+}
+
+// belowBatchMinCount reports whether a candidate list is too short to be worth
+// batching, writing the reason to w when it is.
+//
+// batch_min_count used to live only in the refinery formula's prose, so the
+// check was advisory: a refinery that ran 'gt mq batch run' anyway batched
+// whatever it found. Enforcing it here makes the threshold real regardless of
+// which caller invokes the command.
+func belowBatchMinCount(w io.Writer, candidates, minCount int) bool {
+	if candidates >= minCount {
+		return false
+	}
+	fmt.Fprintf(w, "%s batch: %d eligible < min_count %d, not batching\n", style.Dim.Render("ℹ"), candidates, minCount)
+	return true
+}
+
+// selectBatchCandidates returns ready MRs eligible for batching: P0 MRs are
+// excluded (they always process individually, first), MRs younger than minAge
+// are excluded, and the result is sorted by priority score, highest first.
+// No size cap is applied here — use Engineer.AssembleBatch for that, since it
+// also knows how to skip MRs blocked by something not in the batch.
 func selectBatchCandidates(eng *refinery.Engineer, minAge time.Duration) ([]*refinery.MRInfo, error) {
 	ready, err := eng.ListReadyMRs()
 	if err != nil {
@@ -149,7 +188,7 @@ func selectBatchCandidates(eng *refinery.Engineer, minAge time.Duration) ([]*ref
 func filterAndSortBatchCandidates(ready []*refinery.MRInfo, minAge time.Duration, now time.Time) []*refinery.MRInfo {
 	eligible := make([]*refinery.MRInfo, 0, len(ready))
 	for _, mr := range ready {
-		if mr.Priority <= 1 { // P0, P1: always single-MR, never batched
+		if mr.Priority == 0 { // P0: always single-MR; P1 batches since 2026-09-19
 			continue
 		}
 		if mr.CreatedAt.IsZero() || now.Sub(mr.CreatedAt) < minAge {
@@ -290,6 +329,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	max := resolveBatchMax(mqBatchRunMax, mq)
+	minCount := resolveBatchMinCount(mqBatchRunMinCount, mq)
 
 	eng := refinery.NewEngineer(r)
 
@@ -328,6 +368,19 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 		eligible = filtered
+	}
+
+	// Too few candidates to be worth batching: exit before assembling or
+	// touching the gate slot, so the single-MR path (which runs right after
+	// this in the refinery formula) handles them instead. Exit 0 — a short
+	// queue is a normal condition, not an error.
+	//
+	// Counted after --only, i.e. against what would actually be batched. An
+	// --only that whittles the list below the floor therefore does not batch;
+	// the printed line says why, and --min-count lowers the floor when a
+	// deliberately small batch is what's wanted.
+	if belowBatchMinCount(cmd.OutOrStdout(), len(eligible), minCount) {
+		return nil
 	}
 
 	batchCfg := newBatchConfig(max)

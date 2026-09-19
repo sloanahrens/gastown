@@ -215,8 +215,9 @@ None
 
 **2. Send to Deacon:**
 ```bash
-gt mail send deacon/ -s "GC complete: {{total_cleaned}} items" \
-  -m "{{report}}"
+gt mail send deacon/ -s "GC complete: {{total_cleaned}} items" --stdin <<'BODY'
+{{report}}
+BODY
 ```
 
 **Exit criteria:** Report sent."""

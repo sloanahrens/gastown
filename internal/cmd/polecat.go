@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -393,35 +394,50 @@ func init() {
 
 // PolecatListItem represents a polecat in list output.
 type PolecatListItem struct {
-	Rig                  string        `json:"rig"`
-	Name                 string        `json:"name"`
-	State                polecat.State `json:"state"`
-	Issue                string        `json:"issue,omitempty"`
-	CleanupStatus        string        `json:"cleanup_status,omitempty"`
-	ActiveMR             string        `json:"active_mr,omitempty"`
-	Branch               string        `json:"branch,omitempty"`
-	Verdict              string        `json:"verdict,omitempty"`
-	Reason               string        `json:"reason,omitempty"`
-	Reusable             bool          `json:"reusable"`
-	SafeToNuke           bool          `json:"safe_to_nuke"`
-	NeedsRecovery        bool          `json:"needs_recovery"`
-	NeedsMQSubmit        bool          `json:"needs_mq_submit"`
-	MQStatus             string        `json:"mq_status,omitempty"`
-	CountsTowardCapacity bool          `json:"counts_toward_capacity"`
-	ReuseStatus          string        `json:"reuse_status,omitempty"`
-	Blockers             []string      `json:"blockers,omitempty"`
-	SessionRunning       bool          `json:"session_running"`
-	Zombie               bool          `json:"zombie,omitempty"`
-	Foreign              bool          `json:"foreign,omitempty"`
-	BeadLookupFailed     bool          `json:"bead_lookup_failed,omitempty"`
-	SessionName          string        `json:"session_name,omitempty"`
+	Rig   string        `json:"rig"`
+	Name  string        `json:"name"`
+	State polecat.State `json:"state"`
+	Issue string        `json:"issue,omitempty"`
+	// Agent is the coding agent the live session runs (the session's GT_AGENT,
+	// written at spawn). Empty for a polecat with no live session.
+	Agent string `json:"agent,omitempty"`
+	// MRID and MRStatus are the polecat's merge request from one bulk
+	// rig-wide query: MRID is the MR bead — the agent bead's active_mr when
+	// set, else the open MR this worker submitted — and MRStatus is its queue
+	// state (open|ready|blocked|merged|rejected|missing). A polecat with no MR
+	// in this rig reports neither field.
+	MRID                 string   `json:"mr_id,omitempty"`
+	MRStatus             string   `json:"mr_status,omitempty"`
+	CleanupStatus        string   `json:"cleanup_status,omitempty"`
+	ActiveMR             string   `json:"active_mr,omitempty"`
+	Branch               string   `json:"branch,omitempty"`
+	Verdict              string   `json:"verdict,omitempty"`
+	Reason               string   `json:"reason,omitempty"`
+	Reusable             bool     `json:"reusable"`
+	SafeToNuke           bool     `json:"safe_to_nuke"`
+	NeedsRecovery        bool     `json:"needs_recovery"`
+	NeedsMQSubmit        bool     `json:"needs_mq_submit"`
+	MQStatus             string   `json:"mq_status,omitempty"`
+	CountsTowardCapacity bool     `json:"counts_toward_capacity"`
+	ReuseStatus          string   `json:"reuse_status,omitempty"`
+	Blockers             []string `json:"blockers,omitempty"`
+	SessionRunning       bool     `json:"session_running"`
+	Zombie               bool     `json:"zombie,omitempty"`
+	Foreign              bool     `json:"foreign,omitempty"`
+	BeadLookupFailed     bool     `json:"bead_lookup_failed,omitempty"`
+	SessionName          string   `json:"session_name,omitempty"`
 }
 
 // effectivePolecatState returns the observable state used by polecat list output.
 // Active work is ground truth for working; tmux liveness alone is not enough
 // because persistent polecats may keep a reusable live session after completion.
 // Zombie entries are never auto-rewritten.
-func effectivePolecatState(item PolecatListItem) polecat.State {
+//
+// spawning says the agent bead is still inside its spawn grace (see
+// polecatInventoryItem.Spawning): the dispatch is in flight, so the "session
+// dead + work assigned → stalled" rewrite below must not fire. A grace applied
+// in the inventory but undone here is the same polecat read two ways (gt-yteq).
+func effectivePolecatState(item PolecatListItem, spawning bool) polecat.State {
 	state := item.State
 	// A running session only implies working when there is active work attached.
 	// Without an issue, rewriting idle/done to working recreates "Issue: (none)".
@@ -432,9 +448,44 @@ func effectivePolecatState(item PolecatListItem) polecat.State {
 	// (not done — work was interrupted, not completed). The manager's loadFromBeads
 	// now returns StateStalled for this case, but list reconciliation may override.
 	if !item.SessionRunning && !item.Zombie && state == polecat.StateWorking {
+		if spawning {
+			return polecat.StateSpawning
+		}
 		return polecat.StateStalled
 	}
 	return state
+}
+
+// polecatSpawnGraceWindow resolves the window a dispatched-but-not-live polecat
+// is read as spawning before it becomes stalled, from the same town thresholds
+// the Witness uses (config.WitnessThresholds.HeartbeatStartupGrace, default
+// 5m), so list and witness agree on when spawning ends. An unreadable town root
+// yields the compiled-in default: the grace only ever delays a stalled verdict,
+// so failing to read the config must not fail it off (gt-yteq).
+func polecatSpawnGraceWindow(townRoot string) time.Duration {
+	if strings.TrimSpace(townRoot) == "" {
+		return config.DefaultWitnessHeartbeatStartupGrace
+	}
+	return config.LoadOperationalConfig(townRoot).GetWitnessConfig().HeartbeatStartupGraceD()
+}
+
+// polecatAgentMRDetails renders the agent and merge-request fields for one
+// polecat line — "agent=wisp mr=gt-wisp-1c6 mr_status=ready" — or "" when the
+// polecat has neither. Fields are omitted, never shown empty, so a line only
+// ever claims what the rig-wide join actually found.
+func polecatAgentMRDetails(p PolecatListItem) string {
+	fields := make([]string, 0, 3)
+	if p.Agent != "" {
+		fields = append(fields, "agent="+p.Agent)
+	}
+	if p.MRID != "" {
+		details := "mr=" + p.MRID
+		if p.MRStatus != "" {
+			details += " " + p.MRStatus
+		}
+		fields = append(fields, details)
+	}
+	return strings.Join(fields, " ")
 }
 
 type reuseMRShower interface {
@@ -498,16 +549,34 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect polecats from all rigs
-	t := tmux.NewTmux()
-	sessionNames, err := t.ListSessions()
+	sessions, err := loadPolecatSessionSet(newPoolSessionLister())
 	if err != nil {
 		return fmt.Errorf("listing tmux sessions: %w", err)
 	}
-	sessions := newPolecatSessionSet(sessionNames)
+	// Spawn grace: the window the Witness gives a dispatched session before it
+	// would call it stalled (config.WitnessThresholds.HeartbeatStartupGrace,
+	// default 5m). An unreadable town root falls back to the compiled-in
+	// default rather than switching grace off — grace only ever delays the
+	// stalled verdict (gt-yteq). One clock for the whole listing, so every
+	// polecat is judged against the same instant.
+	townRoot, _ := workspace.FindFromCwd()
+	spawnWindow := polecatSpawnGraceWindow(townRoot)
+	now := time.Now()
 	allPolecats := make([]PolecatListItem, 0)
 
 	for _, r := range rigs {
 		bd := beads.New(r.Path)
+
+		// ONE merge-request query per rig, joined per polecat below — never a
+		// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path
+		// is the blindness this replaces).
+		mrIndex, mrErr := loadPolecatMRIndex(bd, r.Name)
+		if mrErr != nil {
+			// The index is empty and every active_mr reads status=unknown
+			// (fail-closed, as before), but say so — a silently unreadable
+			// queue is how the original hardcoded "unknown" hid real state.
+			fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
+		}
 
 		polecatNames, err := listPolecatDirectoryNames(r.Path)
 		if err != nil {
@@ -530,10 +599,22 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		knownNames := make(map[string]bool)
 		for _, name := range polecatNames {
 			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
-			fields := parsePolecatAgentFields(agents[agentBeadID])
-			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions)
+			agentBead := agents[agentBeadID]
+			fields := parsePolecatAgentFields(agentBead)
+			// Grace is dated by the agent bead's own last write: a bead that
+			// still says spawning and was touched inside the window is a
+			// dispatch in flight, not a stall.
+			env := polecatInventoryEnv{
+				MRs: mrIndex,
+				Spawn: polecatSpawnFacts{
+					UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
+					Grace:     spawnWindow,
+					Now:       now,
+				},
+			}
+			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions, env)
 			if activeWorkErr != nil {
-				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions)
+				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions, env)
 			}
 			disposition := item.Disposition
 			state := effectivePolecatState(PolecatListItem{
@@ -541,12 +622,15 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 				Issue:                item.Issue,
 				SessionRunning:       item.SessionRunning,
 				CountsTowardCapacity: disposition.CountsTowardCapacity,
-			})
+			}, item.Spawning)
 			allPolecats = append(allPolecats, PolecatListItem{
 				Rig:                  r.Name,
 				Name:                 name,
+				Agent:                item.Agent,
 				State:                state,
 				Issue:                item.Issue,
+				MRID:                 item.MRID,
+				MRStatus:             item.MRStatus,
 				CleanupStatus:        item.CleanupStatus,
 				ActiveMR:             item.ActiveMR,
 				Branch:               item.Branch,
@@ -622,6 +706,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		switch p.State {
 		case polecat.StateWorking:
 			stateStr = style.Info.Render(stateStr)
+		case polecat.StateSpawning:
+			// Starting up, not broken: informational, like working.
+			stateStr = style.Info.Render(stateStr)
 		case polecat.StateStuck:
 			stateStr = style.Warning.Render(stateStr)
 		case polecat.StateStalled:
@@ -641,6 +728,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %s/%s  %s\n", sessionStatus, p.Rig, p.Name, stateStr)
 		if p.Issue != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(p.Issue))
+		}
+		if details := polecatAgentMRDetails(p); details != "" {
+			fmt.Printf("    %s\n", style.Dim.Render(details))
 		}
 		if p.ReuseStatus != "" {
 			details := "reuse: " + p.ReuseStatus

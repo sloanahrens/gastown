@@ -229,7 +229,11 @@ Create summary report of convoy feeding actions.
 
 **2. Send to Deacon:**
 ```bash
-gt mail send deacon/ -s "Convoy fed: {{convoy}}" -m "$(cat <<EOF
+SUBJECT=$(cat <<'EOF'
+Convoy fed: {{convoy}}
+EOF
+)
+gt mail send deacon/ -s "$SUBJECT" -m "$(cat <<'EOF'
 Convoy {{convoy}} feeding complete.
 
 Dispatched: {{dispatch_count}}/{{ready_count}} issues

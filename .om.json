@@ -31,6 +31,11 @@
       "name": "security",
       "weight": 3,
       "guidance": "Untrusted input (bead text, mail, transcripts, tool-call strings, git refs, filenames, env) reaching a shell command, filesystem path, SQL, URL fetch, or subprocess environment without validation or canonicalisation; secrets, tokens or API keys written to logs, beads, commits, notes or transcripts; any weakening or bypass of the town guards (dangerous-command, polecat-path, container-suite, pr-workflow) or of gt done/refinery verification; fail-open error handling in a guard or gate. A confirmed finding here outranks style and mergeability and should block on its own."
+    },
+    {
+      "name": "fail-open-branch",
+      "weight": 2,
+      "guidance": "Any check, gate, guard, or measurement whose failure path emits the same value as its success path is a finding, even when the local change is correct."
     }
   ]
 }

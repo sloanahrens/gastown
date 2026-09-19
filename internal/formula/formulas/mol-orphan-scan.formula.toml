@@ -283,15 +283,17 @@ Create summary report of orphan scan and actions.
 
 **2. Send to Deacon (for logs):**
 ```bash
-gt mail send deacon/ -s "Orphan scan complete: {{total_count}} found" \
-  -m "{{report}}"
+gt mail send deacon/ -s "Orphan scan complete: {{total_count}} found" --stdin <<'BODY'
+{{report}}
+BODY
 ```
 
 **3. Send to Mayor (if escalations):**
 ```bash
 # Only if there were escalations
-gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" \
-  -m "{{escalations_section}}"
+gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" --stdin <<'BODY'
+{{escalations_section}}
+BODY
 ```
 
 **Exit criteria:** Reports sent."""

@@ -204,6 +204,8 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if cmd != nil {
 		ctx = cmd.Context()
 	}
+	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
+	slingSteps = newSlingTimer(os.Stderr)
 	defer func() {
 		bead, target := "", ""
 		if len(args) > 0 {
@@ -886,6 +888,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 					fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 				} else {
 					fmt.Printf("%s Created convoy 🚚 %s\n", style.Bold.Render("→"), convoyID)
+					slingSteps.step("convoy")
 					fmt.Printf("  Tracking: %s\n", beadID)
 					if slingOwned {
 						fmt.Printf("  Lifecycle: caller-managed (owned)\n")
@@ -1000,6 +1003,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		// - gt done: close attached_molecule (wisp) first, then close base bead
 		// - Compound resolution: base bead -> attached_molecule -> wisp
 		attachedMoleculeID = result.WispRootID
+		slingSteps.step("formula")
 		if len(result.FormulaVars) > 0 {
 			varsForAttachment = append([]string(nil), result.FormulaVars...)
 			formulaVarsForAttachment = strings.Join(result.FormulaVars, "\n")
@@ -1061,6 +1065,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		rollbackSpawnedPolecat("Hook failed")
 		return err
 	}
+	slingSteps.step("hook")
 
 	// Emit a propulsion signal if the target is the mayor.
 	// This allows the ACP propeller to react to hook changes event-driven.
@@ -1132,6 +1137,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
+		slingSteps.step("session")
 	}
 
 	// Try to inject the "start now" prompt (graceful if no tmux)

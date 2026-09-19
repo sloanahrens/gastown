@@ -227,8 +227,14 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
 			if opts.Agent == "" {
+<<<<<<< HEAD
 				rigPath := filepath.Join(townRoot, rigName)
 				if _, reason := resolvePolecatPoolAgent(townRoot, rigPath); reason != "" {
+=======
+				// peek, not resolve: a dry run prints the route it would take
+				// but must not attach local-attempt:1 to the bead.
+				if _, reason := peekPolecatPoolAgent(opts.TownRoot, opts.HookBead); reason != "" {
+>>>>>>> origin/main
 					fmt.Printf("  %s\n", reason)
 				}
 			}

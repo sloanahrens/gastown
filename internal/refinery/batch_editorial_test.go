@@ -238,22 +238,18 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 	e.config.Editorial = &config.EditorialConfig{Required: true, ReviewParallelism: 3}
 	e.beads = beads.NewWithStore(workDir, store)
 
-	var mu sync.Mutex
-	concurrent := 0
-	maxConcurrent := 0
+	// Parallelism is forced, not observed: the first ReviewParallelism
+	// reviews block at a one-shot barrier until all of them are inside, so
+	// a peak below the bound is impossible whatever the scheduler does.
+	// The upper side stays an observation (a leaking semaphore is caught
+	// only when the extra review overlaps the three at the barrier), which
+	// is fine: an observed excess is never a false alarm. Watching for
+	// ">=2 at some instant" instead flapped whenever a loaded host ran the
+	// goroutines one after another.
+	barrier := newReviewBarrier(3)
 	e.editorialExec = func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
-		mu.Lock()
-		concurrent++
-		if concurrent > maxConcurrent {
-			maxConcurrent = concurrent
-		}
-		mu.Unlock()
-
-		time.Sleep(50 * time.Millisecond)
-
-		mu.Lock()
-		concurrent--
-		mu.Unlock()
+		barrier.arrive()
+		defer barrier.leave()
 
 		verdict := "approve"
 		if mrIDFromArgs(args) == "mr-d" {
@@ -295,12 +291,71 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 	if len(reviewed) != 4 {
 		t.Fatalf("expected 4 reviewed entries, got %d", len(reviewed))
 	}
-	if maxConcurrent > 3 {
-		t.Fatalf("expected at most 3 concurrent review invocations, saw %d", maxConcurrent)
+	if barrier.timedOut() {
+		t.Fatalf("semaphore is serializing: fewer than 3 reviews were ever in flight together (barrier timed out)")
 	}
-	if maxConcurrent < 2 {
-		t.Fatalf("expected some real concurrency (>=2), saw max %d — semaphore may be serializing", maxConcurrent)
+	if got := barrier.maxInFlight(); got != 3 {
+		t.Fatalf("expected exactly 3 concurrent review invocations at the barrier, saw %d", got)
 	}
+}
+
+// reviewBarrier holds the first n callers until all n have arrived, then
+// lets everyone through; later callers pass straight through. It also
+// tracks the peak number of callers between arrive and leave.
+type reviewBarrier struct {
+	n        int
+	mu       sync.Mutex
+	arrived  int
+	inFlight int
+	peak     int
+	release  chan struct{}
+	timeout  bool
+}
+
+func newReviewBarrier(n int) *reviewBarrier {
+	return &reviewBarrier{n: n, release: make(chan struct{})}
+}
+
+func (b *reviewBarrier) arrive() {
+	b.mu.Lock()
+	b.arrived++
+	seq := b.arrived
+	b.inFlight++
+	if b.inFlight > b.peak {
+		b.peak = b.inFlight
+	}
+	if seq == b.n {
+		close(b.release)
+	}
+	b.mu.Unlock()
+	if seq > b.n {
+		return
+	}
+	select {
+	case <-b.release:
+	case <-time.After(5 * time.Second):
+		b.mu.Lock()
+		b.timeout = true
+		b.mu.Unlock()
+	}
+}
+
+func (b *reviewBarrier) leave() {
+	b.mu.Lock()
+	b.inFlight--
+	b.mu.Unlock()
+}
+
+func (b *reviewBarrier) timedOut() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.timeout
+}
+
+func (b *reviewBarrier) maxInFlight() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.peak
 }
 
 // --- ejectPatchIDChanged tests ---

@@ -121,6 +121,31 @@ fi
 
 # --- Build -------------------------------------------------------------------
 
+# Yield to a running gate (gt-htx3): make build competes for CPU with a gate
+# suite whose tests are load-sensitive, so a rebuild while a refinery, batch,
+# main-branch-test or om-review role holds a container-gate slot is deferred to
+# the next cooldown. A stub or missing gt slot status reads as "free": the
+# guard fails open on purpose so a broken status command cannot park rebuilds
+# forever (the drift escalation above still fires if that happens).
+GATE_HOLDER=$(gt slot status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for s in d.get("slots") or []:
+    role = ((s.get("owner") or {}).get("role") or "")
+    if role.endswith(("/refinery", "/refinery-batch", "/main-branch-test", "/om-review")):
+        print(role); break
+' 2>/dev/null || true)
+if [ -n "$GATE_HOLDER" ]; then
+  log "Gate busy ($GATE_HOLDER holds a container-gate slot); deferring rebuild to the next cooldown."
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped: gate busy $GATE_HOLDER]" \
+    --description "Skipped: $GATE_HOLDER holds a container-gate slot; make build would compete with its suite" >/dev/null 2>&1 || true
+  exit 0
+fi
+
 OLD_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
 log "Rebuilding gt from $RIG_ROOT..."
 
