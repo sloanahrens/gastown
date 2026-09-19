@@ -449,17 +449,23 @@ func TestRequeueDrainedNudgesPreservesFailedDelivery(t *testing.T) {
 
 	requeueDrainedNudges(townRoot, session, "test", drained)
 
+	// Both nudges are preserved — a failed injection must not lose the message.
+	pending, err := nudge.Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != len(drained) {
+		t.Fatalf("Pending = %d, want %d (requeue must preserve failed deliveries)", pending, len(drained))
+	}
+
+	// But they are deferred, so the failure cannot be retried on the very next
+	// poll tick — that is the gt-tmlu re-injection loop.
 	got, err := nudge.Drain(townRoot, session)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
-	if len(got) != len(drained) {
-		t.Fatalf("Drain got %d nudges, want %d", len(got), len(drained))
-	}
-	for i := range drained {
-		if got[i].Message != drained[i].Message || got[i].Sender != drained[i].Sender {
-			t.Fatalf("requeued[%d] = %#v, want %#v", i, got[i], drained[i])
-		}
+	if len(got) != 0 {
+		t.Fatalf("Drain immediately after requeue got %d nudges, want 0 (deferred by backoff)", len(got))
 	}
 }
 

@@ -557,6 +557,22 @@ func isAtomicWriteTemp(name string) bool {
 // from mayor/rigs.json nor a built-in town-level actor). Fixture actors like
 // "myr/mycat" (the gt-x9o incident) are caught; concurrent legitimate agents
 // pass.
+//
+// gt-5few: offset is a byte position recorded by Stat at snapshot time, but
+// the town's agents append to the live file whenever they like, so a line can
+// be partially present at either end of the window being scanned:
+//
+//   - head — Stat ran mid-append, so offset points into a line and the scan
+//     starts with that line's tail. This is what the refinery kept hitting:
+//     the "unparseable event" fragments in the gt-5few comments are real
+//     live-town lines missing their leading `{"ts":` (7 bytes).
+//   - tail — a writer is mid-append at scan time, leaving a last line with no
+//     trailing newline.
+//
+// Both fragments fail to parse and were reported as leaked state, though the
+// writer was a concurrent legitimate agent. A truncation says nothing about
+// the actor that produced the line, so partial lines are skipped at both
+// ends; every complete appended line is still checked in full.
 func suspiciousAppendedEvents(root string, offset int64) []string {
 	f, err := os.Open(filepath.Join(root, ".events.jsonl")) //nolint:gosec // path derives from detected town root
 	if err != nil {
@@ -569,27 +585,58 @@ func suspiciousAppendedEvents(root string, offset int64) []string {
 
 	known := knownActorPrefixes(root)
 	var leaks []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var ev struct {
-			Actor string `json:"actor"`
-			Type  string `json:"type"`
-		}
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			leaks = append(leaks, fmt.Sprintf("unparseable event appended to .events.jsonl: %.120s", line))
-			continue
-		}
-		prefix, _, _ := strings.Cut(strings.TrimSuffix(ev.Actor, "/"), "/")
-		if !known[prefix] {
-			leaks = append(leaks, fmt.Sprintf("event with unknown actor %q (type %s) appended to .events.jsonl", ev.Actor, ev.Type))
+	r := bufio.NewReader(f)
+	if !atLineStart(f, offset) {
+		// The snapshot boundary landed inside a line, so that line was at
+		// least partly written before the snapshot. Discard the remainder
+		// and start at the next line boundary.
+		if _, err := r.ReadString('\n'); err != nil {
+			return nil // nothing in the window but the partial line
 		}
 	}
-	return leaks
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			// err is io.EOF (or a read failure). Any bytes returned had no
+			// trailing newline: a write in flight at scan time, not an
+			// appended event with an actor to judge.
+			return leaks
+		}
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			leaks = append(leaks, appendedEventLeaks(trimmed, known)...)
+		}
+	}
+}
+
+// atLineStart reports whether offset is a line boundary: the start of the
+// file, or immediately after a newline. Unknown positions are treated as
+// boundaries so the scan degrades to the pre-gt-5few behavior.
+func atLineStart(f *os.File, offset int64) bool {
+	if offset <= 0 {
+		return true
+	}
+	var prev [1]byte
+	if _, err := f.ReadAt(prev[:], offset-1); err != nil {
+		return true
+	}
+	return prev[0] == '\n'
+}
+
+// appendedEventLeaks classifies one complete appended line: malformed JSON, or
+// an event whose actor prefix the town does not know.
+func appendedEventLeaks(line string, known map[string]bool) []string {
+	var ev struct {
+		Actor string `json:"actor"`
+		Type  string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		return []string{fmt.Sprintf("unparseable event appended to .events.jsonl: %.120s", line)}
+	}
+	prefix, _, _ := strings.Cut(strings.TrimSuffix(ev.Actor, "/"), "/")
+	if !known[prefix] {
+		return []string{fmt.Sprintf("event with unknown actor %q (type %s) appended to .events.jsonl", ev.Actor, ev.Type)}
+	}
+	return nil
 }
 
 // builtinActorPrefixes are town-level actors that are always legitimate.

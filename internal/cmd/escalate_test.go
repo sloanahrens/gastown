@@ -722,16 +722,27 @@ esac
 }
 
 // TestRunEscalateListAllPassesIncludeInfra verifies `gt escalate list --all`
-// queries bd with --include-infra.
+// queries bd with --include-infra, that the query is cross-rig, and that it
+// survives bd's tree-vs-JSON behaviour.
 //
 // Regression test for gt-fcsf: escalations are ephemeral wisps, invisible to
 // `bd list` without --include-infra — the same bug class as gt-4mnd.
+//
+// The stub models bd rather than echoing JSON unconditionally, so a green run
+// shows the query actually worked, not merely that argv looked right:
+//   - it answers with human-readable tree text unless --flat is present
+//     (bd v0.59+ ignores --json on list without --flat), so dropping the flag
+//     makes runEscalateList fail its json.Unmarshal;
+//   - it records BEADS_DIR, which must be absent for prefix routing to reach
+//     other rigs' databases. Pinning it is the gt-wbxb "No escalations found"
+//     symptom.
 func TestRunEscalateListAllPassesIncludeInfra(t *testing.T) {
 	stubDir := t.TempDir()
 	argsPath := filepath.Join(stubDir, "args.txt")
 
 	stubScript := `#!/bin/sh
 {
+  printf 'BEADS_DIR=%s\n' "${BEADS_DIR-<unset>}"
   for a in "$@"; do printf '%s\t' "$a"; done
   printf '\n'
 } >> "` + argsPath + `"
@@ -740,7 +751,21 @@ case "$1" in
     exit 1
     ;;
   list)
-    echo '[]'
+    has_flat=0
+    for a in "$@"; do
+      if [ "$a" = "--flat" ]; then has_flat=1; fi
+    done
+    if [ "$has_flat" = 1 ]; then
+      echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]'
+    else
+      echo 'hq-wisp1  [open] Dolt: server unreachable'
+    fi
+    exit 0
+    ;;
+  show)
+    # The live'd cross-check that filters phantom escalations; answer for the
+    # one ID the list query above returned.
+    echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]'
     exit 0
     ;;
   *)
@@ -784,10 +809,13 @@ esac
 		t.Fatalf("read call log: %v", err)
 	}
 	callLog := string(logData)
-	for _, want := range []string{"--label=gt:escalation", "--status=all", "--include-infra"} {
+	for _, want := range []string{"--label=gt:escalation", "--status=all", "--include-infra", "--flat"} {
 		if !strings.Contains(callLog, want) {
 			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
 		}
+	}
+	if !strings.Contains(callLog, "BEADS_DIR=<unset>") {
+		t.Errorf("expected the list query to run without BEADS_DIR so bd routes across rigs, got log:\n%s", callLog)
 	}
 }
 

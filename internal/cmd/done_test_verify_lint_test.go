@@ -3,6 +3,9 @@
 package cmd
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,6 +134,213 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		}
 		if !result.ran || !result.success {
 			t.Errorf("tests did not run: %+v", result)
+		}
+	})
+}
+
+// TestRunDefaultTestVerification_LintLockContention covers gt-xsty: two lints
+// running at once make golangci-lint's loser exit with "parallel golangci-lint
+// is running" without analysing anything. The gate must wait the holder out
+// and retry (attributing the wait) instead of reporting the collision as a
+// lint finding, and must still report a real finding as a finding.
+func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	// collidingLint appends one line per attempt and prints golangci-lint's
+	// contention message on the first attempt only, so the second attempt
+	// looks like an uncontended lint that found nothing.
+	collidingLint := func(dir string) (lint, counter string) {
+		counter = filepath.Join(dir, "lint-attempts")
+		lint = fmt.Sprintf(`n=$(grep -c . %q 2>/dev/null || echo 0); echo x >> %q; `+
+			`if [ "$n" -lt 1 ]; then echo 'Error: parallel golangci-lint is running' >&2; exit 2; fi`,
+			counter, counter)
+		return lint, counter
+	}
+	attemptsMade := func(t *testing.T, counter string) int {
+		t.Helper()
+		got, err := os.ReadFile(counter)
+		if err != nil {
+			t.Fatalf("reading attempt counter %s: %v", counter, err)
+		}
+		n := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(got)), "\n") {
+			if strings.TrimSpace(line) != "" {
+				n++
+			}
+		}
+		return n
+	}
+	commitPkga := func(t *testing.T, dir string) {
+		t.Helper()
+		changePkga(t, dir)
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+	}
+
+	t.Run("lock held once: waited out, retried, then lint passes and tests run", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		commitPkga(t, dir)
+		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+
+		lint, counter := collidingLint(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint}
+		g := git.NewGit(dir)
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-lock-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification after a released lock: %v", err)
+		}
+		if !result.lintRan {
+			t.Errorf("lint not recorded after a successful retry: %+v", result)
+		}
+		if !result.ran || !result.success {
+			t.Errorf("tests did not run after the retry: %+v", result)
+		}
+		if got := attemptsMade(t, counter); got != 2 {
+			t.Errorf("lint ran %d times, want 2 (one collision, one retry)", got)
+		}
+		log, _ := os.ReadFile(result.logPath)
+		for _, want := range []string{"lint lock held by another golangci-lint", "attempt 1/3", "lint passed in"} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("verify log is missing %q:\n%s", want, log)
+			}
+		}
+	})
+
+	t.Run("lock never released: bounded retries, reported as contention not a finding", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		commitPkga(t, dir)
+		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+
+		testMarker := filepath.Join(dir, "tests-ran")
+		counter := filepath.Join(dir, "lint-attempts")
+		lint := fmt.Sprintf(`echo x >> %q; echo 'Error: parallel golangci-lint is running' >&2; exit 2`, counter)
+		mq := &config.MergeQueueConfig{
+			TestCommand:       "go test ./...",
+			LintCommand:       lint,
+			TestVerifyCommand: "echo ran > '" + testMarker + "'",
+		}
+		g := git.NewGit(dir)
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-lock-stuck-role")
+		if err == nil {
+			t.Fatalf("expected a refusal while the lock stays held, got result=%+v", result)
+		}
+		for _, want := range []string{
+			"lint-verify failed",
+			"exit 2",
+			"another golangci-lint held the lock across 2 retries",
+			"no tests were run",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error is missing %q: %v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "fix the lint findings") {
+			t.Errorf("lock contention was reported as a lint finding: %v", err)
+		}
+		if got := attemptsMade(t, counter); got != 3 {
+			t.Errorf("lint attempts = %d, want 3 (initial + 2 retries)", got)
+		}
+		if _, statErr := os.Stat(testMarker); statErr == nil {
+			t.Error("tests ran despite the lint lock never being released")
+		}
+	})
+
+	t.Run("a real finding is not mistaken for lock contention: no retry", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		commitPkga(t, dir)
+		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+
+		counter := filepath.Join(dir, "lint-attempts")
+		lint := fmt.Sprintf(`echo x >> %q; echo 'pkga/a.go:1:1: something is wrong (fakelint)'; exit 3`, counter)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint}
+		g := git.NewGit(dir)
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-real-finding-role")
+		if err == nil {
+			t.Fatalf("expected a lint refusal, got result=%+v", result)
+		}
+		for _, want := range []string{"lint-verify failed", "exit 3", "fakelint", "fix the lint findings", "no tests were run"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error is missing %q: %v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "held the lock") {
+			t.Errorf("a real finding was attributed to lock contention: %v", err)
+		}
+		if got := attemptsMade(t, counter); got != 1 {
+			t.Errorf("lint attempts = %d, want 1 (a finding is never retried)", got)
+		}
+	})
+}
+
+// TestIsLintLockContention pins the detection to golangci-lint's own wording:
+// the marker is the string its error carries, and near-misses (the same words
+// in lint *output*, or an unrelated failure) must not trigger a retry.
+func TestIsLintLockContention(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"golangci-lint's cobra error", "Error: parallel golangci-lint is running\n", true},
+		{"embedded in a wrapped message", "lint failed: exit 2: Error: parallel golangci-lint is running", true},
+		{"a finding", "pkga/a.go:1:1: something is wrong (fakelint)\n", false},
+		{"empty output", "", false},
+		{"a different lint failure", "can't load config: unsupported version\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLintLockContention(tc.output); got != tc.want {
+				t.Errorf("isLintLockContention(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetryLintLockContention_BudgetBoundsRetry pins the two ways the retry
+// loop refuses to outlive its budget: it never starts a retry the budget
+// cannot also fit a lint into, and it refuses a context with no deadline
+// outright (both callers are bounded; answering "yes" there would turn a
+// contention loop into a hung gate).
+func TestRetryLintLockContention_BudgetBoundsRetry(t *testing.T) {
+	stubLintLockRetryDelay(t, time.Millisecond)
+
+	alwaysContended := func(attempts *int) func() lintAttempt {
+		return func() lintAttempt {
+			*attempts++
+			return lintAttempt{err: errors.New("exit 2"), output: "Error: parallel golangci-lint is running"}
+		}
+	}
+
+	t.Run("a budget with no room left for the lint itself: no retry", func(t *testing.T) {
+		// The deadline is exactly the reserve, so even a 1ms wait would leave
+		// less than a lint's worth of budget.
+		ctx, cancel := context.WithTimeout(context.Background(), lintLockRetryReserve)
+		defer cancel()
+
+		attempts := 0
+		outcome := retryLintLockContention(ctx, alwaysContended(&attempts), nil)
+		if attempts != 1 {
+			t.Errorf("attempts = %d, want 1 (no retry may eat the lint's own budget)", attempts)
+		}
+		if outcome.retries != 0 {
+			t.Errorf("retries = %d, want 0", outcome.retries)
+		}
+		if outcome.err == nil {
+			t.Error("outcome.err = nil, want the attempt's error")
+		}
+	})
+
+	t.Run("a context with no deadline: no retry", func(t *testing.T) {
+		attempts := 0
+		outcome := retryLintLockContention(context.Background(), alwaysContended(&attempts), nil)
+		if attempts != 1 {
+			t.Errorf("attempts = %d, want 1 (an unbounded context must not drive an unbounded retry loop)", attempts)
+		}
+		if outcome.err == nil {
+			t.Error("outcome.err = nil, want the attempt's error")
 		}
 	})
 }

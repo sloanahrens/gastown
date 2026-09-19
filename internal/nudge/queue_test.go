@@ -1,12 +1,14 @@
 package nudge
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestEnqueueAndDrain(t *testing.T) {
@@ -789,5 +791,195 @@ func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
 	// Verify no double-delivery: total must be exactly count, not more.
 	if total > count {
 		t.Errorf("double delivery detected: got %d total nudges, want exactly %d", total, count)
+	}
+}
+
+// clearDeliverAfter rewrites every queued nudge for a session with a zero
+// DeliverAfter, making it immediately deliverable again. Tests use it to model
+// "the requeue backoff window elapsed" without sleeping for the real backoff.
+func clearDeliverAfter(t *testing.T, townRoot, session string) {
+	t.Helper()
+
+	dir := queueDir(townRoot, session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // nothing queued yet
+		}
+		t.Fatalf("read queue dir: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			t.Fatalf("unmarshal %s: %v", entry.Name(), err)
+		}
+		n.DeliverAfter = time.Time{}
+		out, err := json.Marshal(n)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", entry.Name(), err)
+		}
+		if err := os.WriteFile(path, out, 0644); err != nil {
+			t.Fatalf("write %s: %v", entry.Name(), err)
+		}
+	}
+}
+
+// TestRequeueDefersRetryUntilBackoffElapses covers the gt-tmlu re-injection
+// loop: after a failed injection the nudge must be preserved but must NOT be
+// immediately eligible again, or the next poll tick re-injects it.
+func TestRequeueDefersRetryUntilBackoffElapses(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-backoff"
+
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender:  "deacon",
+		Message: "HEALTH_CHECK from deacon",
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	drained, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(drained) != 1 {
+		t.Fatalf("Drain got %d nudges, want 1", len(drained))
+	}
+
+	if err := Requeue(townRoot, session, drained); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+
+	// Preserved, not lost.
+	if pending, err := Pending(townRoot, session); err != nil {
+		t.Fatalf("Pending: %v", err)
+	} else if pending != 1 {
+		t.Fatalf("Pending = %d, want 1 (requeue must not drop the nudge)", pending)
+	}
+
+	// But the retry is spaced: the very next poll tick must not re-inject it.
+	again, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain after requeue: %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("Drain after requeue returned %d nudges, want 0 (deferred by backoff)", len(again))
+	}
+
+	// Once the backoff elapses the nudge is deliverable again, with the failed
+	// attempt recorded so the cap can stop a persistent failure.
+	clearDeliverAfter(t, townRoot, session)
+	again, err = Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain after backoff: %v", err)
+	}
+	if len(again) != 1 {
+		t.Fatalf("Drain after backoff returned %d nudges, want 1", len(again))
+	}
+	if again[0].Attempts != 1 {
+		t.Errorf("Attempts = %d, want 1 (one failed delivery recorded)", again[0].Attempts)
+	}
+	if again[0].Message != "HEALTH_CHECK from deacon" {
+		t.Errorf("Message = %q, want the original message", again[0].Message)
+	}
+}
+
+// TestRequeueDropsNudgeAfterMaxAttempts is the hard bound on the gt-tmlu loop.
+// A nudge whose injection keeps reporting failure must be dropped rather than
+// re-injected forever — the reported incident delivered one nudge 139 times in
+// 12 minutes, ending only when it expired.
+func TestRequeueDropsNudgeAfterMaxAttempts(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-cap"
+	maxAttempts := nudgeConfig(townRoot).MaxDeliveryAttemptsV()
+
+	// Model the delivery loop: each round is one attempted injection that
+	// reports failure, with the retry backoff elapsing in between.
+	cur := []QueuedNudge{{
+		Sender:  "deacon",
+		Message: "HEALTH_CHECK from deacon",
+	}}
+
+	failedAttempts := 0
+	for i := 0; i < maxAttempts+5; i++ {
+		if err := Requeue(townRoot, session, cur); err != nil {
+			t.Fatalf("Requeue round %d: %v", i, err)
+		}
+
+		pending, err := Pending(townRoot, session)
+		if err != nil {
+			t.Fatalf("Pending round %d: %v", i, err)
+		}
+		if pending == 0 {
+			break // dropped — the loop terminates
+		}
+
+		failedAttempts++
+
+		// The backoff window elapses, then the nudge is attempted again.
+		clearDeliverAfter(t, townRoot, session)
+		cur, err = Drain(townRoot, session)
+		if err != nil {
+			t.Fatalf("Drain round %d: %v", i, err)
+		}
+		if len(cur) != 1 {
+			t.Fatalf("Drain round %d got %d nudges, want 1", i, len(cur))
+		}
+	}
+
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("final Pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("queue still holds %d nudge(s) after %d rounds; the retry loop is unbounded", pending, maxAttempts+5)
+	}
+	if failedAttempts != maxAttempts-1 {
+		t.Errorf("nudge survived %d failed attempts, want %d (dropped on failure %d)",
+			failedAttempts, maxAttempts-1, maxAttempts)
+	}
+}
+
+func TestFirstLineExcerpt(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{"single line", "HEALTH_CHECK from deacon", "HEALTH_CHECK from deacon"},
+		{"multi line", "\n  first line  \nsecond line", "first line"},
+		{"exactly at limit", strings.Repeat("a", 120), strings.Repeat("a", 120)},
+		{"over limit", strings.Repeat("a", 130), strings.Repeat("a", 120) + "…"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := firstLineExcerpt(tc.message); got != tc.want {
+				t.Errorf("firstLineExcerpt = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// A cut inside a multi-byte rune would emit invalid UTF-8 into the log.
+	multi := firstLineExcerpt(strings.Repeat("é", 130))
+	if !utf8.ValidString(multi) {
+		t.Errorf("firstLineExcerpt produced invalid UTF-8: %q", multi)
+	}
+	if len(multi) > 120+len("…") {
+		t.Errorf("excerpt is %d bytes, want at most %d", len(multi), 120+len("…"))
+	}
+	if !strings.HasSuffix(multi, "…") {
+		t.Errorf("excerpt = %q, want a trailing ellipsis", multi)
 	}
 }

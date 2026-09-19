@@ -77,6 +77,16 @@ func stubVerifyGate(
 	}
 }
 
+// stubLintLockRetryDelay shortens the waits between lint-lock retries so a
+// test can drive the retry path (gt-xsty) without sleeping the real tens of
+// seconds.
+func stubLintLockRetryDelay(t *testing.T, delays ...time.Duration) {
+	t.Helper()
+	prev := lintLockRetryDelay
+	lintLockRetryDelay = delays
+	t.Cleanup(func() { lintLockRetryDelay = prev })
+}
+
 // stubVerifyProgress shortens the gate's progress interval so a test can
 // observe progress lines without waiting out the real one.
 func stubVerifyProgress(t *testing.T, interval time.Duration) {

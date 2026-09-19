@@ -211,6 +211,89 @@ func TestTripwire_ToleratesAllBuiltinActorPrefixes(t *testing.T) {
 	}
 }
 
+// appendEvents appends raw content to the town's .events.jsonl, exactly as a
+// concurrent live-town writer would.
+func appendEvents(t *testing.T, town, content string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(town, ".events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gt-5few: the tripwire's snapshot offset is a byte position taken by Stat on
+// the live file, and concurrent agents append to that file constantly. When
+// Stat races an append the offset lands mid-line, so the scan began with the
+// line's tail — real live-town JSON missing its leading `{"ts":` (7 bytes) —
+// and reported the concurrent agent's own event as leaked state. The refinery
+// hit this on most gate cycles; zero tests failed, but both heavy packages
+// reported FAIL and the run's exit code could not answer "did the code pass?".
+func TestTripwire_ToleratesMidLineSnapshotOffset(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+	appendEvents(t, town, `{"ts":"2026-09-18T21:29:48Z","source":"gt","type":"session_start","actor":"gastown/polecats/garnet","visibility":"feed"}`+"\n")
+
+	// diff() would use the snapshot's own boundary, which is a line start in
+	// this fixture; drive the detector directly at the truncation the town
+	// actually produced so the mid-line path is exercised. +7 skips `{"ts":"`.
+	leaks := suspiciousAppendedEvents(town, snap.eventsSize+7)
+	if len(leaks) != 0 {
+		t.Errorf("mid-line snapshot offset flagged a concurrent live-town event: %v", leaks)
+	}
+}
+
+func TestTripwire_DetectsFixtureActorAfterMidLineSnapshotOffset(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+	// Concurrent legitimate traffic first (the line the offset lands in), then
+	// the leak that must still be caught.
+	appendEvents(t, town,
+		`{"ts":"2026-09-18T21:29:48Z","source":"gt","type":"nudge","actor":"gastown/witness","visibility":"feed"}`+"\n"+
+			`{"ts":"2026-09-18T21:29:49Z","source":"gt","type":"spawn","actor":"myr/mycat","visibility":"feed"}`+"\n")
+
+	leaks := suspiciousAppendedEvents(town, snap.eventsSize+7)
+	if len(leaks) != 1 {
+		t.Fatalf("expected exactly 1 leak (fixture actor), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "myr/mycat") {
+		t.Errorf("fixture actor not flagged: %v", leaks)
+	}
+}
+
+// A writer mid-append when the scan runs leaves a last line with no trailing
+// newline; that fragment is truncated the same way, and must not be reported.
+func TestTripwire_ToleratesPartialTrailingLine(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+	appendEvents(t, town, `{"ts":"2026-09-18T22:29:19Z","source":"gt","type":"nudge","actor":"dog","payload":{"reason":"DOG_`)
+
+	if leaks := snap.diff(); len(leaks) != 0 {
+		t.Errorf("partial trailing line flagged as leak: %v", leaks)
+	}
+}
+
+// Complete lines must still be judged: a malformed line that ends with a
+// newline is not a truncation, so the leak check stays honest.
+func TestTripwire_FlagsCompleteMalformedLine(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+	appendEvents(t, town, "this is not json\n")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected exactly 1 leak (malformed line), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "unparseable") {
+		t.Errorf("malformed line not flagged as unparseable: %v", leaks)
+	}
+}
+
 func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
 	t.Setenv("GT_ROLE", "gastown/polecats/flint")
 	t.Setenv("BD_ACTOR", "someone")

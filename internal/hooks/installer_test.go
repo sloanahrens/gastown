@@ -183,25 +183,32 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadSettings: %v", err)
 			}
-			// Post gt-5ihs, the pattern lives in a Hook's If field under the
-			// bare "Bash" matcher — Claude Code's matcher only ever matches
-			// the tool name.
+			// Post gt-5ihs/gt-3mp1 the guard lives under the bare "Bash"
+			// tool-name matcher — Claude Code's matcher only ever matches the
+			// tool name — and carries NO If: it is the self-filtering
+			// boot-sendkeys guard, which reads tool_input.command off stdin.
+			// Match on the guard command, not on an If value: asserting "the
+			// hook with an empty If" is what let a regression through before,
+			// because it named whichever ungated hook happened to be last.
 			entry, ok := findPreToolUse(&settings.Hooks, "Bash")
 			if !ok {
 				t.Fatal("boot install did not write the bare Bash PreToolUse entry")
 			}
 			var tmuxGuardCommand string
 			for _, h := range entry.Hooks {
-				if h.If == "Bash(*tmux*send-keys*)" {
+				if strings.Contains(h.Command, "tap guard boot-sendkeys") {
 					tmuxGuardCommand = h.Command
+					if h.If != "" {
+						t.Fatalf("boot raw tmux send-keys guard must self-filter (If=\"\"), got If=%q", h.If)
+					}
 				}
 			}
 			if tmuxGuardCommand == "" {
-				t.Fatal("boot install did not write managed raw tmux send-keys guard")
+				t.Fatal("boot install did not write managed raw tmux send-keys guard (gt tap guard boot-sendkeys)")
 			}
-			if !strings.Contains(tmuxGuardCommand, "gt nudge --mode=immediate deacon") {
-				t.Fatalf("boot guard command does not point to gt nudge: %s", tmuxGuardCommand)
-			}
+			// The block banner and the nudge it points at are the guard's own
+			// output now, not part of the hook command — see
+			// tap_guard_boot_sendkeys_test.go for that text.
 			if len(settings.Hooks.UserPromptSubmit) != 0 {
 				t.Fatalf("boot managed settings should disable UserPromptSubmit, got %+v", settings.Hooks.UserPromptSubmit)
 			}
