@@ -952,3 +952,43 @@ func TestWitnessGitPushReachesGuard(t *testing.T) {
 		t.Errorf("refinery push blocked: %q", reason)
 	}
 }
+
+// Regression tests for gt-3mp1: the if-glob evaluator in Claude Code
+// has a bug where it treats certain shell patterns as "match any pattern
+// starting with *" when it cannot statically resolve them. This caused
+// every if-gated deny hook to fire on unrelated commands.
+func TestDangerousCommand_Gt3mp1Regression(t *testing.T) {
+	// Pattern (a): Commands with { brace group containing a quoted string
+	// trip the if-glob evaluator, which then matches any leading-* glob
+	braceGroupCommands := []string{
+		`echo x{'a'}y`,
+		`echo x{"a"}y`,
+		`python3 - <<'EOF'
+print({'a'})
+EOF`,
+	}
+	for _, cmd := range braceGroupCommands {
+		t.Run("brace-group with quoted string", func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(cmd, 0, "")
+			if reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed (brace-group with quoted string should not trip the guard)", cmd, reason)
+			}
+		})
+	}
+
+	// Pattern (b): Variable assigned from command substitution in the same
+	// command line, then used as a bare double-quoted argument trips hooks
+	commandSubCommands := []string{
+		`M=$(echo abc); echo "$M"`,
+		`ID=$(gt mail inbox --json 2>/dev/null | python3 -c "import json,sys; m=json.load(sys.stdin); print(m[0]['id'] if m else '')"); gt mail read "$ID"`,
+		`MAIN=$(git ls-remote --heads origin main | cut -f1); git cat-file -e "$MAIN"`,
+	}
+	for _, cmd := range commandSubCommands {
+		t.Run("command substitution with bare $VAR", func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(cmd, 0, "")
+			if reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed (command substitution with bare $VAR should not trip the guard)", cmd, reason)
+			}
+		})
+	}
+}

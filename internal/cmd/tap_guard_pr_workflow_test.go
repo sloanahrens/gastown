@@ -169,3 +169,69 @@ func TestPRWorkflowGuard_Integration(t *testing.T) {
 		})
 	}
 }
+
+// Regression tests for gt-3mp1: the if-glob evaluator in Claude Code
+// has a bug where it treats certain shell patterns as "match any pattern
+// starting with *" when it cannot statically resolve them. This caused
+// every if-gated deny hook to fire on unrelated commands.
+func TestPRWorkflowGuard_Gt3mp1Regression(t *testing.T) {
+	bin := buildGT(t)
+	workDir := t.TempDir()
+
+	run := func(t *testing.T, command string, agentContext bool) (exitCode int, stderr string) {
+		t.Helper()
+		env := testutil.CleanGTEnv()
+		if agentContext {
+			env = append(env, "GT_POLECAT=1")
+		}
+		cmd := exec.Command(bin, "tap", "guard", "pr-workflow")
+		cmd.Dir = workDir
+		cmd.Env = env
+		cmd.Stdin = bytes.NewBufferString(`{"tool_name":"Bash","tool_input":{"command":"` + command + `"}}`)
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		err := cmd.Run()
+		if err == nil {
+			return 0, errBuf.String()
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), errBuf.String()
+		}
+		t.Fatalf("running guard: %v", err)
+		return -1, ""
+	}
+
+	// Pattern (a): Commands with { brace group containing a quoted string
+	// trip the if-glob evaluator, which then matches any leading-* glob
+	braceGroupCommands := []string{
+		`echo x{'a'}y`,
+		`echo x{"a"}y`,
+		`python3 - <<'EOF'
+print({'a'})
+EOF`,
+	}
+	for _, cmd := range braceGroupCommands {
+		t.Run("brace-group with quoted string", func(t *testing.T) {
+			code, _ := run(t, cmd, false) // outside agent context
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0 (brace-group with quoted string should not trip the guard)", code)
+			}
+		})
+	}
+
+	// Pattern (b): Variable assigned from command substitution in the same
+	// command line, then used as a bare double-quoted argument trips hooks
+	commandSubCommands := []string{
+		`M=$(echo abc); echo "$M"`,
+		`ID=$(gt mail inbox --json 2>/dev/null | python3 -c "import json,sys; m=json.load(sys.stdin); print(m[0]['id'] if m else '')"); gt mail read "$ID"`,
+		`MAIN=$(git ls-remote --heads origin main | cut -f1); git cat-file -e "$MAIN"`,
+	}
+	for _, cmd := range commandSubCommands {
+		t.Run("command substitution with bare $VAR", func(t *testing.T) {
+			code, _ := run(t, cmd, false) // outside agent context
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0 (command substitution with bare $VAR should not trip the guard)", code)
+			}
+		})
+	}
+}

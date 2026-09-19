@@ -444,8 +444,8 @@ func TestComputeExpected(t *testing.T) {
 	if len(expected.SessionStart) != 1 || expected.SessionStart[0].Hooks[0].Command != "gastown-crew-session" {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
-	// On-disk base has no PreToolUse, so DefaultBase's 3 pr-workflow guards are
-	// backfilled. The crew override adds Bash(git*), making 4 total.
+	// On-disk base has no PreToolUse, so DefaultBase's bare-Bash guard entry
+	// is backfilled. The crew override adds its own Bash(git*) entry.
 	defaultPTU := len(DefaultBase().PreToolUse)
 	if len(expected.PreToolUse) != defaultPTU+1 {
 		t.Errorf("expected %d PreToolUse (default %d + crew 1), got %d", defaultPTU+1, defaultPTU, len(expected.PreToolUse))
@@ -586,14 +586,15 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	// "Bash" tool-name matcher — Claude Code's matcher only ever matches the
 	// tool name. patrol-loop self-filters on tool_input.command (gt-qqfy),
 	// so it needs no If — witness must have exactly one PreToolUse entry
-	// (matcher "Bash") whose Hooks accumulate the base guards (pr-workflow
-	// x3, dangerous-command x1) AND witness's own ungated patrol-loop hook.
+	// (matcher "Bash") whose Hooks accumulate the base guards (pr-workflow,
+	// dangerous-command, container-suite) AND witness's own ungated
+	// patrol-loop hook.
 	witness, err := ComputeExpected("witness")
 	if err != nil {
 		t.Fatalf("ComputeExpected(witness) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "witness", witness, "tap guard patrol-loop")
-	requireIfConditions(t, "witness", witness, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard pr-workflow")
 	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected witness to inherit SessionStart from DefaultBase")
 	}
@@ -606,7 +607,7 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Fatalf("ComputeExpected(deacon) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard patrol-loop")
-	requireIfConditions(t, "deacon", deacon, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard pr-workflow")
 	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected deacon to inherit SessionStart from DefaultBase")
 	}
@@ -617,35 +618,46 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Fatalf("ComputeExpected(refinery) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard patrol-loop")
-	requireIfConditions(t, "refinery", refinery, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard pr-workflow")
 	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected refinery to inherit SessionStart from DefaultBase")
 	}
 }
 
-var prWorkflowIfConditions = []string{
-	"Bash(gh pr create*)",
-	"Bash(git checkout -b*)",
-	"Bash(git switch -c*)",
-}
+// TestBuiltinHooksNeverUseIf pins the gt-3mp1 invariant: no BUILT-IN hook —
+// DefaultBase or any DefaultOverrides role — carries an If condition.
+//
+// The reason is not stylistic. Claude Code's "if" evaluator treats a command
+// it cannot statically resolve — a brace group containing a quoted string
+// (echo x{"a"}y, any JSON/dict literal), or an argument-position $(...)
+// substitution — as matching ANY pattern, so a deny hook gated by a
+// leading-* glob fires on unrelated commands. That took out a share of the
+// witness's patrol traffic (gt-3mp1). A guard that needs to discriminate on
+// the command text must read tool_input.command off stdin instead, which is
+// what every built-in guard now does; an If that creeps back into the
+// defaults reintroduces the failure, so assert its absence here rather than
+// trusting review to notice.
+func TestBuiltinHooksNeverUseIf(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
 
-// requireIfConditions asserts that cfg's PreToolUse has a single bare-"Bash"
-// matcher entry whose Hooks carry every want condition in their If field
-// (gt-5ihs: matcher must be the tool name, never a pattern).
-func requireIfConditions(t *testing.T, label string, cfg *HooksConfig, want []string) {
-	t.Helper()
-	entry, ok := findPreToolUse(cfg, "Bash")
-	if !ok {
-		t.Fatalf("%s: missing bare \"Bash\" PreToolUse matcher entry", label)
-	}
-	have := make(map[string]bool, len(entry.Hooks))
-	for _, h := range entry.Hooks {
-		have[h.If] = true
-	}
-	for _, w := range want {
-		if !have[w] {
-			t.Errorf("%s: missing PreToolUse hook with If=%q under matcher \"Bash\"", label, w)
+	check := func(label string, cfg *HooksConfig) {
+		t.Helper()
+		for _, eventType := range EventTypes {
+			for _, entry := range cfg.GetEntries(eventType) {
+				for _, h := range entry.Hooks {
+					if h.If != "" {
+						t.Errorf("%s: %s hook on matcher %q has If=%q; built-in guards must self-filter on tool_input.command instead of an if-glob (gt-3mp1)",
+							label, eventType, entry.Matcher, h.If)
+					}
+				}
+			}
 		}
+	}
+
+	check("DefaultBase", DefaultBase())
+	for target, override := range DefaultOverrides() {
+		check("DefaultOverrides["+target+"]", override)
 	}
 }
 
@@ -746,7 +758,7 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 		t.Fatalf("dog should disable UserPromptSubmit mail-check, got %+v", dog.UserPromptSubmit)
 	}
 	// Base guards must still apply alongside the allowlist guard.
-	requireIfConditions(t, "dog", dog, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "dog", dog, "tap guard pr-workflow")
 	hasDangerousCommand := false
 	for _, h := range entry.Hooks {
 		if strings.Contains(h.Command, "tap guard dangerous-command") && h.If == "" {
@@ -808,9 +820,9 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
 	}
 	// The base's own guards share the bare "Bash" matcher and must survive the
-	// union (gt-5ihs): pr-workflow's If-gated patterns, dangerous-command and
-	// container-suite's self-filtering hooks.
-	requireIfConditions(t, "gastown/polecats", polecats, prWorkflowIfConditions)
+	// union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command and
+	// container-suite are all self-filtering hooks with no If.
+	requireUngatedGuardCommand(t, "gastown/polecats", polecats, "tap guard pr-workflow")
 	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite"} {
 		found := false
 		for _, h := range bashEntry.Hooks {
@@ -877,26 +889,26 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 		t.Fatalf("ComputeExpected(boot): %v", err)
 	}
 
-	// Post gt-5ihs, the pattern lives in a Hook's If field under the bare
-	// "Bash" matcher — Claude Code's matcher only ever matches the tool name.
+	// Post gt-5ihs/gt-3mp1 the guard lives under the bare "Bash" tool-name
+	// matcher (Claude Code's matcher only ever matches the tool name) and
+	// carries no If: it is the self-filtering boot-sendkeys guard, which
+	// reads tool_input.command off stdin and blocks only a real tmux
+	// send-keys invocation. An If-gated inline echo+exit-2 here is what
+	// blocked every unrelated boot command (gt-3mp1).
 	entry, ok := findPreToolUse(boot, "Bash")
 	if !ok {
 		t.Fatal("boot missing bare Bash PreToolUse entry")
 	}
 	var command string
 	for _, h := range entry.Hooks {
-		if h.If == "Bash(*tmux*send-keys*)" {
+		if strings.Contains(h.Command, "tap guard boot-sendkeys") {
 			command = h.Command
 		}
 	}
 	if command == "" {
-		t.Fatal("boot missing raw tmux send-keys guard (If=Bash(*tmux*send-keys*))")
+		t.Fatal("boot missing the raw tmux send-keys guard (gt tap guard boot-sendkeys)")
 	}
-	for _, want := range []string{
-		"BLOCKED: Boot must not use raw tmux send-keys",
-		"gt nudge --mode=immediate deacon",
-		"exit 2",
-	} {
+	for _, want := range []string{"boot-sendkeys"} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("boot raw tmux guard command missing %q: %s", want, command)
 		}
@@ -914,7 +926,7 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 		t.Fatal("mayor should still have the base Bash guard entry")
 	}
 	for _, h := range mayorEntry.Hooks {
-		if h.If == "Bash(*tmux*send-keys*)" {
+		if strings.Contains(h.Command, "boot-sendkeys") {
 			t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
 		}
 	}

@@ -23,13 +23,18 @@ Hook configuration in .claude/settings.json:
   {
     "PreToolUse": [{
       "matcher": "Bash",
-      "hooks": [{"command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}]
+      "hooks": [{"command": "gt tap guard pr-workflow"}]
     }]
   }
 
 Matcher matches the TOOL NAME only (e.g. "Bash"); a command pattern like
 "Bash(gh pr create*)" belongs in a hook's "if" field, never in "matcher"
-(gt-5ihs) — a pattern written into matcher never fires.
+(gt-5ihs) — a pattern written into matcher never fires. Built-in guards
+set no "if" at all: Claude Code's "if" evaluator resolves a command it
+cannot statically analyze (a brace group holding a quoted string, an
+argument-position $(...) substitution) as matching ANY pattern, so an
+If-gated deny hook fires on unrelated commands (gt-3mp1). Guard commands
+read tool_input.command off stdin and self-filter instead.
 
 See ~/gt/docs/HOOKS.md for full documentation.`,
 }
