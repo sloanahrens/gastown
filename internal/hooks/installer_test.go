@@ -190,14 +190,17 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 			if !ok {
 				t.Fatal("boot install did not write the bare Bash PreToolUse entry")
 			}
+			// Post gt-5ihs/gt-3mp1, the guard self-filters on tool_input.command
+			// (gt-3mp1 removed the problematic "if" glob patterns that tripped the
+			// if-glob evaluator). The guard is now a single bare-Bash entry with no If.
 			var tmuxGuardCommand string
 			for _, h := range entry.Hooks {
-				if h.If == "Bash(*tmux*send-keys*)" {
+				if h.If == "" {
 					tmuxGuardCommand = h.Command
 				}
 			}
 			if tmuxGuardCommand == "" {
-				t.Fatal("boot install did not write managed raw tmux send-keys guard")
+				t.Fatal("boot install did not write managed raw tmux send-keys guard (self-filtering, no If)")
 			}
 			if !strings.Contains(tmuxGuardCommand, "gt nudge --mode=immediate deacon") {
 				t.Fatalf("boot guard command does not point to gt nudge: %s", tmuxGuardCommand)

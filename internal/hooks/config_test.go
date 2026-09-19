@@ -885,20 +885,22 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 		t.Fatalf("ComputeExpected(boot): %v", err)
 	}
 
-	// Post gt-5ihs, the pattern lives in a Hook's If field under the bare
-	// "Bash" matcher — Claude Code's matcher only ever matches the tool name.
+	// Post gt-5ihs/gt-3mp1, the guard self-filters on tool_input.command
+	// (gt-3mp1 removed the problematic "if" glob patterns that tripped the
+	// if-glob evaluator). The guard is now a single bare-Bash entry with no If.
 	entry, ok := findPreToolUse(boot, "Bash")
 	if !ok {
 		t.Fatal("boot missing bare Bash PreToolUse entry")
 	}
 	var command string
 	for _, h := range entry.Hooks {
-		if h.If == "Bash(*tmux*send-keys*)" {
+		// Guard has no If (self-filtering after gt-3mp1)
+		if h.If == "" {
 			command = h.Command
 		}
 	}
 	if command == "" {
-		t.Fatal("boot missing raw tmux send-keys guard (If=Bash(*tmux*send-keys*))")
+		t.Fatal("boot missing raw tmux send-keys guard (self-filtering, no If)")
 	}
 	for _, want := range []string{
 		"BLOCKED: Boot must not use raw tmux send-keys",
@@ -921,8 +923,9 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	if !ok {
 		t.Fatal("mayor should still have the base Bash guard entry")
 	}
+	// mayor should not have the boot's tmux guard (different role)
 	for _, h := range mayorEntry.Hooks {
-		if h.If == "Bash(*tmux*send-keys*)" {
+		if strings.Contains(h.Command, "tmux send-keys") {
 			t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
 		}
 	}
