@@ -432,7 +432,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 						{
 							Type:    "command",
 							Command: "echo 'BLOCKED: Boot must not use raw tmux send-keys; it can leave unsubmitted text staged in the Deacon TUI.' && echo 'Use: gt nudge --mode=immediate deacon \"message\" (do not add --force).' && exit 2",
-							If:      "Bash(*tmux*send-keys*)",
 						},
 					},
 				},
@@ -1053,17 +1052,14 @@ func DefaultBase() *HooksConfig {
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard pr-workflow"),
-						If:      "Bash(gh pr create*)",
 					},
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard pr-workflow"),
-						If:      "Bash(git checkout -b*)",
 					},
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard pr-workflow"),
-						If:      "Bash(git switch -c*)",
 					},
 					{
 						Type:    "command",
