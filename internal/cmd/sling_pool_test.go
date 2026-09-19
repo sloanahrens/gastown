@@ -20,19 +20,20 @@ func TestChoosePoolAgent(t *testing.T) {
 		pool     *config.PolecatPool
 		sessions []poolSession
 		want     string
+		wantLine string // exact reason; "" means only check it is non-empty
 	}{
-		{"no pool", nil, nil, ""},
-		{"pool without local agent", &config.PolecatPool{MaxLocal: 2}, nil, ""},
-		{"pool with max 0", &config.PolecatPool{LocalAgent: "l", MaxLocal: 0}, nil, ""},
-		{"empty town -> local", pool, nil, "local-coder-polecat"},
-		{"one local, old enough -> local", pool, []poolSession{s("local-coder-polecat", 10*time.Minute)}, "local-coder-polecat"},
-		{"one local, too recent -> overflow", pool, []poolSession{s("local-coder-polecat", 90*time.Second)}, "deepseek-flash"},
-		{"pool full -> overflow", pool, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Hour)}, "deepseek-flash"},
-		{"flash sessions do not count", pool, []poolSession{s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute)}, "local-coder-polecat"},
-		{"newest local decides the gap", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Minute)}, "deepseek-flash"},
-		{"oldest local alone would allow", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour)}, "local-coder-polecat"},
-		{"no gap configured -> local while room", &config.PolecatPool{LocalAgent: "l", MaxLocal: 3}, []poolSession{s("l", time.Second)}, "l"},
-		{"full with no overflow agent -> role default", &config.PolecatPool{LocalAgent: "l", MaxLocal: 1}, []poolSession{s("l", time.Hour)}, ""},
+		{"no pool", nil, nil, "", "no polecat pool configured"},
+		{"pool without local agent", &config.PolecatPool{MaxLocal: 2}, nil, "", "polecat_pool has no local_agent; using the role default"},
+		{"pool with max 0", &config.PolecatPool{LocalAgent: "l", MaxLocal: 0}, nil, "", "polecat_pool max_local is 0; using the role default"},
+		{"empty town -> local", pool, nil, "local-coder-polecat", "local seat 1/2 -> local-coder-polecat"},
+		{"one local, old enough -> local", pool, []poolSession{s("local-coder-polecat", 10*time.Minute)}, "local-coder-polecat", "local seat 2/2 -> local-coder-polecat"},
+		{"one local, too recent -> overflow", pool, []poolSession{s("local-coder-polecat", 90*time.Second)}, "deepseek-flash", "local stagger (last spawn 1m30s ago < 4m0s gap, 1/2) -> overflow deepseek-flash"},
+		{"pool full -> overflow", pool, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Hour)}, "deepseek-flash", "local full (2/2) -> overflow deepseek-flash"},
+		{"flash sessions do not count", pool, []poolSession{s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute), s("deepseek-flash", time.Minute)}, "local-coder-polecat", ""},
+		{"newest local decides the gap", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour), s("local-coder-polecat", time.Minute)}, "deepseek-flash", ""},
+		{"oldest local alone would allow", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, []poolSession{s("local-coder-polecat", time.Hour)}, "local-coder-polecat", ""},
+		{"no gap configured -> local while room", &config.PolecatPool{LocalAgent: "l", MaxLocal: 3}, []poolSession{s("l", time.Second)}, "l", ""},
+		{"full with no overflow agent -> role default", &config.PolecatPool{LocalAgent: "l", MaxLocal: 1}, []poolSession{s("l", time.Hour)}, "", "local full (1/1) -> overflow role default"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -43,7 +44,40 @@ func TestChoosePoolAgent(t *testing.T) {
 			if reason == "" {
 				t.Error("reason must never be empty")
 			}
+			if c.wantLine != "" && reason != c.wantLine {
+				t.Errorf("reason = %q, want %q", reason, c.wantLine)
+			}
 		})
+	}
+}
+
+// The seat-taken line and the overflow line must not read alike: telling them
+// apart by one word ("local pool 2/2" vs "local pool full (2/2)") cost a flash
+// seat on 2026-09-18. Both lines name the agent they picked.
+func TestChoosePoolAgentLinesAreUnambiguous(t *testing.T) {
+	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
+	local := poolSession{name: "gt-a", agent: "local-coder-polecat", created: now.Add(-10 * time.Minute)}
+
+	_, seatLine := choosePoolAgent(pool, []poolSession{local}, now)
+	_, fullLine := choosePoolAgent(pool, []poolSession{local, {name: "gt-b", agent: "local-coder-polecat", created: now.Add(-time.Hour)}}, now)
+	_, staggerLine := choosePoolAgent(pool, []poolSession{{name: "gt-c", agent: "local-coder-polecat", created: now.Add(-30 * time.Second)}}, now)
+
+	if seatLine == fullLine || seatLine == staggerLine || fullLine == staggerLine {
+		t.Fatalf("routing lines must be distinct:\n  seat:    %s\n  full:    %s\n  stagger: %s", seatLine, fullLine, staggerLine)
+	}
+	if strings.Contains(seatLine, "full") || strings.Contains(seatLine, "overflow") {
+		t.Errorf("a taken local seat must not read as an overflow: %s", seatLine)
+	}
+	for _, line := range []string{seatLine, fullLine, staggerLine} {
+		agent := "local-coder-polecat"
+		if line != seatLine {
+			agent = "deepseek-flash"
+		}
+		fields := strings.Fields(line)
+		if fields[len(fields)-1] != agent {
+			t.Errorf("routing line must end with the chosen agent %q: %s", agent, line)
+		}
 	}
 }
 

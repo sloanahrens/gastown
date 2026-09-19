@@ -28,6 +28,16 @@ type poolSession struct {
 // choosePoolAgent decides the agent for a new polecat given the pool and
 // the live polecat sessions. It returns "" when the pool does not apply
 // (unset, or no local agent) so the caller falls back to role_agents.
+//
+// The reason is a routing line printed to the operator, so each outcome gets
+// its own unambiguous wording and every line names the agent it picked:
+//
+//	local seat 2/2 -> local-coder-polecat       (took the last seat)
+//	local full (2/2) -> overflow deepseek-flash (no seat to take)
+//	local stagger (last spawn 30s ago < 4m0s gap, 1/2) -> overflow deepseek-flash
+//
+// "seat" and "full" differ by more than a word so a taken seat is never
+// misread as an overflow (that mistake cost a flash seat 2026-09-18).
 func choosePoolAgent(pool *config.PolecatPool, sessions []poolSession, now time.Time) (agent, reason string) {
 	switch {
 	case pool == nil:
@@ -49,12 +59,23 @@ func choosePoolAgent(pool *config.PolecatPool, sessions []poolSession, now time.
 		}
 	}
 	if local >= pool.MaxLocal {
-		return pool.OverflowAgent, fmt.Sprintf("local pool full (%d/%d on %s)", local, pool.MaxLocal, pool.LocalAgent)
+		return pool.OverflowAgent, fmt.Sprintf("local full (%d/%d) -> overflow %s", local, pool.MaxLocal, poolAgentLabel(pool.OverflowAgent))
 	}
 	if gap := pool.MinSpawnGapD(); gap > 0 && local > 0 && now.Sub(newest) < gap {
-		return pool.OverflowAgent, fmt.Sprintf("stagger: last local spawn %s ago, gap %s", now.Sub(newest).Round(time.Second), gap)
+		return pool.OverflowAgent, fmt.Sprintf("local stagger (last spawn %s ago < %s gap, %d/%d) -> overflow %s",
+			now.Sub(newest).Round(time.Second), gap, local, pool.MaxLocal, poolAgentLabel(pool.OverflowAgent))
 	}
-	return pool.LocalAgent, fmt.Sprintf("local pool %d/%d on %s", local+1, pool.MaxLocal, pool.LocalAgent)
+	return pool.LocalAgent, fmt.Sprintf("local seat %d/%d -> %s", local+1, pool.MaxLocal, pool.LocalAgent)
+}
+
+// poolAgentLabel names the agent a routing decision picked. The pool lines
+// must always end with the chosen agent, so an unset overflow agent has to
+// say "role default" rather than trail off into an empty string.
+func poolAgentLabel(agent string) string {
+	if agent == "" {
+		return "role default"
+	}
+	return agent
 }
 
 // sessionLister is the slice of tmux the pool reads; a var so tests can
@@ -109,11 +130,7 @@ func resolvePolecatPoolAgent(townRoot string) (agent, reason string) {
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather
 		// than risk over-filling the GPU.
-		fallback := "the role default"
-		if ts.PolecatPool.OverflowAgent != "" {
-			fallback = ts.PolecatPool.OverflowAgent
-		}
-		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback
+		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + ") -> " + poolAgentLabel(ts.PolecatPool.OverflowAgent)
 	}
 	agent, reason = choosePoolAgent(ts.PolecatPool, sessions, time.Now())
 	return agent, "pool: " + reason
