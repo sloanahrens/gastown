@@ -32,6 +32,14 @@ const (
 	DefaultNudgeUrgentTTL         = 2 * time.Hour
 	DefaultNudgeMaxQueueDepth     = 50
 	DefaultNudgeStaleClaimTimeout = 5 * time.Minute
+	// DefaultNudgeMaxDeliveryAttempts bounds how many times a nudge may be
+	// requeued after a failed injection before it is dropped. Without a bound,
+	// a delivery path that errors on every poll tick (but still injects the
+	// text) re-injects the same nudge indefinitely — see gt-tmlu.
+	DefaultNudgeMaxDeliveryAttempts = 3
+	// DefaultNudgeRequeueBackoff spaces out delivery retries so a failing
+	// injection cannot re-inject at the poll interval (gt-tmlu).
+	DefaultNudgeRequeueBackoff = 30 * time.Second
 )
 
 // Daemon defaults.
@@ -312,6 +320,28 @@ func (n *NudgeThresholds) StaleClaimThresholdD() time.Duration {
 		return ParseDurationOrDefault(n.StaleClaimThreshold, DefaultNudgeStaleClaimTimeout)
 	}
 	return DefaultNudgeStaleClaimTimeout
+}
+
+// MaxDeliveryAttemptsV returns the configured or default cap on requeue
+// attempts per nudge. A value <= 0 means "use the default".
+func (n *NudgeThresholds) MaxDeliveryAttemptsV() int {
+	if n != nil && n.MaxDeliveryAttempts != nil && *n.MaxDeliveryAttempts > 0 {
+		return *n.MaxDeliveryAttempts
+	}
+	return DefaultNudgeMaxDeliveryAttempts
+}
+
+// RequeueBackoffD returns the configured or default delay applied before a
+// requeued nudge becomes eligible for delivery again. An explicit "0s" (or
+// "0") disables the spacing, so retries run at the poll interval; an invalid
+// or negative value falls back to the default.
+func (n *NudgeThresholds) RequeueBackoffD() time.Duration {
+	if n != nil && n.RequeueBackoff != "" {
+		if d, err := time.ParseDuration(n.RequeueBackoff); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return DefaultNudgeRequeueBackoff
 }
 
 // --- Daemon accessors ---

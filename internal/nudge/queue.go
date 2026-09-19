@@ -19,9 +19,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Priority levels for nudge delivery.
@@ -68,6 +70,10 @@ type QueuedNudge struct {
 	// DeliverAfter, if non-zero, defers delivery until this time has passed.
 	// Drain skips (but does not discard) the nudge until the deadline is met.
 	DeliverAfter time.Time `json:"deliver_after,omitempty"`
+	// Attempts counts how many times delivery of this nudge was attempted and
+	// reported as failed, causing a requeue. Requeue increments it and drops
+	// the nudge once it reaches the configured cap (gt-tmlu).
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // queueDir returns the nudge queue directory for a given session.
@@ -140,11 +146,45 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 // Requeue writes previously drained nudges back to the queue for later delivery.
 // Existing timestamps are preserved so FIFO ordering remains stable relative to
 // one another; only expired nudges are skipped.
+//
+// Requeue is bounded (gt-tmlu). A failed injection is not proof that the nudge
+// was not delivered — the delivery verification can time out on a slow or busy
+// session after the text has already reached the agent — so retrying forever
+// re-injects the same message on every poll tick. One nudge was delivered 139
+// times in 12 minutes this way. Each requeue therefore:
+//
+//   - increments the nudge's Attempts counter, and
+//   - drops the nudge entirely once Attempts reaches MaxDeliveryAttempts.
+//
+// Retries are additionally spaced by RequeueBackoff so that even the bounded
+// number of retries cannot repeat at the poll interval.
 func Requeue(townRoot, session string, nudges []QueuedNudge) error {
+	cfg := nudgeConfig(townRoot)
+	maxAttempts := cfg.MaxDeliveryAttemptsV()
+	backoff := cfg.RequeueBackoffD()
+	now := time.Now()
+
 	for _, n := range nudges {
-		if !n.ExpiresAt.IsZero() && time.Now().After(n.ExpiresAt) {
+		if !n.ExpiresAt.IsZero() && now.After(n.ExpiresAt) {
 			continue
 		}
+
+		n.Attempts++
+		if n.Attempts >= maxAttempts {
+			fmt.Fprintf(os.Stderr,
+				"Warning: dropping nudge from %s for %s after %d failed delivery attempts: %s\n",
+				n.Sender, session, n.Attempts, firstLineExcerpt(n.Message))
+			continue
+		}
+
+		// Space out retries: even a bounded number of retries would otherwise
+		// repeat at the poll interval. Only ever pushed later, never earlier.
+		if backoff > 0 {
+			if due := now.Add(backoff); n.DeliverAfter.Before(due) {
+				n.DeliverAfter = due
+			}
+		}
+
 		if err := Enqueue(townRoot, session, n); err != nil {
 			return err
 		}
@@ -363,6 +403,23 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	}
 
 	return removed, nil
+}
+
+// firstLineExcerpt returns the first non-empty line of a nudge message,
+// truncated so a dropped nudge's warning stays one readable log line.
+func firstLineExcerpt(message string) string {
+	const maxLen = 120
+
+	line := util.FirstLine(message)
+	if len(line) <= maxLen {
+		return line
+	}
+	// Cut on a rune boundary so multi-byte text is not mangled.
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + "…"
 }
 
 // FormatForInjection formats queued nudges as a system-reminder block

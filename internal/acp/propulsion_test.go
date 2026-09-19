@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -95,15 +96,38 @@ func TestPropeller_DeliverNudges_RequeuesWhenSessionUnavailable(t *testing.T) {
 		t.Fatalf("expected requeued nudge to remain pending, got %d", pending)
 	}
 
+	// The retry is deferred: requiring it immediately would let a failing
+	// delivery re-inject the same nudge on every watcher event (gt-tmlu).
 	drained, err := nudge.Drain(townRoot, "hq-mayor")
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
-	if len(drained) != 1 {
-		t.Fatalf("expected 1 requeued nudge, got %d", len(drained))
+	if len(drained) != 0 {
+		t.Fatalf("expected 0 immediately-deliverable nudges after requeue, got %d", len(drained))
 	}
-	if drained[0].Priority != nudge.PriorityUrgent {
-		t.Fatalf("priority = %q, want %q", drained[0].Priority, nudge.PriorityUrgent)
+
+	// Deferral must not change what was queued: read the requeued file back.
+	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", "hq-mayor")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read queue dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("queue dir holds %d entries, want 1 requeued nudge", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read queued nudge: %v", err)
+	}
+	var queued nudge.QueuedNudge
+	if err := json.Unmarshal(data, &queued); err != nil {
+		t.Fatalf("unmarshal queued nudge: %v", err)
+	}
+	if queued.Priority != nudge.PriorityUrgent {
+		t.Fatalf("priority = %q, want %q", queued.Priority, nudge.PriorityUrgent)
+	}
+	if queued.Message != "Escalation pending" {
+		t.Fatalf("message = %q, want the original message", queued.Message)
 	}
 }
 
