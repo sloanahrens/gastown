@@ -206,7 +206,20 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	if err != nil {
 		return failureResult(deps, req, Tooling, fmt.Sprintf("mktemp: %v", err), 0)
 	}
-	defer os.RemoveAll(tmpDir)
+	// Defer cleanup but capture raw output first on failure.
+	// This ensures the verdict.json and stderr are preserved for diagnosis.
+	tmpDirCleanup := func() { _ = os.RemoveAll(tmpDir) }
+	defer tmpDirCleanup()
+
+	// If this function returns a failure after tmpDir is created, capture
+	// the raw output before cleanup.
+	defer func() {
+		if recoverPanic := recover(); recoverPanic != nil {
+			// Capture raw output before cleanup when panic occurs
+			rawOutput := captureRawOutput(tmpDir, fmt.Sprintf("panic: %v", recoverPanic))
+			panic(rawOutput)
+		}
+	}()
 
 	priorPath := filepath.Join(tmpDir, "prior.json")
 	priorFindings := req.PriorFindings
@@ -215,10 +228,10 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 	priorData, err := json.Marshal(priorFindings)
 	if err != nil {
-		return failureResult(deps, req, Tooling, fmt.Sprintf("marshal prior findings: %v", err), 0)
+		return failureResultWithRawOutput(deps, req, Tooling, fmt.Sprintf("marshal prior findings: %v", err), 0, tmpDir)
 	}
 	if err := os.WriteFile(priorPath, priorData, 0644); err != nil {
-		return failureResult(deps, req, Tooling, fmt.Sprintf("write prior findings: %v", err), 0)
+		return failureResultWithRawOutput(deps, req, Tooling, fmt.Sprintf("write prior findings: %v", err), 0, tmpDir)
 	}
 
 	verdictPath := filepath.Join(tmpDir, "verdict.json")
@@ -268,7 +281,8 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		if msg == "" && err != nil {
 			msg = err.Error()
 		}
-		return failureResult(deps, req, class, msg, retries)
+		// Capture raw output before temp dir cleanup for diagnostic purposes.
+		return failureResultWithRawOutput(deps, req, class, msg, retries, tmpDir)
 	}
 
 	note := Note{
@@ -328,27 +342,51 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		deps.NotesMu.Unlock()
 	}
 	if writeErr != nil {
-		return failureResult(deps, req, RecordFailed, fmt.Sprintf("write note: %v", writeErr), retries)
+		return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("write note: %v", writeErr), retries, tmpDir)
 	}
 	if pushErr != nil {
-		return failureResult(deps, req, RecordFailed, fmt.Sprintf("push note: %v", pushErr), retries)
+		return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("push note: %v", pushErr), retries, tmpDir)
 	}
 	if _, err := RecordReceipt(deps.Recorder, note); err != nil {
-		return failureResult(deps, req, RecordFailed, fmt.Sprintf("record receipt: %v", err), retries)
+		return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("record receipt: %v", err), retries, tmpDir)
 	}
 
 	if note.Verdict == "approve" {
 		if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
-			return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries)
+			return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
 		}
 		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: lastStderr}
 	}
 	return ReviewResult{Exit: 1, Note: &note, Retries: retries, Stderr: lastStderr}
 }
 
-func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr string, retries int) ReviewResult {
-	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, retries)
-	return ReviewResult{Exit: 2, Class: class, Retries: retries, Stderr: stderr}
+// captureRawOutput reads the verdict.json file from tmpDir (if it exists) and
+// returns it along with stderr for diagnostic purposes. This is called when a
+// failure occurs to preserve the raw backend output before the temp dir is cleaned.
+func captureRawOutput(tmpDir, stderr string) string {
+	output := stderr
+	verdictPath := filepath.Join(tmpDir, "verdict.json")
+	if data, err := os.ReadFile(verdictPath); err == nil {
+		output = strings.TrimSpace(stderr)
+		if output != "" {
+			output += "\n\n"
+		}
+		output += "=== verdict.json content ===\n" + strings.TrimSpace(string(data))
+	}
+	return output
+}
+
+func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr string, _ int) ReviewResult {
+	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, 0)
+	return ReviewResult{Exit: 2, Class: class, Retries: 0, Stderr: stderr}
+}
+
+// failureResultWithRawOutput is like failureResult but captures the raw backend
+// output (stderr + verdict.json) before the temp dir is cleaned.
+func failureResultWithRawOutput(deps Deps, req ReviewRequest, class FailureClass, stderr string, retries int, tmpDir string) ReviewResult {
+	rawOutput := captureRawOutput(tmpDir, stderr)
+	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, rawOutput, retries)
+	return ReviewResult{Exit: 2, Class: class, Retries: retries, Stderr: rawOutput}
 }
 
 // classifyOutcome maps one gate-script invocation's outcome to either a
