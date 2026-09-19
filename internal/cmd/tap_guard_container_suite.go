@@ -78,15 +78,20 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if reason, matched := evaluateContainerSuiteCommand(command); reason != "" {
-		printContainerSuiteBlock(reason, command, matched)
-		return NewSilentExit(2)
-	}
+	// The scope rule answers first for a polecat: its advice is "iterate with
+	// -run", and it must win over the container-suite rule's "run it wrapped"
+	// line, which for a whole-suite command is exactly the run the scope rule
+	// forbids (gt-v6se: three polecats followed that line into full suites
+	// beside the refinery's gate).
 	if isPolecatContext() {
 		if reason, matched := evaluatePolecatTestScope(command); reason != "" {
 			printPolecatTestScopeBlock(reason, command, matched)
 			return NewSilentExit(2)
 		}
+	}
+	if reason, matched := evaluateContainerSuiteCommand(command); reason != "" {
+		printContainerSuiteBlock(reason, command, matched)
+		return NewSilentExit(2)
 	}
 	return nil
 }
@@ -191,7 +196,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 		return "", nil // already wrapped by gt slot run
 	}
 
-	if i := findAdjacentPair(lower, "go", "test"); i >= 0 && dockerOn {
+	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
 		pkgArgs := goTestPackageArgs(tokens[i+2:])
 		wholeRepo, pkgs := containerSuitePackagesIntersect(pkgArgs)
 		if wholeRepo {
@@ -203,7 +208,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 		return "", nil
 	}
 
-	if i := findAdjacentPair(lower, "make", "test"); i >= 0 {
+	if i := findTestInvocation(lower, "make"); i >= 0 {
 		// The Makefile's "test" target unconditionally runs "go test ./..."
 		// after its shell-script checks — there is no scoped form of "make
 		// test", so it always touches every testcontainers-backed package.
@@ -234,11 +239,11 @@ func containsSubsequence(tokens, want []string) bool {
 	return false
 }
 
-// findAdjacentPair returns the index of the first occurrence of a
-// immediately followed by b in tokens (already lowercased), or -1.
-func findAdjacentPair(tokens []string, a, b string) int {
+// findTestInvocation returns the index of the first "<tool> test" pair in
+// tokens (already lowercased) — "go test" or "make test" — or -1.
+func findTestInvocation(tokens []string, tool string) int {
 	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] == a && tokens[i+1] == b {
+		if tokens[i] == tool && tokens[i+1] == "test" {
 			return i
 		}
 	}

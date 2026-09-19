@@ -65,7 +65,13 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
 	}
-	i := findAdjacentPair(lower, "go", "test")
+	// `make test` is `go test ./...` under another name (see the Makefile
+	// target); a gt slot run wrapper or an env prefix does not change what
+	// it costs the host.
+	if findTestInvocation(lower, "make") >= 0 {
+		return "polecat 'make test' runs the whole suite", nil
+	}
+	i := findTestInvocation(lower, "go")
 	if i < 0 {
 		return "", nil
 	}
