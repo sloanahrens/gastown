@@ -46,16 +46,16 @@ const DefaultPollInterval = 2 * time.Second
 // unbounded call that never returns.
 const dockerPSTimeout = 5 * time.Second
 
-// reentrantEnvVar marks, in a process's own environment, "<lockPath>|<pid>"
-// for a container-gate slot it already holds — the lock path so a nested
-// Acquire against a *different* slot still contends normally, and the PID
-// so mutual exclusion is preserved between two unrelated callers that
-// happen to share a process (e.g. two goroutines in the same test binary,
-// or any future long-lived server): the reentrant fast path only applies
-// when the caller's own PID differs from the recorded holder's, i.e. it is
-// truly a descendant process that inherited the marker (`gt slot run`
-// spawns children with the current environment by default), not a sibling
-// call in the same process pretending to be one.
+// ReentrantEnvVar marks, in a process's own environment,
+// "<lockPath>|<pid>|<role>" for a container-gate slot one of its ancestors
+// holds — the lock path so a nested Acquire against a *different* slot
+// still contends normally, the PID so mutual exclusion is preserved between
+// two unrelated callers that happen to share a process (e.g. two goroutines
+// in the same test binary, or any future long-lived server): the reentrant
+// fast path only applies when the caller's own PID differs from the
+// recorded holder's, i.e. it is truly a descendant process that inherited
+// the marker (`gt slot run` spawns children with the current environment by
+// default), not a sibling call in the same process pretending to be one.
 //
 // This closes a real deadlock risk (gt-tuiy): the polecat-work formula's
 // `gt slot run` wrap can run nested inside a Go call path that already
@@ -63,6 +63,34 @@ const dockerPSTimeout = 5 * time.Second
 // spawned subprocess. Without reentrancy, that nested acquire would block
 // forever on a flock its own ancestor process is still holding while
 // waiting for the child to exit.
+//
+// The trailing role scopes that fast path to the holder's own work
+// (gt-off9). A marker is copied into a child's environment at fork(2) and
+// the holder cannot clear it afterwards, so presence alone meant "anything
+// descended from a holder skips the lock": every agent session, dog and
+// plugin the daemon spawned while its main_branch_test hold was active
+// carries the marker for the rest of its own life, and the refinery's gate,
+// `gt done`'s verify suite and any `gt slot run` wrapper underneath them ran
+// invisibly — no flock, no `docker ps` check, no owner file — straight past
+// a hold that is supposed to serialize exactly that suite. Matching the role
+// keeps reentrancy for the holder's own nested work while anything claiming
+// different work contends for the real lock and queues fairly.
+//
+// The cost of that narrowing is deliberate: a nested acquire that names
+// DIFFERENT work — including an unnamed `gt slot run`, whose role is the
+// per-invocation "pid-<pid>" placeholder — now waits for the holder to
+// release instead of skipping its lock. It is a wait, not a failure: the
+// caller prints "Waiting for container-gate slot ..." and reports slot
+// contention, which is the outcome a lock is supposed to produce for
+// unrelated work. A caller that legitimately nests inside a hold must pass
+// that hold's role to stay reentrant.
+//
+// A marker written before roles were recorded is just "<lockPath>|<pid>"
+// (an older gt binary holding the slot mid-rollover). It parses with an
+// empty role and keeps the old presence-only behavior: a marker that cannot
+// be role-checked must not start contending with the very ancestor that
+// wrote it — that contention is the deadlock this variable exists to
+// avoid.
 //
 // Deliberately NOT prefixed GT_/BD_/BEADS_ (gt-tuiy attempt 4, CRITICAL):
 // internal/testutil's hermetic test harness scrubs every variable with
@@ -75,21 +103,62 @@ const dockerPSTimeout = 5 * time.Second
 // marker — a GT_-prefixed name would make the reentrant fast path
 // untestable across that boundary even though it fires for real in
 // production.
-const reentrantEnvVar = "GASTOWN_SLOT_HELD"
+//
+// Exported, unlike the rest of this file's internals, because the marker is
+// a wire format between processes: gt slot run's children, the daemon's
+// gate commands, and the tests that exercise inheritance across a real
+// fork all have to spell it.
+const ReentrantEnvVar = "GASTOWN_SLOT_HELD"
 
-// reentrantHolder parses reentrantEnvVar's value, returning the recorded
-// lock path and PID.
-func reentrantHolder() (lockPath string, pid int, ok bool) {
-	val := os.Getenv(reentrantEnvVar)
-	path, pidStr, found := strings.Cut(val, "|")
+// reentrantMark is a parsed ReentrantEnvVar value.
+type reentrantMark struct {
+	lockPath string
+	pid      int
+	// role is the role the holding process acquired under, or "" for a
+	// legacy marker written before roles were recorded (see ReentrantEnvVar).
+	role string
+}
+
+// parseReentrantMark parses a ReentrantEnvVar value.
+func parseReentrantMark(val string) (reentrantMark, bool) {
+	lockPath, rest, found := strings.Cut(val, "|")
 	if !found {
-		return "", 0, false
+		return reentrantMark{}, false
 	}
-	p, err := strconv.Atoi(pidStr)
+	pidStr, role, _ := strings.Cut(rest, "|") // no role: legacy 2-field marker
+	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
-		return "", 0, false
+		return reentrantMark{}, false
 	}
-	return path, p, true
+	return reentrantMark{lockPath: lockPath, pid: pid, role: role}, true
+}
+
+// reentrantHolder returns the marker this process inherited, if any.
+func reentrantHolder() (reentrantMark, bool) {
+	return parseReentrantMark(os.Getenv(ReentrantEnvVar))
+}
+
+// grants reports whether this marker licenses a caller acquiring role in
+// townRoot to take the reentrant fast path instead of locking for real.
+func (m reentrantMark) grants(townRoot, role string) bool {
+	// A marker naming THIS process is its own (or a sibling goroutine's)
+	// hold, not an ancestor's: it must still contend, or mutual exclusion
+	// would not survive two callers in one process (gt-tuiy).
+	if m.pid == os.Getpid() {
+		return false
+	}
+	// A path outside this town's lock directory is somebody else's slot.
+	if _, ok := slotIndexFromLockPath(townRoot, m.lockPath); !ok {
+		return false
+	}
+	// Legacy markers predate the role field and keep the old permissive
+	// reading; otherwise the caller has to be doing the same work.
+	return m.role == "" || m.role == role
+}
+
+// reentrantEnvValue renders the marker a holder writes for its descendants.
+func reentrantEnvValue(townRoot string, index int, role string, pid int) string {
+	return SlotLockPath(townRoot, index) + "|" + strconv.Itoa(pid) + "|" + role
 }
 
 // gateContainerPatterns matches the container images/names this gate cares
@@ -252,9 +321,12 @@ type Handle struct {
 // a real unwrapped container: release and keep waiting (see
 // isDaemonUnreachable).
 //
-// role is a short human-readable identifier for the caller (e.g.
-// "gastown/refinery" or a rig/MR id) and is recorded in the owner file for
-// `gt status` / `gt doctor` display only; it plays no part in correctness.
+// role is a short identifier for the caller (e.g. "gastown/refinery" or a
+// rig/MR id). It is recorded in the owner file for `gt status` / `gt
+// doctor` display, and — since gt-off9 — it also scopes the reentrant fast
+// path: a marker only exempts a descendant doing the same role's work (see
+// ReentrantEnvVar). Callers working on one item should therefore pass one
+// stable role, not a per-invocation one.
 func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 	return AcquirePool(townRoot, role, timeout, DefaultPool)
 }
@@ -266,12 +338,12 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 func (h *Handle) Release() error {
 	if h.reentrant {
 		// The real holder is an ancestor in this process tree; it owns the
-		// owner file, the flock, and clearing reentrantEnvVar.
+		// owner file, the flock, and clearing ReentrantEnvVar.
 		return nil
 	}
 	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
 	h.unlock()
-	_ = os.Unsetenv(reentrantEnvVar)
+	_ = os.Unsetenv(ReentrantEnvVar)
 	return nil
 }
 

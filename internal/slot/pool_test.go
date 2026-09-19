@@ -193,7 +193,7 @@ func TestStatus_DiscoversPoolSlots(t *testing.T) {
 }
 
 // TestPool_ReentrantMarkerOnAnySlot: a descendant of a holder of slot N
-// (not just slot 0) takes the reentrant fast path even when every slot is
+// (not just slot 0) takes the reentrant fast path, even when every slot is
 // held.
 func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 	stubNoContainers(t)
@@ -205,8 +205,10 @@ func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 	defer h0.Release()
 	defer h1.Release()
 
-	// A different PID than ours, as a real child would see it.
-	t.Setenv(reentrantEnvVar, SlotLockPath(town, 1)+"|"+strconv.Itoa(os.Getpid()+100000))
+	// Slot 1, a different PID than ours as a real child would see it, and
+	// the child's own role — the marker only reaches that role's work
+	// (gt-off9, see reentrantMark.grants).
+	t.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "gastown/b-child", os.Getpid()+100000))
 	start := time.Now()
 	h, err := AcquirePool(town, "gastown/b-child", shortWait, pool)
 	if err != nil {
@@ -218,10 +220,67 @@ func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 	if err := h.Release(); err != nil {
 		t.Fatal(err)
 	}
-	// The real holders are untouched.
+	// The real holders are untouched: a reentrant handle holds nothing of
+	// its own, and its Release must not clear an ancestor's marker.
 	rep, _ := StatusPool(town, pool)
 	if rep.HeldCount != 2 {
 		t.Fatalf("reentrant Release must not release a real slot: %+v", rep)
+	}
+}
+
+// TestPool_RealAcquireNeverRidesTheMarker is the gt-off9 test for the
+// daemon's side of the fix: AcquirePoolReal must take a real, visible hold
+// even when the process carries a marker naming its own role — the shape a
+// marker inherited from a predecessor daemon process has, whose flock the
+// kernel already dropped.
+func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
+	stubNoContainers(t)
+	town := t.TempDir()
+	const role = "gastown/main-branch-test"
+
+	t.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 0, role, os.Getpid()+100000))
+
+	// Sanity check on the hole this closes: with this marker, the ordinary
+	// AcquirePool hands out a reentrant handle that holds nothing at all.
+	reentrant, err := AcquirePool(town, role, shortWait, DefaultPool)
+	if err != nil {
+		t.Fatalf("AcquirePool under a same-role marker: %v", err)
+	}
+	if !reentrant.reentrant {
+		t.Fatalf("AcquirePool under a same-role marker returned a real handle, want the reentrant fast path")
+	}
+
+	h, err := AcquirePoolReal(town, role, 5*time.Second, DefaultPool)
+	if err != nil {
+		t.Fatalf("AcquirePoolReal: %v", err)
+	}
+	if h.reentrant {
+		t.Fatalf("AcquirePoolReal returned a reentrant handle; the daemon's suite would be invisible to every other caller")
+	}
+
+	rep, err := Status(town)
+	if err != nil {
+		t.Fatalf("Status while the real hold is outstanding: %v", err)
+	}
+	if !rep.Held {
+		t.Fatalf("AcquirePoolReal took no flock — the hold is invisible: %+v", rep)
+	}
+	if rep.Owner == nil || rep.Owner.Role != role || rep.Owner.PID != os.Getpid() {
+		t.Fatalf("owner file should name the real holder: %+v", rep.Owner)
+	}
+
+	// It arms the marker for its own descendants like any other holder, but
+	// names its own role — the part that keeps the marker harmless in the
+	// unrelated processes the daemon spawns while holding (reentrantMark.grants).
+	if got := os.Getenv(ReentrantEnvVar); got != reentrantEnvValue(town, h.Index, role, os.Getpid()) {
+		t.Fatalf("marker after AcquirePoolReal = %q, want this hold named by its own role", got)
+	}
+
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if rep, _ = Status(town); rep.Held {
+		t.Fatalf("the hold outlived Release: %+v", rep)
 	}
 }
 

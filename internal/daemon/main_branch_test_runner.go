@@ -341,7 +341,12 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	// first-class slot holder instead of an invisible occupant that collides
 	// with other rigs' container suites on the shared Docker VM (gt-hpce;
 	// same class as gt-afe4/gt-tuiy, wrapped here in Go rather than shelling
-	// out, matching acquireBatchGateSlot in internal/cmd/mq_batch.go).
+	// out, matching acquireBatchGateSlot in internal/cmd/mq_batch.go). The
+	// hold must also stay visible to the processes this run spawns — agent
+	// sessions, dogs, plugins — which inherit the reentrant marker: it names
+	// this runner's role, so a refinery gate or 'gt done' verify suite
+	// descending from it queues behind this hold instead of skipping its
+	// lock (gt-off9, see acquireMainBranchTestSlot).
 	h, err := acquireMainBranchTestSlot(d.config.TownRoot, rigName)
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
@@ -389,10 +394,17 @@ func (d *Daemon) runRigGates(ctx context.Context, rigName, commit, workDir strin
 // without the full git-worktree/bare-repo harness that function requires
 // (gt-hpce, following acquireBatchGateSlot's precedent in
 // internal/cmd/mq_batch.go).
+//
+// slot.AcquirePoolReal, not slot.AcquirePool (gt-off9): the daemon is a
+// long-lived process, and the marker it inherits from its own ancestors
+// outlives them, so riding a reentrant marker could hand this runner a slot
+// nobody holds — its hold would then be invisible to everyone else, with no
+// flock, no owner file and no docker-ps check. See AcquirePoolReal's doc
+// comment.
 func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
 	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
 	pool := slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
-	return slot.AcquirePool(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
+	return slot.AcquirePoolReal(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
 }
 
 // commitTested returns the commit SHA checked out in the worktree, or ""
