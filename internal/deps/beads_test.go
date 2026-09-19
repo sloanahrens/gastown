@@ -1,6 +1,10 @@
 package deps
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
+)
 
 func TestParseBeadsVersion(t *testing.T) {
 	tests := []struct {
@@ -58,4 +62,8 @@ func TestCheckBeads(t *testing.T) {
 	}
 
 	t.Logf("CheckBeads: status=%d, version=%s", status, version)
+}
+
+func TestMain(m *testing.M) {
+	testutil.HermeticMain(m)
 }
