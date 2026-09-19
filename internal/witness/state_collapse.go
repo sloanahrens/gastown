@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -239,6 +240,11 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 //     its branch rather than pushing a duplicate MR. That leaves the same
 //     on-disk signature as a genuine strand, so the close reason must be
 //     read, not just the status.
+//
+// A third false-positive class was added (gt-akap): a branch with an open
+// MR in the queue is NOT stranded — the work is queued, just not merged.
+// Before reporting a branch as stranded, we now check for an open MR whose
+// source_issue and branch match the branch being examined.
 func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, targetBranch string, router *mail.Router) *DetectStrandedBranchesResult {
 	result := &DetectStrandedBranchesResult{}
 	if bd == nil || refs == nil || refs.ListPolecatBranches == nil || refs.TargetHasCommitReferencing == nil {
@@ -252,6 +258,14 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("listing polecat branches: %w", err))
 		return result
+	}
+
+	// Query all open MRs once and build a lookup map for efficiency.
+	// MRs are stored in the wisps table (ephemeral) since beads v0.59.
+	openMRs, err := queryOpenMRs(workDir)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("querying open MRs: %w", err))
+		// Continue anyway - we can still check branches without MR lookup
 	}
 
 	for _, branch := range branches {
@@ -268,6 +282,12 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 
 		if isDeliberateDiscard(closeReason) {
 			continue // closed with an explicit "no-changes:" abandonment, not a strand
+		}
+
+		// Check if an open MR exists for this branch and issue.
+		// If so, the branch is not stranded - the work is queued in the MR.
+		if hasOpenMR(openMRs, meta.Issue, branch) {
+			continue
 		}
 
 		landed, err := refs.TargetHasCommitReferencing(targetBranch, meta.Issue)
@@ -289,6 +309,56 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 	}
 
 	return result
+}
+
+// queryOpenMRs queries for all open merge-request beads.
+// Returns a slice of MR fields for quick lookup, or an error if the query failed.
+func queryOpenMRs(workDir string) ([]*beads.MRFields, error) {
+	// Use bd list with ephemeral=true to query the wisps table
+	// where MRs live since beads v0.59
+	args := []string{"query", "--json", "ephemeral=true AND label='gt:merge-request' AND status='open'", "--limit=0"}
+	cmd := exec.Command("bd", args...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+beads.ResolveBeadsDir(workDir))
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("bd query: %w", err)
+	}
+
+	if len(output) == 0 {
+		return nil, nil
+	}
+
+	// Parse the JSON array of issues
+	var issues []*beads.Issue
+	if err := json.Unmarshal(output, &issues); err != nil {
+		return nil, fmt.Errorf("parsing MR query output: %w", err)
+	}
+
+	// Extract MR fields from each issue
+	var mrFields []*beads.MRFields
+	for _, issue := range issues {
+		fields := beads.ParseMRFields(issue)
+		if fields != nil {
+			mrFields = append(mrFields, fields)
+		}
+	}
+
+	return mrFields, nil
+}
+
+// hasOpenMR reports whether an open MR exists for the given issue and branch.
+func hasOpenMR(openMRs []*beads.MRFields, issueID, branch string) bool {
+	if openMRs == nil {
+		return false
+	}
+	for _, mr := range openMRs {
+		if mr.SourceIssue == issueID && mr.Branch == branch {
+			return true
+		}
+	}
+	return false
 }
 
 // isDeliberateDiscard reports whether a bead close reason declares that no
