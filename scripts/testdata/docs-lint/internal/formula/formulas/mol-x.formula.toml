@@ -1,0 +1,5 @@
+description = """
+A formula. See [guide](../../../docs/guides/guide.md).
+"""
+formula = "mol-x"
+version = 1
