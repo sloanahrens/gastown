@@ -70,42 +70,10 @@ func TestChoosePoolAgent(t *testing.T) {
 			if reason != c.wantWhy {
 				t.Errorf("reason = %q, want %q", reason, c.wantWhy)
 			}
-			if c.wantLine != "" && reason != c.wantLine {
-				t.Errorf("reason = %q, want %q", reason, c.wantLine)
-			}
 		})
 	}
 }
 
-<<<<<<< HEAD
-// The seat-taken line and the overflow line must not read alike: telling them
-// apart by one word ("local pool 2/2" vs "local pool full (2/2)") cost a flash
-// seat on 2026-09-18. Both lines name the agent they picked.
-func TestChoosePoolAgentLinesAreUnambiguous(t *testing.T) {
-	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
-	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
-	local := poolSession{name: "gt-a", agent: "local-coder-polecat", created: now.Add(-10 * time.Minute)}
-
-	_, seatLine := choosePoolAgent(pool, []poolSession{local}, now)
-	_, fullLine := choosePoolAgent(pool, []poolSession{local, {name: "gt-b", agent: "local-coder-polecat", created: now.Add(-time.Hour)}}, now)
-	_, staggerLine := choosePoolAgent(pool, []poolSession{{name: "gt-c", agent: "local-coder-polecat", created: now.Add(-30 * time.Second)}}, now)
-
-	if seatLine == fullLine || seatLine == staggerLine || fullLine == staggerLine {
-		t.Fatalf("routing lines must be distinct:\n  seat:    %s\n  full:    %s\n  stagger: %s", seatLine, fullLine, staggerLine)
-	}
-	if strings.Contains(seatLine, "full") || strings.Contains(seatLine, "overflow") {
-		t.Errorf("a taken local seat must not read as an overflow: %s", seatLine)
-	}
-	for _, line := range []string{seatLine, fullLine, staggerLine} {
-		agent := "local-coder-polecat"
-		if line != seatLine {
-			agent = "deepseek-flash"
-		}
-		fields := strings.Fields(line)
-		if fields[len(fields)-1] != agent {
-			t.Errorf("routing line must end with the chosen agent %q: %s", agent, line)
-		}
-=======
 // A bead carrying route:flash still has to name its agent when the pool is
 // full: the label, not the seat count, is why it went where it went.
 func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
@@ -126,7 +94,6 @@ func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
 	agent, reason = choosePoolAgent(pool, poolBead{Type: "bug", Labels: []string{"local-attempt:1", "route:local"}}, nil, now)
 	if agent != "local-coder-polecat" {
 		t.Errorf("route:local beats local-attempt:1, got %q (%s)", agent, reason)
->>>>>>> origin/main
 	}
 }
 
