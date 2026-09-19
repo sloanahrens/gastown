@@ -251,6 +251,32 @@ func readLogTail(path string, maxBytes int) string {
 	return "... (truncated) ...\n" + string(data[len(data)-maxBytes:])
 }
 
+// readLogFrom returns the part of the log at path written since byte offset
+// from, so a gate can inspect just the slice one attempt produced instead of
+// the whole log it shares with earlier attempts (gt-xsty's lint retry: a
+// marker from a previous attempt must not decide the current one).
+func readLogFrom(path string, from int64) string {
+	data, err := os.ReadFile(path)
+	if err != nil || from < 0 || from >= int64(len(data)) {
+		return ""
+	}
+	return string(data[from:])
+}
+
+// fileSize is the current size of an open gate log, used as the offset to hand
+// readLogFrom. Stat on the *os.File (never a buffered writer: the gates stream
+// straight to the fd) reports exactly what a reader of the path can see.
+func fileSize(f *os.File) int64 {
+	if f == nil {
+		return 0
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
 // humanDuration renders a duration the way it is written in config and in a
 // Makefile ("20m", "1h", "90m") rather than Go's "20m0s", so a budget quoted
 // in the verify log is greppable in the rig's own files.
@@ -702,20 +728,36 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
 		result.lintCommand = lint
 		reportVerifyProgress(logFile, fmt.Sprintf("lint starting (command: %s)", lint))
+		// One context spans every attempt: the lint budget bounds the lint,
+		// retries and waits included, rather than being renewed per try
+		// (gt-xsty).
 		lintCtx, lintCancel := context.WithTimeout(context.Background(), defaultLintVerifyTimeout)
 		lintStart := time.Now()
-		lintErr := runVerifySuite(lintCtx, worktree, lint, env, logFile)
+		outcome := retryLintLockContention(lintCtx, func() lintAttempt {
+			from := fileSize(logFile)
+			err := runVerifySuite(lintCtx, worktree, lint, env, logFile)
+			return lintAttempt{err: err, output: readLogFrom(logPath, from)}
+		}, func(attempt, attempts int, wait time.Duration) {
+			reportVerifyProgress(logFile, fmt.Sprintf("lint lock held by another golangci-lint (attempt %d/%d); retrying in %s", attempt, attempts, wait.Round(time.Second)))
+		})
 		lintCancel()
 		result.lintElapsed = time.Since(lintStart)
-		if lintErr != nil {
+		if outcome.err != nil {
 			exitCode := -1
 			var exitErr *exec.ExitError
-			if errors.As(lintErr, &exitErr) {
+			if errors.As(outcome.err, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
 			fmt.Fprintf(logFile, "=== lint failed (exit %d) ===\n", exitCode)
 			tail := readLogTail(logPath, 4000)
-			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — fix the lint findings before resubmitting (no tests were run; full log: %s):\n%s", exitCode, lint, logPath, tail)
+			// A failure the retries already proved was the lock must not read
+			// as a finding: "fix the lint findings" would send the polecat
+			// looking for output that does not exist (gt-xsty).
+			detail := "fix the lint findings before resubmitting"
+			if outcome.retries > 0 {
+				detail = fmt.Sprintf("another golangci-lint held the lock across %d retries (a concurrent gt done, or the refinery's batch lint) — nothing was linted and no finding is reported; re-run gt done once the other lint finishes", outcome.retries)
+			}
+			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — %s (no tests were run; full log: %s):\n%s", exitCode, lint, detail, logPath, tail)
 		}
 		result.lintRan = true
 		reportVerifyProgress(logFile, fmt.Sprintf("lint passed in %s", result.lintElapsed.Round(time.Second)))
