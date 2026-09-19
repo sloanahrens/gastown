@@ -30,8 +30,15 @@ type Hook struct {
 	// entry's Matcher. Matcher only ever matches the TOOL NAME (exact or
 	// regex, e.g. "Bash"); command-pattern conditions belong here, not in
 	// Matcher — a pattern written into Matcher never fires (gt-5ihs).
-	// Omit when the handler command self-filters on the actual command text
-	// (e.g. dangerous-command reads tool_input.command off stdin directly).
+	//
+	// No BUILT-IN guard sets this field (gt-3mp1): Claude Code's "if"
+	// evaluator resolves commands it cannot statically analyze (a brace
+	// group containing a quoted string, an argument-position $(...)
+	// substitution) as matching ANY pattern, so a deny hook gated by a
+	// leading-* glob fires on unrelated commands. Each built-in guard reads
+	// tool_input.command off stdin and self-filters instead. The field
+	// remains for operator-supplied overrides, which may carry their own
+	// conditions. TestBuiltinHooksNeverUseIf asserts the invariant.
 	If string `json:"if,omitempty"`
 }
 
@@ -425,13 +432,22 @@ func DefaultOverrides() map[string]*HooksConfig {
 		},
 		"boot": {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			// PreToolUse: the raw tmux send-keys guard (gt-3mp1). Formerly an
+			// inline echo+exit-2 command gated by If: "Bash(*tmux*send-keys*)",
+			// which depended entirely on the outer if-glob to decide when to
+			// fire — so post-gt-5ihs it fired on unrelated commands whenever
+			// Claude Code's "if" evaluator couldn't resolve the command
+			// (gt-3mp1), and it could not self-filter if the If were dropped.
+			// It is now a real guard command that reads tool_input.command
+			// off stdin and blocks only a genuine tmux send-keys invocation
+			// (see tap_guard_boot_sendkeys.go) — no If needed.
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash",
 					Hooks: []Hook{
 						{
 							Type:    "command",
-							Command: "echo 'BLOCKED: Boot must not use raw tmux send-keys; it can leave unsubmitted text staged in the Deacon TUI.' && echo 'Use: gt nudge --mode=immediate deacon \"message\" (do not add --force).' && exit 2",
+							Command: gtCommand("gt tap guard boot-sendkeys"),
 						},
 					},
 				},
@@ -1033,30 +1049,32 @@ func DefaultBase() *HooksConfig {
 		// PreToolUse guards all route through the bare "Bash" tool-name
 		// matcher (gt-5ihs): Claude Code's hooks[].matcher matches the TOOL
 		// NAME only — a permission-rule pattern like "Bash(gh pr create*)"
-		// written into Matcher never fires. pr-workflow needs per-pattern
-		// routing, so its patterns live in each Hook's If field instead.
-		// dangerous-command reads tool_input.command off stdin and inspects
-		// the actual command itself (see tap_guard_dangerous.go), so it
-		// self-filters and needs no If — one bare-Bash entry covers every
-		// pattern it used to need a dead-duplicate matcher for (gt-nqcy's
-		// find/bfs/fd/rg/du/grep -r/ls -R matchers included).
-		// container-suite is the same self-filtering shape: it inspects
-		// tool_input.command for a bare go test/make test on a
-		// testcontainers-backed package and blocks it in polecat/refinery
-		// context unless already wrapped in 'gt slot run' (see
-		// tap_guard_container_suite.go, gt-e2rs).
+		// written into Matcher never fires.
+		//
+		// No guard here carries an If field (gt-3mp1). Claude Code's "if"
+		// evaluator treats a command it cannot statically resolve — a brace
+		// group containing a quoted string (echo x{"a"}y, any JSON/dict
+		// literal), or an argument-position $(...) substitution — as matching
+		// ANY pattern, including every leading-* glob, so an If-gated deny
+		// hook fires on unrelated commands. Every guard is instead
+		// self-filtering: it reads tool_input.command off stdin and inspects
+		// the actual command text (tap_guard_pr_workflow.go,
+		// tap_guard_dangerous.go, tap_guard_container_suite.go). One bare-Bash
+		// entry per guard covers every pattern the guard recognizes.
+		//
+		// pr-workflow is self-filtering and covers gh pr create / git
+		// checkout -b / git switch -c in one handler, so it is ONE entry —
+		// not the three identical If-discriminated duplicates it used to be.
+		// dangerous-command self-filters too, which replaces the
+		// dead-duplicate matchers it once needed (gt-nqcy's find/bfs/fd/rg/du/
+		// grep -r/ls -R matchers included). container-suite is the same
+		// shape: it blocks a bare go test/make test on a testcontainers-backed
+		// package in polecat/refinery context unless wrapped in 'gt slot run'
+		// (gt-e2rs).
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash",
 				Hooks: []Hook{
-					{
-						Type:    "command",
-						Command: gtCommand("gt tap guard pr-workflow"),
-					},
-					{
-						Type:    "command",
-						Command: gtCommand("gt tap guard pr-workflow"),
-					},
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard pr-workflow"),

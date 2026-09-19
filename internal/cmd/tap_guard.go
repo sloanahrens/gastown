@@ -21,6 +21,7 @@ forbidden operation entirely.
 
 Available guards:
   pr-workflow        - Block PR creation and feature branches
+  boot-sendkeys      - Block raw tmux send-keys in the boot watchdog
   bd-init            - Block bd init in wrong directories
   mol-patrol         - Block mol patrol from agent contexts
   dangerous-command  - Block rm -rf, force push, hard reset, git clean
@@ -31,13 +32,15 @@ Available guards:
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
 
-Example hook configuration (matcher is the TOOL NAME only; a command
-pattern like "Bash(gh pr create*)" goes in "if", never in "matcher" —
-gt-5ihs, a matcher-only pattern never fires):
+Example hook configuration (matcher is the TOOL NAME only — a command
+pattern like "Bash(gh pr create*)" in "matcher" never fires, gt-5ihs — and
+no "if" either: Claude Code's "if" evaluator matches ANY pattern for a
+command it cannot statically resolve, so a deny guard must read
+tool_input.command off stdin and self-filter, gt-3mp1):
   {
     "PreToolUse": [{
       "matcher": "Bash",
-      "hooks": [{"command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}]
+      "hooks": [{"command": "gt tap guard pr-workflow"}]
     }]
   }`,
 }

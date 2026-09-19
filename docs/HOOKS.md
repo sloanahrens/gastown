@@ -76,6 +76,15 @@ path that is not the polecat's worktree, its own polecat directory, or its
 rig's `.repo.git`. Read-only commands stay allowed anywhere, and a target the
 guard cannot resolve is blocked rather than allowed.
 
+The `boot` override adds the raw-tmux-send-keys guard (`gt tap guard
+boot-sendkeys`, gt-3mp1) on the `Bash` matcher. Boot is the ephemeral agent
+that starts the Deacon after a town restart; typing into the Deacon's pane
+with a raw `tmux send-keys` can leave text staged but unsubmitted in the TUI,
+so boot must use `gt nudge --mode=immediate deacon` instead. The guard reads
+`tool_input.command` off stdin and blocks only a genuine tmux send-keys
+invocation — after gt-3mp1 it no longer relies on an `if` glob to decide when
+to run, because that glob fired on unrelated boot commands.
+
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
@@ -252,10 +261,22 @@ the matcher kind (gt-5ihs):
   guard must route through a bare tool-name matcher post-gt-5ihs (Claude
   Code's matcher only ever matches the tool name), so pr-workflow,
   dangerous-command, and per-role guards like formula-allowlist commonly
-  all share matcher `"Bash"`, discriminated by each hook's `if` field (or
-  by self-inspecting the command) instead of by matcher. Whole-entry
-  replace would silently drop one layer's guards whenever another layer
-  also targets `"Bash"`.
+  all share matcher `"Bash"`, discriminated by the guard itself
+  self-inspecting the command, not by matcher. Whole-entry replace would
+  silently drop one layer's guards whenever another layer also targets
+  `"Bash"`.
+
+  Built-in hooks do not use the `if` field at all (gt-3mp1). Claude Code's
+  `if` evaluator resolves a command it cannot statically analyze — a brace
+  group holding a quoted string (`echo x{"a"}y`, any JSON/dict literal), or
+  an argument-position `$(...)` substitution — as matching ANY pattern, so
+  a deny hook gated by a leading-`*` glob fires on unrelated commands. A
+  guard that needs to discriminate on the command text reads
+  `tool_input.command` off stdin and exits 2 only when it recognizes its
+  own forbidden shape (`tap_guard_boot_sendkeys.go`,
+  `tap_guard_pr_workflow.go`, `tap_guard_dangerous.go`). The field remains
+  available for operator-supplied overrides;
+  `TestBuiltinHooksNeverUseIf` asserts no built-in config sets it.
 
 Example base (bare matcher — unions):
 ```json

@@ -54,7 +54,20 @@ func runTapList(cmd *cobra.Command, args []string) error {
 			kind:        "guard",
 			description: "Block PR creation and feature branches",
 			event:       "PreToolUse",
-			conditions:  []string{"Bash(gh pr create*)", "Bash(git checkout -b*)", "Bash(git switch -c*)"},
+			// Self-filters on tool_input.command directly — no "if" needed
+			// (gt-3mp1: an If-gated leading-* glob fires on unrelated
+			// commands whenever Claude Code's "if" evaluator can't resolve
+			// the command text).
+			conditions:  nil,
+			implemented: true,
+		},
+		{
+			name:        "boot-sendkeys",
+			kind:        "guard",
+			description: "Block raw tmux send-keys in the boot watchdog",
+			event:       "PreToolUse",
+			// Self-filters on tool_input.command directly — no "if" needed.
+			conditions:  nil,
 			implemented: true,
 		},
 		{
