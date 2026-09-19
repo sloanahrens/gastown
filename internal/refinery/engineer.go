@@ -1581,7 +1581,11 @@ func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
 		return fmt.Errorf("merge request is missing")
 	}
 	if strings.TrimSpace(mr.CommitSHA) != "" {
-		return nil
+		// gt-pwa1: a resolved merge conflict necessarily moves the source
+		// branch head, so the SHA recorded at submission time is stale by
+		// construction once the conflict-resolution task closes. Adopt the
+		// live head in that one case; every other MR keeps the strict check.
+		return e.adoptConflictResolvedHead(mr)
 	}
 	if !e.isSyntheticMergeMechanicsMR(mr) {
 		return fmt.Errorf("missing submitted commit_sha")
@@ -1598,6 +1602,108 @@ func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
 		return fmt.Errorf("resolve submitted head for %s: %w", branch, err)
 	}
 	mr.CommitSHA = strings.TrimSpace(sha)
+	return nil
+}
+
+// adoptConflictResolvedHead refreshes the recorded commit_sha to the live source
+// branch head when the conflict-resolution task this refinery dispatched for the
+// MR has been closed (gt-pwa1).
+//
+// Resolving a conflict necessarily rewrites the source branch, but nothing ever
+// wrote the new head back to the MR bead: recordConflictTaskOnMR preserves
+// commit_sha (engineer.go), and ensureMRInfoCommitSHA's backfill only fires for
+// synthetic merge-mechanics MRs. submittedBranchHead then compared the stale SHA
+// against the live branch tip and rejected the retry with "source branch X
+// changed from submitted head A to B" on every cycle — so the flow the conflict
+// task itself documents ("push the resolved branch ... The Refinery will
+// automatically retry the merge after you push") could never converge, and
+// HandleMRInfoFailure classified the rejection as an ordinary failure
+// (Conflict=false), so no conflict task was re-created and no polecat nudged.
+//
+// The closed conflict task is what authorizes the head to have moved, and only
+// that: the task must exist, be closed, and verify as belonging to this MR
+// (isConflictTaskForMR). Anything unverifiable leaves the original strict
+// comparison in force rather than silently trusting a moved branch.
+//
+// No gates are skipped by adopting the head — recording a conflict clears the
+// pre-verification stamp (gt-nao), so the adopted head is re-gated exactly like
+// any other submission. If the "resolution" did not actually resolve anything,
+// the merge attempt still reports a conflict and a fresh task is created.
+func (e *Engineer) adoptConflictResolvedHead(mr *MRInfo) error {
+	// Only the explicit conflict_task_id field authorizes a head move. The
+	// BlockedBy fallback used by conflictTaskIDForMR is for post-merge cleanup
+	// and would match any unrelated blocker that happens to have closed.
+	taskID := strings.TrimSpace(mr.ConflictTaskID)
+	if taskID == "" || e.beads == nil || e.git == nil {
+		return nil
+	}
+	branch := strings.TrimSpace(mr.Branch)
+	if branch == "" {
+		return nil
+	}
+
+	task, err := e.beads.Show(taskID)
+	if err != nil || task == nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: cannot verify conflict task %s for MR %s (%v) — keeping submitted head %s in force\n",
+			taskID, mr.ID, err, shortSHA(mr.CommitSHA))
+		return nil
+	}
+	if task.Status != "closed" {
+		return nil
+	}
+	if !isConflictTaskForMR(task, mr.ID, mr.SourceIssue) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: refusing to adopt moved head for MR %s: task %s is not a verified conflict task for it\n",
+			mr.ID, taskID)
+		return nil
+	}
+
+	head, err := e.git.Rev("refs/heads/" + branch + "^{commit}")
+	if err != nil {
+		return fmt.Errorf("resolve conflict-resolved head for %s: %w", branch, err)
+	}
+	head = strings.TrimSpace(head)
+	recorded := strings.TrimSpace(mr.CommitSHA)
+
+	if head == recorded {
+		// Branch never moved (or already adopted on an earlier cycle). Drop the
+		// spent task link so later calls short-circuit without touching beads.
+		return e.setMRConflictHead(mr, head, "")
+	}
+
+	if err := e.setMRConflictHead(mr, head, ""); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: adopted conflict-resolved head %s (was %s) from closed task %s\n",
+		mr.ID, shortSHA(head), shortSHA(recorded), taskID)
+	return nil
+}
+
+// setMRConflictHead writes commit_sha and conflict_task_id back to the MR bead
+// and mirrors both onto the in-memory MRInfo. Passing an empty taskID clears the
+// "open conflict-resolution task" link, since the field only ever names a task
+// that is still unresolved.
+func (e *Engineer) setMRConflictHead(mr *MRInfo, commitSHA, taskID string) error {
+	mrBead, err := e.beads.Show(mr.ID)
+	if err != nil {
+		return fmt.Errorf("show MR %s to refresh commit_sha: %w", mr.ID, err)
+	}
+	fields := beads.ParseMRFields(mrBead)
+	if fields == nil {
+		fields = &beads.MRFields{}
+	}
+	if strings.TrimSpace(fields.CommitSHA) == commitSHA && fields.ConflictTaskID == taskID {
+		mr.CommitSHA = commitSHA
+		mr.ConflictTaskID = taskID
+		return nil
+	}
+	fields.CommitSHA = commitSHA
+	fields.ConflictTaskID = taskID
+	newDesc := beads.SetMRFields(mrBead, fields)
+	if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
+		return fmt.Errorf("refresh commit_sha on MR %s: %w", mr.ID, err)
+	}
+	mr.CommitSHA = commitSHA
+	mr.ConflictTaskID = taskID
 	return nil
 }
 
@@ -1968,34 +2074,7 @@ func (e *Engineer) createConflictResolutionTaskForMR(mr *MRInfo, _ ProcessResult
 	retryCount := mr.RetryCount + 1
 
 	// Build the task description with metadata
-	description := fmt.Sprintf(`Resolve merge conflicts for branch %s
-
-## Metadata
-- Original MR: %s
-- Branch: %s
-- Conflict with: %s@%s
-- Original issue: %s
-- Retry count: %d
-
-## Instructions
-1. Check out the branch: git checkout %s
-2. Merge target without rewriting branch history: git merge --no-ff origin/%s
-3. Resolve conflicts in your editor
-4. Complete the merge: git add . && git commit
-5. Push the resolved branch: git push origin %s
-6. Close this task: bd close <this-task-id>
-
-The Refinery will automatically retry the merge after you push.`,
-		mr.Branch,
-		mr.ID,
-		mr.Branch,
-		mr.Target, shortSHA(mainSHA),
-		mr.SourceIssue,
-		retryCount,
-		mr.Branch,
-		mr.Target,
-		mr.Branch,
-	)
+	description := conflictTaskDescription(mr, mr.Branch, mr.Target, shortSHA(mainSHA), retryCount)
 
 	// Create the conflict resolution task
 	taskTitle := fmt.Sprintf("Resolve merge conflicts: %s", originalTitle)
@@ -2024,6 +2103,51 @@ The Refinery will automatically retry the merge after you push.`,
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Created conflict resolution task: %s (P%d)\n", task.ID, task.Priority)
 
 	return task.ID, nil
+}
+
+// conflictTaskDescription builds the markdown body of a conflict-resolution
+// task. The "- Key: value" metadata lines are parsed back out by
+// conflictTaskMetadata/isConflictTaskForMR, so they must stay in that shape;
+// the instructions below them are prose and are deliberately colon-free so they
+// cannot be mistaken for metadata.
+//
+// Step 6 is load-bearing for gt-pwa1: closing the task is the signal
+// adoptConflictResolvedHead waits for before it adopts the branch's new head,
+// and the MR stays blocked on this task until it closes.
+func conflictTaskDescription(mr *MRInfo, branch, target, conflictSHA string, retryCount int) string {
+	return fmt.Sprintf(`Resolve merge conflicts for branch %s
+
+## Metadata
+- Original MR: %s
+- Branch: %s
+- Conflict with: %s@%s
+- Original issue: %s
+- Retry count: %d
+
+## Instructions
+1. Check out the branch: git checkout %s
+2. Merge target without rewriting branch history: git merge --no-ff origin/%s
+3. Resolve conflicts in your editor
+4. Complete the merge: git add . && git commit
+5. Push the resolved branch: git push origin %s
+6. Close this task: bd close <this-task-id>
+
+Closing this task is what releases the MR. The Refinery adopts the branch's new
+head once it sees this task closed, then retries the merge. Pushing without
+closing leaves the MR blocked, and closing without pushing leaves the merge
+failing against the old head. Both steps are required. The adopted head is
+re-gated, because recording the conflict cleared any pre-verification stamp, so
+this is not a way to skip checks.`,
+		branch,
+		mr.ID,
+		branch,
+		target, conflictSHA,
+		mr.SourceIssue,
+		retryCount,
+		branch,
+		target,
+		branch,
+	)
 }
 
 func (e *Engineer) recordConflictTaskOnMR(mr *MRInfo, taskID string, retryCount int, conflictSHA string) error {
