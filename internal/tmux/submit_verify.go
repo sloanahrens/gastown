@@ -282,25 +282,113 @@ func (t *Tmux) pollSubmission(target, needle, promptPrefix string, attempts int)
 	return last
 }
 
+// submitTurnTimeout is how long to wait for a turn to start after submitting
+// a nudge. If no turn starts within this window, the nudge delivery is
+// considered stuck and an error is returned.
+const submitTurnTimeout = 5 * time.Second
+
 func (t *Tmux) submitComposer(target, message, promptPrefix string) error {
+	return t.submitComposerWithTimeout(target, message, promptPrefix, submitTurnTimeout)
+}
+
+// submitComposerWithTimeout is like submitComposer but with a configurable
+// timeout for turn-start detection. This is used by nudge immediate mode to
+// detect wedged sessions that appear alive but are not processing input.
+// (Item 3 of gt-eigw: report when pane doesn't start a turn within a few seconds)
+func (t *Tmux) submitComposerWithTimeout(target, message, promptPrefix string, timeout time.Duration) error {
 	enterErr := t.sendEnterVerified(target)
 	needle := submitNeedle(message)
 	if needle == "" {
 		return enterErr
 	}
 
-	switch t.pollSubmission(target, needle, promptPrefix, submitProbeAttempts) {
-	case probeTurnStarted, probeComposerCleared:
+	// First, wait for the initial submission verification (composer cleared or turn started)
+	start := time.Now()
+	probe := t.pollSubmission(target, needle, promptPrefix, submitProbeAttempts)
+	elapsed := time.Since(start)
+
+	switch probe {
+	case probeTurnStarted:
+		// Turn started immediately - success
 		return nil
+	case probeComposerCleared:
+		// Composer cleared but no turn started yet. Wait up to timeout for a turn.
+		return t.waitForTurnWithTimeout(target, promptPrefix, timeout-elapsed)
 	case probeUnknown:
 		return enterErr
 	case probeComposerDirty:
 		return fmt.Errorf("%w (composer contains other text after Enter)", ErrSubmitNotVerified)
 	case probeStranded:
-		return t.recoverStrandedComposer(target, message, needle, promptPrefix)
+		return t.recoverStrandedComposerWithTimeout(target, message, needle, promptPrefix, timeout-elapsed)
 	default:
 		return enterErr
 	}
+}
+
+// waitForTurnWithTimeout polls the pane until a turn starts or the timeout is reached.
+// It returns nil if a turn starts within the timeout, otherwise returns an error.
+func (t *Tmux) waitForTurnWithTimeout(target, promptPrefix string, timeout time.Duration) error {
+	// Poll frequently for turn start, but don't exceed the timeout
+	pollInterval := 200 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if probe := t.probeSubmission(target, "", promptPrefix); probe == probeTurnStarted {
+			return nil
+		}
+		// Use remaining time for the sleep, but cap at pollInterval
+		remaining := time.Until(deadline)
+		if remaining < pollInterval {
+			pollInterval = remaining
+		}
+		if pollInterval <= 0 {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("%w (turn did not start within timeout)", ErrSubmitNotVerified)
+}
+
+// recoverStrandedComposerWithTimeout is like recoverStrandedComposer but with
+// a configurable timeout for turn-start detection after re-typing.
+func (t *Tmux) recoverStrandedComposerWithTimeout(target, message, needle, promptPrefix string, timeout time.Duration) error {
+	if _, err := t.run("send-keys", "-t", target, "C-j"); err != nil {
+		return fmt.Errorf("%w (C-j reset failed: %v)", ErrSubmitNotVerified, err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	switch probe := t.probeSubmission(target, needle, promptPrefix); probe {
+	case probeTurnStarted:
+		return nil
+	case probeComposerCleared:
+		if err := t.sendMessageToTarget(target, message); err != nil {
+			return fmt.Errorf("%w (retype failed: %v)", ErrSubmitNotVerified, err)
+		}
+		time.Sleep(adaptiveTextDelay(len(message)))
+		_ = t.sendEnterVerified(target)
+		// Wait for turn start after re-submission
+		if err := t.waitForTurnWithTimeout(target, promptPrefix, timeout-750*time.Millisecond); err != nil {
+			return fmt.Errorf("%w (turn did not start after retype)", ErrSubmitNotVerified)
+		}
+	case probeStranded, probeComposerDirty, probeUnknown:
+		return fmt.Errorf("%w (composer state after C-j: %s)", ErrSubmitNotVerified, probe)
+	}
+
+	// Final verification with timeout
+	start := time.Now()
+	finalProbe := t.pollSubmission(target, needle, promptPrefix, submitProbeAttempts)
+	elapsed := time.Since(start)
+	if finalProbe == probeTurnStarted {
+		return nil
+	}
+	if elapsed < timeout {
+		if err := t.waitForTurnWithTimeout(target, promptPrefix, timeout-elapsed); err != nil {
+			return fmt.Errorf("nudge submit to %q: %w (turn did not start after timeout, final state: %s)", target, ErrSubmitNotVerified, finalProbe)
+		}
+		return nil
+	}
+	return fmt.Errorf("nudge submit to %q: %w (final state: %s)", target, ErrSubmitNotVerified, finalProbe)
 }
 
 func (t *Tmux) recoverStrandedComposer(target, message, needle, promptPrefix string) error {
