@@ -148,14 +148,31 @@ Sling each ready issue to an available polecat.
 # This spawns a fresh polecat or assigns to idle one
 gt sling <issue-id> <rig>
 
+# If the convoy records an agent, re-dispatch with that same agent:
+gt sling <issue-id> <rig> --agent <convoy-agent>
+
 # Example:
 gt sling gt-abc123 gastown
 gt sling bd-xyz789 beads
 ```
 
+**Preserve the recorded agent (required):**
+Check the convoy's `agent` field before dispatching:
+
+```bash
+gt convoy status <convoy> --json   # "agent" is present when one was recorded
+```
+
+An agent recorded on the convoy is a routing decision made when the work was
+slung (`gt sling <bead> <rig> --agent X`). Feeding the bead with the rig default
+instead silently overrides it. So:
+- `agent` set → pass `--agent <agent>` with the sling
+- `agent` absent → sling without `--agent` (the rig default applies) and say so
+  in the report
+
 **Track results:**
 For each dispatch:
-- Success: Note issue ID, target rig, polecat assigned
+- Success: Note issue ID, target rig, polecat assigned, agent used
 - Failure: Note issue ID, error message
 
 **Important notes:**

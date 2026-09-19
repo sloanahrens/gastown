@@ -1509,6 +1509,10 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string `json:"ready_issues"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	BaseBranch   string   `json:"base_branch,omitempty"`
+	// Agent is the runtime agent requested when the convoy's beads were slung
+	// (--agent). Feeders must re-dispatch with it instead of the rig default,
+	// so a failed sling cannot silently re-route the bead (gt-yg24).
+	Agent string `json:"agent,omitempty"`
 	// Owned reports whether the convoy carries the gt:owned label. Owned
 	// convoys have a designated owner responsible for their own dispatch
 	// cadence; the system-managed stranded scan (daemon's feedFirstReady)
@@ -1615,10 +1619,11 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 
 	// Check each convoy for stranded state
 	for _, convoy := range convoys {
-		// Extract base_branch from convoy description fields
-		var baseBranch string
+		// Extract base_branch and agent from convoy description fields
+		var baseBranch, convoyAgent string
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
+			convoyAgent = cf.Agent
 		}
 		owned := hasLabel(convoy.Labels, "gt:owned")
 
@@ -1640,6 +1645,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Agent:        convoyAgent,
 				Owned:        owned,
 			})
 			continue
@@ -1679,6 +1685,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  readyIssues,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Agent:        convoyAgent,
 				Owned:        owned,
 			})
 		} else {
@@ -1692,6 +1699,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Agent:        convoyAgent,
 				Owned:        owned,
 			})
 		}
@@ -2024,6 +2032,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Owned         bool               `json:"owned"`
 			Lifecycle     string             `json:"lifecycle"`
 			MergeStrategy string             `json:"merge_strategy,omitempty"`
+			Agent         string             `json:"agent,omitempty"`
 			Tracked       []trackedIssueInfo `json:"tracked"`
 			Completed     int                `json:"completed"`
 			Total         int                `json:"total"`
@@ -2035,6 +2044,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Owned:         isOwned,
 			Lifecycle:     lifecycle,
 			MergeStrategy: convoyMergeFromFields(convoy.Description),
+			Agent:         convoyAgentFromFields(convoy.Description),
 			Tracked:       tracked,
 			Completed:     completed,
 			Total:         len(tracked),
@@ -2056,6 +2066,9 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 	merge := convoyMergeFromFields(convoy.Description)
 	if merge != "" {
 		fmt.Printf("  Merge:     %s\n", merge)
+	}
+	if agent := convoyAgentFromFields(convoy.Description); agent != "" {
+		fmt.Printf("  Agent:     %s\n", agent)
 	}
 	fmt.Printf("  Progress:  %d/%d completed\n", completed, len(tracked))
 	fmt.Printf("  Created:   %s\n", convoy.CreatedAt)
@@ -2376,6 +2389,18 @@ func convoyMergeFromFields(description string) string {
 		return ""
 	}
 	return fields.Merge
+}
+
+// convoyAgentFromFields returns the runtime agent recorded on a convoy at sling
+// time (empty when no --agent was requested). Reporters surface it so feeders —
+// including the deacon's mol-convoy-feed dog — re-dispatch with the same agent
+// (gt-yg24).
+func convoyAgentFromFields(description string) string {
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
+	if fields == nil {
+		return ""
+	}
+	return fields.Agent
 }
 
 // formatYesNo returns "yes" or "no" for a boolean value.

@@ -414,6 +414,8 @@ func TestConvoyFieldsParseFormatRoundTrip(t *testing.T) {
 		Notify:               "witness/",
 		Merge:                "direct",
 		Molecule:             "gt-wisp-abc",
+		BaseBranch:           "feat/extraction-review",
+		Agent:                "deepseek-flash",
 		CompletionNotifiedAt: "2026-05-25T02:30:00Z",
 	}
 	formatted := FormatConvoyFields(original)
@@ -435,6 +437,18 @@ func TestConvoyFieldsParseFormatRoundTrip(t *testing.T) {
 	}
 	if parsed.CompletionNotifiedAt != original.CompletionNotifiedAt {
 		t.Errorf("CompletionNotifiedAt: got %q, want %q", parsed.CompletionNotifiedAt, original.CompletionNotifiedAt)
+	}
+	if parsed.BaseBranch != original.BaseBranch {
+		t.Errorf("BaseBranch: got %q, want %q", parsed.BaseBranch, original.BaseBranch)
+	}
+	if parsed.Agent != original.Agent {
+		t.Errorf("Agent: got %q, want %q", parsed.Agent, original.Agent)
+	}
+
+	// A re-format must not duplicate or drop the agent line (the field is
+	// rewritten by SetConvoyFields whenever a convoy's fields change).
+	if reformatted := FormatConvoyFields(parsed); strings.Count(reformatted, "agent: ") != 1 {
+		t.Errorf("expected exactly one agent line after round-trip, got:\n%s", reformatted)
 	}
 }
 

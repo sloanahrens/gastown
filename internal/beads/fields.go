@@ -266,6 +266,7 @@ type ConvoyFields struct {
 	Molecule             string // Associated molecule/swarm ID
 	Merge                string // Merge strategy
 	BaseBranch           string // Target branch for polecats (e.g., "feat/extraction-review")
+	Agent                string // Runtime agent requested at sling time (--agent), re-used by convoy feeders (gt-yg24)
 	Watchers             string // Comma-separated mail notification addresses (added via gt convoy watch)
 	NudgeWatchers        string // Comma-separated nudge notification addresses (added via gt convoy watch --nudge)
 	CompletionNotifiedAt string // RFC3339 timestamp when completion notifications were claimed/sent
@@ -313,6 +314,9 @@ func ParseConvoyFields(issue *Issue) *ConvoyFields {
 			hasFields = true
 		case "base_branch", "base-branch", "basebranch":
 			fields.BaseBranch = value
+			hasFields = true
+		case "agent":
+			fields.Agent = value
 			hasFields = true
 		case "watchers":
 			fields.Watchers = value
@@ -474,6 +478,9 @@ func FormatConvoyFields(fields *ConvoyFields) string {
 	if fields.BaseBranch != "" {
 		lines = append(lines, "base_branch: "+fields.BaseBranch)
 	}
+	if fields.Agent != "" {
+		lines = append(lines, "agent: "+fields.Agent)
+	}
 	if fields.Watchers != "" {
 		lines = append(lines, "Watchers: "+fields.Watchers)
 	}
@@ -561,6 +568,7 @@ func SetConvoyFields(issue *Issue, fields *ConvoyFields) string {
 		"base_branch":            true,
 		"base-branch":            true,
 		"basebranch":             true,
+		"agent":                  true,
 		"watchers":               true,
 		"nudge_watchers":         true,
 		"nudge-watchers":         true,
