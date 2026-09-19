@@ -25,8 +25,8 @@ om reviews diffs. It can catch rot a change introduces or leaves behind; it cann
 ## Terms
 
 - **Agent-facing doc**: a file an agent loads or is pointed at: AGENTS.md, `internal/templates/polecat-CLAUDE.md` (the source of every polecat's CLAUDE.md), docs/HOOKS.md, `plugins/*/plugin.md`, and the description blocks of `internal/formula/formulas/*.toml`. 63 files. The rig's own CLAUDE.md is gitignored and regenerated per clone, so it is not a doc this repo owns.
-- **Reference doc**: a file under docs/ written for humans, excluding the historical dirs. 35 files.
-- **Historical doc**: a file under docs/design, docs/plans, or docs/research. 38 files. Dated, not maintained, excluded from accuracy audits.
+- **Reference doc**: a file under docs/ written for humans that is not historical. About 50 files.
+- **Historical doc**: every file under docs/plans and docs/research, plus any file under docs/design whose first non-blank line is a `> Status:` header. About 20 files. Dated, not maintained, excluded from accuracy audits. docs/design is mixed: architecture.md, mail-protocol.md, escalation.md and their kin describe systems that exist on main and are cited from live docs, so they are reference; the proposal-shaped files (witness-at-team-lead.md, sandboxed-polecat-execution.md, agent-api-inventory.md, and the like) are historical. The bootstrap MR classifies each docs/design file by one rule: a doc that describes something on main today is reference; a doc that proposes, plans, or surveys is historical and gets the header. The header is then the classifier the lint script reads, so the tier list is never a second copy.
 - **Slice**: the set of files one audit run may edit, chosen by the lint script, never by the polecat.
 - **Run bead**: the gastown issue the scheduler creates for one audit run. Its open state is the double-dispatch guard; its comment carries the run's findings.
 - Leading words borrowed from the writing-for-agents skill and used unchanged in the standard: **pointer**, **cache**, **no-op**, **sediment**, **sprawl**, **single source of truth**, **completion criterion**, **negation**.
@@ -100,20 +100,20 @@ Checks:
 |---|---|---|
 | `dead-link` | agent-facing, reference, historical | a relative markdown link that does not resolve from the file's directory (URLs and pure anchors are skipped) |
 | `dead-make-target` | agent-facing, reference | a backtick-quoted `make <target>` whose target is not defined in the Makefile (prose such as "make decisions" is not matched) |
-| `status-header` | historical | the first non-blank line does not match `> Status: ` |
+| `status-header` | docs/plans, docs/research | the first non-blank line does not match `> Status: ` (docs/design files are historical only when they carry the header, so the header cannot be required there) |
 | `word-ceiling` | AGENTS.md, polecat-CLAUDE.md, docs/HOOKS.md, plugin.md | more than 2,000 words |
 
 The grilled ceiling was 1,500 words across the whole agent-facing tier. The baseline shows 16 files over it, 14 of them formulas, the largest patrol formulas at 4,800 to 8,600 words and the towers-of-hanoi demos far beyond. A gate that is red on day one is not a gate. So in v1 the ceiling covers the always-loaded files, set at 2,000 so the two largest (stuck-agent-dog plugin.md at 1,960, HOOKS.md at 1,870) pass with little room, and formulas are reported by `--words` but not gated. Formula sprawl is a finding under the standard's sprawl rule, which the audit applies as it cycles through them. A follow-up bead lowers the ceiling to 1,500 and adds formulas to it once the audit has visited every formula, and that bead is filed under the epic now so the deviation is recorded, not forgotten.
 
 Modes for the audit:
 
-- `--list <agent-facing|reference|historical|go>` prints the tier's files, one per line. The tier globs live here and nowhere else.
+- `--list <agent-facing|reference|historical|go>` prints the tier's files, one per line. The tier globs live here and nowhere else; historical is docs/plans, docs/research, and any docs/design file whose first non-blank line starts with `> Status:`.
 - `--slice <docs> <go>` prints the `<docs>` agent-facing or reference files and the `<go>` non-test Go files least recently modified, by the date of the last commit touching each file. Ties break by path. Deterministic, so the polecat cannot choose its own slice.
 - `--words` prints the total word count across the agent-facing tier.
 
 Wiring: the `lint` target gains `docs-lint` as a dependency, so the rig's `lint_command` (`make lint`) and main_branch_test pick it up unchanged. Every MR gate and every main-branch check runs it.
 
-Bootstrap: the introducing MR must leave main green, so it also adds the status header to all 38 historical docs and fixes the `dead-link` and `dead-make-target` findings the first run reports. The rough baseline count is zero dead links and one dead make target, so the bulk of that MR is the 38 headers. A finding that needs a judgement call is fixed by hand in that MR rather than allowlisted; there is no ignore file.
+Bootstrap: the introducing MR must leave main green, so it also adds the status header to every docs/plans and docs/research file and to the proposal-shaped docs/design files and fixes the `dead-link` and `dead-make-target` findings the first run reports. The rough baseline count is zero dead links and one dead make target, so the bulk of that MR is the headers and the docs/design classification. A finding that needs a judgement call is fixed by hand in that MR rather than allowlisted; there is no ignore file.
 
 ### 4. The audit formula: mol-doc-audit
 
@@ -178,7 +178,7 @@ Fallback if the patrol slips: a launchd agent running the same bead-create-and-s
 
 Four merge requests, each usable alone, in this order.
 
-1. The standard, the polecat template pointer, docs-lint with its tests, the Makefile wiring, the status headers on all historical docs, and the link and make-target fixes the first run reports. Main is green on merge.
+1. The standard, the polecat template pointer, docs-lint with its tests, the Makefile wiring, the status headers on historical docs, the docs/design classification, and the link and make-target fixes the first run reports. Main is green on merge. This may land as several MRs, but the Makefile wiring that makes docs-lint part of `make lint` lands in the same MR as the fixes that make it green.
 2. The `.om.json` criterion and `context_file`, filed only after in-flight branches have rebased past MR 1. The operator re-stamps the gastown manifest immediately after merge.
 3. The formula, plus one hand-run sling. The operator reads the resulting MR and the run bead comment. If the om gate rejects two audit MRs in a row, the formula or the rule text is fixed before step 4.
 4. The patrol, its tests, and the daemon.json entry, armed only after the hand run's MR merged cleanly.
