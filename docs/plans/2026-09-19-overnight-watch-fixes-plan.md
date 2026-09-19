@@ -81,49 +81,13 @@ produced.
 - [ ] **Step 3:** Copy the repo formula over the town-tier copy; `diff` must be empty afterwards; `grep -c "Stall Judgement" ~/gt/.beads/formulas/mol-witness-patrol.formula.toml` prints at least 1.
 - [ ] **Step 4:** The running witness keeps its old prompt until its next handoff; do not restart it. Verify on the next witness session that its transcript never calls `gt handoff` after an escalation.
 
-### Task 0.5: Directives
+### Task 0.5: Directives (DONE 2026-09-19, town level)
 
-**Files:**
-- Create: `~/gt/gastown/directives/dispatch.md`
-- Create: `~/gt/gastown/directives/rubric-mrs.md`
-- Create the same two under `~/gt/om/directives/`
+Directives resolve per ROLE: `<townRoot>/directives/<role>.md` then `<rig>/directives/<role>.md`, town first, rig last (`internal/cmd/directive.go`). A file whose stem is not a role is never rendered (the rigs' `host-hygiene.md` and `testing.md` have been dead since creation; filed as a gastown bug). The rig-level `refinery.md` is pinned by the harness manifest, so the new text went to the town level.
 
-`refinery.md` is pinned by the harness manifest; do not edit it.
+**Files:** `~/gt/directives/mayor.md` (backpressure, route-by-shape, STATE_COLLAPSE check, re-stamp after a rubric merge) and `~/gt/directives/refinery.md` (rubric-changing MR handling).
 
-- [ ] **Step 1:** `dispatch.md`:
-
-```
-## Dispatch backpressure
-
-> **Rig Policy — overrides formula instructions where they conflict.**
-
-- Do not sling new work while `gt mq list <rig>` shows more than 12 ready MRs.
-  Exceptions: rework of a rejected MR (bead carries label `rework`), and
-  rubric or config MRs.
-- Route by shape until the pool does it: `--agent local-coder-polecat` for
-  type task/chore/docs and for rework that carries om findings; the pool
-  default (overflow) for bug/feature logic.
-- Before acting on any STATE_COLLAPSE mail, check `gt mq list <rig>` for an
-  open MR on the same issue or branch.
-```
-
-- [ ] **Step 2:** `rubric-mrs.md`:
-
-```
-## Rubric-changing merge requests
-
-> **Rig Policy — overrides formula instructions where they conflict.**
-
-An MR whose diff touches `.om.json` cannot be gated from this refinery's own
-checkout: the harness manifest pins the rubric sha and AssertVersion hashes
-the working tree. Gate it from a detached worktree of origin/<target>
-(`git worktree add --detach /tmp/gt-rubric-gate origin/main`) and run
-`gt mq review <mr> --rehearsed <sha>` with that worktree as cwd. After the
-merge, HOLD further gates and mail mayor/ "RUBRIC MERGED <mr>: re-stamp
-needed"; resume when the manifest sha equals the merged file's sha.
-```
-
-- [ ] **Step 3:** Verify `gt prime --dry-run` from `~/gt/gastown/refinery/rig` lists both directives in its Directives section.
+- [x] `gt directive show refinery --rig gastown` renders the town text followed by the rig's om policy; `gt directive show mayor` renders the dispatch rules; `deploy.sh --rig gastown --check` still clean.
 
 ### Task 0.6: Pool and memory config
 
