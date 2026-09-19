@@ -239,6 +239,11 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 //     its branch rather than pushing a duplicate MR. That leaves the same
 //     on-disk signature as a genuine strand, so the close reason must be
 //     read, not just the status.
+//
+// A third false-positive class is now filtered: a branch whose issue is
+// closed but whose MR is still open in the queue (work is pending, not
+// stranded). Before reporting, we query the MR queue for an open MR matching
+// this branch; if found, the branch is skipped.
 func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, targetBranch string, router *mail.Router) *DetectStrandedBranchesResult {
 	result := &DetectStrandedBranchesResult{}
 	if bd == nil || refs == nil || refs.ListPolecatBranches == nil || refs.TargetHasCommitReferencing == nil {
@@ -251,6 +256,14 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 	branches, err := refs.ListPolecatBranches()
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("listing polecat branches: %w", err))
+		return result
+	}
+
+	// Pre-fetch all open MRs to avoid repeated bd calls in the loop.
+	// This also ensures a single error path for MR query failures.
+	openMRs, mrErr := getOpenMRs(workDir, bd)
+	if mrErr != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("listing open MRs: %w", mrErr))
 		return result
 	}
 
@@ -268,6 +281,12 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 
 		if isDeliberateDiscard(closeReason) {
 			continue // closed with an explicit "no-changes:" abandonment, not a strand
+		}
+
+		// Check if an open MR exists for this branch. If so, the work is
+		// queued, not stranded — skip this branch.
+		if hasOpenMRForBranch(openMRs, branch) {
+			continue
 		}
 
 		landed, err := refs.TargetHasCommitReferencing(targetBranch, meta.Issue)
@@ -289,6 +308,39 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 	}
 
 	return result
+}
+
+// getOpenMRs fetches all open merge-request beads and returns them parsed.
+// Returns an error if the query fails, ensuring MR lookup failures are
+// distinguishable from "no MRs found".
+func getOpenMRs(workDir string, bd *BdCli) ([]*beads.Issue, error) {
+	output, err := bd.Exec(workDir, "list", "--label=gt:merge-request", "--status=open", "--json", "--limit=0")
+	if err != nil {
+		return nil, fmt.Errorf("listing open MRs: %w", err)
+	}
+	if output == "" {
+		return nil, nil
+	}
+	var mrs []*beads.Issue
+	if err := json.Unmarshal([]byte(output), &mrs); err != nil {
+		return nil, fmt.Errorf("parsing open MRs: %w", err)
+	}
+	return mrs, nil
+}
+
+// hasOpenMRForBranch reports whether any open MR in the list matches the given
+// branch by checking the branch field in the MR description.
+func hasOpenMRForBranch(openMRs []*beads.Issue, branch string) bool {
+	prefix := "branch: " + branch + "\n"
+	for _, mr := range openMRs {
+		if mr.Status == "closed" {
+			continue
+		}
+		if strings.HasPrefix(mr.Description, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isDeliberateDiscard reports whether a bead close reason declares that no
