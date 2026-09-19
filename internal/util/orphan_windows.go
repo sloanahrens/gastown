@@ -6,6 +6,7 @@ package util
 // On Windows, orphan cleanup is not supported, so this is a stub definition.
 type OrphanedProcess struct {
 	PID      int
+	PPID     int // Parent pid at scan time; 0 or 1 means reparented to launchd/init
 	Cmd      string
 	Age      int    // Age in seconds
 	TownRoot string // Gas Town workspace root, or "" if not in any workspace
@@ -23,6 +24,7 @@ type CleanupResult struct {
 // On Windows, zombie cleanup is not supported, so this is a stub definition.
 type ZombieProcess struct {
 	PID      int
+	PPID     int // Parent pid at scan time; 0 or 1 means reparented to launchd/init
 	Cmd      string
 	Age      int    // Age in seconds
 	TTY      string // TTY column from ps

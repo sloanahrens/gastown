@@ -1456,13 +1456,13 @@ func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
 		}
 		switch r.Signal {
 		case "SIGTERM":
-			fmt.Printf("  %s Sent SIGTERM to PID %d (%s) town=%s\n", style.Bold.Render("→"), r.Process.PID, r.Process.Cmd, town)
+			fmt.Printf("  %s Sent SIGTERM to PID %d (%s) ppid=%d town=%s\n", style.Bold.Render("→"), r.Process.PID, r.Process.Cmd, r.Process.PPID, town)
 			terminated++
 		case "SIGKILL":
-			fmt.Printf("  %s Escalated to SIGKILL for PID %d (%s) town=%s\n", style.Bold.Render("!"), r.Process.PID, r.Process.Cmd, town)
+			fmt.Printf("  %s Escalated to SIGKILL for PID %d (%s) ppid=%d town=%s\n", style.Bold.Render("!"), r.Process.PID, r.Process.Cmd, r.Process.PPID, town)
 			escalated++
 		case "UNKILLABLE":
-			fmt.Printf("  %s WARNING: PID %d (%s) survived SIGKILL town=%s\n", style.Bold.Render("⚠"), r.Process.PID, r.Process.Cmd, town)
+			fmt.Printf("  %s WARNING: PID %d (%s) ppid=%d survived SIGKILL town=%s\n", style.Bold.Render("⚠"), r.Process.PID, r.Process.Cmd, r.Process.PPID, town)
 			unkillable++
 		}
 	}
@@ -1504,8 +1504,8 @@ func runDeaconZombieScan(cmd *cobra.Command, args []string) error {
 			if town == "" {
 				town = "unknown"
 			}
-			fmt.Printf("  %s PID %d (%s) TTY=%s age=%s town=%s\n",
-				style.Dim.Render("→"), z.PID, z.Cmd, z.TTY, ageStr, town)
+			fmt.Printf("  %s PID %d (%s) ppid=%d TTY=%s age=%s town=%s\n",
+				style.Dim.Render("→"), z.PID, z.Cmd, z.PPID, z.TTY, ageStr, town)
 		}
 		fmt.Printf("%s Dry run - no processes killed\n", style.Dim.Render("○"))
 		return nil
@@ -1526,16 +1526,16 @@ func runDeaconZombieScan(cmd *cobra.Command, args []string) error {
 		}
 		switch r.Signal {
 		case "SIGTERM":
-			fmt.Printf("  %s Sent SIGTERM to PID %d (%s) TTY=%s town=%s\n",
-				style.Bold.Render("→"), r.Process.PID, r.Process.Cmd, r.Process.TTY, town)
+			fmt.Printf("  %s Sent SIGTERM to PID %d (%s) ppid=%d TTY=%s town=%s\n",
+				style.Bold.Render("→"), r.Process.PID, r.Process.Cmd, r.Process.PPID, r.Process.TTY, town)
 			terminated++
 		case "SIGKILL":
-			fmt.Printf("  %s Escalated to SIGKILL for PID %d (%s) town=%s\n",
-				style.Bold.Render("!"), r.Process.PID, r.Process.Cmd, town)
+			fmt.Printf("  %s Escalated to SIGKILL for PID %d (%s) ppid=%d town=%s\n",
+				style.Bold.Render("!"), r.Process.PID, r.Process.Cmd, r.Process.PPID, town)
 			escalated++
 		case "UNKILLABLE":
-			fmt.Printf("  %s WARNING: PID %d (%s) survived SIGKILL town=%s\n",
-				style.Bold.Render("⚠"), r.Process.PID, r.Process.Cmd, town)
+			fmt.Printf("  %s WARNING: PID %d (%s) ppid=%d survived SIGKILL town=%s\n",
+				style.Bold.Render("⚠"), r.Process.PID, r.Process.Cmd, r.Process.PPID, town)
 			unkillable++
 		}
 	}
