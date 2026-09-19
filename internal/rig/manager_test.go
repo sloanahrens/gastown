@@ -646,9 +646,6 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
 
-	// Debug: print the expected beadsDir
-	t.Logf("Expected beadsDir: %s", beadsDir)
-
 	script := `#!/usr/bin/env bash
 set -e
 cmd="$1"
