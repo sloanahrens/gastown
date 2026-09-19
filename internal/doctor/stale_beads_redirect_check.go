@@ -65,7 +65,6 @@ var staleFilePatterns = []string{
 	"metadata.json",
 	"sync-state.json",
 	"last-touched",
-	".local_version",
 	// Daemon runtime files
 	"daemon.lock",
 	"daemon.log",

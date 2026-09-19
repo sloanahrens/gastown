@@ -1294,9 +1294,19 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		return nil
 	}
 
-	// No tracked beads - create local database
+	// No tracked beads - create local database and redirect for mayor clone
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		return err
+	}
+
+	// Create redirect file for mayor clone to point to mayor/rig/.beads
+	// This is essential for bd commands in mayor/rig to find the beads database
+	if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
+		return err
+	}
+	redirectPath := filepath.Join(mayorRigBeads, "redirect")
+	if err := os.WriteFile(redirectPath, []byte("../../.beads\n"), 0644); err != nil {
+		return fmt.Errorf("creating redirect file: %w", err)
 	}
 
 	// Pin bd to the intended .beads directory/database through the shared
@@ -1382,14 +1392,34 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		}
 	}
 
+	// Ensure .local_version file exists with current bd version string.
+	// This file is required for Dolt server compatibility - without it, bd
+	// reports "legacy Dolt server workspace detected; explicit migration is required".
+	localVersionPath := filepath.Join(beadsDir, ".local_version")
+	localVersion := "1.2.2" // Current bd version string
+	if err := os.WriteFile(localVersionPath, []byte(localVersion+"\n"), 0644); err != nil {
+		return fmt.Errorf("writing .local_version: %w", err)
+	}
+
+	// Force migrate to ensure the database has the latest schema version.
+	// The --force flag ensures schema migration even on existing databases.
+	// Without this, new rigs may have an old schema version (e.g., v49 vs v66),
+	// causing "table not found: leases" errors.
+	// Ignore errors - this is optional for functionality (fake bd in tests
+	// won't have migrate command, and real failures are handled by bd itself).
+	forceMigrateCmd := exec.Command("bd", "migrate", "--force")
+	forceMigrateCmd.Dir = rigPath
+	forceMigrateCmd.Env = filteredEnv
+	_, _ = forceMigrateCmd.CombinedOutput()
+
 	// Ensure database has repository fingerprint (GH #25).
 	// This is idempotent - safe on both new and legacy (pre-0.17.5) databases.
 	// Without fingerprint, the bd daemon fails to start silently.
-	migrateCmd := exec.Command("bd", "migrate", "--update-repo-id")
-	migrateCmd.Dir = rigPath
-	migrateCmd.Env = filteredEnv
+	fingerprintCmd := exec.Command("bd", "migrate", "--update-repo-id")
+	fingerprintCmd.Dir = rigPath
+	fingerprintCmd.Env = filteredEnv
 	// Ignore errors - fingerprint is optional for functionality
-	_, _ = migrateCmd.CombinedOutput()
+	_, _ = fingerprintCmd.CombinedOutput()
 
 	// NOTE: We intentionally do NOT create routes.jsonl in rig beads.
 	// bd's routing walks up to find town root (via mayor/town.json) and uses

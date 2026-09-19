@@ -138,8 +138,6 @@ func cleanBeadsRuntimeFiles(beadsDir string) error {
 		"daemon.lock", "daemon.log", "daemon.pid", "bd.sock",
 		// Sync state
 		"last-touched",
-		// Version tracking
-		".local_version",
 		// Redirect file (we're about to recreate it)
 		"redirect",
 		// Runtime directories
