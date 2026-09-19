@@ -491,8 +491,9 @@ The fetch is not optional: `origin/<merge-target>` in this clone is only as
 fresh as the last fetch, and a rehearsal against a stale target scores a
 gate that cannot be attributed to the MR (gt-x1x3). If the target moves
 while the gate runs, the review itself stays sound (`gt mq review` diffs
-from the merge-base, not from the moved target), but the merge in Step 5
-must be rehearsed again on the new tip before it is pushed.
+from the merge-base, not from the moved target), but the merge in
+merge-push must be rehearsed again on the new tip before it is pushed
+(merge-push fetches and fast-forwards the target first and says so).
 
 **Step 1 note (REBASE-BEFORE-REVIEW, gt-oh41):** This rehearsal exists to
 make `temp` safe to review, not only to test the merge. Once it succeeds,
@@ -895,10 +896,18 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 **If merge_strategy = "direct" (default):**
 
 ```bash
+git fetch origin
 git checkout <merge-target>
+git merge --ff-only origin/<merge-target>
 git merge --no-ff -m "Merge <polecat-branch> into <merge-target>" origin/<polecat-branch>
 git push origin <merge-target>
 ```
+
+If `git merge --ff-only origin/<merge-target>` moved the local target past
+the tip the rehearsal in process-branch used, the merge you are about to
+push was never rehearsed on this tip: go back to process-branch and
+rehearse again before merging (gt-x1x3). The push rejects a stale merge as
+non-fast-forward anyway, but only after the gate was spent.
 
 **Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
 
