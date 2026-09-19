@@ -565,14 +565,14 @@ func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	// pointing to mayor/rig/.beads instead of creating a local database.
 	rigPath := t.TempDir()
 
-	// Simulate tracked beads in the cloned repo
+	// Simulate tracked beads in the cloned repo (metadata.json is the marker)
 	mayorBeadsDir := filepath.Join(rigPath, "mayor", "rig", ".beads")
 	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
 		t.Fatalf("mkdir mayor beads: %v", err)
 	}
-	// Create a config file to simulate a real beads directory
-	if err := os.WriteFile(filepath.Join(mayorBeadsDir, "config.yaml"), []byte("prefix: gt\n"), 0644); err != nil {
-		t.Fatalf("write mayor config: %v", err)
+	// Create metadata.json to simulate a real beads database
+	if err := os.WriteFile(filepath.Join(mayorBeadsDir, "metadata.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("write mayor metadata.json: %v", err)
 	}
 
 	manager := &Manager{}
@@ -648,19 +648,27 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 
 	script := `#!/usr/bin/env bash
 set -e
-if [[ -n "$BEADS_DIR_LOG" ]]; then
-  echo "${BEADS_DIR:-<unset>}" >> "$BEADS_DIR_LOG"
-fi
 cmd="$1"
 shift
 if [[ "$cmd" == "init" ]]; then
+  # Log BEADS_DIR only for the init command (the one we're testing)
+  if [[ -n "$BEADS_DIR_LOG" && -n "$BEADS_DIR" ]]; then
+    echo "${BEADS_DIR}" >> "$BEADS_DIR_LOG"
+  fi
   echo "bd init failed" >&2
   exit 1
+elif [[ "$cmd" == "migrate" ]]; then
+  # migrate is optional, succeed silently
+  exit 0
+elif [[ "$cmd" == "version" ]]; then
+  # Return a fake version for .local_version (must go to stdout)
+  echo "bd version 1.2.3"
+  exit 0
 fi
 echo "unexpected command: $cmd" >&2
 exit 1
 `
-	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nexit /b 1\r\n"
+	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nif \"%1\"==\"migrate\" (\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"version\" (\r\n  echo bd version 1.2.3\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
 
 	binDir := writeFakeBD(t, script, windowsScript)
 	beadsDirLog := filepath.Join(t.TempDir(), "beads-dir.log")

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -46,7 +47,12 @@ func CheckBeads() (BeadsStatus, string) {
 	// packages), even a trivial shell script can take >3s to start.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Use a clean environment that strips BEADS target env vars
+	// to prevent stale shell state from leaking into version checks.
+	baseEnv := beads.StripBDTargetEnv(os.Environ())
 	cmd := exec.CommandContext(ctx, "bd", "version")
+	cmd.Env = baseEnv
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
