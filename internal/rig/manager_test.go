@@ -656,11 +656,18 @@ shift
 if [[ "$cmd" == "init" ]]; then
   echo "bd init failed" >&2
   exit 1
+elif [[ "$cmd" == "migrate" ]]; then
+  # migrate is optional, succeed silently
+  exit 0
+elif [[ "$cmd" == "version" ]]; then
+  # Return a fake version for .local_version (must go to stdout)
+  echo "bd version 1.2.3"
+  exit 0
 fi
 echo "unexpected command: $cmd" >&2
 exit 1
 `
-	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nexit /b 1\r\n"
+	windowsScript := "@echo off\r\nif defined BEADS_DIR_LOG (\r\n  if defined BEADS_DIR (\r\n    echo %BEADS_DIR%>>\"%BEADS_DIR_LOG%\"\r\n  ) else (\r\n    echo ^<unset^> >>\"%BEADS_DIR_LOG%\"\r\n  )\r\n)\r\nif \"%1\"==\"init\" (\r\n  exit /b 1\r\n)\r\nif \"%1\"==\"migrate\" (\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"version\" (\r\n  echo bd version 1.2.3\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
 
 	binDir := writeFakeBD(t, script, windowsScript)
 	beadsDirLog := filepath.Join(t.TempDir(), "beads-dir.log")
