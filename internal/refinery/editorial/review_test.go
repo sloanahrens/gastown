@@ -1074,3 +1074,57 @@ func TestRun_ResolvesRehearsedRefToSHA(t *testing.T) {
 		t.Errorf("editorial_reviewed_head = %v, want resolved sha %s, not the ref name", fields, fixture.head)
 	}
 }
+
+// The gate script must diff from the merge-base, never from origin/<target>:
+// when main moves while a rehearsal is under review, a two-dot
+// origin/main..head diff shows main's own new commits as deletions and om
+// rejects the branch for work it never touched (two phantom rejections on
+// 2026-09-19, gt-x1x3).
+func TestRun_GateBaseIsMergeBaseNotMovedTarget(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+
+	// origin/main moves past the rehearsal's base after the head was cut.
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = fixture.repoDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	tree := run("rev-parse", fixture.base+"^{tree}")
+	moved := run("commit-tree", tree, "-p", fixture.base, "-m", "main moved during the gate")
+	run("update-ref", "refs/remotes/origin/main", moved)
+
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	var gateBase string
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			for i, a := range args {
+				if a == "--base" && i+1 < len(args) {
+					gateBase = args[i+1]
+				}
+			}
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q)", result.Exit, result.Stderr)
+	}
+	if gateBase != fixture.base {
+		t.Errorf("gate --base = %q, want the merge-base sha %s (origin/main moved to %s)", gateBase, fixture.base, moved[:7])
+	}
+	if result.Note.BaseSHA != fixture.base {
+		t.Errorf("Note.BaseSHA = %q, want %s", result.Note.BaseSHA, fixture.base)
+	}
+}

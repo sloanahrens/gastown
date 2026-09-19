@@ -223,8 +223,13 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 
 	verdictPath := filepath.Join(tmpDir, "verdict.json")
 	scriptPath := filepath.Join(req.RigDir, cfg.Command)
+	// The diff base is the merge-base sha, not origin/<target>: the target
+	// can move while a rehearsed head waits for its gate, and a diff from the
+	// moved target shows the target's own new commits as deletions on the
+	// branch (two phantom rejections on 2026-09-19, gt-x1x3). The merge-base
+	// pins the review to exactly what the branch changed.
 	args := []string{
-		"--base", "origin/" + req.Target,
+		"--base", mergeBase,
 		"--head", head,
 		"--mr", req.MRID,
 		"--worker", req.Worker,

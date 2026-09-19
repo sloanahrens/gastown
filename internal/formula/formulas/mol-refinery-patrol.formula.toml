@@ -117,7 +117,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 26
+version = 27
 
 [vars]
 [vars.wisp_type]
@@ -482,9 +482,17 @@ If the branch no longer exists (exit code non-zero):
 
 **Step 1: Checkout and rehearse merge without rewriting the submitted head**
 ```bash
+git fetch --prune origin
 git checkout -b temp origin/<polecat-branch>
 git merge --no-ff --no-edit origin/<merge-target>
 ```
+
+The fetch is not optional: `origin/<merge-target>` in this clone is only as
+fresh as the last fetch, and a rehearsal against a stale target scores a
+gate that cannot be attributed to the MR (gt-x1x3). If the target moves
+while the gate runs, the review itself stays sound (`gt mq review` diffs
+from the merge-base, not from the moved target), but the merge in Step 5
+must be rehearsed again on the new tip before it is pushed.
 
 **Step 1 note (REBASE-BEFORE-REVIEW, gt-oh41):** This rehearsal exists to
 make `temp` safe to review, not only to test the merge. Once it succeeds,
