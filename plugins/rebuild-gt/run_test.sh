@@ -47,9 +47,16 @@ STUB
 }
 
 run_plugin() {
-  local town="$1"
-  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" PATH="$town/bin:$PATH"; bash "$RUN_SH" ) > "$town/run.out" 2>&1
-  echo $?
+  # Capture the exit code without set -e aborting the test script on non-zero
+  # (om review of gt-htx3: with set -e the rc assertions could never fire).
+  local town="$1" rc=0
+  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" PATH="$town/bin:$PATH"; bash "$RUN_SH" ) > "$town/run.out" 2>&1 || rc=$?
+  echo "$rc"
+}
+
+# holder_json ROLE -> slot.json with that role holding slot 0
+holder_json() {
+  printf '{"held": true, "slots": [{"index": 0, "held": true, "owner": {"role": "%s", "pid": 1, "slot": 0}}, {"index": 1, "held": false}]}' "$1"
 }
 
 # --- Case 1: a gate-class role holds a slot -> recorded skip, no build ---
@@ -81,6 +88,38 @@ T=$(make_town)
 echo '{"held": true, "slots": [{"index": 0, "held": false}, {"index": 1, "held": true, "owner": {"role": "gastown/polecats/opal", "pid": 2, "slot": 1}}]}' > "$T/slot.json"
 rc=$(run_plugin "$T")
 if [ -e "$T/build.marker" ]; then pass "polecat holder: build ran"; else fail "polecat holder: build did not run: $(cat "$T/run.out")"; fi
+
+# --- Case 4: every gate-class role suffix defers the rebuild ---
+for role in gastown/refinery-batch gastown/main-branch-test om/om-review; do
+  T=$(make_town)
+  holder_json "$role" > "$T/slot.json"
+  rc=$(run_plugin "$T")
+  if [ "$rc" = "0" ] && [ ! -e "$T/build.marker" ] && grep -q "gate busy $role" "$T/gt.log" 2>/dev/null; then
+    pass "$role holder: deferred and recorded"
+  else
+    fail "$role holder: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no) log=$(cat "$T/gt.log" 2>/dev/null)"
+  fi
+done
+
+# --- Case 5: a broken slot status (non-JSON) fails OPEN: the build still runs ---
+T=$(make_town)
+echo "gt slot status: dolt unreachable" > "$T/slot.json"
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "broken slot status: fail-open, build ran"; else fail "broken slot status: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"; fi
+
+# --- Case 6: a failed build exits non-zero and records a failure (proves the
+# rc capture: with set -e swallowing it this assertion could never run) ---
+T=$(make_town)
+echo '{"held": false, "slots": [{"index": 0, "held": false}]}' > "$T/slot.json"
+printf 'build:\n\tfalse\nsafe-install:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
+git -C "$T/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -am "break build"
+git -C "$T/gastown/mayor/rig" push -q origin main
+rc=$(run_plugin "$T")
+if [ "$rc" != "0" ] && grep -q -- "--result failure" "$T/gt.log" 2>/dev/null; then
+  pass "failed build: non-zero exit ($rc) and failure recorded"
+else
+  fail "failed build: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all rebuild-gt tests passed"
