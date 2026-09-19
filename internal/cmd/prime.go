@@ -761,7 +761,7 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	} else {
 		outputAutonomousDirective(ctx, hookedBead, hasWorkflow)
 	}
-	outputHookedBeadDetails(hookedBead)
+	outputHookedBeadDetails(ctx, hookedBead)
 
 	if hasWorkflow {
 		if err := outputMoleculeWorkflow(ctx, attachment); err != nil {
@@ -1008,7 +1008,7 @@ func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMole
 }
 
 // outputHookedBeadDetails displays the hooked bead's ID, title, and description summary.
-func outputHookedBeadDetails(hookedBead *beads.Issue) {
+func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
 	fmt.Printf("%s\n\n", style.Bold.Render("## Hooked Work"))
 	fmt.Printf("  Bead ID: %s\n", style.Bold.Render(hookedBead.ID))
 	fmt.Printf("  Title: %s\n", hookedBead.Title)
@@ -1024,7 +1024,66 @@ func outputHookedBeadDetails(hookedBead *beads.Issue) {
 			fmt.Printf("    %s\n", line)
 		}
 	}
+	outputDependencyMergeStatus(ctx, hookedBead)
 	fmt.Println()
+}
+
+// outputDependencyMergeStatus tells a starting worker what state each of its
+// bead's blocking dependencies is actually in — landed, still in the merge
+// queue, or not yet closed (gt-0r0z).
+//
+// The failure this prevents is specific. A polecat's bead can be dispatched
+// against a main that does not yet contain its blocker's work, because the
+// blocker reads as "closed" from the moment its MR is submitted rather than
+// when that MR merges. The worker then designs against a world that does not
+// exist — and until now it had no way to find that out. One line here is the
+// difference between "my prerequisite is on main" and "my prerequisite is
+// sitting in the queue behind me".
+func outputDependencyMergeStatus(ctx RoleContext, hookedBead *beads.Issue) {
+	renderDependencyMergeStatus(beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), hookedBead))
+}
+
+// renderDependencyMergeStatus prints already-resolved dependency merge states.
+// Split from the lookup so the wording a worker actually reads is testable
+// without a database.
+func renderDependencyMergeStatus(statuses []beads.DependencyMergeStatus) {
+	if len(statuses) == 0 {
+		return
+	}
+
+	fmt.Println()
+	fmt.Printf("  %s\n", style.Bold.Render("Dependencies:"))
+	for _, status := range statuses {
+		switch status.State {
+		case beads.DependencyMergeUnmerged:
+			detail := fmt.Sprintf("submitted but NOT merged (MR %s", status.MR)
+			if status.Branch != "" {
+				detail += " on " + status.Branch
+			}
+			detail += ")"
+			fmt.Printf("    %s %s — %s\n", style.Warning.Render("⏳"), status.ID, detail)
+		case beads.DependencyMergeLanded:
+			fmt.Printf("    %s %s — landed\n", style.Success.Render("✓"), status.ID)
+		case beads.DependencyMergeOpen:
+			fmt.Printf("    %s %s — still open\n", style.Dim.Render("○"), status.ID)
+		default:
+			fmt.Printf("    %s %s — merge state unknown\n", style.Warning.Render("?"), status.ID)
+		}
+	}
+
+	// The only case that changes what the worker should do. Say it plainly and
+	// once, rather than leaving the reader to infer it from the list.
+	for _, status := range statuses {
+		if status.State != beads.DependencyMergeUnmerged {
+			continue
+		}
+		fmt.Println()
+		fmt.Printf("  %s %s is closed but its work is NOT on your base branch yet.\n",
+			style.Warning.Render("⚠"), status.ID)
+		fmt.Printf("  Do not build on it as though it exists. Verify it is actually present\n")
+		fmt.Printf("  before relying on it, or design to work without it.\n")
+		break
+	}
 }
 
 // outputMoleculeWorkflow displays attached molecule context with current step.

@@ -203,9 +203,11 @@ git commit
 - Read the original issue for context: `bd show <source-issue>`
 - If still unclear, escalate to Witness:
   ```bash
-  gt mail send <rig>/witness -s "HELP: Complex conflict" -m "Task: {{task}}
-  File: <conflicted-file>
-  Issue: Cannot determine correct resolution"
+gt mail send <rig>/witness -s "HELP: Complex conflict" --stdin <<'BODY'
+Task: {{task}}
+File: <conflicted-file>
+Issue: Cannot determine correct resolution
+BODY
   ```
 
 **4. Verify merge success:**

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -123,5 +124,57 @@ func TestInjectWorkContext_NoopInDryRun(t *testing.T) {
 
 	if got := os.Getenv("GT_WORK_BEAD"); got != "" {
 		t.Errorf("GT_WORK_BEAD = %q, want empty in dry-run mode", got)
+	}
+}
+
+// TestRenderDependencyMergeStatusWarnsOnUnmergedBlocker is acceptance criterion
+// 5 at the point the worker actually reads it: a starting polecat is told, in
+// words, that its prerequisite is submitted but not landed.
+func TestRenderDependencyMergeStatusWarnsOnUnmergedBlocker(t *testing.T) {
+	out := captureOutput(func() {
+		renderDependencyMergeStatus([]beads.DependencyMergeStatus{
+			{ID: "gt-blocker", Status: "closed", State: beads.DependencyMergeUnmerged, MR: "gt-wisp-mr1", Branch: "polecat/onyx/gt-blocker"},
+			{ID: "gt-done", Status: "closed", State: beads.DependencyMergeLanded},
+		})
+	})
+
+	// The blocker and its MR must both be named, so the worker can go look.
+	if !strings.Contains(out, "gt-blocker") || !strings.Contains(out, "gt-wisp-mr1") {
+		t.Fatalf("output must name the unmerged blocker and its MR, got:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT merged") {
+		t.Fatalf("output must say the dependency is not merged, got:\n%s", out)
+	}
+	// It must not claim a merely-queued dependency has landed.
+	if strings.Contains(out, "gt-blocker — landed") {
+		t.Fatalf("unmerged blocker must not be reported as landed, got:\n%s", out)
+	}
+	// And it must not warn about a dependency that has landed.
+	if strings.Contains(out, "gt-done is closed but its work is NOT") {
+		t.Fatalf("landed dependency must not raise the unmerged warning, got:\n%s", out)
+	}
+}
+
+// TestRenderDependencyMergeStatusSilentWithoutDependencies: a bead with no
+// dependencies gets no dependency noise in its starting context.
+func TestRenderDependencyMergeStatusSilentWithoutDependencies(t *testing.T) {
+	if out := captureOutput(func() { renderDependencyMergeStatus(nil) }); out != "" {
+		t.Fatalf("expected no output, got %q", out)
+	}
+}
+
+// TestRenderDependencyMergeStatusReportsUnknownHonestly: a blocker we could not
+// check must not read as landed.
+func TestRenderDependencyMergeStatusReportsUnknownHonestly(t *testing.T) {
+	out := captureOutput(func() {
+		renderDependencyMergeStatus([]beads.DependencyMergeStatus{
+			{ID: "gt-unchecked", Status: "closed", State: beads.DependencyMergeUnknown},
+		})
+	})
+	if !strings.Contains(out, "unknown") {
+		t.Fatalf("unchecked blocker must report unknown, got:\n%s", out)
+	}
+	if strings.Contains(out, "landed") {
+		t.Fatalf("unchecked blocker must never read as landed, got:\n%s", out)
 	}
 }

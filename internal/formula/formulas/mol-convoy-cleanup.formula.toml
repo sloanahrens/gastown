@@ -145,7 +145,11 @@ Notify the Mayor (overseer) of convoy completion.
 
 **1. Send completion mail:**
 ```bash
-gt mail send mayor/ -s "Convoy complete: {{convoy.title}}" -m "$(cat <<EOF
+SUBJECT=$(cat <<'EOF'
+Convoy complete: {{convoy.title}}
+EOF
+)
+gt mail send mayor/ -s "$SUBJECT" -m "$(cat <<'EOF'
 Convoy {{convoy}} has completed and been closed.
 
 ## Summary

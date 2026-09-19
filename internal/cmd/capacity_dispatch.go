@@ -412,6 +412,8 @@ type scheduledContextAssessment struct {
 	found          bool
 	blocked        bool
 	blockedUnknown bool
+	mergePending   bool   // a blocker is submitted but unmerged (gt-0r0z)
+	mergePendingMR string // the open MR holding it back
 	ready          bool
 }
 
@@ -478,6 +480,11 @@ type beadStatusInfo struct {
 	Status string
 	Title  string
 	Labels []string
+	// Dependencies carries the blocking edges declared by this bead, when the
+	// query that filled this struct returned them. Only `bd show --json` does;
+	// the lighter query paths leave it nil, and a nil dependency list means
+	// "no merge-aware gating" — which is the pre-gt-0r0z behavior.
+	Dependencies []beads.IssueDep
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -515,19 +522,21 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID           string           `json:"id"`
+			Status       string           `json:"status"`
+			Title        string           `json:"title"`
+			Labels       []string         `json:"labels"`
+			Dependencies []beads.IssueDep `json:"dependencies"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status: item.Status,
-				Title:  item.Title,
-				Labels: item.Labels,
+				Status:       item.Status,
+				Title:        item.Title,
+				Labels:       item.Labels,
+				Dependencies: item.Dependencies,
 			}
 		}
 	}
@@ -614,6 +623,7 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 	blockedWorkIDs, blockedUnknownIDs, blockedErr := listBlockedWorkBeadIDStates(townRoot, workBeadIDs)
+	mergePendingWorkIDs := listUnmergedBlockedWorkBeadIDs(townRoot, workBeadIDs, workBeadInfo)
 
 	seenWork := make(map[string]bool)
 	assessments := make([]scheduledContextAssessment, 0, len(candidates))
@@ -629,7 +639,9 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		candidate.found = found
 		candidate.blocked = blockedWorkIDs[workBeadID]
 		candidate.blockedUnknown = blockedUnknownIDs[workBeadID]
-		candidate.ready = isScheduledWorkBeadReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs)
+		_, candidate.mergePending = mergePendingWorkIDs[workBeadID]
+		candidate.mergePendingMR = mergePendingWorkIDs[workBeadID]
+		candidate.ready = isScheduledWorkBeadMergeReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs, mergePendingWorkIDs)
 		assessments = append(assessments, candidate)
 	}
 
@@ -920,8 +932,119 @@ func markBlockedUnknown(blockedUnknownIDs map[string]bool, ids []string) {
 }
 
 func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool, blockedWorkIDs, blockedUnknownIDs map[string]bool) bool {
+	return isScheduledWorkBeadMergeReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs, nil)
+}
+
+// isScheduledWorkBeadMergeReady is isScheduledWorkBeadReady plus the
+// merge-aware dependency gate (gt-0r0z).
+//
+// `bd blocked` answers "is this bead blocked?" from bead STATUS alone: a
+// blocker that a polecat closed at MR-creation time reads as satisfied even
+// while its work is still sitting in the merge queue. mergePendingWorkIDs
+// carries the missing distinction — it maps a work bead to the open merge
+// request of a blocker that has been submitted but has not landed, and any
+// entry here holds the bead back. A nil or empty map is the ordinary case and
+// behaves exactly like the status-only check.
+func isScheduledWorkBeadMergeReady(workBeadID string, info beadStatusInfo, found bool, blockedWorkIDs, blockedUnknownIDs map[string]bool, mergePendingWorkIDs map[string]string) bool {
 	if !found || blockedWorkIDs[workBeadID] || blockedUnknownIDs[workBeadID] {
 		return false
 	}
+	if _, pending := mergePendingWorkIDs[workBeadID]; pending {
+		return false
+	}
 	return info.Status == "open"
+}
+
+// openMRIndexLookup returns the open merge requests of one beads database,
+// indexed by the source issue they were submitted for.
+type openMRIndexLookup func(beadsDir string) (map[string]*beads.Issue, error)
+
+func runOpenMRIndexLookup(beadsDir string) (map[string]*beads.Issue, error) {
+	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	return b.OpenMRsBySourceIssue()
+}
+
+// listUnmergedBlockedWorkBeadIDs returns the work beads that must not dispatch
+// yet because a blocking dependency has been submitted but not landed. The map
+// value is the open merge-request bead holding the dependency back, which is
+// what the worker is told about its starting context.
+//
+// This is the merge-aware half of dispatch readiness (gt-0r0z). It is
+// deliberately cheap in the common case: a work bead with no dependencies, or
+// whose blockers are all still open, needs no merge-queue lookup at all, so if
+// nothing in the batch has a closed blocking dependency NO query is issued and
+// the batch dispatches on exactly the timing it had before this feature
+// existed.
+func listUnmergedBlockedWorkBeadIDs(townRoot string, workBeadIDs []string, infos map[string]beadStatusInfo) map[string]string {
+	return listUnmergedBlockedWorkBeadIDsWithLookup(townRoot, workBeadIDs, infos, runOpenMRIndexLookup)
+}
+
+func listUnmergedBlockedWorkBeadIDsWithLookup(townRoot string, workBeadIDs []string, infos map[string]beadStatusInfo, lookup openMRIndexLookup) map[string]string {
+	held := make(map[string]string)
+	if len(workBeadIDs) == 0 {
+		return held
+	}
+
+	// Pass 1: which blockers read as resolved by status? Only those can be
+	// "closed but unmerged". A blocker still open is handled by `bd blocked`
+	// and never needs a merge-queue lookup.
+	blockers := make([]string, 0)
+	seenBlocker := make(map[string]bool)
+	for _, id := range uniqueNonEmptyIDs(workBeadIDs) {
+		info, ok := infos[id]
+		if !ok {
+			continue
+		}
+		probe := &beads.Issue{ID: id, Dependencies: info.Dependencies}
+		for _, blockerID := range beads.CandidateMergeAwareBlockerIDs(probe) {
+			if seenBlocker[blockerID] {
+				continue
+			}
+			seenBlocker[blockerID] = true
+			blockers = append(blockers, blockerID)
+		}
+	}
+	if len(blockers) == 0 {
+		return held
+	}
+
+	// Pass 2: one merge-request index per beads database the blockers live in.
+	// A failure here is reported but NOT fatal: the merge-aware gate fails open.
+	// Failing closed would turn a transient Dolt hiccup into a town-wide
+	// dispatch stall — a new failure class — whereas a missed gate merely
+	// reproduces the pre-existing behavior. The warning keeps it visible, and
+	// criterion 5 still tells the worker its dependency's true state.
+	openMRs := make(map[string]*beads.Issue)
+	for beadsDir := range groupBeadIDsByResolvedBeadsDir(townRoot, blockers) {
+		index, err := lookup(beadsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s Warning: merge-aware dependency check unavailable for %s: %v\n",
+				style.Dim.Render("⚠"), filepath.Dir(beadsDir), err)
+			continue
+		}
+		for source, mr := range index {
+			if _, ok := openMRs[source]; !ok {
+				openMRs[source] = mr
+			}
+		}
+	}
+
+	// Pass 3: classify each candidate work bead against that index.
+	for _, id := range uniqueNonEmptyIDs(workBeadIDs) {
+		info, ok := infos[id]
+		if !ok {
+			continue
+		}
+		probe := &beads.Issue{ID: id, Dependencies: info.Dependencies}
+		unmerged := beads.UnmergedBlockerIDs(probe, openMRs)
+		if len(unmerged) == 0 {
+			continue
+		}
+		mrID := ""
+		if mr := openMRs[unmerged[0]]; mr != nil {
+			mrID = mr.ID
+		}
+		held[id] = mrID
+	}
+	return held
 }

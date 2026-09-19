@@ -133,10 +133,11 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	}
 
 	// Polecat model pool: with no explicit --agent, the town's polecat_pool
-	// decides between the local model and the overflow agent from the live
-	// polecat sessions (see sling_pool.go).
+	// decides between the local model and the overflow agent from the hooked
+	// bead's shape and the live polecat sessions (see sling_pool.go). The
+	// reason line always names the agent it chose.
 	if opts.Agent == "" {
-		if agent, reason := resolvePolecatPoolAgent(townRoot); reason != "" {
+		if agent, reason := resolvePolecatPoolAgent(townRoot, opts.HookBead); reason != "" {
 			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
 			opts.Agent = agent
 		}
@@ -189,6 +190,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 		defer admission.Release()
 	}
+	slingSteps.step("admission")
 
 	// Per-bead respawn circuit breaker (clown show #22):
 	// Track how many times this bead has been slung. Block after N attempts
@@ -281,6 +283,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			sessionName := polecatSessMgr.SessionName(polecatName)
 
 			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
+			slingSteps.step("reuse")
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 
 			effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
@@ -362,6 +365,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, fmt.Errorf("allocating and creating polecat: %w", err)
 	}
 	fmt.Printf("Created polecat: %s\n", polecatName)
+	slingSteps.step("allocate")
 
 	// Get polecat object for path info
 	polecatObj, err := polecatMgr.Get(polecatName)
@@ -382,6 +386,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	polecatSessMgr := polecat.NewSessionManager(t, r)
 	sessionName := polecatSessMgr.SessionName(polecatName)
 
+	slingSteps.step("worktree")
 	fmt.Printf("%s Polecat %s spawned (session start deferred)\n", style.Bold.Render("✓"), polecatName)
 
 	// Log spawn event to activity feed

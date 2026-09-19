@@ -70,7 +70,7 @@ source of truth.
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
 | batch_min_age | 1h | Minimum queue age for an MR to be batch-eligible |
 | batch_max | 12 | Maximum number of MRs in a single batch |
-| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in |
+| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in; `gt mq batch run` enforces this itself and exits without batching when fewer are eligible |
 
 ## Target Resolution Rule
 
@@ -117,7 +117,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 25
+version = 28
 
 [vars]
 [vars.wisp_type]
@@ -373,9 +373,11 @@ description = """
 Rebasing, gating, and pushing one ready MR at a time costs a full test suite
 run per MR (often ~10 min). When several MRs have queued up, batch them:
 stack them onto one rebase, gate once, and land them all in one push — or
-bisect to isolate a single red MR if the suite fails. P0/P1 MRs are never
+bisect to isolate a single red MR if the suite fails. P0 MRs are never
 batched; they always take the single-MR path first so critical fixes aren't
-held up waiting for a batch to assemble.
+held up waiting for a batch to assemble. P1 MRs batch alongside P2 — the
+P1 exclusion was removed on 2026-09-19 because most of this town's work is
+filed at P1, so excluding them meant batching never engaged at all.
 
 **Step 1: Check how many MRs are batch-eligible**
 
@@ -383,36 +385,27 @@ held up waiting for a batch to assemble.
 gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
 ```
 
-This excludes P0/P1 MRs and anything younger than batch_min_age, sorts by
+This excludes P0 MRs and anything younger than batch_min_age, sorts by
 priority score, and caps at batch_max. Read `.eligible_total` from the output.
 
 **If `.eligible_total` < {{batch_min_count}}: SKIP the rest of this step,
 proceed to process-branch.** Not enough has queued up to be worth batching
-this cycle — the single-MR path will process what's ready.
+this cycle — the single-MR path will process what's ready. (This is only a
+courtesy check to save a call; `gt mq batch run` enforces the same threshold
+itself and exits without batching, so skipping the call and running it are
+both safe.)
 
-**Step 2: `gt mq batch run` does not review candidates today — do not
-pre-filter here either**
+**Step 2: `gt mq batch run` reviews every candidate itself (T7, gt-2liq, on main since 2026-09-11)**
 
-`gt mq batch run` does not invoke a fresh editorial verdict per candidate.
-Today it only enforces the existing push precondition — refusing to push if
-any stacked member lacks an approve note whose patch-id matches the branch
-head — the same precondition a single-MR merge already checks. It does not
-run `gt mq review` on batch members itself. Do not pre-filter candidates with
-a parallel review loop here — proceed straight to Step 3 with all eligible
-candidates.
-
-**On an `editorial_required` rig, this precondition failure aborts the whole
-batch, not just one member.** Because nothing here (or in Step 3) reviews
-candidates before stacking, no batch member will have a matching approve
-note. When the precondition finds the first one missing, `gt mq batch run`
-resets the stack back to `origin/{{target_branch}}`, escalates to the
-witness, and fails with a non-zero exit — the refused member is not set
-aside in `.conflicts[]` the way a stack or gate conflict is (see Step 5).
-Expect every batch-scan cycle to fail this way on such a rig until T7 lands.
-
-Follow-up: reviewing each candidate before stacking, and ejecting any member
-whose patch-id changed on the stack, is tracked as T7 (gt-2liq) and is not on
-main yet. Do not block on it.
+The batch run rehearses each candidate onto the target, runs the om editorial
+review on each one (bounded parallelism), and then stacks only the approved
+members. A member that gets request_changes or an infra failure is DROPPED
+FROM THE BATCH AND LEFT QUEUED, untouched; nothing is closed and no
+FIX_NEEDED is sent from the batch path (the deacon's editorial redispatch
+handles it). A member whose patch-id changed once stacked is ejected the same
+way. Do NOT pre-review candidates here. On an editorial_required rig the
+batch lands only members that hold an approve note, which the run itself
+produced.
 
 **Step 3: Assemble, gate, and land the batch**
 
@@ -449,15 +442,15 @@ other ready MR (see Step 6).
 
 **Step 6: Continue to the single-MR path — do NOT skip it**
 
-`gt mq batch run` only ever touches non-P0/P1 MRs older than batch_min_age,
-capped at batch_max. P0/P1 MRs are never batched (by design, so critical
-fixes aren't held up assembling a batch), and any MR beyond batch_max or
-younger than batch_min_age was left untouched too. All of those are still
-sitting in the tracked MR list from queue-scan.
+`gt mq batch run` only ever touches non-P0 MRs older than batch_min_age,
+capped at batch_max. P0 MRs are never batched (by design, so critical fixes
+aren't held up assembling a batch), and any MR beyond batch_max or younger
+than batch_min_age was left untouched too. All of those are still sitting in
+the tracked MR list from queue-scan.
 
 **Do NOT skip to loop-check.** Continue forward in DAG order to process-branch
 as normal, exactly as you would if batch-scan had been skipped (empty
-eligible_total) — this is what prevents P0/P1 fixes from starving behind a
+eligible_total) — this is what prevents P0 fixes from starving behind a
 batch run. MRs the batch already merged are closed and gone from the queue,
 so process-branch will not see them again; MRs left in `.culprits[]` or
 `.conflicts[]` remain ready and are handled by process-branch's existing
@@ -494,9 +487,18 @@ If the branch no longer exists (exit code non-zero):
 
 **Step 1: Checkout and rehearse merge without rewriting the submitted head**
 ```bash
+git fetch --prune origin
 git checkout -b temp origin/<polecat-branch>
 git merge --no-ff --no-edit origin/<merge-target>
 ```
+
+The fetch is not optional: `origin/<merge-target>` in this clone is only as
+fresh as the last fetch, and a rehearsal against a stale target scores a
+gate that cannot be attributed to the MR (gt-x1x3). If the target moves
+while the gate runs, the review itself stays sound (`gt mq review` diffs
+from the merge-base, not from the moved target), but the merge in
+merge-push must be rehearsed again on the new tip before it is pushed
+(merge-push fetches and fast-forwards the target first and says so).
 
 **Step 1 note (REBASE-BEFORE-REVIEW, gt-oh41):** This rehearsal exists to
 make `temp` safe to review, not only to test the merge. Once it succeeds,
@@ -640,6 +642,24 @@ go-icu-regex with "unicode/regex.h file not found", producing ~21 packages
 run the exact configured test_command (e.g. `make test`), never your own
 substitute.
 
+**Run the gate in the foreground and wait for it.** One Bash call with a
+timeout of 2700000 ms (45 minutes; this role's preset allows up to
+3600000 ms, use that if the suite legitimately needs it), writing the log
+to a file so a red run stays inspectable. No pipeline: the exit code must
+come straight from the gate, and PIPESTATUS does not exist in zsh:
+
+```bash
+gt slot run --role {{rig}}/refinery -- {{test_command}} > /tmp/<mr-bead-id>-gate.log 2>&1; echo "GATE_EXIT=$?"; tail -40 /tmp/<mr-bead-id>-gate.log
+```
+
+Never run the gate in the background and sleep-poll it: the call returns
+the instant the suite exits, while a `sleep 290` poll loop leaves the
+refinery idle for up to five minutes after the suite is already done
+(measured 4m52s, 2m43s and 1m26s on three consecutive MRs on 2026-09-19).
+If the foreground call is refused because the Bash ceiling is still the
+default (preset not yet applied to this session), background it and check
+every 30 seconds at most.
+
 Track results: pass count, fail count, specific failures."""
 
 [[steps]]
@@ -682,6 +702,11 @@ notes.
 REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json)
 REVIEW_EXIT=$?
 ```
+
+Run it in the foreground and wait: a review takes about five minutes,
+well inside any Bash ceiling, so there is nothing to background. A
+`sleep 290` poll after a backgrounded review adds up to five idle minutes
+per MR for no reason.
 
 **Step 2: Branch on the exit code**
 
@@ -876,10 +901,18 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 **If merge_strategy = "direct" (default):**
 
 ```bash
+git fetch origin
 git checkout <merge-target>
+git merge --ff-only origin/<merge-target>
 git merge --no-ff -m "Merge <polecat-branch> into <merge-target>" origin/<polecat-branch>
 git push origin <merge-target>
 ```
+
+If `git merge --ff-only origin/<merge-target>` moved the local target past
+the tip the rehearsal in process-branch used, the merge you are about to
+push was never rehearsed on this tip: go back to process-branch and
+rehearse again before merging (gt-x1x3). The push rejects a stale merge as
+non-fast-forward anyway, but only after the gate was spent.
 
 **Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
 
@@ -1123,7 +1156,30 @@ More branches to process?
 - Normal: After successful merge-push
 - Conflict-skip: After process-branch created conflict-resolution task
 
-If yes: Return to process-branch with next branch.
+If yes, pick the path by what is left in the queue, using the same
+candidates call batch-scan Step 1 makes (same vars: batch_min_age,
+batch_max, batch_min_count from the config table above):
+
+```bash
+gt mq batch candidates <rig> --min-age {{batch_min_age}} --max {{batch_max}} --json
+```
+
+- Eligible candidates >= {{batch_min_count}}: return to **batch-scan** and
+  land them as one batch. Visiting batch-scan only once per cycle and then
+  walking the rest of the queue through process-branch costs one full
+  container suite per MR; a batch is one suite for up to {{batch_max}}.
+- Fewer: return to process-branch with the next branch.
+- A rubric-changing MR never goes into a batch. Check each candidate:
+
+  ```bash
+  git diff --name-only origin/<merge-target>...origin/<polecat-branch> | grep -qx '.om.json' && echo RUBRIC
+  ```
+
+  Land a RUBRIC candidate alone via process-branch (the town directive for
+  this role says how the manifest is re-stamped afterwards), then batch
+  the rest. If isolating it leaves fewer than {{batch_min_count}}
+  candidates, the remainder goes through process-branch too.
+
 If no: Continue to generate-summary.
 
 **Track for this cycle:**

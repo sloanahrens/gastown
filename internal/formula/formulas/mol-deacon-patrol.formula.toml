@@ -714,9 +714,17 @@ gt escalate -s CRITICAL "Dolt server is down"
 ```
 
 **Commit bloat (commits > 50k in any DB):**
-The compactor dog (`mol-dog-compactor`) may have failed. Dispatch a compactor:
+The compactor dog (`mol-dog-compactor`) escalates when a database crosses its
+threshold, so a silent 50k DB means either the escalation is not reaching you or
+the patrol is not running. Re-run the monitor:
 ```bash
 gt dog dispatch --formula mol-dog-compactor --var db=<db_name>
+```
+That does not compact — compaction rewrites the commit graph and force-pushes,
+so it is operator-only. To actually compact:
+```bash
+bash plugins/compactor-dog/run.sh --compact   # flatten
+gt dolt rebase <db_name>                      # surgical (keep recent commits)
 ```
 If no idle dogs, log for next cycle.
 

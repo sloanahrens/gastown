@@ -319,7 +319,11 @@ All leg analyses from: {{.output.directory}}/
 
 **After writing the file, mail the human overseer:**
 ```bash
-gt mail send --human -s "PRD Review Complete: {{.problem}}" -m "
+SUBJECT=$(cat <<'EOF'
+PRD Review Complete: {{.problem}}
+EOF
+)
+gt mail send --human -s "$SUBJECT" --stdin <<'BODY'
 Review is ready: {{.output.directory}}/prd-review.md
 
 ## Summary
@@ -330,7 +334,7 @@ Review is ready: {{.output.directory}}/prd-review.md
 
 Reply with answers (numbered list matching questions) and I'll kick off
 implementation plan generation.
-"
+BODY
 ```
 """
 depends_on = ["requirements", "gaps", "ambiguity", "feasibility", "scope", "stakeholders"]

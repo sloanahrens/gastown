@@ -65,6 +65,16 @@ const (
 	// Unlike "stuck" (polecat self-reports), stalled is detected externally.
 	StateStalled State = "stalled"
 
+	// StateSpawning means the polecat was dispatched but has not come up yet:
+	// the agent bead still says agent_state=spawning and was written inside the
+	// spawn grace window (config.WitnessThresholds.HeartbeatStartupGrace,
+	// default 5m), while no tmux session is live yet. Without it, "work
+	// assigned + no session" read as stalled within seconds of dispatch, and
+	// the restart paths chased sessions that were still booting (gt-yteq).
+	// Past the grace window the same evidence is StateStalled: a session that
+	// never came up.
+	StateSpawning State = "spawning"
+
 	// StateZombie means a tmux session exists but has no corresponding worktree directory.
 	// This is a detected condition: the polecat was incompletely nuked or has a
 	// session naming mismatch, leaving an orphaned tmux session.

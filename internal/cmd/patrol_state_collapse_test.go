@@ -70,6 +70,36 @@ func TestPatrolStateCollapseOutputJSON(t *testing.T) {
 	}
 }
 
+// TestPatrolStateCollapseJSONMRLookupHonesty is the machine-readable half of
+// gt-92ry. The MR-driven check used to read the queue with a plain
+// `bd list --label=gt:merge-request`, which returns no wisps — it saw an
+// empty queue and emitted a clean-looking result. A consumer now has to be
+// able to tell a scan that resolved the queue from one that never did, and
+// must not read the latter as a clean bill of health.
+func TestPatrolStateCollapseJSONMRLookupHonesty(t *testing.T) {
+	clean := PatrolStateCollapseOutput{Rig: "gastown", MRLookupRan: true, BranchMRLookup: true, AllClear: true}
+	data, err := json.Marshal(clean)
+	if err != nil {
+		t.Fatalf("failed to marshal output: %v", err)
+	}
+	for _, want := range []string{`"mr_lookup_ran":true`, `"all_clear":true`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("resolved lookup must be explicit in JSON: want %s in %s", want, data)
+		}
+	}
+
+	unchecked := PatrolStateCollapseOutput{Rig: "gastown"}
+	data, err = json.Marshal(unchecked)
+	if err != nil {
+		t.Fatalf("failed to marshal output: %v", err)
+	}
+	for _, want := range []string{`"mr_lookup_ran":false`, `"all_clear":false`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("unresolved lookup must be explicit in JSON: want %s in %s", want, data)
+		}
+	}
+}
+
 func TestPatrolStateCollapseCmdRegistered(t *testing.T) {
 	found := false
 	for _, c := range patrolCmd.Commands() {

@@ -106,6 +106,7 @@ type ScanResult struct {
 	PurgeCandidates        int       `json:"purge_candidates"`
 	MailCandidates         int       `json:"mail_candidates"`
 	StaleCandidates        int       `json:"stale_candidates"`
+	AbsentParentCandidates int       `json:"absent_parent_candidates,omitempty"`
 	OpenWisps              int       `json:"open_wisps"`
 	Anomalies              []Anomaly `json:"anomalies,omitempty"`
 }
@@ -115,6 +116,7 @@ type ReapResult struct {
 	Database            string    `json:"database"`
 	Reaped              int       `json:"reaped"`
 	MoleculeStepsClosed int       `json:"molecule_steps_closed,omitempty"`
+	AbsentParentClosed  int       `json:"absent_parent_closed,omitempty"`
 	OpenRemain          int       `json:"open_remain"`
 	DryRun              bool      `json:"dry_run,omitempty"`
 	Anomalies           []Anomaly `json:"anomalies,omitempty"`
@@ -508,6 +510,9 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 			Message: fmt.Sprintf("%d wisp(s) have parent dependency records pointing to purged/missing parents", danglingCount),
 			Count:   danglingCount,
 		})
+		// Also count these as absent-parent candidates for the reaper's preview.
+		// The Reap function will close these wisps.
+		result.AbsentParentCandidates = danglingCount
 	}
 
 	return result, nil
@@ -542,6 +547,20 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 		openWispStatusWhere, parentWhere, mrWhere, activeMRClause)
 	whereArgs := append([]interface{}{cutoff}, activeMRArgs...)
 
+	// absentParentJoin and absentParentWhere are used for both dry-run counting
+	// and real execution. Define them once here.
+	absentParentJoin := `LEFT JOIN wisp_dependencies wd ON wd.issue_id = w.id
+		LEFT JOIN wisps pm ON pm.id = wd.depends_on_wisp_id
+		LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id`
+	absentParentWhere := fmt.Sprintf("wd.type = 'parent-child' AND wd.depends_on_external IS NULL AND pm.id IS NULL AND pi.id IS NULL AND NOT EXISTS ("+
+		"  SELECT 1 FROM wisp_dependencies open_dep"+
+		"  LEFT JOIN wisps open_pw ON open_pw.id = open_dep.depends_on_wisp_id"+
+		"  LEFT JOIN issues open_pi ON open_pi.id = open_dep.depends_on_issue_id"+
+		"  WHERE open_dep.issue_id = wd.issue_id"+
+		"  AND open_dep.type = 'parent-child'"+
+		"  AND (open_pw.status IN ('open', 'hooked', 'in_progress') OR open_pi.status IN ('open', 'hooked', 'in_progress') OR open_dep.depends_on_external IS NOT NULL)"+
+		") AND w.issue_type != 'agent' AND %s", openWispStatusWhere)
+
 	result := &ReapResult{Database: dbName, DryRun: dryRun}
 
 	if dryRun {
@@ -551,6 +570,15 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 		if err := db.QueryRowContext(ctx, moleculeStepCountQuery).Scan(&result.MoleculeStepsClosed); err != nil {
 			return nil, fmt.Errorf("dry-run molecule step count: %w", err)
 		}
+
+		// Count absent-parent candidates: open wisps whose parent molecule record is purged.
+		absentParentCountQuery := fmt.Sprintf(
+			"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
+			absentParentJoin, absentParentWhere)
+		if err := db.QueryRowContext(ctx, absentParentCountQuery).Scan(&result.AbsentParentClosed); err != nil {
+			return nil, fmt.Errorf("dry-run absent-parent count: %w", err)
+		}
+
 		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM wisps w %s %s %s WHERE %s", parentJoin, moleculeStepExcludeJoin, mrJoin, whereClause)
 		if err := db.QueryRowContext(ctx, countQuery, whereArgs...).Scan(&result.Reaped); err != nil {
 			return nil, fmt.Errorf("dry-run count: %w", err)
@@ -588,6 +616,18 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	}
 	result.MoleculeStepsClosed = moleculeStepsClosed
 
+	// Close wisps whose parent molecule record was purged (absent parent).
+	// These are molecule step-wisps that the reaper should reap but the closedMoleculeStep
+	// subquery misses because INNER JOIN wisps pm requires the parent row to exist.
+	// Uses the same pattern as Scan's danglingQuery: both wisp and issue parents must be absent.
+	absentParentIDQuery := fmt.Sprintf(
+		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
+		absentParentJoin, absentParentWhere, DefaultBatchSize)
+	absentParentClosed, err := closeWispsInBatches(ctx, conn, absentParentIDQuery, nil, "absent-parent molecule steps")
+	if err != nil {
+		return nil, err
+	}
+
 	// Batch UPDATE: select IDs in chunks, update each chunk.
 	// This avoids holding a write lock on the entire table for minutes.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
@@ -601,7 +641,7 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	}
 
 	result.Reaped = totalReaped
-	totalClosed := totalReaped + moleculeStepsClosed
+	totalClosed := totalReaped + moleculeStepsClosed + absentParentClosed
 
 	if totalClosed > 0 {
 		// Flush the SQL transaction to the Dolt working set before DOLT_COMMIT.
