@@ -133,10 +133,11 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	}
 
 	// Polecat model pool: with no explicit --agent, the town's polecat_pool
-	// decides between the local model and the overflow agent from the live
-	// polecat sessions (see sling_pool.go).
+	// decides between the local model and the overflow agent from the hooked
+	// bead's shape and the live polecat sessions (see sling_pool.go). The
+	// reason line always names the agent it chose.
 	if opts.Agent == "" {
-		if agent, reason := resolvePolecatPoolAgent(townRoot); reason != "" {
+		if agent, reason := resolvePolecatPoolAgent(townRoot, opts.HookBead); reason != "" {
 			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
 			opts.Agent = agent
 		}
