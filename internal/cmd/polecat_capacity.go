@@ -263,7 +263,11 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 }
 
 func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+	// Zero env on purpose: the snapshot reports counts, not per-polecat state,
+	// and a polecat inside its spawn grace produces the same disposition as a
+	// stalled one (recovery-blocked, counts toward capacity). Capacity also
+	// has no MR index — it never reports MR state.
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, polecatInventoryEnv{})
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 

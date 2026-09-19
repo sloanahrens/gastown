@@ -145,6 +145,10 @@ type Manager struct {
 	namePool *NamePool
 	tmux     *tmux.Tmux
 	townRoot string // Computed once at construction; used by agentBeadID for deterministic IDs
+	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
+	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
+	// construction from the town's witness thresholds.
+	spawnGraceWindow time.Duration
 }
 
 // NewManager creates a new polecat manager.
@@ -196,13 +200,19 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
 
 	_ = pool.Load() // non-fatal: state file may not exist for new rigs
 
+	// Spawn grace, resolved once: the window the Witness uses before it will
+	// call a starting session stalled (gt-yteq). Reading it here keeps state
+	// derivation from re-reading town settings per polecat in List().
+	spawnGraceWindow := config.LoadOperationalConfig(townRoot).GetWitnessConfig().HeartbeatStartupGraceD()
+
 	return &Manager{
-		rig:      r,
-		git:      g,
-		beads:    beads.NewWithBeadsDir(beadsPath, resolvedBeads),
-		namePool: pool,
-		tmux:     t,
-		townRoot: townRoot,
+		rig:              r,
+		git:              g,
+		beads:            beads.NewWithBeadsDir(beadsPath, resolvedBeads),
+		namePool:         pool,
+		tmux:             t,
+		townRoot:         townRoot,
+		spawnGraceWindow: spawnGraceWindow,
 	}
 }
 
@@ -2869,6 +2879,10 @@ func (m *Manager) lookupAssignedIssue(assignee string, batch *beadsBatch) (*bead
 //  4. Live session without active issue + clean cleanup → idle
 //  5. Live session without active issue + non-clean/unknown cleanup → review-needed
 //  6. Beads query failure + live/dead session → review-needed/stalled fallback
+//
+// Every "work assigned but no live session" outcome is spawning inside the
+// spawn grace and stalled after it (see sessionDownState) — the agent bead is
+// loaded up front so all four of those sites decide from the same facts.
 func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error) {
 	// Use clonePath which handles both new (polecats/<name>/<rigname>/)
 	// and old (polecats/<name>/) structures
@@ -2895,13 +2909,25 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	sessionRunning, sessionStale := m.polecatSessionState(name)
 	sessionDead := m.tmux != nil && (!sessionRunning || sessionStale)
 
+	// Agent bead, loaded up front: its agent_state and update time are what
+	// tell a dispatch that is still starting up (spawning, touched inside the
+	// grace window) from a session that died mid-work (gt-yteq). batch-aware,
+	// so List() still issues one rig-wide query rather than one per polecat.
+	agentID := m.agentBeadID(name)
+	agentIssue, fields, agentErr := m.lookupAgentBead(agentID, batch)
+	var agentStateRaw string
+	if agentErr == nil && fields != nil {
+		agentStateRaw = fields.AgentState
+	}
+	spawning := SpawnGrace(agentStateRaw, AgentBeadUpdatedAt(agentIssue), time.Now(), m.spawnGraceWindow)
+
 	// Primary source: the work bead itself (status=hooked + assignee).
 	// This is the direct-tracking model introduced in hq-l6mm5.
 	hookedIssue, hookedErr := m.lookupHooked(assignee, batch)
 	if hookedErr == nil && hookedIssue != nil {
 		state := StateWorking
 		if sessionDead {
-			state = StateStalled
+			state = sessionDownState(spawning)
 		}
 		return &Polecat{
 			Name:      name,
@@ -2916,14 +2942,12 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	// Compatibility fallback: if legacy hook_bead is still set, only trust it when
 	// it resolves to a currently hooked bead for this assignee. This avoids stale
 	// issue reporting when hook_bead diverges from the work bead state.
-	agentID := m.agentBeadID(name)
-	_, fields, agentErr := m.lookupAgentBead(agentID, batch)
 	if agentErr == nil && fields != nil && fields.HookBead != "" {
 		if hookIssue, err := m.beads.Show(fields.HookBead); err == nil &&
 			isCurrentHookedIssueForAssignee(hookIssue, assignee) {
 			state := StateWorking
 			if sessionDead {
-				state = StateStalled
+				state = sessionDownState(spawning)
 			}
 			return &Polecat{
 				Name:      name,
@@ -2944,7 +2968,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 		// Avoid synthesizing working with no issue when we cannot verify active work.
 		state := StateWorking
 		if sessionDead {
-			state = StateStalled
+			state = sessionDownState(spawning)
 		} else if sessionRunning {
 			state = StateReviewNeeded
 		}
@@ -2977,7 +3001,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	if issueID != "" {
 		state = StateWorking
 		if sessionDead {
-			state = StateStalled
+			state = sessionDownState(spawning)
 		}
 	} else if agentState == StateIdle && sessionRunning && !sessionStale && !m.getCleanupStatusFromBead(name, batch).IsSafe() {
 		state = StateReviewNeeded

@@ -35,9 +35,10 @@ func (f fakeReuseMapShower) Show(issueID string) (*beads.Issue, error) {
 
 func TestEffectivePolecatState(t *testing.T) {
 	tests := []struct {
-		name string
-		item PolecatListItem
-		want polecat.State
+		name     string
+		item     PolecatListItem
+		spawning bool
+		want     polecat.State
 	}{
 		{
 			name: "session-running-done-with-issue-becomes-working",
@@ -134,11 +135,45 @@ func TestEffectivePolecatState(t *testing.T) {
 			},
 			want: polecat.StateReviewNeeded,
 		},
+		{
+			// gt-yteq: the death-to-stalled rewrite must yield to the spawn
+			// grace, or a polecat slung seconds ago is restarted mid-boot.
+			name: "session-dead-working-inside-spawn-grace-is-spawning",
+			item: PolecatListItem{
+				State:          polecat.StateWorking,
+				Issue:          "gt-abc",
+				SessionRunning: false,
+			},
+			spawning: true,
+			want:     polecat.StateSpawning,
+		},
+		{
+			name: "session-dead-working-outside-spawn-grace-is-stalled",
+			item: PolecatListItem{
+				State:          polecat.StateWorking,
+				Issue:          "gt-abc",
+				SessionRunning: false,
+			},
+			spawning: false,
+			want:     polecat.StateStalled,
+		},
+		{
+			// The grace only replaces the stalled rewrite; a zombie stays a
+			// zombie, and a live session still wins (it is not spawning).
+			name: "spawn-grace-never-rewrites-a-zombie",
+			item: PolecatListItem{
+				State:          polecat.StateZombie,
+				SessionRunning: false,
+				Zombie:         true,
+			},
+			spawning: true,
+			want:     polecat.StateZombie,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := effectivePolecatState(tt.item)
+			got := effectivePolecatState(tt.item, tt.spawning)
 			if got != tt.want {
 				t.Fatalf("effectivePolecatState() = %q, want %q", got, tt.want)
 			}
