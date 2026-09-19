@@ -25,10 +25,9 @@ func shortHash(hash string) string {
 const (
 	defaultCompactorDogInterval = 24 * time.Hour
 	// defaultCompactorCommitThreshold is the minimum commit count before compaction triggers.
-	// 2000 commits prevents the escalation feedback loop where each compaction
-	// failure creates beads/escalations that add more commits than the compactor
-	// can drain at 500. Configurable via daemon.json.
-	defaultCompactorCommitThreshold = 2000
+	// 500 commits matches the compactor-dog plugin's escalation threshold.
+	// Configurable via daemon.json.
+	defaultCompactorCommitThreshold = 500
 	// compactorQueryTimeout is the timeout for individual SQL queries during compaction.
 	compactorQueryTimeout = 30 * time.Second
 	// compactorGCTimeout is the timeout for CALL dolt_gc() after compaction.
@@ -49,7 +48,7 @@ type CompactorDogConfig struct {
 	Enabled     bool     `json:"enabled"`
 	IntervalStr string   `json:"interval,omitempty"`
 	// Threshold is the minimum commit count before compaction triggers.
-	// Defaults to 2000 if not set.
+	// Defaults to 500 if not set.
 	Threshold int `json:"threshold,omitempty"`
 	// Databases lists specific database names to compact.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
@@ -77,7 +76,7 @@ func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // compactorDogThreshold returns the configured commit threshold, or
-// defaultCompactorCommitThreshold (2000). Note this daemon patrol compacts on
+// defaultCompactorCommitThreshold (500). This daemon patrol compacts on
 // its own; it does not share the agent-facing plugin's 500/1000 escalation
 // policy — see plugins/compactor-dog/plugin.md.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
