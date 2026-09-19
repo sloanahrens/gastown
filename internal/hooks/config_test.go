@@ -582,18 +582,22 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 
 	// Witness should get DefaultBase + built-in patrol-loop guard (gt-e47hxn,
-	// gt-qqfy). Post gt-5ihs, every PreToolUse Bash guard shares the bare
-	// "Bash" tool-name matcher — Claude Code's matcher only ever matches the
-	// tool name. patrol-loop self-filters on tool_input.command (gt-qqfy),
-	// so it needs no If — witness must have exactly one PreToolUse entry
-	// (matcher "Bash") whose Hooks accumulate the base guards (pr-workflow
-	// x3, dangerous-command x1) AND witness's own ungated patrol-loop hook.
+	// gt-qqfy). Post gt-5ihs/gt-3mp1, every PreToolUse Bash guard shares the
+	// bare "Bash" tool-name matcher — Claude Code's matcher only ever matches
+	// the tool name. patrol-loop self-filters on tool_input.command (gt-qqfy),
+	// so it needs no If. pr-workflow is also self-filtering (no If) after
+	// gt-3mp1 removed the problematic "if" glob patterns.
+	// witness must have exactly one PreToolUse entry (matcher "Bash") whose
+	// Hooks accumulate the base guards (pr-workflow x3, dangerous-command x1)
+	// AND witness's own ungated patrol-loop hook.
 	witness, err := ComputeExpected("witness")
 	if err != nil {
 		t.Fatalf("ComputeExpected(witness) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "witness", witness, "tap guard patrol-loop")
-	requireIfConditions(t, "witness", witness, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard dangerous-command")
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard container-suite")
 	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected witness to inherit SessionStart from DefaultBase")
 	}
@@ -606,7 +610,9 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Fatalf("ComputeExpected(deacon) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard patrol-loop")
-	requireIfConditions(t, "deacon", deacon, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard dangerous-command")
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard container-suite")
 	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected deacon to inherit SessionStart from DefaultBase")
 	}
@@ -617,7 +623,9 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Fatalf("ComputeExpected(refinery) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard patrol-loop")
-	requireIfConditions(t, "refinery", refinery, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard dangerous-command")
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard container-suite")
 	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected refinery to inherit SessionStart from DefaultBase")
 	}
@@ -723,12 +731,11 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 		t.Fatalf("ComputeExpected(dog): %v", err)
 	}
 
-	// Post gt-5ihs, dog's formula-allowlist guard and the base's pr-workflow
-	// / dangerous-command guards all share the bare "Bash" matcher — Claude
-	// Code's matcher only ever matches the tool name — and accumulate as
-	// separate Hooks rather than one replacing the other (merge.go's
-	// unionHooks). formula-allowlist has no If (it self-filters, like
-	// dangerous-command), so it must appear among the hooks with an empty If.
+	// Post gt-5ihs and gt-3mp1, dog's formula-allowlist guard and the base's
+	// pr-workflow/dangerous-command/container-suite guards all share the bare
+	// "Bash" matcher — Claude Code's matcher only ever matches the tool name —
+	// and accumulate as separate Hooks rather than one replacing the other
+	// (merge.go's unionHooks). All self-filtering guards have no If field.
 	entry, ok := findPreToolUse(dog, "Bash")
 	if !ok {
 		t.Fatal("dog missing PreToolUse guard on bare Bash matcher")
@@ -746,7 +753,9 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 		t.Fatalf("dog should disable UserPromptSubmit mail-check, got %+v", dog.UserPromptSubmit)
 	}
 	// Base guards must still apply alongside the allowlist guard.
-	requireIfConditions(t, "dog", dog, prWorkflowIfConditions)
+	requireUngatedGuardCommand(t, "dog", dog, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "dog", dog, "tap guard dangerous-command")
+	requireUngatedGuardCommand(t, "dog", dog, "tap guard container-suite")
 	hasDangerousCommand := false
 	for _, h := range entry.Hooks {
 		if strings.Contains(h.Command, "tap guard dangerous-command") && h.If == "" {
@@ -758,8 +767,8 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 	}
 
 	// Other roles must not receive the dog guard. Mayor still has its own
-	// bare "Bash" entry (base's pr-workflow/dangerous-command guards), but
-	// it must not contain formula-allowlist.
+	// bare "Bash" entry (base's pr-workflow/dangerous-command/container-suite
+	// guards), but it must not contain formula-allowlist.
 	mayorCfg, err := ComputeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected(mayor): %v", err)
@@ -808,10 +817,9 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
 	}
 	// The base's own guards share the bare "Bash" matcher and must survive the
-	// union (gt-5ihs): pr-workflow's If-gated patterns, dangerous-command and
-	// container-suite's self-filtering hooks.
-	requireIfConditions(t, "gastown/polecats", polecats, prWorkflowIfConditions)
-	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite"} {
+	// union (gt-5ihs/gt-3mp1): pr-workflow, dangerous-command, and container-suite
+	// are all self-filtering (no If) after gt-3mp1 removed the problematic patterns.
+	for _, want := range []string{"tap guard pr-workflow", "tap guard dangerous-command", "tap guard container-suite"} {
 		found := false
 		for _, h := range bashEntry.Hooks {
 			if strings.Contains(h.Command, want) {
