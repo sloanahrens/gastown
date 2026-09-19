@@ -390,29 +390,17 @@ priority score, and caps at batch_max. Read `.eligible_total` from the output.
 proceed to process-branch.** Not enough has queued up to be worth batching
 this cycle — the single-MR path will process what's ready.
 
-**Step 2: `gt mq batch run` does not review candidates today — do not
-pre-filter here either**
+**Step 2: `gt mq batch run` reviews every candidate itself (T7, gt-2liq, on main since 2026-09-11)**
 
-`gt mq batch run` does not invoke a fresh editorial verdict per candidate.
-Today it only enforces the existing push precondition — refusing to push if
-any stacked member lacks an approve note whose patch-id matches the branch
-head — the same precondition a single-MR merge already checks. It does not
-run `gt mq review` on batch members itself. Do not pre-filter candidates with
-a parallel review loop here — proceed straight to Step 3 with all eligible
-candidates.
-
-**On an `editorial_required` rig, this precondition failure aborts the whole
-batch, not just one member.** Because nothing here (or in Step 3) reviews
-candidates before stacking, no batch member will have a matching approve
-note. When the precondition finds the first one missing, `gt mq batch run`
-resets the stack back to `origin/{{target_branch}}`, escalates to the
-witness, and fails with a non-zero exit — the refused member is not set
-aside in `.conflicts[]` the way a stack or gate conflict is (see Step 5).
-Expect every batch-scan cycle to fail this way on such a rig until T7 lands.
-
-Follow-up: reviewing each candidate before stacking, and ejecting any member
-whose patch-id changed on the stack, is tracked as T7 (gt-2liq) and is not on
-main yet. Do not block on it.
+The batch run rehearses each candidate onto the target, runs the om editorial
+review on each one (bounded parallelism), and then stacks only the approved
+members. A member that gets request_changes or an infra failure is DROPPED
+FROM THE BATCH AND LEFT QUEUED, untouched; nothing is closed and no
+FIX_NEEDED is sent from the batch path (the deacon's editorial redispatch
+handles it). A member whose patch-id changed once stacked is ejected the same
+way. Do NOT pre-review candidates here. On an editorial_required rig the
+batch lands only members that hold an approve note, which the run itself
+produced.
 
 **Step 3: Assemble, gate, and land the batch**
 
