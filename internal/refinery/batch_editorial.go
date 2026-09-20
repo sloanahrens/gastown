@@ -35,11 +35,15 @@ type EjectedMR struct {
 // rigs that never configured editorial keep upstream (pre-gate) behavior.
 //
 // Members whose review does not come back Exit 0 (approve) are dropped from
-// the returned batch and left untouched in the queue — they aren't recorded
-// as conflicts or culprits, since nothing about their branch or merge
-// eligibility failed. editorial.Run already persists the note/receipt (or
-// failure receipt) for every outcome, so there is nothing further to record
-// here beyond the summary in reviewed.
+// the returned batch. A request_changes verdict (Exit 1) is a verdict about
+// the diff, so the member is rejected outright — MR closed "rejected: ..."
+// and its source bead handed to dead-worker recovery (see
+// rejectReviewedCandidate, gt-bsmp); it is not recorded as a conflict or a
+// culprit, since nothing about its branch failed. An infra-class result
+// (Exit 2) is not a verdict: it is left queued and untouched for the next
+// cycle. editorial.Run already persists the note/receipt (or failure
+// receipt) for every outcome, so there is nothing further to record here
+// beyond the summary in reviewed.
 //
 // notes carries each approved member's editorial note (keyed by MR ID), so
 // the caller can later recompute its patch-id once the member is actually
@@ -168,11 +172,65 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 				// approve path is otherwise quiet.
 				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: approved with warning: %s\n", mr.ID, r.Stderr)
 			}
+		} else if r.Note != nil && r.Note.Verdict != "approve" {
+			// A verdict, not an infra failure: the review ran and rejected
+			// this diff, so the MR must not stay merge-eligible (gt-bsmp).
+			e.rejectReviewedCandidate(mr, target, r)
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial review exit=%d, dropped from batch (left queued)\n", mr.ID, r.Exit)
 		}
 	}
 	return approved, reviewed, notes
+}
+
+// rejectReviewedCandidate closes a batch candidate whose editorial review
+// came back request_changes and hands its source bead to dead-worker
+// recovery: the two halves of a rejection, in the order Manager.RejectMR
+// performs them for `gt mq reject`.
+//
+// The close is what keeps a rejected diff from landing (gt-bsmp). A wisp left
+// ready is re-rehearsed and re-reviewed on an unchanged head every cycle, and
+// an om re-roll of the same diff can come back approve (gt-bveg): that
+// approve note satisfies the push precondition, so the next cycle lands a diff
+// a reviewer rejected. Recovery travels with the close because the batch path
+// sends no FIX_NEEDED and the source bead is already closed by `gt done`
+// (pending_mr: <id>) — a rejected MR with no redispatch is work nobody
+// resumes. Recovery writes the MERGE REJECTION note, reopens the bead when the
+// worker no longer holds it, and mails RECOVERED_BEAD to the deacon.
+//
+// An infra-class result (Exit 2) never reaches this: no Note means no verdict,
+// so that candidate stays queued and untouched for the next cycle.
+func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editorial.ReviewResult) {
+	attempt := mr.RetryCount + 1
+	reason := fmt.Sprintf("EDITORIAL REJECTION (attempt %d): om gate %s, score %.2f, %d finding(s)",
+		attempt, r.Note.Verdict, r.Note.Score, r.Note.FindingsCount)
+
+	// Left to the caller under testAllowSyntheticMRs, like every other beads
+	// write on the merge-mechanics path (see refuseEmptyMerge): synthetic MRs
+	// exist only in tests and have no bead to close.
+	if e.isSyntheticMergeMechanicsMR(mr) {
+		return
+	}
+	if closeErr := e.closeIneligibleMR(mr, reason); closeErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to close rejected MR %s: %v\n", mr.ID, closeErr)
+	}
+	_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial %s — closed (rejected), dropped from batch\n", mr.ID, r.Note.Verdict)
+
+	if e.recoverDeadWorker == nil {
+		return
+	}
+	e.recoverDeadWorker(deadWorkerRecoveryRequest{
+		MRID:          mr.ID,
+		Branch:        mr.Branch,
+		Target:        target,
+		SourceIssue:   mr.SourceIssue,
+		Worker:        mr.Worker,
+		RigName:       e.rig.Name,
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: attempt,
+		Summary:       fmt.Sprintf("%d findings, score %.2f (%s)", r.Note.FindingsCount, r.Note.Score, r.Note.Verdict),
+	})
 }
 
 // ejectPatchIDChanged recomputes each stacked member's range patch-id as it

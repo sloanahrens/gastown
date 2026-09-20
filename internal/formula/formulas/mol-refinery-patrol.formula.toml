@@ -388,13 +388,17 @@ process-branch as if this step had been skipped.
 
 The batch run rehearses each candidate onto the target, runs the om editorial
 review on each one (bounded parallelism), and then stacks only the approved
-members. A member that gets request_changes or an infra failure is DROPPED
-FROM THE BATCH AND LEFT QUEUED, untouched; nothing is closed and no
-FIX_NEEDED is sent from the batch path (the deacon's editorial redispatch
-handles it). A member whose patch-id changed once stacked is ejected the same
-way. Do NOT pre-review candidates here. On an editorial_required rig the
-batch lands only members that hold an approve note, which the run itself
-produced.
+members. A member whose review comes back request_changes is DROPPED FROM THE
+BATCH AND REJECTED (gt-bsmp): the run closes its MR bead with a
+`rejected: EDITORIAL REJECTION ...` reason and hands its source bead to
+dead-worker recovery, which records the MERGE REJECTION notes and mails
+RECOVERED_BEAD to the deacon. No FIX_NEEDED comes from the batch path — do not
+send one; the deacon's redispatch owns the resubmit. A member that fails for
+an infra reason (exit 2) is left queued and untouched, since that is not a
+verdict on its diff, and a member whose patch-id changed once stacked is
+ejected the same way. Do NOT pre-review candidates here. On an
+editorial_required rig the batch lands only members that hold an approve
+note, which the run itself produced.
 
 **Step 3: Assemble, gate, and land the batch**
 
@@ -733,7 +737,17 @@ per MR for no reason.
   Target: <target-branch>
   MR: <mr-bead-id>"
   ```
-- Do NOT close the MR bead. Do NOT delete the polecat branch.
+- **Close the MR bead as rejected** (gt-bsmp). A request_changes verdict is the
+  rejection; a wisp left `ready` behind it is a rejected diff the queue will
+  re-rehearse and re-review on an unchanged head every cycle, and a re-roll
+  that comes back approve satisfies the push precondition for a diff a
+  reviewer already rejected. Close it with the verdict as the reason:
+  ```bash
+  gt mq reject <rig> <mr-bead-id> --no-recover --reason "EDITORIAL REJECTION (attempt <N>): om gate request_changes, <score>, <n> findings"
+  ```
+  `--no-recover` because this step runs the polecat-liveness check and the
+  dead-polecat RECOVERED_BEAD redispatch itself, immediately below.
+- Do NOT delete the polecat branch — the fix is resubmitted on it.
 - Archive the MERGE_READY message and skip to loop-check.
 
 **Exit 2 — execution error (never an approval):** `gt mq review` could not
@@ -830,7 +844,26 @@ If any check or test FAILED:
         ```
      The redispatched polecat reads the MERGE REJECTION note, checks out
      the existing branch, and fixes forward.
-   - **Do NOT close the MR bead** — the fix will be resubmitted
+   - **Close the MR bead as rejected** (gt-bsmp) — the fix is resubmitted on
+     the branch, which means a NEW MR, so leaving this one `ready` only keeps a
+     rejected diff merge-eligible: the queue re-gates (and, on an
+     editorial-required rig, re-reviews) it on an unchanged head every cycle
+     until something else clears it, and it shows up as mergeable in the
+     meantime. Close it with the failure as the reason:
+     ```bash
+     gt mq reject <rig> <mr-bead-id> --no-recover --reason "GATE REJECTION: <failure-type> - <error summary>"
+     ```
+     `--no-recover` because the polecat-liveness check and RECOVERED_BEAD
+     redispatch above are this step's own, and running recovery twice is a
+     second Dolt commit for nothing.
+   - **But NOT when the gate never ran.** A timeout, a gate command that
+     could not be found (`exit 127`), an empty gate command or a binary that
+     could not be launched says nothing about the branch — that is
+     infrastructure, and the checklist's own pre-existing-vs-branch test above
+     does not cover it either. Leave the MR bead open for the next cycle in
+     that case and escalate the gate problem instead of rejecting the work;
+     closing on a container-gate flap dequeues every MR in the queue and sends
+     every worker off to fix nothing.
    - **Do NOT delete the branch** — the next session needs it for the fix
    - **Do NOT reopen the source issue when the polecat is ALIVE** — it is
      still working on it (reopen ONLY in the dead-polecat case above)

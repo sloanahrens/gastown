@@ -94,6 +94,13 @@ type GateResult struct {
 	Success bool
 	Error   string
 	Elapsed time.Duration
+
+	// Infra reports that the gate could not RUN, so its failure is not a
+	// verdict on the branch: the command was empty, the process could not be
+	// launched, or the context ended under it (timeout/cancel). A gate that
+	// ran and exited non-zero leaves this false. Only meaningful when
+	// Success is false — see runGate.
+	Infra bool
 }
 
 // MergeQueueConfig holds configuration for the merge queue processor.
@@ -561,6 +568,7 @@ type ProcessResult struct {
 	Error          string
 	Conflict       bool
 	TestsFailed    bool
+	GateInfra      bool // Gate failed without running (timeout/launch/empty cmd) — not a verdict, only meaningful with TestsFailed
 	SlotTimeout    bool // Merge slot contention timeout (distinct from build/test failure)
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
@@ -1282,6 +1290,7 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 			Success: false,
 			Error:   "gate command is empty",
 			Elapsed: time.Since(start),
+			Infra:   true,
 		}
 	}
 
@@ -1312,8 +1321,39 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 	}
 
 	errMsg := fmt.Sprintf("%v", err)
-	if gateCtx.Err() == context.DeadlineExceeded {
-		errMsg = fmt.Sprintf("timed out after %v", gate.Timeout)
+	// A gate that could not run is not a verdict on the branch, and the two
+	// are indistinguishable from the outside unless they are separated here:
+	// a killed process reports an *exec.ExitError exactly like a command that
+	// ran to completion and exited non-zero, so a timeout or a canceled
+	// context would otherwise read as "the branch failed the gate".
+	infra := false
+	if gateCtx.Err() != nil {
+		// The context ended under the process, so it was killed, not
+		// judged: deadline exceeded (the configured gate timeout or the
+		// caller's) or cancellation.
+		infra = true
+		if gateCtx.Err() == context.DeadlineExceeded && gate.Timeout > 0 {
+			errMsg = fmt.Sprintf("timed out after %v", gate.Timeout)
+		} else {
+			errMsg = fmt.Sprintf("gate did not run to completion: %v", gateCtx.Err())
+		}
+	} else {
+		var exitErr *exec.ExitError
+		switch {
+		case !errors.As(err, &exitErr):
+			// The process never started (missing shell, permission, fork
+			// failure) — infrastructure, not a verdict.
+			infra = true
+		case exitErr.ExitCode() == 126 || exitErr.ExitCode() == 127:
+			// 126/127 are the shell's own "found it, could not execute it"
+			// and "could not find it" statuses (POSIX XCU 2.8.2), not the
+			// gate's verdict: the gate never ran. A mistyped gate command or
+			// a tool missing from PATH lands here, and treating that as a
+			// branch failure would dequeue every MR in the queue over a
+			// config error.
+			infra = true
+			errMsg = fmt.Sprintf("gate command did not run (%s)", errMsg)
+		}
 	}
 	if stderrStr := strings.TrimSpace(stderr.String()); stderrStr != "" {
 		// Cap stderr to avoid huge error messages
@@ -1328,6 +1368,7 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		Success: false,
 		Error:   errMsg,
 		Elapsed: elapsed,
+		Infra:   infra,
 	}
 }
 
@@ -1393,12 +1434,20 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 
 	// Report results
 	var failures []string
+	// A gate that could not run is not a verdict, so the failure as a whole is
+	// infrastructure unless at least one gate actually ran and rejected
+	// (GateInfra, ProcessResult). One real failure among timeouts is still a
+	// verdict on the branch.
+	infraOnly := true
 	for _, r := range results {
 		if r.Success {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: passed (%v)\n", r.Name, r.Elapsed.Truncate(time.Millisecond))
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: FAILED (%v) - %s\n", r.Name, r.Elapsed.Truncate(time.Millisecond), r.Error)
 			failures = append(failures, fmt.Sprintf("%s: %s", r.Name, r.Error))
+			if !r.Infra {
+				infraOnly = false
+			}
 		}
 	}
 
@@ -1406,6 +1455,7 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 		return ProcessResult{
 			Success:     false,
 			TestsFailed: true,
+			GateInfra:   infraOnly,
 			Error:       fmt.Sprintf("quality gates failed: %s", strings.Join(failures, "; ")),
 		}
 	}
@@ -1867,6 +1917,31 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		return
 	}
 
+	// A gate that RAN and rejected this branch is a verdict, so the MR must
+	// not stay merge-eligible behind it (gt-bsmp) — the nudge and the
+	// recovery below only tell the worker, they leave the wisp ready to be
+	// re-gated on an unchanged head every cycle. Close at the verdict, like
+	// refuseEmptyMerge does, because a caller that inspects this result is not
+	// guaranteed to dequeue the MR.
+	//
+	// GateInfra is the line between a verdict and a gate that never ran
+	// (timeout, unlaunchable or empty command): an infra flap says nothing
+	// about the branch, and closing on it would dequeue every MR in the queue
+	// and send every worker off to fix nothing. Those stay queued for retry.
+	//
+	// A batch that bisected to a culprit does not come through here
+	// (processSingleMR and ProcessBatch only report culprits): attributing a
+	// whole-stack gate failure to a branch needs the pre-existing-vs-branch
+	// diagnosis mol-refinery-patrol's handle-failures step performs, and that
+	// step closes the culprit itself.
+	if result.TestsFailed && !result.GateInfra {
+		if closeErr := e.closeIneligibleMR(mr, "GATE REJECTION: "+result.Error); closeErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close rejected MR %s: %v\n", mr.ID, closeErr)
+		} else {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: gate rejected this branch — closed (rejected)\n", mr.ID)
+		}
+	}
+
 	// Nudge polecat directly about the merge failure.
 	// Previously sent MERGE_FAILED mail to witness (which relayed to polecat),
 	// but that created permanent Dolt commits for routine protocol signals.
@@ -1950,9 +2025,14 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 
 	// Log the failure - MR stays in queue but may be blocked
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Failed: %s - %s\n", mr.ID, result.Error)
-	if mr.BlockedBy != "" {
+	switch {
+	case mr.BlockedBy != "":
 		_, _ = fmt.Fprintln(e.output, "[Engineer] MR blocked pending conflict resolution - queue continues to next MR")
-	} else {
+	case result.TestsFailed && !result.GateInfra:
+		// Closed above (gt-bsmp): it is not in the queue any more, and saying
+		// so here is what kept a rejected MR looking retryable.
+		_, _ = fmt.Fprintln(e.output, "[Engineer] MR closed as rejected - the branch stays on origin for the rework")
+	default:
 		_, _ = fmt.Fprintln(e.output, "[Engineer] MR remains in queue for retry")
 	}
 }

@@ -64,10 +64,11 @@ func (e *Engineer) buildLandedMRs(mrs []*MRInfo, target string) ([]editorial.Lan
 // On success it returns the notes and the LandedMR descriptors used to
 // compute them, so the caller can copy each note onto its landed commit
 // after the push succeeds. On a classified failure it logs the exact
-// reason, records a failure receipt, escalates to the rig witness, and
-// returns the error — the caller must not push. skipGates never bypasses
-// this: callers invoke it unconditionally before the push slot is
-// acquired.
+// reason, records a failure receipt, escalates to the rig witness, closes
+// the offending MR when the reason is a verdict rather than a state the
+// next cycle can still resolve (see rejectEditorialVerdict), and returns
+// the error — the caller must not push. skipGates never bypasses this:
+// callers invoke it unconditionally before the push slot is acquired.
 func (e *Engineer) editorialPrecondition(logPrefix string, mrs []*MRInfo, target string) ([]editorial.Note, []editorial.LandedMR, *editorial.PreconditionError) {
 	if e.config.Editorial == nil || !e.config.Editorial.Required || len(mrs) == 0 {
 		return nil, nil, nil
@@ -85,11 +86,59 @@ func (e *Engineer) editorialPrecondition(logPrefix string, mrs []*MRInfo, target
 	notes, cerr := editorial.CheckPrecondition(e.git, *e.config.Editorial, landed)
 	if cerr != nil {
 		_, _ = fmt.Fprintf(e.output, "%s %s\n", logPrefix, cerr.Error())
-		e.recordEditorialFailure(mrByID(mrs, cerr.MR), cerr)
+		offending := mrByID(mrs, cerr.MR)
+		e.recordEditorialFailure(offending, cerr)
 		e.escalateToWitness(editorialEscalationMessage(cerr))
+		e.rejectEditorialVerdict(offending, cerr)
 		return nil, nil, cerr
 	}
 	return notes, landed, nil
+}
+
+// editorialVerdictReasons are the push-precondition failures that ARE a
+// verdict about the diff being pushed, as opposed to a state the next cycle
+// can still resolve on its own.
+//
+// ReasonVerdictNotApprove is the one that matters: the reviewed head carries
+// a request_changes note covering exactly this range, i.e. a reviewer saw
+// this diff and rejected it. The three quarters are not verdicts —
+// ReasonMissing means this range was never reviewed (the next cycle reviews
+// it, and refusing to push a range with no verdict yet is the precondition
+// working as designed), ReasonPatchIDMismatch means the head moved since the
+// verdict (re-reviewed, not rejected), ReasonVersionBelowMin is a rubric
+// floor, and ReasonRangeUnresolvable is a git failure, not a judgment.
+var editorialVerdictReasons = map[editorial.PreconditionReason]bool{
+	editorial.ReasonVerdictNotApprove: true,
+}
+
+// rejectEditorialVerdict closes mr when the push precondition refused it for a
+// verdict reason (gt-bsmp). This is where an editorial rejection surfaces on
+// the single-MR path: the batch path reviews its own candidates, but a batch
+// of one goes straight to doMerge, so a request_changes note comes back as
+// ReasonVerdictNotApprove rather than as a dropped candidate.
+//
+// Left open, the MR stays merge-eligible and is re-gated and re-reviewed on an
+// unchanged head every cycle; a re-roll that comes back approve writes an
+// approve note whose patch-id now matches, which is what lets a rejected diff
+// land (gt-bveg records why a re-roll can disagree). The close happens here
+// rather than in the caller for the reason refuseEmptyMerge states: a caller
+// that inspects this error is not guaranteed to dequeue the MR.
+//
+// The source bead is left alone — the paths that queue this failure for
+// redispatch own its notes, and a duplicate write here is a second Dolt commit
+// for nothing.
+func (e *Engineer) rejectEditorialVerdict(mr *MRInfo, cerr *editorial.PreconditionError) {
+	if !editorialVerdictReasons[cerr.Reason] {
+		return
+	}
+	if e.isSyntheticMergeMechanicsMR(mr) {
+		return
+	}
+	reason := fmt.Sprintf("EDITORIAL REJECTION: om gate %s for %s — push refused, no approve note for this range",
+		cerr.Reason, cerr.MR)
+	if closeErr := e.closeIneligibleMR(mr, reason); closeErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close rejected MR %s: %v\n", mr.ID, closeErr)
+	}
 }
 
 // mrByID returns the MR in mrs matching id, falling back to the first MR
