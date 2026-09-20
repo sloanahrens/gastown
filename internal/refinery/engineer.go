@@ -1391,8 +1391,6 @@ func isLintGate(name string) bool {
 
 // runGateWithLintRetry runs a gate with lint contention retry logic.
 func (e *Engineer) runGateWithLintRetry(ctx context.Context, name string, gate *GateConfig, start time.Time) GateResult {
-	var lastResult GateResult
-
 	attemptRunner := func() lintAttempt {
 		gateCtx := ctx
 		if gate.Timeout > 0 {
