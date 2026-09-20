@@ -5471,18 +5471,24 @@ func TestBdFirstRunMetricsNoticeConstantsMatchInstalledBd(t *testing.T) {
 	workDir := t.TempDir()
 	fakeHome := t.TempDir()
 
-	cmd := exec.Command("bd", "init", "--quiet", "--non-interactive")
+	// No --quiet: bd's local init --quiet suppresses the banner from
+	// be-1ix on, and this test exists to see the banner. The notice is
+	// stripped from Init()'s quiet runs by the same constants either way.
+	cmd := exec.Command("bd", "init", "--non-interactive")
 	cmd.Dir = workDir
-	// BD_DISABLE_EVENT_FLUSH keeps bd's metrics *enabled* — the first-run
-	// banner below only fires while metrics are on — but suppresses the
-	// DETACHED `bd send-metrics` child that metrics.CloseAndFlush spawns at
-	// exit. That child outlives this test and keeps writing
+	// BD_DISABLE_METRICS=0 keeps bd's metrics *enabled* — the first-run
+	// banner below only fires while metrics are on, and the hermetic
+	// harness switches telemetry off for every other bd the package spawns
+	// (gt-wcq2; the variable is a bidirectional override, so an explicit 0
+	// wins). BD_DISABLE_EVENT_FLUSH suppresses the DETACHED
+	// `bd send-metrics` child that metrics.CloseAndFlush spawns at exit.
+	// That child outlives this test and keeps writing
 	// $HOME/.beads/eventsData while Go's t.TempDir cleanup is deleting
 	// fakeHome, producing an assertion-free "TempDir RemoveAll cleanup:
 	// unlinkat .../eventsData: directory not empty" that reddens the whole
 	// package (gt-ul8f; same failure the beads repo itself fixed in its
 	// testMainInner for wy-12x1p).
-	cmd.Env = append(os.Environ(), "HOME="+fakeHome, "BD_DISABLE_EVENT_FLUSH=1")
+	cmd.Env = append(os.Environ(), "HOME="+fakeHome, "BD_DISABLE_METRICS=0", "BD_DISABLE_EVENT_FLUSH=1")
 
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -5503,8 +5509,18 @@ func TestBdFirstRunMetricsNoticeConstantsMatchInstalledBd(t *testing.T) {
 		t.Fatalf("bdFirstRunMetricsNoticeEnd now appears before bdFirstRunMetricsNoticeStart in the installed bd's banner — stripFirstRunMetricsNotice would no longer bound it correctly.\nRaw stderr:\n%s", raw)
 	}
 
-	if got := bdEmptyOutputIsError(raw); got {
-		t.Fatalf("bdEmptyOutputIsError(installed bd's real first-run banner) = true, want false — stripFirstRunMetricsNotice no longer fully removes it.\nRaw stderr:\n%s", raw)
+	// Without --quiet bd also prints its ordinary init diagnostics (the
+	// no-Dolt-remote warning), so "stripped output is empty" is no longer
+	// the right assertion. What the old check really guarded is bd growing
+	// consent text OUTSIDE the two markers, which the strip would leave
+	// behind: the banner is the only thing bd says about metrics at init,
+	// so nothing about metrics may survive the strip.
+	stripped := stripFirstRunMetricsNotice(raw)
+	if strings.Contains(stripped, bdFirstRunMetricsNoticeStart) || strings.Contains(stripped, bdFirstRunMetricsNoticeEnd) {
+		t.Fatalf("stripFirstRunMetricsNotice left a banner marker behind.\nStripped stderr:\n%s", stripped)
+	}
+	if strings.Contains(strings.ToLower(stripped), "metrics") {
+		t.Fatalf("installed bd prints metrics text outside the banner markers: if it is consent text, extend the constants; if it is an unrelated diagnostic, narrow this check.\nStripped stderr:\n%s", stripped)
 	}
 }
 

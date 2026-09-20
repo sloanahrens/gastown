@@ -971,11 +971,12 @@ func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 	}
 	prefix := "pt" + hex.EncodeToString(buf[:])
 	if err := b.Init(prefix); err != nil {
-		// Environmental, not a regression: bd writes its first-run metrics
-		// notice and its Dolt auto-start port warning to stderr while printing
-		// nothing to stdout on success, and internal/beads' exit-0 "produced no
-		// output" heuristic turns that benign stderr into an error on any host
-		// whose bd config has no recorded consent (gt-fhkg). Sibling
+		// Environmental, not a regression. This used to trip on every host
+		// with no recorded metrics consent: bd's first-run notice landed on
+		// stderr with empty stdout and internal/beads read that as an error
+		// (gt-fhkg). The hermetic harness now switches bd telemetry off for
+		// every subprocess (gt-wcq2), so these tests run for real; what is
+		// left here is a bd that is genuinely missing or broken. Sibling
 		// container-backed suites (internal/refinery, internal/cmd's
 		// rig_park_persistence_test.go) skip for the same reason.
 		t.Skipf("bd init unavailable in this test environment: %v", err)

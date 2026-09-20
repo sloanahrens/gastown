@@ -6,15 +6,24 @@ import (
 	"strings"
 )
 
-// CleanGTEnv returns os.Environ() with GT_* and BD_* variables removed, except
-// GT_DOLT_PORT, GT_DOLT_HOST, and GT_TEST_EXTERNAL_DOLT which are preserved so
-// subprocesses connect to and reuse the test Dolt server. BEADS_DOLT_PORT and
-// BEADS_DOLT_SERVER_HOST (prefix BEADS_, not BD_) pass through implicitly since
-// only BD_* is stripped.
+// CleanGTEnv returns os.Environ() with GT_* and BD_* variables removed, except:
+// GT_DOLT_PORT, GT_DOLT_HOST and GT_TEST_EXTERNAL_DOLT (so subprocesses reuse
+// the test Dolt server), the hermetic markers GT_TEST_HERMETIC and
+// GT_TEST_FORBIDDEN_TOWN_ROOT, and the bd telemetry switches
+// BD_DISABLE_METRICS and BD_DISABLE_EVENT_FLUSH (bdTelemetryOff). BEADS_DOLT_PORT
+// and BEADS_DOLT_SERVER_HOST (prefix BEADS_, not BD_) pass through implicitly
+// since only BD_* is stripped.
 //
 // Use this when setting cmd.Env on bd/gt subprocess calls in tests.
 // If you do NOT set cmd.Env, the process env (including GT_DOLT_PORT) is
 // inherited automatically — no need for this function in that case.
+// isTelemetrySwitch reports whether a KEY=value entry is one of bdTelemetryOff's.
+func isTelemetrySwitch(kv string) bool {
+	name, _, _ := strings.Cut(kv, "=")
+	_, ok := bdTelemetryOff[name]
+	return ok
+}
+
 func CleanGTEnv(extraEnv ...string) []string {
 	var clean []string
 	for _, e := range os.Environ() {
@@ -28,7 +37,9 @@ func CleanGTEnv(extraEnv ...string) []string {
 			!strings.HasPrefix(e, "GT_TEST_FORBIDDEN_TOWN_ROOT=") {
 			continue
 		}
-		if strings.HasPrefix(e, "BD_") {
+		// bd's telemetry switches are the BD_* values that must reach a
+		// subprocess; bdTelemetryOff (hermetic.go) is the one list of them.
+		if strings.HasPrefix(e, "BD_") && !isTelemetrySwitch(e) {
 			continue
 		}
 		clean = append(clean, e)
@@ -55,7 +66,7 @@ func NewGTCommand(args ...string) *exec.Cmd {
 }
 
 // NewIsolatedBDCommand creates an exec.Command for the bd CLI with GT_*/BD_*
-// env stripped except GT_DOLT_PORT and BEADS_DOLT_PORT. Use this when you need
+// env stripped except the passthroughs CleanGTEnv lists. Use this when you need
 // to isolate a subprocess from the parent Gas Town workspace but still route
 // to the test Dolt server.
 func NewIsolatedBDCommand(args ...string) *exec.Cmd {
@@ -65,7 +76,7 @@ func NewIsolatedBDCommand(args ...string) *exec.Cmd {
 }
 
 // NewIsolatedGTCommand creates an exec.Command for the gt CLI with GT_*/BD_*
-// env stripped except GT_DOLT_PORT and BEADS_DOLT_PORT. Use this when you need
+// env stripped except the passthroughs CleanGTEnv lists. Use this when you need
 // to isolate a subprocess from the parent Gas Town workspace but still route
 // to the test Dolt server.
 func NewIsolatedGTCommand(args ...string) *exec.Cmd {

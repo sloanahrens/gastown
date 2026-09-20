@@ -331,11 +331,34 @@ func (h *Hermetic) Finish(code int) int {
 	return code
 }
 
+// bdTelemetryOff is what every bd spawned under the harness must see. With
+// HOME redirected to the sandbox there is no user config saying `bd metrics
+// off`, so bd resolves telemetry ENABLED by default: it forks the platform
+// machine-id probe on the cold cache, writes event files under the sandbox
+// and spawns detached send-metrics children at the real endpoint. Both
+// switches are telemetry-only: BD_DISABLE_METRICS turns the collector off
+// and BD_DISABLE_EVENT_FLUSH stops the detached flusher, which bd gates
+// independently of the collector (beads GH#5712). BEADS_TEST_MODE is
+// deliberately not used here — it is a general test-mode switch in the
+// beads SDK (testdb_ minting among other things) that the packages needing
+// it set for themselves. Set after the scrub (which removes BD_*) and re-set
+// by every scrub (gt-wcq2).
+var bdTelemetryOff = map[string]string{
+	"BD_DISABLE_METRICS":     "1",
+	"BD_DISABLE_EVENT_FLUSH": "1",
+}
+
 // scrubProcessEnv removes every GT_*, BD_* and BEADS_* variable from the
 // process environment so tests and their subprocesses cannot inherit live
 // town context from the invoking agent session. When keepDolt is true the
 // Dolt passthrough variables survive (an outer runner provided the server).
+// It leaves bd's telemetry switched off (bdTelemetryOff).
 func scrubProcessEnv(keepDolt bool) {
+	defer func() {
+		for k, v := range bdTelemetryOff {
+			_ = os.Setenv(k, v)
+		}
+	}()
 	// DockerTestsEnv is the caller's opt-in to container-backed tests, not
 	// live-town context; it is a GT_* variable only by naming convention.
 	// Without this, `GT_TEST_DOCKER=1 go test` would be wiped here before
