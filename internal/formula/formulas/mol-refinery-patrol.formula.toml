@@ -114,7 +114,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 29
+version = 30
 
 [vars]
 [vars.wisp_type]
@@ -396,13 +396,83 @@ way. Do NOT pre-review candidates here. On an editorial_required rig the
 batch lands only members that hold an approve note, which the run itself
 produced.
 
-**Step 3: Assemble, gate, and land the batch**
+**Step 3: Assemble, gate, and land the batch — as a background call**
+
+A batch run is not bounded like a single gate: a red first gate costs a
+flaky retry, then a bisection of several more gates, each a full suite, and
+a foreground Bash call carrying that is killed at the tool's time ceiling
+mid-bisection (gt-f75t). So never run it in the foreground. Run this ONE
+Bash call with
+`run_in_background: true` — the tool then owns the process with no timeout,
+keeps it running across your turns, and notifies you when it exits:
 
 ```bash
-gt mq batch run <rig> --json
+gt mq batch run <rig> --json > /tmp/<rig>-batch.json 2> /tmp/<rig>-batch.err
+echo "BATCH_EXIT=$?" >> /tmp/<rig>-batch.err
 ```
 
-This one command stacks the eligible MRs via ancestry-preserving merges,
+Fixed paths, so nothing has to be remembered across calls. Wait for the
+completion notification; to see progress in the meantime, a short separate
+call `tail -n 3 /tmp/<rig>-batch.json` shows the `[Batch]` / `[Bisect]`
+lines as they land. While it runs do nothing else to the rig checkout or
+the queue — the batch holds the gate slot and owns {{target_branch}} in the
+rig checkout.
+
+When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
+
+- `BATCH_EXIT=0` or `BATCH_EXIT=<non-zero>` — the run ended. The .json
+  file holds the `[Batch]` / `[Bisect]` progress lines FOLLOWED BY the JSON
+  result when one was produced (both go to stdout), so extract the trailing
+  object rather than parsing the whole file:
+  ```bash
+  sed -n '/^{/,$p' /tmp/<rig>-batch.json > /tmp/<rig>-batch-result.json
+  test -s /tmp/<rig>-batch-result.json && echo HAS_JSON || echo NO_JSON
+  ```
+  `NO_JSON` with exit 0 is a normal not-batched exit (below
+  `merge_queue.batch_min_count`, no eligible MRs, merge_strategy=pr): nothing
+  was landed; go to Step 6. `HAS_JSON`: read `.merged[]`, `.culprits[]`,
+  `.conflicts[]` and `.error` from `/tmp/<rig>-batch-result.json`, then
+  answer two questions in this order, whatever the exit code:
+
+  1. What landed? `.merged[]` lists only members whose post-merge cleanup
+     succeeded; every one of them is on {{target_branch}} and owes Step 4's
+     Witness mail. A member can also have landed WITHOUT appearing there —
+     its commits pushed, its cleanup failed, its MR bead and branch left
+     behind (`.error` records only the first such failure, and a batch that
+     shrank to one member reports it with an empty `.merged[]`). Find every
+     one with
+     `grep -E 'Post-merge (proof|cleanup) failed for' /tmp/<rig>-batch.json`
+     and run the verified cleanup for each, never a manual close:
+     `gt mq post-merge <rig> <mr-id> --skip-branch-delete` re-runs the
+     post-merge proof and closes MR and source issue together (the tool
+     merged-pr-sweep uses for the same case). Proof fails again → it did NOT
+     land, leave it queued for process-branch. Proof passes → send its
+     Witness mail like any other merged entry.
+  2. Did the run fail before or beside that? A non-zero exit whose `.error`
+     does not start with `post-merge cleanup proof failed for` (the exact
+     prefix the cleanup failures above carry) is an infra failure (push
+     refused, slot, editorial precondition, eligibility recheck): escalate
+     it observably exactly as handle-failures does for a single MR (`.error`
+     text, mail the mayor) before going to Step 6, so the same failure is
+     not silently retried one MR at a time.
+  `NO_JSON` with a non-zero exit is the same kind of infra failure earlier
+  in the run (candidate listing, gate-slot wait): nothing was landed;
+  escalate it the same way (tail of `/tmp/<rig>-batch.err`, mail the mayor)
+  and go to Step 6.
+- no `BATCH_EXIT=` line at all — the process died abnormally (killed,
+  crashed, session lost). Do NOT wait. The container-gate slot needs
+  nothing: it is a kernel flock and cleared when the process died. Two
+  things can be left behind, and both need the mayor, not you: (1) the rig
+  checkout — `git status`; if {{target_branch}} sits on a stacked commit it
+  must go back to `origin/{{target_branch}}`, a hard reset you do not run
+  yourself; (2) the beads merge slot, taken as `<rig>/refinery/push/<ts>`
+  while the stack was being pushed, which has no staleness eviction and
+  keeps the push path blocked until released. Mail the mayor both facts
+  (the sha the checkout sits on, the merge-slot holder if any) and continue
+  to Step 6 treating the batch as not run, so process-branch takes the MRs
+  one at a time once the mayor has cleared the way.
+
+The command stacks the eligible MRs via ancestry-preserving merges,
 enforces the push precondition described in Step 2, runs the configured gate
 commands once, and either fast-forwards the whole batch to {{target_branch}}
 or bisects to isolate a red MR and lands the rest. It also
