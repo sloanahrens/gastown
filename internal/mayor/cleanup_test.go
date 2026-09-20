@@ -8,26 +8,13 @@ import (
 	"testing"
 )
 
-// impossiblePID is a PID no process can hold, so a test can put the ACP pid
-// file into the "stale" state without racing whatever the host happens to be
-// running.
-//
-// The stale-PID tests need a dead PID, and both used a guess: syscall.Getpid()
-// minus 10000, and a hardcoded 999999. PIDs are recycled, so "ten thousand
-// allocations old" is only probably dead — 97 of the 20000 PIDs below this
-// process's were live when this was written, which is the roughly one-in-two-
-// hundred flake that failed TestRemoveACPPid_RemovesStalePid in a full
-// `GOFLAGS=-p=8 make test` run while the town's own processes were coming and
-// going, the live mayor among them (gt-toc1). When the guessed PID is live,
-// acpProcessAlive says so, IsACPActive says so, and the test fails against
-// correct production code.
-//
-// This bound is a kernel invariant rather than a reading of the host: every
-// platform caps allocatable PIDs — 99998 on Darwin, at most 1<<22 on Linux —
-// and kill(2) on a PID above the cap reports no such process. 1<<23 clears
-// both caps, so it is dead by construction. TestImpossiblePIDIsNotLive asserts
-// the bound rather than trusting it.
-const impossiblePID = 1 << 23
+// impossiblePID is a PID no supported platform can allocate, so a test can put
+// the ACP pid file into the "stale" state without racing the host's own
+// processes — a live mayor among them (gt-toc1). It is above every platform's
+// ceiling (99998 on Darwin, 1<<22 on Linux) and, not being a multiple of 4, it
+// is not one of the strides Windows allocates PIDs at either.
+// TestImpossiblePIDIsNotLive asserts the bound rather than trusting it.
+const impossiblePID = 1<<23 + 1
 
 func TestWriteAndRemoveACPPid(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -257,7 +244,7 @@ func containsSubstring(s, substr string) bool {
 // them to fail intermittently somewhere else.
 func TestImpossiblePIDIsNotLive(t *testing.T) {
 	if acpProcessAlive(impossiblePID) {
-		t.Fatalf("PID %d reports as live; the stale-PID tests need a PID above this platform's allocatable cap", impossiblePID)
+		t.Fatalf("PID %d reports as live; the stale-PID tests need a PID this platform cannot allocate", impossiblePID)
 	}
 }
 

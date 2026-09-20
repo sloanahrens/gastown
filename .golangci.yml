@@ -3,21 +3,12 @@ version: "2"
 run:
   timeout: 5m
   tests: false
-  # golangci-lint takes a module-wide flock ($TMPDIR/golangci-lint.lock) for the
-  # whole run. By default it gives up on that lock after 5s and fails with
-  # "parallel golangci-lint is running" — nothing analysed, no findings, and a
-  # failure a reader cannot tell apart from a real one. In a town running five
-  # polecats plus the refinery, two overlapping lints are routine rather than
-  # exotic, and the refinery's batch gate chains this rig's lint_command ("make
-  # lint") verbatim with no retry of its own, so a lost coin flip there costs a
-  # whole 14-35 min gate slot (gt-taoz, gt-xsty).
-  #
-  # Serialising is the wanted behaviour, so wait for the holder instead of
-  # failing. The wait is not unbounded at this setting's expense: golangci-lint
-  # acquires the lock in its preRunE and only starts run.timeout's clock
-  # afterwards, so the waiter still gets its full 5m of analysis, and a holder
-  # is in turn bounded by its own timeout. `make lint` names the lock before it
-  # starts, because golangci-lint prints nothing while it waits.
+  # Block on the module-wide flock ($TMPDIR/golangci-lint.lock) instead of
+  # giving up on it after 5s with "parallel golangci-lint is running", which
+  # analyzes nothing and which the refinery's batch gate — chaining this rig's
+  # `make lint` verbatim, with no retry of its own — cannot tell from a real
+  # failure (gt-taoz, gt-xsty). golangci-lint prints nothing while it waits, so
+  # the lint target announces the wait before starting it.
   allow-serial-runners: true
 
 linters:
