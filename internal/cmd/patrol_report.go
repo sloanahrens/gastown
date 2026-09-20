@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 var (
@@ -82,13 +83,57 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported role for patrol report: %q", roleName)
 	}
 
+	// Bound the witness's hand-maintained cycle counter before anything else,
+	// so no exit path from this command can leave it accumulating. The role
+	// template's old stop rule read patrol_count >= 15; a session still running
+	// an older rendered prompt would obey it, and a template edit cannot reach
+	// that prompt (gt prime writes the role prompt for the *next* spawn). See
+	// witness.NormalizePatrolCounter (gt-oabl).
+	//
+	// Witness only: the deacon keeps a bounded counter with a real handoff rule
+	// by design (gt-wdv9), so its file must not be touched here.
+	if roleInfo.Role == RoleWitness {
+		if changed, err := witness.NormalizePatrolCounter(roleInfo.TownRoot, roleInfo.Rig); err != nil {
+			style.PrintWarning("could not bound witness patrol counter: %v", err)
+		} else if changed {
+			fmt.Printf("%s Bounded witness patrol counter (reset patrol_count to 0)\n", style.Success.Render("✓"))
+		}
+	}
+
 	// Find the active patrol
 	patrolID, _, hasPatrol, findErr := findActivePatrol(cfg)
 	if findErr != nil {
 		return fmt.Errorf("finding active patrol: %w", findErr)
 	}
 	if !hasPatrol {
-		return fmt.Errorf("no active patrol found for %s", cfg.RoleName)
+		// Re-attach instead of dead-ending. A patrol role that lost its wisp —
+		// reaped, or a session that primed without the molecule section, which
+		// the hook budget can drop (gt-oabl) — has no way back on its own today:
+		// this command returned an error, and the only seed path is `gt patrol
+		// new`, which nothing invokes. The agent is then idle with an empty hook
+		// and its rig goes unwatched. Seeding here makes the loop's own
+		// re-entry command heal the loop, and the cycle below closes and
+		// re-spawns it exactly as a normal cycle would.
+		//
+		// A parked or docked rig is an operator stop, not a lost wisp — respect
+		// it, the same way prime's witness path does (IsRigParkedOrDocked).
+		if roleInfo.Rig != "" {
+			if stopped, reason := IsRigParkedOrDocked(roleInfo.TownRoot, roleInfo.Rig); stopped {
+				return fmt.Errorf("no active patrol found for %s and rig %s is %s",
+					cfg.RoleName, roleInfo.Rig, reason)
+			}
+		}
+
+		seeded, seedErr := autoSpawnPatrol(cfg)
+		if seedErr != nil && seeded == "" {
+			return fmt.Errorf("no active patrol for %s and could not start one: %w", cfg.RoleName, seedErr)
+		}
+		patrolID = seeded
+		if seedErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", seedErr.Error())
+		}
+		fmt.Printf("%s No active patrol for %s — seeded %s and continuing the cycle\n",
+			style.Success.Render("✓"), cfg.RoleName, patrolID)
 	}
 
 	// Close the current patrol root with the summary
