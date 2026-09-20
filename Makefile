@@ -59,6 +59,10 @@ lint-tools:
 
 lint:
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
+	@# run.allow-serial-runners (.golangci.yml) makes a contended lint wait for the module
+	@# lock instead of failing after 5s, and golangci-lint prints nothing while it waits.
+	@# Say so first, so a pause here reads as contention rather than a hung agent (gt-taoz).
+	@echo "lint: golangci-lint run --timeout=5m (waits, silently, if another lint holds the module lock)"
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 
 # Deterministic docs and comments checks (docs/writing-for-agents.md).

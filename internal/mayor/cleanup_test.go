@@ -5,9 +5,29 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"syscall"
 	"testing"
 )
+
+// impossiblePID is a PID no process can hold, so a test can put the ACP pid
+// file into the "stale" state without racing whatever the host happens to be
+// running.
+//
+// The stale-PID tests need a dead PID, and both used a guess: syscall.Getpid()
+// minus 10000, and a hardcoded 999999. PIDs are recycled, so "ten thousand
+// allocations old" is only probably dead — 97 of the 20000 PIDs below this
+// process's were live when this was written, which is the roughly one-in-two-
+// hundred flake that failed TestRemoveACPPid_RemovesStalePid in a full
+// `GOFLAGS=-p=8 make test` run while the town's own processes were coming and
+// going, the live mayor among them (gt-toc1). When the guessed PID is live,
+// acpProcessAlive says so, IsACPActive says so, and the test fails against
+// correct production code.
+//
+// This bound is a kernel invariant rather than a reading of the host: every
+// platform caps allocatable PIDs — 99998 on Darwin, at most 1<<22 on Linux —
+// and kill(2) on a PID above the cap reports no such process. 1<<23 clears
+// both caps, so it is dead by construction. TestImpossiblePIDIsNotLive asserts
+// the bound rather than trusting it.
+const impossiblePID = 1 << 23
 
 func TestWriteAndRemoveACPPid(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -83,7 +103,7 @@ func TestIsACPActive_DeadProcess(t *testing.T) {
 	}
 
 	pidPath := ACPPidFilePath(tmpDir)
-	deadPid := 999999
+	deadPid := impossiblePID
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(deadPid)), 0644); err != nil {
 		t.Fatalf("failed to write PID file: %v", err)
 	}
@@ -229,6 +249,18 @@ func containsSubstring(s, substr string) bool {
 	return false
 }
 
+// TestImpossiblePIDIsNotLive holds the stale-PID tests to their fixture: if a
+// platform ever reports impossiblePID as live — a larger PID cap, or a
+// detection path with a side effect this bound did not anticipate — then
+// TestRemoveACPPid_RemovesStalePid and TestIsACPActive_DeadProcess are no
+// longer testing what they claim, and failing here says so instead of leaving
+// them to fail intermittently somewhere else.
+func TestImpossiblePIDIsNotLive(t *testing.T) {
+	if acpProcessAlive(impossiblePID) {
+		t.Fatalf("PID %d reports as live; the stale-PID tests need a PID above this platform's allocatable cap", impossiblePID)
+	}
+}
+
 func TestRemoveACPPid_RemovesStalePid(t *testing.T) {
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -236,12 +268,8 @@ func TestRemoveACPPid_RemovesStalePid(t *testing.T) {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
 
-	initialPid := syscall.Getpid() - 10000
-	if initialPid < 1 {
-		initialPid = 1
-	}
 	pidPath := ACPPidFilePath(tmpDir)
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(initialPid)), 0644); err != nil {
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(impossiblePID)), 0644); err != nil {
 		t.Fatalf("failed to write stale PID file: %v", err)
 	}
 
