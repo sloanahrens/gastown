@@ -198,6 +198,68 @@ func TestRenderRole_Deacon(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Witness_NoCycleBasedStop pins the fix for gt-oabl: the witness
+// patrol loop must have exactly one exit (context HIGH from context-check). The
+// template used to tell the witness to hand off after 15 patrol loops or after
+// any "extraordinary action", which is read on every cycle from a
+// hand-maintained state.json counter that no code ever bounded — the om witness
+// obeyed it at patrol_count 610 and sat at the prompt, abandoning the rig.
+//
+// The formula (mol-witness-patrol, step loop-or-exit) says the opposite — loop
+// unless context is HIGH — so a reintroduced stop rule here is a real
+// regression, not a style question. The deacon template deliberately keeps its
+// own counter block (it hands off every cycle by design); this guard is
+// witness-only.
+func TestRenderRole_Witness_NoCycleBasedStop(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "witness",
+		RigName:       "testrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/testrig/witness",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("witness", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	if !strings.Contains(output, "Witness Context") {
+		t.Error("output missing 'Witness Context'")
+	}
+
+	// No cycle-count stop, and no "extraordinary action" stop.
+	for _, banned := range []string{
+		"15 patrol loops",
+		"patrol_count >= 15",
+		"extraordinary_action",
+		"Extraordinary actions",
+	} {
+		if strings.Contains(output, banned) {
+			t.Errorf("witness template still carries a stop trigger: %q", banned)
+		}
+	}
+
+	// The loop must be stated as mandatory, and the single exit named.
+	for _, required := range []string{
+		"Never end your turn",
+		"exactly one exit",
+		constants.MolWitnessPatrol,
+	} {
+		if !strings.Contains(output, required) {
+			t.Errorf("witness template missing loop mandate %q", required)
+		}
+	}
+}
+
 func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {

@@ -231,28 +231,36 @@ Process mail in your inbox-check mol step.
 
 ## 🔄 Context Management
 
-**Heuristic**: Hand off after **15 patrol loops** without major incident, OR
-**immediately** after any extraordinary action.
+**The patrol loop has exactly one exit: context HIGH.** The number of completed
+cycles is never a reason to stop, and neither is a hard call (an escalation, a
+recovery, a LIFECYCLE request). Those are patrol work, not a reason to end the
+patrol.
 
-**Extraordinary actions** (trigger immediate handoff):
-- Processing a LIFECYCLE:Shutdown request
-- Handling a recovery escalation (unpushed work detected)
-- Filing an escalation to Mayor
-- Resolving a stuck polecat (3+ nudge attempts)
+`patrol_count` in `state.json` is an informational counter. It gates nothing.
+Hundreds of cycles on a quiet rig is normal, and `{{ cmd }} patrol report` zeroes
+it every cycle — so a large value means a stale reading, not a reason to hand off.
 
-**At loop-or-exit step:**
-1. Read `state.json` for `patrol_count` and `extraordinary_action`
-2. If `extraordinary_action == true` → hand off immediately
-3. If `patrol_count >= 15` → hand off
-4. Otherwise → use `await-signal` to sleep until activity (30s-15m backoff when idle)
-5. After waking, increment `patrol_count`, save state, then:
-   - Report and loop: `{{ cmd }} patrol report --summary "<summary>"`
-   - This closes the current patrol and starts a new cycle
+**At the loop-or-exit step — every cycle, no exceptions:**
 
-**Idle sleep prevents crash loops**: await-signal ensures minimum time between
-patrols (30s base, exponential backoff to 15m max).
+1. Use `await-signal` to sleep until activity (30s base, exponential backoff to
+   15m max). The backoff is the crash-loop guard; it is not permission to skip
+   the step.
+2. After waking, report and loop:
+   `{{ cmd }} patrol report --summary "<summary>"`
+   This closes the current cycle and starts the next one.
+3. Immediately begin step 1 of the new cycle.
 
-**Handoff command:** `{{ cmd }} handoff -s "Witness cycle" -m "Completed N patrols, no incidents"`
+**Never end your turn at this step.** Stopping at the prompt to wait for an
+external wake is a defect, not idle backoff. Nothing restarts or re-seeds a
+patrol session that is alive but idle: the daemon's liveness probe needs
+unsubmitted input in the pane and a clean prompt passes it, `{{ cmd }} patrol
+scan` only inspects polecats, and a nudge whose submit cannot be verified is
+dropped rather than queued. The rig then goes unwatched — no polecat
+supervision, no merge reaping, no stall detection — until a human notices.
+
+**Hand off only when `context-check` reports HIGH**, and then run the handoff so
+a fresh session picks the loop up:
+`{{ cmd }} handoff -s "Witness cycle" -m "Patrol handoff, context HIGH after N cycles"`
 
 ---
 
