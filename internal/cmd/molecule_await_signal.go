@@ -25,19 +25,39 @@ var (
 	awaitSignalBackoffMax  string
 	awaitSignalQuiet       bool
 	awaitSignalAgentBead   string
+	awaitSignalRig         string
 )
+
+// awaitSignalRigAny is the --rig value that disables rig scoping, restoring the
+// town-wide subscription await-signal had before gt-qwfp. Town-level agents use
+// it: deacon/ is not a rig, so no rig context resolves for it.
+const awaitSignalRigAny = "town"
 
 var moleculeAwaitSignalCmd = &cobra.Command{
 	Use:   "await-signal",
 	Short: "Wait for activity feed signal with timeout",
-	Long: `Wait for any activity on the events feed, with optional backoff.
+	Long: `Wait for activity relevant to this rig on the events feed, with optional backoff.
 
 This command is the primary wake mechanism for patrol agents. It tails
-~/gt/.events.jsonl and returns immediately when a new event is appended
-(indicating Gas Town activity such as slings, nudges, mail, spawns, etc.).
+~/gt/.events.jsonl and returns when an event relevant to YOUR rig is appended
+(slings, nudges, mail, spawns, and completions inside the rig).
 
-If no activity occurs within the timeout, the command returns with exit code 0
-but sets the AWAIT_SIGNAL_REASON environment variable to "timeout".
+RIG SCOPING (gt-qwfp):
+The subscription is scoped to one rig. An event counts as a signal when its
+actor is that rig or an agent inside it ("om", "om/witness"), or when the event
+addresses the rig — mail/nudge "to"/"target" of "om/witness", a sling targeting
+"om/polecats/jasper", a spawn with "rig":"om". Everything else is another rig's
+business and is skipped, so an idle rig still reaches its backoff cap and runs
+abbreviated patrols. Town-wide events that must wake a specific agent should be
+sent as a nudge or mail to that agent, which is already matched.
+
+The scope comes from --rig, then GT_RIG, then the registered rig containing the
+current directory. With no rig context the subscription stays town-wide, so
+town-level agents (mayor, deacon) behave as before. Pass --rig town to ask for
+that explicitly.
+
+If no relevant activity occurs within the timeout, the command returns with exit
+code 0 but sets the AWAIT_SIGNAL_REASON environment variable to "timeout".
 
 The timeout can be specified directly or via backoff configuration for
 exponential wait patterns.
@@ -64,6 +84,12 @@ EXAMPLES:
   # Backoff mode with agent bead tracking:
   gt mol await-signal --agent-bead gt-gastown-witness \
     --backoff-base 30s --backoff-mult 2 --backoff-max 15m
+
+  # Explicit rig scope (default: GT_RIG, else the rig containing cwd)
+  gt mol await-signal --rig om --agent-bead om-witness --backoff-base 30s
+
+  # Town-wide subscription (no rig scoping) for a town-level agent
+  gt mol await-signal --rig town --agent-bead hq-deacon --backoff-base 30s
 
   # On timeout, the agent bead's idle:N label is auto-incremented
   # On signal, caller should reset: gt agents state gt-gastown-witness --set idle=0
@@ -104,6 +130,8 @@ func init() {
 		"Maximum interval cap for backoff (e.g., 10m)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
+	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
+		"Rig scope for signals (default: GT_RIG or rig containing cwd; 'town' accepts any rig)")
 	moleculeAwaitSignalCmd.Flags().BoolVar(&awaitSignalQuiet, "quiet", false,
 		"Suppress output (for scripting)")
 	moleculeAwaitSignalCmd.Flags().BoolVar(&moleculeJSON, "json", false,
@@ -122,6 +150,8 @@ func init() {
 		"Maximum interval cap for backoff (e.g., 10m)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
+	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
+		"Rig scope for signals (default: GT_RIG or rig containing cwd; 'town' accepts any rig)")
 	moleculeAwaitSignalShortcutCmd.Flags().BoolVar(&awaitSignalQuiet, "quiet", false,
 		"Suppress output (for scripting)")
 	moleculeAwaitSignalShortcutCmd.Flags().BoolVar(&moleculeJSON, "json", false,
@@ -203,16 +233,28 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Scope the subscription to this rig (gt-qwfp). Without it the town-wide
+	// feed wakes an idle rig's witness on every other rig's activity, so the
+	// idle backoff never grows and full patrols run back-to-back.
+	rigScope := resolveEventRig(townRoot, awaitSignalRig)
+	if rigScope == awaitSignalRigAny {
+		rigScope = ""
+	}
+
 	if !awaitSignalQuiet && !moleculeJSON {
+		scope := "town-wide"
+		if rigScope != "" {
+			scope = "rig " + rigScope
+		}
 		if resumed {
-			fmt.Printf("%s Resuming backoff (remaining: %v, idle: %d)...\n",
-				style.Dim.Render("⏳"), timeout.Round(time.Second), idleCycles)
+			fmt.Printf("%s Resuming backoff (remaining: %v, idle: %d, %s)...\n",
+				style.Dim.Render("⏳"), timeout.Round(time.Second), idleCycles, scope)
 		} else if awaitSignalAgentBead != "" {
-			fmt.Printf("%s Awaiting signal (timeout: %v, idle: %d)...\n",
-				style.Dim.Render("⏳"), timeout, idleCycles)
+			fmt.Printf("%s Awaiting signal (timeout: %v, idle: %d, %s)...\n",
+				style.Dim.Render("⏳"), timeout, idleCycles, scope)
 		} else {
-			fmt.Printf("%s Awaiting signal (timeout: %v)...\n",
-				style.Dim.Render("⏳"), timeout)
+			fmt.Printf("%s Awaiting signal (timeout: %v, %s)...\n",
+				style.Dim.Render("⏳"), timeout, scope)
 		}
 	}
 
@@ -222,7 +264,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	result, err := waitForActivitySignal(ctx, townRoot)
+	result, err := waitForActivitySignal(ctx, townRoot, rigScope)
 	if err != nil {
 		return fmt.Errorf("feed subscription failed: %w", err)
 	}
@@ -359,17 +401,20 @@ func calculateEffectiveTimeout(idleCycles int) (time.Duration, error) {
 	return time.ParseDuration(awaitSignalTimeout)
 }
 
-// waitForActivitySignal tails the events file for new activity.
+// waitForActivitySignal tails the events file for new activity relevant to rig.
 // townRoot is the Gas Town workspace root; the events file is at
-// <townRoot>/.events.jsonl. Returns immediately when a new event line is
-// appended, or when context is canceled.
-func waitForActivitySignal(ctx context.Context, townRoot string) (*AwaitSignalResult, error) {
-	return waitForEventsFile(ctx, filepath.Join(townRoot, events.EventsFile))
+// <townRoot>/.events.jsonl. An empty rig accepts events from any rig. Returns
+// immediately when a relevant event line is appended, or when context is
+// canceled.
+func waitForActivitySignal(ctx context.Context, townRoot, rig string) (*AwaitSignalResult, error) {
+	return waitForEventsFile(ctx, filepath.Join(townRoot, events.EventsFile), rig)
 }
 
-// waitForEventsFile tails the events file for new lines.
-// This replaces the former bd activity --follow subprocess approach.
-func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResult, error) {
+// waitForEventsFile tails the events file for new lines relevant to rig.
+// Lines belonging to other rigs are consumed and discarded so the wait
+// continues; only a relevant line ends it. This replaces the former
+// bd activity --follow subprocess approach.
+func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSignalResult, error) {
 
 	f, err := os.OpenFile(eventsPath, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil {
@@ -389,6 +434,10 @@ func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResu
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
+	// A line can be observed mid-write. Hold the prefix until its newline
+	// arrives, so the match below never runs on a truncated event.
+	var partial string
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -396,19 +445,77 @@ func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResu
 				Reason: "timeout",
 			}, nil
 		case <-ticker.C:
-			line, err := reader.ReadString('\n')
-			if err == nil && line != "" {
-				return &AwaitSignalResult{
-					Reason: "signal",
-					Signal: strings.TrimRight(line, "\n"),
-				}, nil
-			}
-			// io.EOF means no new data yet — keep polling
-			if err != nil && err != io.EOF {
-				return nil, fmt.Errorf("reading events file: %w", err)
+			// Drain every complete line appended so far. Reading one line per
+			// tick would let a busy town outrun the reader, delaying a signal
+			// for this rig indefinitely — cross-rig lines are now skipped
+			// rather than returned, so the backlog that used to end the wait
+			// no longer drains itself.
+			for {
+				chunk, err := reader.ReadString('\n')
+				if err != nil && err != io.EOF {
+					return nil, fmt.Errorf("reading events file: %w", err)
+				}
+				partial += chunk
+				if strings.HasSuffix(partial, "\n") {
+					line := strings.TrimSuffix(partial, "\n")
+					partial = ""
+					if line != "" && eventRelevantToRig(line, rig) {
+						return &AwaitSignalResult{
+							Reason: "signal",
+							Signal: line,
+						}, nil
+					}
+				}
+				if err != nil {
+					break // io.EOF: nothing more buffered this tick.
+				}
 			}
 		}
 	}
+}
+
+// eventRelevantToRig reports whether a raw .events.jsonl line should wake a
+// waiter scoped to rig. An empty rig accepts every line (town-wide scope).
+//
+// Relevance is deliberately two-sided: a rig's activity looks like events its
+// own agents emit (actor "om/witness") AND events other agents aim at it (mail
+// to "om/witness", a sling targeting "om/polecats/jasper", a spawn with
+// "rig":"om"). Cross-rig events matching neither are what kept idle rigs at
+// full effort, so they are skipped (gt-qwfp).
+func eventRelevantToRig(line, rig string) bool {
+	if rig == "" {
+		return true
+	}
+
+	var ev events.Event
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		// Nothing to attribute to a rig. Skipping keeps a truncated or
+		// non-JSON line from spending a full patrol.
+		return false
+	}
+
+	if addressInRig(ev.Actor, rig) {
+		return true
+	}
+	// Payload keys that name a destination: "target"/"to" for slings, nudges,
+	// mail and escalations, "rig" for spawns and boots.
+	for _, key := range []string{"target", "to", "rig"} {
+		if addr, ok := ev.Payload[key].(string); ok && addressInRig(addr, rig) {
+			return true
+		}
+	}
+	return false
+}
+
+// addressInRig reports whether an actor or recipient address names rig or an
+// agent inside it: "om" and "om/witness" belong to rig om, "mayor" does not.
+// A trailing slash is tolerated because some emitters log "mayor/".
+func addressInRig(addr, rig string) bool {
+	if addr == "" || rig == "" {
+		return false
+	}
+	addr = strings.TrimSuffix(addr, "/")
+	return addr == rig || strings.HasPrefix(addr, rig+"/")
 }
 
 // parseIntSimple parses a string to int without using strconv.
