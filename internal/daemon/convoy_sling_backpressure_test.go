@@ -214,6 +214,14 @@ func TestSlingBackpressureReason(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The pool's refusal carries the same marker, so the feeder defers
+			// a full pool exactly as it defers a deep merge queue (gt-jzr1).
+			name:   "pool refusal is a deferral too",
+			stderr: "Error: spawning polecat: sling refused: pool: overflow full (3/3) -> no seat (type=bug); pass --force to spawn anyway",
+			want:   "sling refused: pool: overflow full (3/3) -> no seat (type=bug); pass --force to spawn anyway",
+			wantOK: true,
+		},
+		{
 			name:   "any other failure is not a deferral",
 			stderr: "Error: spawning polecat: pre-spawn health check failed: connection refused",
 			wantOK: false,
