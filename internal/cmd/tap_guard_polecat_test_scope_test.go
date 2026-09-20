@@ -9,6 +9,7 @@ import (
 // block; filtered runs, light packages and the refinery's own commands pass.
 // The count assertion fails a version that blocks everything or nothing.
 func TestEvaluatePolecatTestScope(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string

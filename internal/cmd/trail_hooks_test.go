@@ -31,6 +31,7 @@ func writeTrailEventsFile(t *testing.T, path string, entries []events.Event) {
 }
 
 func TestReadHookTrailEntriesMissingFile(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".events.jsonl")
 
@@ -44,6 +45,7 @@ func TestReadHookTrailEntriesMissingFile(t *testing.T) {
 }
 
 func TestReadHookTrailEntriesFiltersAndOrders(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".events.jsonl")
 	base := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
@@ -95,6 +97,7 @@ func TestReadHookTrailEntriesFiltersAndOrders(t *testing.T) {
 }
 
 func TestReadHookTrailEntriesSinceAndLimit(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".events.jsonl")
 	base := time.Date(2026, time.January, 3, 12, 0, 0, 0, time.UTC)

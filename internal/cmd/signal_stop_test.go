@@ -9,6 +9,7 @@ import (
 )
 
 func TestIsSelfHandoff(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		msg     *mail.Message
@@ -64,6 +65,7 @@ func TestIsSelfHandoff(t *testing.T) {
 }
 
 func TestOutputStopAllow(t *testing.T) {
+	t.Parallel()
 	// outputStopAllow should not return an error
 	err := outputStopAllow()
 	if err != nil {
@@ -72,6 +74,7 @@ func TestOutputStopAllow(t *testing.T) {
 }
 
 func TestOutputStopBlock(t *testing.T) {
+	t.Parallel()
 	// outputStopBlock should not return an error
 	err := outputStopBlock("test reason")
 	if err != nil {
@@ -80,6 +83,7 @@ func TestOutputStopBlock(t *testing.T) {
 }
 
 func TestStopStateFilePath(t *testing.T) {
+	t.Parallel()
 	got := stopStateFilePath("gastown/polecats/nux")
 	want := filepath.Join(os.TempDir(), "gt-signal-stop-gastown_polecats_nux.json")
 	if got != want {
@@ -88,6 +92,7 @@ func TestStopStateFilePath(t *testing.T) {
 }
 
 func TestStopStateRoundtrip(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "test-state.json")
 
 	// Initially no state
@@ -117,6 +122,7 @@ func TestStopStateRoundtrip(t *testing.T) {
 }
 
 func TestStopStateDedupPreventsInfiniteLoop(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "test-state.json")
 	reason := "[gt signal stop] You have 1 unread message(s). Most recent from gastown/witness: \"NUDGE\""
 

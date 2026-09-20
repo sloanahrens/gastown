@@ -12,6 +12,7 @@ import (
 )
 
 func TestGetFormulaNames(t *testing.T) {
+	t.Parallel()
 	// Create temp directory structure
 	tmpDir := t.TempDir()
 	formulasDir := filepath.Join(tmpDir, "formulas")
@@ -69,6 +70,7 @@ func issueIDs(issues []*beads.Issue) []string {
 }
 
 func TestGetFormulaNames_NonexistentDir(t *testing.T) {
+	t.Parallel()
 	names := getFormulaNames("/nonexistent/path")
 	if names != nil {
 		t.Error("expected nil for nonexistent directory")
@@ -76,6 +78,7 @@ func TestGetFormulaNames_NonexistentDir(t *testing.T) {
 }
 
 func TestFilterFormulaScaffolds(t *testing.T) {
+	t.Parallel()
 	formulaNames := map[string]bool{
 		constants.MolDeaconPatrol:  true,
 		constants.MolWitnessPatrol: true,
@@ -112,6 +115,7 @@ func TestFilterFormulaScaffolds(t *testing.T) {
 }
 
 func TestFilterFormulaScaffolds_NilFormulaNames(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		{ID: "hq-123", Title: "Real work"},
 		{ID: constants.MolDeaconPatrol, Title: "Would be filtered"},
@@ -125,6 +129,7 @@ func TestFilterFormulaScaffolds_NilFormulaNames(t *testing.T) {
 }
 
 func TestFilterFormulaScaffolds_EmptyFormulaNames(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		{ID: "hq-123", Title: "Real work"},
 		{ID: constants.MolDeaconPatrol, Title: "Would be filtered"},
@@ -138,6 +143,7 @@ func TestFilterFormulaScaffolds_EmptyFormulaNames(t *testing.T) {
 }
 
 func TestFilterFormulaScaffolds_EmptyIssues(t *testing.T) {
+	t.Parallel()
 	formulaNames := map[string]bool{constants.MolDeaconPatrol: true}
 	filtered := filterFormulaScaffolds([]*beads.Issue{}, formulaNames)
 	if len(filtered) != 0 {
@@ -175,6 +181,7 @@ exit 1
 }
 
 func TestFilterFormulaScaffolds_DotInNonScaffold(t *testing.T) {
+	t.Parallel()
 	// Issue ID has a dot but prefix is not a formula name
 	formulaNames := map[string]bool{constants.MolDeaconPatrol: true}
 
@@ -190,6 +197,7 @@ func TestFilterFormulaScaffolds_DotInNonScaffold(t *testing.T) {
 }
 
 func TestFilterReadyIssuesByRoute(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("creating town beads dir: %v", err)

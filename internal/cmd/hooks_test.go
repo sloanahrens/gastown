@@ -94,6 +94,7 @@ func TestParseHooksFile(t *testing.T) {
 }
 
 func TestParseHooksFileMissing(t *testing.T) {
+	t.Parallel()
 	// parseHooksFile now returns empty results for missing files (via LoadSettings),
 	// not an error. This matches the updated semantics.
 	infos, err := parseHooksFile("/nonexistent/settings.json", "test")
@@ -106,6 +107,7 @@ func TestParseHooksFileMissing(t *testing.T) {
 }
 
 func TestParseHooksFileInvalidJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 
@@ -120,6 +122,7 @@ func TestParseHooksFileInvalidJSON(t *testing.T) {
 }
 
 func TestInstallHookToSerializesCorrectly(t *testing.T) {
+	t.Parallel()
 	// Regression test: installHookTo must use hooks.MarshalSettings, not
 	// json.MarshalIndent. SettingsJSON fields use json:"-" tags, so
 	// encoding/json produces {} and silently clobbers hooks/plugins.
@@ -157,6 +160,7 @@ func TestInstallHookToSerializesCorrectly(t *testing.T) {
 }
 
 func TestParseHooksFileEmptyHooks(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 
@@ -259,6 +263,7 @@ func TestDiscoverHooksCrewLevel(t *testing.T) {
 }
 
 func TestResolveSettingsTarget(t *testing.T) {
+	t.Parallel()
 	townRoot := "/home/user/gt"
 
 	tests := []struct {

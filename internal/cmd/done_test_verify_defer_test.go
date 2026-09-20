@@ -32,6 +32,7 @@ func changePkga(t *testing.T, dir string) {
 }
 
 func TestIsContainerSuitePackage(t *testing.T) {
+	t.Parallel()
 	for path, want := range map[string]bool{
 		"github.com/steveyegge/gastown/internal/cmd":       true,
 		"github.com/steveyegge/gastown/internal/beads":     true,

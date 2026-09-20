@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseStateLabels(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		labels   []string
@@ -55,6 +56,7 @@ func TestParseStateLabels(t *testing.T) {
 }
 
 func TestApplyLabelOperations(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		initial   map[string]string
@@ -219,6 +221,7 @@ func intToString(n int) string {
 }
 
 func TestParseAgentBeadLabels(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		stdout     []byte

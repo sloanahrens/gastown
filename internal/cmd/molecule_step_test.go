@@ -8,6 +8,7 @@ import (
 )
 
 func TestExtractMoleculeIDFromStep(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		stepID   string
@@ -186,6 +187,7 @@ func makeStepIssue(id, title, parent, status string, dependsOn []string) *beads.
 
 // TestStepDoneScenarios tests complete step-done scenarios
 func TestStepDoneScenarios(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		stepID       string
@@ -351,6 +353,7 @@ func makeStepIssueWithDepType(id, title, parent, status string, deps []beads.Iss
 // string) are non-blocking — matching beads' default behavior. Parent-child is
 // non-blocking for step gating (it represents molecule→step hierarchy).
 func TestDepTypeBlockingSemantics(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		depType   string
@@ -467,6 +470,7 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 // TestReadyStepOrderReversed verifies that readySteps are sorted by sequence
 // number even when bd list returns children in reverse creation order.
 func TestReadyStepOrderReversed(t *testing.T) {
+	t.Parallel()
 	m := newMockBeadsForStep()
 
 	// Add issues in REVERSE order to simulate bd list's reverse-creation ordering.
@@ -536,6 +540,7 @@ func TestReadyStepOrderReversed(t *testing.T) {
 // empty string) when both appear on the same step. Matches beads' AffectsReadyWork
 // semantics: only "blocks", "conditional-blocks", "waits-for" are blocking.
 func TestMoleculeDepTypeFilterMixed(t *testing.T) {
+	t.Parallel()
 	m := newMockBeadsForStep()
 
 	// Root molecule

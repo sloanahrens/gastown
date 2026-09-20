@@ -15,6 +15,7 @@ import (
 // reads {{base_branch}} as --target and submits a self-targeted MR that
 // merges as a no-op and gets deleted by post-merge cleanup.
 func TestBuildSlingFormulaVars_ResumeDispatch(t *testing.T) {
+	t.Parallel()
 	resumeBranch := "polecat/thunder/be-r18+mtvr3qm3"
 
 	// Post-fix: spawnPolecatForSling never sets BaseBranch to the resume
@@ -43,6 +44,7 @@ func TestBuildSlingFormulaVars_ResumeDispatch(t *testing.T) {
 // (non-resume) --base-branch override path still works: rig defaults first,
 // then user vars, then the non-"main" base_branch override.
 func TestBuildSlingFormulaVars_NonMainBaseBranch(t *testing.T) {
+	t.Parallel()
 	got := buildSlingFormulaVars(
 		[]string{"lint_command=make lint"},
 		[]string{"issue=gt-abc"},

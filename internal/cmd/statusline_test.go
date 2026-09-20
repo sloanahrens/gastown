@@ -22,6 +22,7 @@ func setupCmdTestRegistry(t *testing.T) {
 }
 
 func TestStatusLineAvoidsBeadsHotPath(t *testing.T) {
+	t.Parallel()
 	if !beadsExemptCommands["status-line"] {
 		t.Fatal("status-line must be exempt from bd version checks")
 	}
@@ -55,6 +56,7 @@ func TestStatusLineAvoidsBeadsHotPath(t *testing.T) {
 }
 
 func TestSchedulerRunAvoidsRootBeadsChecks(t *testing.T) {
+	t.Parallel()
 	if !beadsExemptCommands["scheduler"] {
 		t.Fatal("scheduler must be exempt from root bd version checks")
 	}

@@ -265,6 +265,7 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 }
 
 func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T) {
+	t.Parallel()
 	item := buildPolecatInventoryItemFromEvidence(
 		"gastown",
 		"lookup",
@@ -286,6 +287,7 @@ func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T)
 }
 
 func TestPolecatSummaryIssueRankPrefersActiveWork(t *testing.T) {
+	t.Parallel()
 	ordered := []*beads.Issue{
 		{ID: "hook", Status: string(beads.IssueStatusHooked)},
 		{ID: "progress", Status: string(beads.StatusInProgress)},
@@ -301,6 +303,7 @@ func TestPolecatSummaryIssueRankPrefersActiveWork(t *testing.T) {
 }
 
 func TestPolecatNameFromAssignee(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		assignee string
 		wantName string

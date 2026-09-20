@@ -54,6 +54,7 @@ title = "Step 1"
 `
 
 func TestResolveDogFormulaAllowlist(t *testing.T) {
+	t.Parallel()
 	t.Run("constrained formula returns declared entries", func(t *testing.T) {
 		townRoot := writeDogFixture(t, "test-dog-work", "test-dog-work", constrainedFormula)
 		name, entries := resolveDogFormulaAllowlist("dog", "alpha", townRoot)
@@ -111,6 +112,7 @@ func TestResolveDogFormulaAllowlist(t *testing.T) {
 // TestDogAllowlistBaselineCoversLifecycle pins the baseline entries that the
 // dog role templates depend on — removing one would strand a constrained dog.
 func TestDogAllowlistBaselineCoversLifecycle(t *testing.T) {
+	t.Parallel()
 	required := []string{"gt dog done", "gt escalate", "gt nudge", "gt hook", "gt prime"}
 	have := make(map[string]bool, len(dogAllowlistBaseline))
 	for _, e := range dogAllowlistBaseline {

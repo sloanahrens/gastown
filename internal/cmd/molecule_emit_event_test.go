@@ -11,6 +11,7 @@ import (
 )
 
 func TestEmitEvent(t *testing.T) {
+	t.Parallel()
 	t.Run("basic event creation", func(t *testing.T) {
 		townRoot := t.TempDir()
 
@@ -124,6 +125,7 @@ func TestEmitEvent(t *testing.T) {
 }
 
 func TestEmitEventChannelValidation(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Valid channel name should succeed
@@ -152,6 +154,7 @@ func TestEmitEventChannelValidation(t *testing.T) {
 }
 
 func TestEmitEventPIDInFilename(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	path, err := channelevents.EmitToTown(townRoot, "test-channel", "", "TEST", nil)
 	if err != nil {
@@ -170,6 +173,7 @@ func TestEmitEventPIDInFilename(t *testing.T) {
 }
 
 func TestEmitEventResult(t *testing.T) {
+	t.Parallel()
 	result := EmitEventResult{
 		Path:    "/home/gt/events/refinery/12345.event",
 		Channel: "refinery",

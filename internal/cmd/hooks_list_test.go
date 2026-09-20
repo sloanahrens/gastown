@@ -5,6 +5,7 @@ import (
 )
 
 func TestFormatOverrides(t *testing.T) {
+	t.Parallel()
 	// Empty overrides
 	got := formatOverridesPlain(nil)
 	if got != "(none)" {
@@ -25,6 +26,7 @@ func TestFormatOverrides(t *testing.T) {
 }
 
 func TestFormatOverridesStyled(t *testing.T) {
+	t.Parallel()
 	// Styled version of empty should contain "(none)" text
 	got := formatOverrides(nil)
 	if len(got) == 0 {
@@ -39,6 +41,7 @@ func TestFormatOverridesStyled(t *testing.T) {
 }
 
 func TestPadRight(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		s     string
 		width int
@@ -59,6 +62,7 @@ func TestPadRight(t *testing.T) {
 }
 
 func TestRenderSyncStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status string
 		empty  bool
@@ -79,6 +83,7 @@ func TestRenderSyncStatus(t *testing.T) {
 }
 
 func TestBuildTargetInfoMissingFile(t *testing.T) {
+	t.Parallel()
 	// Use a non-existent path
 	target := struct {
 		status string

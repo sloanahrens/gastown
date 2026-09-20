@@ -9,6 +9,7 @@ import (
 // are trimmed to handle tab-completion artifacts like "slingshot/" -> "slingshot".
 // This ensures that "gt sling sl-123 slingshot/" behaves the same as "gt sling sl-123 slingshot".
 func TestSlingTrimsTrailingSlash(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -39,6 +40,7 @@ func TestSlingTrimsTrailingSlash(t *testing.T) {
 // TestIsRigNameWithTrailingSlash verifies that IsRigName correctly rejects
 // targets with trailing slashes (since they'll be trimmed before reaching IsRigName).
 func TestIsRigNameWithTrailingSlash(t *testing.T) {
+	t.Parallel()
 	// Note: In actual usage, trailing slashes are trimmed in runSling before
 	// reaching IsRigName. This test verifies IsRigName's current behavior.
 

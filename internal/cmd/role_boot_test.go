@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseRoleStringBoot(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		wantRole Role
@@ -45,6 +46,7 @@ func TestParseRoleStringBoot(t *testing.T) {
 }
 
 func TestGetRoleHomeBoot(t *testing.T) {
+	t.Parallel()
 	townRoot := "/tmp/gt"
 	got := getRoleHome(RoleBoot, "", "", townRoot)
 	want := filepath.Join(townRoot, "deacon", "dogs", "boot")
@@ -54,6 +56,7 @@ func TestGetRoleHomeBoot(t *testing.T) {
 }
 
 func TestIsTownLevelRoleBoot(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		agentID string
 		want    bool
@@ -78,6 +81,7 @@ func TestIsTownLevelRoleBoot(t *testing.T) {
 }
 
 func TestActorStringBoot(t *testing.T) {
+	t.Parallel()
 	info := RoleInfo{Role: RoleBoot}
 	got := info.ActorString()
 	want := "deacon-boot"
@@ -87,6 +91,7 @@ func TestActorStringBoot(t *testing.T) {
 }
 
 func TestActorStringConsistentWithBDActorBoot(t *testing.T) {
+	t.Parallel()
 	// ActorString() must match what BD_ACTOR is set to in config/env.go:57.
 	// This is a snapshot value — if BD_ACTOR for boot changes in config/env.go,
 	// update it here too.
@@ -99,6 +104,7 @@ func TestActorStringConsistentWithBDActorBoot(t *testing.T) {
 }
 
 func TestBuildAgentBeadIDBoot(t *testing.T) {
+	t.Parallel()
 	// RoleBoot should produce the town-level dog bead ID "hq-dog-boot"
 	// via both the explicit role path and the identity-inference path.
 	want := beads.DogBeadIDTown("boot")

@@ -34,6 +34,7 @@ func TestAreScheduledFailClosed(t *testing.T) {
 
 // TestAreScheduledEmptyInput verifies areScheduled returns empty map for no input.
 func TestAreScheduledEmptyInput(t *testing.T) {
+	t.Parallel()
 	result := areScheduled(nil)
 	if len(result) != 0 {
 		t.Errorf("areScheduled(nil) should return empty map, got %d entries", len(result))

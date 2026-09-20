@@ -25,6 +25,7 @@ func (d *progressDiagnostics) Write(p []byte) (int, error) {
 }
 
 func TestPatrolScanOutputJSON(t *testing.T) {
+	t.Parallel()
 	output := PatrolScanOutput{
 		Rig:       "gastown",
 		Timestamp: "2026-03-17T12:00:00Z",
@@ -98,6 +99,7 @@ func TestPatrolScanOutputJSON(t *testing.T) {
 }
 
 func TestCountActiveWorkZombies(t *testing.T) {
+	t.Parallel()
 	result := &witness.DetectZombiePolecatsResult{
 		Zombies: []witness.ZombieResult{
 			{PolecatName: "alpha", WasActive: true},
@@ -113,6 +115,7 @@ func TestCountActiveWorkZombies(t *testing.T) {
 }
 
 func TestCountActiveWorkZombies_Empty(t *testing.T) {
+	t.Parallel()
 	result := &witness.DetectZombiePolecatsResult{}
 	got := countActiveWorkZombies(result)
 	if got != 0 {
@@ -190,6 +193,7 @@ func TestRunPatrolScanPhaseZeroIntervalSkipsProgressTicks(t *testing.T) {
 }
 
 func TestPatrolScanZombieItemSerialization(t *testing.T) {
+	t.Parallel()
 	item := PatrolScanZombieItem{
 		Polecat:        "obsidian",
 		Classification: "agent-dead-in-session",

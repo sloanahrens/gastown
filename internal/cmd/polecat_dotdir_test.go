@@ -13,6 +13,7 @@ import (
 )
 
 func TestDiscoverHooksSkipsPolecatDotDirs(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForDotDir(t)
 	rigPath := filepath.Join(townRoot, "gastown")
 

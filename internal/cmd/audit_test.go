@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseDuration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected time.Duration
@@ -41,6 +42,7 @@ func TestParseDuration(t *testing.T) {
 }
 
 func TestExtractAuthorName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -63,6 +65,7 @@ func TestExtractAuthorName(t *testing.T) {
 }
 
 func TestMatchesActor(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		actor    string
@@ -98,6 +101,7 @@ func TestMatchesActor(t *testing.T) {
 }
 
 func TestParseBeadsTimestamp(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string // Format: "2006-01-02 15:04"
@@ -128,6 +132,7 @@ func TestParseBeadsTimestamp(t *testing.T) {
 }
 
 func TestFormatSource(t *testing.T) {
+	t.Parallel()
 	// Just verify it doesn't panic and returns non-empty strings
 	sources := []string{"git", "beads", "townlog", "events", "unknown"}
 	for _, s := range sources {
@@ -139,6 +144,7 @@ func TestFormatSource(t *testing.T) {
 }
 
 func TestFormatType(t *testing.T) {
+	t.Parallel()
 	// Just verify it doesn't panic and returns non-empty strings
 	types := []string{"commit", "bead_created", "bead_closed", "spawn", "done", "handoff", "crash", "kill", "merged", "merge_failed", "unknown"}
 	for _, typ := range types {

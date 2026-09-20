@@ -175,6 +175,7 @@ func TestConvoyResolveBeadsDir_RegressionEmptyConvoy(t *testing.T) {
 // correctly handles the getTownBeadsDir() output (workspace root) by appending
 // .beads, while also being idempotent when already given a .beads path.
 func TestResolveBeadsDir_WorkspaceRootVsBeadsDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -213,6 +214,7 @@ func TestResolveBeadsDir_WorkspaceRootVsBeadsDir(t *testing.T) {
 // shared beads database. The convoy code must call ResolveBeadsDir to handle
 // this case — passing the raw workspace root would skip the redirect.
 func TestResolveBeadsDir_WithRedirect(t *testing.T) {
+	t.Parallel()
 	sharedRoot := t.TempDir()
 	sharedBeads := filepath.Join(sharedRoot, ".beads")
 	if err := os.MkdirAll(sharedBeads, 0755); err != nil {
@@ -244,6 +246,7 @@ func TestResolveBeadsDir_WithRedirect(t *testing.T) {
 // writes sentinel files to the .beads directory, not the workspace root.
 // This is an end-to-end regression test for the empty convoy bug.
 func TestConvoyCreate_SentinelPlacement(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows — shell stubs")
 	}

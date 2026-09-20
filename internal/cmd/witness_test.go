@@ -6,6 +6,7 @@ import (
 )
 
 func TestWitnessRestartAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := witnessRestartCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected witness restart to define --agent flag")
@@ -19,6 +20,7 @@ func TestWitnessRestartAgentFlag(t *testing.T) {
 }
 
 func TestWitnessStartAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := witnessStartCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected witness start to define --agent flag")
@@ -32,6 +34,7 @@ func TestWitnessStartAgentFlag(t *testing.T) {
 }
 
 func TestWitnessStartForegroundFlagHidden(t *testing.T) {
+	t.Parallel()
 	flag := witnessStartCmd.Flags().Lookup("foreground")
 	if flag == nil {
 		t.Fatal("expected hidden compatibility --foreground flag")

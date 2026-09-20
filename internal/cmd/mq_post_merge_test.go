@@ -116,6 +116,7 @@ func testMQPostMergeMR() *refinery.MergeRequest {
 }
 
 func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{verifyErr: errors.New("not reachable")}
 
@@ -144,6 +145,7 @@ func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing
 // explicit --landed-commit attestation for the SHA the refinery actually
 // pushed satisfies the proof instead (gt-f5f6).
 func TestRunVerifiedMQPostMerge_LandedCommitAttestationSatisfiesConflictResolvedRebase(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{
 		mergeBase:      "oldbase000",
@@ -174,6 +176,7 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationSatisfiesConflictResolved
 // bogus or stale --landed-commit is rejected rather than trusted blindly —
 // it must itself be reachable from target.
 func TestRunVerifiedMQPostMerge_LandedCommitAttestationStillVerified(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{verifyErr: errors.New("not reachable")}
 
@@ -193,6 +196,7 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationStillVerified(t *testing.
 // changed files share nothing with what the MR actually submitted — must be
 // rejected rather than accepted as proof this MR landed.
 func TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{
 		mergeBase:      "oldbase000",
@@ -217,6 +221,7 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit(t 
 }
 
 func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, localHead: mgr.mr.CommitSHA}
 
@@ -245,6 +250,7 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 }
 
 func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{}
 
@@ -267,6 +273,7 @@ func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T)
 }
 
 func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{openPR: true, localHead: mgr.mr.CommitSHA}
 
@@ -289,6 +296,7 @@ func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) 
 }
 
 func TestRunVerifiedMQPostMerge_LeaseDeleteFailureReturnsAfterPostMerge(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, deleteErr: errors.New("stale info")}
 
@@ -311,6 +319,7 @@ func TestRunVerifiedMQPostMerge_LeaseDeleteFailureReturnsAfterPostMerge(t *testi
 }
 
 func TestRunVerifiedMQPostMerge_MissingRemoteBranchIsIdempotentAfterProof(t *testing.T) {
+	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{localHead: mgr.mr.CommitSHA}
 
@@ -330,6 +339,7 @@ func TestRunVerifiedMQPostMerge_MissingRemoteBranchIsIdempotentAfterProof(t *tes
 }
 
 func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
+	t.Parallel()
 	mr := testMQPostMergeMR()
 	mr.CommitSHA = ""
 	mgr := &fakeMQPostMergeManager{mr: mr}
@@ -348,6 +358,7 @@ func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
 }
 
 func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
+	t.Parallel()
 	mr := testMQPostMergeMR()
 	mr.Branch = "main"
 	mr.TargetBranch = "main"

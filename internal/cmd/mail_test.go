@@ -10,6 +10,7 @@ import (
 )
 
 func TestMailHelpUsesTownRootMessagingConfig(t *testing.T) {
+	t.Parallel()
 	const want = "<town-root>/config/messaging.json"
 
 	for _, command := range []struct {
@@ -33,6 +34,7 @@ func TestMailHelpUsesTownRootMessagingConfig(t *testing.T) {
 // TestClaimPatternMatching tests claim pattern matching via the beads package.
 // This verifies that the pattern matching used for queue eligibility works correctly.
 func TestClaimPatternMatching(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		pattern string
@@ -105,6 +107,7 @@ func TestClaimPatternMatching(t *testing.T) {
 // - Messages claimed by a different worker
 // - Messages without queue labels (non-queue messages)
 func TestQueueMessageReleaseValidation(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		msgInfo     *queueMessageInfo
@@ -274,6 +277,7 @@ func TestMailAnnounces(t *testing.T) {
 
 // TestAnnounceMessageParsing tests parsing of announce messages from beads output.
 func TestAnnounceMessageParsing(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		labels []string

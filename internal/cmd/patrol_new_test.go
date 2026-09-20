@@ -5,6 +5,7 @@ import (
 )
 
 func TestRunPatrolNew_UnsupportedRole(t *testing.T) {
+	t.Parallel()
 	// Test that an unsupported role returns an error
 	// We can't easily test the full flow without bd/beads,
 	// but we can verify role validation logic
@@ -29,6 +30,7 @@ func TestRunPatrolNew_UnsupportedRole(t *testing.T) {
 }
 
 func TestPatrolNewCmd_Registered(t *testing.T) {
+	t.Parallel()
 	// Verify the command is properly registered
 	found := false
 	for _, cmd := range patrolCmd.Commands() {
@@ -43,6 +45,7 @@ func TestPatrolNewCmd_Registered(t *testing.T) {
 }
 
 func TestPatrolNewCmd_HasRoleFlag(t *testing.T) {
+	t.Parallel()
 	flag := patrolNewCmd.Flags().Lookup("role")
 	if flag == nil {
 		t.Error("patrol new command missing --role flag")

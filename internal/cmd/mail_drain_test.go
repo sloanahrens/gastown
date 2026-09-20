@@ -5,6 +5,7 @@ import (
 )
 
 func TestIsDrainableMessage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject   string
 		drainable bool

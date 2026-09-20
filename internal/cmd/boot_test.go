@@ -13,6 +13,7 @@ import (
 )
 
 func TestBootSpawnAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := bootSpawnCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected boot spawn to define --agent flag")
@@ -125,6 +126,7 @@ func TestExecuteWarrants_SkipsAlreadyExecuted(t *testing.T) {
 // TestExecuteWarrants_MissingDir verifies that executeWarrants handles a
 // missing warrants directory gracefully (no panic, no error).
 func TestExecuteWarrants_MissingDir(t *testing.T) {
+	t.Parallel()
 	tm := tmux.NewTmux()
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
 	executeWarrants(missingDir, tm) // should not panic
@@ -133,6 +135,7 @@ func TestExecuteWarrants_MissingDir(t *testing.T) {
 // TestExecuteWarrants_EmptyDir verifies that executeWarrants handles an
 // empty warrants directory gracefully.
 func TestExecuteWarrants_EmptyDir(t *testing.T) {
+	t.Parallel()
 	warrantDir := t.TempDir()
 	tm := tmux.NewTmux()
 	executeWarrants(warrantDir, tm) // should not panic
@@ -141,6 +144,7 @@ func TestExecuteWarrants_EmptyDir(t *testing.T) {
 // TestExecuteWarrants_IgnoresNonWarrantFiles verifies that non-.warrant.json
 // files in the directory are ignored.
 func TestExecuteWarrants_IgnoresNonWarrantFiles(t *testing.T) {
+	t.Parallel()
 	warrantDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(warrantDir, "readme.txt"), []byte("ignore me"), 0644); err != nil {
 		t.Fatalf("writing test file: %v", err)

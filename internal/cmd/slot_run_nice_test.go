@@ -8,6 +8,7 @@ import (
 // TestSlotRunNiceness covers gt-93m1: gate-class holders keep normal CPU
 // priority, everyone else is niced, and --nice overrides both.
 func TestSlotRunNiceness(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		role string
 		flag int
@@ -30,6 +31,7 @@ func TestSlotRunNiceness(t *testing.T) {
 }
 
 func TestWithNice(t *testing.T) {
+	t.Parallel()
 	base := []string{"make", "test"}
 	if got := withNice(base, 0); strings.Join(got, " ") != "make test" {
 		t.Errorf("nice 0 must leave the command alone: %v", got)

@@ -19,6 +19,7 @@ import (
 // for hq-j6hur.3.7 (gh#3604): refinery left dirty worktree on consolidation
 // conflict because the failure was an opaque string-wrapped error.
 func TestLandConflictError_ErrorsAs(t *testing.T) {
+	t.Parallel()
 	underlying := fmt.Errorf("git merge exit 1: CONFLICT in foo.go")
 	wrapped := fmt.Errorf("integration land failed: %w", &LandConflictError{
 		EpicID:        "gt-epic-99",
@@ -55,6 +56,7 @@ func TestLandConflictError_ErrorsAs(t *testing.T) {
 // failed (e.g., GetConflictingFiles returned nil) — the error message must
 // still be informative.
 func TestLandConflictError_NoFiles(t *testing.T) {
+	t.Parallel()
 	lce := &LandConflictError{
 		EpicID:       "gt-epic-99",
 		Branch:       "integration/auth",
@@ -76,6 +78,7 @@ func TestLandConflictError_NoFiles(t *testing.T) {
 // PR #1226 review: mq_integration.go queries Type: "merge-request" but
 // real MR beads have Type: "task" with label "gt:merge-request".
 func TestMakeTestMR_RealisticFields(t *testing.T) {
+	t.Parallel()
 	mr := makeTestMR("mr-1", "polecat/Nux/gt-001", "main", "Nux", "open")
 
 	// Real MR beads have Type: "task", not "merge-request"
@@ -92,6 +95,7 @@ func TestMakeTestMR_RealisticFields(t *testing.T) {
 // TestMockBeadsList_LabelFilter verifies that the mock's List method correctly
 // filters by Label (not just Type), matching real Beads.List behavior.
 func TestMockBeadsList_LabelFilter(t *testing.T) {
+	t.Parallel()
 	mock := newMockBeads()
 
 	// Add a realistic MR (Type: "task", Label: "gt:merge-request")
@@ -121,6 +125,7 @@ func TestMockBeadsList_LabelFilter(t *testing.T) {
 // This is the regression test for gt-6ck (MT-1): integration status showed
 // 0 MRs because Status:"" silently excluded closed/merged MRs.
 func TestMockBeadsList_StatusFiltering(t *testing.T) {
+	t.Parallel()
 	mock := newMockBeads()
 
 	// Add issues in various statuses
@@ -215,6 +220,7 @@ func (m *mockBranchChecker) RemoteBranchExists(remote, name string) (bool, error
 // This is the regression test for review item #3: legacy epics created before
 // the {epic}→{title} template change become undiscoverable in land/status.
 func TestResolveEpicBranch_LegacyFallback(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		epic           *beads.Issue
@@ -307,6 +313,7 @@ func TestResolveEpicBranch_LegacyFallback(t *testing.T) {
 }
 
 func TestFilterMRsByTarget(t *testing.T) {
+	t.Parallel()
 	// Create test MRs with different targets
 	mrs := []*beads.Issue{
 		makeTestMR("mr-1", "polecat/Nux/gt-001", "integration/gt-epic", "Nux", "open"),
@@ -369,6 +376,7 @@ func TestFilterMRsByTarget(t *testing.T) {
 }
 
 func TestFilterMRsByTarget_EmptyInput(t *testing.T) {
+	t.Parallel()
 	got := filterMRsByTarget(nil, "integration/gt-epic")
 	if got != nil {
 		t.Errorf("filterMRsByTarget(nil) = %v, want nil", got)
@@ -381,6 +389,7 @@ func TestFilterMRsByTarget_EmptyInput(t *testing.T) {
 }
 
 func TestFilterMRsByTarget_NoMRFields(t *testing.T) {
+	t.Parallel()
 	// Issue with MR label but no MR fields in description
 	plainIssue := &beads.Issue{
 		ID:          "issue-1",
@@ -398,6 +407,7 @@ func TestFilterMRsByTarget_NoMRFields(t *testing.T) {
 }
 
 func TestValidateBranchName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		branchName string
@@ -526,6 +536,7 @@ func TestValidateBranchName(t *testing.T) {
 }
 
 func TestGetIntegrationBranchField(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -579,6 +590,7 @@ func TestGetIntegrationBranchField(t *testing.T) {
 }
 
 func TestGetRigGit(t *testing.T) {
+	t.Parallel()
 	t.Run("bare repo exists", func(t *testing.T) {
 		tmp := t.TempDir()
 		bareRepo := filepath.Join(tmp, ".repo.git")
@@ -653,6 +665,7 @@ func TestGetRigGit(t *testing.T) {
 // Before the fix, the function returned nil on getRigGit failure, giving exit
 // code 0 and causing the refinery to skip retry on branch-delete failures.
 func TestPostMerge_RigGitError(t *testing.T) {
+	t.Parallel()
 	// Empty temp dir: no .repo.git, no mayor/rig → getRigGit returns error.
 	tmp := t.TempDir()
 
@@ -669,6 +682,7 @@ func TestPostMerge_RigGitError(t *testing.T) {
 // git push --delete returns a non-nil error from DeleteRemoteBranch (gh#3868).
 // Before the fix, runMQPostMerge swallowed this error and returned exit code 0.
 func TestPostMerge_DeleteRemoteBranchErrorPropagated(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -694,6 +708,7 @@ func TestPostMerge_DeleteRemoteBranchErrorPropagated(t *testing.T) {
 }
 
 func TestGetIntegrationBranchTemplate(t *testing.T) {
+	t.Parallel()
 	t.Run("CLI override provided", func(t *testing.T) {
 		tmp := t.TempDir()
 		got := getIntegrationBranchTemplate(tmp, "custom/{epic}")
@@ -758,6 +773,7 @@ func TestGetIntegrationBranchTemplate(t *testing.T) {
 }
 
 func TestIsReadyToLand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		aheadCount     int
@@ -835,6 +851,7 @@ func TestIsReadyToLand(t *testing.T) {
 //
 // The fix uses getIntegrationBranchTemplate + buildIntegrationBranchName instead.
 func TestResolveEpicTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		epicID    string
@@ -918,6 +935,7 @@ func TestResolveEpicTarget(t *testing.T) {
 // (an invalid git ref). This is the regression test for review item #5:
 // empty epic title with {title} template could produce "integration/".
 func TestBuildIntegrationBranchName_NeverProducesInvalidRef(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		template  string
@@ -984,6 +1002,7 @@ func TestBuildIntegrationBranchName_NeverProducesInvalidRef(t *testing.T) {
 }
 
 func TestExtractEpicNumericSuffix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		epicID string
 		want   string

@@ -13,6 +13,7 @@ import (
 )
 
 func TestMemorySummary(t *testing.T) {
+	t.Parallel()
 	// A value whose first sentence fits: preview is that sentence, flagged.
 	shortFirst := "STOPPING RULE (gastown/refinery, 2026-09-09). And then four " +
 		"more paragraphs of detail that the index should not carry."
@@ -213,6 +214,7 @@ func omittedCount(t *testing.T, out string) int {
 // type is part of the key in each namespace, which is what makes this the test
 // for the legacy prefix coming off before the type is read.
 func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
+	t.Parallel()
 	grouped := collectMemories(map[string]string{
 		"gt.feedback.always-race":     "written by gt remember",
 		"memory.project.merge-freeze": "written by bd remember, typed",
@@ -260,6 +262,7 @@ func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
 // bound is checked *with* the accounting: every memory is either on a line or
 // in the omission count, and never just gone.
 func TestRenderMemoryIndex_RendersOrCountsEveryMemory(t *testing.T) {
+	t.Parallel()
 	const n = 200
 	kvs := syntheticMemories(n, 1200)
 	grouped := collectMemories(kvs)
@@ -315,6 +318,7 @@ func TestRenderMemoryIndex_RendersOrCountsEveryMemory(t *testing.T) {
 // Budgets here are chosen to run out inside the first type group, which is
 // exactly the case that would strand the later sections.
 func TestRenderMemoryIndex_NeverEmitsAnEmptySection(t *testing.T) {
+	t.Parallel()
 	grouped := collectMemories(syntheticTypedMemories(40, 1200))
 
 	for _, budget := range []int{500, 1500, 3000, 8000, 100000} {
@@ -349,6 +353,7 @@ func TestRenderMemoryIndex_NeverEmitsAnEmptySection(t *testing.T) {
 // once even bare keys overflow, the index says how many it could not list, and
 // the count is the real remainder rather than a constant.
 func TestRenderMemoryIndex_DropsEntriesOnlyWhenKeysCannotFit(t *testing.T) {
+	t.Parallel()
 	const n = 2000
 	kvs := syntheticMemories(n, 1200)
 	grouped := collectMemories(kvs)
@@ -381,6 +386,7 @@ func TestRenderMemoryIndex_DropsEntriesOnlyWhenKeysCannotFit(t *testing.T) {
 // TestRenderMemoryIndex_EmptyStoreRendersNothing pins the no-memories case: no
 // section at all, rather than an empty heading an agent has to read past.
 func TestRenderMemoryIndex_EmptyStoreRendersNothing(t *testing.T) {
+	t.Parallel()
 	if out := renderMemoryIndex(map[string][]memoryEntry{}, memoryInjectMaxChars); out != "" {
 		t.Errorf("renderMemoryIndex(empty) = %q, want no output", out)
 	}
@@ -404,6 +410,7 @@ func TestRenderMemoryIndex_EmptyStoreRendersNothing(t *testing.T) {
 // promises, so that "the first entry is the first key" is an assertion rather
 // than an accident of whichever test happens to look for the first key.
 func TestRenderMemoryIndex_OrdersKeysWithinAType(t *testing.T) {
+	t.Parallel()
 	kvs := map[string]string{
 		memoryKeyPrefix + "zebra": "last.",
 		memoryKeyPrefix + "alpha": "first.",
@@ -427,6 +434,7 @@ func TestRenderMemoryIndex_OrdersKeysWithinAType(t *testing.T) {
 // not length-limit keys, and the footer echoes the first key as the retrieval
 // example. Before the example was capped, this test failed.
 func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
+	t.Parallel()
 	longKey := strings.Repeat("k", 8000)
 	kvs := map[string]string{
 		memoryKeyPrefix + longKey: "OPERATIONAL (2026-09-16): a short gist sentence. Then much more text follows.",
@@ -452,6 +460,7 @@ func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
 // values) must render as a small fraction of its raw size, with entries dropped
 // only when keys cannot fit.
 func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
+	t.Parallel()
 	const entries = 38
 	const valueChars = 1234 // live median is ~1187
 	kvs := syntheticMemories(entries, valueChars)

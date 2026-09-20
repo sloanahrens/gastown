@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestIsBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  bool

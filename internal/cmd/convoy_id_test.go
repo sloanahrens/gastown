@@ -19,6 +19,7 @@ func (r *uniqueBase36Reader) Read(p []byte) (int, error) {
 }
 
 func TestGenerateShortID_Length(t *testing.T) {
+	t.Parallel()
 	id := generateShortID()
 	if len(id) != 5 {
 		t.Errorf("generateShortID() = %q (len %d), want length 5", id, len(id))
@@ -26,6 +27,7 @@ func TestGenerateShortID_Length(t *testing.T) {
 }
 
 func TestGenerateShortID_ValidChars(t *testing.T) {
+	t.Parallel()
 	const validChars = "0123456789abcdefghijklmnopqrstuvwxyz"
 	valid := make(map[byte]bool)
 	for i := range validChars {
@@ -43,6 +45,7 @@ func TestGenerateShortID_ValidChars(t *testing.T) {
 }
 
 func TestGenerateShortID_Uniqueness(t *testing.T) {
+	t.Parallel()
 	seen := make(map[string]bool)
 	const n = 1000
 	reader := &uniqueBase36Reader{}

@@ -52,6 +52,7 @@ func writeHealthRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 // that invented a nonexistent "mo" database and omitted real rigs ("be", "om")
 // whose names simply weren't in the hardcoded slice.
 func TestProductionDatabaseNames_MatchesRigsNotHardcodedList(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	writeHealthRigsJSON(t, townRoot, []string{"gastown", "beads", "om"})

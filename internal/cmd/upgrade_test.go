@@ -8,6 +8,7 @@ import (
 )
 
 func TestGenerateCLAUDEMD(t *testing.T) {
+	t.Parallel()
 	content := generateCLAUDEMD()
 
 	// Must contain the Gas Town header
@@ -172,6 +173,7 @@ func TestUpgradeDaemonConfig_ExistingValid(t *testing.T) {
 }
 
 func TestUpgradeCommandRegistered(t *testing.T) {
+	t.Parallel()
 	// Verify the upgrade command is registered in rootCmd
 	found := false
 	for _, cmd := range rootCmd.Commands() {
@@ -186,12 +188,14 @@ func TestUpgradeCommandRegistered(t *testing.T) {
 }
 
 func TestUpgradeBeadsExempt(t *testing.T) {
+	t.Parallel()
 	if !beadsExemptCommands["upgrade"] {
 		t.Error("upgrade should be in beadsExemptCommands")
 	}
 }
 
 func TestUpgradeBranchCheckExempt(t *testing.T) {
+	t.Parallel()
 	if !branchCheckExemptCommands["upgrade"] {
 		t.Error("upgrade should be in branchCheckExemptCommands")
 	}

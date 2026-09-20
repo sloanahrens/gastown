@@ -16,6 +16,7 @@ import (
 // configured lifecycle.reaper.delete_age when present, and a fallback to
 // the default when the configured value can't be parsed as a duration.
 func TestClosedWispDeleteAge(t *testing.T) {
+	t.Parallel()
 	t.Run("no config file", func(t *testing.T) {
 		townRoot := t.TempDir()
 		if got := closedWispDeleteAge(townRoot); got != defaultClosedWispDeleteAge {

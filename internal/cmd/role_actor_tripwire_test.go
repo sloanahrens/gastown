@@ -20,6 +20,7 @@ import (
 // here — at the point the actor is constructed — instead of surfacing later
 // as an intermittent tripwire false positive on an unrelated branch.
 func TestDetectActorOutputsToleratedByTripwire(t *testing.T) {
+	t.Parallel()
 	known := make(map[string]bool)
 	for _, p := range testutil.BuiltinActorPrefixes() {
 		known[p] = true
@@ -57,6 +58,7 @@ func TestDetectActorOutputsToleratedByTripwire(t *testing.T) {
 // builtinActorPrefixes — asserting those here would require faking a
 // registered rig and wouldn't exercise the mechanism this test guards.
 func TestGetAgentIdentityOutputsToleratedByTripwire(t *testing.T) {
+	t.Parallel()
 	known := make(map[string]bool)
 	for _, p := range testutil.BuiltinActorPrefixes() {
 		known[p] = true
@@ -85,6 +87,7 @@ func TestGetAgentIdentityOutputsToleratedByTripwire(t *testing.T) {
 // check that both TestDetectActorOutputsToleratedByTripwire and
 // TestGetAgentIdentityOutputsToleratedByTripwire rely on.
 func TestTripwireStillFlagsNovelActor(t *testing.T) {
+	t.Parallel()
 	known := make(map[string]bool)
 	for _, p := range testutil.BuiltinActorPrefixes() {
 		known[p] = true

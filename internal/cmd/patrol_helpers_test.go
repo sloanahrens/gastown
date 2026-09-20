@@ -24,6 +24,7 @@ import (
 )
 
 func TestBuildWitnessPatrolVars_NilContext(t *testing.T) {
+	t.Parallel()
 	ctx := RoleContext{}
 	vars := buildWitnessPatrolVars(ctx)
 	if len(vars) != 0 {
@@ -32,6 +33,7 @@ func TestBuildWitnessPatrolVars_NilContext(t *testing.T) {
 }
 
 func TestBuildWitnessPatrolVars_InjectsRigAndPrefix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -62,6 +64,7 @@ func TestBuildWitnessPatrolVars_InjectsRigAndPrefix(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_NilContext(t *testing.T) {
+	t.Parallel()
 	ctx := RoleContext{}
 	vars := buildRefineryPatrolVars(ctx)
 	if len(vars) != 0 {
@@ -70,6 +73,7 @@ func TestBuildRefineryPatrolVars_NilContext(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_MissingSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(filepath.Join(rigDir, "settings"), 0o755); err != nil {
@@ -173,6 +177,7 @@ esac
 }
 
 func TestBuildRefineryPatrolVars_NilMergeQueue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -222,6 +227,7 @@ func TestBuildRefineryPatrolVars_NilMergeQueue(t *testing.T) {
 // --pre-verified claim even though loadRigCommandVars had already surfaced
 // those same commands to the polecat.
 func TestBuildRefineryPatrolVars_ReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -267,6 +273,7 @@ func TestBuildRefineryPatrolVars_ReadsRigRootMergeQueue(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_FullConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -354,6 +361,7 @@ func TestBuildRefineryPatrolVars_FullConfig(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_AllCommandsSet(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -410,6 +418,7 @@ func TestBuildRefineryPatrolVars_AllCommandsSet(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_EmptyTestCommand(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -468,6 +477,7 @@ func TestBuildRefineryPatrolVars_EmptyTestCommand(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_BoolFormat(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -548,6 +558,7 @@ func TestBuildRefineryPatrolVars_BoolFormat(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_DefaultBranchWithoutMQ(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -590,6 +601,7 @@ func TestBuildRefineryPatrolVars_DefaultBranchWithoutMQ(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_MergeStrategy(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -629,6 +641,7 @@ func TestBuildRefineryPatrolVars_MergeStrategy(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_MergeStrategyDefaultOmitted(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -669,6 +682,7 @@ func TestBuildRefineryPatrolVars_MergeStrategyDefaultOmitted(t *testing.T) {
 }
 
 func TestBuildRefineryPatrolVars_RequireReview(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -716,6 +730,7 @@ func TestBuildRefineryPatrolVars_RequireReview(t *testing.T) {
 // (gt-wsg7): when a rig configures merge_queue.editorial, the refinery
 // patrol formula must receive the resolved-and-defaulted block as vars.
 func TestBuildRefineryPatrolVars_Editorial(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -770,6 +785,7 @@ func TestBuildRefineryPatrolVars_Editorial(t *testing.T) {
 // counterpart: a rig that never configures editorial gets no editorial_*
 // vars at all (upstream behavior unchanged, gt-wsg7).
 func TestBuildRefineryPatrolVars_NoEditorial(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
 	settingsDir := filepath.Join(rigDir, "settings")
@@ -818,6 +834,7 @@ func splitFirstEquals(s string) []string {
 }
 
 func TestPatrolRigName(t *testing.T) {
+	t.Parallel()
 	if got := patrolRigName(PatrolConfig{Assignee: "gastown/refinery"}); got != "gastown" {
 		t.Fatalf("patrolRigName = %q, want gastown", got)
 	}
@@ -827,6 +844,7 @@ func TestPatrolRigName(t *testing.T) {
 }
 
 func TestRenderPatrolWispDescription_DeaconInlinesStepsAndVars(t *testing.T) {
+	t.Parallel()
 	desc, err := renderPatrolWispDescription(PatrolConfig{
 		PatrolMolName: "mol-deacon-patrol",
 		BeadsDir:      t.TempDir(),
@@ -849,6 +867,7 @@ func TestRenderPatrolWispDescription_DeaconInlinesStepsAndVars(t *testing.T) {
 }
 
 func TestRenderPatrolWispDescription_AppliesOverlay(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	overlayDir := filepath.Join(townRoot, "formula-overlays")
 	if err := os.MkdirAll(overlayDir, 0755); err != nil {
@@ -876,6 +895,7 @@ description = "overlay heartbeat note"
 }
 
 func TestRenderPatrolWispDescription_RefinerySubstitutesRigAndEmptyDefaults(t *testing.T) {
+	t.Parallel()
 	desc, err := renderPatrolWispDescription(PatrolConfig{
 		PatrolMolName: "mol-refinery-patrol",
 		BeadsDir:      t.TempDir(),
@@ -893,6 +913,7 @@ func TestRenderPatrolWispDescription_RefinerySubstitutesRigAndEmptyDefaults(t *t
 }
 
 func TestRenderPatrolWispDescription_ExtraVarsOverrideRoleVars(t *testing.T) {
+	t.Parallel()
 	desc, err := renderPatrolWispDescription(PatrolConfig{
 		PatrolMolName: constants.MolRefineryPatrol,
 		BeadsDir:      t.TempDir(),
@@ -1037,6 +1058,7 @@ func createHookedPatrol(t *testing.T, b *beads.Beads, molName, assignee string, 
 }
 
 func TestFindActivePatrolHooked(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1074,6 +1096,7 @@ func TestFindActivePatrolHooked(t *testing.T) {
 }
 
 func TestFindActivePatrolStale(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1120,6 +1143,7 @@ func TestFindActivePatrolStale(t *testing.T) {
 }
 
 func TestFindActivePatrolZeroChildren(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1160,6 +1184,7 @@ func TestFindActivePatrolZeroChildren(t *testing.T) {
 }
 
 func TestFindActivePatrolMultiple(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1231,6 +1256,7 @@ func TestFindActivePatrolMultiple(t *testing.T) {
 // accumulate with no active patrol, cleanup is capped at maxStalePurgePerRun per call
 // to prevent overwhelming Dolt with sequential write queries (gt-18dzn6p).
 func TestFindActivePatrol_StaleCleanupCapped(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1305,6 +1331,7 @@ func TestFindActivePatrol_StaleCleanupCapped(t *testing.T) {
 }
 
 func TestBurnPreviousPatrolWisps(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 
@@ -1338,6 +1365,7 @@ func TestBurnPreviousPatrolWisps(t *testing.T) {
 }
 
 func TestBurnPreviousPatrolWisps_IgnoresOtherBeads(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	tmpDir, b := setupPatrolTestDB(t)
 

@@ -7,6 +7,7 @@ import (
 )
 
 func TestVitalsFormatCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		n    int
 		want string
@@ -25,6 +26,7 @@ func TestVitalsFormatCount(t *testing.T) {
 }
 
 func TestVitalsShortHome(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("no home dir")

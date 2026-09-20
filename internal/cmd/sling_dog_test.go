@@ -13,6 +13,7 @@ import (
 //   - "dog:" -> pool dispatch (shorthand)
 //   - "dog:alpha" -> specific dog (shorthand)
 func TestIsDogTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target  string
 		wantDog string
@@ -63,6 +64,7 @@ func TestIsDogTarget(t *testing.T) {
 //   - StartDelayedSession() must be called to actually start the session
 // This prevents the race condition where dogs start before their hook is set.
 func TestDogDispatchInfoDelayedSession(t *testing.T) {
+	t.Parallel()
 	// Test that DogDispatchInfo correctly tracks delayed state
 	info := &DogDispatchInfo{
 		DogName:        "alpha",
@@ -88,6 +90,7 @@ func TestDogDispatchInfoDelayedSession(t *testing.T) {
 
 // TestDogDispatchOptionsStruct verifies the DogDispatchOptions fields.
 func TestDogDispatchOptionsStruct(t *testing.T) {
+	t.Parallel()
 	opts := DogDispatchOptions{
 		Create:            true,
 		WorkDesc:          constants.MolConvoyFeed,
@@ -107,6 +110,7 @@ func TestDogDispatchOptionsStruct(t *testing.T) {
 
 // TestMaxDogPoolSize verifies the pool size constant matches the documented limit.
 func TestMaxDogPoolSize(t *testing.T) {
+	t.Parallel()
 	if maxDogPoolSize != 4 {
 		t.Errorf("maxDogPoolSize = %d, want 4 (matches mol-deacon-patrol pool sizing guideline)", maxDogPoolSize)
 	}
@@ -126,6 +130,7 @@ func TestMaxDogPoolSize(t *testing.T) {
 // This test locks in the classification invariant that dog pool targets
 // satisfy IsDogTarget (so sling.go can fall them through to direct dispatch).
 func TestDogTargetsAreNotMistakenForRigs(t *testing.T) {
+	t.Parallel()
 	// Any classifier-level change that makes one of these stop being a dog
 	// target will break feed-stranded auto-feeding in deferred mode.
 	dogPoolTargets := []string{

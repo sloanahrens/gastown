@@ -8,6 +8,7 @@ import (
 )
 
 func TestStaleMessagesForSession(t *testing.T) {
+	t.Parallel()
 	sessionStart := time.Date(2026, 1, 24, 2, 0, 0, 0, time.UTC)
 	messages := []*mail.Message{
 		{ID: "msg-1", Subject: "Older", Timestamp: sessionStart.Add(-2 * time.Minute)},

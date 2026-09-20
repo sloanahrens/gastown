@@ -28,6 +28,7 @@ func writeDogStateForDispatchTest(t *testing.T, townRoot, name string, state *do
 }
 
 func TestDogDispatchInfoClearWorkIfMatchesUsesAssignmentTimestamp(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	now := time.Now().Truncate(time.Second)
@@ -84,6 +85,7 @@ func TestDogDispatchInfoClearWorkIfMatchesUsesAssignmentTimestamp(t *testing.T) 
 }
 
 func TestDogDispatchInfoClearWorkIfMatchesSkipsReusedWork(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	now := time.Now().Truncate(time.Second)
@@ -120,6 +122,7 @@ func TestDogDispatchInfoClearWorkIfMatchesSkipsReusedWork(t *testing.T) {
 }
 
 func TestReusableHookedDogFormulaSkipsStaleDogHooks(t *testing.T) {
+	t.Parallel()
 	hooked := []*beads.Issue{
 		{ID: "not-a-dog", Assignee: "gastown/polecats/alpha", Description: "attached_formula: mol-dog-reaper"},
 		{ID: "bad-dog-name", Assignee: "deacon/dogs/nested/name", Description: "attached_formula: mol-dog-reaper"},
@@ -144,6 +147,7 @@ func TestReusableHookedDogFormulaSkipsStaleDogHooks(t *testing.T) {
 }
 
 func TestNewestHookedFormulaPrefersLatestAttachedAt(t *testing.T) {
+	t.Parallel()
 	hooked := []*beads.Issue{
 		{ID: "stale", Description: "attached_formula: mol-dog-reaper\nattached_at: 2026-06-16T20:30:15Z"},
 		{ID: "undated", Description: "attached_formula: mol-dog-reaper"},
@@ -158,6 +162,7 @@ func TestNewestHookedFormulaPrefersLatestAttachedAt(t *testing.T) {
 }
 
 func TestDogWorksOnHookRequiresFreshAttachment(t *testing.T) {
+	t.Parallel()
 	startedAt := time.Date(2026, 6, 16, 20, 30, 15, 900_000_000, time.UTC)
 	workingDog := &dog.Dog{
 		Name:          "alpha",
@@ -182,6 +187,7 @@ func TestDogWorksOnHookRequiresFreshAttachment(t *testing.T) {
 }
 
 func TestShouldReuseExistingFormulaSkipsStaleHookAfterFreshDogAssignment(t *testing.T) {
+	t.Parallel()
 	startedAt := time.Date(2026, 6, 16, 20, 30, 15, 900_000_000, time.UTC)
 	existing := &beads.Issue{ID: "gt-wisp-stale"}
 	freshDogHook := &beads.Issue{

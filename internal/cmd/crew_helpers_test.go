@@ -5,6 +5,7 @@ import (
 )
 
 func TestCrewSessionName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		rigName  string
@@ -51,6 +52,7 @@ func TestParseCrewSessionName(t *testing.T) {
 }
 
 func TestParseCrewSessionName_Invalid(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		session string

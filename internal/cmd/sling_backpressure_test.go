@@ -241,6 +241,7 @@ func TestCheckSlingBackpressureNoSettingsIsOff(t *testing.T) {
 // TestCountReadyMergeRequests pins the count itself, including the wisp-era
 // detail that a partially-blocked queue is not the same as a deep one.
 func TestCountReadyMergeRequests(t *testing.T) {
+	t.Parallel()
 	lister := &fakeDispatchMRLister{mrs: []*beads.Issue{
 		{ID: "gt-mr1", Status: "open"},
 		{ID: "gt-mr2", Status: "open", BlockedBy: []string{"gt-other"}},
@@ -265,6 +266,7 @@ func TestCountReadyMergeRequests(t *testing.T) {
 // in-process callers match with errors.Is, so the message may change but the
 // identity must not.
 func TestQueueBackpressureErrorIsIdentifiable(t *testing.T) {
+	t.Parallel()
 	err := &queueBackpressureError{Rig: "gastown", Ready: 13, Max: 12}
 	if !errors.Is(err, errQueueBackpressure) {
 		t.Error("errors.Is(queueBackpressureError, errQueueBackpressure) = false, want true")

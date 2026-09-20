@@ -187,6 +187,7 @@ exit 0
 
 // TestCleanupSpawnedPolecat_WithNilSpawnInfo handles nil spawnInfo gracefully.
 func TestCleanupSpawnedPolecat_WithNilSpawnInfo(t *testing.T) {
+	t.Parallel()
 	// This test verifies that cleanupSpawnedPolecat doesn't panic when spawnInfo is nil
 	// The function should handle this gracefully
 

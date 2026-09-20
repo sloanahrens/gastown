@@ -7,6 +7,7 @@ import (
 )
 
 func TestDirSizeHuman(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Empty directory
@@ -41,6 +42,7 @@ func TestDirSizeHuman(t *testing.T) {
 }
 
 func TestDirSizeHuman_NonexistentDir(t *testing.T) {
+	t.Parallel()
 	got := dirSizeHuman("/nonexistent/path/that/does/not/exist")
 	if got != "0 B" {
 		t.Errorf("nonexistent dir: got %q, want %q", got, "0 B")

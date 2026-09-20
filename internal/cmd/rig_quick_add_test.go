@@ -85,6 +85,7 @@ func TestFindOrCreateTown(t *testing.T) {
 }
 
 func TestIsValidTown(t *testing.T) {
+	t.Parallel()
 	t.Run("valid town has mayor directory", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		mayorDir := filepath.Join(tmpDir, "mayor")

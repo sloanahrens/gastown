@@ -129,6 +129,7 @@ func TestOutputStaleText(t *testing.T) {
 }
 
 func TestStaleQuietExitCode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		info *version.StaleBinaryInfo

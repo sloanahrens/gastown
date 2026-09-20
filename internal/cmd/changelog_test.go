@@ -13,6 +13,7 @@ import (
 // TestIsInternalBead verifies that ephemeral, event-type, and system-prefix
 // beads are filtered out, while normal beads pass through.
 func TestIsInternalBead(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		b    closedBead
@@ -167,6 +168,7 @@ func TestChangelogSinceTime(t *testing.T) {
 
 // TestFormatPeriod checks the three output cases: Today, Week of, and Since.
 func TestFormatPeriod(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	y, m, d := now.Date()
 	today := time.Date(y, m, d, 0, 0, 0, 0, time.Local)

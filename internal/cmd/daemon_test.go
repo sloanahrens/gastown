@@ -61,6 +61,7 @@ func TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld(t *testing.T) {
 }
 
 func TestReadDaemonStartupFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -82,6 +83,7 @@ func TestReadDaemonStartupFailure(t *testing.T) {
 }
 
 func TestReadDaemonStartupFailure_MissingPIDReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {

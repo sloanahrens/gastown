@@ -46,6 +46,7 @@ esac
 }
 
 func TestDispatchScheduledWorkReportsHeldLock(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	runtimeDir := filepath.Join(townRoot, ".runtime")
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
@@ -72,6 +73,7 @@ func TestDispatchScheduledWorkReportsHeldLock(t *testing.T) {
 }
 
 func TestValidateDryRunDispatchPlanMarksAllInvalidAsValidation(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeJSONFile(t, filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
 		Version: config.CurrentRigsVersion,

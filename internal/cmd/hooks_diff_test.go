@@ -8,6 +8,7 @@ import (
 )
 
 func TestDiffHooksConfigsNoChanges(t *testing.T) {
+	t.Parallel()
 	cfg := &hooks.HooksConfig{
 		SessionStart: []hooks.HookEntry{
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "test"}}},
@@ -24,6 +25,7 @@ func TestDiffHooksConfigsNoChanges(t *testing.T) {
 }
 
 func TestDiffHooksConfigsAddedHookType(t *testing.T) {
+	t.Parallel()
 	current := &hooks.HooksConfig{}
 	expected := &hooks.HooksConfig{
 		SessionStart: []hooks.HookEntry{
@@ -49,6 +51,7 @@ func TestDiffHooksConfigsAddedHookType(t *testing.T) {
 }
 
 func TestDiffHooksConfigsRemovedHookType(t *testing.T) {
+	t.Parallel()
 	current := &hooks.HooksConfig{
 		Stop: []hooks.HookEntry{
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "old-cmd"}}},
@@ -63,6 +66,7 @@ func TestDiffHooksConfigsRemovedHookType(t *testing.T) {
 }
 
 func TestDiffHooksConfigsModifiedCommand(t *testing.T) {
+	t.Parallel()
 	current := &hooks.HooksConfig{
 		SessionStart: []hooks.HookEntry{
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "old-cmd"}}},
@@ -86,6 +90,7 @@ func TestDiffHooksConfigsModifiedCommand(t *testing.T) {
 }
 
 func TestDiffHookEntriesAddedMatcher(t *testing.T) {
+	t.Parallel()
 	current := []hooks.HookEntry{}
 	expected := []hooks.HookEntry{
 		{Matcher: "Bash(git*)", Hooks: []hooks.Hook{{Type: "command", Command: "block"}}},
@@ -98,6 +103,7 @@ func TestDiffHookEntriesAddedMatcher(t *testing.T) {
 }
 
 func TestDiffHookEntriesRemovedMatcher(t *testing.T) {
+	t.Parallel()
 	current := []hooks.HookEntry{
 		{Matcher: "Bash(git*)", Hooks: []hooks.Hook{{Type: "command", Command: "block"}}},
 	}
@@ -110,6 +116,7 @@ func TestDiffHookEntriesRemovedMatcher(t *testing.T) {
 }
 
 func TestTruncateCommand(t *testing.T) {
+	t.Parallel()
 	short := "echo hello"
 	if got := truncateCommand(short); got != short {
 		t.Errorf("short command should not be truncated: got %q", got)
@@ -125,6 +132,7 @@ func TestTruncateCommand(t *testing.T) {
 }
 
 func TestMatcherDisplay(t *testing.T) {
+	t.Parallel()
 	if got := matcherDisplay(""); got != `"" (all)` {
 		t.Errorf("empty matcher: got %q", got)
 	}
@@ -140,6 +148,7 @@ func TestMatcherDisplay(t *testing.T) {
 // compared only Command, so a typo'd If pattern in an on-disk override was
 // invisible to gt hooks diff.
 func TestDiffCommandsDetectsIfOnlyDrift(t *testing.T) {
+	t.Parallel()
 	current := hooks.HookEntry{
 		Matcher: "Bash",
 		Hooks: []hooks.Hook{
@@ -172,6 +181,7 @@ func TestDiffCommandsDetectsIfOnlyDrift(t *testing.T) {
 // matcher "Bash") produce different fingerprints — otherwise gt hooks init
 // would deduplicate them into one (finding 6, gt-wisp-db27).
 func TestHooksFingerprintDistinguishesByIf(t *testing.T) {
+	t.Parallel()
 	a := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"}}
 	b := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(git checkout -b*)"}}
 
@@ -183,6 +193,7 @@ func TestHooksFingerprintDistinguishesByIf(t *testing.T) {
 // TestHooksListEqualDistinguishesByIf mirrors TestHooksFingerprintDistinguishesByIf
 // for hooksListEqual, used by computeDiff.
 func TestHooksListEqualDistinguishesByIf(t *testing.T) {
+	t.Parallel()
 	a := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"}}
 	b := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(git checkout -b*)"}}
 
@@ -195,6 +206,7 @@ func TestHooksListEqualDistinguishesByIf(t *testing.T) {
 }
 
 func TestIndexByMatcher(t *testing.T) {
+	t.Parallel()
 	entries := []hooks.HookEntry{
 		{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "all"}}},
 		{Matcher: "Bash(git*)", Hooks: []hooks.Hook{{Type: "command", Command: "git"}}},

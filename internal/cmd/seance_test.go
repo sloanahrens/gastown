@@ -426,6 +426,7 @@ func writeTestEvents(t *testing.T, townRoot string, sessionIDs []string) {
 }
 
 func TestResolveSessionPrefix(t *testing.T) {
+	t.Parallel()
 	t.Run("resolves unique prefix", func(t *testing.T) {
 		townRoot := t.TempDir()
 		fullID := "46621448-3caa-4bbb-8ccc-123456789abc"

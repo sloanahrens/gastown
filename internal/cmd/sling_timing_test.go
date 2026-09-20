@@ -11,6 +11,7 @@ import (
 // attributing a slow sling: one line per step, in call order, with the step's
 // own duration and the running total, both measured from the timer's clock.
 func TestSlingTimerStepLines(t *testing.T) {
+	t.Parallel()
 	t0 := time.Date(2026, 9, 19, 10, 20, 19, 0, time.UTC)
 	ticks := []time.Time{t0, t0.Add(1 * time.Second), t0.Add(3 * time.Second)}
 	i := 0
@@ -39,6 +40,7 @@ func TestSlingTimerStepLines(t *testing.T) {
 // A nil timer must be safe to call: every caller on the spawn path guards
 // nothing, so the zero value has to be a no-op rather than a nil dereference.
 func TestSlingTimerNilIsNoop(t *testing.T) {
+	t.Parallel()
 	var tm *slingTimer
 	tm.step("anything") // must not panic
 }

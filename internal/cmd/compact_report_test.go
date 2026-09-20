@@ -13,6 +13,7 @@ import (
 )
 
 func TestWispTypeToCategory(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		wispType string
 		title    string
@@ -50,6 +51,7 @@ func TestWispTypeToCategory_TitlePatrolFallback(t *testing.T) {
 }
 
 func TestBuildReport(t *testing.T) {
+	t.Parallel()
 	result := &compactResult{
 		Deleted: []compactAction{
 			{ID: "w-1", Title: "Heartbeat 1", WispType: "heartbeat"},
@@ -260,6 +262,7 @@ printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payloa
 }
 
 func TestDetectAnomalies(t *testing.T) {
+	t.Parallel()
 	t.Run("high heartbeat volume", func(t *testing.T) {
 		report := &compactReport{
 			Categories: map[string]*categoryStats{
@@ -345,6 +348,7 @@ func TestDetectAnomalies(t *testing.T) {
 }
 
 func TestFormatDailyDigest(t *testing.T) {
+	t.Parallel()
 	report := &compactReport{
 		Date: "2026-02-09",
 		Categories: map[string]*categoryStats{
@@ -386,6 +390,7 @@ func TestFormatDailyDigest(t *testing.T) {
 }
 
 func TestFormatDailyDigestEmpty(t *testing.T) {
+	t.Parallel()
 	report := &compactReport{
 		Date: "2026-02-09",
 		Categories: map[string]*categoryStats{
@@ -411,6 +416,7 @@ func TestFormatDailyDigestEmpty(t *testing.T) {
 }
 
 func TestFormatWeeklyRollup(t *testing.T) {
+	t.Parallel()
 	rollup := &weeklyRollup{
 		WeekStart: "2026-02-02",
 		WeekEnd:   "2026-02-09",
@@ -448,6 +454,7 @@ func TestFormatWeeklyRollup(t *testing.T) {
 }
 
 func TestFormatWeeklyRollupExplainsZeroDayCoverage(t *testing.T) {
+	t.Parallel()
 	rollup := &weeklyRollup{
 		WeekStart: "2026-07-05",
 		WeekEnd:   "2026-07-12",
@@ -466,6 +473,7 @@ func TestFormatWeeklyRollupExplainsZeroDayCoverage(t *testing.T) {
 }
 
 func TestNormalizeCompactionAnomalyRemovesUnsupportedHealthClaim(t *testing.T) {
+	t.Parallel()
 	got := normalizeCompactionAnomaly("0 patrol wisps (patrol agents may be down)")
 	if strings.Contains(got, "agents may be down") {
 		t.Fatalf("normalized anomaly still claims agent health: %q", got)
@@ -476,6 +484,7 @@ func TestNormalizeCompactionAnomalyRemovesUnsupportedHealthClaim(t *testing.T) {
 }
 
 func TestExtractBeadID(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		input   string

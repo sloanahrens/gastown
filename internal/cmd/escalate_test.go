@@ -14,6 +14,7 @@ import (
 )
 
 func TestGetNextSeverity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  string
@@ -37,6 +38,7 @@ func TestGetNextSeverity(t *testing.T) {
 }
 
 func TestExtractMailTargetsFromActions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		actions []string
@@ -96,6 +98,7 @@ func TestExtractMailTargetsFromActions(t *testing.T) {
 }
 
 func TestExecuteExternalActionsReportsWarningsAndFailures(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	statuses := executeExternalActions([]string{"email:human", "log"}, &config.EscalationConfig{}, "hq-esc1", "high", "desc", townRoot)
 	if len(statuses) != 2 {
@@ -110,6 +113,7 @@ func TestExecuteExternalActionsReportsWarningsAndFailures(t *testing.T) {
 }
 
 func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
+	t.Parallel()
 	statuses := []deliveryStatus{{Channel: "bead", Created: true}, {Channel: "mail", Target: "mayor", Error: "notify failed"}}
 	hasFailure := false
 	for _, status := range statuses {
@@ -139,6 +143,7 @@ func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
 }
 
 func TestDeliveryStatusJSONContainsSuccessfulMailPathDetails(t *testing.T) {
+	t.Parallel()
 	statuses := []deliveryStatus{{Channel: "bead", Created: true, Severity: "critical"}, {Channel: "mail", Target: "mayor", Persisted: true, RuntimeNotified: true, Annotated: true, Severity: "critical", NotificationRoute: "mail+nudge"}}
 	result := map[string]interface{}{
 		"id":       "hq-esc2",
@@ -161,6 +166,7 @@ func TestDeliveryStatusJSONContainsSuccessfulMailPathDetails(t *testing.T) {
 }
 
 func TestEscalationFingerprintLabel(t *testing.T) {
+	t.Parallel()
 	got := escalationFingerprintLabel(" deacon:await-signal:hq-deacon ")
 	trimmed := escalationFingerprintLabel("deacon:await-signal:hq-deacon")
 	if got != trimmed {
@@ -181,6 +187,7 @@ func TestEscalationFingerprintLabel(t *testing.T) {
 }
 
 func TestSeverityEmoji(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		severity string
 		want     string
@@ -204,6 +211,7 @@ func TestSeverityEmoji(t *testing.T) {
 }
 
 func TestFormatRelativeTime(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 
 	tests := []struct {
@@ -269,6 +277,7 @@ func TestFormatRelativeTime(t *testing.T) {
 }
 
 func TestReasonDisplay(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		reason string
@@ -288,6 +297,7 @@ func TestReasonDisplay(t *testing.T) {
 }
 
 func TestFormatEscalationMailBody(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		beadID   string
@@ -363,6 +373,7 @@ func TestFormatEscalationMailBody(t *testing.T) {
 }
 
 func TestFormatReescalationMailBody(t *testing.T) {
+	t.Parallel()
 	result := &beads.ReescalationResult{
 		ID:              "hq-esc123",
 		Title:           "Build blocked",
@@ -439,6 +450,7 @@ func TestDetectSenderFallback(t *testing.T) {
 }
 
 func TestExecuteExternalActions(t *testing.T) {
+	t.Parallel()
 	// executeExternalActions prints warnings/info but doesn't return errors.
 	// We test that it doesn't panic with various configurations.
 
@@ -527,6 +539,7 @@ func TestExecuteExternalActions(t *testing.T) {
 }
 
 func TestWriteEscalationLog(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	err := writeEscalationLog(tmpDir, "hq-abc", "critical", "Test failure")
 	if err != nil {
@@ -605,6 +618,7 @@ func TestRunEscalateValidation(t *testing.T) {
 }
 
 func TestFormatEscalationMailBodyNeutralSubjectStillCarriesStructuredBody(t *testing.T) {
+	t.Parallel()
 	body := formatEscalationMailBody("hq-abc123", "high", "Database drift", "deacon/", "gt-xyz")
 	for _, want := range []string{
 		"Escalation ID: hq-abc123",
@@ -820,6 +834,7 @@ esac
 }
 
 func TestGetNextSeverityMatchesConfig(t *testing.T) {
+	t.Parallel()
 	// Verify getNextSeverity in escalate_impl.go matches config.NextSeverity
 	// to catch if they ever diverge.
 	severities := []string{"low", "medium", "high", "critical"}

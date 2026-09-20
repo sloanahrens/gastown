@@ -10,6 +10,7 @@ import (
 )
 
 func TestBuildUpSummary(t *testing.T) {
+	t.Parallel()
 	services := []ServiceStatus{
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
 		{Name: "Deacon", Type: constants.RoleDeacon, OK: true, Detail: "gt-deacon"},
@@ -29,6 +30,7 @@ func TestBuildUpSummary(t *testing.T) {
 }
 
 func TestEmitUpJSON_Success(t *testing.T) {
+	t.Parallel()
 	services := []ServiceStatus{
 		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started (port 3306)"},
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
@@ -58,6 +60,7 @@ func TestEmitUpJSON_Success(t *testing.T) {
 }
 
 func TestEmitUpJSON_FailureReturnsSilentExitAndValidJSON(t *testing.T) {
+	t.Parallel()
 	services := []ServiceStatus{
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
 		{Name: "Mayor", Type: constants.RoleMayor, OK: false, Detail: "start failed"},
@@ -90,6 +93,7 @@ func TestEmitUpJSON_FailureReturnsSilentExitAndValidJSON(t *testing.T) {
 }
 
 func TestEmitUpJSON_SuccessDerivesFromServices(t *testing.T) {
+	t.Parallel()
 	// When all services are OK, Success should be true even without explicit allOK param
 	services := []ServiceStatus{
 		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started"},
@@ -128,6 +132,7 @@ func TestEmitUpJSON_SuccessDerivesFromServices(t *testing.T) {
 }
 
 func TestEmitUpJSON_SessionNames(t *testing.T) {
+	t.Parallel()
 	rigName := "gastown"
 	prefix := session.PrefixFor(rigName)
 

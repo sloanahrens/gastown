@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestIsValidGroupName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -33,6 +34,7 @@ func TestIsValidGroupName(t *testing.T) {
 }
 
 func TestIsValidMemberPattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		pattern string
 		want    bool

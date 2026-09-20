@@ -13,6 +13,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestConvoyCreate_FromEpicFlagExists(t *testing.T) {
+	t.Parallel()
 	flag := convoyCreateCmd.Flags().Lookup("from-epic")
 	if flag == nil {
 		t.Fatal("convoyCreateCmd should have --from-epic flag")
@@ -27,6 +28,7 @@ func TestConvoyCreate_FromEpicFlagExists(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCollectEpicChildren_NotAnEpic(t *testing.T) {
+	t.Parallel()
 	// bdShow is package-level and uses real bd; for unit tests we test
 	// the error message format when the type check fails.
 	// This test validates the error message construction.
@@ -112,6 +114,7 @@ func TestConvoyCreate_NoArgsNoFlag(t *testing.T) {
 }
 
 func TestConvoyCreate_FromEpicWithOverrideName(t *testing.T) {
+	t.Parallel()
 	// Verify the command accepts positional args alongside --from-epic
 	// (ArbitraryArgs allows this). The actual from-epic logic needs bd,
 	// so we just verify the command definition allows it.
@@ -132,6 +135,7 @@ func TestConvoyCreate_FromEpicWithOverrideName(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFromEpic_SlingableTypeFiltering(t *testing.T) {
+	t.Parallel()
 	// Verify the types that collectEpicChildren would include/exclude
 	slingable := []string{"task", "bug", "feature", "chore"}
 	nonSlingable := []string{"epic", "decision"}
@@ -164,6 +168,7 @@ func convoyops_IsSlingableType(issueType string) bool {
 // ---------------------------------------------------------------------------
 
 func TestFromEpic_FlagLikeTitleGuard(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title    string
 		flagLike bool

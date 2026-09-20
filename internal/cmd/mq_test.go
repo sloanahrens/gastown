@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseBranchName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		branch     string
@@ -114,6 +115,7 @@ func TestParseBranchName(t *testing.T) {
 }
 
 func TestFormatMRAge(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		createdAt string
@@ -147,6 +149,7 @@ func TestFormatMRAge(t *testing.T) {
 }
 
 func TestGetDescriptionWithoutMRFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -185,6 +188,7 @@ func TestGetDescriptionWithoutMRFields(t *testing.T) {
 }
 
 func TestTruncateString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		s      string
@@ -228,6 +232,7 @@ func TestTruncateString(t *testing.T) {
 }
 
 func TestFormatStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		status string
@@ -270,6 +275,7 @@ func TestFormatStatus(t *testing.T) {
 }
 
 func TestGetStatusIcon(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status string
 		want   string
@@ -292,6 +298,7 @@ func TestGetStatusIcon(t *testing.T) {
 }
 
 func TestFormatTimeAgo(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		timestamp string
@@ -360,6 +367,7 @@ func stringContains(s, substr string) bool {
 // TestIssuePatternCompiledAtPackageLevel verifies that the issuePattern regex
 // is compiled once at package level (not on every parseBranchName call).
 func TestIssuePatternCompiledAtPackageLevel(t *testing.T) {
+	t.Parallel()
 	// Verify the pattern is not nil and is a compiled regex
 	if issuePattern == nil {
 		t.Error("issuePattern should be compiled at package level, got nil")
@@ -392,6 +400,7 @@ func TestIssuePatternCompiledAtPackageLevel(t *testing.T) {
 
 // TestPolecatCleanupTimeoutConstant verifies the timeout constant is set correctly.
 func TestPolecatCleanupTimeoutConstant(t *testing.T) {
+	t.Parallel()
 	// This test documents the expected timeout value.
 	// The actual timeout behavior is tested manually or with integration tests.
 	const expectedMaxCleanupWait = 5 * time.Minute
@@ -404,6 +413,7 @@ func TestPolecatCleanupTimeoutConstant(t *testing.T) {
 // label rather than the deprecated issue_type field. This is the fix for #816 where
 // MRs created by `gt done` have issue_type='task' but correct gt:merge-request label.
 func TestMRFilteringByLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		issue    *beads.Issue

@@ -93,6 +93,7 @@ func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) 
 }
 
 func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0o755); err != nil {
@@ -141,6 +142,7 @@ func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing
 }
 
 func TestIsScheduledWorkBeadReadyFailsClosedForBlockedUnknown(t *testing.T) {
+	t.Parallel()
 	info := beadStatusInfo{Status: "open"}
 	if isScheduledWorkBeadReady("gt-ready", info, true, nil, map[string]bool{"gt-ready": true}) {
 		t.Fatalf("blocked-unknown source must not be scheduler-ready")
@@ -188,6 +190,7 @@ func openMRIndexContaining(t *testing.T, blockers ...string) map[string]*beads.I
 // at the dispatch layer: the dependent is not dispatchable while its blocker's
 // merge request is still in the queue.
 func TestSchedulerHoldsDependentWhileBlockerMRIsQueued(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-dependent": {{ID: "gt-blocker", Status: "closed", DependencyType: "blocks"}},
 	})
@@ -210,6 +213,7 @@ func TestSchedulerHoldsDependentWhileBlockerMRIsQueued(t *testing.T) {
 // TestSchedulerReleasesDependentOnceBlockerMRMerges closes the loop on
 // criterion 1: the merge is what releases the dependent, and nothing else.
 func TestSchedulerReleasesDependentOnceBlockerMRMerges(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-dependent": {{ID: "gt-blocker", Status: "closed", DependencyType: "blocks"}},
 	})
@@ -231,6 +235,7 @@ func TestSchedulerReleasesDependentOnceBlockerMRMerges(t *testing.T) {
 // batch of beads that declare no closed blocking dependency issues NO merge
 // queue query at all, so dispatch timing is unchanged in the common case.
 func TestSchedulerSkipsMergeLookupWithNoDependencies(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-plain":   nil,
 		"gt-tracked": {{ID: "gt-other", Status: "closed", DependencyType: "tracks"}},
@@ -255,6 +260,7 @@ func TestSchedulerSkipsMergeLookupWithNoDependencies(t *testing.T) {
 // warns; criterion 5's injected context is what keeps the worker honest in
 // that window.
 func TestSchedulerMergeLookupFailsOpen(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-dependent": {{ID: "gt-blocker", Status: "closed", DependencyType: "blocks"}},
 	})
@@ -274,6 +280,7 @@ func TestSchedulerMergeLookupFailsOpen(t *testing.T) {
 // dispatch layer: a blocker that never produced an MR (docs-only, decision
 // bead, superseded) satisfies its dependents on close rather than deadlocking.
 func TestSchedulerReleasesBlockerWithNoMR(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-dependent": {{ID: "gt-docs-only", Status: "closed", DependencyType: "blocks"}},
 	})
@@ -291,6 +298,7 @@ func TestSchedulerReleasesBlockerWithNoMR(t *testing.T) {
 // the dispatch layer: a rejected or superseded MR is closed at the MR level, so
 // it drops out of the open index and releases dependents.
 func TestSchedulerReleasesBlockerWhoseMRWasRejected(t *testing.T) {
+	t.Parallel()
 	townRoot, infos := dependencyGatingFixture(t, map[string][]beads.IssueDep{
 		"gt-dependent": {{ID: "gt-blocker", Status: "closed", DependencyType: "blocks"}},
 	})
@@ -308,6 +316,7 @@ func TestSchedulerReleasesBlockerWhoseMRWasRejected(t *testing.T) {
 // TestMergeReadyGateComposesWithStatusBasedGates: the merge gate is additive.
 // It must not resurrect a bead that the status-based gates already reject.
 func TestMergeReadyGateComposesWithStatusBasedGates(t *testing.T) {
+	t.Parallel()
 	info := beadStatusInfo{Status: "in_progress"}
 	if isScheduledWorkBeadMergeReady("gt-x", info, true, nil, nil, nil) {
 		t.Fatal("a non-open bead must not be ready even with an empty merge-pending set")

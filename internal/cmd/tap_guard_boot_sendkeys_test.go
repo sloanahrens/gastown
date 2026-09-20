@@ -14,6 +14,7 @@ import (
 // against tool_input.command, replacing the leading-* "if" glob
 // Bash(*tmux*send-keys*) the boot hook used to carry (gt-3mp1).
 func TestMatchesRawTmuxSendKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -58,6 +59,7 @@ func TestMatchesRawTmuxSendKeys(t *testing.T) {
 // trip the guard, the same treatment every other guard in this family gives
 // it (gt-mkrj).
 func TestCommandInvokesRawTmuxSendKeys_HeredocBodyIsData(t *testing.T) {
+	t.Parallel()
 	command := "cat > note.md <<'EOF'\nnever use tmux send-keys; use gt nudge\nEOF"
 	if commandInvokesRawTmuxSendKeys(command, 0) {
 		t.Errorf("commandInvokesRawTmuxSendKeys(%q) = true, want false (heredoc body is data)", command)
@@ -78,6 +80,7 @@ func TestCommandInvokesRawTmuxSendKeys_HeredocBodyIsData(t *testing.T) {
 // are asserted allowed here, run directly against the guard as if no outer
 // filter existed at all.
 func TestBootSendKeysGuard_Integration(t *testing.T) {
+	t.Parallel()
 	bin := buildGT(t)
 	workDir := t.TempDir()
 

@@ -26,6 +26,7 @@ func setupWarrantTestRegistry(t *testing.T) {
 
 // TestWarrantFile_NewWarrant verifies that filing a new warrant creates the file.
 func TestWarrantFile_NewWarrant(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	warrantDir := filepath.Join(tmpDir, "warrants")
 
@@ -81,6 +82,7 @@ func TestWarrantFile_NewWarrant(t *testing.T) {
 // TestWarrantFile_DuplicateWarrant verifies that filing a duplicate warrant
 // is handled gracefully (doesn't overwrite).
 func TestWarrantFile_DuplicateWarrant(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	warrantDir := filepath.Join(tmpDir, "warrants")
 
@@ -126,6 +128,7 @@ func TestWarrantFile_DuplicateWarrant(t *testing.T) {
 
 // TestWarrantExecute_MarksExecuted verifies that executing a warrant marks it as executed.
 func TestWarrantExecute_MarksExecuted(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	warrantDir := filepath.Join(tmpDir, "warrants")
 
@@ -211,6 +214,7 @@ func TestTargetToSessionName(t *testing.T) {
 
 // TestWarrantFilePath verifies warrant file path generation.
 func TestWarrantFilePath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		dir    string
 		target string

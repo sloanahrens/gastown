@@ -57,6 +57,7 @@ func setupPolecatCapacityRig(t *testing.T, maxPolecats int) string {
 }
 
 func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	dir := polecatAdmissionDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -91,6 +92,7 @@ func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
 }
 
 func TestCapacitySnapshotRemovesStructurallyInvalidReservations(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	dir := polecatAdmissionDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -114,6 +116,7 @@ func TestCapacitySnapshotRemovesStructurallyInvalidReservations(t *testing.T) {
 }
 
 func TestCapacitySnapshotRemovesMismatchedReservationFile(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	dir := polecatAdmissionDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -149,6 +152,7 @@ func TestCapacitySnapshotRemovesMismatchedReservationFile(t *testing.T) {
 }
 
 func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	dir := polecatAdmissionDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -184,6 +188,7 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 }
 
 func TestAcquirePolecatAdmissionUsesConfiguredCap(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 
 	first, snapshot, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
@@ -222,6 +227,7 @@ func TestAcquirePolecatAdmissionUsesConfiguredCap(t *testing.T) {
 }
 
 func TestAcquirePolecatAdmissionDisabledWhenSchedulerCapNonPositive(t *testing.T) {
+	t.Parallel()
 	for _, maxPolecats := range []int{-1, 0} {
 		t.Run("max", func(t *testing.T) {
 			townRoot := t.TempDir()
@@ -246,6 +252,7 @@ func TestAcquirePolecatAdmissionDisabledWhenSchedulerCapNonPositive(t *testing.T
 }
 
 func TestConcurrentPolecatAdmissionReservationsDoNotExceedCap(t *testing.T) {
+	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -290,6 +297,7 @@ func TestConcurrentPolecatAdmissionReservationsDoNotExceedCap(t *testing.T) {
 }
 
 func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		fields     *beads.AgentFields
@@ -337,6 +345,7 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 }
 
 func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *testing.T) {
+	t.Parallel()
 	snapshot := polecatCapacitySnapshot{Max: 3}
 	applyWorkstateDispositionToCapacitySnapshot(&snapshot, polecat.StateIdle, polecat.WorkstateDisposition{
 		Verdict:              polecat.WorkstateVerdictNeedsRecovery,

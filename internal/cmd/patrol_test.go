@@ -6,6 +6,7 @@ import (
 )
 
 func TestExtractPatrolRole(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		title    string
@@ -64,6 +65,7 @@ func TestExtractPatrolRole(t *testing.T) {
 }
 
 func TestPatrolDigestDateFormat(t *testing.T) {
+	t.Parallel()
 	// Test that PatrolDigest.Date format is YYYY-MM-DD
 	digest := PatrolDigest{
 		Date:        "2026-01-17",
@@ -85,6 +87,7 @@ func TestPatrolDigestDateFormat(t *testing.T) {
 }
 
 func TestPatrolCycleEntry(t *testing.T) {
+	t.Parallel()
 	entry := PatrolCycleEntry{
 		ID:          "gt-abc123",
 		Role:        "deacon",
@@ -102,6 +105,7 @@ func TestPatrolCycleEntry(t *testing.T) {
 }
 
 func TestParseStepResults(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -170,6 +174,7 @@ func TestParseStepResults(t *testing.T) {
 }
 
 func TestBuildStepAudit(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		formulaName string

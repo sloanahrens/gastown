@@ -12,6 +12,7 @@ import "testing"
 //	    effectiveBranch = opts.ResumeBranch // BUG: corrupts the merge target
 //	}
 func TestResolveSpawnBaseBranch(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		baseBranch    string
@@ -34,6 +35,7 @@ func TestResolveSpawnBaseBranch(t *testing.T) {
 }
 
 func TestEffectivePolecatDirCap(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		configured int

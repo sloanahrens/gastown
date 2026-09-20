@@ -33,6 +33,7 @@ func TestAgentActor(t *testing.T) {
 }
 
 func TestCheckAgentForceAuthorization(t *testing.T) {
+	t.Parallel()
 	t.Run("refuses without authorization bead", func(t *testing.T) {
 		err := checkAgentForceAuthorization("deacon/dogs/alpha", "")
 		if err == nil {
@@ -54,6 +55,7 @@ func TestCheckAgentForceAuthorization(t *testing.T) {
 }
 
 func TestHoldsGateError(t *testing.T) {
+	t.Parallel()
 	t.Run("no error passes", func(t *testing.T) {
 		if err := holdsGateError(nil, false); err != nil {
 			t.Errorf("expected nil for successful holds query, got: %v", err)
@@ -203,6 +205,7 @@ func TestCleanupAuditorCompletion(t *testing.T) {
 }
 
 func TestResolveDestructiveActor(t *testing.T) {
+	t.Parallel()
 	t.Run("env identity is an agent", func(t *testing.T) {
 		actor, isAgent := resolveDestructiveActor("gastown/polecats/onyx", true)
 		if !isAgent || actor != "gastown/polecats/onyx" {

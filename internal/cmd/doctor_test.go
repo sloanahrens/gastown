@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestDoctorDoesNotRegisterDoltConfigCheck(t *testing.T) {
+	t.Parallel()
 	d := newDoctorForCommand("")
 	for _, check := range d.Checks() {
 		if check.Name() == "dolt-config" {
@@ -12,6 +13,7 @@ func TestDoctorDoesNotRegisterDoltConfigCheck(t *testing.T) {
 }
 
 func TestDoctorRegistersEditorialChecksWithRig(t *testing.T) {
+	t.Parallel()
 	d := newDoctorForCommand("testrig")
 	want := map[string]bool{
 		"editorial-coverage": false,
@@ -31,6 +33,7 @@ func TestDoctorRegistersEditorialChecksWithRig(t *testing.T) {
 }
 
 func TestDoctorCheckFlagFiltersToNamedCheck(t *testing.T) {
+	t.Parallel()
 	d := newDoctorForCommand("testrig")
 	d.Only([]string{"editorial-coverage"})
 	checks := d.Checks()

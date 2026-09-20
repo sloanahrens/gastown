@@ -1051,6 +1051,7 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 }
 
 func TestParseBool(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  bool

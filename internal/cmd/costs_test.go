@@ -204,6 +204,7 @@ func TestRunCostsRecord_NoSession_ReturnsNil(t *testing.T) {
 }
 
 func TestCostDigestPayload_ExcludesSessions(t *testing.T) {
+	t.Parallel()
 	// Build a digest with many sessions (simulating the 2885-session case)
 	digest := CostDigest{
 		Date:         "2026-02-14",

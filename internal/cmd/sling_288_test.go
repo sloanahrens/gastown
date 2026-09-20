@@ -288,6 +288,7 @@ func TestSlingHookRawBeadFlag(t *testing.T) {
 // TestAutoApplyLogic verifies the auto-apply detection logic.
 // When formulaName is empty and target contains "/polecats/", mol-polecat-work should be applied.
 func TestAutoApplyLogic(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		formulaName   string

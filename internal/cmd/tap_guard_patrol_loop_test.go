@@ -6,6 +6,7 @@ import (
 )
 
 func TestMatchesBdMolPourPatrol(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -32,6 +33,7 @@ func TestMatchesBdMolPourPatrol(t *testing.T) {
 }
 
 func TestMatchesForSeqLoop(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -53,6 +55,7 @@ func TestMatchesForSeqLoop(t *testing.T) {
 }
 
 func TestMatchesOpenEndedWhileLoop(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string

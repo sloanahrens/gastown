@@ -191,6 +191,7 @@ func TestSlingDeadAgentForcesWhenBranchUnknown(t *testing.T) {
 // wrong rig root here would silently disable the whole guard, so it is worth
 // the git fixture.
 func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}

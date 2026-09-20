@@ -10,6 +10,7 @@ import (
 )
 
 func TestTrackingDependsOnID_CrossRigWrapsExternal(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
@@ -26,6 +27,7 @@ func TestTrackingDependsOnID_CrossRigWrapsExternal(t *testing.T) {
 }
 
 func TestTrackingDependsOnID_HQStaysLocal(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	got := trackingDependsOnID(townRoot, "hq-cv-test")
 	if got != "hq-cv-test" {

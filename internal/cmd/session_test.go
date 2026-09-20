@@ -12,6 +12,7 @@ import (
 )
 
 func TestSessionInfoJSONOutput(t *testing.T) {
+	t.Parallel()
 	info := &polecat.SessionInfo{
 		Polecat:   "alpha",
 		SessionID: "gt-alpha",
@@ -47,6 +48,7 @@ func TestSessionInfoJSONOutput(t *testing.T) {
 }
 
 func TestSessionStatusCmdJSONFlagWiring(t *testing.T) {
+	t.Parallel()
 	// Verify --json flag is registered on the session status command.
 	// This catches regressions where flag binding is accidentally removed,
 	// which would silently break formulas that depend on --json output.
@@ -60,6 +62,7 @@ func TestSessionStatusCmdJSONFlagWiring(t *testing.T) {
 }
 
 func TestSessionHealthCmdFlagWiring(t *testing.T) {
+	t.Parallel()
 	if sessionCmd.Commands() == nil {
 		t.Fatal("session command has no subcommands")
 	}
@@ -82,6 +85,7 @@ func TestSessionHealthCmdFlagWiring(t *testing.T) {
 }
 
 func TestSessionHealthReportJSONContract(t *testing.T) {
+	t.Parallel()
 	report := newSessionHealthReport("gt-vault", tmux.AgentDead, 30*time.Minute)
 	data, err := json.Marshal(report)
 	if err != nil {
@@ -160,6 +164,7 @@ func TestRunSessionHealthJSONSessionDead(t *testing.T) {
 }
 
 func TestSessionInfoJSONOutputNotRunning(t *testing.T) {
+	t.Parallel()
 	info := &polecat.SessionInfo{
 		Polecat:   "beta",
 		SessionID: "gt-beta",

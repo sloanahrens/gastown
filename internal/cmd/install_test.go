@@ -243,6 +243,7 @@ func installEnvMap(env []string) map[string]string {
 }
 
 func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 
 	if err := beads.EnsureConfigYAML(beadsDir, "hq"); err != nil {
@@ -262,6 +263,7 @@ func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
 }
 
 func TestEnsureBeadsConfigYAML_RepairsPrefixKeysAndPreservesOtherLines(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	path := filepath.Join(beadsDir, "config.yaml")
 	original := strings.Join([]string{
@@ -296,6 +298,7 @@ func TestEnsureBeadsConfigYAML_RepairsPrefixKeysAndPreservesOtherLines(t *testin
 }
 
 func TestEnsureBeadsConfigYAML_AddsMissingIssuePrefixKey(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	path := filepath.Join(beadsDir, "config.yaml")
 	if err := os.WriteFile(path, []byte("prefix: hq\n"), 0644); err != nil {
@@ -320,6 +323,7 @@ func TestEnsureBeadsConfigYAML_AddsMissingIssuePrefixKey(t *testing.T) {
 }
 
 func TestFormatInstallDoltError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		status    deps.DoltStatus
@@ -386,6 +390,7 @@ func TestFormatInstallDoltError(t *testing.T) {
 }
 
 func TestInstallDoltServerReuseRejectsNonMySQLPortPromptly(t *testing.T) {
+	t.Parallel()
 	ln := listenAndHoldTCP(t)
 	port := ln.Addr().(*net.TCPAddr).Port
 	start := time.Now()

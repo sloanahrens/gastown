@@ -34,6 +34,7 @@ func setupEstopCommandTestTown(t *testing.T) string {
 }
 
 func TestEstopCmdRejectsUnexpectedArgs(t *testing.T) {
+	t.Parallel()
 	if estopCmd.Args == nil {
 		t.Fatal("estopCmd.Args is nil")
 	}

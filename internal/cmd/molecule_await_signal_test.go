@@ -123,6 +123,7 @@ func TestCalculateEffectiveTimeout(t *testing.T) {
 }
 
 func TestAwaitSignalResult(t *testing.T) {
+	t.Parallel()
 	// Test that result struct marshals correctly
 	result := AwaitSignalResult{
 		Reason:  "signal",
@@ -239,6 +240,7 @@ func TestWaitForActivitySignal_PathWiring(t *testing.T) {
 }
 
 func TestEventRelevantToRig(t *testing.T) {
+	t.Parallel()
 	// Shapes below are copied from a live ~/gt/.events.jsonl, which is what an
 	// idle rig's witness was being woken by (gt-qwfp).
 	tests := []struct {
@@ -346,6 +348,7 @@ func TestEventRelevantToRig(t *testing.T) {
 }
 
 func TestAddressInRig(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr, rig string
 		want      bool
@@ -510,6 +513,7 @@ func TestWaitForEventsFile_DrainsBacklogOfOtherRigs(t *testing.T) {
 }
 
 func TestBackoffWindowResumption(t *testing.T) {
+	t.Parallel()
 	// Test the backoff window resumption logic that makes await-signal
 	// resilient to interrupts. When a backoff-until timestamp is in the
 	// future and remaining time <= full timeout, use remaining time.

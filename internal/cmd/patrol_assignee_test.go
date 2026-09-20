@@ -13,6 +13,7 @@ import (
 // patrol wisps invisible to gt hook, causing duplicate patrol wisps every
 // cycle.
 func TestPatrolAssignee_MatchesHookQueryAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		roleName string
@@ -55,6 +56,7 @@ func TestPatrolAssignee_MatchesHookQueryAddress(t *testing.T) {
 // gt-cut: bare "deacon" (no slash) is what gt patrol report used to write,
 // and it is invisible to gt hook's "deacon/" query.
 func TestPatrolAssignee_DeaconHasTrailingSlash(t *testing.T) {
+	t.Parallel()
 	got := patrolAssignee("deacon", "")
 	if got != "deacon/" {
 		t.Errorf("patrolAssignee(\"deacon\", \"\") = %q, want \"deacon/\"", got)

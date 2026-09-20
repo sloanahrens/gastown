@@ -6,6 +6,7 @@ import (
 )
 
 func TestFormatAssigneeDisplay(t *testing.T) {
+	t.Parallel()
 	if got := formatAssigneeDisplay(""); got != "-" {
 		t.Errorf("expected empty assignee to render as %q, got %q", "-", got)
 	}
@@ -18,6 +19,7 @@ func TestFormatAssigneeDisplay(t *testing.T) {
 }
 
 func TestRefineryStartAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := refineryStartCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected refinery start to define --agent flag")
@@ -31,6 +33,7 @@ func TestRefineryStartAgentFlag(t *testing.T) {
 }
 
 func TestRefineryAttachAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := refineryAttachCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected refinery attach to define --agent flag")
@@ -44,6 +47,7 @@ func TestRefineryAttachAgentFlag(t *testing.T) {
 }
 
 func TestRefineryRestartAgentFlag(t *testing.T) {
+	t.Parallel()
 	flag := refineryRestartCmd.Flags().Lookup("agent")
 	if flag == nil {
 		t.Fatal("expected refinery restart to define --agent flag")
@@ -57,6 +61,7 @@ func TestRefineryRestartAgentFlag(t *testing.T) {
 }
 
 func TestRefineryStartForceFlag(t *testing.T) {
+	t.Parallel()
 	flag := refineryStartCmd.Flags().Lookup("force")
 	if flag == nil {
 		t.Fatal("expected refinery start to define --force flag")
@@ -70,6 +75,7 @@ func TestRefineryStartForceFlag(t *testing.T) {
 }
 
 func TestRefineryRestartForceFlag(t *testing.T) {
+	t.Parallel()
 	flag := refineryRestartCmd.Flags().Lookup("force")
 	if flag == nil {
 		t.Fatal("expected refinery restart to define --force flag")
@@ -83,6 +89,7 @@ func TestRefineryRestartForceFlag(t *testing.T) {
 }
 
 func TestRefineryStartForegroundFlagHidden(t *testing.T) {
+	t.Parallel()
 	flag := refineryStartCmd.Flags().Lookup("foreground")
 	if flag == nil {
 		t.Fatal("expected hidden compatibility --foreground flag")

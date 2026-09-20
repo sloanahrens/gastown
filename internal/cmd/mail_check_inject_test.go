@@ -8,6 +8,7 @@ import (
 )
 
 func TestFormatInjectOutput(t *testing.T) {
+	t.Parallel()
 	// Helper to build test messages with a given priority.
 	msg := func(id, from, subject string, priority mail.Priority) *mail.Message {
 		return &mail.Message{

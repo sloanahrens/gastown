@@ -66,6 +66,7 @@ func blockedMR(id, worker, rig string) *beads.Issue {
 // states come from the same derivation `gt mq list` uses, and the terminal ones
 // say how the MR left the queue.
 func TestPolecatMRStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		mr   *beads.Issue
@@ -95,6 +96,7 @@ func TestPolecatMRStatus(t *testing.T) {
 // was already cleared, and a pointer with no bead behind it reports missing
 // rather than silently nothing.
 func TestPolecatMRIndexStatusFor(t *testing.T) {
+	t.Parallel()
 	open := mrBead("gt-mr-open", "topaz", "gastown", "open", "")
 	merged := mrBead("gt-mr-merged", "flint", "gastown", "closed", "merged")
 	otherRig := mrBead("gt-mr-other", "topaz", "greenplace", "open", "")
@@ -261,6 +263,7 @@ func TestPolecatInventoryMRJoin(t *testing.T) {
 // TestPolecatAgentMRDetails pins the text output: only what the join actually
 // found is claimed, and a polecat with neither agent nor MR adds no line.
 func TestPolecatAgentMRDetails(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		item PolecatListItem
@@ -285,6 +288,7 @@ func TestPolecatAgentMRDetails(t *testing.T) {
 // the compiled-in witness default instead of switching the grace off — grace
 // only delays a stalled verdict, so losing the config must not lose the grace.
 func TestPolecatSpawnGraceWindowFallsBack(t *testing.T) {
+	t.Parallel()
 	got := polecatSpawnGraceWindow("")
 	if got <= 0 {
 		t.Fatalf("polecatSpawnGraceWindow(\"\") = %s, want the compiled-in default", got)
@@ -296,6 +300,7 @@ func TestPolecatSpawnGraceWindowFallsBack(t *testing.T) {
 
 // TestPolecatSpawnGraceWindowReadsTownSettings drives the configured branch.
 func TestPolecatSpawnGraceWindowReadsTownSettings(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	settingsDir := filepath.Join(townRoot, "settings")
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
@@ -315,6 +320,7 @@ func TestPolecatSpawnGraceWindowReadsTownSettings(t *testing.T) {
 // dashboard consumer (gt-kqi2): the new fields are present when known and
 // omitted when not, so existing JSON readers keep working.
 func TestPolecatListJSONAddsAgentAndMRFields(t *testing.T) {
+	t.Parallel()
 	encoded, err := json.Marshal(PolecatListItem{
 		Rig: "gastown", Name: "topaz", State: polecat.StateWorking,
 		Agent: "flash", MRID: "gt-mr1", MRStatus: polecatMRStatusReady,

@@ -8,6 +8,7 @@ import (
 // TestSlingCrewFlagExpandsTarget verifies that --crew transforms a rig target
 // into a crew member path: "gastown --crew mel" → "gastown/crew/mel".
 func TestSlingCrewFlagExpandsTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		args     []string

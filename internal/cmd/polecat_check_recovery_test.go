@@ -964,6 +964,7 @@ func TestCheckRecoveryTextMatchesJSONForWorkingPolecat(t *testing.T) {
 // new WorkstateVerdict to silently fall into "default means SAFE_TO_NUKE"
 // the way WorkstateVerdictWorking did before this fix.
 func TestCheckRecoveryTextRendersUnknownVerdictAsUnsafe(t *testing.T) {
+	t.Parallel()
 	status := RecoveryStatus{Rig: "gastown", Polecat: "amethyst", Verdict: "SOME_FUTURE_VERDICT"}
 
 	var buf bytes.Buffer
@@ -976,6 +977,7 @@ func TestCheckRecoveryTextRendersUnknownVerdictAsUnsafe(t *testing.T) {
 }
 
 func TestPartialSpawnWithoutDurableHook(t *testing.T) {
+	t.Parallel()
 	assignee := "gastown/polecats/nitro"
 	tests := []struct {
 		name         string
@@ -1022,6 +1024,7 @@ func TestPartialSpawnWithoutDurableHook(t *testing.T) {
 }
 
 func TestRecoveryGitStateBlocker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		state *GitState
@@ -1065,6 +1068,7 @@ func TestRecoveryGitStateBlocker(t *testing.T) {
 }
 
 func TestRecoveryActionsForBlockers(t *testing.T) {
+	t.Parallel()
 	actions := recoveryActionsForBlockers([]string{"git_state=has_stash stash_count=1"})
 	if len(actions) != 1 || !strings.Contains(actions[0], "preserve branch-owned stash") {
 		t.Fatalf("actions = %v, want branch stash preservation action", actions)
@@ -1075,6 +1079,7 @@ func TestRecoveryActionsForBlockers(t *testing.T) {
 }
 
 func TestStaleCleanWithRealUnpushedStillBlocks(t *testing.T) {
+	t.Parallel()
 	status := RecoveryStatus{CleanupStatus: polecat.CleanupClean}
 	if blocker := recoveryGitStateBlocker("/tmp/polecat", &GitState{UnpushedCommits: 1}, nil); blocker != "" {
 		status.Blockers = append(status.Blockers, blocker)
@@ -1085,6 +1090,7 @@ func TestStaleCleanWithRealUnpushedStillBlocks(t *testing.T) {
 }
 
 func TestActiveMRBlocker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		mrID       string
@@ -1114,6 +1120,7 @@ func TestActiveMRBlocker(t *testing.T) {
 }
 
 func TestFormatSafetyCheckBlockers(t *testing.T) {
+	t.Parallel()
 	blocked := []*SafetyCheckResult{
 		{Polecat: "gastown/fury", Reasons: []string{"cleanup_status=unknown", "active_mr=hq-wisp-1 status=open"}},
 		{Polecat: "gastown/rust", Reasons: []string{"has work on hook (gt-abc)"}},
@@ -1127,6 +1134,7 @@ func TestFormatSafetyCheckBlockers(t *testing.T) {
 }
 
 func TestDisplaySafetyCheckBlockedToIncludesPredicates(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	displaySafetyCheckBlockedTo(&buf, []*SafetyCheckResult{{
 		Polecat: "gastown/fury",
@@ -1147,6 +1155,7 @@ func TestDisplaySafetyCheckBlockedToIncludesPredicates(t *testing.T) {
 }
 
 func TestDryRunNukeSummary(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		total   int
@@ -1167,6 +1176,7 @@ func TestDryRunNukeSummary(t *testing.T) {
 }
 
 func TestHasSubmittableWorkForRecoveryUsesUpstream(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 
 	if got := hasSubmittableWorkForRecovery(repo, nil, &GitState{UnpushedCommits: 99}, nil); got {
@@ -1183,6 +1193,7 @@ func TestHasSubmittableWorkForRecoveryUsesUpstream(t *testing.T) {
 }
 
 func TestHasSubmittableWorkForRecoveryIgnoresSelfUpstream(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/test")
 	writeRecoveryFile(t, filepath.Join(repo, "feature.txt"), "feature")
@@ -1196,6 +1207,7 @@ func TestHasSubmittableWorkForRecoveryIgnoresSelfUpstream(t *testing.T) {
 }
 
 func TestHasSubmittableWorkForRecoveryIgnoresPatchEquivalentBranch(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/equivalent")
 	writeRecoveryFile(t, filepath.Join(repo, "equiv.txt"), "equiv")
@@ -1216,6 +1228,7 @@ func TestHasSubmittableWorkForRecoveryIgnoresPatchEquivalentBranch(t *testing.T)
 }
 
 func TestHasSubmittableWorkForRecoveryUsesExplicitTargetAncestor(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/contained")
 	writeRecoveryFile(t, filepath.Join(repo, "contained.txt"), "contained")
@@ -1232,6 +1245,7 @@ func TestHasSubmittableWorkForRecoveryUsesExplicitTargetAncestor(t *testing.T) {
 }
 
 func TestHasSubmittableWorkForRecoveryUsesExplicitTargetCherry(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/cherry")
 	writeRecoveryFile(t, filepath.Join(repo, "cherry.txt"), "cherry")
@@ -1251,6 +1265,7 @@ func TestHasSubmittableWorkForRecoveryUsesExplicitTargetCherry(t *testing.T) {
 }
 
 func TestHasSubmittableWorkForRecoveryUsesExplicitTargetSquashNoop(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
 		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
@@ -1278,6 +1293,7 @@ func TestHasSubmittableWorkForRecoveryUsesExplicitTargetSquashNoop(t *testing.T)
 }
 
 func TestHasSubmittableWorkForRecoveryKeepsExplicitTargetUniquePatch(t *testing.T) {
+	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/unique")
 	writeRecoveryFile(t, filepath.Join(repo, "unique.txt"), "unique")
@@ -1290,6 +1306,7 @@ func TestHasSubmittableWorkForRecoveryKeepsExplicitTargetUniquePatch(t *testing.
 }
 
 func TestHasSubmittableWorkForRecoveryFallback(t *testing.T) {
+	t.Parallel()
 	if got := hasSubmittableWorkForRecovery("/does/not/exist", nil, &GitState{UnpushedCommits: 0}, nil); got {
 		t.Fatal("clean fallback git state should not require MQ submission")
 	}

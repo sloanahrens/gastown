@@ -116,6 +116,7 @@ func TestNudgeRefineryNoOpWithoutLog(t *testing.T) {
 }
 
 func TestIsDeferredBead(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		info *beadInfo
@@ -143,6 +144,7 @@ func TestIsDeferredBead(t *testing.T) {
 }
 
 func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		info *beadInfo
@@ -263,6 +265,7 @@ exit 1
 }
 
 func TestIsSlingConfigError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -347,6 +350,7 @@ exit 1
 // vars, not just the ones from settings/config.json or the repo-committed
 // .gastown/settings.json.
 func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -397,6 +401,7 @@ func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
 // so the test fails if rootMQ and repoMQ are ever collapsed into a single
 // "floor" or their precedence is flipped.
 func TestLoadRigCommandVarsPrecedence(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	repoRoot := filepath.Join(rigDir, "mayor", "rig")

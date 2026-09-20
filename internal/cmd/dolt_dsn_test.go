@@ -149,6 +149,7 @@ func TestBuildDoltDSNFromConfig_LocalHostFallbackPreserved(t *testing.T) {
 // TestLocalDoltSocketPath_RealSocket verifies the actual probe (not the
 // test mock) recognizes a live unix socket.
 func TestLocalDoltSocketPath_RealSocket(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("unix domain sockets not supported on Windows")
 	}
@@ -187,6 +188,7 @@ func TestLocalDoltSocketPath_RealSocket(t *testing.T) {
 }
 
 func TestLocalDoltSocketPath_StaleSocketReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("unix domain sockets not supported on Windows")
 	}
@@ -386,6 +388,7 @@ func TestLocalDoltSocketPath_StaleSocketIsNotRetried(t *testing.T) {
 
 // TestDoltSocketPathForPort pins the path derivation the probe wrapper uses.
 func TestDoltSocketPathForPort(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		port int
 		want string

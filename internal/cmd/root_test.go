@@ -11,6 +11,7 @@ import (
 )
 
 func TestCheckHelpFlag(t *testing.T) {
+	t.Parallel()
 	// Create a test command
 	testCmd := &cobra.Command{
 		Use:   "test",
@@ -101,6 +102,7 @@ func TestCheckHelpFlag(t *testing.T) {
 }
 
 func TestCheckHelpFlag_EdgeCases(t *testing.T) {
+	t.Parallel()
 	testCmd := &cobra.Command{
 		Use:   "test",
 		Short: "Test command",

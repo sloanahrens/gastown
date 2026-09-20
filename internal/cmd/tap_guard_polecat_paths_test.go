@@ -337,6 +337,7 @@ func TestPolecatPathGuardBashUnresolvableReadIsAllowed(t *testing.T) {
 }
 
 func TestSplitPolecatLayout(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		path     string
 		ok       bool
@@ -369,6 +370,7 @@ func TestSplitPolecatLayout(t *testing.T) {
 }
 
 func TestIsWithinPath(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		target string
 		root   string
@@ -450,6 +452,7 @@ func TestCanonicalizeToolPath(t *testing.T) {
 }
 
 func TestBashPathCandidates(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		word string
 		want []string
@@ -484,6 +487,7 @@ func TestBashPathCandidates(t *testing.T) {
 }
 
 func TestRedirectTargets(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		command string
 		want    []string
@@ -508,6 +512,7 @@ func TestRedirectTargets(t *testing.T) {
 }
 
 func TestSegmentCommandWord(t *testing.T) {
+	t.Parallel()
 	word, args := segmentCommandWord([]string{"GOFLAGS=-p=6", "env", "FOO=bar", "make", "build"})
 	if word != "make" {
 		t.Errorf("command word = %q, want make", word)

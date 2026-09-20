@@ -6,6 +6,7 @@ import (
 )
 
 func TestExtractBeadIDs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -94,6 +95,7 @@ func TestExtractBeadIDs(t *testing.T) {
 }
 
 func TestExtractCascadeFlag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		args        []string
@@ -145,6 +147,7 @@ func TestExtractCascadeFlag(t *testing.T) {
 }
 
 func TestChildBeadUnmarshal(t *testing.T) {
+	t.Parallel()
 	jsonData := `[{"id":"gt-abc","status":"open"},{"id":"gt-def","status":"closed"}]`
 	var children []childBead
 	if err := json.Unmarshal([]byte(jsonData), &children); err != nil {

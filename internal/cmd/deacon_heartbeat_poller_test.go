@@ -9,6 +9,7 @@ import (
 )
 
 func TestDeaconHeartbeatPollOnce_ExitsWhenSessionGone(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	shouldExit := deaconHeartbeatPollOnce(townRoot, func() bool { return false })
@@ -29,6 +30,7 @@ func TestDeaconHeartbeatPollOnce_ExitsWhenSessionGone(t *testing.T) {
 // the heartbeat cycle count still advances on every tick, proving the
 // background poller is what closes the gap, not incidental gt/bd traffic.
 func TestDeaconHeartbeatPollOnce_TouchesRepeatedlyWithZeroGtInvocations(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
 		t.Fatal(err)
@@ -56,6 +58,7 @@ func TestDeaconHeartbeatPollOnce_TouchesRepeatedlyWithZeroGtInvocations(t *testi
 }
 
 func TestDeaconHeartbeatPollOnce_SkipsTouchWhilePausedButKeepsPolling(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := deacon.Pause(townRoot, "maintenance", "test"); err != nil {
 		t.Fatalf("Pause error: %v", err)

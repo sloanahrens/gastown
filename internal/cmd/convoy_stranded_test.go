@@ -7,6 +7,7 @@ import (
 )
 
 func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   trackedIssueInfo
@@ -73,6 +74,7 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 }
 
 func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
+	t.Parallel()
 	dep := trackedDependency{
 		ID:     "gt-123",
 		Status: "open",
@@ -91,6 +93,7 @@ func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
 }
 
 func TestApplyFreshIssueDetails_BlankStatusBecomesUnknown(t *testing.T) {
+	t.Parallel()
 	dep := trackedDependency{ID: "gt-123"}
 	details := &issueDetails{ID: "gt-123", Status: "  "}
 
@@ -102,6 +105,7 @@ func TestApplyFreshIssueDetails_BlankStatusBecomesUnknown(t *testing.T) {
 }
 
 func TestIssueDetailsIsBlocked(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   issueDetails
@@ -161,6 +165,7 @@ func TestIssueDetailsIsBlocked(t *testing.T) {
 }
 
 func TestIsSlingableBead(t *testing.T) {
+	t.Parallel()
 	// Set up a fake town root with routes.jsonl
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")

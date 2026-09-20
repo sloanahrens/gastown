@@ -7,6 +7,7 @@ import (
 )
 
 func TestHasReplyPrefix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want bool
@@ -29,6 +30,7 @@ func TestHasReplyPrefix(t *testing.T) {
 }
 
 func TestNormalizeReplySubject(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, want string
 	}{
@@ -48,6 +50,7 @@ func TestNormalizeReplySubject(t *testing.T) {
 }
 
 func TestNormalizeAddress(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, want string
 	}{
@@ -64,6 +67,7 @@ func TestNormalizeAddress(t *testing.T) {
 }
 
 func TestPickReplyTo(t *testing.T) {
+	t.Parallel()
 	msg := func(id, from, subj string) *mail.Message {
 		return &mail.Message{ID: id, From: from, Subject: subj}
 	}

@@ -146,6 +146,7 @@ echo '[{"depends_on_id":"gt-other1"},{"depends_on_id":"external:gt-abc:gt-abc123
 // TestBdDepListRawIDsValidation verifies that bdDepListRawIDs rejects
 // invalid bead IDs to prevent SQL injection.
 func TestBdDepListRawIDsValidation(t *testing.T) {
+	t.Parallel()
 	_, err := bdDepListRawIDs("/tmp", "'; DROP TABLE deps; --", "down", "tracks")
 	if err == nil {
 		t.Error("bdDepListRawIDs should reject SQL injection attempts")
@@ -213,6 +214,7 @@ printf '[{"depends_on_id":"external:ag:ag-95s.1"}]\n'
 }
 
 func TestSQLExternalDepTargetClauseEscapesUnderscore(t *testing.T) {
+	t.Parallel()
 	got := sqlExternalDepTargetClause("gt-a_b")
 	want := "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'"
 	if got != want {

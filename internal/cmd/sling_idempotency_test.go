@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestMatchesSlingTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		target    string

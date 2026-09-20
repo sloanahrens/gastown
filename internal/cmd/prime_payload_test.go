@@ -26,6 +26,7 @@ func threeStepFormula() *formula.Formula {
 }
 
 func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
+	t.Parallel()
 	vars := map[string]string{"issue": "gt-abc"}
 	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), vars, 1)
 
@@ -52,6 +53,7 @@ func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 }
 
 func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
+	t.Parallel()
 	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), nil, 3)
 	if !strings.Contains(out, "Body of step three.") {
 		t.Fatalf("expected step 3 body:\n%s", out)
@@ -62,6 +64,7 @@ func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
 }
 
 func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
+	t.Parallel()
 	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), nil, 9)
 	if !strings.Contains(out, "Body of step one") {
 		t.Fatalf("out-of-range full step must fall back to step 1:\n%s", out)
@@ -69,12 +72,14 @@ func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
 }
 
 func TestRenderFormulaChecklist_EmptyFormula(t *testing.T) {
+	t.Parallel()
 	if out := renderFormulaChecklist("x", &formula.Formula{}, nil, 1); out != "" {
 		t.Fatalf("expected empty output for a formula without steps, got %q", out)
 	}
 }
 
 func TestPrimePayload_UnderBudgetRendersInOrder(t *testing.T) {
+	t.Parallel()
 	var p primePayload
 	p.add("hook", 1, false, "HOOK\n")
 	p.add("memories", 5, false, "MEMORIES\n")
@@ -86,6 +91,7 @@ func TestPrimePayload_UnderBudgetRendersInOrder(t *testing.T) {
 }
 
 func TestPrimePayload_DropsLowestPriorityFirstAndNamesIt(t *testing.T) {
+	t.Parallel()
 	var p primePayload
 	p.add("hook", 1, false, strings.Repeat("H", 40)+"\n")
 	p.add("directives", 3, false, strings.Repeat("D", 40)+"\n")
@@ -108,6 +114,7 @@ func TestPrimePayload_DropsLowestPriorityFirstAndNamesIt(t *testing.T) {
 }
 
 func TestPrimePayload_KeepSectionsNeverDropped(t *testing.T) {
+	t.Parallel()
 	var p primePayload
 	p.add("hook", 1, true, strings.Repeat("H", 100)+"\n")
 	p.add("memories", 5, false, strings.Repeat("M", 100)+"\n")
@@ -123,6 +130,7 @@ func TestPrimePayload_KeepSectionsNeverDropped(t *testing.T) {
 }
 
 func TestPrimePayload_ZeroBudgetMeansUnlimited(t *testing.T) {
+	t.Parallel()
 	var p primePayload
 	p.add("a", 1, false, strings.Repeat("A", 5000))
 	p.add("b", 2, false, strings.Repeat("B", 5000))
@@ -132,6 +140,7 @@ func TestPrimePayload_ZeroBudgetMeansUnlimited(t *testing.T) {
 }
 
 func TestPrimePayload_EmptySectionsAreSkipped(t *testing.T) {
+	t.Parallel()
 	var p primePayload
 	p.add("a", 1, false, "")
 	p.add("b", 2, false, "B\n")
@@ -159,6 +168,7 @@ func TestPrimeStaticTextDelivered_NeedsEnvAndFile(t *testing.T) {
 }
 
 func TestWriteSystemPromptFile_WritesOnlyOnChange(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "sub", ".claude", "system-prompt.md")
 	changed, err := writeSystemPromptFile(path, "one")
 	if err != nil || !changed {
@@ -184,6 +194,7 @@ func TestWriteSystemPromptFile_WritesOnlyOnChange(t *testing.T) {
 }
 
 func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
@@ -207,6 +218,7 @@ func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
 }
 
 func TestUseCompactResumePath(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		source, handoff string
 		delivered, want bool
@@ -228,6 +240,7 @@ func TestUseCompactResumePath(t *testing.T) {
 }
 
 func TestRenderFormulaStep_OneStepBody(t *testing.T) {
+	t.Parallel()
 	out, err := renderFormulaStep("mol-test-work", threeStepFormula(), map[string]string{"issue": "gt-abc"}, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +319,7 @@ func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
 }
 
 func TestAssemblePrimePayload_StaticTextAfterHookedWorkWhenNotDelivered(t *testing.T) {
+	t.Parallel()
 	payload := assemblePrimePayload(primeParts{
 		session:    func() string { return "SESSION\n" },
 		hookedWork: func() string { return "HOOKED\n" },
@@ -365,6 +379,7 @@ func TestOutputRoleDirectives_CapsLongDirective(t *testing.T) {
 }
 
 func TestPrimeStepFormulaName(t *testing.T) {
+	t.Parallel()
 	hooked := &beads.Issue{ID: "gt-1", Description: "attached_formula: mol-polecat-work\n"}
 	cases := []struct {
 		name     string
@@ -450,6 +465,7 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 }
 
 func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("ctx"), 0o644); err != nil {
 		t.Fatal(err)
@@ -473,6 +489,7 @@ func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
 }
 
 func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
+	t.Parallel()
 	f := &formula.Formula{Steps: []formula.Step{
 		{Title: "Huge", Description: strings.Repeat("a line of step body text\n", 400)}, // ~10 KB
 		{Title: "Small", Description: "tiny"},
@@ -487,6 +504,7 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 }
 
 func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
@@ -507,6 +525,7 @@ func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing
 }
 
 func TestAssemblePrimePayload_MailIsNeverDropped(t *testing.T) {
+	t.Parallel()
 	// `gt mail check --inject` ACKs deliveries as a side effect, so the mail
 	// section must survive the budget or the agent loses mail for good.
 	payload := assemblePrimePayload(primeParts{
@@ -541,6 +560,7 @@ func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
 }
 
 func TestPrimeStepVars_FollowTheResolvedFormula(t *testing.T) {
+	t.Parallel()
 	// A witness whose hooked bead has no attached formula reads its patrol
 	// formula, so the vars must be the patrol vars, not the (empty) attachment vars.
 	ctx := RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: t.TempDir()}
@@ -568,6 +588,7 @@ func TestPrimeStepVars_FollowTheResolvedFormula(t *testing.T) {
 }
 
 func TestSystemPromptPathFor_PolecatIsPerAgent(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	got := systemPromptPathFor(RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town})
 	want := filepath.Join(town, "myrig", "polecats", ".claude", "system-prompt-nux.md")
@@ -594,6 +615,7 @@ func TestOutputRoleDirectives_UncappedOutsideHookMode(t *testing.T) {
 }
 
 func TestFindAgentWorkWithAttempts_SingleAttemptDoesNotBackOff(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
 	start := time.Now()

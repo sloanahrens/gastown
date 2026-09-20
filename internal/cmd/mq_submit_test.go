@@ -18,6 +18,7 @@ import (
 // (gt-me9t) had that setting silently ignored — mq submit and gt done would
 // still auto-detect an integration branch as the MR target.
 func TestRefineryIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -42,6 +43,7 @@ func TestRefineryIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
 // TestRefineryIntegrationEnabledDefaultsTrue verifies the pre-gt-me9t
 // default is preserved when no layer configures the setting.
 func TestRefineryIntegrationEnabledDefaultsTrue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -54,6 +56,7 @@ func TestRefineryIntegrationEnabledDefaultsTrue(t *testing.T) {
 }
 
 func TestResolveMQSubmitCommitSHAUsesSubmittedBranch(t *testing.T) {
+	t.Parallel()
 	repo := t.TempDir()
 	runGitForMQSubmitTest(t, repo, "init")
 	runGitForMQSubmitTest(t, repo, "config", "user.email", "test@example.com")
@@ -86,6 +89,7 @@ func TestResolveMQSubmitCommitSHAUsesSubmittedBranch(t *testing.T) {
 }
 
 func TestVerifyMQSubmitPushedBranchRequiresRemoteBranch(t *testing.T) {
+	t.Parallel()
 	repo := t.TempDir()
 	remote := t.TempDir()
 	runGitForMQSubmitTest(t, remote, "init", "--bare")
@@ -142,6 +146,7 @@ func writeMQSubmitTestFile(t *testing.T, dir, name, content string) {
 }
 
 func TestValidateMoleculePrereqs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		children  []*beads.Issue

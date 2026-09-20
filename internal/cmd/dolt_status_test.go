@@ -12,6 +12,7 @@ import (
 )
 
 func TestReadBeadsRuntimeConfigServerMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -102,6 +103,7 @@ func TestReadBeadsRuntimeConfigPortFileFallback(t *testing.T) {
 }
 
 func TestReadBeadsRuntimeConfigIgnoresEmbeddedMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -122,6 +124,7 @@ func TestReadBeadsRuntimeConfigIgnoresEmbeddedMetadata(t *testing.T) {
 }
 
 func TestBeadsScopeHint_HQWarnsAgainstGlobal(t *testing.T) {
+	t.Parallel()
 	townRoot := filepath.Join(string(filepath.Separator), "custom", "town root")
 	hint := beadsScopeHint("hq", townRoot)
 
@@ -136,12 +139,14 @@ func TestBeadsScopeHint_HQWarnsAgainstGlobal(t *testing.T) {
 }
 
 func TestBeadsScopeHint_NonHQEmpty(t *testing.T) {
+	t.Parallel()
 	if hint := beadsScopeHint("gastown", "/custom/town"); hint != "" {
 		t.Fatalf("beadsScopeHint() = %q, want empty", hint)
 	}
 }
 
 func TestStatusDatabases_PrefersLiveList(t *testing.T) {
+	t.Parallel()
 	served := []string{"be", "gt", "hq", "om"}
 	cached := []string{"be", "gt", "hq", "om", "gastown"} // stale snapshot from server start
 
@@ -156,6 +161,7 @@ func TestStatusDatabases_PrefersLiveList(t *testing.T) {
 }
 
 func TestStatusDatabases_TrustsEmptyLiveList(t *testing.T) {
+	t.Parallel()
 	cached := []string{"gastown"}
 
 	dbs, _ := statusDatabases(nil, nil, cached)
@@ -166,6 +172,7 @@ func TestStatusDatabases_TrustsEmptyLiveList(t *testing.T) {
 }
 
 func TestStatusDatabases_FallsBackToCachedOnQueryError(t *testing.T) {
+	t.Parallel()
 	cached := []string{"be", "gt"}
 
 	dbs, label := statusDatabases(nil, errors.New("connection refused"), cached)

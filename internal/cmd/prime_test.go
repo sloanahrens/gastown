@@ -59,6 +59,7 @@ func writeTestRoutes(t *testing.T, townRoot string, routes []beads.Route) {
 }
 
 func TestRenderFormulaStepsFull_DeaconIncludesHeartbeatCommand(t *testing.T) {
+	t.Parallel()
 	out, err := renderFormulaStepsFull(constants.MolDeaconPatrol, t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("renderFormulaStepsFull: %v", err)
@@ -75,6 +76,7 @@ func TestRenderFormulaStepsFull_DeaconIncludesHeartbeatCommand(t *testing.T) {
 }
 
 func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRoutes(t, townRoot, []beads.Route{
 		{Prefix: "bd-", Path: "beads/mayor/rig"},
@@ -152,6 +154,7 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 }
 
 func TestRigBeadsRootPrefersRouteResolvedRigDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRoutes(t, townRoot, []beads.Route{
 		{Prefix: "gt-", Path: "gastown/mayor/rig"},
@@ -174,6 +177,7 @@ func TestRigBeadsRootPrefersRouteResolvedRigDir(t *testing.T) {
 }
 
 func TestRigBeadsRootFallsBackWhenRouteMissing(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	ctx := RoleContext{
 		Role:     RolePolecat,
@@ -263,6 +267,7 @@ func TestCheckHandoffMarkerDryRun_NoMarker(t *testing.T) {
 
 // TestDetectSessionState tests detectSessionState for all states.
 func TestDetectSessionState(t *testing.T) {
+	t.Parallel()
 	t.Run("normal_state", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
@@ -1038,6 +1043,7 @@ func TestCompactResumeReminder_NonPolecatNoGtDone(t *testing.T) {
 }
 
 func TestEnsureBeadsRedirect_WitnessCreatesRedirect(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigRoot := filepath.Join(townRoot, "testrig")
 	witnessDir := filepath.Join(rigRoot, "witness")
@@ -1068,6 +1074,7 @@ func TestEnsureBeadsRedirect_WitnessCreatesRedirect(t *testing.T) {
 }
 
 func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigRoot := filepath.Join(townRoot, "testrig")
 	rigBeadsDir := filepath.Join(rigRoot, ".beads")
@@ -1116,6 +1123,7 @@ func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 }
 
 func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *testing.T) {
+	t.Parallel()
 	runGit := func(t *testing.T, dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -1230,6 +1238,7 @@ func TestOutputRalphLoopDirective_PluginMissing(t *testing.T) {
 }
 
 func TestRalphLoopPluginInstalledIn(t *testing.T) {
+	t.Parallel()
 	pluginsDir := filepath.Join(t.TempDir(), "plugins")
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		t.Fatalf("mkdir plugins: %v", err)
@@ -1283,6 +1292,7 @@ func TestIsRalphLoopPluginInstalledUsesClaudeConfigDir(t *testing.T) {
 }
 
 func TestQuoteForRalphLoop(t *testing.T) {
+	t.Parallel()
 	quoted := quoteForRalphLoop("line1\r\nline2 \"quoted\" \\ $HOME `cmd`")
 	if !strings.HasPrefix(quoted, `"`) || !strings.HasSuffix(quoted, `"`) {
 		t.Fatalf("expected double-quoted prompt, got %q", quoted)
@@ -1300,6 +1310,7 @@ func TestQuoteForRalphLoop(t *testing.T) {
 }
 
 func TestIsBeadNotFound(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -1323,6 +1334,7 @@ func TestIsBeadNotFound(t *testing.T) {
 }
 
 func TestErrHookUnresolvable_IsErrors(t *testing.T) {
+	t.Parallel()
 	wrapped := fmt.Errorf("%w: agent=foo hook_bead=hq-igrp", ErrHookUnresolvable)
 	if !errors.Is(wrapped, ErrHookUnresolvable) {
 		t.Fatalf("errors.Is should report wrapped err matches ErrHookUnresolvable")
@@ -1337,6 +1349,7 @@ func TestErrHookUnresolvable_IsErrors(t *testing.T) {
 // integration check but ties pass/fail to a fixed spawn-timeout deadline —
 // this test proves the actual routing logic deterministically.
 func TestShouldSkipStartupMailInject(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		role string
 		want bool
@@ -1369,6 +1382,7 @@ func TestShouldSkipStartupMailInject(t *testing.T) {
 // Every role is listed, so adding a role to the code without deciding whether
 // it gets memories is a compile-visible omission rather than a silent default.
 func TestShouldRenderMemories(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		role string
 		want bool

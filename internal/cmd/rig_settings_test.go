@@ -767,6 +767,7 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 
 // Test helper functions
 func TestParseValue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string

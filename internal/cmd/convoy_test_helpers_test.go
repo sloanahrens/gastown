@@ -856,6 +856,7 @@ func (w *waveAssertHelper) Total(n int) *waveAssertHelper {
 // ---------------------------------------------------------------------------
 
 func TestWaveAssert_BasicUsage(t *testing.T) {
+	t.Parallel()
 	waves := []Wave{
 		{Number: 1, Tasks: []string{"a", "c"}},
 		{Number: 2, Tasks: []string{"b"}},
@@ -870,6 +871,7 @@ func TestWaveAssert_BasicUsage(t *testing.T) {
 }
 
 func TestWaveAssert_WrongWaveFails(t *testing.T) {
+	t.Parallel()
 	waves := []Wave{
 		{Number: 1, Tasks: []string{"a"}},
 	}
@@ -881,10 +883,12 @@ func TestWaveAssert_WrongWaveFails(t *testing.T) {
 }
 
 func TestWaveAssert_EmptyWaves(t *testing.T) {
+	t.Parallel()
 	waveAssert(t, nil).Total(0)
 }
 
 func TestWaveAssert_Integration_WithComputeWaves(t *testing.T) {
+	t.Parallel()
 	// Build a simple DAG and verify waves using the helper
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a":    {ID: "a", Type: "task", Blocks: []string{"b"}},

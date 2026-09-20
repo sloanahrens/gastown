@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestDoneContaminationBaseRef(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		defaultBranch  string

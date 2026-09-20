@@ -9,6 +9,7 @@ import (
 )
 
 func TestPatrolStateCollapseOutputJSON(t *testing.T) {
+	t.Parallel()
 	output := PatrolStateCollapseOutput{
 		Rig:            "gastown",
 		Checked:        2,
@@ -77,6 +78,7 @@ func TestPatrolStateCollapseOutputJSON(t *testing.T) {
 // able to tell a scan that resolved the queue from one that never did, and
 // must not read the latter as a clean bill of health.
 func TestPatrolStateCollapseJSONMRLookupHonesty(t *testing.T) {
+	t.Parallel()
 	clean := PatrolStateCollapseOutput{Rig: "gastown", MRLookupRan: true, BranchMRLookup: true, AllClear: true}
 	data, err := json.Marshal(clean)
 	if err != nil {
@@ -101,6 +103,7 @@ func TestPatrolStateCollapseJSONMRLookupHonesty(t *testing.T) {
 }
 
 func TestPatrolStateCollapseCmdRegistered(t *testing.T) {
+	t.Parallel()
 	found := false
 	for _, c := range patrolCmd.Commands() {
 		if c.Name() == "state-collapse" {

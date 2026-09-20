@@ -34,6 +34,7 @@ func (f fakeReuseMapShower) Show(issueID string) (*beads.Issue, error) {
 }
 
 func TestEffectivePolecatState(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		item     PolecatListItem
@@ -191,6 +192,7 @@ func TestEffectivePolecatState(t *testing.T) {
 // (the gt-yav3 MR1 bounce) — it must fail safe as an unconfirmed zombie and
 // say so loudly via BeadLookupFailed.
 func TestClassifyOrphanSession(t *testing.T) {
+	t.Parallel()
 	t.Run("no bead is foreign, not zombie", func(t *testing.T) {
 		got := classifyOrphanSession("gastown", "test-nudge-immediate-busy-refusal", "gt-test-nudge-immediate-busy-refusal", beadAbsent)
 		if got.State != polecat.StateForeign {
@@ -247,6 +249,7 @@ func TestClassifyOrphanSession(t *testing.T) {
 }
 
 func TestActiveMRBlocksReuse(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		mrID       string
@@ -315,6 +318,7 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 }
 
 func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		in           polecat.WorkstateInput
@@ -401,6 +405,7 @@ func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
 }
 
 func TestPolecatReuseStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		state            polecat.State

@@ -11,6 +11,7 @@ import (
 )
 
 func TestEnsureRoleWorktreeIntegrityRequiresPolecatMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	cwd := filepath.Join(townRoot, "gastown", "polecats", "deathclaw", "gastown")
 	if err := os.MkdirAll(cwd, 0755); err != nil {
@@ -27,6 +28,7 @@ func TestEnsureRoleWorktreeIntegrityRequiresPolecatMetadata(t *testing.T) {
 }
 
 func TestEnsureRoleWorktreeIntegrityAllowsNeutralDirectoryWithoutMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := ensureRoleWorktreeIntegrity(townRoot, townRoot, RoleUnknown); err != nil {
@@ -35,6 +37,7 @@ func TestEnsureRoleWorktreeIntegrityAllowsNeutralDirectoryWithoutMetadata(t *tes
 }
 
 func TestEnsureRoleWorktreeIntegrityRejectsMalformedOptionalMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	cwd := filepath.Join(townRoot, "scratch")
 	if err := os.MkdirAll(cwd, 0755); err != nil {

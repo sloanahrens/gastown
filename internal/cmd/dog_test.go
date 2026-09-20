@@ -63,6 +63,7 @@ func setupTestDog(t *testing.T, m *dog.Manager, townRoot, name string, state *do
 // TestDetectDogNameFromPath tests the path parsing logic used by runDogDone
 // to auto-detect the dog name from the current working directory.
 func TestDetectDogNameFromPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		path     string
@@ -195,6 +196,7 @@ func splitPath(path string) []string {
 // TestDogDone_AlreadyIdle verifies that dogDone handles the case where
 // a dog is already idle gracefully.
 func TestDogDone_AlreadyIdle(t *testing.T) {
+	t.Parallel()
 	m, tmpDir := testDogManager(t)
 
 	now := time.Now()
@@ -236,6 +238,7 @@ func TestDogDone_AlreadyIdle(t *testing.T) {
 // TestDogDone_WorkingToIdle verifies that dogDone transitions a working
 // dog back to idle state.
 func TestDogDone_WorkingToIdle(t *testing.T) {
+	t.Parallel()
 	m, tmpDir := testDogManager(t)
 
 	now := time.Now()
@@ -278,6 +281,7 @@ func TestDogDone_WorkingToIdle(t *testing.T) {
 
 // TestDogDone_NotFound verifies error handling for non-existent dog.
 func TestDogDone_NotFound(t *testing.T) {
+	t.Parallel()
 	m, _ := testDogManager(t)
 
 	err := m.ClearWork("nonexistent")
@@ -295,6 +299,7 @@ func TestDogDone_NotFound(t *testing.T) {
 // The predicate lives in internal/beads (shared with the daemon's dispatch
 // path); this pins that `gt dog done` selects exactly the same beads.
 func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		beads []*beads.Issue
@@ -517,6 +522,7 @@ func readBdCalls(t *testing.T, logPath string) []string {
 // TestDogClear_WorkingToIdle verifies that dogClear transitions a working
 // dog back to idle state.
 func TestDogClear_WorkingToIdle(t *testing.T) {
+	t.Parallel()
 	m, tmpDir := testDogManager(t)
 
 	now := time.Now()
@@ -561,6 +567,7 @@ func TestDogClear_WorkingToIdle(t *testing.T) {
 // TestDogClear_AlreadyIdle verifies that dogClear handles the case where
 // a dog is already idle gracefully.
 func TestDogClear_AlreadyIdle(t *testing.T) {
+	t.Parallel()
 	m, tmpDir := testDogManager(t)
 
 	now := time.Now()
@@ -601,6 +608,7 @@ func TestDogClear_AlreadyIdle(t *testing.T) {
 
 // TestDogClear_NotFound verifies error handling for non-existent dog.
 func TestDogClear_NotFound(t *testing.T) {
+	t.Parallel()
 	m, _ := testDogManager(t)
 
 	err := m.ClearWork("nonexistent")
@@ -659,6 +667,7 @@ func TestSplitPath(t *testing.T) {
 // =============================================================================
 
 func TestDogFormatTimeAgo(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		offset time.Duration
@@ -685,6 +694,7 @@ func TestDogFormatTimeAgo(t *testing.T) {
 }
 
 func TestDogFormatTimeAgo_ZeroTime(t *testing.T) {
+	t.Parallel()
 	got := dogFormatTimeAgo(time.Time{})
 	if got != "(unknown)" {
 		t.Errorf("dogFormatTimeAgo(zero) = %q, want '(unknown)'", got)

@@ -94,6 +94,7 @@ func TestRunRigListJSON_RepoPath(t *testing.T) {
 }
 
 func TestGetRigLED(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		hasWitness  bool

@@ -49,6 +49,7 @@ func fakeTown(t *testing.T) string {
 }
 
 func TestTownScanHazard(t *testing.T) {
+	t.Parallel()
 	town := fakeTown(t)
 	rig := filepath.Join(town, fakeRigName)
 	other := t.TempDir()
@@ -110,6 +111,7 @@ func TestTownScanHazard(t *testing.T) {
 // town rule is inert, so the guard behaves exactly as it did before gt-6e2l
 // for anything outside a Gas Town workspace.
 func TestTownScanHazardNoTown(t *testing.T) {
+	t.Parallel()
 	town := fakeTown(t)
 	for _, p := range []string{town, filepath.Join(town, fakeRigName), filepath.Join(town, fakeRigName, ".repo.git")} {
 		if got := townScanHazard(p, ""); got != "" {

@@ -16,6 +16,7 @@ import (
 // which meant batching never engaged on a town that files nearly all of its
 // work at P1 (gt-92ms).
 func TestFilterAndSortBatchCandidates_ExcludesOnlyP0(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	old := now.Add(-2 * time.Hour)
 	mrs := []*refinery.MRInfo{
@@ -48,6 +49,7 @@ func TestFilterAndSortBatchCandidates_ExcludesOnlyP0(t *testing.T) {
 }
 
 func TestFilterAndSortBatchCandidates_ExcludesYoungerThanMinAge(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	mrs := []*refinery.MRInfo{
 		{ID: "old-enough", Priority: 2, CreatedAt: now.Add(-2 * time.Hour)},
@@ -63,6 +65,7 @@ func TestFilterAndSortBatchCandidates_ExcludesYoungerThanMinAge(t *testing.T) {
 }
 
 func TestFilterAndSortBatchCandidates_SortsByScoreDescending(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	mrs := []*refinery.MRInfo{
 		{ID: "p4-old", Priority: 4, CreatedAt: now.Add(-48 * time.Hour)},
@@ -93,6 +96,7 @@ func idsOf(mrs []*refinery.MRInfo) []string {
 }
 
 func TestBuildBatchGateSteps(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		mq   *config.MergeQueueConfig
@@ -141,6 +145,7 @@ func TestBuildBatchGateSteps(t *testing.T) {
 }
 
 func TestResolveBatchMinAge(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		flag    string
@@ -174,6 +179,7 @@ func TestResolveBatchMinAge(t *testing.T) {
 }
 
 func TestResolveBatchMax(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		flag int
@@ -197,6 +203,7 @@ func TestResolveBatchMax(t *testing.T) {
 }
 
 func TestResolveBatchMinCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		flag int
@@ -224,6 +231,7 @@ func TestResolveBatchMinCount(t *testing.T) {
 // never reaches AssembleBatch/ProcessBatch. Driving it directly is what keeps
 // "no ProcessBatch call" true by construction: the call site sits behind it.
 func TestBelowBatchMinCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		candidates int
@@ -259,6 +267,7 @@ func TestBelowBatchMinCount(t *testing.T) {
 }
 
 func TestNewBatchConfig_KeepsDefaultsOtherThanMaxBatchSize(t *testing.T) {
+	t.Parallel()
 	def := refinery.DefaultBatchConfig()
 	got := newBatchConfig(7)
 

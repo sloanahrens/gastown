@@ -7,6 +7,7 @@ import (
 )
 
 func TestIsPRCreateCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -29,6 +30,7 @@ func TestIsPRCreateCommand(t *testing.T) {
 }
 
 func TestIsFeatureBranchCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string

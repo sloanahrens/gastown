@@ -37,6 +37,7 @@ func writeTestRigsConfig(t *testing.T, townRoot string, rigNames ...string) {
 }
 
 func TestGetTTL(t *testing.T) {
+	t.Parallel()
 	ttls := defaultTTLs
 
 	tests := []struct {
@@ -66,6 +67,7 @@ func TestGetTTL(t *testing.T) {
 }
 
 func TestWispAge(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -114,6 +116,7 @@ func TestWispAge(t *testing.T) {
 }
 
 func TestHasKeepLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		labels []string
@@ -138,6 +141,7 @@ func TestHasKeepLabel(t *testing.T) {
 }
 
 func TestHasComments(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		count int
@@ -158,6 +162,7 @@ func TestHasComments(t *testing.T) {
 }
 
 func TestIsReferenced(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		depCnt  int
@@ -186,6 +191,7 @@ func TestIsReferenced(t *testing.T) {
 }
 
 func TestCompactTruncate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		s      string
@@ -215,6 +221,7 @@ func TestCompactTruncate(t *testing.T) {
 }
 
 func TestExtractJSONArray(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		data string
@@ -258,6 +265,7 @@ func TestExtractJSONArray(t *testing.T) {
 }
 
 func TestLoadTTLConfigDefaults(t *testing.T) {
+	t.Parallel()
 	// With empty town root, should return defaults
 	ttls := loadTTLConfig("", "")
 
@@ -273,6 +281,7 @@ func TestLoadTTLConfigDefaults(t *testing.T) {
 }
 
 func TestLoadTTLConfigWithRoleDefaults(t *testing.T) {
+	t.Parallel()
 	// With empty town root, should return hardcoded defaults
 	ttls := loadTTLConfigWithRole("", "")
 
@@ -284,6 +293,7 @@ func TestLoadTTLConfigWithRoleDefaults(t *testing.T) {
 }
 
 func TestLoadTTLConfigWithRoleSkipsInvalidPaths(t *testing.T) {
+	t.Parallel()
 	// With nonexistent paths, rig bead lookup should gracefully skip
 	ttls := loadTTLConfigWithRole("/nonexistent/town", "myrig")
 
@@ -297,6 +307,7 @@ func TestLoadTTLConfigWithRoleSkipsInvalidPaths(t *testing.T) {
 }
 
 func TestCleanOrphanedWispDepsUsesTypedTargets(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("compact.go")
 	if err != nil {
 		t.Fatalf("read compact.go: %v", err)
@@ -335,6 +346,7 @@ func compactSourceBetween(t *testing.T, source, startMarker, endMarker string) s
 // town-level database (e.g. the deacon's ~/gt/deacon) must still reach every
 // registered rig's database, not just the ambient one.
 func TestResolveCompactTargetsReachesAllRegisteredRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRigsConfig(t, townRoot, "gastown", "beads")
 
@@ -372,6 +384,7 @@ func TestResolveCompactTargetsReachesAllRegisteredRigs(t *testing.T) {
 // compact" from inside a registered rig's own directory doesn't compact
 // that rig's database twice.
 func TestResolveCompactTargetsDedupesAmbientRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRigsConfig(t, townRoot, "gastown", "beads")
 
@@ -398,6 +411,7 @@ func TestResolveCompactTargetsDedupesAmbientRig(t *testing.T) {
 
 // TestResolveCompactTargetsExplicitRig ensures --rig scopes to only that rig.
 func TestResolveCompactTargetsExplicitRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRigsConfig(t, townRoot, "gastown", "beads")
 
@@ -416,6 +430,7 @@ func TestResolveCompactTargetsExplicitRig(t *testing.T) {
 
 // TestResolveCompactTargetsNoTownRoot falls back to just the ambient target.
 func TestResolveCompactTargetsNoTownRoot(t *testing.T) {
+	t.Parallel()
 	targets, err := resolveCompactTargets("", "/some/dir", "")
 	if err != nil {
 		t.Fatalf("resolveCompactTargets: %v", err)
@@ -426,6 +441,7 @@ func TestResolveCompactTargetsNoTownRoot(t *testing.T) {
 }
 
 func TestResolveRigPathNotFound(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRigsConfig(t, townRoot, "gastown")
 
@@ -435,6 +451,7 @@ func TestResolveRigPathNotFound(t *testing.T) {
 }
 
 func TestResolveRigPathNoTownRoot(t *testing.T) {
+	t.Parallel()
 	if _, err := resolveRigPath("", "gastown"); err == nil {
 		t.Error("expected error when town root is unknown, got nil")
 	}

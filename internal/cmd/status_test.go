@@ -38,6 +38,7 @@ func captureStderr(t *testing.T, fn func()) string {
 }
 
 func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRoutes(t, townRoot, []beads.Route{
 		{Prefix: "bd-", Path: "beads/mayor/rig"},
@@ -77,6 +78,7 @@ func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 }
 
 func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestRoutes(t, townRoot, []beads.Route{
 		{Prefix: "bd-", Path: "beads/mayor/rig"},
@@ -99,6 +101,7 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 }
 
 func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
+	t.Parallel()
 	// Verify that a session in allSessions with value=false (zombie: tmux alive,
 	// agent dead) results in agent.Running=false. This is the core fix for gt-bd6i3.
 	townRoot := t.TempDir()
@@ -131,6 +134,7 @@ func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
 }
 
 func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
+	t.Parallel()
 	// Verify that a session not in allSessions at all results in agent.Running=false.
 	townRoot := t.TempDir()
 	writeTestRoutes(t, townRoot, []beads.Route{
@@ -159,6 +163,7 @@ func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
 }
 
 func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {
+	t.Parallel()
 	// Verify that a zombie agent (Running=false) shows ○ (stopped), not ● (running)
 	agent := AgentRuntime{Running: false}
 	indicator := buildStatusIndicator(agent)
@@ -168,6 +173,7 @@ func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {
 }
 
 func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
+	t.Parallel()
 	// Verify that an alive agent (Running=true) shows ● (running)
 	agent := AgentRuntime{Running: true}
 	indicator := buildStatusIndicator(agent)
@@ -177,6 +183,7 @@ func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 }
 
 func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
+	t.Parallel()
 	agent := AgentRuntime{Running: true, NotificationLevel: beads.NotifyMuted}
 	indicator := buildStatusIndicator(agent)
 	if !strings.Contains(indicator, "🔕") {
@@ -185,6 +192,7 @@ func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
 }
 
 func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
+	t.Parallel()
 	status := TownStatus{
 		Name:     "gt",
 		Location: "/tmp/gt",
@@ -209,6 +217,7 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 }
 
 func TestOutputStatusText_ContainerSlot(t *testing.T) {
+	t.Parallel()
 	held := TownStatus{
 		Name:     "gt",
 		Location: "/tmp/gt",
@@ -308,6 +317,7 @@ func TestRunStatusWatch_RejectsJSONCombo(t *testing.T) {
 }
 
 func TestTryStatusDetailLockContention(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	release, ok := tryStatusDetailLock(townRoot)

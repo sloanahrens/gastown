@@ -6,6 +6,7 @@ import (
 )
 
 func TestMaintainCommand_Registered(t *testing.T) {
+	t.Parallel()
 	var found bool
 	for _, cmd := range rootCmd.Commands() {
 		if cmd.Name() == "maintain" {
@@ -42,6 +43,7 @@ func TestMaintainCommand_Registered(t *testing.T) {
 }
 
 func TestMaintainNeedsFlatten(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		commitCount int
@@ -73,6 +75,7 @@ func TestMaintainNeedsFlatten(t *testing.T) {
 }
 
 func TestMaintainCountRendering(t *testing.T) {
+	t.Parallel()
 	known := maintainDBInfo{name: "om", commitCount: 608, countKnown: true}
 	zero := maintainDBInfo{name: "om", commitCount: 0, countKnown: true}
 	unknown := maintainDBInfo{name: "om", countErr: errors.New("connect: connection refused")}
@@ -107,6 +110,7 @@ func TestMaintainCountRendering(t *testing.T) {
 }
 
 func TestMaintainDBInfo(t *testing.T) {
+	t.Parallel()
 	// Verify the struct can hold expected values.
 	info := maintainDBInfo{
 		name:        "gastown",
@@ -126,6 +130,7 @@ func TestMaintainDBInfo(t *testing.T) {
 }
 
 func TestMaintainConstants(t *testing.T) {
+	t.Parallel()
 	if defaultMaintainThreshold != 100 {
 		t.Errorf("expected default threshold 100, got %d", defaultMaintainThreshold)
 	}
@@ -136,6 +141,7 @@ func TestMaintainConstants(t *testing.T) {
 // whose remote has moved on makes the two histories disagree, and the
 // force-push that follows a flatten then deletes the remote-only commits.
 func TestMaintainPreflightRefusal(t *testing.T) {
+	t.Parallel()
 	fetchErr := errors.New("DOLT_FETCH origin: dial tcp 127.0.0.1:443: connect: connection refused")
 
 	tests := []struct {
@@ -202,6 +208,7 @@ func TestMaintainPreflightRefusal(t *testing.T) {
 // lose if someone "simplified" the failed-check branch to a pass: a pre-flight
 // error must never be reported as cleared.
 func TestMaintainPreflightRefusalIsNotSilent(t *testing.T) {
+	t.Parallel()
 	failed := maintainPreflight{Remote: "origin", Err: errors.New("boom")}
 	if failed.refusal(false) == "" {
 		t.Fatal("a failed pre-flight cleared the guard — flatten would proceed unverified")

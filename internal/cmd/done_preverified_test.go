@@ -200,6 +200,7 @@ func initPreVerifyTestGitRepo(t *testing.T, dir string) {
 // worktree HEAD that never actually contains the target base being
 // stamped. resolvePreVerification must refuse to stamp in that case.
 func TestResolvePreVerification(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()

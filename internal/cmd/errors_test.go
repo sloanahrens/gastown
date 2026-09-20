@@ -7,6 +7,7 @@ import (
 )
 
 func TestSilentExitError_Error(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		code int
@@ -30,6 +31,7 @@ func TestSilentExitError_Error(t *testing.T) {
 }
 
 func TestNewSilentExit(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		code int
 	}{
@@ -53,6 +55,7 @@ func TestNewSilentExit(t *testing.T) {
 }
 
 func TestIsSilentExit(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		err          error
@@ -81,6 +84,7 @@ func TestIsSilentExit(t *testing.T) {
 }
 
 func TestSilentExitError_Is(t *testing.T) {
+	t.Parallel()
 	err := NewSilentExit(1)
 	var target *SilentExitError
 	if !errors.As(err, &target) {

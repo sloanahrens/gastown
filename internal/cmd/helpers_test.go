@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseRigSlashName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -34,6 +35,7 @@ func TestParseRigSlashName(t *testing.T) {
 }
 
 func TestInferRigFromCrewName(t *testing.T) {
+	t.Parallel()
 	// Set up a fake town structure in a temp dir
 	townRoot := t.TempDir()
 
@@ -80,6 +82,7 @@ func TestInferRigFromCrewName(t *testing.T) {
 }
 
 func TestIsShellCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cmd    string
 		expect bool

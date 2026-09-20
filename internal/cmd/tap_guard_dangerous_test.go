@@ -9,6 +9,7 @@ import (
 )
 
 func TestExtractCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -30,6 +31,7 @@ func TestExtractCommand(t *testing.T) {
 }
 
 func TestMatchesAllFragments(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		command   string
@@ -56,6 +58,7 @@ func TestMatchesAllFragments(t *testing.T) {
 }
 
 func TestMatchesDangerousRmRf(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -86,6 +89,7 @@ func TestMatchesDangerousRmRf(t *testing.T) {
 }
 
 func TestMatchesDangerousGitPush(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -119,6 +123,7 @@ func TestMatchesDangerousGitPush(t *testing.T) {
 // every reset to a local ref or a pathspec still works, since that is the
 // ordinary squash and unstage vocabulary.
 func TestMatchesDangerousGitReset(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -152,6 +157,7 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 }
 
 func TestMatchesSudo(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -180,6 +186,7 @@ func TestMatchesSudo(t *testing.T) {
 }
 
 func TestMatchesPackageInstall(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -225,6 +232,7 @@ func TestMatchesPackageInstall(t *testing.T) {
 // capital 'S' sync/install meaning) as if they were installs
 // (finding 7, gt-wisp-db27).
 func TestMatchesPacmanInstall(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -255,6 +263,7 @@ func TestMatchesPacmanInstall(t *testing.T) {
 // matching never fires on it unless evaluateDangerousCommand recurses into
 // the nested command text (finding 4, gt-wisp-db27).
 func TestNestedShellCommands(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -286,6 +295,7 @@ func TestNestedShellCommands(t *testing.T) {
 // came from treating quoted prose as command text, and SQL strings are the
 // same category of risk, not a shell hazard like bash -c/eval.
 func TestQuotedSQLStaysOpaque(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		`dolt sql -q "DROP TABLE issues"`,
 		`psql -c "TRUNCATE TABLE users"`,
@@ -306,6 +316,7 @@ func TestQuotedSQLStaysOpaque(t *testing.T) {
 // recurse into $(...) and `...` command substitution, since these really do
 // execute as shell (unlike a quoted SQL string or mail body).
 func TestCommandSubstitutionRecursion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -328,6 +339,7 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 }
 
 func TestMatchesUnboundedScan(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -402,6 +414,7 @@ func lowerTokens(command string) []string {
 // commands must stay allowed for non-polecat sessions (crew, refinery, mayor
 // all push the default branch directly by design).
 func TestMatchesPolecatMainPush(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -484,6 +497,7 @@ func TestPolecatMainPushReachesGuard(t *testing.T) {
 // pass (no dangerous-command block) once matching is shell-aware and
 // token-exact. See mail hq-wisp-io521 for the original reports.
 func TestGtMkrjRegressions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -546,6 +560,7 @@ func TestGtMkrjRegressions(t *testing.T) {
 // dangerous command chained after it isn't hidden inside one opaque
 // shlex token (e.g. "hi;rm" swallowing "rm").
 func TestGluedOperatorsAreBlocked(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -569,6 +584,7 @@ func TestGluedOperatorsAreBlocked(t *testing.T) {
 // this pass — see TestQuotedSQLStaysOpaque and TestGtMkrjRegressions for
 // the same invariant on other matchers.
 func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
+	t.Parallel()
 	command := `sed -i '' "s|OLD|jq -r '.[] // []'|" watch.sh`
 	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted operators must stay opaque", command, reason)
@@ -580,6 +596,7 @@ func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
 // earlier in the same command line must be blocked exactly like a literal
 // root argument.
 func TestShellVariableScanRootIsBlocked(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -601,6 +618,7 @@ func TestShellVariableScanRootIsBlocked(t *testing.T) {
 // false positive — only a variable that actually resolves to a denylisted
 // root should block.
 func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
+	t.Parallel()
 	command := "x=./src; bfs $x -name regex.h"
 	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — variable resolves to a bounded path", command, reason)
@@ -613,6 +631,7 @@ func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
 // not block the command — mirroring TestQuotedSQLStaysOpaque for quoted
 // strings.
 func TestHeredocBodyStaysOpaque(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -635,6 +654,7 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 // removes the body span and leaves surrounding shell text — including a
 // second, genuinely dangerous command after the terminator — intact.
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
+	t.Parallel()
 	command := "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /"
 	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
 		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — real command after heredoc must still be checked", command)
@@ -649,6 +669,7 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 // stay allowed even though joining tokens (the old behavior) would have
 // fabricated a dangerous command line that was never actually live.
 func TestNestedShellCPositionalArgsAreNotConcatenated(t *testing.T) {
+	t.Parallel()
 	command := `bash -c "echo a" "&&" "rm -rf /"`
 	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — extra -c args are positional params, not appended command text", command, reason)
@@ -657,6 +678,7 @@ func TestNestedShellCPositionalArgsAreNotConcatenated(t *testing.T) {
 
 // TestDangerousGuard_Integration tests the full pattern set end-to-end.
 func TestDangerousGuard_Integration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -775,6 +797,7 @@ func dangerousCommandGuardMatcher(command string) bool {
 // like "/usr/bin/find /" or "ls -laR /". This walks the real matcher config
 // from internal/hooks, not a hand-rolled stand-in for it.
 func TestHookMatchersRouteKnownDangerousCommands(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -809,6 +832,7 @@ func TestHookMatchersRouteKnownDangerousCommands(t *testing.T) {
 // commands alone — the guard itself would allow them anyway, but a matcher
 // that fires on everything defeats the point of routing selectively.
 func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"find . -name x",
 		"find /tmp -name x",
@@ -887,6 +911,7 @@ func TestUnboundedScanLiteralHomeDir(t *testing.T) {
 // a polecat (whose branch pushes are its job) and a refinery. Read-only git
 // from a witness stays allowed.
 func TestMatchesWitnessGitPush(t *testing.T) {
+	t.Parallel()
 	blocked := []string{
 		"cd /Users/sloan/gt/gastown/polecats/slate/gastown && git push origin polecat/slate/gt-nkyy+x:b43cc157 --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345",
 		"git push origin polecat/slate/gt-nkyy+x --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345",
@@ -958,6 +983,7 @@ func TestWitnessGitPushReachesGuard(t *testing.T) {
 // starting with *" when it cannot statically resolve them. This caused
 // every if-gated deny hook to fire on unrelated commands.
 func TestDangerousCommand_Gt3mp1Regression(t *testing.T) {
+	t.Parallel()
 	// Pattern (a): Commands with { brace group containing a quoted string
 	// trip the if-glob evaluator, which then matches any leading-* glob
 	braceGroupCommands := []string{

@@ -15,6 +15,7 @@ import (
 // (see ttmux.Tmux.ListSessions' ErrNoServer handling), so this exercises
 // the real code path end to end without needing a live tmux server.
 func TestScanForResume_NoAccountsConfigured(t *testing.T) {
+	t.Parallel()
 	tmux := ttmux.NewTmuxWithSocket("gt-749e-test-no-such-socket")
 	results, candidates, err := scanForResume(tmux, nil)
 	if err != nil {
@@ -29,6 +30,7 @@ func TestScanForResume_NoAccountsConfigured(t *testing.T) {
 // rotation result and logs it every cycle. With no resume candidates,
 // runResumeNudges must return a non-nil slice so it marshals to "[]".
 func TestRunResumeNudges_EmptyCandidatesMarshalsToEmptyArray(t *testing.T) {
+	t.Parallel()
 	results := runResumeNudges(nil, nil, true)
 	if results == nil {
 		t.Fatal("runResumeNudges(nil candidates) returned nil, want non-nil empty slice")
@@ -47,6 +49,7 @@ func TestRunResumeNudges_EmptyCandidatesMarshalsToEmptyArray(t *testing.T) {
 }
 
 func TestRunResumeNudges_WithCandidatesDryRun(t *testing.T) {
+	t.Parallel()
 	candidates := []quota.ResumeCandidate{
 		{Session: "rig/witness", ResetsAt: "5pm"},
 	}

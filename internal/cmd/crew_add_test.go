@@ -31,6 +31,7 @@ func (f *fakeAgentBeadUpserter) CreateOrReopenAgentBead(id, title string, fields
 }
 
 func TestUpsertCrewAgentBead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)

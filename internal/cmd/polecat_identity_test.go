@@ -8,6 +8,7 @@ import (
 )
 
 func TestExtractWorkType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		title     string
@@ -58,6 +59,7 @@ func TestExtractWorkType(t *testing.T) {
 }
 
 func TestFormatRelativeTimeCV(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 
 	tests := []struct {
@@ -98,6 +100,7 @@ func TestFormatRelativeTimeCV(t *testing.T) {
 }
 
 func TestFormatLanguageStats(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		langs  map[string]int
@@ -119,6 +122,7 @@ func TestFormatLanguageStats(t *testing.T) {
 }
 
 func TestFormatWorkTypeStats(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		types  map[string]int
@@ -140,6 +144,7 @@ func TestFormatWorkTypeStats(t *testing.T) {
 }
 
 func TestSessionToAgentID(t *testing.T) {
+	t.Parallel()
 	// Generate known session names and verify the agent ID
 	sessionName := crewSessionName("gastown", "tester")
 	agentID := sessionToAgentID(sessionName)
@@ -155,6 +160,7 @@ func TestSessionToAgentID(t *testing.T) {
 }
 
 func TestSessionToAgentID_Fallback(t *testing.T) {
+	t.Parallel()
 	// Invalid session names should return the input as fallback
 	got := sessionToAgentID("random-session-name")
 	// Should still return something (either parsed or fallback)
@@ -167,6 +173,7 @@ func TestSessionToAgentID_Fallback(t *testing.T) {
 // deacon) must produce a trailing-slash address so writes from gt sling match
 // the form queried by gt hook / runMoleculeStatus / buildAgentIdentity.
 func TestSessionToAgentID_TownLevel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		session string
 		want    string
@@ -185,6 +192,7 @@ func TestSessionToAgentID_TownLevel(t *testing.T) {
 }
 
 func TestFormatCountStyled(t *testing.T) {
+	t.Parallel()
 	// Test that zero returns a dim "0"
 	got := formatCountStyled(0, style.Success)
 	if got == "" {

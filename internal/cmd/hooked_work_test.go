@@ -9,6 +9,7 @@ import (
 )
 
 func TestResolveHookLookupWorkDirUsesRouteOwnedRigDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
@@ -33,6 +34,7 @@ func TestResolveHookLookupWorkDirUsesRouteOwnedRigDir(t *testing.T) {
 }
 
 func TestResolveHookLookupWorkDirLeavesTownLevelTargetLocal(t *testing.T) {
+	t.Parallel()
 	workDir := filepath.Join(t.TempDir(), "mayor")
 	got := resolveHookLookupWorkDir(workDir, "mayor/", t.TempDir())
 	if got != workDir {
@@ -41,6 +43,7 @@ func TestResolveHookLookupWorkDirLeavesTownLevelTargetLocal(t *testing.T) {
 }
 
 func TestResolveHookLookupWorkDirRejectsUnsafeTargetPath(t *testing.T) {
+	t.Parallel()
 	workDir := filepath.Join(t.TempDir(), "gastown", "polecats", "toast")
 	townRoot := t.TempDir()
 
@@ -55,6 +58,7 @@ func TestResolveHookLookupWorkDirRejectsUnsafeTargetPath(t *testing.T) {
 }
 
 func TestResolveHookLookupWorkDirIgnoresEscapingRoute(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
@@ -75,6 +79,7 @@ func TestResolveHookLookupWorkDirIgnoresEscapingRoute(t *testing.T) {
 }
 
 func TestResolveHookLookupWorkDirUsesSafeUnknownRigFallback(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := filepath.Join(townRoot, "gastown", "polecats", "toast")
 	got := resolveHookLookupWorkDir(workDir, "other/refinery", townRoot)
@@ -85,6 +90,7 @@ func TestResolveHookLookupWorkDirUsesSafeUnknownRigFallback(t *testing.T) {
 }
 
 func TestActiveWorkStatusesPreferHookedOverInProgress(t *testing.T) {
+	t.Parallel()
 	got := activeWorkStatuses()
 	want := []string{beads.StatusHooked, string(beads.StatusInProgress)}
 	if len(got) != len(want) {
@@ -98,6 +104,7 @@ func TestActiveWorkStatusesPreferHookedOverInProgress(t *testing.T) {
 }
 
 func TestActiveWorkMergeBeadListsDedupeAndSort(t *testing.T) {
+	t.Parallel()
 	primary := []*beads.Issue{
 		{ID: "gt-older", UpdatedAt: "2026-01-01T00:00:00Z"},
 		{ID: "gt-same", UpdatedAt: "2026-01-02T00:00:00Z", Title: "durable"},

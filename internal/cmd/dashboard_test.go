@@ -9,6 +9,7 @@ import (
 )
 
 func TestDashboardCmd_FlagsExist(t *testing.T) {
+	t.Parallel()
 	// Verify required flags exist with correct defaults
 	portFlag := dashboardCmd.Flags().Lookup("port")
 	if portFlag == nil {
@@ -40,6 +41,7 @@ func TestDashboardCmd_FlagsExist(t *testing.T) {
 }
 
 func TestDashboardCmd_IsRegistered(t *testing.T) {
+	t.Parallel()
 	// Verify command is registered under root
 	found := false
 	for _, cmd := range rootCmd.Commands() {
@@ -54,12 +56,14 @@ func TestDashboardCmd_IsRegistered(t *testing.T) {
 }
 
 func TestDashboardCmd_HasCorrectGroup(t *testing.T) {
+	t.Parallel()
 	if dashboardCmd.GroupID != GroupDiag {
 		t.Errorf("dashboard should be in diag group, got %s", dashboardCmd.GroupID)
 	}
 }
 
 func TestDashboardCmd_RequiresWorkspace(t *testing.T) {
+	t.Parallel()
 	// Create a test command that simulates running outside workspace
 	cmd := &cobra.Command{}
 	cmd.SetArgs([]string{})

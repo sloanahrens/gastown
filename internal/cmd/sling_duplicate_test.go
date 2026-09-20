@@ -54,6 +54,7 @@ GetRigDirForName's route-resolved lookups generally (TestRigBeadsRootPrefersRout
 )
 
 func TestExtractContentRefs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		text      string
@@ -130,6 +131,7 @@ func TestExtractContentRefs(t *testing.T) {
 }
 
 func TestTestNamesOverlap(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		a, b string
 		want bool
@@ -151,6 +153,7 @@ func TestTestNamesOverlap(t *testing.T) {
 // TestSlingDuplicateCheckCatchesTonightPairs is the acceptance bar on gt-mcq:
 // replaying tonight's two double dispatches against the check must flag both.
 func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
+	t.Parallel()
 	t.Run("gt-80o and gt-g6b", func(t *testing.T) {
 		// gt-g6b was dispatched while gt-80o was still open, so the pool holds
 		// the closed-after-the-fact side. Replay in both directions: whichever
@@ -222,6 +225,7 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 // genuinely distinct bead that happens to share a file, but shares no test,
 // must pass with a warning rather than being refused.
 func TestSlingDuplicateNegativeControl(t *testing.T) {
+	t.Parallel()
 	existing := newDuplicateCandidate("gt-aaaa", "gt sling retries the hook write on lock contention", "open",
 		"The retry loop lives in internal/cmd/sling.go and needs a bounded backoff.",
 		"Regression test: TestSlingRetryAfterLockTimeout.")
@@ -253,6 +257,7 @@ func TestSlingDuplicateNegativeControl(t *testing.T) {
 }
 
 func TestDecideSlingDuplicates(t *testing.T) {
+	t.Parallel()
 	if got := decideSlingDuplicates("gt-x", nil); got.Message != "" || got.Blocked {
 		t.Errorf("no matches should produce no report, got %+v", got)
 	}
@@ -289,6 +294,7 @@ func TestDecideSlingDuplicates(t *testing.T) {
 }
 
 func TestFindDuplicateMatchesSkipsSelfAndEmpty(t *testing.T) {
+	t.Parallel()
 	candidate := newDuplicateCandidate("gt-x", "fix TestFoo", "open", "in internal/cmd/sling.go")
 	pool := []duplicateCandidate{
 		candidate, // must not match itself
@@ -416,6 +422,7 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 // TestNoteSlingCandidateDispatchedNilIsSafe guards the call sites, which pass
 // through a possibly-nil candidate when the check was skipped.
 func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
+	t.Parallel()
 	resetDuplicatePoolCache()
 	t.Cleanup(resetDuplicatePoolCache)
 	noteSlingCandidateDispatched(t.TempDir(), nil)

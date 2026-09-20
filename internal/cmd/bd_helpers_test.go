@@ -11,6 +11,7 @@ import (
 )
 
 func TestBdCmd_Build(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		setup    func() *bdCmd
@@ -110,6 +111,7 @@ func TestBdCmd_Build(t *testing.T) {
 }
 
 func TestBdCmd_Stderr(t *testing.T) {
+	t.Parallel()
 	var stderrBuf bytes.Buffer
 
 	bdc := BdCmd("show", "nonexistent-id").
@@ -152,6 +154,7 @@ echo stdin:%stdin%
 }
 
 func TestBdCmd_DefaultStderr(t *testing.T) {
+	t.Parallel()
 	bdc := BdCmd("list")
 	cmd := bdc.Build()
 
@@ -162,6 +165,7 @@ func TestBdCmd_DefaultStderr(t *testing.T) {
 }
 
 func TestBdCmd_Output(t *testing.T) {
+	t.Parallel()
 	// Use "bd version" or similar that should work
 	// Note: This requires bd to be installed. If not available, skip.
 	if _, err := exec.LookPath("bd"); err != nil {
@@ -181,6 +185,7 @@ func TestBdCmd_Output(t *testing.T) {
 }
 
 func TestBdCmd_Run(t *testing.T) {
+	t.Parallel()
 	// Use "bd --version" or similar that should work
 	// Note: This requires bd to be installed. If not available, skip.
 	if _, err := exec.LookPath("bd"); err != nil {
@@ -248,6 +253,7 @@ echo stderr:%* 1>&2
 }
 
 func TestBdCmd_Chaining(t *testing.T) {
+	t.Parallel()
 	// Test that all builder methods return the receiver for chaining
 	bdc := BdCmd("test")
 
@@ -294,6 +300,7 @@ func parseEnv(env []string) map[string]string {
 // ===================================================================
 
 func TestBdCmd_WithAutoCommit_OverridesParentOff(t *testing.T) {
+	t.Parallel()
 	// Test that WithAutoCommit() removes the existing BD_DOLT_AUTO_COMMIT=off
 	// before appending BD_DOLT_AUTO_COMMIT=on. This is critical because
 	// glibc getenv() returns the first match in the env array, so a duplicate
@@ -330,6 +337,7 @@ func TestBdCmd_WithAutoCommit_OverridesParentOff(t *testing.T) {
 }
 
 func TestBdCmd_MultipleAutoCommit_DedupRemovesOld(t *testing.T) {
+	t.Parallel()
 	// Test that WithAutoCommit() deduplicates: removes existing "off" and adds "on".
 	// This ensures glibc getenv() (first-match-wins) returns the correct value.
 	baseEnv := []string{"BD_DOLT_AUTO_COMMIT=off"}
@@ -370,6 +378,7 @@ func TestBdCmd_MultipleAutoCommit_DedupRemovesOld(t *testing.T) {
 }
 
 func TestBdCmd_EmptyGTRoot_Skipped(t *testing.T) {
+	t.Parallel()
 	// Test that empty GT_ROOT is not added to env.
 	// Use a clean env to avoid inheriting GT_ROOT from the test runner.
 	bdc := BdCmd("show", "id").
@@ -387,6 +396,7 @@ func TestBdCmd_EmptyGTRoot_Skipped(t *testing.T) {
 }
 
 func TestBdCmd_AllCombinations(t *testing.T) {
+	t.Parallel()
 	// Test all possible option combinations
 	baseEnv := []string{"BD_DOLT_AUTO_COMMIT=off", "PATH=/usr/bin"}
 
@@ -474,6 +484,7 @@ func TestBdCmd_ConcurrentBuild(t *testing.T) {
 }
 
 func TestBdCmd_EnvImmutability(t *testing.T) {
+	t.Parallel()
 	// Test that buildEnv doesn't mutate the original b.env
 	baseEnv := []string{"PATH=/usr/bin", "HOME=/home/user"}
 	originalLen := len(baseEnv)
@@ -496,6 +507,7 @@ func TestBdCmd_EnvImmutability(t *testing.T) {
 }
 
 func TestBdCmd_WithBeadsDir_SetsEnv(t *testing.T) {
+	t.Parallel()
 	// WithBeadsDir should set BEADS_DIR in the environment
 	bdc := BdCmd("show", "id").
 		WithBeadsDir("/town/rig/mayor/rig/.beads")
@@ -508,6 +520,7 @@ func TestBdCmd_WithBeadsDir_SetsEnv(t *testing.T) {
 }
 
 func TestBdCmd_DirPinsResolvedBeadsDir(t *testing.T) {
+	t.Parallel()
 	// Dir should pin bd to that directory's resolved .beads database so ambient
 	// discovery cannot select HQ or an inherited rig database.
 	baseEnv := []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"}
@@ -537,6 +550,7 @@ func TestBdCmd_DirPinsResolvedBeadsDir(t *testing.T) {
 }
 
 func TestBdCmd_DirPinsMetadataDatabaseOverInheritedDefault(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	beadsDir := filepath.Join(rigDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -579,6 +593,7 @@ func TestBdCmd_DirPinsMetadataDatabaseOverInheritedDefault(t *testing.T) {
 }
 
 func TestBdCmd_WithBeadsDirFollowsRedirectBeforeMetadata(t *testing.T) {
+	t.Parallel()
 	rigRoot := t.TempDir()
 	redirectBeadsDir := filepath.Join(rigRoot, ".beads")
 	canonicalBeadsDir := filepath.Join(rigRoot, "mayor", "rig", ".beads")
@@ -625,6 +640,7 @@ func TestBdCmd_WithBeadsDirFollowsRedirectBeforeMetadata(t *testing.T) {
 }
 
 func TestBdCmd_WithBeadsDir_OverridesInherited(t *testing.T) {
+	t.Parallel()
 	// WithBeadsDir should override an inherited BEADS_DIR from the parent
 	// process. This is the core fix for gt-ctir: without overriding,
 	// bd could write to the wrong database (HQ instead of rig).
@@ -656,6 +672,7 @@ func TestBdCmd_WithBeadsDir_OverridesInherited(t *testing.T) {
 }
 
 func TestBdCmd_WithBeadsDir_OverridesInheritedDoltTarget(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir beads dir: %v", err)
@@ -708,6 +725,7 @@ func TestBdCmd_WithBeadsDir_OverridesInheritedDoltTarget(t *testing.T) {
 }
 
 func TestBdCmd_EmptyBeadsDir_Skipped(t *testing.T) {
+	t.Parallel()
 	// Empty WithBeadsDir should not add BEADS_DIR to env
 	bdc := BdCmd("show", "id").
 		WithBeadsDir("")
@@ -722,6 +740,7 @@ func TestBdCmd_EmptyBeadsDir_Skipped(t *testing.T) {
 }
 
 func TestBdCmd_DefaultStripsTargetEnvAndSuppressesSideEffects(t *testing.T) {
+	t.Parallel()
 	bdc := &bdCmd{
 		args: []string{"version"},
 		env: []string{
@@ -746,6 +765,7 @@ func TestBdCmd_DefaultStripsTargetEnvAndSuppressesSideEffects(t *testing.T) {
 }
 
 func TestBdCmd_WithBeadsDir_Chaining(t *testing.T) {
+	t.Parallel()
 	// WithBeadsDir should return receiver for chaining
 	bdc := BdCmd("test")
 	if bdc.WithBeadsDir("/test") != bdc {
@@ -754,6 +774,7 @@ func TestBdCmd_WithBeadsDir_Chaining(t *testing.T) {
 }
 
 func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
+	t.Parallel()
 	// StripBeadsDir should remove inherited BEADS_DIR from the environment.
 	// Dir() still pins BEADS_DIR to the resolved target database.
 	bdc := &bdCmd{
@@ -775,6 +796,7 @@ func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
 }
 
 func TestBdCmd_StripBeadsDir_NoOpWhenAbsent(t *testing.T) {
+	t.Parallel()
 	// StripBeadsDir should be harmless when BEADS_DIR is not set; Dir() still
 	// pins the target database.
 	bdc := &bdCmd{
@@ -792,6 +814,7 @@ func TestBdCmd_StripBeadsDir_NoOpWhenAbsent(t *testing.T) {
 }
 
 func TestBdCmd_WithRoutingDoesNotPinBeadsDir(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -825,6 +848,7 @@ func TestBdCmd_WithRoutingDoesNotPinBeadsDir(t *testing.T) {
 }
 
 func TestBdCmd_UsesCentralReadMutationModes(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	beadsDir := filepath.Join(rigDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -918,6 +942,7 @@ func TestBdCmd_UsesCentralReadMutationModes(t *testing.T) {
 }
 
 func TestBdCmd_StripBeadsDir_Chaining(t *testing.T) {
+	t.Parallel()
 	bdc := BdCmd("test")
 	if bdc.StripBeadsDir() != bdc {
 		t.Error("StripBeadsDir() should return receiver for chaining")

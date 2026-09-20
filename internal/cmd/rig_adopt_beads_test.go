@@ -9,6 +9,7 @@ import (
 // TestRigAdoptBeadsCandidateDetection verifies the .beads/ candidate detection
 // logic used by runRigAdopt to decide whether to initialize a fresh database.
 func TestRigAdoptBeadsCandidateDetection(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		setupDirs      []string // directories to create under rigPath
@@ -75,6 +76,7 @@ func TestRigAdoptBeadsCandidateDetection(t *testing.T) {
 // TestRigAdoptFallbackInitNeeded verifies that when no .beads/ candidate exists
 // and a prefix is available, the fallback init path is triggered.
 func TestRigAdoptFallbackInitNeeded(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		hasDotBeads  bool

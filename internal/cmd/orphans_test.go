@@ -11,6 +11,7 @@ import (
 // TestFindOrphanPolecatBranches verifies that polecat worktrees with unmerged
 // branches are detected and reported (GH #1024).
 func TestFindOrphanPolecatBranches(t *testing.T) {
+	t.Parallel()
 	// Create a fake rig with a polecat worktree that has unmerged commits.
 	rigDir := t.TempDir()
 	rigName := "testrig"
@@ -83,6 +84,7 @@ func TestFindOrphanPolecatBranches(t *testing.T) {
 // TestFindOrphanPolecatBranches_NewStructure verifies that the new-structure
 // layout (polecats/<name>/<rigname>/) is correctly detected.
 func TestFindOrphanPolecatBranches_NewStructure(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	rigName := "myrig"
 	polecatsDir := filepath.Join(rigDir, "polecats")
@@ -142,6 +144,7 @@ func TestFindOrphanPolecatBranches_NewStructure(t *testing.T) {
 // TestFindOrphanPolecatBranches_CustomDefaultBranch verifies that a non-main
 // default branch is respected.
 func TestFindOrphanPolecatBranches_CustomDefaultBranch(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	rigName := "testrig"
 	polecatsDir := filepath.Join(rigDir, "polecats")
@@ -198,6 +201,7 @@ func TestFindOrphanPolecatBranches_CustomDefaultBranch(t *testing.T) {
 // TestFindOrphanPolecatBranches_OnMain verifies that polecats on main are not
 // reported as orphans.
 func TestFindOrphanPolecatBranches_OnMain(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	rigName := "testrig"
 	polecatsDir := filepath.Join(rigDir, "polecats")
@@ -229,6 +233,7 @@ func TestFindOrphanPolecatBranches_OnMain(t *testing.T) {
 // unmerged forever. Patch-equivalence (git cherry) recognizes the content
 // already landed. See gt-r8o.
 func TestFindOrphanPolecatBranches_RebaseMerged(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	rigName := "testrig"
 	polecatsDir := filepath.Join(rigDir, "polecats")

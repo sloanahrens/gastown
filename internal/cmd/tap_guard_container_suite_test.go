@@ -73,6 +73,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 }
 
 func TestContainerSuitePackagesIntersect(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		pkgArgs   []string
@@ -268,6 +269,7 @@ func TestRunTapGuardContainerSuite_NonContainerPackageAllowed(t *testing.T) {
 // The guard spells the opt-in variable out instead of importing testutil
 // (which would link testcontainers into gt); this pins the two together.
 func TestDockerTestsEnvMatchesTestutil(t *testing.T) {
+	t.Parallel()
 	if dockerTestsEnv != testutil.DockerTestsEnv {
 		t.Fatalf("guard dockerTestsEnv %q != testutil.DockerTestsEnv %q", dockerTestsEnv, testutil.DockerTestsEnv)
 	}

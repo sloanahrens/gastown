@@ -18,6 +18,7 @@ import (
 )
 
 func TestAgentStartResult_Fields(t *testing.T) {
+	t.Parallel()
 	result := agentStartResult{
 		name:   "Witness (gastown)",
 		ok:     true,
@@ -65,6 +66,7 @@ func TestUpStartRefinerySkipsForkRig(t *testing.T) {
 }
 
 func TestMaxConcurrentAgentStarts_Constant(t *testing.T) {
+	t.Parallel()
 	// Verify the constant is set to a reasonable value
 	if maxConcurrentAgentStarts < 1 {
 		t.Errorf("maxConcurrentAgentStarts = %d, should be >= 1", maxConcurrentAgentStarts)
@@ -171,6 +173,7 @@ func TestSemaphoreLimitsConcurrency(t *testing.T) {
 }
 
 func TestStartRigAgentsWithPrefetch_EmptyRigs(t *testing.T) {
+	t.Parallel()
 	// Test with empty inputs
 	witnessResults, refineryResults := startRigAgentsWithPrefetch(
 		[]string{},
@@ -187,6 +190,7 @@ func TestStartRigAgentsWithPrefetch_EmptyRigs(t *testing.T) {
 }
 
 func TestStartRigAgentsWithPrefetch_RecordsErrors(t *testing.T) {
+	t.Parallel()
 	// Test that rig errors are properly recorded
 	rigErrors := map[string]error{
 		"badrig": fmt.Errorf("rig not found"),
@@ -218,6 +222,7 @@ func TestStartRigAgentsWithPrefetch_RecordsErrors(t *testing.T) {
 }
 
 func TestPrefetchRigs_Empty(t *testing.T) {
+	t.Parallel()
 	// Test with empty rig list
 	rigs, errors := prefetchRigs([]string{})
 
@@ -303,6 +308,7 @@ func TestWorkerPoolLimitsConcurrency(t *testing.T) {
 // =============================================================================
 
 func TestRecoverOrphanedBeads_NoRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	services := recoverOrphanedBeads(townRoot, []string{}, make(map[string]*rig.Rig))
 	if len(services) != 0 {
@@ -311,6 +317,7 @@ func TestRecoverOrphanedBeads_NoRigs(t *testing.T) {
 }
 
 func TestRecoverOrphanedBeads_SkipsUnloadedRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Rig "badrig" is in the list but not in prefetchedRigs — should be skipped.
 	services := recoverOrphanedBeads(townRoot, []string{"badrig"}, make(map[string]*rig.Rig))
@@ -320,6 +327,7 @@ func TestRecoverOrphanedBeads_SkipsUnloadedRigs(t *testing.T) {
 }
 
 func TestRecoverOrphanedBeads_NoOrphansCleanRig(t *testing.T) {
+	t.Parallel()
 	// Set up a rig directory with no beads — should produce no services.
 	// Note: Full recovery-path tests (hooked bead + dead polecat → reset to open)
 	// require a live Dolt server and are covered by DetectOrphanedBeads tests
@@ -341,6 +349,7 @@ func TestRecoverOrphanedBeads_NoOrphansCleanRig(t *testing.T) {
 }
 
 func TestRecoverOrphanedBeads_MultipleRigsOnlyProcessesLoaded(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Set up two rigs, but only prefetch one
@@ -366,6 +375,7 @@ func TestRecoverOrphanedBeads_MultipleRigsOnlyProcessesLoaded(t *testing.T) {
 }
 
 func TestWaitForDoltReady_NoServerMode(t *testing.T) {
+	t.Parallel()
 	// When no server mode metadata exists, waitForDoltReady should not block.
 	townRoot := t.TempDir()
 

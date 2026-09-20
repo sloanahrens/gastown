@@ -33,6 +33,7 @@ const proseAck = "Ack — flint is still on it, so no redispatch needed.\n" +
 // the reply body is exactly the caller's text and contains none of the
 // original's protocol block.
 func TestNewReplyMessageSendsCallerBodyNotParentPayload(t *testing.T) {
+	t.Parallel()
 	original := &mail.Message{
 		ID:       "hq-wisp-z6l09",
 		From:     "gastown/refinery",
@@ -75,6 +76,7 @@ func TestNewReplyMessageSendsCallerBodyNotParentPayload(t *testing.T) {
 // does not invent a thread either — runMailReply generates one after the
 // builder returns, so the builder must report "no thread" as "no thread".
 func TestNewReplyMessageKeepsUntheadedReplyUntheaded(t *testing.T) {
+	t.Parallel()
 	original := &mail.Message{ID: "hq-wisp-abc", From: "mayor/", Subject: "Status"}
 
 	reply := newReplyMessage("gastown/refinery", original, "Re: Status", "on it")
@@ -85,6 +87,7 @@ func TestNewReplyMessageKeepsUntheadedReplyUntheaded(t *testing.T) {
 }
 
 func TestReplyDuplicatesProtocolPayload(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		parentBody string

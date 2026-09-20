@@ -366,6 +366,7 @@ func TestReconcile_RefusesWhenReadsResolveToSameRow(t *testing.T) {
 }
 
 func TestResolveReconcileID(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	cases := []struct {
 		name    string

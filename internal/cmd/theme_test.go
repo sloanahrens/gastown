@@ -199,6 +199,7 @@ func TestSaveRigTheme_PreservesNonThemeSettings(t *testing.T) {
 }
 
 func TestSaveRigTheme_RoundTripsJSON(t *testing.T) {
+	t.Parallel()
 	// Verify that the JSON serialization of ThemeConfig preserves all fields
 	original := &config.ThemeConfig{
 		Disabled: true,

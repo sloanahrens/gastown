@@ -225,6 +225,7 @@ func TestResolveTestVerifyBudgets(t *testing.T) {
 }
 
 func TestSplitCommandEnvPrefixAndMakeTarget(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		command  string

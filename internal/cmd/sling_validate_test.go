@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		target  string

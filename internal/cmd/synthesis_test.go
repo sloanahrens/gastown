@@ -6,6 +6,7 @@ import (
 )
 
 func TestExpandOutputPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		directory string
@@ -59,6 +60,7 @@ func TestExpandOutputPath(t *testing.T) {
 }
 
 func TestLegOutput(t *testing.T) {
+	t.Parallel()
 	// Test LegOutput struct
 	output := LegOutput{
 		LegID:    "correctness",
@@ -83,6 +85,7 @@ func TestLegOutput(t *testing.T) {
 }
 
 func TestConvoyMeta(t *testing.T) {
+	t.Parallel()
 	// Test ConvoyMeta struct
 	meta := ConvoyMeta{
 		ID:        "hq-cv-abc",

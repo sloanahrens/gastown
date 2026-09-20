@@ -8,6 +8,7 @@ import (
 )
 
 func TestAgentBeadMatchesDescriptionAndIDFallback(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		issue *beads.Issue
@@ -76,6 +77,7 @@ func TestAgentBeadMatchesDescriptionAndIDFallback(t *testing.T) {
 }
 
 func TestPickBestAgentBead(t *testing.T) {
+	t.Parallel()
 	candidates := []agentBeadCandidate{
 		candidate("town-issue", agentSourceTownIssues, "open"),
 		candidate("rig-issue", agentSourceRigIssues, "open"),
@@ -93,6 +95,7 @@ func TestPickBestAgentBead(t *testing.T) {
 }
 
 func TestPickBestAgentBeadSkipsClosed(t *testing.T) {
+	t.Parallel()
 	candidates := []agentBeadCandidate{
 		candidate("closed-rig-wisp", agentSourceRigWisps, "closed"),
 		candidate("open-rig-issue", agentSourceRigIssues, "open"),
@@ -108,6 +111,7 @@ func TestPickBestAgentBeadSkipsClosed(t *testing.T) {
 }
 
 func TestPickBestAgentBeadRejectsSameRankDuplicates(t *testing.T) {
+	t.Parallel()
 	candidates := []agentBeadCandidate{
 		candidate("rig-wisp-a", agentSourceRigWisps, "open"),
 		candidate("rig-wisp-b", agentSourceRigWisps, "open"),

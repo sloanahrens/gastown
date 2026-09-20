@@ -17,6 +17,7 @@ import (
 // one-line reason, because the line is the only thing a sling prints and
 // "local pool 2/2" vs "local pool full (2/2)" used to read the same (gt-ipk7).
 func TestChoosePoolAgent(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
 	s := func(agent string, age time.Duration) poolSession {
@@ -110,6 +111,7 @@ func TestChoosePoolAgent(t *testing.T) {
 // A bead carrying route:flash still has to name its agent when the pool is
 // full: the label, not the seat count, is why it went where it went.
 func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
 	full := []poolSession{
@@ -164,6 +166,7 @@ func (f *fakeLister) GetSessionCreatedTime(name string) (time.Time, error) {
 // and dogs on the same server are ignored; a polecat without GT_AGENT is
 // counted with an empty agent (so it never inflates the local count).
 func TestListPolecatSessions(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	f := &fakeLister{
 		sessions: map[string]map[string]string{

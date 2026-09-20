@@ -31,6 +31,7 @@ func (m *mockBranchVerifier) RemoteTrackingBranchExists(remote, branch string) (
 }
 
 func TestVerifyBranch(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		verify      bool

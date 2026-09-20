@@ -10,6 +10,7 @@ import (
 )
 
 func TestIsRigParked_WhenParked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -34,6 +35,7 @@ func TestIsRigParked_WhenParked(t *testing.T) {
 }
 
 func TestIsRigParked_WhenNotParked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -44,6 +46,7 @@ func TestIsRigParked_WhenNotParked(t *testing.T) {
 }
 
 func TestIsRigParked_WhenUnparked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -68,6 +71,7 @@ func TestIsRigParked_WhenUnparked(t *testing.T) {
 }
 
 func TestIsRigParked_WhenDocked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -93,6 +97,7 @@ func TestIsRigParked_WhenDocked(t *testing.T) {
 }
 
 func TestRigStatusConstants(t *testing.T) {
+	t.Parallel()
 	if RigStatusKey != "status" {
 		t.Errorf("expected RigStatusKey to be 'status', got %q", RigStatusKey)
 	}

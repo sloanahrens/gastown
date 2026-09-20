@@ -9,6 +9,7 @@ import (
 // hooks.DefaultBase() (Bash(gh pr create*), Bash(git checkout -b*),
 // Bash(git switch -c*)).
 func TestMatchesPRWorkflowCommand(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string

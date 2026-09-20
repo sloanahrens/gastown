@@ -5,6 +5,7 @@ import (
 )
 
 func TestAutoKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		content string
@@ -48,6 +49,7 @@ func TestAutoKey(t *testing.T) {
 }
 
 func TestSanitizeKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		key  string
@@ -101,6 +103,7 @@ func TestSanitizeKey(t *testing.T) {
 }
 
 func TestParseMemoryKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		kvKey    string
@@ -195,6 +198,7 @@ func TestParseMemoryKey(t *testing.T) {
 }
 
 func TestMemTypeRank(t *testing.T) {
+	t.Parallel()
 	// feedback should come before general
 	if memTypeRank("feedback") >= memTypeRank("general") {
 		t.Error("feedback should rank before general")
@@ -210,6 +214,7 @@ func TestMemTypeRank(t *testing.T) {
 }
 
 func TestParseBdKvListJSON(t *testing.T) {
+	t.Parallel()
 	got, err := parseBdKvListJSON([]byte(`{
 		"gt.project.note":"keep me",
 		"gt.project.empty":"",
@@ -256,6 +261,7 @@ func TestParseBdKvListJSON(t *testing.T) {
 }
 
 func TestParseBdKvListJSONMalformed(t *testing.T) {
+	t.Parallel()
 	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
 		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
 	}

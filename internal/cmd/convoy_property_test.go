@@ -98,6 +98,7 @@ func randomDAGWithCycle(seed int64, nodes int) *ConvoyDAG {
 
 // TestRandomDAG_AcyclicIsAcyclic verifies generated acyclic DAGs have no cycles
 func TestRandomDAG_AcyclicIsAcyclic(t *testing.T) {
+	t.Parallel()
 	for seed := int64(0); seed < 50; seed++ {
 		dag := randomAcyclicDAG(seed, 20, 30)
 		cycle := detectCycles(dag)
@@ -109,6 +110,7 @@ func TestRandomDAG_AcyclicIsAcyclic(t *testing.T) {
 
 // TestRandomDAG_CyclicHasCycle verifies generated cyclic DAGs have cycles
 func TestRandomDAG_CyclicHasCycle(t *testing.T) {
+	t.Parallel()
 	for seed := int64(0); seed < 50; seed++ {
 		dag := randomDAGWithCycle(seed, 10)
 		cycle := detectCycles(dag)
@@ -120,6 +122,7 @@ func TestRandomDAG_CyclicHasCycle(t *testing.T) {
 
 // TestRandomDAG_WavesTerminate verifies wave computation always terminates on acyclic DAGs
 func TestRandomDAG_WavesTerminate(t *testing.T) {
+	t.Parallel()
 	for seed := int64(0); seed < 50; seed++ {
 		dag := randomAcyclicDAG(seed, 15, 20)
 		waves, _, err := computeWaves(dag)
@@ -137,6 +140,7 @@ func TestRandomDAG_WavesTerminate(t *testing.T) {
 
 // TestRandomDAG_Deterministic verifies same seed produces same waves
 func TestRandomDAG_Deterministic(t *testing.T) {
+	t.Parallel()
 	for seed := int64(0); seed < 20; seed++ {
 		dag1 := randomAcyclicDAG(seed, 10, 15)
 		dag2 := randomAcyclicDAG(seed, 10, 15)
@@ -161,6 +165,7 @@ func TestRandomDAG_Deterministic(t *testing.T) {
 
 // TestRandomDAG_SeedLoggedOnFailure demonstrates seed logging pattern
 func TestRandomDAG_SeedLoggedOnFailure(t *testing.T) {
+	t.Parallel()
 	// This test should always pass — it just verifies the pattern works
 	seed := int64(42)
 	dag := randomAcyclicDAG(seed, 5, 5)
@@ -178,6 +183,7 @@ func TestRandomDAG_SeedLoggedOnFailure(t *testing.T) {
 // terminates, returns at least 1 wave, and Wave 1 is non-empty for acyclic DAGs
 // of varying sizes.
 func TestProperty_WaveComputationTerminates(t *testing.T) {
+	t.Parallel()
 	for seed := int64(100); seed < 200; seed++ {
 		// Vary node count between 5 and 50, edges = nodes*2
 		nodes := 5 + int(seed-100)%46
@@ -200,6 +206,7 @@ func TestProperty_WaveComputationTerminates(t *testing.T) {
 // TestProperty_EveryTaskInExactlyOneWave (PT-02) verifies every slingable task
 // appears in exactly one wave — no duplicates, no omissions.
 func TestProperty_EveryTaskInExactlyOneWave(t *testing.T) {
+	t.Parallel()
 	for seed := int64(200); seed < 300; seed++ {
 		nodes := 5 + int(seed-200)%46
 		edges := nodes * 2
@@ -255,6 +262,7 @@ func TestProperty_EveryTaskInExactlyOneWave(t *testing.T) {
 // wave before all of its blockers. For every slingable node, each slingable
 // blocker must have a strictly earlier wave number.
 func TestProperty_NoTaskBeforeBlocker(t *testing.T) {
+	t.Parallel()
 	for seed := int64(300); seed < 400; seed++ {
 		nodes := 10 + int(seed-300)%41
 		edges := nodes * 3 // higher edge count for denser graphs
@@ -304,6 +312,7 @@ func TestProperty_NoTaskBeforeBlocker(t *testing.T) {
 // always finds a cycle in cyclic DAGs, the cycle has >= 2 nodes, and each
 // consecutive pair has a Blocks edge.
 func TestProperty_CycleAlwaysDetectedInCyclicDAGs(t *testing.T) {
+	t.Parallel()
 	for seed := int64(400); seed < 500; seed++ {
 		nodes := 5 + int(seed-400)%26 // 5-30 nodes
 		dag := randomDAGWithCycle(seed, nodes)
@@ -342,6 +351,7 @@ func TestProperty_CycleAlwaysDetectedInCyclicDAGs(t *testing.T) {
 // TestProperty_DeterministicWaveAssignment (PT-05) verifies same seed always
 // produces identical wave assignments: same wave count, same tasks, same order.
 func TestProperty_DeterministicWaveAssignment(t *testing.T) {
+	t.Parallel()
 	for seed := int64(500); seed < 600; seed++ {
 		nodes := 10 + int(seed-500)%41
 		edges := nodes * 2
@@ -386,6 +396,7 @@ func TestProperty_DeterministicWaveAssignment(t *testing.T) {
 // parent-child hierarchy edges (epics as parents) does not change wave
 // assignments for slingable tasks.
 func TestProperty_ParentChildDoesNotAffectWaves(t *testing.T) {
+	t.Parallel()
 	for seed := int64(600); seed < 650; seed++ {
 		nodes := 10 + int(seed-600)%41
 		edges := nodes * 2

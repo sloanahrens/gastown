@@ -3,6 +3,7 @@ package cmd
 import "testing"
 
 func TestBuildMQListColumns_IncludesTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		verify        bool

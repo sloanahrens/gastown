@@ -19,6 +19,7 @@ func (f *fakeInboxLister) List() ([]*mail.Message, error) {
 }
 
 func TestLoadInboxSnapshotListsOnceAndCounts(t *testing.T) {
+	t.Parallel()
 	box := &fakeInboxLister{
 		messages: []*mail.Message{
 			{ID: "msg-1", Read: false},
@@ -43,6 +44,7 @@ func TestLoadInboxSnapshotListsOnceAndCounts(t *testing.T) {
 }
 
 func TestLoadInboxSnapshotUnreadOnlyFiltersAfterSingleList(t *testing.T) {
+	t.Parallel()
 	box := &fakeInboxLister{
 		messages: []*mail.Message{
 			{ID: "msg-1", Read: false},
@@ -70,6 +72,7 @@ func TestLoadInboxSnapshotUnreadOnlyFiltersAfterSingleList(t *testing.T) {
 }
 
 func TestLoadInboxSnapshotPropagatesListError(t *testing.T) {
+	t.Parallel()
 	wantErr := errors.New("list failed")
 	box := &fakeInboxLister{err: wantErr}
 

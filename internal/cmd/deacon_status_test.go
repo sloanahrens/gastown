@@ -9,6 +9,7 @@ import (
 // TestDeaconStatusJSON_Schema verifies the JSON output schema for gt deacon status --json.
 // This catches schema changes that would break witness parsing.
 func TestDeaconStatusJSON_Schema(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 
 	out := DeaconStatusOutput{
@@ -69,6 +70,7 @@ func TestDeaconStatusJSON_Schema(t *testing.T) {
 
 // TestDeaconStatusJSON_NoHeartbeat verifies heartbeat is omitted when nil.
 func TestDeaconStatusJSON_NoHeartbeat(t *testing.T) {
+	t.Parallel()
 	out := DeaconStatusOutput{
 		Running:   false,
 		Paused:    false,
@@ -97,6 +99,7 @@ func TestDeaconStatusJSON_NoHeartbeat(t *testing.T) {
 
 // TestDeaconStatusJSON_Roundtrip verifies the struct can be marshaled and unmarshaled.
 func TestDeaconStatusJSON_Roundtrip(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC().Truncate(time.Second) // Truncate for JSON precision
 
 	original := DeaconStatusOutput{
@@ -153,6 +156,7 @@ func TestDeaconStatusJSON_Roundtrip(t *testing.T) {
 // TestDeaconStatusJSON_FreshnessStates verifies the three freshness states are mutually exclusive
 // in typical usage (fresh, stale, very_stale).
 func TestDeaconStatusJSON_FreshnessStates(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		fresh     bool
@@ -202,6 +206,7 @@ func TestDeaconStatusJSON_FreshnessStates(t *testing.T) {
 
 // TestDeaconStatusJSON_LastActionOmitEmpty verifies last_action is omitted when empty.
 func TestDeaconStatusJSON_LastActionOmitEmpty(t *testing.T) {
+	t.Parallel()
 	out := DeaconStatusOutput{
 		Running: true,
 		Session: "gt-deacon",

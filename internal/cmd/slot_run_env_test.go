@@ -11,6 +11,7 @@ import (
 // tokens as environment (env(1) semantics) so the polecat formula's verbatim
 // wrap of an env-prefixed test_command works.
 func TestSplitEnvPrefix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in      []string
 		wantEnv []string
@@ -35,6 +36,7 @@ func TestSplitEnvPrefix(t *testing.T) {
 // TestSplitEnvPrefix_ChildSeesVariable proves the split is enough for the
 // child to observe the assignment when applied the way runSlotRun applies it.
 func TestSplitEnvPrefix_ChildSeesVariable(t *testing.T) {
+	t.Parallel()
 	envAssigns, cmdArgs := splitEnvPrefix([]string{"GT_SLOT_RUN_PROBE=bar", "sh", "-c", "printf %s \"$GT_SLOT_RUN_PROBE\""})
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: fixed test args
 	cmd.Env = append(os.Environ(), envAssigns...)
