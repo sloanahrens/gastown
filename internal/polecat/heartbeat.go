@@ -115,8 +115,12 @@ func startHeartbeatKeepAlive(townRoot, sessionName, context, bead string, interv
 	TouchSessionHeartbeatWithState(townRoot, sessionName, HeartbeatExiting, context, bead)
 
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	var once sync.Once
 	go func() {
+		// closed last, after the ticker is stopped, so a stop that waits on it
+		// is waiting on a goroutine that can no longer renew the heartbeat.
+		defer close(exited)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -128,7 +132,23 @@ func startHeartbeatKeepAlive(townRoot, sessionName, context, bead string, interv
 			}
 		}
 	}()
-	return func() { once.Do(func() { close(done) }) }
+	// Stop is a barrier, not a signal: it returns only once the renewal
+	// goroutine has actually exited, so no write can land after it returns.
+	// Closing done alone left one write in flight — a ticker tick already past
+	// the select but still inside TouchSessionHeartbeatWithState (mkdir,
+	// marshal, write) — which lands after stop and makes the heartbeat look
+	// live again to a caller that reads it immediately afterwards. That is the
+	// "kept renewing after stop" flake (gt-nyh8): under host load the write
+	// straddled the caller's first read, so the test saw the pre-write value as
+	// "frozen" and the post-write value as a renewal. Waiting for exited makes
+	// the last renewal the caller can observe the last one that exists, which
+	// is what every reader of a stopped keep-alive already assumes.
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
+	}
 }
 
 // TouchSessionHeartbeat writes or updates the heartbeat file for a polecat session.
