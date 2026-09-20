@@ -16,7 +16,7 @@ Full context is injected by `gt prime` at session start.
 
 This project uses [beads](https://github.com/steveyegge/beads) for issue tracking. Issues live in `.beads/` and are tracked in git.
 
-Two CLIs: **bd** (issue CRUD) and **bv** (graph-aware triage, read-only).
+The CLI is **bd** (issue CRUD).
 
 ### bd: Issue Management
 
@@ -32,21 +32,9 @@ bd dep add <a> <b>    # a depends on b
 bd sync               # Sync with git
 ```
 
-### bv: Graph Analysis (read-only)
-
-**NEVER run bare `bv`** — it launches interactive TUI. Always use `--robot-*` flags:
-
-```bash
-bv --robot-triage     # Ranked picks, quick wins, blockers, health
-bv --robot-next       # Single top pick + claim command
-bv --robot-plan       # Parallel execution tracks
-bv --robot-alerts     # Stale issues, cascades, mismatches
-bv --robot-insights   # Full graph metrics: PageRank, betweenness, cycles
-```
-
 ### Workflow
 
-1. **Start**: `bd ready` (or `bv --robot-triage` for graph analysis)
+1. **Start**: `bd ready`
 2. **Claim**: `bd update <id> --status=in_progress`
 3. **Work**: Implement the task
 4. **Complete**: `bd close <id>`
