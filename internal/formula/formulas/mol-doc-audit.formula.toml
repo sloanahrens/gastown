@@ -1,0 +1,568 @@
+description = """
+Weekly docs-and-comments audit of one bounded slice of the repository.
+
+You are a polecat. The skeleton is mol-polecat-work: load context, branch,
+work, commit, self-review, build-check, pre-verify, gt done. The work step is
+an audit, not a feature: apply every rule in docs/writing-for-agents.md to
+every file in a slice the lint script chose, edit in place, and post a
+findings comment on your bead. The MR rides the normal refinery and om gate.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | hook_bead | The run bead you are assigned |
+| base_branch | sling vars | Branch to rebase on (default: main) |
+| slice_docs | sling vars | Docs in the slice (default 8) |
+| slice_go | sling vars | Go files in the slice (default 4) |
+| setup_command, typecheck_command, test_command, lint_command, build_command | rig config | As in mol-polecat-work |
+
+## Hard limits
+
+- You edit only files the slice names. A file outside the slice is reverted before submit.
+- In a Go file you edit comments only. Code, identifiers, and tests are untouched.
+- You never delete a historical doc. A deletion is a proposal in the bead comment.
+"""
+formula = "mol-doc-audit"
+version = 1
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+gt prime                    # Load role context
+bd prime                    # Load beads context
+```
+
+**2. Preflight check (validate connectivity):**
+```bash
+gt hook               # Shows your pinned molecule and hook_bead
+bd show {{issue}}           # Validates Dolt connectivity + reads your assignment
+```
+If `bd show` hangs or fails: run `gt dolt status` to check Dolt health.
+If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it yourself.
+
+The hook_bead is your assigned issue. Read the output of `bd show` carefully.
+
+**3. Check inbox for additional context:**
+```bash
+gt mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Check for prior merge failure context:**
+
+If the bead notes contain "MERGE REJECTION" (or the legacy "Merge failure"
+wording), a previous polecat's work was rejected by the refinery.
+Read the failure details carefully:
+- **Failure-Type**: what broke (tests, build, lint, typecheck)
+- **Error**: the actual error output
+- **Branch**: the previous branch may still exist with the original work
+
+If a prior branch exists, check it out instead of creating a new one:
+```bash
+git fetch origin
+git branch -a | grep <branch-from-notes>
+# If it exists: git checkout <branch> && git rebase origin/{{base_branch}}
+```
+
+This lets you make a targeted fix rather than starting from scratch.
+
+**5. Understand the requirements:**
+- What exactly needs to be done?
+- What files are likely involved?
+- Are there dependencies or blockers?
+- What does "done" look like?
+- If this is a rework: what specifically failed and why?
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand what to do
+- Required resources are available
+
+If blocked or unclear, mail Witness immediately:
+```bash
+gt mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the work and can begin implementation."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a FRESH branch named for THIS bead, based on latest origin/{{base_branch}}.
+
+**The branch name is load-bearing metadata.** `gt done` infers the MR's
+source_issue from the bead-id embedded in your branch name. A reused branch
+carries the PREVIOUS bead's id: your MR gets attributed to the wrong (often
+closed) bead, close credit goes to the wrong issue, and your real issue stays
+open and hooked forever. NEVER reuse a branch from a previous assignment —
+even if your worktree is already checked out on it.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+If the current branch name embeds a bead-id that is not {{issue}}, it is
+leftover from a previous assignment. Do NOT work on it — create a fresh
+branch in step 3.
+
+**2. Exception — rejected-MR rework for THIS bead only:**
+
+If the bead notes contain "MERGE REJECTION" (or legacy "Merge failure")
+with a branch name, that branch holds previous work on {{issue}} itself. Reusing it preserves all previous work:
+```bash
+git fetch origin
+# Check for prior branch
+git branch -r | grep <prior-branch>
+# If found, check it out:
+git checkout -b <prior-branch> origin/<prior-branch>
+git rebase origin/{{base_branch}}
+```
+
+This exception applies ONLY when the prior branch is for {{issue}}. A branch
+from a different bead is never reusable.
+
+**3. Otherwise, create a fresh branch NAMED FOR THE HOOKED BEAD:**
+```bash
+git fetch origin
+git checkout -b "polecat/<name>/{{issue}}+$(openssl rand -hex 3)" origin/{{base_branch}}
+```
+
+The format is `polecat/<your-name>/<bead-id>+<short-unique-suffix>`. The
+embedded bead-id is what makes MR attribution work; the suffix keeps the
+name unique across re-dispatches of the same bead.
+
+**4. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**5. Sync with {{base_branch}}:**
+```bash
+git fetch origin
+git rebase origin/{{base_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- If stuck, mail Witness
+
+**Integrate ONLY with `git rebase`. Never reset onto the remote.**
+
+`git reset --soft origin/{{base_branch}}` (or `--mixed`/`--hard`) moves HEAD to
+the current remote tip while your index and working tree stay as they were when
+your worktree was cut. The commit you make afterwards then records
+(old tree) - (new tip): a REVERT of every commit merged since you started, plus
+your own change, submitted under a message describing only your change. That is
+how two polecat MRs reached the merge queue with 9 and 17 files of other
+people's work deleted (gt-63sz), and `gt done` now refuses such a branch.
+
+Rebase replays YOUR commits onto the new base and leaves the remote's content
+alone, which is what you want. The same applies to `git stash` + `git reset` +
+`git stash pop` rituals: there is no sequence that needs a reset onto a
+remote-tracking ref.
+
+**6. Run project setup (if configured):**
+
+If setup_command is set, run it to install dependencies:
+```bash
+{{setup_command}}
+```
+
+This ensures dependencies are installed before you start work.
+Empty setup_command means "not configured" — skip this step.
+
+**Exit criteria:** You're on a clean feature branch whose name embeds {{issue}}, rebased on latest {{base_branch}}, dependencies installed."""
+
+[[steps]]
+id = "audit"
+title = "Audit the slice against docs/writing-for-agents.md"
+needs = ["branch-setup"]
+description = """
+**1. Compute the slice. The script chooses; you do not.**
+```bash
+bash scripts/docs-lint.sh --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
+bash scripts/docs-lint.sh --words   # record as WORDS_BEFORE
+bd update {{issue}} --notes "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
+```
+
+**2. Read the standard.** Open docs/writing-for-agents.md and keep the rule ids
+R1-R13 in front of you. They are the checklist.
+
+**3. For every file in the slice, apply every rule.**
+- A `.md` or `.toml` file: read the whole file. For each rule, ask whether any
+  line fails it. Edit in place. Deleting is the usual fix (R3, R4, R5, R13);
+  a pointer replaces a duplicate (R2); a split or a move behind a pointer fixes
+  sprawl (R6).
+- A `.go` file: comments only. Every doc comment on an exported identifier
+  states the contract in one sentence (R10); every inline comment says why
+  (R9); history collapses to one bead citation (R11). Never touch code.
+- A historical doc (first line `> Status:`): check the header only. If a
+  commit or bead it names is on main or closed, write a deletion proposal for
+  step 5 with the evidence (`git log --oneline -1 <sha>`, `bd show <id>`).
+  Do not delete it.
+- A claim you cannot verify against the code or the environment: leave it
+  and record it as a proposal.
+
+**4. Commit per file** (the commit-changes step tells you how). The message
+names the rule ids applied: `docs: R3 R5 on docs/reference.md ({{issue}})`.
+
+**5. Post the run comment on your bead. This is the audit's output.**
+```bash
+bd comments add {{issue}} "$(cat <<'EOF'
+doc-audit run
+files: <one per line, with the rule ids applied or 'clean'>
+findings per rule: R1=<n> R2=<n> ... R13=<n>
+words agent-facing: before=<WORDS_BEFORE> after=<docs-lint.sh --words now>
+proposals:
+- <deletion | out-of-slice rot | rule to sharpen>: <path or rule> — <evidence>
+EOF
+)"
+```
+
+**Done when:** every file in /tmp/doc-audit-slice.txt has a commit or is listed
+as clean in the comment, and the comment is posted.
+"""
+
+[[steps]]
+id = "commit-changes"
+title = "Commit all implementation changes"
+needs = ["audit"]
+description = """
+Ensure ALL implementation work is committed IMMEDIATELY after implementation.
+This step exists to prevent the #1 polecat failure mode: context exhaustion
+before code is committed. Commit NOW, review and build AFTER.
+
+**CRITICAL: You MUST commit all changes from implementation.**
+NEVER use `git checkout -- .` or `git restore .` to discard implementation work.
+ALWAYS commit ALL uncommitted changes from your implementation.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+
+**2. If there are ANY uncommitted changes, commit them now:**
+```bash
+git add -A && git commit -m "<type>: <descriptive message> ({{issue}})"
+```
+
+**3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
+
+**4. VERIFY commits exist (HARD GATE — do NOT close this step without passing):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+
+This MUST show at least 1 commit. If it shows NOTHING:
+- You have NOT completed your implementation. Do NOT close this step.
+- Go back to the implement step and do the work.
+- If the task genuinely requires no code changes (already fixed upstream, etc.),
+  run `gt done --status DEFERRED` and skip remaining steps.
+- Do NOT proceed to review or build with zero commits.
+
+**5. VERIFY clean working tree:**
+```bash
+git status
+```
+Must show "nothing to commit, working tree clean".
+
+**Report-only tasks (audits, reviews, research — no code changes):**
+If your task produced no code changes, verify your findings are persisted to the bead:
+```bash
+bd show {{issue}}    # Check notes/design fields have your findings
+```
+If the bead is `review_only: true`, also verify a fresh assignee-authored
+`PR-SHERIFF-EVIDENCE` comment exists for the current `HEAD`.
+If findings/evidence are persisted, proceed to review. Report-only tasks with
+findings persisted can skip commit verification.
+
+**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review: only the slice changed"
+needs = ["commit-changes"]
+description = """
+**1. Diff scope is a hard gate.**
+```bash
+git fetch origin {{base_branch}}
+git diff --name-only origin/{{base_branch}}...HEAD | sort > /tmp/doc-audit-changed.txt
+sort /tmp/doc-audit-slice.txt > /tmp/doc-audit-slice-sorted.txt
+comm -23 /tmp/doc-audit-changed.txt /tmp/doc-audit-slice-sorted.txt
+```
+The last command must print nothing. Any path it prints is outside the slice:
+revert it (`git checkout origin/{{base_branch}} -- <path>` then commit) and add
+a line to the bead comment: `reverted out-of-slice edit: <path>`.
+
+**2. Go files: comments only.**
+```bash
+for f in $(grep '\\.go$' /tmp/doc-audit-changed.txt); do
+  git diff origin/{{base_branch}}...HEAD -- "$f" | grep -E '^[-+]' | grep -vE '^(\\+\\+\\+|---)' | grep -vE '^[-+][[:space:]]*(//|/\\*|\\*)' && echo "NON-COMMENT CHANGE in $f"
+done
+```
+Must print nothing. A non-comment change is reverted the same way.
+
+**3. Re-read each diff once** with the rule ids in view. An edit that does not
+cite a rule it satisfies is reverted.
+
+**Done when:** steps 1 and 2 print nothing and every remaining edit cites a rule.
+"""
+
+[[steps]]
+id = "build-check"
+title = "Build and sanity check"
+needs = ["self-review"]
+description = """
+Verify your changes compile and pass basic sanity checks. The Refinery's
+bisecting merge queue runs the full test suite — your job is to catch
+obvious problems fast so you don't waste the MQ's time.
+
+**1. Build (REQUIRED — must pass):**
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If setup_command is set (ensure new deps are installed):
+```bash
+{{setup_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+Empty commands mean "not configured" — skip silently.
+
+**2. If build fails:**
+- Fix it. Return to implement step if needed.
+- Do NOT submit broken code to the merge queue.
+
+**3. Targeted tests (OPTIONAL — run if fast and relevant):**
+
+If you modified or added test files, run THOSE tests with a `-run` filter to
+catch obvious regressions. Never a whole package of internal/cmd, daemon,
+polecat or refinery (3-10 minutes each; the guard refuses it) and never the
+full suite — the Refinery runs the suite once per submission and `gt done`
+tests the light packages you changed (gt-pxlg).
+
+```bash
+# Run only the tests you touched, in the package you changed
+go test ./internal/pkg/you/changed/ -run 'TestOne|TestTwo'
+# Or for JS: npx jest --testPathPattern="changed-file"
+```
+
+Container-backed tests (Dolt, testcontainers) are opt-in and skip unless
+`GT_TEST_DOCKER=1` is set, so a filtered run is bare, fast and never touches
+Docker or the container-gate slot. You normally do not need them: the
+Refinery runs them. If you must see one locally, opt in AND take the slot:
+```bash
+gt slot run --role <rig>/<your-name> -- env GT_TEST_DOCKER=1 go test ./internal/pkg/ -run TestThatOne
+```
+
+If you're unsure which tests are relevant, skip this — the MQ will catch it.
+
+**4. Lint (OPTIONAL — run if configured and fast):**
+
+If lint_command is set:
+```bash
+{{lint_command}}
+```
+
+**Exit criteria:** Code compiles. Obvious regressions caught. Ready to submit."""
+
+[[steps]]
+id = "pre-verify"
+title = "Pre-merge rebase verification"
+needs = ["build-check"]
+description = """
+Rebase onto the target branch and run the CHEAP gates. Do not run the test
+suite here: `gt done` itself lints and tests the changed packages that spin
+no containers, and the refinery runs the Docker-backed suite exactly once per
+submission (gt-yihz). A polecat running test_command as well duplicates that
+gate and, on the shared host, slows the refinery's own gate down — three
+concurrent suites tripled a merge gate on 2026-09-17 (gt-d7ir).
+
+**1. Fetch and rebase onto target:**
+```bash
+git fetch origin {{base_branch}}
+git rebase origin/{{base_branch}}
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Re-run the build to ensure the resolution is correct
+- If stuck, mail Witness
+
+After the rebase, confirm you are on YOUR branch and not a detached HEAD
+(`git status` must not say "HEAD detached"); if it does:
+```bash
+git switch -C <your-branch>
+```
+
+**2. Run the cheap gates on the rebased result:**
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+If lint_command is set (gt done runs it again; fixing findings now saves a
+round trip):
+```bash
+{{lint_command}}
+```
+
+**Do NOT run {{test_command}} and do NOT run whole packages.** The refinery
+runs the full suite once per submission and `gt done` tests the light
+packages you changed. If you want one more signal on the rebased result, run
+only the tests you touched with a `-run` filter, bare (container tests are
+opt-in via GT_TEST_DOCKER=1 and skip otherwise). Never the whole suite.
+
+Empty commands mean "not configured" — skip silently.
+
+**3. If a gate fails after rebase:** fix the issue, commit, and re-run from
+step 1.
+
+**4. Submit with plain `gt done` (next step). Do NOT use `--pre-verified`:**
+it re-runs the full gate set including the container suite under a slot
+cap, disables the auto-rebase, and the refinery's gate is the authority
+either way.
+
+**5. Confirm the branch contains only YOUR files:**
+```bash
+git diff --stat origin/{{base_branch}}...HEAD     # three dots
+```
+
+This is the last check before submission, and the one that catches a stale
+tree. Every line of the stat should be a file you meant to touch for
+{{issue}}. A file you have never heard of, or a large negative line count in
+files unrelated to your change, means your tree predates work merged into
+{{base_branch}} — most often because something reset onto origin/{{base_branch}}
+instead of rebasing. Fix it by rebasing your CHANGES (step 1), not by
+reverting anyone's work. `gt done` prints this same stat and refuses a branch
+that undoes merged work.
+
+**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, on your
+own branch (not detached), the three-dot stat lists only files you changed,
+build/typecheck/lint pass."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit work and self-clean"
+needs = ["pre-verify"]
+description = """
+Submit your work and clean up. You cease to exist after this step.
+
+**Self-Cleaning Model:**
+Once you run `gt done`, you're gone. The command:
+1. Pushes your branch to origin
+2. Creates an MR bead in the merge queue
+3. Nukes your sandbox (worktree removal)
+4. Exits your session immediately
+
+**Pre-flight: Verify you have actual work to submit (HARD GATE):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
+`gt done` will reject zero-commit branches for polecats.
+
+**Run gt done:**
+```bash
+# For code tasks (gt done lints and tests your changed non-container packages,
+# then submits; the refinery runs the Docker suite once):
+gt done --target {{base_branch}}
+
+# For report-only tasks (no commits — audits, reviews, research):
+gt done --status DEFERRED
+```
+
+You should see output like:
+```
+✓ Work submitted to merge queue
+  MR ID: gt-xxxxx
+  Source: polecat/<name>
+  Target: {{base_branch}}
+  Issue: {{issue}}
+✓ Sandbox nuked
+✓ Session exiting
+```
+
+**What happens next (not your concern):**
+- Refinery batches MRs and runs gates on the merged stack
+- If green: all MRs in the batch merge to {{base_branch}} at once
+- If red: Refinery bisects to isolate the culprit, merges the good ones
+- Refinery fixes failures itself (inline or via helper polecats)
+- Refinery closes your issue after successful merge
+
+You are NOT involved in any of that. You're gone. Done means gone.
+
+**Exit criteria:** Work submitted, sandbox nuked, session exited."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this polecat"
+required = true
+
+[vars.base_branch]
+description = "The base branch to rebase on and compare against (e.g., main, integration/epic-id)"
+default = "main"
+
+[vars.slice_docs]
+description = "Number of agent-facing or reference docs in the slice"
+default = "8"
+
+[vars.slice_go]
+description = "Number of non-test Go files in the slice"
+default = "4"
+
+[vars.setup_command]
+description = "Setup/install command (e.g., pnpm install). Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Command to run tests (auto-detected from rig settings)"
+default = ""
+
+[vars.lint_command]
+description = "Command to run linting. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Command to run build. Empty = skip."
+default = ""
