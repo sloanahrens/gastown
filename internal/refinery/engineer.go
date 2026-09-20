@@ -28,6 +28,54 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
+// lintLockContentionMarker is the text golangci-lint outputs when another
+// instance holds the lock. With allow-serial-runners: true, golangci-lint
+// blocks on the lock instead of exiting with this marker, so a contended lint
+// times out after its budget without producing any output.
+const lintLockContentionMarker = "parallel golangci-lint is running"
+
+// lintLockRetryDelay is how long to wait before each retry of a lock-contended
+// lint. One entry per retry, so at most len+1 attempts. The schedule widens
+// and then holds, because the size of the wait is not what decides a retry —
+// golangci-lint's own TryLockContext already spins for 5s on each attempt, so
+// an attempt is a ticket in the race for the lock, and what is being chosen
+// here is how many tickets to buy and how much CPU to spend between them.
+// These waits total 285s, which fits within the default 10m lint budget.
+var lintLockRetryDelay = []time.Duration{
+	15 * time.Second, 30 * time.Second, 30 * time.Second, 45 * time.Second,
+	45 * time.Second, 45 * time.Second, 45 * time.Second, 45 * time.Second,
+}
+
+// lintLockRetryReserve is the time budget kept for the actual lint that
+// eventually gets the lock. A contended attempt costs only the ~5s
+// golangci-lint spends failing to take the lock, but the winner then needs
+// a whole lint — ~90s on a quiet host — and a lint cut short by the budget
+// would be reported as a failure, which is the misattribution this logic
+// exists to prevent.
+const lintLockRetryReserve = 3 * time.Minute
+
+// lintAttempt is one run of a lint command: the error and output.
+type lintAttempt struct {
+	err    error
+	output string
+}
+
+// roomForRetry reports whether ctx can still afford to wait for wait and then
+// run a full lint, so a retry is never started that the budget cannot finish.
+func roomForRetry(ctx context.Context, wait time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	return time.Until(deadline) >= wait+lintLockRetryReserve
+}
+
+// isLintLockContention reports whether a failed lint attempt failed because
+// another golangci-lint held the lock, rather than because it found anything.
+func isLintLockContention(output string) bool {
+	return strings.Contains(output, lintLockContentionMarker)
+}
+
 // shortSHA returns at most 8 characters of a SHA for display.
 func shortSHA(sha string) string {
 	if len(sha) > 8 {
