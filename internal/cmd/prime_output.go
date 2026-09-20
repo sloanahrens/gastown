@@ -134,6 +134,8 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		if rigPath != "" {
 			explainf("Role directives: also checked %s", rigPath)
 		}
+		// Warn about unused directive files even when no role-specific content exists
+		outputUnusedDirectiveWarning(w, ctx.TownRoot, ctx.Rig)
 		return
 	}
 
@@ -179,6 +181,64 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		return
 	}
 	fmt.Fprintln(w, content)
+}
+
+// outputUnusedDirectiveWarning checks for directive files that don't correspond
+// to known agent roles and prints a warning if any are found.
+func outputUnusedDirectiveWarning(w io.Writer, townRoot, rigName string) {
+	// Build a map of valid roles for quick lookup
+	validRoles := make(map[string]bool)
+	for _, r := range config.AllRoles() {
+		validRoles[r] = true
+	}
+
+	var unusedFiles []string
+
+	// Check town-level directives
+	townDir := filepath.Join(townRoot, "directives")
+	if files, err := os.ReadDir(townDir); err == nil {
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".md") {
+				continue
+			}
+			role := strings.TrimSuffix(f.Name(), ".md")
+			if !validRoles[role] {
+				unusedFiles = append(unusedFiles, filepath.Join(townDir, f.Name()))
+			}
+		}
+	}
+
+	// Check rig-level directives if a specific rig is being checked
+	if rigName != "" {
+		rigDir := filepath.Join(townRoot, rigName, "directives")
+		files, err := os.ReadDir(rigDir)
+		if err == nil {
+			for _, f := range files {
+				if f.IsDir() || !strings.HasSuffix(f.Name(), ".md") {
+					continue
+				}
+				role := strings.TrimSuffix(f.Name(), ".md")
+				if !validRoles[role] {
+					unusedFiles = append(unusedFiles, filepath.Join(rigDir, f.Name()))
+				}
+			}
+		}
+	}
+
+	if len(unusedFiles) == 0 {
+		return
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, style.Warning.Render("## ⚠️  Unused Directive Files Detected"))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "The following directive files are not named for a known agent role:")
+	for _, f := range unusedFiles {
+		fmt.Fprintf(w, "  - %s\n", f)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "These files are silently never loaded by Gas Town.")
+	fmt.Fprintln(w, "Use 'gt directive list' to see all directive files with their status.")
 }
 
 func outputPrimeContextFallback(ctx RoleContext) {

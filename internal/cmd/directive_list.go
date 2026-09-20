@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -32,10 +34,17 @@ func runDirectiveList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	// Build a map of valid roles for quick lookup
+	validRoles := make(map[string]bool)
+	for _, r := range config.AllRoles() {
+		validRoles[r] = true
+	}
+
 	type entry struct {
-		scope string // "town" or rig name
-		role  string
-		path  string
+		scope      string // "town" or rig name
+		role       string
+		path       string
+		isUnused   bool   // true if role doesn't match any known agent
 	}
 
 	var entries []entry
@@ -50,7 +59,12 @@ func runDirectiveList(cmd *cobra.Command, args []string) error {
 			role := strings.TrimSuffix(f.Name(), ".md")
 			path := filepath.Join(townDir, f.Name())
 			if fileHasContent(path) {
-				entries = append(entries, entry{scope: "town", role: role, path: path})
+				entries = append(entries, entry{
+					scope:    "town",
+					role:     role,
+					path:     path,
+					isUnused: !validRoles[role],
+				})
 			}
 		}
 	}
@@ -81,7 +95,12 @@ func runDirectiveList(cmd *cobra.Command, args []string) error {
 				role := strings.TrimSuffix(f.Name(), ".md")
 				path := filepath.Join(rigDir, f.Name())
 				if fileHasContent(path) {
-					entries = append(entries, entry{scope: rigName, role: role, path: path})
+					entries = append(entries, entry{
+						scope:    rigName,
+						role:     role,
+						path:     path,
+						isUnused: !validRoles[role],
+					})
 				}
 			}
 		}
@@ -97,7 +116,30 @@ func runDirectiveList(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %-10s %-12s %s\n", "SCOPE", "ROLE", "PATH")
 	fmt.Printf("  %-10s %-12s %s\n", "─────", "────", "────")
 	for _, e := range entries {
-		fmt.Printf("  %-10s %-12s %s\n", e.scope, e.role, e.path)
+		roleDisplay := e.role
+		if e.isUnused {
+			roleDisplay += " [UNUSED (no such role)]"
+		}
+		fmt.Printf("  %-10s %-12s %s\n", e.scope, roleDisplay, e.path)
+	}
+
+	// Report unused roles at the end
+	// Use a map to deduplicate unused roles
+	unusedRoleSet := make(map[string]bool)
+	for _, e := range entries {
+		if e.isUnused {
+			unusedRoleSet[e.role] = true
+		}
+	}
+	if len(unusedRoleSet) > 0 {
+		fmt.Println()
+		fmt.Println(style.Warning.Render("⚠️  Unused directive files detected:"))
+		for role := range unusedRoleSet {
+			fmt.Printf("    - %s (no agent role matches this name)\n", role)
+		}
+		fmt.Println()
+		fmt.Println("  These files are never loaded by Gas Town.")
+		fmt.Println("  Use 'gt directive show <role>' to verify, or rename/delete unused files.")
 	}
 
 	return nil

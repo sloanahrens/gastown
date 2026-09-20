@@ -338,6 +338,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewHooksSyncCheck())
 	d.Register(doctor.NewHooksBaseCheck())
 
+	// Directive hygiene checks
+	d.Register(doctor.NewUnusedDirectiveCheck())
+
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
