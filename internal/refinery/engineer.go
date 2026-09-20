@@ -2056,8 +2056,18 @@ func (e *Engineer) closeIneligibleMR(mr *MRInfo, reason string) error {
 }
 
 func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string, mergeCommit ...string) error {
+	_, err := e.closeMRWithReasonResult(mr, closeReason, mergeCommit...)
+	return err
+}
+
+// closeMRWithReasonResult is closeMRWithReason reporting the close outcome.
+// A caller that follows the close with work of its own — dead-worker recovery
+// on a rejection (see rejectReviewedCandidate) — needs to know whether THIS
+// call was the one that closed the MR, since another path that closed it first
+// has already run whatever recovery it needed (gt-bsmp).
+func (e *Engineer) closeMRWithReasonResult(mr *MRInfo, closeReason string, mergeCommit ...string) (*terminalMRCloseResult, error) {
 	if mr == nil || strings.TrimSpace(mr.ID) == "" {
-		return nil
+		return &terminalMRCloseResult{}, nil
 	}
 	var commit string
 	if len(mergeCommit) > 0 {
@@ -2075,7 +2085,7 @@ func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string, mergeCommit
 		ExpectedMR:    expected,
 	})
 	if err != nil {
-		return err
+		return result, err
 	}
 	if result.Closed {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
@@ -2083,7 +2093,7 @@ func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string, mergeCommit
 	if result.AgentActiveMRClearErr != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to clear agent bead %s active_mr: %v\n", result.AgentBead, result.AgentActiveMRClearErr)
 	}
-	return nil
+	return result, nil
 }
 
 func mergeRequestFromMRInfo(mr *MRInfo) *MergeRequest {
