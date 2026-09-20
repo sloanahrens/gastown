@@ -35,6 +35,7 @@ type ConvoyFetcher interface {
 	FetchMayor() (*MayorStatus, error)
 	FetchIssues() ([]IssueRow, error)
 	FetchActivity() ([]ActivityRow, error)
+	FetchLocalPool() (*LocalPoolData, error)
 }
 
 // expandCacheEntry holds a cached expanded-view response.

@@ -13,6 +13,18 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
+// LocalPoolData represents the local polecat pool panel data.
+type LocalPoolData struct {
+	MaxLocal       int    // Max local polecats from config
+	LocalSeats     int    // Current number of local polecats running
+	SlotsBusy      int    // Number of llama-server slots in use
+	SlotsTotal     int    // Total llama-server slots available
+	LocalAgent     string // GT_AGENT value for local polecats
+	OverflowAgent  string // Overflow agent name (optional)
+	MinSpawnGap    string // Min spawn gap duration (optional)
+	Error          string // Error message if fetch failed (e.g., "llama-server: down")
+}
+
 // ConvoyData represents data passed to the convoy template.
 type ConvoyData struct {
 	Convoys     []ConvoyRow
@@ -29,6 +41,7 @@ type ConvoyData struct {
 	Mayor       *MayorStatus
 	Issues      []IssueRow
 	Activity    []ActivityRow
+	LocalPool   *LocalPoolData
 	Summary     *DashboardSummary
 	Expand      string // Panel to show fullscreen (from ?expand=name)
 	CSRFToken   string // Token for CSRF protection on POST requests
