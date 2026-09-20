@@ -182,6 +182,92 @@ func write(t *testing.T, path, content string) {
 	}
 }
 
+func TestTreesIdentical(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	if _, err := g.run("checkout", "-b", "same"); err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	identical, err := g.TreesIdentical("main", "same")
+	if err != nil {
+		t.Fatalf("TreesIdentical: %v", err)
+	}
+	if !identical {
+		t.Error("descendant branch with no commits reported as differing from its base")
+	}
+
+	write(t, filepath.Join(dir, "extra.txt"), "extra\n")
+	if _, err := g.run("add", "."); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := g.run("commit", "-m", "add extra"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	identical, err = g.TreesIdentical("main", "same")
+	if err != nil {
+		t.Fatalf("TreesIdentical after commit: %v", err)
+	}
+	if identical {
+		t.Error("branch that adds a file reported as having its base's tree")
+	}
+}
+
+// TestCommitLineStatsInRange pins the two shapes git log --numstat emits inside
+// a range: a commit with changes prints a blank line and its per-file counts,
+// and a commit with none — an empty commit — prints nothing at all, so the next
+// hash line follows the subject directly. A parser that assumes the blank line
+// is present loses every commit after an empty one.
+func TestCommitLineStatsInRange(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	if _, err := g.run("checkout", "-b", "work"); err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	write(t, filepath.Join(dir, "payload.txt"), "one\ntwo\nthree\n")
+	if _, err := g.run("add", "."); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := g.run("commit", "-m", "feat: add payload"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := g.run("commit", "--allow-empty", "-m", "chore: no-op"); err != nil {
+		t.Fatalf("empty commit: %v", err)
+	}
+	if _, err := g.run("rm", "payload.txt"); err != nil {
+		t.Fatalf("rm: %v", err)
+	}
+	if _, err := g.run("commit", "-m", "fix: drop payload"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	stats, err := g.CommitLineStatsInRange("main..work", 10)
+	if err != nil {
+		t.Fatalf("CommitLineStatsInRange: %v", err)
+	}
+	if len(stats) != 3 {
+		t.Fatalf("got %d commits, want 3: %+v", len(stats), stats)
+	}
+	if stats[0].Subject != "fix: drop payload" || stats[0].Added != 0 || stats[0].Removed != 3 {
+		t.Errorf("newest = %+v, want a 3-line removal", stats[0])
+	}
+	if stats[1].Subject != "chore: no-op" || stats[1].Added != 0 || stats[1].Removed != 0 {
+		t.Errorf("empty commit = %+v, want zero counts", stats[1])
+	}
+	if stats[2].Subject != "feat: add payload" || stats[2].Added != 3 || stats[2].Removed != 0 {
+		t.Errorf("oldest = %+v, want a 3-line addition", stats[2])
+	}
+
+	limited, err := g.CommitLineStatsInRange("main..work", 1)
+	if err != nil {
+		t.Fatalf("CommitLineStatsInRange limited: %v", err)
+	}
+	if len(limited) != 1 || limited[0].Subject != "fix: drop payload" {
+		t.Errorf("limit 1 = %+v, want only the newest commit", limited)
+	}
+}
+
 func keys(m map[string]CommitFileChange) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

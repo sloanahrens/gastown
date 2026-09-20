@@ -352,6 +352,51 @@ func TestBuildRebaseStack_ConflictRemovesMR(t *testing.T) {
 	}
 }
 
+// TestBuildRebaseStack_DropsEmptyMR pins that a batch member whose merge leaves
+// the stack unchanged is dropped instead of stacked. Stacked, it would be
+// pushed and closed as merged while contributing nothing (gt-j5cc), and it is
+// not a conflict, so the rest of the batch must be unaffected.
+func TestBuildRebaseStack_DropsEmptyMR(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+
+	// feature-empty commits a payload and then removes it again, ending with
+	// main's own tree.
+	run(t, workDir, "git", "checkout", "-b", "feature-empty", "main")
+	writeFile(t, workDir, "payload.txt", "payload\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: add payload")
+	run(t, workDir, "git", "rm", "payload.txt")
+	run(t, workDir, "git", "commit", "-m", "fix: drop payload")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{
+		makeMR("mr-a", "feature-a", "main"),
+		makeMR("mr-empty", "feature-empty", "main"),
+	}
+
+	stacked, conflicts, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stacked) != 1 || stacked[0].ID != "mr-a" {
+		t.Errorf("expected only mr-a stacked, got %v", stackedIDs(stacked))
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("expected 0 conflicts (an empty MR is not one), got %d", len(conflicts))
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "a.txt")); os.IsNotExist(err) {
+		t.Error("mr-a's file is missing from the stack")
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "payload.txt")); !os.IsNotExist(err) {
+		t.Error("the empty MR's payload is in the stack")
+	}
+}
+
 func TestBuildRebaseStack_EmptyBatch(t *testing.T) {
 	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)

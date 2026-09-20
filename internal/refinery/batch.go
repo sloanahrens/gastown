@@ -183,6 +183,12 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		}
 
 		// Merge this MR onto the stack, preserving the submitted head in ancestry.
+		// The tip is captured first so a member whose merge leaves the stack
+		// exactly as it was can be detected and undone below (gt-j5cc).
+		beforeSHA, headErr := e.git.Rev("HEAD")
+		if headErr != nil {
+			return nil, nil, fmt.Errorf("resolve stack tip before %s: %w", mr.ID, headErr)
+		}
 		msg := e.getMergeMessage(mr)
 		if mergeErr := e.git.MergeNoFF(mergeRef, msg); mergeErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: merge failed: %v, removing from batch\n", mr.ID, mergeErr)
@@ -202,6 +208,31 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 					return nil, nil, fmt.Errorf("rebuild stack for %s: %w", prev.ID, rebuildErr)
 				}
 			}
+			continue
+		}
+
+		// An MR whose merge leaves the stack unchanged contributes nothing to
+		// the push, so it would land as merged while changing nothing — the
+		// empty MR the single-MR path refuses (gt-j5cc). Undo just its merge
+		// and dequeue it. The refusal closes the MR itself, so this does not
+		// route through HandleMRInfoFailure; a second close is a second Dolt
+		// commit for nothing.
+		addedNothing, cmpErr := e.git.TreesIdentical(beforeSHA, "HEAD")
+		if cmpErr != nil {
+			return nil, nil, fmt.Errorf("compare stack tip around %s: %w", mr.ID, cmpErr)
+		}
+		if addedNothing {
+			if resetErr := e.git.ResetHard(beforeSHA); resetErr != nil {
+				return nil, nil, fmt.Errorf("undo empty merge of %s: %w", mr.ID, resetErr)
+			}
+			result := e.refuseEmptyMerge(mr, emptyMerge{
+				Target:     target,
+				Base:       baseSHA,
+				Head:       mergeRef,
+				Stage:      "in batch stack",
+				Comparison: fmt.Sprintf("merging it onto the batch's stack (%d MRs already stacked) left that stack unchanged", len(stacked)),
+			})
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: %s, removed from batch\n", mr.ID, result.Error)
 			continue
 		}
 
