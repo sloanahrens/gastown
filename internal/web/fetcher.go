@@ -819,6 +819,18 @@ func determineColorClass(ciStatus, mergeable string) string {
 	return "mq-yellow"
 }
 
+// polecatListItem represents a polecat in list output (from gt polecat list --json).
+type polecatListItem struct {
+	Name       string `json:"name"`
+	Agent      string `json:"agent,omitempty"`
+	MRID       string `json:"mr_id,omitempty"`
+	MRStatus   string `json:"mr_status,omitempty"`
+	Rig        string `json:"rig"`
+	State      string `json:"state"`
+	Issue      string `json:"issue,omitempty"`
+	SessionName string `json:"session_name,omitempty"`
+}
+
 // FetchWorkers fetches all running worker sessions (polecats and refinery) with activity data.
 func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 	// Load registered rigs to filter sessions
@@ -836,6 +848,9 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 
 	// Pre-fetch assigned issues map: assignee -> (issueID, title)
 	assignedIssues := f.getAssignedIssuesMap()
+
+	// Pre-fetch polecat data for agent and MR status
+	polecatData := f.fetchPolecatData()
 
 	// Query all tmux sessions with window_activity for more accurate timing
 	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}|#{window_activity}")
@@ -925,6 +940,13 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 			// Keep full title - CSS handles overflow
 		}
 
+		// Look up agent and MR status from polecat data
+		var agent, mrStatus string
+		if pd, ok := polecatData[rig][workerName]; ok {
+			agent = pd.Agent
+			mrStatus = pd.MRStatus
+		}
+
 		// Calculate work status based on activity age and issue assignment
 		workStatus := calculateWorkerWorkStatus(activityAge, issueID, workerName, f.staleThreshold, f.stuckThreshold)
 
@@ -938,10 +960,42 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 			IssueTitle:   issueTitle,
 			WorkStatus:   workStatus,
 			AgentType:    agentType,
+			Agent:        agent,
+			MRStatus:     mrStatus,
 		})
 	}
 
 	return workers, nil
+}
+
+// fetchPolecatData fetches polecat data from gt polecat list --all --json.
+// Returns a map of rig -> name -> polecat data.
+func (f *LiveConvoyFetcher) fetchPolecatData() map[string]map[string]polecatListItem {
+	result := make(map[string]map[string]polecatListItem)
+
+	// Run gt polecat list --all --json
+	stdout, err := runCmd(f.cmdTimeout, "gt", "polecat", "list", "--all", "--json")
+	if err != nil {
+		// If gt polecat list fails, return empty data
+		log.Printf("warning: gt polecat list failed: %v", err)
+		return result
+	}
+
+	var poles []polecatListItem
+	if err := json.Unmarshal(stdout.Bytes(), &poles); err != nil {
+		log.Printf("warning: parsing gt polecat list output: %v", err)
+		return result
+	}
+
+	// Group by rig and name
+	for _, p := range poles {
+		if _, ok := result[p.Rig]; !ok {
+			result[p.Rig] = make(map[string]polecatListItem)
+		}
+		result[p.Rig][p.Name] = p
+	}
+
+	return result
 }
 
 // assignedIssue holds issue info for the assigned issues map.
