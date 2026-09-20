@@ -354,8 +354,7 @@ this rig's own config (`merge_queue.batch_min_age`, `merge_queue.batch_max`,
 `merge_queue.batch_min_count` in the rig's config.json): `gt mq batch
 candidates` and `gt mq batch run` read them when called without
 `--min-age`/`--max`/`--min-count`. Never pass those flags from this
-formula. A formula-level value drifts from the config (a 1h default here
-against a 20m rig setting kept five ready MRs on the single-MR path), and
+formula. A formula-level value drifts from the config (gt-kd6b), and
 the command's own header line prints the values it actually used.
 
 **If batch_enabled = "false": SKIP this entire step, proceed to process-branch
@@ -1154,9 +1153,9 @@ the window, the size and the minimum count):
 gt mq batch candidates <rig> --json
 ```
 
-- `.eligible_total` >= 2: return to **batch-scan** and land them as one
-  batch (`gt mq batch run` still applies the rig's `merge_queue.batch_min_count`
-  and falls through to process-branch when too few remain). Visiting batch-scan only once per cycle and then
+- `.eligible_total` > 0: return to **batch-scan** and land them as one
+  batch (`gt mq batch run` applies the rig's `merge_queue.batch_min_count`
+  itself and falls through to process-branch when too few remain). Visiting batch-scan only once per cycle and then
   walking the rest of the queue through process-branch costs one full
   container suite per MR; a batch is one suite for up to the rig's
   `merge_queue.batch_max`.
