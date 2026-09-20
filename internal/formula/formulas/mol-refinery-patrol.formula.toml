@@ -68,7 +68,6 @@ source of truth.
 | merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
-| batch_min_count | 4 | Minimum batch-eligible MRs required before batching kicks in; `gt mq batch run` enforces this itself and exits without batching when fewer are eligible |
 
 ## Target Resolution Rule
 
@@ -181,10 +180,6 @@ default = "false"
 [vars.batch_enabled]
 description = "Whether to batch-gate multiple ready MRs (stack, one suite run, bisect on red) instead of processing one at a time"
 default = "false"
-
-[vars.batch_min_count]
-description = "Minimum number of batch-eligible ready MRs required before batching instead of single-MR processing"
-default = "4"
 
 [vars.rig]
 description = "Name of the rig this refinery belongs to (e.g., gastown, laser)"
@@ -353,12 +348,12 @@ title = "Batch-gate ready MRs (if enough have queued up)"
 needs = ["merged-pr-sweep"]
 description = """
 **Config: batch_enabled = {{batch_enabled}}**
-**Config: batch_min_count = {{batch_min_count}}**
 
-The eligibility window and the batch size come from this rig's own config
-(`merge_queue.batch_min_age`, `merge_queue.batch_max` in the rig's
-config.json): `gt mq batch candidates` and `gt mq batch run` read them when
-called without `--min-age`/`--max`. Never pass those flags from this
+The eligibility window, the batch size and the minimum count all come from
+this rig's own config (`merge_queue.batch_min_age`, `merge_queue.batch_max`,
+`merge_queue.batch_min_count` in the rig's config.json): `gt mq batch
+candidates` and `gt mq batch run` read them when called without
+`--min-age`/`--max`/`--min-count`. Never pass those flags from this
 formula. A formula-level value drifts from the config (a 1h default here
 against a 20m rig setting kept five ready MRs on the single-MR path), and
 the command's own header line prints the values it actually used.
@@ -381,15 +376,14 @@ filed at P1, so excluding them meant batching never engaged at all.
 gt mq batch candidates <rig> --json
 ```
 
-This excludes P0 MRs and anything younger than batch_min_age, sorts by
-priority score, and caps at batch_max. Read `.eligible_total` from the output.
+This excludes P0 MRs and anything younger than the rig's `merge_queue.batch_min_age`,
+sorts by priority score, and caps at `merge_queue.batch_max`. Read `.eligible_total` from the output.
 
-**If `.eligible_total` < {{batch_min_count}}: SKIP the rest of this step,
-proceed to process-branch.** Not enough has queued up to be worth batching
-this cycle — the single-MR path will process what's ready. (This is only a
-courtesy check to save a call; `gt mq batch run` enforces the same threshold
-itself and exits without batching, so skipping the call and running it are
-both safe.)
+**If `.eligible_total` is 0: SKIP the rest of this step, proceed to
+process-branch.** Otherwise run Step 2: `gt mq batch run` enforces the
+rig's `merge_queue.batch_min_count` itself and exits without batching when
+too few are eligible (its output says so); on that exit, proceed to
+process-branch as if this step had been skipped.
 
 **Step 2: `gt mq batch run` reviews every candidate itself (T7, gt-2liq, on main since 2026-09-11)**
 
@@ -438,10 +432,10 @@ other ready MR (see Step 6).
 
 **Step 6: Continue to the single-MR path — do NOT skip it**
 
-`gt mq batch run` only ever touches non-P0 MRs older than batch_min_age,
-capped at batch_max. P0 MRs are never batched (by design, so critical fixes
-aren't held up assembling a batch), and any MR beyond batch_max or younger
-than batch_min_age was left untouched too. All of those are still sitting in
+`gt mq batch run` only ever touches non-P0 MRs older than the rig's
+`merge_queue.batch_min_age`, capped at `merge_queue.batch_max`. P0 MRs are never batched (by design, so critical fixes
+aren't held up assembling a batch), and any MR beyond `merge_queue.batch_max`
+or younger than `merge_queue.batch_min_age` was left untouched too. All of those are still sitting in
 the tracked MR list from queue-scan.
 
 **Do NOT skip to loop-check.** Continue forward in DAG order to process-branch
@@ -1153,18 +1147,19 @@ More branches to process?
 - Conflict-skip: After process-branch created conflict-resolution task
 
 If yes, pick the path by what is left in the queue, using the same
-candidates call batch-scan Step 1 makes (no --min-age/--max: the rig
-config decides; batch_min_count from the config table above):
+candidates call batch-scan Step 1 makes (no flags: the rig config decides
+the window, the size and the minimum count):
 
 ```bash
 gt mq batch candidates <rig> --json
 ```
 
-- Eligible candidates >= {{batch_min_count}}: return to **batch-scan** and
-  land them as one batch. Visiting batch-scan only once per cycle and then
+- `.eligible_total` >= 2: return to **batch-scan** and land them as one
+  batch (`gt mq batch run` still applies the rig's `merge_queue.batch_min_count`
+  and falls through to process-branch when too few remain). Visiting batch-scan only once per cycle and then
   walking the rest of the queue through process-branch costs one full
   container suite per MR; a batch is one suite for up to the rig's
-  batch_max.
+  `merge_queue.batch_max`.
 - Fewer: return to process-branch with the next branch.
 - A rubric-changing MR never goes into a batch. Check each candidate:
 
@@ -1174,8 +1169,8 @@ gt mq batch candidates <rig> --json
 
   Land a RUBRIC candidate alone via process-branch (the town directive for
   this role says how the manifest is re-stamped afterwards), then batch
-  the rest. If isolating it leaves fewer than {{batch_min_count}}
-  candidates, the remainder goes through process-branch too.
+  the rest. If isolating it leaves too few candidates for the rig's
+  `merge_queue.batch_min_count`, the remainder goes through process-branch too.
 
 If no: Continue to generate-summary.
 
