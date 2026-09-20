@@ -185,6 +185,27 @@ type WorkerRow struct {
 	IssueTitle   string        // Issue title (truncated)
 	WorkStatus   string        // working, stale, stuck, idle
 	AgentType    string        // "polecat" (ephemeral sessions) or "refinery" (permanent)
+	Agent        string        // coding agent the session runs (GT_AGENT), e.g. "claude-opus-5"
+	MRID         string        // merge-request bead, e.g. "gt-wisp-pwh6"
+	MRStatus     string        // MR queue state: open, ready, blocked, merged, rejected, missing
+}
+
+// mrStatusClass colors an MR state using the badge vocabulary: green is what
+// the refinery can take now, blue a merge that already landed, yellow one still
+// in flight, red one that needs a human.
+func mrStatusClass(status string) string {
+	switch status {
+	case "ready":
+		return "badge-green"
+	case "merged":
+		return "badge-blue"
+	case "open", "blocked":
+		return "badge-yellow"
+	case "rejected", "missing":
+		return "badge-red"
+	default:
+		return "badge-muted"
+	}
 }
 
 // MergeQueueRow represents a PR in the merge queue.
@@ -269,6 +290,7 @@ func LoadTemplates() (*template.Template, error) {
 		"dogStateClass":      dogStateClass,
 		"queueStatusClass":   queueStatusClass,
 		"polecatStatusClass": polecatStatusClass,
+		"mrStatusClass":      mrStatusClass,
 		"activityTypeClass":  activityTypeClass,
 		"contains": func(s, substr string) bool {
 			return strings.Contains(s, substr)

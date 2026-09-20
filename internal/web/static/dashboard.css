@@ -644,6 +644,35 @@
             color: var(--text-muted);
         }
 
+        /* Polecat agent and merge-request cells */
+        .polecat-agent,
+        .polecat-mr {
+            font-size: 0.8rem;
+        }
+
+        .polecat-agent {
+            max-width: 140px;
+        }
+
+        .polecat-agent .agent-name {
+            color: var(--text-secondary);
+        }
+
+        .polecat-mr {
+            max-width: 180px;
+        }
+
+        .polecat-mr .mr-id {
+            color: var(--blue);
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .polecat-agent .no-issue,
+        .polecat-mr .no-issue {
+            color: var(--text-muted);
+        }
+
         /* Polecat status row highlights */
         tr.polecat-working { }
         tr.polecat-stale { background: rgba(255, 180, 84, 0.05); }

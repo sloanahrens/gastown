@@ -158,6 +158,9 @@ type LiveConvoyFetcher struct {
 	// bdBin is the bd binary name or path. Defaults to "bd" if empty.
 	bdBin string
 
+	// gtBin is the gt binary name or path. Defaults to "gt" if empty.
+	gtBin string
+
 	// registry is a prefix registry built from the town's rigs.json.
 	// Used for parsing tmux session names instead of relying on the
 	// package-level DefaultRegistry, which may not be initialized in
@@ -194,6 +197,19 @@ type LiveConvoyFetcher struct {
 
 	// listMRs derives one rig's merge queue; nil means listRigMergeRequests.
 	listMRs mrListerFunc
+
+	// polecatIndex is the `gt polecat list --all --json` snapshot the Polecats
+	// panel joins onto its tmux sessions for the AGENT and MR columns. The list
+	// costs a bd query and a bulk merge-request join per rig, so it follows the
+	// merge-queue snapshot's shape: a render reads the cache, and a background
+	// refresh replaces it once stale (gt-kqi2).
+	polecatMu        sync.Mutex
+	polecatIndex     polecatIndex
+	polecatFetchedAt time.Time
+	polecatBreaker   fetchCircuitBreaker
+
+	// listPolecats derives the town's polecats; nil means listTownPolecats.
+	listPolecats polecatLister
 
 	// Merges-last-6h tile: its own cache, and its own counter so tests can
 	// count merges without a git subprocess.
@@ -252,6 +268,9 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 	// load: the derivation takes tens of seconds, so a dashboard whose first
 	// render triggers it shows an empty panel for the rest of that cycle.
 	fetcher.FetchTownMergeQueue()
+	// Same for the polecat inventory behind the Polecats panel's AGENT and MR
+	// columns, which is slower still (gt-kqi2).
+	fetcher.workerPolecatIndex()
 	return fetcher, nil
 }
 
@@ -1128,6 +1147,178 @@ func countMergesOnMain(repoPath string, window time.Duration) (int, error) {
 	return n, nil
 }
 
+// polecatIndexTTL is how long a `gt polecat list` snapshot is served before a
+// background refresh replaces it. The agent a session runs and its merge
+// request both move on the scale of a spawn or a merge, not a render, and a
+// refresh costs tens of seconds (see polecatListTimeout) — so the TTL is long
+// enough that the list does not run continuously, and short enough that a
+// spawned polecat names its agent well before its MR moves.
+const polecatIndexTTL = 3 * time.Minute
+
+// polecatListTimeout bounds `gt polecat list --all --json`. The list reads each
+// polecat's tmux session for GT_AGENT and runs a bulk merge-request query per
+// rig; measured 2026-09-20 it took 45s for 52 polecats across 5 rigs, so the
+// fetcher's generic cmdTimeout (15s default) would never see an answer. The
+// call runs only in the background refresh, where the budget costs a render
+// nothing.
+const polecatListTimeout = 90 * time.Second
+
+// polecatListItem is the slice of `gt polecat list --json` the Polecats panel
+// renders (gt-2540). Everything else in that output — verdict, blockers,
+// reuse status — belongs to the workstate panels, not this one.
+type polecatListItem struct {
+	Rig      string `json:"rig"`
+	Name     string `json:"name"`
+	Agent    string `json:"agent"`
+	MRID     string `json:"mr_id"`
+	MRStatus string `json:"mr_status"`
+}
+
+// polecatIndex answers "which agent is this polecat running, and what happened
+// to its MR" by rig and polecat name. A missing rig or name means no row: the
+// panel shows an empty cell rather than inventing a status.
+type polecatIndex map[string]map[string]polecatListItem
+
+// polecatLister derives the town's polecat inventory. It is the seam tests
+// replace so the panel renders without spawning gt.
+type polecatLister func() ([]byte, error)
+
+// listTownPolecats is the production lister: `gt polecat list --all --json`,
+// one call for every rig. Listing per rig would multiply the bd subprocesses
+// the list already pays for, and measured per-rig times add up to the same
+// total, so one process doing them in sequence beats five concurrent ones.
+func (f *LiveConvoyFetcher) listTownPolecats() ([]byte, error) {
+	stdout, err := f.runGtCmd(polecatListTimeout, "polecat", "list", "--all", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+// runGtCmd executes a gt subcommand from the town root. The fetcher's other
+// runners are bd- and tmux-specific; the polecat inventory is gt's.
+func (f *LiveConvoyFetcher) runGtCmd(timeout time.Duration, args ...string) (*bytes.Buffer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	bin := f.gtBin
+	if bin == "" {
+		bin = "gt"
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = f.townRoot
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("gt %s timed out after %v", strings.Join(args, " "), timeout)
+		}
+		// gt may exit non-zero after writing usable JSON.
+		if stdout.Len() > 0 {
+			return &stdout, nil
+		}
+		return nil, err
+	}
+	return &stdout, nil
+}
+
+// workerPolecatIndex returns the cached polecat snapshot, starting a background
+// refresh when it is stale. No render ever pays for the list, which is what
+// keeps the polecat inventory off the per-poll process budget: before gt-kqi2
+// the panel's agent and MR cells had no source at all, and the obvious source
+// (`gt polecat list` inline) runs for the better part of a minute.
+//
+// The cost of that is a blank AGENT and MR cell until the first refresh lands.
+// A blank column is the honest reading — the inventory is not loaded yet — and
+// the alternative, blocking a render on the list, would hold the page for as
+// long as the list takes.
+func (f *LiveConvoyFetcher) workerPolecatIndex() polecatIndex {
+	f.polecatMu.Lock()
+	index, fetchedAt := f.polecatIndex, f.polecatFetchedAt
+	f.polecatMu.Unlock()
+
+	if (fetchedAt.IsZero() || time.Since(fetchedAt) >= polecatIndexTTL) && f.polecatBreaker.allow() {
+		go f.refreshPolecatIndex()
+	}
+	return index
+}
+
+// refreshPolecatIndex republishes the snapshot on success. A failed refresh
+// keeps the previous one — a stale agent name beats a blank column — and the
+// breaker decides when to try again.
+func (f *LiveConvoyFetcher) refreshPolecatIndex() {
+	index, err := f.polecatIndexSnapshot()
+	if err != nil {
+		f.polecatBreaker.recordFailure()
+		log.Printf("dashboard: polecat inventory refresh failed: %v", err)
+		return
+	}
+	f.polecatBreaker.recordSuccess()
+
+	f.polecatMu.Lock()
+	f.polecatIndex = mergePolecatIndexes(f.polecatIndex, index)
+	f.polecatFetchedAt = time.Now()
+	f.polecatMu.Unlock()
+}
+
+// mergePolecatIndexes carries a rig's previous rows into a fresh snapshot that
+// has nothing for it. `gt polecat list --all` warns and exits 0 when one rig's
+// database is unreadable, so that rig arrives absent rather than empty — and an
+// absent rig would blank its Agent and MR cells for a whole TTL, which is the
+// outcome keeping the previous snapshot is meant to avoid.
+//
+// Carrying rows forward cannot show a wrong agent: a carried row is only read
+// for a polecat that has a live session right now, which is the case where the
+// previous read is the best answer available.
+func mergePolecatIndexes(previous, fresh polecatIndex) polecatIndex {
+	if len(previous) == 0 {
+		return fresh
+	}
+	merged := make(polecatIndex, len(fresh)+1)
+	for rig, rows := range fresh {
+		merged[rig] = rows
+	}
+	for rig, rows := range previous {
+		if _, ok := merged[rig]; !ok {
+			merged[rig] = rows
+		}
+	}
+	return merged
+}
+
+// polecatIndexSnapshot runs the list and indexes its rows. A rig that answers
+// with no polecats is an answer; only an unreadable list is an error.
+func (f *LiveConvoyFetcher) polecatIndexSnapshot() (polecatIndex, error) {
+	list := f.listPolecats
+	if list == nil {
+		list = f.listTownPolecats
+	}
+
+	raw, err := list()
+	if err != nil {
+		return nil, fmt.Errorf("gt polecat list: %w", err)
+	}
+
+	var items []polecatListItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing gt polecat list output: %w", err)
+	}
+
+	index := make(polecatIndex, len(items))
+	for _, item := range items {
+		if item.Rig == "" || item.Name == "" {
+			continue
+		}
+		if index[item.Rig] == nil {
+			index[item.Rig] = make(map[string]polecatListItem)
+		}
+		index[item.Rig][item.Name] = item
+	}
+	return index, nil
+}
+
 // FetchWorkers fetches all running worker sessions (polecats and refinery) with activity data.
 func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 	// Load registered rigs to filter sessions
@@ -1145,6 +1336,10 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 
 	// Pre-fetch assigned issues map: assignee -> (issueID, title)
 	assignedIssues := f.getAssignedIssuesMap()
+
+	// Pre-fetch the polecat inventory that carries each worker's coding agent
+	// and merge request (gt-kqi2). One list covers every rig.
+	polecats := f.workerPolecatIndex()
 
 	// Query all tmux sessions with window_activity for more accurate timing
 	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}|#{window_activity}")
@@ -1234,10 +1429,21 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 			// Keep full title - CSS handles overflow
 		}
 
+		// The inventory is keyed by rig and polecat name, so only real polecats
+		// may read it. A crew session shares the polecat name space — a crew
+		// member named for a polecat in the same rig would otherwise wear that
+		// polecat's agent and, worse, its "Idle (merged)" — and the refinery for
+		// a rig has no inventory row at all.
+		var polecat polecatListItem
+		hasPolecat := identity.Role == session.RolePolecat
+		if hasPolecat {
+			polecat, hasPolecat = polecats[rig][workerName]
+		}
+
 		// Calculate work status based on activity age and issue assignment
 		workStatus := calculateWorkerWorkStatus(activityAge, issueID, workerName, f.staleThreshold, f.stuckThreshold)
 
-		workers = append(workers, WorkerRow{
+		worker := WorkerRow{
 			Name:         workerName,
 			Rig:          rig,
 			SessionID:    sessionName,
@@ -1247,7 +1453,13 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 			IssueTitle:   issueTitle,
 			WorkStatus:   workStatus,
 			AgentType:    agentType,
-		})
+		}
+		if hasPolecat {
+			worker.Agent = polecat.Agent
+			worker.MRID = polecat.MRID
+			worker.MRStatus = polecat.MRStatus
+		}
+		workers = append(workers, worker)
 	}
 
 	return workers, nil

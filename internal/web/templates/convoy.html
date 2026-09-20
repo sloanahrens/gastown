@@ -319,7 +319,9 @@
                                 <th>Worker</th>
                                 <th>Type</th>
                                 <th>Rig</th>
+                                <th>Agent</th>
                                 <th>Working On</th>
+                                <th>MR</th>
                                 <th>Status</th>
                                 <th>Activity</th>
                             </tr>
@@ -330,10 +332,25 @@
                                 <td><span class="polecat-name">{{.Name}}</span></td>
                                 <td>{{if eq .AgentType "refinery"}}<span class="badge badge-blue">refinery</span>{{else}}<span class="badge badge-muted">polecat</span>{{end}}</td>
                                 <td><span class="polecat-rig">{{.Rig}}</span></td>
+                                <td class="polecat-agent">
+                                    {{if .Agent}}
+                                    <span class="agent-name">{{.Agent}}</span>
+                                    {{else}}
+                                    <span class="no-issue">—</span>
+                                    {{end}}
+                                </td>
                                 <td class="polecat-issue">
                                     {{if .IssueID}}
                                     <span class="issue-id">{{.IssueID}}</span>
                                     <span class="issue-title">{{.IssueTitle}}</span>
+                                    {{else}}
+                                    <span class="no-issue">—</span>
+                                    {{end}}
+                                </td>
+                                <td class="polecat-mr">
+                                    {{if .MRStatus}}
+                                    {{if .MRID}}<span class="mr-id">{{.MRID}}</span>{{end}}
+                                    <span class="badge {{mrStatusClass .MRStatus}}">{{.MRStatus}}</span>
                                     {{else}}
                                     <span class="no-issue">—</span>
                                     {{end}}
@@ -345,6 +362,8 @@
                                     <span class="badge badge-yellow">Stale</span>
                                     {{else if eq .WorkStatus "stuck"}}
                                     <span class="badge badge-red">Stuck</span>
+                                    {{else if eq .MRStatus "merged"}}
+                                    <span class="badge badge-muted">Idle (merged)</span>
                                     {{else}}
                                     <span class="badge badge-muted">Idle</span>
                                     {{end}}

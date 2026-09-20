@@ -363,3 +363,108 @@ func TestConvoyTemplate_EmptyState(t *testing.T) {
 		t.Error("Template should show empty state message when no convoys")
 	}
 }
+
+// TestConvoyTemplate_PolecatsPanelShowsAgentAndMR covers gt-kqi2: the Polecats
+// panel's AGENT and MR columns, and the "Idle (merged)" reading for an idle
+// polecat whose merge request already landed.
+func TestConvoyTemplate_PolecatsPanelShowsAgentAndMR(t *testing.T) {
+	tmpl, err := LoadTemplates()
+	if err != nil {
+		t.Fatalf("LoadTemplates() error = %v", err)
+	}
+
+	data := ConvoyData{
+		Workers: []WorkerRow{
+			{
+				Name:       "malachite",
+				Rig:        "gastown",
+				AgentType:  "polecat",
+				WorkStatus: "idle",
+				Agent:      "claude-opus-5",
+				MRID:       "gt-wisp-merged",
+				MRStatus:   "merged",
+			},
+			{
+				Name:       "opal",
+				Rig:        "gastown",
+				AgentType:  "polecat",
+				WorkStatus: "idle",
+				Agent:      "deepseek-flash",
+				MRStatus:   "unknown",
+			},
+			{
+				Name:       "refinery",
+				Rig:        "gastown",
+				AgentType:  "refinery",
+				WorkStatus: "working",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	output := buf.String()
+
+	panel := panelSection(t, output, "🦨 Polecats", "📟 Sessions")
+
+	// The columns exist, not just the data behind them.
+	for _, header := range []string{"<th>Agent</th>", "<th>MR</th>"} {
+		if !strings.Contains(panel, header) {
+			t.Errorf("Polecats panel is missing the %s column", header)
+		}
+	}
+
+	// The agent column carries the session's coding agent.
+	if !strings.Contains(panel, "claude-opus-5") {
+		t.Error("Polecats panel should name the polecat's coding agent")
+	}
+
+	// The MR column carries the merge request and its state.
+	if !strings.Contains(panel, "gt-wisp-merged") {
+		t.Error("Polecats panel should show the polecat's merge request id")
+	}
+	if !strings.Contains(panel, `class="badge badge-blue">merged`) {
+		t.Error("Polecats panel should badge a merged MR")
+	}
+
+	// "unknown" reaches the panel only when the inventory says the rig's queue
+	// could not be read — not as a placeholder the fetcher wrote itself.
+	if !strings.Contains(panel, `class="badge badge-muted">unknown`) {
+		t.Error("a queue that could not be read should badge as unknown")
+	}
+	if strings.Contains(panel, `<span class="mr-id"></span>`) {
+		t.Error("an MR with no bead behind it should not render an empty mr-id span")
+	}
+
+	// An idle polecat whose MR merged says so; an idle polecat without one does
+	// not.
+	if !strings.Contains(panel, "Idle (merged)") {
+		t.Error(`idle row with a merged MR should read "Idle (merged)"`)
+	}
+	if got := strings.Count(panel, "Idle (merged)"); got != 1 {
+		t.Errorf(`"Idle (merged)" rendered %d times, want 1`, got)
+	}
+	if !strings.Contains(panel, `>Idle</span>`) {
+		t.Error("idle row without a merged MR should still read plain Idle")
+	}
+}
+
+// panelSection returns the rendered slice between two panel headings, failing
+// the test if either is absent — otherwise a renamed heading would silently
+// widen the window to the whole page and let the assertions below match another
+// panel's text.
+func panelSection(t *testing.T, output, from, to string) string {
+	t.Helper()
+	start := strings.Index(output, from)
+	if start < 0 {
+		t.Fatalf("rendered page has no %q heading", from)
+	}
+	section := output[start:]
+	end := strings.Index(section, to)
+	if end < 0 {
+		t.Fatalf("rendered page has no %q heading after %q", to, from)
+	}
+	return section[:end]
+}

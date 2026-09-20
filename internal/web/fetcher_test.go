@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1495,5 +1496,522 @@ func TestCountMergesOnMainUsesParseableSince(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("git args = %q, want %q", joined, want)
 		}
+	}
+}
+
+// ============================================
+// POLECAT INVENTORY (gt-kqi2)
+// ============================================
+
+// polecatListFixture is the shape `gt polecat list --all --json` emits after
+// gt-2540 added the agent and MR fields: a working polecat with a merge request
+// the refinery can take, an idle polecat whose MR already merged, a polecat with
+// no MR at all, and one whose active_mr points at nothing.
+const polecatListFixture = `[
+  {"rig":"gastown","name":"agate","state":"working","issue":"gt-kqi2",
+   "agent":"claude-opus-5","mr_id":"gt-wisp-ready","mr_status":"ready"},
+  {"rig":"gastown","name":"malachite","state":"done","agent":"claude-sonnet-5",
+   "mr_id":"gt-wisp-merged","mr_status":"merged"},
+  {"rig":"gastown","name":"opal","state":"idle","agent":"deepseek-flash"},
+  {"rig":"gastown","name":"shale","state":"done","active_mr":"gt-wisp-gone",
+   "mr_id":"gt-wisp-gone","mr_status":"missing"},
+  {"rig":"beads","name":"agate","state":"working","agent":"other-rig-agent",
+   "mr_id":"gt-wisp-beads","mr_status":"blocked"}
+]`
+
+func TestPolecatIndexSnapshotIndexesRowsByRigAndName(t *testing.T) {
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			return []byte(polecatListFixture), nil
+		},
+	}
+
+	index, err := f.polecatIndexSnapshot()
+	if err != nil {
+		t.Fatalf("polecatIndexSnapshot() error = %v", err)
+	}
+
+	// The same polecat name exists in two rigs; the index must not let one
+	// rig's agent and MR answer for the other's.
+	got, ok := index["gastown"]["agate"]
+	if !ok {
+		t.Fatal("index[gastown][agate] missing")
+	}
+	if got.Agent != "claude-opus-5" || got.MRID != "gt-wisp-ready" || got.MRStatus != "ready" {
+		t.Errorf("gastown/agate = %+v, want agent=claude-opus-5 mr_id=gt-wisp-ready mr_status=ready", got)
+	}
+
+	other, ok := index["beads"]["agate"]
+	if !ok {
+		t.Fatal("index[beads][agate] missing")
+	}
+	if other.Agent != "other-rig-agent" || other.MRStatus != "blocked" {
+		t.Errorf("beads/agate = %+v, want the beads rig's own agent and MR", other)
+	}
+
+	// A polecat with no MR reports neither field rather than a placeholder.
+	if opal := index["gastown"]["opal"]; opal.MRStatus != "" || opal.MRID != "" {
+		t.Errorf("gastown/opal = %+v, want empty MR fields", opal)
+	}
+}
+
+func TestPolecatIndexSnapshotUnreadableListIsAnError(t *testing.T) {
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			return nil, fmt.Errorf("gt exploded")
+		},
+	}
+
+	if _, err := f.polecatIndexSnapshot(); err == nil {
+		t.Fatal("polecatIndexSnapshot() error = nil, want the lister's failure surfaced")
+	}
+}
+
+func TestPolecatIndexSnapshotRejectsGarbageJSON(t *testing.T) {
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			return []byte("still thinking about it\n"), nil
+		},
+	}
+
+	if _, err := f.polecatIndexSnapshot(); err == nil {
+		t.Fatal("polecatIndexSnapshot() error = nil, want a parse error")
+	}
+}
+
+// TestPolecatIndexSnapshotEmptyOutputIsAnError covers a list that returns
+// nothing: the refresh runs in a background goroutine, where a panic would take
+// the whole dashboard down rather than just failing one fetch.
+func TestPolecatIndexSnapshotEmptyOutputIsAnError(t *testing.T) {
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			return nil, nil
+		},
+	}
+
+	if _, err := f.polecatIndexSnapshot(); err == nil {
+		t.Fatal("polecatIndexSnapshot() error = nil, want a parse error for empty output")
+	}
+}
+
+// TestWorkerPolecatIndexServesTheCachedSnapshot is the process-budget guard:
+// while the snapshot is fresh, rendering must not spawn `gt polecat list` at
+// all, because one call costs a tmux read per polecat and a bulk
+// merge-request join per rig.
+func TestWorkerPolecatIndexServesTheCachedSnapshot(t *testing.T) {
+	var listCalls int32
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			atomic.AddInt32(&listCalls, 1)
+			return []byte(polecatListFixture), nil
+		},
+	}
+	// Seed a fresh snapshot, as a completed refresh would leave it.
+	f.polecatFetchedAt = time.Now().UTC()
+	index, err := f.polecatIndexSnapshot()
+	if err != nil {
+		t.Fatalf("seeding snapshot: %v", err)
+	}
+	f.polecatIndex = index
+	atomic.StoreInt32(&listCalls, 0) // the seeding call is not a render
+
+	for i := 0; i < 5; i++ {
+		got := f.workerPolecatIndex()
+		if _, ok := got["gastown"]["agate"]; !ok {
+			t.Fatalf("render %d: snapshot is missing gastown/agate", i)
+		}
+	}
+
+	if got := atomic.LoadInt32(&listCalls); got != 0 {
+		t.Errorf("gt polecat list ran %d times on fresh renders, want 0", got)
+	}
+}
+
+// TestWorkerPolecatIndexStaleSnapshotRefreshesOnce proves the stale path
+// single-flights: however many renders arrive while a refresh is in flight,
+// exactly one list runs.
+func TestWorkerPolecatIndexStaleSnapshotRefreshesOnce(t *testing.T) {
+	release := make(chan struct{})
+	var listCalls int32
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			atomic.AddInt32(&listCalls, 1)
+			<-release
+			return []byte(polecatListFixture), nil
+		},
+	}
+	// Stale snapshot: there is data to serve while the refresh runs.
+	f.polecatIndex = polecatIndex{"gastown": {"agate": polecatListItem{Rig: "gastown", Name: "agate", Agent: "stale-agent"}}}
+	f.polecatFetchedAt = time.Now().Add(-polecatIndexTTL - time.Minute)
+
+	for i := 0; i < 5; i++ {
+		if got := f.workerPolecatIndex(); got["gastown"]["agate"].Agent != "stale-agent" {
+			t.Fatalf("render %d: got %+v, want the previous snapshot while refreshing", i, got)
+		}
+	}
+
+	close(release)
+	waitForPolecatRefresh(t, f)
+
+	if got := atomic.LoadInt32(&listCalls); got != 1 {
+		t.Errorf("gt polecat list ran %d times across 5 stale renders, want 1", got)
+	}
+	if got := f.workerPolecatIndex()["gastown"]["agate"].Agent; got != "claude-opus-5" {
+		t.Errorf("after refresh, agent = %q, want the refreshed snapshot", got)
+	}
+}
+
+// TestWorkerPolecatIndexColdStartDoesNotBlock covers the branch that alarms: a
+// fresh dashboard must render before the list has answered, or every first page
+// load would wait out the list's tens of seconds.
+func TestWorkerPolecatIndexColdStartDoesNotBlock(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			close(started)
+			<-release
+			close(finished)
+			return []byte(polecatListFixture), nil
+		},
+	}
+
+	returned := make(chan polecatIndex, 1)
+	go func() { returned <- f.workerPolecatIndex() }()
+
+	select {
+	case index := <-returned:
+		if index != nil {
+			t.Errorf("index = %v, want nil before the first refresh lands", index)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("workerPolecatIndex blocked on the list; a render must not wait for it")
+	}
+
+	<-started
+	close(release)
+	<-finished
+}
+
+// waitForPolecatRefresh blocks until the published snapshot is fresh again.
+func waitForPolecatRefresh(t *testing.T, f *LiveConvoyFetcher) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		f.polecatMu.Lock()
+		fetchedAt := f.polecatFetchedAt
+		f.polecatMu.Unlock()
+		if !fetchedAt.IsZero() && time.Since(fetchedAt) < polecatIndexTTL {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("polecat inventory refresh never published")
+}
+
+// TestRefreshPolecatIndexPublishesAndKeepsOnFailure drives the refresh's two
+// outcomes directly.
+func TestRefreshPolecatIndexPublishesAndKeepsOnFailure(t *testing.T) {
+	failing := false
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			if failing {
+				return nil, fmt.Errorf("gt exploded")
+			}
+			return []byte(polecatListFixture), nil
+		},
+	}
+	f.polecatIndex = polecatIndex{"gastown": {"agate": polecatListItem{Name: "agate", Agent: "previous"}}}
+	f.polecatFetchedAt = time.Now().Add(-time.Hour)
+
+	f.refreshPolecatIndex()
+	if got := f.workerPolecatIndex()["gastown"]["agate"].Agent; got != "claude-opus-5" {
+		t.Errorf("after a successful refresh, agent = %q, want claude-opus-5", got)
+	}
+
+	// A failed refresh must keep the previous snapshot rather than blank the
+	// panel, and must close the breaker.
+	failing = true
+	f.polecatFetchedAt = time.Now().Add(-time.Hour)
+	f.refreshPolecatIndex()
+
+	if got := f.workerPolecatIndex()["gastown"]["agate"].Agent; got != "claude-opus-5" {
+		t.Errorf("after a failed refresh, agent = %q, want the previous snapshot kept", got)
+	}
+	if f.polecatBreaker.allow() {
+		t.Error("a failed refresh should close the breaker")
+	}
+}
+
+// TestFetchWorkersJoinsAgentAndMRFromInventory is the integration the review of
+// attempt 1 asked for: the Agent and MRStatus fields must actually reach the
+// panel's rows, not sit unread.
+func TestFetchWorkersJoinsAgentAndMRFromInventory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	townRoot := townRootWithRigs(t, "gastown")
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+echo '[{"id":"gt-kqi2","title":"Polecats panel","status":"in_progress","assignee":"gastown/polecats/agate"}]'
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	now := time.Now().Unix()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			return bytes.NewBufferString(fmt.Sprintf("gt-agate|%d\ngt-refinery|%d\n", now, now)), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+
+	listCalls := 0
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		cmdTimeout:     5 * time.Second,
+		bdBin:          bdPath,
+		registry:       registry,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 15 * time.Minute,
+		listPolecats: func() ([]byte, error) {
+			listCalls++
+			return []byte(polecatListFixture), nil
+		},
+	}
+
+	// Warm the inventory the way NewLiveConvoyFetcher does at startup; a fresh
+	// fetcher serves an empty snapshot until the first refresh lands.
+	f.workerPolecatIndex()
+	waitForPolecatRefresh(t, f)
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+
+	byName := make(map[string]WorkerRow, len(workers))
+	for _, w := range workers {
+		byName[w.Name] = w
+	}
+
+	agate, ok := byName["agate"]
+	if !ok {
+		t.Fatalf("no agate worker row; got %d rows: %+v", len(workers), workers)
+	}
+	if agate.Agent != "claude-opus-5" {
+		t.Errorf("agate.Agent = %q, want claude-opus-5", agate.Agent)
+	}
+	if agate.MRID != "gt-wisp-ready" {
+		t.Errorf("agate.MRID = %q, want gt-wisp-ready", agate.MRID)
+	}
+	if agate.MRStatus != "ready" {
+		t.Errorf("agate.MRStatus = %q, want ready", agate.MRStatus)
+	}
+
+	// The refinery has no polecat inventory row, so its cells stay empty rather
+	// than borrowing a polecat's agent or MR.
+	refinery, ok := byName["refinery"]
+	if !ok {
+		t.Fatal("no refinery worker row")
+	}
+	if refinery.Agent != "" || refinery.MRID != "" || refinery.MRStatus != "" {
+		t.Errorf("refinery = %+v, want empty agent and MR", refinery)
+	}
+
+	// One bulk list for the whole panel, not one per worker.
+	if listCalls != 1 {
+		t.Errorf("gt polecat list ran %d times, want 1", listCalls)
+	}
+}
+
+// TestPolecatBreakerRetriesAfterBackoff guards the wedge: a breaker whose
+// in-flight flag is never cleared rejects every later refresh, so the columns
+// stay blank for the life of the process. A failure must be recoverable.
+func TestPolecatBreakerRetriesAfterBackoff(t *testing.T) {
+	failing := true
+	var listCalls int32
+	f := &LiveConvoyFetcher{
+		listPolecats: func() ([]byte, error) {
+			atomic.AddInt32(&listCalls, 1)
+			if failing {
+				return nil, fmt.Errorf("gt: command not found")
+			}
+			return []byte(polecatListFixture), nil
+		},
+	}
+
+	f.refreshPolecatIndex()
+	if f.polecatBreaker.allow() {
+		t.Fatal("a failed refresh should hold the next attempt off")
+	}
+
+	// Age the breaker past its backoff, as time passing would.
+	f.polecatBreaker.mu.Lock()
+	f.polecatBreaker.lastAttempt = time.Now().Add(-time.Hour)
+	f.polecatBreaker.mu.Unlock()
+
+	failing = false
+	if got := f.workerPolecatIndex(); got != nil {
+		t.Errorf("index = %v, want nil until the retry lands", got)
+	}
+	waitForPolecatRefresh(t, f)
+
+	if got := atomic.LoadInt32(&listCalls); got != 2 {
+		t.Errorf("gt polecat list ran %d times, want 2 (the retry must happen)", got)
+	}
+}
+
+// TestMergePolecatIndexesCarriesAnAbsentRigForward covers the partial read:
+// `gt polecat list --all` warns and exits 0 when one rig's database cannot be
+// read, so that rig arrives absent — and absent would blank its cells for a
+// whole TTL.
+func TestMergePolecatIndexesCarriesAnAbsentRigForward(t *testing.T) {
+	previous := polecatIndex{
+		"gastown": {"agate": {Rig: "gastown", Name: "agate", Agent: "claude-opus-5", MRStatus: "ready"}},
+		"beads":   {"quartz": {Rig: "beads", Name: "quartz", Agent: "gpt"}},
+	}
+	fresh := polecatIndex{
+		"gastown": {"agate": {Rig: "gastown", Name: "agate", Agent: "claude-sonnet-5"}},
+	}
+
+	merged := mergePolecatIndexes(previous, fresh)
+
+	if got := merged["gastown"]["agate"].Agent; got != "claude-sonnet-5" {
+		t.Errorf("gastown/agate agent = %q, want the fresh reading", got)
+	}
+	if got := merged["beads"]["quartz"].Agent; got != "gpt" {
+		t.Errorf("beads/quartz agent = %q, want the carried-forward row", got)
+	}
+}
+
+// TestListTownPolecatsRunsTheRightCommand pins the argv and working directory
+// the whole feature rests on. No other test executes the production lister, so
+// a dropped --all (gt then demands a rig name and prints no JSON) or the wrong
+// directory would leave the columns blank forever with every test still green.
+func TestListTownPolecatsRunsTheRightCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	townRoot := t.TempDir()
+	tmp := t.TempDir()
+	recordPath := filepath.Join(tmp, "record")
+	gtPath := filepath.Join(tmp, "gt")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$PWD" > %s
+printf '%%s\n' "$*" >> %s
+cat <<'JSON'
+%s
+JSON
+`, recordPath, recordPath, polecatListFixture)
+	if err := os.WriteFile(gtPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	f := &LiveConvoyFetcher{townRoot: townRoot, gtBin: gtPath, cmdTimeout: 5 * time.Second}
+	raw, err := f.listTownPolecats()
+	if err != nil {
+		t.Fatalf("listTownPolecats() error = %v", err)
+	}
+	if !strings.Contains(string(raw), "gt-wisp-ready") {
+		t.Errorf("listTownPolecats() = %q, want the list JSON", raw)
+	}
+
+	recorded, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read recorded command: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("fake gt recorded %d lines, want 2: %q", len(lines), recorded)
+	}
+
+	// sh reports the resolved path, and t.TempDir() hands back the symlinked
+	// one on macOS.
+	gotDir, err := filepath.EvalSymlinks(lines[0])
+	if err != nil {
+		t.Fatalf("resolve recorded dir %q: %v", lines[0], err)
+	}
+	wantDir, err := filepath.EvalSymlinks(townRoot)
+	if err != nil {
+		t.Fatalf("resolve town root %q: %v", townRoot, err)
+	}
+	if gotDir != wantDir {
+		t.Errorf("gt ran in %q, want the town root %q", gotDir, wantDir)
+	}
+	if want := "polecat list --all --json"; lines[1] != want {
+		t.Errorf("gt ran with %q, want %q", lines[1], want)
+	}
+}
+
+// TestFetchWorkersCrewDoesNotBorrowAPolecatAgent covers the name collision:
+// crew sessions share the polecat name space in a rig, and the inventory is
+// keyed by polecat name, so a crew member must not read a polecat's row.
+func TestFetchWorkersCrewDoesNotBorrowAPolecatAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	townRoot := townRootWithRigs(t, "gastown")
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+echo '[]'
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	now := time.Now().Unix()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			// The crew member is named for a polecat in the same rig.
+			return bytes.NewBufferString(fmt.Sprintf("gt-crew-agate|%d\n", now)), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		cmdTimeout:     5 * time.Second,
+		bdBin:          bdPath,
+		registry:       registry,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 15 * time.Minute,
+		listPolecats: func() ([]byte, error) {
+			return []byte(polecatListFixture), nil
+		},
+	}
+
+	// Warm the inventory, so the empty cells below are the crew gate's doing
+	// and not a cold cache.
+	f.workerPolecatIndex()
+	waitForPolecatRefresh(t, f)
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("got %d workers, want 1: %+v", len(workers), workers)
+	}
+	if got := workers[0]; got.Agent != "" || got.MRID != "" || got.MRStatus != "" {
+		t.Errorf("crew row = %+v, want no agent or MR borrowed from the polecat named agate", got)
 	}
 }
