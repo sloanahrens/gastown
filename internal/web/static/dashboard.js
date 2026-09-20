@@ -2693,7 +2693,25 @@
     // ============================================
     var prList = document.getElementById('pr-list');
     var prDetail = document.getElementById('pr-detail');
+    var townMqList = document.getElementById('town-mq-list');
     var currentPrUrl = null;
+
+    // Merge Queue tabs: the town's MR wisps (what the refinery gates) and the
+    // GitHub PR list. Bound once here rather than in an htmx:afterSwap hook so
+    // the morph swap cannot stack a second listener (gt-8tpe).
+    document.querySelectorAll('.mq-tab').forEach(function(tab) {
+        tab.addEventListener('click', function() {
+            var target = tab.getAttribute('data-tab');
+            document.querySelectorAll('.mq-tab').forEach(function(t) {
+                t.classList.toggle('active', t === tab);
+            });
+            if (townMqList) townMqList.style.display = target === 'town' ? 'block' : 'none';
+            if (prList) prList.style.display = target === 'prs' ? 'block' : 'none';
+            // A PR detail view belongs to the PR tab; leaving it up over the
+            // town list would show one tab's content under the other's header.
+            if (prDetail) prDetail.style.display = 'none';
+        });
+    });
 
     // Click on PR row to view details
     document.addEventListener('click', function(e) {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -182,6 +183,25 @@ type LiveConvoyFetcher struct {
 	// Circuit breaker for FetchConvoys — prevents process storms when
 	// bd list by convoy label fails persistently (e.g., schema mismatch).
 	convoyBreaker fetchCircuitBreaker
+
+	// Merge-queue snapshot, published by a background refresh. Doubles as the
+	// breaker's single-flight guard: the derivation is far too slow to run
+	// inside a render (gt-r65r).
+	mqMu        sync.Mutex
+	mqSnapshot  TownMergeQueue
+	mqFetchedAt time.Time
+	mqBreaker   fetchCircuitBreaker
+
+	// listMRs derives one rig's merge queue; nil means listRigMergeRequests.
+	listMRs mrListerFunc
+
+	// Merges-last-6h tile: its own cache, and its own counter so tests can
+	// count merges without a git subprocess.
+	mergesMu    sync.Mutex
+	mergesTile  []RigMergeCount
+	mergesTotal int
+	mergesAt    time.Time
+	countMerges countMergesFunc
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -214,7 +234,7 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		registry = session.DefaultRegistry()
 	}
 
-	return &LiveConvoyFetcher{
+	fetcher := &LiveConvoyFetcher{
 		townRoot:                townRoot,
 		townBeads:               filepath.Join(townRoot, ".beads"),
 		registry:                registry,
@@ -226,7 +246,13 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		stuckThreshold:          config.ParseDurationOrDefault(workerCfg.StuckThreshold, constants.GUPPViolationTimeout),
 		heartbeatFreshThreshold: config.ParseDurationOrDefault(workerCfg.HeartbeatFreshThreshold, 5*time.Minute),
 		mayorActiveThreshold:    config.ParseDurationOrDefault(workerCfg.MayorActiveThreshold, 5*time.Minute),
-	}, nil
+	}
+
+	// Start the merge-queue refresh at startup rather than at the first page
+	// load: the derivation takes tens of seconds, so a dashboard whose first
+	// render triggers it shows an empty panel for the rest of that cycle.
+	fetcher.FetchTownMergeQueue()
+	return fetcher, nil
 }
 
 // FetchConvoys fetches all open convoys with their activity data.
@@ -817,6 +843,289 @@ func determineColorClass(ciStatus, mergeable string) string {
 		return "mq-green"
 	}
 	return "mq-yellow"
+}
+
+const (
+	// mergeRequestLabel is the label every MR submitted by `gt mq submit` carries.
+	mergeRequestLabel = "gt:merge-request"
+
+	// townMergeQueueTTL is how long a merge-queue snapshot is served before a
+	// background refresh replaces it.
+	townMergeQueueTTL = 3 * time.Minute
+
+	// mergesTileTTL caches the merges-last-6h tile. The tile's window moves an
+	// order of magnitude slower than a dashboard refresh, and each count is a
+	// git subprocess per rig.
+	mergesTileTTL = 5 * time.Minute
+
+	// mergesWindow is the tile's lookback window.
+	mergesWindow = 6 * time.Hour
+
+	// mergesCountTimeout bounds one `git rev-list --count` per rig.
+	mergesCountTimeout = 10 * time.Second
+)
+
+// mrListerFunc derives one rig's merge-request wisps. It is the seam tests
+// replace so the derivation runs without spawning bd.
+type mrListerFunc func(beadsDir string, opts beads.ListOptions) ([]*beads.Issue, error)
+
+// listRigMergeRequests is the production lister: the `gt mq list` derivation,
+// which searches both the issues and the wisps table and hydrates each MR so
+// its blockers are visible.
+func listRigMergeRequests(beadsDir string, opts beads.ListOptions) ([]*beads.Issue, error) {
+	return beads.New(beadsDir).ListMergeRequests(opts)
+}
+
+// countMergesFunc counts merges landed on a repo's main branch since a window.
+type countMergesFunc func(repoPath string, window time.Duration) (int, error)
+
+// FetchTownMergeQueue returns the town's merge-request wisps and the
+// merges-last-6h tile.
+//
+// It does not block on bd. One derivation costs three bd subprocesses per rig
+// (list, wisp query, hydration) and bd startup alone runs to seconds under
+// town load, so a synchronous fetch would add that to every render — and would
+// spawn that many processes on every poll tick. The call therefore returns the
+// snapshot the last background refresh produced and starts a refresh when that
+// snapshot is stale (gt-r65r).
+func (f *LiveConvoyFetcher) FetchTownMergeQueue() TownMergeQueue {
+	f.mqMu.Lock()
+	snapshot := f.mqSnapshot
+	stale := time.Since(f.mqFetchedAt) >= townMergeQueueTTL
+	f.mqMu.Unlock()
+
+	// The breaker both single-flights the refresh and backs it off after
+	// failures, so a town whose rigs cannot be read does not re-derive on
+	// every render.
+	if stale && f.mqBreaker.allow() {
+		go f.refreshTownMergeQueue()
+	}
+	return snapshot
+}
+
+// refreshTownMergeQueue republishes the snapshot on success. A failed refresh
+// keeps the previous one: an empty panel is worse than a stale one, and the
+// breaker decides when to try again.
+func (f *LiveConvoyFetcher) refreshTownMergeQueue() {
+	snapshot, err := f.townMergeQueueSnapshot()
+	if err != nil {
+		f.mqBreaker.recordFailure()
+		log.Printf("dashboard: town merge queue refresh failed: %v", err)
+		return
+	}
+	f.mqBreaker.recordSuccess()
+
+	f.mqMu.Lock()
+	f.mqSnapshot = snapshot
+	f.mqFetchedAt = time.Now()
+	f.mqMu.Unlock()
+}
+
+// townMergeQueueSnapshot derives the merge queue for every rig laid out in
+// this town. MRs are wisps in each rig's own database, so the derivation is
+// per rig: no single query spans them.
+func (f *LiveConvoyFetcher) townMergeQueueSnapshot() (TownMergeQueue, error) {
+	rigsConfig, err := config.LoadRigsConfig(filepath.Join(f.townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return TownMergeQueue{}, fmt.Errorf("loading rigs config: %w", err)
+	}
+
+	list := f.listMRs
+	if list == nil {
+		list = listRigMergeRequests
+	}
+
+	now := time.Now()
+	var rows []TownMergeQueueRow
+	var firstErr error
+	answered := 0
+	rigNames := make([]string, 0, len(rigsConfig.Rigs))
+	for rigName := range rigsConfig.Rigs {
+		rigPath := filepath.Join(f.townRoot, rigName)
+		if _, statErr := os.Stat(rigPath); statErr != nil {
+			continue // registered in rigs.json but not laid out on this machine
+		}
+		rigNames = append(rigNames, rigName)
+
+		issues, listErr := list(rigPath, beads.ListOptions{
+			Label:    mergeRequestLabel,
+			Status:   "open",
+			Priority: -1, // no priority filter; 0 would mean P0 only
+			Rig:      rigName,
+		})
+		if listErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", rigName, listErr)
+			}
+			continue
+		}
+		answered++
+		for _, issue := range issues {
+			rows = append(rows, townMergeQueueRow(issue, rigName, now))
+		}
+	}
+	// A rig that answered with nothing is an answer. Only a town where no read
+	// succeeded is worth failing the whole refresh over, because that is the
+	// case where an empty panel would be a lie rather than a fact.
+	if answered == 0 && firstErr != nil {
+		return TownMergeQueue{}, firstErr
+	}
+	if firstErr != nil {
+		log.Printf("dashboard: merge queue incomplete: %v", firstErr)
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		iReady := rows[i].Status == "ready"
+		jReady := rows[j].Status == "ready"
+		if iReady != jReady {
+			return iReady // what the refinery can take now, before what it cannot
+		}
+		if rows[i].Priority != rows[j].Priority {
+			return rows[i].Priority < rows[j].Priority
+		}
+		return rows[i].createdAt.Before(rows[j].createdAt) // oldest first: starvation shows up as age
+	})
+
+	snapshot := TownMergeQueue{Loaded: true, Rows: rows}
+	for _, row := range rows {
+		if row.Status == "ready" {
+			snapshot.ReadyCount++
+		}
+	}
+	snapshot.Merges6h, snapshot.Merges6hTotal = f.mergesLast6h(rigNames)
+	return snapshot, nil
+}
+
+// townMergeQueueRow renders one MR wisp, deriving ready/blocked the way
+// `gt mq list` does so the dashboard and the CLI cannot disagree.
+func townMergeQueueRow(issue *beads.Issue, rigName string, now time.Time) TownMergeQueueRow {
+	createdAt, err := time.Parse(time.RFC3339, issue.CreatedAt)
+	if err != nil {
+		createdAt = now
+	}
+
+	row := TownMergeQueueRow{
+		ID:        issue.ID,
+		Priority:  issue.Priority,
+		Rig:       rigName,
+		Status:    issue.Status,
+		Age:       formatMergeAge(now.Sub(createdAt)),
+		createdAt: createdAt,
+	}
+	if fields := beads.ParseMRFields(issue); fields != nil {
+		row.Branch = fields.Branch
+		row.Assignee = fields.Worker
+	}
+	if row.Branch == "" {
+		row.Branch = "(unset)"
+	}
+	if row.Assignee == "" {
+		// MR wisps carry the worker in their description; fall back to the
+		// bead's assignee, then to whoever submitted it.
+		row.Assignee = formatAgentAddress(firstNonEmpty(issue.Assignee, issue.CreatedBy))
+	}
+
+	if issue.Status == "open" {
+		if beads.HasUnresolvedBlockers(issue) {
+			row.Status = "blocked"
+		} else {
+			row.Status = "ready"
+		}
+	}
+	switch row.Status {
+	case "ready":
+		row.ColorClass = "mq-green"
+	case "blocked":
+		row.ColorClass = "mq-red"
+	default:
+		row.ColorClass = "mq-yellow"
+	}
+	return row
+}
+
+// formatMergeAge renders an age the way the `gt mq list` AGE column does.
+func formatMergeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// mergesLast6h counts merges that landed on each rig's main branch in the
+// last six hours, for the panel's throughput tile.
+func (f *LiveConvoyFetcher) mergesLast6h(rigNames []string) ([]RigMergeCount, int) {
+	f.mergesMu.Lock()
+	if time.Since(f.mergesAt) < mergesTileTTL {
+		tile, total := f.mergesTile, f.mergesTotal
+		f.mergesMu.Unlock()
+		return tile, total
+	}
+	f.mergesMu.Unlock()
+
+	count := f.countMerges
+	if count == nil {
+		count = countMergesOnMain
+	}
+
+	var tile []RigMergeCount
+	total := 0
+	for _, rigName := range rigNames {
+		repoPath := filepath.Join(f.townRoot, rigName, "mayor", "rig")
+		n, err := count(repoPath, mergesWindow)
+		if err != nil {
+			continue
+		}
+		tile = append(tile, RigMergeCount{Rig: rigName, Count: n})
+		total += n
+	}
+	sort.Slice(tile, func(i, j int) bool { return tile[i].Rig < tile[j].Rig })
+
+	// A total miss (git missing, clones absent) is retried on the next
+	// refresh rather than parked for a whole TTL.
+	if len(tile) == 0 && len(rigNames) > 0 {
+		return tile, 0
+	}
+
+	f.mergesMu.Lock()
+	f.mergesTile, f.mergesTotal, f.mergesAt = tile, total, time.Now()
+	f.mergesMu.Unlock()
+	return tile, total
+}
+
+// countMergesOnMain counts merge commits on origin/main newer than the window.
+// origin/main, not main, so a clone that has not checked out the tip still
+// counts what landed upstream.
+//
+// The window is spelled "N hours ago" deliberately: git's approxidate drops an
+// unparseable --since value and counts every merge in history instead, so the
+// obvious --since=6h renders as the repo's lifetime total (gt-r65r).
+func countMergesOnMain(repoPath string, window time.Duration) (int, error) {
+	since := fmt.Sprintf("--since=%d hours ago", int(window.Hours()))
+	stdout, err := fetcherRunCmd(mergesCountTimeout, "git", "-C", repoPath,
+		"rev-list", "--count", "--merges", since, "origin/main")
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
+	if err != nil {
+		return 0, fmt.Errorf("parsing rev-list count: %w", err)
+	}
+	return n, nil
 }
 
 // FetchWorkers fetches all running worker sessions (polecats and refinery) with activity data.

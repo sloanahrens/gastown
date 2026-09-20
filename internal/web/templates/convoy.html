@@ -585,13 +585,75 @@
             <div class="panel" id="merge-queue-panel">
                 <div class="panel-header">
                     <h2>🔀 Merge Queue</h2>
-                    <span class="count">{{len .MergeQueue}}</span>
+                    <span class="count">{{if .TownMergeQueue.Loaded}}{{.TownMergeQueue.ReadyCount}} ready{{else}}…{{end}}</span>
+                    <div class="mq-tabs">
+                        <button class="mq-tab active" data-tab="town">Town MRs ({{len .TownMergeQueue.Rows}})</button>
+                        <button class="mq-tab" data-tab="prs">GitHub PRs ({{len .MergeQueue}})</button>
+                    </div>
                     <button class="collapse-btn" aria-label="Toggle panel">▼</button>
                     <button class="expand-btn">Expand</button>
                 </div>
+                {{if .TownMergeQueue.Loaded}}
+                <div class="mq-tile" title="Merge commits on origin/main in the last 6 hours, per rig">
+                    <span class="mq-tile-label">merges last 6h</span>
+                    <span class="mq-tile-value">{{.TownMergeQueue.Merges6hTotal}}</span>
+                    {{range .TownMergeQueue.Merges6h}}
+                    <span class="mq-tile-rig">{{.Rig}} {{.Count}}</span>
+                    {{end}}
+                </div>
+                {{end}}
                 <div class="panel-body">
-                    <!-- PR List View -->
-                    <div id="pr-list">
+                    <!-- Town MRs View -->
+                    <div id="town-mq-list">
+                        {{if not .TownMergeQueue.Loaded}}
+                        <div class="empty-state">
+                            <p>Loading the town's merge queue…</p>
+                        </div>
+                        {{else if .TownMergeQueue.Rows}}
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>PRI</th>
+                                    <th>RIG</th>
+                                    <th>BRANCH</th>
+                                    <th>STATUS</th>
+                                    <th>AGE</th>
+                                    <th>ASSIGNEE</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .TownMergeQueue.Rows}}
+                                <tr class="mr-row {{.ColorClass}}">
+                                    <td><span class="issue-id">{{.ID}}</span></td>
+                                    <td>
+                                        {{if eq .Priority 0}}<span class="badge badge-red">P0</span>
+                                        {{else if eq .Priority 1}}<span class="badge badge-red">P1</span>
+                                        {{else if eq .Priority 2}}<span class="badge badge-orange">P2</span>
+                                        {{else if eq .Priority 3}}<span class="badge badge-yellow">P3</span>
+                                        {{else}}<span class="badge badge-muted">P{{.Priority}}</span>{{end}}
+                                    </td>
+                                    <td>{{.Rig}}</td>
+                                    <td class="mr-branch">{{.Branch}}</td>
+                                    <td>
+                                        {{if eq .Status "ready"}}<span class="badge badge-green">ready</span>
+                                        {{else if eq .Status "blocked"}}<span class="badge badge-muted">blocked</span>
+                                        {{else}}<span class="badge badge-blue">{{.Status}}</span>{{end}}
+                                    </td>
+                                    <td>{{.Age}}</td>
+                                    <td>{{.Assignee}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                        {{else}}
+                        <div class="empty-state">
+                            <p>No merge requests in queue</p>
+                        </div>
+                        {{end}}
+                    </div>
+                    <!-- PR List View (hidden by default) -->
+                    <div id="pr-list" style="display: none;">
                         {{if .MergeQueue}}
                         <table>
                             <thead>
