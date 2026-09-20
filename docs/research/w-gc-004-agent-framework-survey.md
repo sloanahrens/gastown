@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Survey: Agent Orchestration Frameworks vs Gas City
 
 **Wanted:** w-gc-004 — Survey existing agent orchestration frameworks

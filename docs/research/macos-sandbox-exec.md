@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # macOS sandbox-exec Research Report
 
 **Bead:** gt-6qt

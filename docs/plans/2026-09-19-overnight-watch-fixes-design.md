@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Abandoned: unknown. Not maintained.
+
 # Overnight-watch fixes: throughput, routing, mayor ground truth, config-moves-with-code
 
 Date: 2026-09-19. Source: handoff bead hq-5n25a (findings from the operator watch 2026-09-18 20:50 to 2026-09-19 09:50). Decisions were grilled and approved by Sloan on 2026-09-19; the grilling record is in the bead notes.

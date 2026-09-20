@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Sandboxed Polecat Execution (exitbox + daytona)
 
 > **Date:** 2026-03-02

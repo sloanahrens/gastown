@@ -128,7 +128,7 @@ export BD_ACTOR="gastown/crew/debug"
 bd create --title="Test issue"  # Will show created_by: gastown/crew/debug
 ```
 
-See [reference.md](reference.md#environment-variables) for the complete
+See [reference.md](../reference.md#environment-variables) for the complete
 environment variable reference.
 
 ## Identity Parsing

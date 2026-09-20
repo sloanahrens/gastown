@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Merged in: gt-a6g. Not maintained.
+
 # Agent-bead migration completion: one authoritative row per agent
 
 Date: 2026-09-09

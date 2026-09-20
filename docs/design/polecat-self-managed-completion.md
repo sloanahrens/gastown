@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Polecat Self-Managed Completion
 
 > **Bead:** gt-0wkk
