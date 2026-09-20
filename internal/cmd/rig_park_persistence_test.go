@@ -43,7 +43,12 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init(prefix); err != nil {
-		t.Fatalf("bd init failed: %v", err)
+		// Environmental, not a regression — see the twin comment in
+		// setupPatrolTestDB (gt-fhkg): bd's first-run metrics notice and Dolt
+		// auto-start warning land on stderr with empty stdout on success, and
+		// internal/beads turns that into an error on hosts with no recorded
+		// metrics consent.
+		t.Skipf("bd init unavailable in this test environment: %v", err)
 	}
 
 	// Keep the test container clean.

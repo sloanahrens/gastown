@@ -5473,7 +5473,17 @@ func TestBdFirstRunMetricsNoticeConstantsMatchInstalledBd(t *testing.T) {
 
 	cmd := exec.Command("bd", "init", "--quiet", "--non-interactive")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "HOME="+fakeHome)
+	// BD_DISABLE_EVENT_FLUSH keeps bd's metrics *enabled* — the first-run
+	// banner below only fires while metrics are on — but suppresses the
+	// DETACHED `bd send-metrics` child that metrics.CloseAndFlush spawns at
+	// exit. That child outlives this test and keeps writing
+	// $HOME/.beads/eventsData while Go's t.TempDir cleanup is deleting
+	// fakeHome, producing an assertion-free "TempDir RemoveAll cleanup:
+	// unlinkat .../eventsData: directory not empty" that reddens the whole
+	// package (gt-ul8f; same failure the beads repo itself fixed in its
+	// testMainInner for wy-12x1p).
+	cmd.Env = append(os.Environ(), "HOME="+fakeHome, "BD_DISABLE_EVENT_FLUSH=1")
+
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

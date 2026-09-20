@@ -41,6 +41,15 @@ var primeStructuredSessionStartOutput bool
 var primeExternalToolTimeout = 5 * time.Second
 var primeExternalToolWaitDelay = time.Second
 
+// primeExternalToolContext builds the context that bounds a single external
+// prime tool subprocess. It is a var so bound-enforcement tests can drive the
+// deadline from a barrier (the stub announcing it has started) rather than from
+// host wall-clock time — an elapsed<N assertion measures the host, not the
+// code, and reddens the suite on a loaded gate (gt-v2a5).
+var primeExternalToolContext = func(timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), timeout)
+}
+
 // primeHookSource stores the SessionStart source ("startup", "resume", "clear", "compact")
 // when running in hook mode. Used to provide lighter output on compaction/resume.
 var primeHookSource string
@@ -662,7 +671,7 @@ func shouldSkipStartupMailInject(role string) bool {
 
 func runPrimeExternalCommand(workDir, name string, args ...string) (bytes.Buffer, bytes.Buffer, error) {
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), primeExternalToolTimeout)
+	ctx, cancel := primeExternalToolContext(primeExternalToolTimeout)
 	defer cancel()
 
 	if name == "bd" {

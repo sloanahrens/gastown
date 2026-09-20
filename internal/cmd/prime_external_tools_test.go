@@ -1,13 +1,37 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// primeTestToolTimeout is deliberately far larger than any property under test.
+// Most tests in this file assert on what prime *does* with a stub tool's output,
+// so the stub has to be allowed to finish: under gate load (GOFLAGS=-p=8 across
+// the whole suite) a /bin/sh fork+exec can take well over a second, and a
+// deadline tight enough to be interesting is a deadline tight enough to kill
+// the stub before it writes anything — which is how gt-5clb turned a clean
+// branch into "read call log: open .../calls.log: no such file or directory".
+// Bound enforcement is covered separately, by deadline-driven tests below.
+const primeTestToolTimeout = 60 * time.Second
+
+// primeTestSlowToolStall is how long a stub on the slow path sleeps. It only
+// has to outlive the moment prime abandons the tool (see
+// withPrimeExternalToolDeadline), and it doubles as the safety-net ceiling for
+// how long such a call may take.
+const primeTestSlowToolStall = 10 * time.Second
+
+// primeTestBarrierWait caps how long a test waits for a stub to announce it has
+// started. It is a fallback, not a correctness bound: reaching it means the host
+// could not fork+exec /bin/sh, which no assertion in this file can say anything
+// about.
+const primeTestBarrierWait = 60 * time.Second
 
 func setupPrimeExternalToolTest(t *testing.T, bdScript, gtScript string) string {
 	t.Helper()
@@ -19,18 +43,7 @@ func setupPrimeExternalToolTest(t *testing.T, bdScript, gtScript string) string 
 
 	oldTimeout := primeExternalToolTimeout
 	oldWaitDelay := primeExternalToolWaitDelay
-	// 1.5s/150ms rather than a tighter bound: under host contention (many
-	// concurrent agent subprocesses) even a trivial script can take >100ms
-	// to spawn. This was previously tuned to 500ms/50ms (gt-80o), but that
-	// still wasn't generous enough: reproduced under stress (`-count=200`
-	// on a loaded dev box) as calls.log never being created at all because
-	// the subprocess spawn itself didn't complete before the context
-	// deadline (gt-0nk) — not, as first suspected, tests reading live-town
-	// mail state. Dependent tests below use hardcoded 2s slow-path
-	// sleeps/assertElapsedUnder bounds that assume
-	// primeExternalToolTimeout+primeExternalToolWaitDelay stays under 2s;
-	// keep headroom against that if tuning further.
-	primeExternalToolTimeout = 1500 * time.Millisecond
+	primeExternalToolTimeout = primeTestToolTimeout
 	primeExternalToolWaitDelay = 150 * time.Millisecond
 	t.Cleanup(func() {
 		primeExternalToolTimeout = oldTimeout
@@ -64,13 +77,6 @@ func writePrimeToolScript(t *testing.T, path, body string) {
 	}
 }
 
-func assertElapsedUnder(t *testing.T, elapsed time.Duration, max time.Duration) {
-	t.Helper()
-	if elapsed > max {
-		t.Fatalf("elapsed = %v, want under %v", elapsed, max)
-	}
-}
-
 func assertPrimeToolCalled(t *testing.T, want string) {
 	t.Helper()
 	logPath := os.Getenv("PRIME_TOOL_CALL_LOG")
@@ -83,6 +89,47 @@ func assertPrimeToolCalled(t *testing.T, want string) {
 	}
 }
 
+func assertPrimeToolNotCalled(t *testing.T, unwanted string) {
+	t.Helper()
+	logPath := os.Getenv("PRIME_TOOL_CALL_LOG")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	if strings.Contains(string(data), unwanted) {
+		t.Fatalf("call log unexpectedly has %q:\n%s", unwanted, string(data))
+	}
+}
+
+// waitForPath polls for path to appear, returning whether it did within max.
+func waitForPath(path string, max time.Duration) bool {
+	deadline := time.Now().Add(max)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// withPrimeExternalToolDeadline replaces the wall-clock deadline that bounds
+// prime's external tool subprocesses. Tests pass a context they cancel from a
+// barrier, so "prime abandoned the tool at its deadline" becomes a property of
+// the code rather than of how loaded the host was.
+func withPrimeExternalToolDeadline(t *testing.T, fn func(time.Duration) (context.Context, context.CancelFunc)) {
+	t.Helper()
+	old := primeExternalToolContext
+	primeExternalToolContext = fn
+	t.Cleanup(func() { primeExternalToolContext = old })
+}
+
+// primeTestStallSeconds renders primeTestSlowToolStall for embedding in a stub script,
+// so the shell's sleep and the test's safety net can never drift apart.
+var primeTestStallSeconds = strconv.Itoa(int(primeTestSlowToolStall / time.Second))
+
 func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
@@ -94,9 +141,7 @@ case "$*" in
 esac
 `)
 
-	start := time.Now()
 	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
-	assertElapsedUnder(t, time.Since(start), 2*time.Second)
 	assertPrimeToolCalled(t, "bd:kv list --json")
 	assertPrimeToolCalled(t, "gt:mail check --inject")
 
@@ -108,10 +153,21 @@ esac
 	}
 }
 
+// TestRunPrimeExternalTools_BoundsSlowMailCheck proves prime abandons a mail
+// check that outlives its deadline instead of blocking startup on it.
+//
+// The deadline is driven by a barrier — the stub announces it has started, and
+// that announcement cancels the context — not by host wall-clock time. An
+// elapsed<N assertion measured the host, not the code: under gate load a
+// correctly bounded prime still measured 2.687s and reddened the suite for a
+// branch that touched no prime file (gt-v2a5). The barrier removes both
+// failure modes at once: the stub is guaranteed to have run before the deadline
+// fires, and the assertions are about what prime did with the stub, not about
+// how fast the host was.
 func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	markerDir := t.TempDir()
 	startedPath := filepath.Join(markerDir, "child-started")
-	survivedPath := filepath.Join(markerDir, "child-survived")
+
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
   "kv list --json") printf '%s\n' '{"gt.feedback.test":"remembered"}'; exit 0 ;;
@@ -119,34 +175,59 @@ esac
 `, `
 case "$*" in
   "mail check --inject")
-    (: > "$PRIME_CHILD_STARTED"; sleep 2; : > "$PRIME_CHILD_SURVIVED") &
-    while [ ! -f "$PRIME_CHILD_STARTED" ]; do sleep 0.01; done
+    (: > "$PRIME_CHILD_STARTED"; sleep `+primeTestStallSeconds+`; : > "$PRIME_CHILD_SURVIVED") &
     wait
     exit 0
     ;;
 esac
 `)
+	survivedPath := filepath.Join(markerDir, "child-survived")
 	t.Setenv("PRIME_CHILD_STARTED", startedPath)
 	t.Setenv("PRIME_CHILD_SURVIVED", survivedPath)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	withPrimeExternalToolDeadline(t, func(time.Duration) (context.Context, context.CancelFunc) {
+		// The mailbox check is the only call still in flight once the stub has
+		// announced itself — the memory injection that precedes it has already
+		// returned — so cancelling this context is exactly the deadline firing.
+		return context.WithCancel(ctx)
+	})
+
+	barrierReached := make(chan bool, 1)
+	go func() {
+		reached := waitForPath(startedPath, primeTestBarrierWait)
+		cancel() // never leave prime blocked, even if the barrier never came
+		barrierReached <- reached
+	}()
+
 	start := time.Now()
 	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
-	assertElapsedUnder(t, time.Since(start), 2*time.Second)
-	assertPrimeToolCalled(t, "bd:kv list --json")
-	assertPrimeToolCalled(t, "gt:mail check --inject")
+	elapsed := time.Since(start)
 
-	if !strings.Contains(output, "remembered") {
-		t.Fatalf("memory output missing: %q", output)
-	}
-	if _, err := os.Stat(startedPath); err != nil {
-		t.Fatalf("child did not start before timeout: %v", err)
+	if !<-barrierReached {
+		t.Fatalf("mail stub never announced it started within %v — nothing can be concluded about prime's bound", primeTestBarrierWait)
 	}
 
-	time.Sleep(2 * time.Second)
+	// The stub was mid-stall when the deadline fired, so the call must have
+	// returned without it: a prime that waited the tool out would have reaped
+	// the child, and the child writes its survived marker before exiting.
 	if _, err := os.Stat(survivedPath); err == nil {
-		t.Fatalf("child process survived command timeout and wrote %s", survivedPath)
+		t.Fatalf("mail check child ran to completion — prime waited past its deadline instead of abandoning the tool")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("check survived marker: %v", err)
+	}
+
+	// Safety net rather than a bound: the stub stalls for primeTestSlowToolStall,
+	// so only a prime that sat out the whole stall can approach it. Load cannot
+	// fake this — it would have to inflate a sub-second call by a factor of ten.
+	if elapsed > primeTestSlowToolStall {
+		t.Fatalf("prime waited out the stalled mail check: elapsed = %v", elapsed)
+	}
+
+	assertPrimeToolCalled(t, "gt:mail check --inject")
+	if !strings.Contains(output, "remembered") {
+		t.Fatalf("a slow mail check must not suppress the memory section: %q", output)
 	}
 }
 
@@ -165,13 +246,7 @@ esac
 
 			output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: Role(role)}, workDir) })
 			assertPrimeToolCalled(t, "bd:kv list --json")
-			logData, err := os.ReadFile(os.Getenv("PRIME_TOOL_CALL_LOG"))
-			if err != nil {
-				t.Fatalf("read call log: %v", err)
-			}
-			if strings.Contains(string(logData), "gt:mail check --inject") {
-				t.Fatalf("patrol role %s should not run startup mail check:\n%s", role, string(logData))
-			}
+			assertPrimeToolNotCalled(t, "gt:mail check --inject")
 			if strings.Contains(output, "MAIL OUTPUT") {
 				t.Fatalf("patrol role %s injected mail output: %q", role, output)
 			}
@@ -179,24 +254,61 @@ esac
 	}
 }
 
+// TestCheckPendingEscalations_BoundsSlowBdList is the escalation-query sibling
+// of TestRunPrimeExternalTools_BoundsSlowMailCheck: a bd list that outlives the
+// deadline must be abandoned, not waited out, and its output must never be
+// shown. Deadlines are barrier-driven for the same reason (gt-5clb: the stubbed
+// bd never got to write within the old 1.5s bound on a loaded host).
 func TestCheckPendingEscalations_BoundsSlowBdList(t *testing.T) {
+	markerDir := t.TempDir()
+	startedPath := filepath.Join(markerDir, "bd-started")
+
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
-	  "list --status=open --label=gt:escalation --include-infra --json --flat") sleep 2; exit 0 ;;
+  "list --status=open --label=gt:escalation --include-infra --json --flat")
+    : > "$PRIME_BD_STARTED"
+    sleep `+primeTestStallSeconds+`
+    printf '%s\n' '[{"id":"hq-wisp1","title":"Dolt unreachable","priority":0,"labels":["gt:escalation"]}]'
+    exit 0
+    ;;
 esac
 `, `
 `)
+	t.Setenv("PRIME_BD_STARTED", startedPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	withPrimeExternalToolDeadline(t, func(time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(ctx)
+	})
+
+	barrierReached := make(chan bool, 1)
+	go func() {
+		reached := waitForPath(startedPath, primeTestBarrierWait)
+		cancel()
+		barrierReached <- reached
+	}()
 
 	start := time.Now()
 	output := captureStdout(t, func() {
 		checkPendingEscalations(RoleContext{Role: RoleMayor, WorkDir: workDir})
 	})
-	assertElapsedUnder(t, time.Since(start), 2*time.Second)
-	assertPrimeToolCalled(t, "bd:list --status=open --label=gt:escalation --include-infra --json --flat")
+	elapsed := time.Since(start)
 
-	if strings.Contains(output, "PENDING ESCALATIONS") {
-		t.Fatalf("timed-out escalation output should not be emitted: %q", output)
+	if !<-barrierReached {
+		t.Fatalf("bd stub never announced it started within %v — nothing can be concluded about prime's bound", primeTestBarrierWait)
 	}
+
+	// The stub prints its payload only after the stall, so a payload that
+	// reached prime's output means the query was not abandoned at the deadline.
+	if strings.Contains(output, "PENDING ESCALATIONS") {
+		t.Fatalf("abandoned escalation query still emitted output: %q", output)
+	}
+	if elapsed > primeTestSlowToolStall {
+		t.Fatalf("prime waited out the stalled escalation query: elapsed = %v", elapsed)
+	}
+
+	assertPrimeToolCalled(t, "bd:list --status=open --label=gt:escalation --include-infra --json --flat")
 }
 
 // TestCheckPendingEscalations_SurfacesOpenEphemeralEscalation proves the
