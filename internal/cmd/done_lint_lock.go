@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -19,6 +20,15 @@ import (
 // waits the holder out and retries a bounded number of times before it reports
 // anything, and writes every wait to the verify log and the polecat's pane so
 // the delay is attributable rather than looking like a hung agent (gt-hkhu).
+//
+// gt-taoz: this rig's own lint_command no longer reaches the retry below.
+// .golangci.yml sets run.allow-serial-runners, which makes a contended
+// golangci-lint block on the module lock — TryLockContext against a context
+// carrying no deadline — rather than exit with the marker, so there is no
+// marker to match and one attempt absorbs the whole wait. The retry stays for
+// the callers that cannot see this repo's config, a lint_command that is a
+// bare `golangci-lint run` among them; for this rig's, the wait is attributed
+// by lintFailureDetail's budget case instead.
 const lintLockContentionMarker = "parallel golangci-lint is running"
 
 // lintLockRetryDelay is how long the gate waits before each retry of a
@@ -123,5 +133,28 @@ func retryLintLockContention(ctx context.Context, attempt func() lintAttempt, on
 			return lockRetryOutcome{err: got.err, retries: n}
 		case <-timer.C:
 		}
+	}
+}
+
+// lintFailureDetail is what a failed lint attempt tells the polecat. Only a
+// lint that ran to completion and reported findings may ask for findings to be
+// fixed; the other two failures linted nothing, and sending a polecat after
+// output that does not exist is the misattribution this file exists to prevent
+// (gt-xsty).
+//
+// The budget case is the one gt-taoz opened. With run.allow-serial-runners a
+// contended lint blocks rather than exiting with the marker, so the retry
+// never fires and the wait is spent inside a single attempt — one that the
+// outer budget can and does kill, at which point cmd.Run returns a signal
+// error carrying no marker, retries is 0, and the default detail would claim
+// findings. budgetExpired tells the two apart.
+func lintFailureDetail(retries int, budgetExpired bool, budget time.Duration) string {
+	switch {
+	case retries > 0:
+		return fmt.Sprintf("another golangci-lint held the lock across %d retries (a concurrent gt done, or the refinery's batch lint) — nothing was linted and no finding is reported; re-run gt done once the other lint finishes", retries)
+	case budgetExpired:
+		return fmt.Sprintf("the lint was killed at its %s budget without finishing — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run gt done once other lints have", humanDuration(budget))
+	default:
+		return "fix the lint findings before resubmitting"
 	}
 }

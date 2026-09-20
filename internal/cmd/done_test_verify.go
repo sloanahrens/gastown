@@ -56,8 +56,14 @@ const defaultTestVerifyPerPackageTimeout = 20 * time.Minute
 
 // defaultLintVerifyTimeout bounds the rig's lint_command inside gt done's
 // default gate. Lint is static analysis (no Docker, no Dolt, ~7 s on gastown),
-// so this is a safety net against a hung tool, not a budget to tune.
+// so this is a safety net against a hung tool, not a budget to tune. The gate
+// now spends it waiting for a held lock as well as linting (gt-taoz), which is
+// why a budget that runs out is attributed rather than reported as findings.
 const defaultLintVerifyTimeout = 10 * time.Minute
+
+// lintVerifyTimeout is the budget the lint gate spends, a var so a test can
+// drive a real expiry instead of waiting out the default.
+var lintVerifyTimeout = defaultLintVerifyTimeout
 
 // makeDryRunTimeout bounds the `make -n <target>` probe that reads the rig's
 // own per-package -timeout out of its test recipe. `make -n` prints the
@@ -696,7 +702,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	fmt.Fprintf(logFile, "=== gt done default test-verify (scope=%s) ===\n", scope)
 	fmt.Fprintf(logFile, "command: %s\n", testCmd)
 	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
-		fmt.Fprintf(logFile, "lint: %s (budget %s, no container slot)\n", lint, humanDuration(defaultLintVerifyTimeout))
+		fmt.Fprintf(logFile, "lint: %s (budget %s, no container slot)\n", lint, humanDuration(lintVerifyTimeout))
 	}
 	fmt.Fprintf(logFile, "run budget: %s (%s)\n", humanDuration(budgets.runTimeout), budgets.runSource)
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
@@ -731,7 +737,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		// One context spans every attempt: the lint budget bounds the lint,
 		// retries and waits included, rather than being renewed per try
 		// (gt-xsty).
-		lintCtx, lintCancel := context.WithTimeout(context.Background(), defaultLintVerifyTimeout)
+		lintCtx, lintCancel := context.WithTimeout(context.Background(), lintVerifyTimeout)
 		lintStart := time.Now()
 		outcome := retryLintLockContention(lintCtx, func() lintAttempt {
 			from := fileSize(logFile)
@@ -740,6 +746,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		}, func(attempt, attempts int, wait time.Duration) {
 			reportVerifyProgress(logFile, fmt.Sprintf("lint lock held by another golangci-lint (attempt %d/%d); retrying in %s", attempt, attempts, wait.Round(time.Second)))
 		})
+		// Read the deadline out before canceling: afterwards the context is
+		// canceled either way, and "the budget ran out while this lint was
+		// still going" is the whole difference between a finding and nothing
+		// having been linted at all (gt-taoz).
+		budgetExpired := errors.Is(lintCtx.Err(), context.DeadlineExceeded)
 		lintCancel()
 		result.lintElapsed = time.Since(lintStart)
 		if outcome.err != nil {
@@ -750,13 +761,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			}
 			fmt.Fprintf(logFile, "=== lint failed (exit %d) ===\n", exitCode)
 			tail := readLogTail(logPath, 4000)
-			// A failure the retries already proved was the lock must not read
-			// as a finding: "fix the lint findings" would send the polecat
-			// looking for output that does not exist (gt-xsty).
-			detail := "fix the lint findings before resubmitting"
-			if outcome.retries > 0 {
-				detail = fmt.Sprintf("another golangci-lint held the lock across %d retries (a concurrent gt done, or the refinery's batch lint) — nothing was linted and no finding is reported; re-run gt done once the other lint finishes", outcome.retries)
-			}
+			detail := lintFailureDetail(outcome.retries, budgetExpired, lintVerifyTimeout)
 			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — %s (no tests were run; full log: %s):\n%s", exitCode, lint, detail, logPath, tail)
 		}
 		result.lintRan = true

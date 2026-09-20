@@ -30,6 +30,12 @@ const (
 	// Precondition means the push precondition refused to land an MR:
 	// note missing, patch-id mismatch, or version below minimum.
 	Precondition FailureClass = "precondition"
+	// RubricRegression means the MR's .om.json drops a criterion, or changes
+	// its weight or guidance, without carrying editorial.RetirementLabel
+	// (gt-2oi0). Refused before the gate script runs, because the script
+	// grades the diff against the deployed rubric and would approve the
+	// change this class exists to stop.
+	RubricRegression FailureClass = "rubric_regression"
 )
 
 // Retryable reports whether gt mq review should retry the review once

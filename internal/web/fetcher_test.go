@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/activity"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1220,5 +1221,279 @@ func TestFetchHealth_DeaconHeartbeatFieldName(t *testing.T) {
 	// Heartbeat should be considered fresh (written just now).
 	if !health.HeartbeatFresh {
 		t.Error("HeartbeatFresh = false for a just-written heartbeat")
+	}
+}
+
+// ============================================
+// TOWN MERGE QUEUE (gt-r65r)
+// ============================================
+
+// townRootWithRigs builds a temp town whose rigs.json lists the given rigs and
+// whose rig directories exist, which is what the merge-queue derivation checks.
+func townRootWithRigs(t *testing.T, rigs ...string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("create mayor dir: %v", err)
+	}
+	entries := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		entries = append(entries, fmt.Sprintf("%q:{\"git_url\":\"x\",\"added_at\":\"2026-01-01T00:00:00Z\"}", rig))
+		if err := os.MkdirAll(filepath.Join(townRoot, rig), 0o755); err != nil {
+			t.Fatalf("create rig dir %s: %v", rig, err)
+		}
+	}
+	rigsJSON := fmt.Sprintf(`{"version":1,"rigs":{%s}}`, strings.Join(entries, ","))
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte(rigsJSON), 0o644); err != nil {
+		t.Fatalf("write rigs.json: %v", err)
+	}
+	return townRoot
+}
+
+// mrWisp builds a merge-request wisp with the description fields `gt mq submit`
+// writes. Blocked MRs carry a blocker id, which is how gt mq list derives the
+// blocked status.
+func mrWisp(id, rig, branch, worker string, priority int, created time.Time, blocked bool) *beads.Issue {
+	issue := &beads.Issue{
+		ID:          id,
+		Status:      "open",
+		Priority:    priority,
+		CreatedAt:   created.Format(time.RFC3339),
+		CreatedBy:   fmt.Sprintf("%s/polecats/%s", rig, worker),
+		Description: fmt.Sprintf("branch: %s\ntarget: main\nrig: %s\nworker: %s", branch, rig, worker),
+	}
+	if blocked {
+		issue.BlockedBy = []string{"gt-blocker"}
+	}
+	return issue
+}
+
+func TestTownMergeQueueSnapshotDerivesRowsFromLister(t *testing.T) {
+	townRoot := townRootWithRigs(t, "gastown", "beads")
+	now := time.Now()
+
+	var listDirs []string
+	var listOpts []beads.ListOptions
+	f := &LiveConvoyFetcher{
+		townRoot: townRoot,
+		listMRs: func(beadsDir string, opts beads.ListOptions) ([]*beads.Issue, error) {
+			listDirs = append(listDirs, filepath.Base(beadsDir))
+			listOpts = append(listOpts, opts)
+			switch filepath.Base(beadsDir) {
+			case "gastown":
+				return []*beads.Issue{
+					mrWisp("gt-wisp-new", "gastown", "polecat/quartz/gt-new", "quartz", 2, now.Add(-5*time.Minute), false),
+					mrWisp("gt-wisp-old", "gastown", "polecat/flint/gt-old", "flint", 1, now.Add(-45*time.Minute), true),
+				}, nil
+			case "beads":
+				return []*beads.Issue{
+					mrWisp("be-wisp-a", "beads", "be/crew/be-a", "be/crew", 1, now.Add(-90*time.Minute), false),
+				}, nil
+			}
+			return nil, nil
+		},
+		countMerges: func(string, time.Duration) (int, error) { return 0, fmt.Errorf("no clone") },
+	}
+
+	snapshot, err := f.townMergeQueueSnapshot()
+	if err != nil {
+		t.Fatalf("townMergeQueueSnapshot() error = %v", err)
+	}
+
+	// Every rig laid out on disk is asked, with the label and filters
+	// `gt mq list` uses — a priority of 0 here would mean "P0 only".
+	if len(listDirs) != 2 {
+		t.Fatalf("lister called for %v, want both rigs", listDirs)
+	}
+	for i, opts := range listOpts {
+		if opts.Label != mergeRequestLabel || opts.Status != "open" || opts.Priority != -1 || opts.Rig == "" {
+			t.Errorf("listOpts[%d] = %+v, want label=%s status=open priority=-1 and a rig", i, opts, mergeRequestLabel)
+		}
+	}
+
+	if got, want := len(snapshot.Rows), 3; got != want {
+		t.Fatalf("len(Rows) = %d, want %d", got, want)
+	}
+	// Ready before blocked; then priority, then age.
+	wantOrder := []string{"be-wisp-a", "gt-wisp-new", "gt-wisp-old"}
+	for i, want := range wantOrder {
+		if got := snapshot.Rows[i].ID; got != want {
+			t.Errorf("Rows[%d].ID = %q, want %q", i, got, want)
+		}
+	}
+	if snapshot.ReadyCount != 2 {
+		t.Errorf("ReadyCount = %d, want 2", snapshot.ReadyCount)
+	}
+
+	ready := snapshot.Rows[1]
+	if ready.Status != "ready" || ready.ColorClass != "mq-green" {
+		t.Errorf("ready row = %+v, want status ready and mq-green", ready)
+	}
+	if ready.Branch != "polecat/quartz/gt-new" || ready.Rig != "gastown" || ready.Assignee != "quartz" {
+		t.Errorf("ready row = %+v, want the description's branch, rig, and worker", ready)
+	}
+	if ready.Age != "5m" {
+		t.Errorf("ready row Age = %q, want 5m", ready.Age)
+	}
+
+	blocked := snapshot.Rows[2]
+	if blocked.Status != "blocked" || blocked.ColorClass != "mq-red" {
+		t.Errorf("blocked row = %+v, want status blocked and mq-red", blocked)
+	}
+	if blocked.Age != "45m" {
+		t.Errorf("blocked row Age = %q, want 45m", blocked.Age)
+	}
+
+	// A rig with no MRs contributes no rows but is not an error.
+	if snapshot.Merges6hTotal != 0 {
+		t.Errorf("Merges6hTotal = %d, want 0 when no clone answered", snapshot.Merges6hTotal)
+	}
+}
+
+func TestTownMergeQueueSnapshotErrorsOnlyWhenEveryRigFails(t *testing.T) {
+	townRoot := townRootWithRigs(t, "gastown", "beads")
+	f := &LiveConvoyFetcher{
+		townRoot: townRoot,
+		listMRs: func(beadsDir string, _ beads.ListOptions) ([]*beads.Issue, error) {
+			if filepath.Base(beadsDir) == "gastown" {
+				return nil, fmt.Errorf("dolt unreachable")
+			}
+			return nil, nil
+		},
+		countMerges: func(string, time.Duration) (int, error) { return 0, fmt.Errorf("no clone") },
+	}
+
+	// One rig answered (with nothing): the town's queue is empty, not broken.
+	if _, err := f.townMergeQueueSnapshot(); err != nil {
+		t.Fatalf("townMergeQueueSnapshot() error = %v, want nil when a rig answered", err)
+	}
+
+	f.listMRs = func(string, beads.ListOptions) ([]*beads.Issue, error) {
+		return nil, fmt.Errorf("dolt unreachable")
+	}
+	if _, err := f.townMergeQueueSnapshot(); err == nil {
+		t.Fatal("townMergeQueueSnapshot() = nil error, want the every-rig failure reported")
+	}
+}
+
+func TestFetchTownMergeQueueServesStaleSnapshotWithoutBlocking(t *testing.T) {
+	now := time.Now()
+	release := make(chan struct{})
+	listed := make(chan struct{})
+	var listCalls int
+
+	f := &LiveConvoyFetcher{
+		townRoot: townRootWithRigs(t, "gastown"),
+		listMRs: func(string, beads.ListOptions) ([]*beads.Issue, error) {
+			listCalls++
+			<-release
+			close(listed)
+			return []*beads.Issue{mrWisp("gt-wisp-a", "gastown", "polecat/x/gt-a", "x", 1, now, false)}, nil
+		},
+		countMerges: func(string, time.Duration) (int, error) { return 0, fmt.Errorf("no clone") },
+	}
+
+	// The cold call returns immediately: the derivation runs in the background.
+	if got := f.FetchTownMergeQueue(); len(got.Rows) != 0 {
+		t.Fatalf("cold snapshot = %+v, want empty until the first refresh lands", got)
+	}
+
+	close(release)
+	<-listed
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := f.FetchTownMergeQueue(); len(got.Rows) == 1 {
+			if got.ReadyCount != 1 {
+				t.Errorf("ReadyCount = %d, want 1", got.ReadyCount)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("published snapshot never became visible")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A fresh snapshot is served from memory, so a render costs no bd process.
+	for i := 0; i < 5; i++ {
+		f.FetchTownMergeQueue()
+	}
+	if listCalls != 1 {
+		t.Errorf("lister called %d times, want 1 while the snapshot is fresh", listCalls)
+	}
+}
+
+func TestMergesLast6hCountsEachRigAndCaches(t *testing.T) {
+	f := &LiveConvoyFetcher{townRoot: "/town"}
+	counts := map[string]int{"gastown": 3, "beads": 2, "hm": 0}
+	var calls []string
+
+	f.countMerges = func(repoPath string, window time.Duration) (int, error) {
+		if window != mergesWindow {
+			t.Errorf("window = %v, want %v", window, mergesWindow)
+		}
+		rig := filepath.Base(filepath.Dir(filepath.Dir(repoPath)))
+		calls = append(calls, rig)
+		if rig == "om" {
+			return 0, fmt.Errorf("no clone")
+		}
+		return counts[rig], nil
+	}
+
+	tile, total := f.mergesLast6h([]string{"hm", "gastown", "om", "beads"})
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+	want := []RigMergeCount{{Rig: "beads", Count: 2}, {Rig: "gastown", Count: 3}, {Rig: "hm", Count: 0}}
+	if len(tile) != len(want) {
+		t.Fatalf("tile = %+v, want %+v", tile, want)
+	}
+	for i := range want {
+		if tile[i] != want[i] {
+			t.Errorf("tile[%d] = %+v, want %+v", i, tile[i], want[i])
+		}
+	}
+
+	callsAfterFirst := len(calls)
+	if _, total := f.mergesLast6h([]string{"hm", "gastown", "om", "beads"}); total != 5 {
+		t.Errorf("cached total = %d, want 5", total)
+	}
+	if len(calls) != callsAfterFirst {
+		t.Errorf("countMerges ran %d times after a cached second call, want %d", len(calls)-callsAfterFirst, 0)
+	}
+}
+
+func TestCountMergesOnMainUsesParseableSince(t *testing.T) {
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+
+	var gotArgs []string
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "git" {
+			t.Fatalf("ran %q, want git", name)
+		}
+		gotArgs = args
+		return bytes.NewBufferString("4\n"), nil
+	}
+
+	n, err := countMergesOnMain("/town/gastown/mayor/rig", mergesWindow)
+	if err != nil {
+		t.Fatalf("countMergesOnMain() error = %v", err)
+	}
+	if n != 4 {
+		t.Errorf("count = %d, want 4", n)
+	}
+
+	// git's approxidate silently drops --since=6h and counts the repo's whole
+	// history, so the window must be spelled out (gt-r65r).
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "--since=6 hours ago") {
+		t.Errorf("git args = %q, want a parseable --since window", joined)
+	}
+	for _, want := range []string{"-C /town/gastown/mayor/rig", "--count", "--merges", "origin/main"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("git args = %q, want %q", joined, want)
+		}
 	}
 }

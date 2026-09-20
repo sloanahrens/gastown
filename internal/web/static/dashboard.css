@@ -1099,6 +1099,45 @@
         .mq-yellow { background: rgba(255, 180, 84, 0.08); }
         .mq-red { background: rgba(240, 113, 120, 0.08); }
 
+        /* Merge queue: town MR rows and the throughput tile */
+        .mr-branch {
+            font-size: 0.75rem;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .mq-tile {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .mq-tile-label {
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .mq-tile-value {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .mq-tile-rig {
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: var(--bg-card-hover);
+            color: var(--text-secondary);
+        }
+
         /* Severity styles */
         .severity-critical { color: var(--red); font-weight: bold; }
         .severity-high { color: var(--orange); }
@@ -3270,6 +3309,36 @@
         }
 
         .mail-tab.active {
+            background: var(--blue);
+            color: var(--bg-dark);
+            border-color: var(--blue);
+        }
+
+        /* Merge queue tabs (town MRs / GitHub PRs) */
+        .mq-tabs {
+            display: flex;
+            gap: 4px;
+            margin-left: 8px;
+        }
+
+        .mq-tab {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .mq-tab:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .mq-tab.active {
             background: var(--blue);
             color: var(--bg-dark);
             border-color: var(--blue);

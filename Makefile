@@ -59,6 +59,7 @@ lint-tools:
 
 lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
+	@echo "lint: golangci-lint run --timeout=5m (blocks, printing nothing, if another lint holds the module lock)"
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 
 # Deterministic docs and comments checks (docs/writing-for-agents.md).

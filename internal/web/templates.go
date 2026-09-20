@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/activity"
 )
@@ -15,24 +16,25 @@ var templateFS embed.FS
 
 // ConvoyData represents data passed to the convoy template.
 type ConvoyData struct {
-	Convoys     []ConvoyRow
-	MergeQueue  []MergeQueueRow
-	Workers     []WorkerRow
-	Mail        []MailRow
-	Rigs        []RigRow
-	Dogs        []DogRow
-	Escalations []EscalationRow
-	Health      *HealthRow
-	Queues      []QueueRow
-	Sessions    []SessionRow
-	Hooks       []HookRow
-	Mayor       *MayorStatus
-	Issues      []IssueRow
-	Activity    []ActivityRow
-	Gate        *GateStatus
-	Summary     *DashboardSummary
-	Expand      string // Panel to show fullscreen (from ?expand=name)
-	CSRFToken   string // Token for CSRF protection on POST requests
+	Convoys        []ConvoyRow
+	MergeQueue     []MergeQueueRow
+	TownMergeQueue TownMergeQueue
+	Gate           *GateStatus
+	Workers        []WorkerRow
+	Mail           []MailRow
+	Rigs           []RigRow
+	Dogs           []DogRow
+	Escalations    []EscalationRow
+	Health         *HealthRow
+	Queues         []QueueRow
+	Sessions       []SessionRow
+	Hooks          []HookRow
+	Mayor          *MayorStatus
+	Issues         []IssueRow
+	Activity       []ActivityRow
+	Summary        *DashboardSummary
+	Expand         string // Panel to show fullscreen (from ?expand=name)
+	CSRFToken      string // Token for CSRF protection on POST requests
 }
 
 // RigRow represents a registered rig in the dashboard.
@@ -196,6 +198,40 @@ type MergeQueueRow struct {
 	ColorClass string // "mq-green", "mq-yellow", "mq-red"
 }
 
+// TownMergeQueueRow is one merge-request wisp in the town's merge queue, the
+// unit the refinery actually gates.
+type TownMergeQueueRow struct {
+	ID         string
+	Priority   int
+	Rig        string
+	Branch     string
+	Status     string // "ready", "blocked", or the raw beads status
+	Age        string // compact, as `gt mq list` renders it: "42m"
+	Assignee   string
+	ColorClass string // "mq-green" ready, "mq-red" blocked
+
+	createdAt time.Time // sort key; the Age string has already lost the ordering
+}
+
+// RigMergeCount is one rig's row of the merges-last-6h tile.
+type RigMergeCount struct {
+	Rig   string
+	Count int
+}
+
+// TownMergeQueue is the Merge Queue panel's town view: the merge-request wisps
+// across every rig, plus the throughput tile.
+//
+// Loaded separates "the queue is empty" from "the first refresh has not
+// landed"; without it a cold dashboard would claim an empty queue.
+type TownMergeQueue struct {
+	Loaded        bool
+	Rows          []TownMergeQueueRow
+	ReadyCount    int // the "N ready" header
+	Merges6h      []RigMergeCount
+	Merges6hTotal int
+}
+
 // ConvoyRow represents a single convoy in the dashboard.
 type ConvoyRow struct {
 	ID            string
@@ -233,7 +269,7 @@ func LoadTemplates() (*template.Template, error) {
 		"dogStateClass":      dogStateClass,
 		"queueStatusClass":   queueStatusClass,
 		"polecatStatusClass": polecatStatusClass,
-		"activityTypeClass": activityTypeClass,
+		"activityTypeClass":  activityTypeClass,
 		"contains": func(s, substr string) bool {
 			return strings.Contains(s, substr)
 		},

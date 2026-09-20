@@ -53,6 +53,13 @@ type Note struct {
 	// without this field still round-trip.
 	Followups []string `json:"followups,omitempty"`
 
+	// RubricRetirement is set when this review let a rubric change through
+	// the criterion-deletion guard because the MR bead carried
+	// RetirementLabel: the reviewed diff drops or rewrites a criterion, and
+	// the note is where that survives the MR bead (gt-2oi0). Omitted when
+	// false, so reviews that touched no criterion round-trip unchanged.
+	RubricRetirement bool `json:"rubric_retirement,omitempty"`
+
 	// The fields below are written only by the auditable backfill (gt mq
 	// rekey-note), never by gt mq review: they record that this note was
 	// copied onto a different commit than the one the review wrote it on,

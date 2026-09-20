@@ -23,6 +23,7 @@ var staticFiles embed.FS
 type ConvoyFetcher interface {
 	FetchConvoys() ([]ConvoyRow, error)
 	FetchMergeQueue() ([]MergeQueueRow, error)
+	FetchTownMergeQueue() TownMergeQueue
 	FetchWorkers() ([]WorkerRow, error)
 	FetchMail() ([]MailRow, error)
 	FetchRigs() ([]RigRow, error)
@@ -190,26 +191,27 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 	defer cancel()
 
 	var (
-		convoys     []ConvoyRow
-		mergeQueue  []MergeQueueRow
-		workers     []WorkerRow
-		mail        []MailRow
-		rigs        []RigRow
-		dogs        []DogRow
-		escalations []EscalationRow
-		health      *HealthRow
-		queues      []QueueRow
-		sessions    []SessionRow
-		hooks       []HookRow
-		mayor       *MayorStatus
-		issues      []IssueRow
-		activity    []ActivityRow
-		gate        *GateStatus
-		wg          sync.WaitGroup
+		convoys        []ConvoyRow
+		mergeQueue     []MergeQueueRow
+		townMergeQueue TownMergeQueue
+		gate           *GateStatus
+		workers        []WorkerRow
+		mail           []MailRow
+		rigs           []RigRow
+		dogs           []DogRow
+		escalations    []EscalationRow
+		health         *HealthRow
+		queues         []QueueRow
+		sessions       []SessionRow
+		hooks          []HookRow
+		mayor          *MayorStatus
+		issues         []IssueRow
+		activity       []ActivityRow
+		wg             sync.WaitGroup
 	)
 
 	// Run all fetches in parallel with error logging
-	wg.Add(15)
+	wg.Add(16)
 
 	go func() {
 		defer wg.Done()
@@ -226,6 +228,11 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		if err != nil {
 			log.Printf("dashboard: FetchMergeQueue failed: %v", err)
 		}
+	}()
+	go func() {
+		defer wg.Done()
+		// Serves a snapshot; the refresh it may start runs in the background.
+		townMergeQueue = h.fetcher.FetchTownMergeQueue()
 	}()
 	go func() {
 		defer wg.Done()
@@ -353,24 +360,25 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 	summary := computeSummary(workers, hooks, issues, convoys, escalations, activity)
 
 	data := ConvoyData{
-		Convoys:     convoys,
-		MergeQueue:  mergeQueue,
-		Workers:     workers,
-		Mail:        mail,
-		Rigs:        rigs,
-		Dogs:        dogs,
-		Escalations: escalations,
-		Health:      health,
-		Queues:      queues,
-		Sessions:    sessions,
-		Hooks:       hooks,
-		Mayor:       mayor,
-		Issues:      enrichIssuesWithAssignees(issues, hooks),
-		Activity:    activity,
-		Gate:        gate,
-		Summary:     summary,
-		Expand:      expandPanel,
-		CSRFToken:   h.csrfToken,
+		Convoys:        convoys,
+		MergeQueue:     mergeQueue,
+		TownMergeQueue: townMergeQueue,
+		Gate:           gate,
+		Workers:        workers,
+		Mail:           mail,
+		Rigs:           rigs,
+		Dogs:           dogs,
+		Escalations:    escalations,
+		Health:         health,
+		Queues:         queues,
+		Sessions:       sessions,
+		Hooks:          hooks,
+		Mayor:          mayor,
+		Issues:         enrichIssuesWithAssignees(issues, hooks),
+		Activity:       activity,
+		Summary:        summary,
+		Expand:         expandPanel,
+		CSRFToken:      h.csrfToken,
 	}
 
 	var buf bytes.Buffer

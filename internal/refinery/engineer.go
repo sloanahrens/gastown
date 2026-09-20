@@ -228,6 +228,12 @@ type MRInfo struct {
 	CreatedAt       time.Time  // MR creation time
 	BlockedBy       string     // Task ID blocking this MR
 
+	// Labels are the MR bead's labels. The batch reviewer needs them because
+	// editorial.RetirementLabel — the mark that lets a deliberate rubric
+	// retirement past the criterion-deletion guard — lives here and nowhere
+	// else in the MR's data (gt-2oi0).
+	Labels []string
+
 	// Pre-verification fields (Phase 3: polecat-owned rebasing)
 	// When set, the refinery can skip gates if VerifiedBase matches target HEAD.
 	PreVerified     bool      // Polecat ran full gates after rebasing onto target
@@ -611,6 +617,12 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
 	}
 
+	// Step 2.5: Refuse a submission that changes nothing. Gating a no-op MR
+	// spends the suite on the target's own tree and then lands it as merged.
+	if empty := e.checkSubmittedHeadAddsChange(mr, target, mergeRef); !empty.Success {
+		return empty
+	}
+
 	// Step 3: Check for merge conflicts (using local branch)
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking for conflicts...\n")
 	conflicts, err := e.git.CheckConflicts(mergeRef, target)
@@ -742,6 +754,17 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			}
 			return postResult
 		}
+	}
+
+	// Step 5.6: Refuse a local merge that added nothing to what origin/target
+	// already holds — the one check the submitted head cannot make, since a
+	// branch whose content the target already carries has a tree of its own
+	// that differs from the target's (gt-j5cc).
+	if landed := e.checkLandedMergeAddsChange(mr, target, mergeRef); !landed.Success {
+		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after empty merge: %v\n", target, resetErr)
+		}
+		return landed
 	}
 
 	// Step 6: Get the merge commit SHA
@@ -2382,6 +2405,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		CreatedAt:             createdAt,
 		UpdatedAt:             updatedAt,
 		Assignee:              issue.Assignee,
+		Labels:                issue.Labels,
 	}
 }
 

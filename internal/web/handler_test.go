@@ -18,22 +18,23 @@ var errFetchFailed = errors.New("fetch failed")
 
 // MockConvoyFetcher is a mock implementation for testing.
 type MockConvoyFetcher struct {
-	Convoys     []ConvoyRow
-	MergeQueue  []MergeQueueRow
-	Workers     []WorkerRow
-	Mail        []MailRow
-	Rigs        []RigRow
-	Dogs        []DogRow
-	Escalations []EscalationRow
-	Health      *HealthRow
-	Queues      []QueueRow
-	Sessions    []SessionRow
-	Hooks       []HookRow
-	Mayor       *MayorStatus
-	Issues      []IssueRow
-	Activity    []ActivityRow
-	Gate        *GateStatus
-	Error       error
+	Convoys        []ConvoyRow
+	MergeQueue     []MergeQueueRow
+	TownMergeQueue TownMergeQueue
+	Gate           *GateStatus
+	Workers        []WorkerRow
+	Mail           []MailRow
+	Rigs           []RigRow
+	Dogs           []DogRow
+	Escalations    []EscalationRow
+	Health         *HealthRow
+	Queues         []QueueRow
+	Sessions       []SessionRow
+	Hooks          []HookRow
+	Mayor          *MayorStatus
+	Issues         []IssueRow
+	Activity       []ActivityRow
+	Error          error
 }
 
 func (m *MockConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
@@ -42,6 +43,10 @@ func (m *MockConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 
 func (m *MockConvoyFetcher) FetchMergeQueue() ([]MergeQueueRow, error) {
 	return m.MergeQueue, nil
+}
+
+func (m *MockConvoyFetcher) FetchTownMergeQueue() TownMergeQueue {
+	return m.TownMergeQueue
 }
 
 func (m *MockConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
@@ -286,6 +291,123 @@ func TestConvoyHandler_FetchConvoysError(t *testing.T) {
 }
 
 // Integration tests for merge queue rendering
+
+func TestConvoyHandler_TownMergeQueueRendering(t *testing.T) {
+	mock := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{},
+		TownMergeQueue: TownMergeQueue{
+			Loaded: true,
+			Rows: []TownMergeQueueRow{
+				{
+					ID:         "gt-wisp-aaa",
+					Priority:   1,
+					Rig:        "gastown",
+					Branch:     "polecat/quartz/gt-r65r",
+					Status:     "ready",
+					Age:        "42m",
+					Assignee:   "quartz",
+					ColorClass: "mq-green",
+				},
+				{
+					ID:         "gt-wisp-bbb",
+					Priority:   2,
+					Rig:        "beads",
+					Branch:     "polecat/flint/be-xyz",
+					Status:     "blocked",
+					Age:        "3h",
+					Assignee:   "flint",
+					ColorClass: "mq-red",
+				},
+			},
+			ReadyCount:    1,
+			Merges6h:      []RigMergeCount{{Rig: "beads", Count: 2}, {Rig: "gastown", Count: 4}},
+			Merges6hTotal: 6,
+		},
+		MergeQueue: []MergeQueueRow{
+			{Number: 456, Repo: "gastown", Title: "Add dashboard feature", URL: "https://example.test/pr/456", CIStatus: "pending", Mergeable: "pending", ColorClass: "mq-yellow"},
+		},
+	}
+
+	handler, err := NewConvoyHandler(mock, 8*time.Second, "test-token")
+	if err != nil {
+		t.Fatalf("NewConvoyHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+
+	// The panel's header counts what the refinery can actually take now.
+	if !strings.Contains(body, "1 ready") {
+		t.Error("Response should contain the '1 ready' merge queue header")
+	}
+	// Both tabs are present; the town MR tab is the default view.
+	if !strings.Contains(body, `class="mq-tab active" data-tab="town"`) {
+		t.Error("Response should open on the town MR tab")
+	}
+	if !strings.Contains(body, `data-tab="prs"`) {
+		t.Error("Response should keep the GitHub PR list as a second tab")
+	}
+
+	for _, want := range []string{"gt-wisp-aaa", "gt-wisp-bbb", "polecat/quartz/gt-r65r", "polecat/flint/be-xyz", "quartz", "flint", "42m", "3h", ">ready<", ">blocked<"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Response should contain town merge queue %q", want)
+		}
+	}
+	// The GitHub PR list is still rendered behind its tab.
+	if !strings.Contains(body, "#456") {
+		t.Error("Response should still render the GitHub PR list")
+	}
+
+	// Throughput tile: the total and each rig's share.
+	if !strings.Contains(body, "merges last 6h") {
+		t.Error("Response should contain the merges-last-6h tile")
+	}
+	if !strings.Contains(body, `<span class="mq-tile-value">6</span>`) {
+		t.Error("Tile should show the town total of 6 merges")
+	}
+	if !strings.Contains(body, `<span class="mq-tile-rig">gastown 4</span>`) {
+		t.Error("Tile should show gastown's 4 merges")
+	}
+	if strings.Contains(body, "No merge requests in queue") {
+		t.Error("Non-empty town merge queue should not render the empty state")
+	}
+	if strings.Contains(body, "Loading the town's merge queue") {
+		t.Error("A loaded snapshot should not render the loading state")
+	}
+}
+
+func TestConvoyHandler_TownMergeQueueColdStartShowsLoading(t *testing.T) {
+	// A zero TownMergeQueue is what the fetcher returns before its first
+	// background refresh lands. The panel must say so rather than claim an
+	// empty queue.
+	mock := &MockConvoyFetcher{Convoys: []ConvoyRow{}}
+
+	handler, err := NewConvoyHandler(mock, 8*time.Second, "test-token")
+	if err != nil {
+		t.Fatalf("NewConvoyHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Loading the town's merge queue") {
+		t.Error("Cold start should render the loading state")
+	}
+	if strings.Contains(body, "No merge requests in queue") {
+		t.Error("Cold start must not claim the queue is empty")
+	}
+	if strings.Contains(body, "merges last 6h") {
+		t.Error("Cold start should not show a tile of zeros")
+	}
+}
 
 func TestConvoyHandler_MergeQueueRendering(t *testing.T) {
 	mock := &MockConvoyFetcher{
@@ -1020,6 +1142,10 @@ func (m *MockConvoyFetcherWithErrors) FetchMergeQueue() ([]MergeQueueRow, error)
 	return nil, m.MergeQueueError
 }
 
+func (m *MockConvoyFetcherWithErrors) FetchTownMergeQueue() TownMergeQueue {
+	return TownMergeQueue{}
+}
+
 func (m *MockConvoyFetcherWithErrors) FetchWorkers() ([]WorkerRow, error) {
 	return nil, m.WorkersError
 }
@@ -1255,6 +1381,9 @@ func (m *CountingMockFetcher) FetchConvoys() ([]ConvoyRow, error) {
 }
 func (m *CountingMockFetcher) FetchMergeQueue() ([]MergeQueueRow, error) {
 	return m.inner.FetchMergeQueue()
+}
+func (m *CountingMockFetcher) FetchTownMergeQueue() TownMergeQueue {
+	return m.inner.FetchTownMergeQueue()
 }
 func (m *CountingMockFetcher) FetchWorkers() ([]WorkerRow, error) { return m.inner.FetchWorkers() }
 func (m *CountingMockFetcher) FetchMail() ([]MailRow, error)      { return m.inner.FetchMail() }

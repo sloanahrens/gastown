@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // initVerifyTestGoRepo builds a tiny Go module with two packages (pkga,
@@ -94,6 +95,15 @@ func stubVerifyProgress(t *testing.T, interval time.Duration) {
 	prev := testVerifyProgressInterval
 	testVerifyProgressInterval = interval
 	t.Cleanup(func() { testVerifyProgressInterval = prev })
+}
+
+// stubLintVerifyTimeout shrinks the lint gate's budget so a test can drive a
+// real expiry (gt-taoz) rather than sleeping out the 10m default.
+func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
+	t.Helper()
+	prev := lintVerifyTimeout
+	lintVerifyTimeout = budget
+	t.Cleanup(func() { lintVerifyTimeout = prev })
 }
 
 func TestResolveTestVerifyBudgets(t *testing.T) {
@@ -288,4 +298,96 @@ func runGitOut(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+// TestLintFailureDetail pins what a failed lint attempt is allowed to tell the
+// polecat. Only a lint that ran to completion may ask for findings to be fixed;
+// lock contention the retries already proved, and a budget that ran out while
+// the lint was still going (gt-taoz: run.allow-serial-runners makes a contended
+// golangci-lint block on the lock rather than exit with the marker), both
+// linted nothing (gt-xsty).
+func TestLintFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		retries       int
+		budgetExpired bool
+		want          string
+		notWant       string
+	}{
+		{
+			name:    "a lint that completed and reported findings",
+			want:    "fix the lint findings before resubmitting",
+			notWant: "no finding is reported",
+		},
+		{
+			name:    "lock contention the retries already proved",
+			retries: 2,
+			want:    "held the lock across 2 retries",
+			notWant: "fix the lint findings",
+		},
+		{
+			name:          "the budget ran out while the lint was still going",
+			budgetExpired: true,
+			want:          "killed at its 1m budget without finishing",
+			notWant:       "fix the lint findings",
+		},
+		{
+			name:          "both: contention is the more specific story",
+			retries:       2,
+			budgetExpired: true,
+			want:          "held the lock across 2 retries",
+			notWant:       "fix the lint findings",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lintFailureDetail(tc.retries, tc.budgetExpired, time.Minute)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("lintFailureDetail(%d, %v) = %q, want it to contain %q", tc.retries, tc.budgetExpired, got, tc.want)
+			}
+			if strings.Contains(got, tc.notWant) {
+				t.Errorf("lintFailureDetail(%d, %v) = %q, must not contain %q", tc.retries, tc.budgetExpired, got, tc.notWant)
+			}
+		})
+	}
+}
+
+// TestRunDefaultTestVerification_LintBudgetExpiry drives that case end to end:
+// a lint that outlives its budget is killed by the gate's own context, and the
+// refusal must not read as a finding. This is the failure gt-taoz opened —
+// nothing in the log is attributable, because a lint blocked on a lock prints
+// nothing at all.
+func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+	stubLintVerifyTimeout(t, 250*time.Millisecond)
+
+	dir, _ := initVerifyTestGoRepo(t)
+	changePkga(t, dir)
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+
+	testMarker := filepath.Join(dir, "tests-ran")
+	mq := &config.MergeQueueConfig{
+		TestCommand:       "go test ./...",
+		LintCommand:       "sleep 30",
+		TestVerifyCommand: "echo ran > '" + testMarker + "'",
+	}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-budget-role")
+	if err == nil {
+		t.Fatalf("expected a refusal when the lint outlives its budget, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "budget without finishing") {
+		t.Errorf("a lint killed by its budget was not attributed to the budget: %v", err)
+	}
+	if strings.Contains(err.Error(), "fix the lint findings") {
+		t.Errorf("a lint killed by its budget was reported as a lint finding: %v", err)
+	}
+	if _, statErr := os.Stat(testMarker); statErr == nil {
+		t.Error("tests ran despite the lint never finishing")
+	}
 }

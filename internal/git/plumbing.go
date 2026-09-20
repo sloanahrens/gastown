@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -184,4 +185,125 @@ func (g *Git) CommitSubject(rev string) (string, error) {
 // base..head range, which also reports base's own progress as a deletion).
 func (g *Git) DiffStatThreeDot(base, head string) (string, error) {
 	return g.run("diff", "--stat", base+"..."+head)
+}
+
+// TreesIdentical reports whether a and b name commits with byte-identical
+// trees — the condition under which merging either into the other leaves the
+// receiving branch's tree untouched.
+func (g *Git) TreesIdentical(a, b string) (bool, error) {
+	aTree, err := g.run("rev-parse", a+"^{tree}")
+	if err != nil {
+		return false, fmt.Errorf("resolve tree of %s: %w", a, err)
+	}
+	bTree, err := g.run("rev-parse", b+"^{tree}")
+	if err != nil {
+		return false, fmt.Errorf("resolve tree of %s: %w", b, err)
+	}
+	return strings.TrimSpace(aTree) == strings.TrimSpace(bTree), nil
+}
+
+// CommitLineStats is one commit's total added and removed line counts.
+type CommitLineStats struct {
+	Commit  string
+	Subject string
+	Added   int
+	Removed int
+}
+
+// CommitLineStatsInRange returns per-commit line totals for up to limit commits
+// in revRange (e.g. "main..branch"), newest first.
+//
+// Merge commits contribute nothing: git log --numstat prints no stats for a
+// merge without -m/-c, and the changes a merge brings in are already reported
+// by the commits it merges, which the same walk visits. Binary files also
+// contribute nothing — git reports their counts as "-".
+func (g *Git) CommitLineStatsInRange(revRange string, limit int) ([]CommitLineStats, error) {
+	out, err := g.run("log", "--no-merges", "--numstat", "--format=%H%n%s",
+		"-n", strconv.Itoa(limit), revRange)
+	if err != nil {
+		return nil, err
+	}
+	return parseNumstatLog(out), nil
+}
+
+// parseNumstatLog walks the line-oriented stream of CommitLineStatsInRange's
+// git log invocation: a commit hash line, its subject line, then a blank line
+// and the per-file "<added>\t<removed>\t<path>" lines. A commit with no changes
+// emits no stats block at all, so there the next hash line follows the subject
+// immediately.
+func parseNumstatLog(out string) []CommitLineStats {
+	var stats []CommitLineStats
+	lines := strings.Split(out, "\n")
+	for i := 0; i < len(lines); {
+		commit := strings.TrimSpace(lines[i])
+		if !isFullSHA(commit) {
+			i++
+			continue
+		}
+		entry := CommitLineStats{Commit: commit}
+		i++
+		if i < len(lines) {
+			entry.Subject = strings.TrimSpace(lines[i])
+			i++
+		}
+		for i < len(lines) {
+			if strings.TrimSpace(lines[i]) == "" {
+				i++
+				continue
+			}
+			added, removed, ok := parseNumstatLine(lines[i])
+			if !ok {
+				break // the next commit's hash line ends this stats block
+			}
+			entry.Added += added
+			entry.Removed += removed
+			i++
+		}
+		stats = append(stats, entry)
+	}
+	return stats
+}
+
+// parseNumstatLine reads one "<added>\t<removed>\t<path>" numstat line. ok is
+// false for a line that is not one, which is how the walk detects the end of a
+// commit's stats block.
+func parseNumstatLine(line string) (added, removed int, ok bool) {
+	fields := strings.SplitN(line, "\t", 3)
+	if len(fields) < 3 {
+		return 0, 0, false
+	}
+	added, err := numstatCount(fields[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	removed, err = numstatCount(fields[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return added, removed, true
+}
+
+// numstatCount parses one side of a numstat line. A binary file's counts are
+// "-", which is zero lines rather than a malformed field.
+func numstatCount(field string) (int, error) {
+	if field == "-" {
+		return 0, nil
+	}
+	return strconv.Atoi(field)
+}
+
+// isFullSHA reports whether s is a lowercase-or-uppercase 40-character hex
+// object name.
+func isFullSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
