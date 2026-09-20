@@ -389,7 +389,9 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 	}
 
 	// 3. Stop ends the renewal. Wait well past the interval so a live ticker
-	// would have written again many times over.
+	// would have written again many times over. This only holds because stop
+	// is a barrier and not a mere signal — see
+	// TestStartHeartbeatKeepAlive_StopIsABarrier for the property itself.
 	stop()
 	stop() // idempotent — a second call must not panic or re-arm anything
 	frozen := ReadSessionHeartbeat(townRoot, sessionName)
@@ -403,6 +405,52 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 	}
 	if !after.Timestamp.Equal(frozen.Timestamp) {
 		t.Fatalf("keep-alive kept renewing after stop: %v -> %v", frozen.Timestamp, after.Timestamp)
+	}
+}
+
+// TestStartHeartbeatKeepAlive_StopIsABarrier pins the invariant the assertion
+// above depends on: once stop returns, the heartbeat can never be renewed
+// again. That is not free — closing the done channel only *signals* the
+// goroutine, and a tick already taken out of the ticker but still inside
+// TouchSessionHeartbeatWithState (mkdir, marshal, write) runs to completion
+// regardless, landing a renewal after stop returned. A caller that samples the
+// file immediately after stop then reads the pre-write value as its baseline
+// and the in-flight write as a fresh renewal — the "kept renewing after stop"
+// failure in gt-nyh8, which only surfaced under host load because that is what
+// makes the write straddle the read.
+//
+// The interval is deliberately shorter than the write loop and the loop
+// deliberately re-races stop against it many times: a signal-only stop leaves
+// a write in flight on a good fraction of iterations, so the barrier property
+// is asserted against the race repeatedly instead of hoping to catch it once.
+// Like its sibling above, this is a bound, not a tolerance — it does not sleep
+// past the race, it makes the race unable to happen.
+func TestStartHeartbeatKeepAlive_StopIsABarrier(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "myr-barrier"
+	const interval = 250 * time.Microsecond
+
+	for i := 0; i < 200; i++ {
+		stop := startHeartbeatKeepAlive(townRoot, sessionName, "gt done", "gt-azmw", interval)
+		// Let a few ticks land, so stop is likely called with the goroutine
+		// inside its write path rather than parked in the select.
+		time.Sleep(time.Millisecond)
+		stop()
+
+		frozen := ReadSessionHeartbeat(townRoot, sessionName)
+		if frozen == nil {
+			t.Fatalf("iteration %d: expected a heartbeat after starting the keep-alive", i)
+		}
+		// Far longer than the write itself, so any write that was in flight
+		// when stop returned has landed by the time we look.
+		time.Sleep(5 * time.Millisecond)
+		after := ReadSessionHeartbeat(townRoot, sessionName)
+		if after == nil {
+			t.Fatalf("iteration %d: expected the heartbeat to survive stop", i)
+		}
+		if !after.Timestamp.Equal(frozen.Timestamp) {
+			t.Fatalf("iteration %d: stop returned with a renewal still in flight: %v -> %v", i, frozen.Timestamp, after.Timestamp)
+		}
 	}
 }
 
