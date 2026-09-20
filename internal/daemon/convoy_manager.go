@@ -641,6 +641,17 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			m.logger("Convoy %s: sling %s: %s", c.ID, issueID, l)
 		}
 		if runErr != nil {
+			// A refusal is not a failure (gt-xidg, A3): the rig's merge queue
+			// is over its configured ceiling, so the sling declined to add
+			// more work to it. The bead keeps the readiness the convoy scan
+			// gave it and nothing here touches its status, so the next tick
+			// offers it again — once the queue drains, the same bead feeds.
+			// Logging it as a deferral keeps "the town is at capacity"
+			// distinguishable from "the sling broke" in daemon.log.
+			if reason, ok := slingBackpressureReason(stderr.String()); ok {
+				m.logger("Convoy %s: deferring %s: %s", c.ID, issueID, reason)
+				continue
+			}
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(stderr.String()))
 			continue
 		}

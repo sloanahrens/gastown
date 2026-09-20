@@ -74,7 +74,7 @@ func (s *SpawnedPolecatInfo) SessionStarted() bool {
 // SlingSpawnOptions contains options for spawning a polecat via sling.
 type SlingSpawnOptions struct {
 	TownRoot      string // Gas Town workspace root; falls back to cwd when empty
-	Force         bool   // Force spawn even if polecat has uncommitted work
+	Force         bool   // Force spawn even if polecat has uncommitted work, and past merge-queue backpressure (gt-xidg)
 	Account       string // Claude Code account handle to use
 	Create        bool   // Create polecat if it doesn't exist (currently always true for sling)
 	HookBead      string // Bead ID to set as hook_bead at spawn time (atomic assignment)
@@ -130,6 +130,15 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		if err != nil {
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
+	}
+
+	// Pre-dispatch backpressure (gt-xidg, plan Task 3 / A3): the rig's merge
+	// queue is the limit on what the town can absorb, so a sling is refused
+	// while the rig has more ready MRs than merge_queue.max_ready_for_dispatch
+	// allows. It runs before the pool decision below, which costs a tmux round
+	// trip and may claim a local seat for a polecat that will never spawn.
+	if err := checkSlingBackpressure(townRoot, rigName, opts); err != nil {
+		return nil, err
 	}
 
 	// Polecat model pool: with no explicit --agent, the town's polecat_pool

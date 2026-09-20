@@ -295,6 +295,12 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: batch_min_count must be non-negative", ErrMissingField)
 	}
 
+	// Zero is the documented "guard off" value, so only a negative is invalid:
+	// a typo'd -1 would silently disable the ceiling the operator meant to set.
+	if c.MaxReadyForDispatch < 0 {
+		return fmt.Errorf("%w: max_ready_for_dispatch must be non-negative", ErrMissingField)
+	}
+
 	return nil
 }
 
