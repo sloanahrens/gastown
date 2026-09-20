@@ -286,7 +286,7 @@ or Gemini CLI), Gas Town can install hooks automatically.
 | `PreToolUse` | Before tool execution | `gt tap guard pr-workflow` (guards PR creation) |
 | `Stop` | Session ends | `gt costs record` |
 
-Reference template: `internal/claude/config/settings-autonomous.json`
+Reference template: `internal/hooks/templates/claude/settings-autonomous.json`
 
 ```json
 {
