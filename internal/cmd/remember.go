@@ -14,7 +14,19 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-const memoryKeyPrefix = "gt."
+// Memories live in two kv namespaces: gt.<type>.<key>, which `gt remember`
+// writes, and the older memory.<key> that `bd remember` writes. Both corpora
+// are live, so every reader has to accept both prefixes (gt-o51s).
+const (
+	memoryKeyPrefix       = "gt."
+	memoryLegacyKeyPrefix = "memory."
+)
+
+// isMemoryKey reports whether a beads kv key holds a memory, in either the gt.*
+// or the legacy memory.* namespace.
+func isMemoryKey(key string) bool {
+	return strings.HasPrefix(key, memoryKeyPrefix) || strings.HasPrefix(key, memoryLegacyKeyPrefix)
+}
 
 // validMemoryTypes are the recognized memory type categories.
 // Typed memories are stored as gt.<type>.<key> in the kv store.
@@ -114,9 +126,15 @@ func runRemember(cmd *cobra.Command, args []string) error {
 }
 
 // parseMemoryKey extracts the type and short key from a full kv key.
-// Handles both typed keys (memory.<type>.<key>) and legacy keys (memory.<key>).
+// Handles both typed keys (gt.<type>.<key> or memory.<type>.<key>) and legacy
+// untyped keys (gt.<key> or memory.<key>).
 func parseMemoryKey(kvKey string) (memType, shortKey string) {
-	rest := strings.TrimPrefix(kvKey, memoryKeyPrefix)
+	prefix := memoryLegacyKeyPrefix
+	if strings.HasPrefix(kvKey, memoryKeyPrefix) {
+		prefix = memoryKeyPrefix
+	}
+
+	rest := strings.TrimPrefix(kvKey, prefix)
 	if rest == "" {
 		return "general", ""
 	}
@@ -233,7 +251,7 @@ func parseBdKvListJSON(data []byte) (map[string]string, error) {
 			continue
 		}
 
-		if !strings.HasPrefix(k, memoryKeyPrefix) {
+		if !isMemoryKey(k) {
 			continue
 		}
 

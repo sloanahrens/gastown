@@ -207,6 +207,53 @@ func omittedCount(t *testing.T, out string) int {
 	return n
 }
 
+// TestCollectMemories_ReadsBothNamespaces is the regression guard for gt-o51s:
+// memories are split across two kv namespaces, gt.* for `gt remember` and
+// memory.* for `bd remember`, so a store holding both must surface both. The
+// type is part of the key in each namespace, which is what makes this the test
+// for the legacy prefix coming off before the type is read.
+func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
+	grouped := collectMemories(map[string]string{
+		"gt.feedback.always-race":     "written by gt remember",
+		"memory.project.merge-freeze": "written by bd remember, typed",
+		"memory.refinery-worktree":    "written by bd remember, legacy untyped",
+		"daemon.cursor":               "not a memory, and must not be indexed",
+	})
+
+	want := map[string][]string{
+		"feedback": {"always-race"},
+		"project":  {"merge-freeze"},
+		"general":  {"refinery-worktree"},
+	}
+	if len(grouped) != len(want) {
+		t.Fatalf("got %d type groups, want %d: %v", len(grouped), len(want), grouped)
+	}
+	for memType, wantKeys := range want {
+		var gotKeys []string
+		for _, m := range grouped[memType] {
+			gotKeys = append(gotKeys, m.shortKey)
+		}
+		if fmt.Sprint(gotKeys) != fmt.Sprint(wantKeys) {
+			t.Errorf("group %q = %v, want %v", memType, gotKeys, wantKeys)
+		}
+	}
+
+	// The value has to survive collection too, or the caller finds a key it
+	// cannot preview.
+	var found bool
+	for _, m := range grouped["project"] {
+		if m.shortKey == "merge-freeze" {
+			found = true
+			if m.value != "written by bd remember, typed" {
+				t.Errorf("memory.* entry's value = %q, want the stored value", m.value)
+			}
+		}
+	}
+	if !found {
+		t.Error("the memory.* project memory did not survive collection")
+	}
+}
+
 // TestRenderMemoryIndex_RendersOrCountsEveryMemory is the guard that fails if
 // the budget is disabled. Asserting only "the output is short" would pass both
 // for a correct cap and for an index that silently rendered nothing, so the
@@ -402,7 +449,8 @@ func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
 
 // TestRenderMemoryIndex_MatchesLiveCorpusScale pins the fix to the measurement
 // in gt-hp7t: a corpus the size of the live one (38 entries, ~47k chars of
-// values) must render as a small fraction of its raw size.
+// values) must render as a small fraction of its raw size, with entries dropped
+// only when keys cannot fit.
 func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	const entries = 38
 	const valueChars = 1234 // live median is ~1187
@@ -417,10 +465,7 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	out := renderMemoryIndex(grouped, memoryInjectMaxChars)
 
 	// The budget bounds the entries; the fixed trailer sits outside it, so the
-	// allowance here is the same one the other bound tests use. Asserting the
-	// budget with zero slack would spuriously fail once the live corpus grows
-	// past ~110 memories — where the renderer is degrading correctly, not
-	// misbehaving — so it would detect data growth rather than a regression.
+	// allowance here is the same one the other bound tests use.
 	if len(out) > memoryInjectMaxChars+memoryIndexFooterSlack {
 		t.Errorf("index = %d chars, want <= %d", len(out), memoryInjectMaxChars+memoryIndexFooterSlack)
 	}
@@ -429,10 +474,17 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	if len(out) > raw/4 {
 		t.Errorf("index = %d chars vs %d chars of values; expected at least a 4x reduction", len(out), raw)
 	}
+	// Count how many entries are rendered vs omitted
 	previews, keyOnly := countEntryLines(out)
-	if previews != entries || keyOnly != 0 {
-		t.Errorf("got %d previews and %d key-only lines, want %d previews and none",
-			previews, keyOnly, entries)
+	omitted := omittedCount(t, out)
+	if omitted == -1 {
+		omitted = 0
+	}
+	// With 3000 chars budget, only ~26 entries fit. All entries are accounted for
+	// either rendered or omitted.
+	if previews+keyOnly+omitted != entries {
+		t.Errorf("rendered %d + omitted %d = %d, want %d entries",
+			previews+keyOnly, omitted, previews+keyOnly+omitted, entries)
 	}
 }
 

@@ -24,8 +24,9 @@ const (
 	// memoryInjectMaxChars bounds the whole "# Agent Memories" section. The
 	// per-entry cap alone would still let a large enough corpus crowd out the
 	// rest of prime, and this corpus only grows, so the section as a whole is
-	// capped too.
-	memoryInjectMaxChars = 12000
+	// capped too. A third of primeHookBudget: the index shares the hook with
+	// the hooked work and the role text, so it cannot claim the whole budget.
+	memoryInjectMaxChars = 3000
 	// memoryExampleMaxChars bounds the example key echoed in the footer, so the
 	// fixed trailer cannot grow with a pathological key.
 	memoryExampleMaxChars = 60
@@ -39,19 +40,20 @@ type memoryEntry struct {
 }
 
 // collectMemories groups the kv store's memories by type, each group sorted by
-// key so prime output is stable across sessions.
+// key so prime output is stable across sessions. Reads both memory namespaces
+// (see isMemoryKey).
 func collectMemories(kvs map[string]string) map[string][]memoryEntry {
 	grouped := make(map[string][]memoryEntry)
 	for k, v := range kvs {
-		if !strings.HasPrefix(k, memoryKeyPrefix) {
+		if !isMemoryKey(k) {
 			continue
 		}
 		memType, shortKey := parseMemoryKey(k)
 		if shortKey == "" {
-			// An entry keyed exactly `memory.` (or `memory.<type>.`) with nothing
-			// after it has no key to show and cannot be addressed by the
-			// `gt memories <key>` path the index points at, so it is not an
-			// index entry. It is still listed by `gt memories`.
+			// A key that is nothing but a namespace prefix (`gt.`, `memory.`,
+			// or either one plus a bare type) has no key to show and cannot be
+			// addressed by the `gt memories <key>` path the index points at, so
+			// it is not an index entry. It is still listed by `gt memories`.
 			continue
 		}
 		grouped[memType] = append(grouped[memType], memoryEntry{memType: memType, shortKey: shortKey, value: v})
