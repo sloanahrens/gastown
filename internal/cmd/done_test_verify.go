@@ -673,10 +673,10 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		if override := strings.TrimSpace(mq.TestVerifyCommand); override != "" {
 			testCmd = strings.ReplaceAll(override, testVerifyPackagesPlaceholder, strings.Join(pkgs, " "))
 		} else {
-			// The -timeout is stated explicitly rather than left to Go's 10m
-			// default: the value the rig's own Makefile uses (gt-g8kr), and
-			// the same value the outer run budget was scaled from.
-			testCmd = fmt.Sprintf("go test -timeout %s %s", humanDuration(budgets.perPackage), strings.Join(pkgs, " "))
+			// The rig's test_command runs through the hermetic env (e.g.
+			// 'make test' sets BEADS_TEST_MODE, sources test-env.sh, etc.).
+			// Use it directly without the Go-specific `go test` wrapper.
+			testCmd = mq.TestCommand
 		}
 	default:
 		if strings.Contains(mq.TestVerifyCommand, testVerifyPackagesPlaceholder) {
