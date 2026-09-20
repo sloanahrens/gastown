@@ -1507,6 +1507,14 @@ type MergeQueueConfig struct {
 	// at a time. Zero or unset defaults to 4.
 	BatchMinCount int `json:"batch_min_count,omitempty"`
 
+	// MaxReadyForDispatch is the ready-MR ceiling above which a new dispatch
+	// is refused: the merge queue, not the pool, is the real limit on how
+	// much work the town can absorb, so `gt sling` stops feeding it while the
+	// rig has more than this many ready MRs (plan Task 3 / A3). A bead
+	// labeled `rework` or an explicit --force passes anyway. Zero or unset
+	// disables the guard (no queue read at all).
+	MaxReadyForDispatch int `json:"max_ready_for_dispatch,omitempty"`
+
 	// Editorial configures the om editorial gate: whether a merge requires
 	// an om review before it can land, and how that review runs. Nil means
 	// no tier has set an editorial block; Required defaults to false so
@@ -1677,6 +1685,16 @@ func (c *MergeQueueConfig) GetBatchMinCount() int {
 		return 4
 	}
 	return c.BatchMinCount
+}
+
+// GetMaxReadyForDispatch returns the ready-MR ceiling above which a new
+// dispatch is refused. Nil-safe, and zero means the guard is off: a rig that
+// never sets the knob must not pay for a queue read on every sling.
+func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
+	if c == nil {
+		return 0
+	}
+	return c.MaxReadyForDispatch
 }
 
 // HasAnyGateCommand reports whether at least one of the five gate commands

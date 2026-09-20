@@ -476,6 +476,25 @@ func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
 	}
 }
 
+// TestMaxReadyForDispatchAccessor guards the gt-xidg dispatch ceiling: zero
+// means the guard is off, so the accessor must report 0 for a rig that never
+// configured the knob — including a nil config, since sling reads the knob
+// through a settings load it may not have.
+func TestMaxReadyForDispatchAccessor(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *MergeQueueConfig
+	if got := nilCfg.GetMaxReadyForDispatch(); got != 0 {
+		t.Errorf("nil GetMaxReadyForDispatch() = %d, want 0 (guard off)", got)
+	}
+	if got := (&MergeQueueConfig{}).GetMaxReadyForDispatch(); got != 0 {
+		t.Errorf("unset GetMaxReadyForDispatch() = %d, want 0 (guard off)", got)
+	}
+	if got := (&MergeQueueConfig{MaxReadyForDispatch: 12}).GetMaxReadyForDispatch(); got != 12 {
+		t.Errorf("GetMaxReadyForDispatch() = %d, want 12", got)
+	}
+}
+
 func TestValidateMergeQueueConfig_Batch(t *testing.T) {
 	t.Parallel()
 
@@ -493,6 +512,9 @@ func TestValidateMergeQueueConfig_Batch(t *testing.T) {
 		{name: "negative batch_min_count is invalid", cfg: &MergeQueueConfig{BatchMinCount: -1}, wantErr: true},
 		{name: "positive batch_min_count is valid", cfg: &MergeQueueConfig{BatchMinCount: 8}, wantErr: false},
 		{name: "zero batch_min_count is valid (uses default)", cfg: &MergeQueueConfig{BatchMinCount: 0}, wantErr: false},
+		{name: "negative max_ready_for_dispatch is invalid", cfg: &MergeQueueConfig{MaxReadyForDispatch: -1}, wantErr: true},
+		{name: "positive max_ready_for_dispatch is valid", cfg: &MergeQueueConfig{MaxReadyForDispatch: 12}, wantErr: false},
+		{name: "zero max_ready_for_dispatch is valid (guard off)", cfg: &MergeQueueConfig{MaxReadyForDispatch: 0}, wantErr: false},
 	}
 
 	for _, tt := range tests {
