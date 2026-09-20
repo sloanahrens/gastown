@@ -79,7 +79,7 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 	})
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -148,7 +148,7 @@ func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 	})
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",

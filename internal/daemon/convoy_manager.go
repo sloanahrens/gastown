@@ -131,6 +131,19 @@ type ConvoyManager struct {
 	// been handled. This allows the 1s overlap window above without replaying
 	// the same lifecycle events on every poll.
 	processedLifecycleEvents sync.Map // map[string]bool
+
+	// cmdRunner runs external commands. Nil means use exec.CommandContext.
+	cmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
+}
+
+// cmdRunnerFunc is a function that runs an external command.
+type cmdRunnerFunc func(ctx context.Context, name string, args ...string) *exec.Cmd
+
+// defaultCmdRunner returns a cmdRunner that uses exec.CommandContext.
+func defaultCmdRunner() cmdRunnerFunc {
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, name, args...)
+	}
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -141,12 +154,16 @@ type ConvoyManager struct {
 // openStores is called lazily if stores is nil (e.g., Dolt not ready at startup).
 // isRigParked reports whether a rig should be skipped during polling (nil = never parked).
 // gtPath is the resolved path to the gt binary for subprocess calls.
-func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), gtPath string, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() map[string]beadsdk.Storage, isRigParked func(string) bool) *ConvoyManager {
+// cmdRunner runs external commands; nil means use exec.CommandContext.
+func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), gtPath string, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() map[string]beadsdk.Storage, isRigParked func(string) bool, cmdRunner cmdRunnerFunc) *ConvoyManager {
 	if scanInterval <= 0 {
 		scanInterval = defaultStrandedScanInterval
 	}
 	if isRigParked == nil {
 		isRigParked = func(string) bool { return false }
+	}
+	if cmdRunner == nil {
+		cmdRunner = defaultCmdRunner()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ConvoyManager{
@@ -159,7 +176,17 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		openStores:   openStores,
 		isRigParked:  isRigParked,
 		gtPath:       gtPath,
+		cmdRunner:    cmdRunner,
 	}
+}
+
+// runCmd runs an external command using the injected cmdRunner.
+// It sets the working directory on the command before returning it.
+// Callers are responsible for setting Env and calling util.SetProcessGroup.
+func (m *ConvoyManager) runCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := m.cmdRunner(ctx, name, args...)
+	cmd.Dir = m.townRoot
+	return cmd
 }
 
 // Start begins the convoy manager goroutines (event poll + stranded scan).
@@ -538,8 +565,7 @@ func (m *ConvoyManager) scan() {
 
 // findStranded runs `gt convoy stranded --json` and parses the output.
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "stranded", "--json")
-	cmd.Dir = m.townRoot
+	cmd := m.runCmd(m.ctx, m.gtPath, "convoy", "stranded", "--json")
 	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
 	util.SetProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
@@ -627,8 +653,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		if agent != "" {
 			slingArgs = append(slingArgs, "--agent="+agent)
 		}
-		cmd := exec.CommandContext(m.ctx, m.gtPath, slingArgs...)
-		cmd.Dir = m.townRoot
+		cmd := m.runCmd(m.ctx, m.gtPath, slingArgs...)
 		cmd.Env = bdMutationRoutingEnv(m.townRoot)
 		util.SetProcessGroup(cmd)
 		var stderr bytes.Buffer
@@ -748,8 +773,7 @@ func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) bool {
 // tracked issues may all be closed. This handles the case where the event poll
 // missed the close events (e.g., daemon restart, Dolt latency).
 func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
+	cmd := m.runCmd(m.ctx, m.gtPath, "convoy", "check", convoyID)
 	cmd.Env = bdMutationRoutingEnv(m.townRoot)
 	util.SetProcessGroup(cmd)
 	var stderr bytes.Buffer
@@ -764,8 +788,7 @@ func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
 
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
+	cmd := m.runCmd(m.ctx, m.gtPath, "convoy", "check", convoyID)
 	cmd.Env = bdMutationRoutingEnv(m.townRoot)
 	util.SetProcessGroup(cmd)
 	var stderr bytes.Buffer
