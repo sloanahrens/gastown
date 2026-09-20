@@ -161,6 +161,24 @@ func TestParseMemoryKey(t *testing.T) {
 			wantType: "feedback",
 			wantKey:  "always-use-race-flag",
 		},
+		{
+			name:     "memory. typed feedback key",
+			kvKey:    "memory.feedback.always-use-race-flag",
+			wantType: "feedback",
+			wantKey:  "always-use-race-flag",
+		},
+		{
+			name:     "memory. typed project key",
+			kvKey:    "memory.project.merge-freeze",
+			wantType: "project",
+			wantKey:  "merge-freeze",
+		},
+		{
+			name:     "memory. legacy untyped key",
+			kvKey:    "memory.refinery-worktree",
+			wantType: "general",
+			wantKey:  "refinery-worktree",
+		},
 	}
 
 	for _, tt := range tests {

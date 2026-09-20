@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,6 +94,13 @@ func assertPrimeToolNotCalled(t *testing.T, unwanted string) {
 	t.Helper()
 	logPath := os.Getenv("PRIME_TOOL_CALL_LOG")
 	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		// A log that was never written is the strongest possible evidence that
+		// nothing was called: the stub tool appends on entry, before it can do
+		// anything else. Roles for which prime runs no subprocess at all end up
+		// here, so a missing log is a pass, not an error.
+		return
+	}
 	if err != nil {
 		t.Fatalf("read call log: %v", err)
 	}
@@ -130,6 +138,10 @@ func withPrimeExternalToolDeadline(t *testing.T, fn func(time.Duration) (context
 // so the shell's sleep and the test's safety net can never drift apart.
 var primeTestStallSeconds = strconv.Itoa(int(primeTestSlowToolStall / time.Second))
 
+// TestRunPrimeExternalTools_RunsMemoryAndMail pins that the two sections are
+// independent: a role that renders memories still gets its mail, both in one
+// call. The mayor is the role that gets both, so it is the subject here; the
+// roles that get only one are covered by the two tests below.
 func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	workDir := setupPrimeExternalToolTest(t, `
 case "$*" in
@@ -141,7 +153,7 @@ case "$*" in
 esac
 `)
 
-	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
+	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RoleMayor}, workDir) })
 	assertPrimeToolCalled(t, "bd:kv list --json")
 	assertPrimeToolCalled(t, "gt:mail check --inject")
 
@@ -150,6 +162,99 @@ esac
 	}
 	if !strings.Contains(output, "MAIL OUTPUT") {
 		t.Fatalf("mail injection missing: %q", output)
+	}
+}
+
+// TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly pins the memory role gate
+// (gt-o51s, plan Task 8 C3). It is a separate test from
+// SkipsMailCheckForPatrolRoles because the two gates are independent: mail is
+// withheld from patrol roles, memories from everyone but mayor and crew, and a
+// polecat is the role that gets exactly one of them.
+func TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly(t *testing.T) {
+	for _, tc := range []struct {
+		role       Role
+		wantMemory bool
+	}{
+		{RoleMayor, true},
+		{RoleCrew, true},
+		{RolePolecat, false},
+		{RoleWitness, false},
+		{RoleRefinery, false},
+		{RoleDeacon, false},
+		{RoleBoot, false},
+	} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			workDir := setupPrimeExternalToolTest(t, `
+case "$*" in
+  "kv list --json") printf '%s\n' '{"gt.feedback.test":"remembered"}'; exit 0 ;;
+esac
+`, `
+case "$*" in
+  "mail check --inject") printf '%s\n' 'MAIL OUTPUT'; exit 0 ;;
+esac
+`)
+
+			output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: tc.role}, workDir) })
+
+			if tc.wantMemory {
+				assertPrimeToolCalled(t, "bd:kv list --json")
+				if !strings.Contains(output, "remembered") {
+					t.Fatalf("role %s rendered no memories: %q", tc.role, output)
+				}
+				return
+			}
+			assertPrimeToolNotCalled(t, "bd:kv list --json")
+			if strings.Contains(output, "remembered") {
+				t.Fatalf("role %s rendered a memory index it should not have: %q", tc.role, output)
+			}
+			// The gate is about memories only: withholding them must not take
+			// the role's mail with it.
+			if tc.role == RolePolecat {
+				assertPrimeToolCalled(t, "gt:mail check --inject")
+				if !strings.Contains(output, "MAIL OUTPUT") {
+					t.Fatalf("polecat lost its mail along with its memories: %q", output)
+				}
+			}
+		})
+	}
+}
+
+// TestRunPrimeMemoryInject_BoundsTheIndex is the acceptance guard for the size
+// half of gt-o51s: at the live corpus's scale the section a mayor's prime
+// carries must fit inside memoryInjectMaxChars, which is what makes it fit
+// inside primeHookBudget alongside the hooked work at all.
+func TestRunPrimeMemoryInject_BoundsTheIndex(t *testing.T) {
+	// The live corpus, in shape: 38 entries of ~1200 chars each.
+	kvJSON, err := json.Marshal(syntheticMemories(38, 1200))
+	if err != nil {
+		t.Fatalf("marshal kv: %v", err)
+	}
+	jsonPath := filepath.Join(t.TempDir(), "kv.json")
+	if err := os.WriteFile(jsonPath, kvJSON, 0600); err != nil {
+		t.Fatalf("write kv json: %v", err)
+	}
+	workDir := setupPrimeExternalToolTest(t, `
+case "$*" in
+  "kv list --json") cat "$KV_JSON_FILE"; exit 0 ;;
+esac
+`, ``)
+	t.Setenv("KV_JSON_FILE", jsonPath)
+
+	out := captureStdout(t, func() {
+		runPrimeMemoryInject(RoleContext{Role: RoleMayor}, workDir)
+	})
+
+	if !strings.Contains(out, "# Agent Memories (38)") {
+		t.Fatalf("mayor rendered no index over a 38-entry corpus:\n%s", out[:min(len(out), 400)])
+	}
+	if len(out) > memoryInjectMaxChars+memoryIndexFooterSlack {
+		t.Errorf("memory section = %d chars, want <= %d (cap %d + footer)",
+			len(out), memoryInjectMaxChars+memoryIndexFooterSlack, memoryInjectMaxChars)
+	}
+	// The section is only useful if the whole of it is affordable: a bound that
+	// still exceeded the hook budget would be no bound at all.
+	if len(out) > primeHookBudget {
+		t.Errorf("memory section = %d chars, over the %d-char hook budget by itself", len(out), primeHookBudget)
 	}
 }
 
@@ -202,7 +307,10 @@ esac
 	}()
 
 	start := time.Now()
-	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
+	// The mayor is the subject because this test asserts that a stalled mail
+	// check leaves the memory section standing, which needs a role that renders
+	// one (see shouldRenderMemories).
+	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RoleMayor}, workDir) })
 	elapsed := time.Since(start)
 
 	if !<-barrierReached {
@@ -231,6 +339,11 @@ esac
 	}
 }
 
+// TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles pins that a patrol
+// role's prime runs no external tool: mail is withheld by
+// shouldSkipStartupMailInject and memories by shouldRenderMemories. The bd
+// assertion is the half that catches the memory gate landing without its tests
+// (gt-o51s) — these roles have no other reason to shell out at all.
 func TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles(t *testing.T) {
 	for _, role := range []string{string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot)} {
 		t.Run(role, func(t *testing.T) {
@@ -245,10 +358,13 @@ esac
 `)
 
 			output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: Role(role)}, workDir) })
-			assertPrimeToolCalled(t, "bd:kv list --json")
+			assertPrimeToolNotCalled(t, "bd:kv list --json")
 			assertPrimeToolNotCalled(t, "gt:mail check --inject")
 			if strings.Contains(output, "MAIL OUTPUT") {
 				t.Fatalf("patrol role %s injected mail output: %q", role, output)
+			}
+			if strings.Contains(output, "# Agent Memories") {
+				t.Fatalf("patrol role %s injected a memory index: %q", role, output)
 			}
 		})
 	}

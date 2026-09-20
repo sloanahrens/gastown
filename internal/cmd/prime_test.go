@@ -1361,3 +1361,35 @@ func TestShouldSkipStartupMailInject(t *testing.T) {
 		})
 	}
 }
+
+// TestShouldRenderMemories is the pure unit half of the memory role gate
+// (gt-o51s, plan Task 8 C3), for the same reason TestShouldSkipStartupMailInject
+// is the pure half of the mail gate: the subprocess-based tests that exercise
+// this end to end tie their verdict to a spawn deadline, and this one does not.
+// Every role is listed, so adding a role to the code without deciding whether
+// it gets memories is a compile-visible omission rather than a silent default.
+func TestShouldRenderMemories(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{string(RoleMayor), true},
+		{string(RoleCrew), true},
+		{string(RolePolecat), false},
+		{string(RoleWitness), false},
+		{string(RoleRefinery), false},
+		{string(RoleDeacon), false},
+		{string(RoleBoot), false},
+		{string(RoleDog), false},
+		{string(RoleUnknown), false},
+		{"", false},
+		{"MAYOR", true}, // role comparison is case-insensitive
+	}
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			if got := shouldRenderMemories(tt.role); got != tt.want {
+				t.Errorf("shouldRenderMemories(%q) = %v, want %v", tt.role, got, tt.want)
+			}
+		})
+	}
+}

@@ -298,7 +298,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
 		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
 		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
-		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(cwd) }) },
+		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(ctx, cwd) }) },
 		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
 		startup: func() string {
 			if primeContinuationMode {
@@ -634,14 +634,19 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 // runPrime renders the two as separate payload sections; this wrapper keeps
 // the combined behavior for callers and tests.
 func runPrimeExternalTools(ctx RoleContext, cwd string) {
-	runPrimeMemoryInject(cwd)
+	runPrimeMemoryInject(ctx, cwd)
 	runPrimeMailInject(ctx, cwd)
 }
 
-// runPrimeMemoryInject renders the memory index section (skipped in dry-run).
-func runPrimeMemoryInject(cwd string) {
+// runPrimeMemoryInject renders the memory index section (skipped in dry-run and
+// for roles that do not render memories).
+func runPrimeMemoryInject(ctx RoleContext, cwd string) {
 	if primeDryRun {
 		explain(true, "memory injection: skipped in dry-run mode")
+		return
+	}
+	if !shouldRenderMemories(string(ctx.Role)) {
+		explain(true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
 		return
 	}
 	runMemoryInject(cwd)
@@ -663,6 +668,23 @@ func runPrimeMailInject(ctx RoleContext, cwd string) {
 func shouldSkipStartupMailInject(role string) bool {
 	switch strings.ToLower(role) {
 	case string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot):
+		return true
+	default:
+		return false
+	}
+}
+
+// shouldRenderMemories reports whether a role's prime payload carries the
+// "# Agent Memories" index: true for the mayor and crew, the two roles that
+// hold cross-issue context from one session to the next.
+//
+// The index is the first section the hook budget evicts, and the roles that
+// do not get it carry their rules in a section that outranks memories — a
+// patrol role's attached formula, a polecat's hooked work — so spending a
+// third of the budget on a section evicted ahead of them buys nothing.
+func shouldRenderMemories(role string) bool {
+	switch strings.ToLower(role) {
+	case string(RoleMayor), string(RoleCrew):
 		return true
 	default:
 		return false
