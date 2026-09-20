@@ -3,8 +3,6 @@
 package cmd
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -273,74 +271,5 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 	})
 }
 
-// TestIsLintLockContention pins the detection to golangci-lint's own wording:
-// the marker is the string its error carries, and near-misses (the same words
-// in lint *output*, or an unrelated failure) must not trigger a retry.
-func TestIsLintLockContention(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{"golangci-lint's cobra error", "Error: parallel golangci-lint is running\n", true},
-		{"embedded in a wrapped message", "lint failed: exit 2: Error: parallel golangci-lint is running", true},
-		{"a finding", "pkga/a.go:1:1: something is wrong (fakelint)\n", false},
-		{"empty output", "", false},
-		{"a different lint failure", "can't load config: unsupported version\n", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isLintLockContention(tc.output); got != tc.want {
-				t.Errorf("isLintLockContention(%q) = %v, want %v", tc.output, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestRetryLintLockContention_BudgetBoundsRetry pins the two ways the retry
-// loop refuses to outlive its budget: it never starts a retry the budget
-// cannot also fit a lint into, and it refuses a context with no deadline
-// outright (both callers are bounded; answering "yes" there would turn a
-// contention loop into a hung gate).
-func TestRetryLintLockContention_BudgetBoundsRetry(t *testing.T) {
-	stubLintLockRetryDelay(t, time.Millisecond)
-
-	alwaysContended := func(attempts *int) func() lintAttempt {
-		return func() lintAttempt {
-			*attempts++
-			return lintAttempt{err: errors.New("exit 2"), output: "Error: parallel golangci-lint is running"}
-		}
-	}
-
-	t.Run("a budget with no room left for the lint itself: no retry", func(t *testing.T) {
-		// The deadline is exactly the reserve, so even a 1ms wait would leave
-		// less than a lint's worth of budget.
-		ctx, cancel := context.WithTimeout(context.Background(), lintLockRetryReserve)
-		defer cancel()
-
-		attempts := 0
-		outcome := retryLintLockContention(ctx, alwaysContended(&attempts), nil)
-		if attempts != 1 {
-			t.Errorf("attempts = %d, want 1 (no retry may eat the lint's own budget)", attempts)
-		}
-		if outcome.retries != 0 {
-			t.Errorf("retries = %d, want 0", outcome.retries)
-		}
-		if outcome.err == nil {
-			t.Error("outcome.err = nil, want the attempt's error")
-		}
-	})
-
-	t.Run("a context with no deadline: no retry", func(t *testing.T) {
-		attempts := 0
-		outcome := retryLintLockContention(context.Background(), alwaysContended(&attempts), nil)
-		if attempts != 1 {
-			t.Errorf("attempts = %d, want 1 (an unbounded context must not drive an unbounded retry loop)", attempts)
-		}
-		if outcome.err == nil {
-			t.Error("outcome.err = nil, want the attempt's error")
-		}
-	})
-}
+// The retry policy's own unit tests (detection wording, budget bounds) live
+// with the policy in internal/lintlock; what stays here is gt done's use of it.

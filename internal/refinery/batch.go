@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lintlock"
 )
 
 // BatchConfig holds configuration for the batch-then-bisect merge queue.
@@ -485,22 +486,84 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 
 // runBatchGates runs quality gates (or legacy tests) on the current working tree.
 func (e *Engineer) runBatchGates(ctx context.Context) ProcessResult {
-	if len(e.config.Gates) > 0 {
-		return e.runGates(ctx)
-	}
-	if e.config.RunTests && e.config.TestCommand != "" {
-		result := e.runTests(ctx)
-		if !result.Success {
-			return ProcessResult{
-				Success:     false,
-				TestsFailed: true,
-				Error:       result.Error,
-			}
-		}
-		return ProcessResult{Success: true}
+	if result, ran := e.runVerification(ctx); ran {
+		return result
 	}
 	// No gates configured — pass by default
 	return ProcessResult{Success: true}
+}
+
+// runVerification runs whatever verification this rig configures for a merge:
+// its named gates, else the batch's ordered gate steps, else the legacy test
+// command. A false return means nothing is configured.
+//
+// The one place that decision is made, so the single-MR and batch paths cannot
+// disagree about what this rig verifies with (gt-ijqw).
+func (e *Engineer) runVerification(ctx context.Context) (ProcessResult, bool) {
+	switch {
+	case len(e.config.Gates) > 0:
+		return e.runGates(ctx), true
+	case e.config.RunTests && len(e.config.BatchGateSteps) > 0:
+		return e.runBatchSteps(ctx, e.config.BatchGateSteps), true
+	case e.config.RunTests && e.config.TestCommand != "":
+		result := e.runTests(ctx)
+		if !result.Success {
+			return ProcessResult{Success: false, TestsFailed: true, Error: result.Error}, true
+		}
+		return ProcessResult{Success: true}, true
+	}
+	return ProcessResult{}, false
+}
+
+// runBatchSteps runs the batch's configured steps in order, stopping at the
+// first failure. One chained shell command (which this replaces) could not name
+// the step that failed, so a contended lint read as the batch's own test
+// failure and every MR in it was ejected as a culprit (gt-ijqw).
+func (e *Engineer) runBatchSteps(ctx context.Context, steps []GateStep) ProcessResult {
+	for _, step := range steps {
+		_, _ = fmt.Fprintf(e.output, "[Batch] Gate %q: starting (%s)\n", step.Name, step.Cmd)
+		if res := e.runBatchStep(ctx, step); !res.Success {
+			return ProcessResult{
+				Success:     false,
+				TestsFailed: true,
+				Error:       fmt.Sprintf("quality gates failed: %s: %s", res.Name, res.Error),
+			}
+		}
+	}
+	return ProcessResult{Success: true}
+}
+
+// runBatchStep runs one batch step, keeping the two retries the chained command
+// used to get as a whole: the test step's flake retry (RetryFlakyTests, which
+// the chain passed to runTests), and the lint step's lock retry (which runGate
+// applies).
+func (e *Engineer) runBatchStep(ctx context.Context, step GateStep) GateResult {
+	gate := &GateConfig{Cmd: step.Cmd}
+	if isGolangciLintGate(step.Name, gate) {
+		// The lock retry measures itself against a deadline and the batch
+		// context has none (gt-ijqw), so a lint step carries the budget its
+		// retry schedule was sized for. That also bounds a lint which the
+		// chained command left unbounded — golangci-lint is configured with
+		// its own 5m timeout, so one still running after this is not going to
+		// report findings either way.
+		gate.Timeout = lintlock.MinBudget()
+	}
+
+	attempts := 1
+	if step.Name == "test" && e.config.RetryFlakyTests > attempts {
+		attempts = e.config.RetryFlakyTests
+	}
+
+	var res GateResult
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			_, _ = fmt.Fprintf(e.output, "[Batch] Gate %q: retrying after a failure (attempt %d/%d)\n", step.Name, attempt, attempts)
+		}
+		if res = e.runGate(ctx, step.Name, gate); res.Success {
+			return res
+		}
+	}
+	return res
 }
 
 // verifyAndPush runs gates and pushes the current state for a set of stacked

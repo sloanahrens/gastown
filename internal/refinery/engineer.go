@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lintlock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -88,6 +89,12 @@ type GateConfig struct {
 	Phase GatePhase `json:"phase"`
 }
 
+// GateStep is one named command in an ordered gate sequence.
+type GateStep struct {
+	Name string
+	Cmd  string
+}
+
 // GateResult holds the outcome of a single gate execution.
 type GateResult struct {
 	Name    string
@@ -143,6 +150,13 @@ type MergeQueueConfig struct {
 	// GatesParallel controls whether gates run concurrently.
 	// When true, all gates start simultaneously; any failure = overall failure.
 	GatesParallel bool `json:"gates_parallel"`
+
+	// BatchGateSteps is the ordered command sequence the batch gate runs, in
+	// place of the legacy chained TestCommand. Set at runtime by `gt mq batch
+	// run` from the rig's setup/typecheck/lint/build/test commands, so each
+	// step is named in its own failure and the lint step can wait out
+	// golangci-lint's lock (gt-ijqw). Not read from config.json.
+	BatchGateSteps []GateStep `json:"-"`
 
 	// StaleClaimWarningAfter is how long a claimed MR can sit without updates
 	// before it triggers a "warning" severity anomaly.
@@ -682,24 +696,11 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	shouldSkipGates := len(skipGates) > 0 && skipGates[0]
 	if shouldSkipGates {
 		_, _ = fmt.Fprintln(e.output, "[Engineer] Skipping gates (pre-verified by polecat)")
-	} else if len(e.config.Gates) > 0 {
-		// New gates system: run configured quality gates
-		gateResult := e.runGates(ctx)
-		if !gateResult.Success {
-			return gateResult
+	} else if verification, ran := e.runVerification(ctx); ran {
+		if !verification.Success {
+			return verification
 		}
-	} else if e.config.RunTests && e.config.TestCommand != "" {
-		// Legacy test command path (backward compatible)
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Running tests: %s\n", e.config.TestCommand)
-		result := e.runTests(ctx)
-		if !result.Success {
-			return ProcessResult{
-				Success:     false,
-				TestsFailed: true,
-				Error:       result.Error,
-			}
-		}
-		_, _ = fmt.Fprintln(e.output, "[Engineer] Tests passed")
+		_, _ = fmt.Fprintln(e.output, "[Engineer] Verification passed")
 	}
 
 	// PR merge path: when merge_strategy=pr, use the VCS provider's merge API
@@ -1293,6 +1294,12 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		defer cancel()
 	}
 
+	// golangci-lint shares one module-wide lock, so a gate running it gets
+	// waited out rather than reported as the MR's own failure (gt-ijqw).
+	if isGolangciLintGate(name, gate) {
+		return e.runGolangciLintGate(gateCtx, name, gate, start)
+	}
+
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = e.workDir
@@ -1329,6 +1336,93 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		Error:   errMsg,
 		Elapsed: elapsed,
 	}
+}
+
+// isGolangciLintGate reports whether a gate runs golangci-lint, the one gate
+// command with a module-wide lock. The command names it when it can; the name
+// is a fallback for a rig whose command is a wrapper (`make lint` here),
+// matched exactly rather than by substring so an `eslint` or `lintian` gate is
+// not routed through golangci-lint's retry and wording (om-gate attempt 1
+// minor).
+func isGolangciLintGate(name string, gate *GateConfig) bool {
+	if strings.Contains(strings.ToLower(gate.Cmd), "golangci-lint") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(name), "lint")
+}
+
+// runGolangciLintGate runs a gate whose command is golangci-lint, waiting the
+// module lock out instead of reporting a contended lint as the MR's own
+// failure.
+//
+// ctx carries the gate's own budget, which bounds every attempt and every wait
+// together, rather than each attempt getting a fresh one (gt-xsty).
+func (e *Engineer) runGolangciLintGate(ctx context.Context, name string, gate *GateConfig, start time.Time) GateResult {
+	attempt := func() lintlock.Attempt {
+		cmd := exec.CommandContext(ctx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
+		util.SetDetachedProcessGroup(cmd)
+		cmd.Dir = e.workDir
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		return lintlock.Attempt{Err: err, Output: strings.TrimSpace(stderr.String() + stdout.String())}
+	}
+
+	onRetry := func(attemptNo, attempts int, wait time.Duration) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: golangci-lint did not get the lock (attempt %d/%d); retrying in %s\n", name, attemptNo, attempts, wait.Round(time.Second))
+	}
+
+	outcome := lintlock.Retry(ctx, attempt, onRetry)
+	elapsed := time.Since(start)
+
+	if outcome.Err == nil {
+		return GateResult{Name: name, Success: true, Elapsed: elapsed}
+	}
+
+	return GateResult{
+		Name:    name,
+		Success: false,
+		Error:   gateFailureDetail(gate, ctx, outcome),
+		Elapsed: elapsed,
+	}
+}
+
+// gateFailureDetail is what a failed golangci-lint gate reports. Only a lint
+// that ran to completion and reported findings may ask for findings to be
+// fixed; the other outcomes linted nothing, and a culprit MR blamed for one is
+// the misattribution this retry exists to prevent (gt-ijqw).
+//
+// The verdict comes from the FINAL attempt's own output rather than from the
+// retry count, so a lint that contended once and then found real errors is
+// forwarded as findings — the opposite report sends the agent to re-run it into
+// the same errors (om-gate attempt 1 major).
+func gateFailureDetail(gate *GateConfig, ctx context.Context, outcome lintlock.Outcome) string {
+	switch {
+	case outcome.Contended:
+		return fmt.Sprintf("another golangci-lint held the lock %s (a concurrent gate, polecat, or the refinery's own lint) — nothing was linted and no finding is reported; re-run the gate once the other lint finishes", outcome.LockWait())
+	case outcome.Unfinished:
+		return "golangci-lint stopped without reporting findings — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run the gate once other lints have"
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf("the lint was killed at its %s budget without finishing — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run the gate once other lints have", gate.Timeout.Round(time.Second))
+	default:
+		return withGateOutput("fix the lint findings before resubmitting", outcome.Output)
+	}
+}
+
+// withGateOutput appends a failed gate's own output to detail, capped so one
+// noisy gate cannot bury the merge queue's log.
+func withGateOutput(detail, output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return detail
+	}
+	const max = 500
+	if len(output) > max {
+		output = output[:max] + "..."
+	}
+	return fmt.Sprintf("%s: %s", detail, output)
 }
 
 // runGates executes all pre-merge gates (backward-compatible entry point).

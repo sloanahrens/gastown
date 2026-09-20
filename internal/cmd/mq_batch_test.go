@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -91,16 +92,16 @@ func idsOf(mrs []*refinery.MRInfo) []string {
 	return ids
 }
 
-func TestBuildBatchGateCommand(t *testing.T) {
+func TestBuildBatchGateSteps(t *testing.T) {
 	tests := []struct {
 		name string
 		mq   *config.MergeQueueConfig
-		want string
+		want []refinery.GateStep
 	}{
-		{name: "nil config", mq: nil, want: ""},
-		{name: "no commands configured", mq: &config.MergeQueueConfig{}, want: ""},
+		{name: "nil config", mq: nil, want: nil},
+		{name: "no commands configured", mq: &config.MergeQueueConfig{}, want: nil},
 		{
-			name: "chains configured steps in setup/typecheck/lint/build/test order",
+			name: "orders configured steps setup/typecheck/lint/build/test",
 			mq: &config.MergeQueueConfig{
 				TestCommand:      "make test",
 				SetupCommand:     "make setup",
@@ -108,7 +109,13 @@ func TestBuildBatchGateCommand(t *testing.T) {
 				LintCommand:      "make lint",
 				TypecheckCommand: "make typecheck",
 			},
-			want: "make setup && make typecheck && make lint && make build && make test",
+			want: []refinery.GateStep{
+				{Name: "setup", Cmd: "make setup"},
+				{Name: "typecheck", Cmd: "make typecheck"},
+				{Name: "lint", Cmd: "make lint"},
+				{Name: "build", Cmd: "make build"},
+				{Name: "test", Cmd: "make test"},
+			},
 		},
 		{
 			name: "skips unset steps but preserves order",
@@ -116,15 +123,18 @@ func TestBuildBatchGateCommand(t *testing.T) {
 				LintCommand: "make lint",
 				TestCommand: "make test",
 			},
-			want: "make lint && make test",
+			want: []refinery.GateStep{
+				{Name: "lint", Cmd: "make lint"},
+				{Name: "test", Cmd: "make test"},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildBatchGateCommand(tt.mq)
-			if got != tt.want {
-				t.Errorf("buildBatchGateCommand() = %q, want %q", got, tt.want)
+			got := buildBatchGateSteps(tt.mq)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("buildBatchGateSteps() = %v, want %v", got, tt.want)
 			}
 		})
 	}
