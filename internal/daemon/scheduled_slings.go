@@ -196,12 +196,32 @@ const (
 	scheduledSlingEscalateAfter  = 3
 )
 
+// commandRunner wraps exec.CommandContext for injection in tests.
+type commandRunner interface {
+	run(ctx context.Context, name string, args ...string) (*exec.Cmd, error)
+}
+
+// execCommandRunner is the production command runner that uses exec.CommandContext.
+type execCommandRunner struct{}
+
+func (r *execCommandRunner) run(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd, nil
+}
+
 type execScheduledSlingRunner struct {
 	townRoot, bdPath, gtPath string
+	cmdRunner                commandRunner
 }
 
 func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, r.bdPath, args...)
+	if r.cmdRunner == nil {
+		r.cmdRunner = &execCommandRunner{}
+	}
+	cmd, err := r.cmdRunner.run(ctx, r.bdPath, args...)
+	if err != nil {
+		return nil, err
+	}
 	// ConfigureCommand sets cmd.Dir to the rig dir, so bd's cwd routing lands
 	// on the rig database (never --repo: see the bd-create-repo memory).
 	rigDir := filepath.Join(r.townRoot, rig)
@@ -273,7 +293,13 @@ func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntr
 }
 
 func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
-	cmd := exec.CommandContext(ctx, r.gtPath, r.slingArgs(beadID, e)...)
+	if r.cmdRunner == nil {
+		r.cmdRunner = &execCommandRunner{}
+	}
+	cmd, err := r.cmdRunner.run(ctx, r.gtPath, r.slingArgs(beadID, e)...)
+	if err != nil {
+		return err
+	}
 	cmd.Dir = r.townRoot
 	cmd.Env = bdMutationRoutingEnv(r.townRoot)
 	util.SetProcessGroup(cmd)
