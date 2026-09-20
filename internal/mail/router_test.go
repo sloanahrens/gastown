@@ -330,6 +330,16 @@ func TestShouldBeWisp(t *testing.T) {
 			msg:  &Message{Subject: "HANDOFF: context notes"},
 			want: false,
 		},
+		{
+			name: "Plugin: subject (ephemeral run record)",
+			msg:  &Message{Subject: "Plugin: stuck-agent-dog"},
+			want: true,
+		},
+		{
+			name: "Plugin: subject lowercase",
+			msg:  &Message{Subject: "plugin: compactor-dog"},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {

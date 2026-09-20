@@ -843,6 +843,7 @@ func (r *Router) shouldBeWisp(msg *Message) bool {
 		"merged",
 		"merge_ready",
 		"merge_failed",
+		"plugin:", // Plugin dispatch messages are run records, not durable work items
 	}
 	for _, prefix := range wispPrefixes {
 		if strings.HasPrefix(subjectLower, prefix) {
