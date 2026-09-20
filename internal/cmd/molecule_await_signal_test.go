@@ -144,7 +144,7 @@ func TestWaitForEventsFile_MissingFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	result, err := waitForEventsFile(ctx, filepath.Join(t.TempDir(), "nonexistent.jsonl"))
+	result, err := waitForEventsFile(ctx, filepath.Join(t.TempDir(), "nonexistent.jsonl"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestWaitForEventsFile_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	result, err := waitForEventsFile(ctx, eventsPath)
+	result, err := waitForEventsFile(ctx, eventsPath, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestWaitForEventsFile_Signal(t *testing.T) {
 		_, _ = f.WriteString(`{"ts":"new","type":"sling","actor":"test"}` + "\n")
 	}()
 
-	result, err := waitForEventsFile(ctx, eventsPath)
+	result, err := waitForEventsFile(ctx, eventsPath, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,12 +229,283 @@ func TestWaitForActivitySignal_PathWiring(t *testing.T) {
 		_, _ = f.WriteString(`{"ts":"new","type":"sling"}` + "\n")
 	}()
 
-	result, err := waitForActivitySignal(ctx, townRoot)
+	result, err := waitForActivitySignal(ctx, townRoot, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Reason != "signal" {
 		t.Errorf("expected reason 'signal', got %q", result.Reason)
+	}
+}
+
+func TestEventRelevantToRig(t *testing.T) {
+	// Shapes below are copied from a live ~/gt/.events.jsonl, which is what an
+	// idle rig's witness was being woken by (gt-qwfp).
+	tests := []struct {
+		name  string
+		line  string
+		rig   string
+		want  bool
+		notes string
+	}{
+		{
+			name: "own rig actor wakes",
+			line: `{"type":"done","actor":"om/polecats/garnet","payload":{"bead":"om-1"}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "bare rig actor wakes",
+			line: `{"type":"session_start","actor":"om","payload":{}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "another rig's polecat is skipped",
+			line: `{"type":"done","actor":"gastown/polecats/garnet","payload":{"bead":"gt-2bj"}}`,
+			rig:  "om", want: false,
+			notes: "the exact cross-rig wake that kept om patrolling at full effort",
+		},
+		{
+			name: "dog nudge to the deacon is skipped",
+			line: `{"type":"nudge","actor":"dog","payload":{"reason":"DOG_DONE: compactor-dog check-only","rig":"","target":"deacon"}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "mail addressed to my rig wakes",
+			line: `{"type":"mail","actor":"mayor/","payload":{"subject":"Deacon line rejected","to":"om/witness"}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "mail addressed to another rig is skipped",
+			line: `{"type":"mail","actor":"mayor/","payload":{"subject":"Deacon line rejected","to":"gastown/witness"}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "nudge targeting my rig wakes",
+			line: `{"type":"nudge","actor":"mayor","payload":{"reason":"wake up","rig":"","target":"om/witness"}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "sling targeting my polecat wakes",
+			line: `{"type":"sling","actor":"mayor","payload":{"bead":"om-hd2","target":"om/polecats/jasper"}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "spawn in my rig wakes",
+			line: `{"type":"spawn","actor":"gt","payload":{"polecat":"jasper","rig":"om"}}`,
+			rig:  "om", want: true,
+		},
+		{
+			name: "spawn in another rig is skipped",
+			line: `{"type":"spawn","actor":"gt","payload":{"polecat":"flint","rig":"gastown"}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "town-scoped nudge without a rig target is skipped",
+			line: `{"type":"nudge","actor":"dog","payload":{"reason":"DOG_DONE","rig":"","target":"deacon"}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "town-wide boot wakes only a town scope",
+			line: `{"type":"boot","actor":"gt","payload":{"rig":"town","agents":[]}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "empty rig accepts anything",
+			line: `{"type":"done","actor":"gastown/polecats/garnet","payload":{}}`,
+			rig:  "", want: true,
+		},
+		{
+			name: "empty rig accepts an unparseable line",
+			line: `not json at all`,
+			rig:  "", want: true,
+		},
+		{
+			name: "unparseable line is skipped under a rig scope",
+			line: `not json at all`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "trailing slash on a town actor is not my rig",
+			line: `{"type":"mail","actor":"mayor/","payload":{"to":"mayor/"}}`,
+			rig:  "om", want: false,
+		},
+		{
+			name: "missing payload does not panic",
+			line: `{"type":"done","actor":"dog"}`,
+			rig:  "om", want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := eventRelevantToRig(tt.line, tt.rig); got != tt.want {
+				t.Errorf("eventRelevantToRig(%s, %q) = %v, want %v", tt.line, tt.rig, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddressInRig(t *testing.T) {
+	tests := []struct {
+		addr, rig string
+		want      bool
+	}{
+		{"om", "om", true},
+		{"om/witness", "om", true},
+		{"om/polecats/jasper", "om", true},
+		{"mayor/", "om", false},
+		{"gastown/witness", "om", false},
+		// Prefix boundary: a longer rig name must not match a shorter one.
+		{"beads/witness", "be", false},
+		{"om2/witness", "om", false},
+		{"", "om", false},
+		{"om", "", false},
+	}
+
+	for _, tt := range tests {
+		if got := addressInRig(tt.addr, tt.rig); got != tt.want {
+			t.Errorf("addressInRig(%q, %q) = %v, want %v", tt.addr, tt.rig, got, tt.want)
+		}
+	}
+}
+
+func TestWaitForEventsFile_CrossRigActivityTimesOut(t *testing.T) {
+	// The gt-qwfp bug: an idle rig's witness was woken by any town event, so
+	// idle backoff never engaged. Cross-rig activity must not wake it.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		for _, line := range []string{
+			`{"type":"nudge","actor":"dog","payload":{"target":"deacon"}}`,
+			`{"type":"done","actor":"gastown/polecats/garnet","payload":{"bead":"gt-2bj"}}`,
+			`{"type":"mail","actor":"mayor/","payload":{"to":"gastown/witness"}}`,
+		} {
+			_, _ = f.WriteString(line + "\n")
+		}
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "om")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "timeout" {
+		t.Errorf("expected reason 'timeout', got %q (woke on %s)", result.Reason, result.Signal)
+	}
+}
+
+func TestWaitForEventsFile_WakesOnOwnRigAfterSkippingOthers(t *testing.T) {
+	// Foreign events arriving first must be skipped, not swallowed, so a later
+	// event for this rig still wakes the waiter.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"type":"nudge","actor":"dog","payload":{"target":"deacon"}}` + "\n")
+		time.Sleep(300 * time.Millisecond)
+		_, _ = f.WriteString(`{"type":"sling","actor":"mayor","payload":{"target":"om/polecats/jasper"}}` + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "om")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" {
+		t.Fatalf("expected reason 'signal', got %q", result.Reason)
+	}
+	if !strings.Contains(result.Signal, "om/polecats/jasper") {
+		t.Errorf("woke on the wrong event: %s", result.Signal)
+	}
+}
+
+func TestWaitForEventsFile_WakesOnEventSplitAcrossWrites(t *testing.T) {
+	// A poller can catch a line mid-write. The prefix must be held until its
+	// newline arrives, or the event is judged unparseable and skipped.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"type":"done","actor":"om/pole`)
+		time.Sleep(600 * time.Millisecond) // several poll ticks land mid-line
+		_, _ = f.WriteString(`cats/jasper","payload":{}}` + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "om")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" {
+		t.Fatalf("expected reason 'signal', got %q", result.Reason)
+	}
+	if !strings.Contains(result.Signal, "om/polecats/jasper") {
+		t.Errorf("woke on a truncated event: %s", result.Signal)
+	}
+}
+
+func TestWaitForEventsFile_DrainsBacklogOfOtherRigs(t *testing.T) {
+	// Skipped lines must all be consumed each tick. If only one were drained
+	// per tick, a town producing events faster than 5/s would starve the wait
+	// and a later signal for this rig would never be seen.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	const backlog = 500
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		for i := 0; i < backlog; i++ {
+			_, _ = f.WriteString(`{"type":"nudge","actor":"dog","payload":{"target":"deacon"}}` + "\n")
+		}
+		_, _ = f.WriteString(`{"type":"done","actor":"om/polecats/jasper","payload":{}}` + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "om")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" {
+		t.Fatalf("expected reason 'signal' after draining %d foreign lines, got %q", backlog, result.Reason)
+	}
+	if !strings.Contains(result.Signal, "om/polecats/jasper") {
+		t.Errorf("woke on the wrong event: %s", result.Signal)
 	}
 }
 

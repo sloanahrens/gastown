@@ -81,20 +81,22 @@ This must resolve exactly one bead ID. If it fails, STOP and report the error. I
 Then use await-signal with exponential backoff to wait for activity:
 
 ```bash
-gt mol step await-signal --agent-bead "$YOUR_AGENT_BEAD" \
+gt mol step await-signal --rig {{rig}} --agent-bead "$YOUR_AGENT_BEAD" \
   --backoff-base 30s --backoff-mult 2 --backoff-max 5m
 ```
 
 This command:
-1. Subscribes to `bd activity --follow` (beads activity feed)
-2. Returns IMMEDIATELY when any beads activity occurs
-3. If no activity, times out with exponential backoff:
+1. Subscribes to the town events feed (`~/gt/.events.jsonl`)
+2. Returns IMMEDIATELY on {{rig}} activity — an event from a {{rig}} agent, or one
+   addressed to {{rig}} (mail or nudge to you, a sling onto one of your polecats)
+3. Ignores other rigs' activity (gt-qwfp), so an idle {{rig}} reaches the cap below
+4. If no {{rig}} activity, times out with exponential backoff:
    - First timeout: 30s
    - Second timeout: 60s
    - Third timeout: 120s
    - ...capped at 5 minutes max
-4. Tracks `idle:N` label on your agent bead for backoff state
-5. Outputs `EFFORT: reduced` or `EFFORT: full` directive for next cycle
+5. Tracks `idle:N` label on your agent bead for backoff state
+6. Outputs `EFFORT: reduced` or `EFFORT: full` directive for next cycle
 
 **On signal received** (activity detected):
 Reset the idle counter and start next patrol cycle:
