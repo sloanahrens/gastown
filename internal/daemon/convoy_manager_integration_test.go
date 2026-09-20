@@ -64,7 +64,7 @@ exit 0
 	}
 
 	// Start with short scan interval so stranded scan fires quickly.
-	m := NewConvoyManager(townRoot, logger, gtPath, 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil, nil)
 
 	// S-08: Start should succeed.
 	if err := m.Start(); err != nil {
@@ -279,7 +279,7 @@ exit 0
 
 	// Start manager with short scan interval; event poll is 5s (fixed).
 	stores := map[string]beadsdk.Storage{"hq": store}
-	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil, nil)
 	// Skip seeding so pollStoresSnapshot processes events immediately.
 	m.seeded.Store(true)
 	// Drive one poll manually instead of waiting for the 5s ticker.
@@ -394,7 +394,7 @@ exit 0
 	}
 
 	stores := map[string]beadsdk.Storage{"hq": store}
-	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil, nil)
 	// Skip seeding so pollStoresSnapshot processes events immediately.
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(stores)
@@ -509,7 +509,7 @@ exit 0
 	}
 
 	stores := map[string]beadsdk.Storage{"hq": store}
-	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil, nil)
 	// Skip seeding so pollStoresSnapshot processes events immediately.
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(stores)
@@ -719,7 +719,7 @@ exit 0
 	}
 
 	// Short scan interval so the hanging gt fires immediately.
-	m := NewConvoyManager(townRoot, logger, gtPath, 100*time.Millisecond, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 100*time.Millisecond, nil, nil, nil, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
