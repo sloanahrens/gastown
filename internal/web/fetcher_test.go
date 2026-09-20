@@ -2015,3 +2015,74 @@ echo '[]'
 		t.Errorf("crew row = %+v, want no agent or MR borrowed from the polecat named agate", got)
 	}
 }
+
+// A slung polecat's bead lives in the rig DB with status "hooked", so the hq
+// "bd list --status=in_progress" map never matches it; the inventory row from
+// gt polecat list already names the issue, and a working polecat must not
+// render as idle with an empty WORKING ON cell (gt-bcfc).
+func TestFetchWorkersTakesIssueFromInventoryWhenHqMapMisses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	townRoot := townRootWithRigs(t, "gastown")
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho '[]'\n"), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	now := time.Now().Unix()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			return bytes.NewBufferString(fmt.Sprintf("gt-agate|%d\ngt-opal|%d\n", now, now)), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		cmdTimeout:     5 * time.Second,
+		bdBin:          bdPath,
+		registry:       registry,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 15 * time.Minute,
+		listPolecats:   func() ([]byte, error) { return []byte(polecatListFixture), nil },
+	}
+	f.workerPolecatIndex()
+	waitForPolecatRefresh(t, f)
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+	byName := make(map[string]WorkerRow, len(workers))
+	for _, w := range workers {
+		byName[w.Name] = w
+	}
+
+	agate, ok := byName["agate"]
+	if !ok {
+		t.Fatalf("no agate worker row; got %+v", workers)
+	}
+	if agate.IssueID != "gt-kqi2" {
+		t.Errorf("agate.IssueID = %q, want gt-kqi2 from the inventory", agate.IssueID)
+	}
+	if agate.WorkStatus != "working" {
+		t.Errorf("agate.WorkStatus = %q, want working", agate.WorkStatus)
+	}
+
+	// An idle polecat has no issue in either source and stays idle.
+	opal, ok := byName["opal"]
+	if !ok {
+		t.Fatalf("no opal worker row; got %+v", workers)
+	}
+	if opal.IssueID != "" || opal.WorkStatus != "idle" {
+		t.Errorf("opal = issue %q status %q, want empty/idle", opal.IssueID, opal.WorkStatus)
+	}
+}

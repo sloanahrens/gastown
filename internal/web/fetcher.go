@@ -1178,6 +1178,7 @@ const polecatListTimeout = 90 * time.Second
 type polecatListItem struct {
 	Rig      string `json:"rig"`
 	Name     string `json:"name"`
+	Issue    string `json:"issue"`
 	Agent    string `json:"agent"`
 	MRID     string `json:"mr_id"`
 	MRStatus string `json:"mr_status"`
@@ -1447,6 +1448,13 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		hasPolecat := identity.Role == session.RolePolecat
 		if hasPolecat {
 			polecat, hasPolecat = polecats[rig][workerName]
+		}
+
+		// The hq map only sees town-root beads in in_progress; a slung
+		// polecat's bead is in the rig DB in status hooked, so it never
+		// matches. The inventory row carries the hooked issue (gt-bcfc).
+		if issueID == "" && hasPolecat && polecat.Issue != "" {
+			issueID = polecat.Issue
 		}
 
 		// Calculate work status based on activity age and issue assignment
