@@ -132,18 +132,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 	}
 
-	// Polecat model pool: with no explicit --agent, the town's polecat_pool
-	// decides between the local model and the overflow agent from the hooked
-	// bead's shape and the live polecat sessions (see sling_pool.go). The
-	// reason line always names the agent it chose.
-	if opts.Agent == "" {
-		if agent, reason := resolvePolecatPoolAgent(townRoot, opts.HookBead); reason != "" {
-			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
-			opts.Agent = agent
-		}
-	}
-
-	// Load rig config
+	// Load rig config first so we can compute rigPath for pending markers.
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
 	if err != nil {
@@ -155,6 +144,20 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	r, err := rigMgr.GetRig(rigName)
 	if err != nil {
 		return nil, fmt.Errorf("rig '%s' not found", rigName)
+	}
+
+	// rigPath is used to write pending markers that track in-progress spawns.
+	rigPath := r.Path
+
+	// Polecat model pool: with no explicit --agent, the town's polecat_pool
+	// decides between the local model and the overflow agent from the hooked
+	// bead's shape and the live polecat sessions (see sling_pool.go). The
+	// reason line always names the agent it chose.
+	if opts.Agent == "" {
+		if agent, reason := resolvePolecatPoolAgent(townRoot, opts.HookBead, rigPath); reason != "" {
+			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
+			opts.Agent = agent
+		}
 	}
 
 	// Get polecat manager (with tmux for session-aware allocation)

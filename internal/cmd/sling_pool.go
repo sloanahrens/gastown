@@ -3,6 +3,9 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,9 +127,11 @@ type poolSession struct {
 // "" when the pool does not apply (unset, or no local agent) so the caller
 // falls back to role_agents.
 //
+// rigPath is used to read pending markers that track in-progress spawns.
+//
 // Every reason names the agent it chose, except the three "the pool does not
 // apply" lines, which name no agent because the caller has yet to pick one.
-func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSession, now time.Time) (agent, reason string) {
+func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSession, now time.Time, rigPath string) (agent, reason string) {
 	switch {
 	case pool == nil:
 		return "", "pool: no polecat pool configured"
@@ -147,6 +152,10 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 		}
 	}
 	gap := pool.MinSpawnGapD()
+	// Count pending markers (reservation markers) younger than the stagger gap
+	// as local sessions to prevent concurrent slings from exceeding the cap.
+	pendingCount := countPendingMarkers(pool.LocalAgent, gap, now, rigPath)
+	local += pendingCount
 	// The prefill guard. Every fresh local session spends 20-25k tokens of
 	// prefill during which the decoding slots starve, so two local spawns
 	// closer together than min_spawn_gap cost more than they buy.
@@ -252,6 +261,113 @@ func listPolecatSessions(t sessionLister) ([]poolSession, error) {
 	return out, nil
 }
 
+// pendingMarkersDir returns the directory for pending pool spawn markers.
+func pendingMarkersDir(rigPath string) string {
+	return filepath.Join(rigPath, ".runtime", "pending-pool-spawns")
+}
+
+// countPendingMarkers counts pending reservation markers for the given agent
+// that are younger than the specified gap duration. These markers represent
+// spawns that are in progress but haven't created a tmux session yet.
+func countPendingMarkers(agent string, gap time.Duration, now time.Time, rigPath string) int {
+	if agent == "" || gap <= 0 || rigPath == "" {
+		return 0
+	}
+	dir := pendingMarkersDir(rigPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// If the directory doesn't exist or can't be read, no markers exist
+		return 0
+	}
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Markers are named: <agent>.pending.<pid>.<timestamp>
+		if !strings.HasPrefix(name, agent+".pending.") {
+			continue
+		}
+		// Extract timestamp from the end of the filename
+		parts := strings.Split(name, ".")
+		if len(parts) < 4 {
+			continue
+		}
+		// Last part is the timestamp
+		tsStr := parts[len(parts)-1]
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		created := time.Unix(ts, 0)
+		// Count markers younger than the gap
+		if now.Sub(created) < gap {
+			count++
+		}
+	}
+	return count
+}
+
+// writePendingMarker creates a reservation marker for the given agent.
+// This must be called before spawning a polecat, while holding the pool lock.
+// The marker is removed by SpawnPolecatForSling after the polecat directory is created.
+func writePendingMarker(agent string, rigPath string) error {
+	if agent == "" || rigPath == "" {
+		return nil
+	}
+	dir := pendingMarkersDir(rigPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating pending markers dir: %w", err)
+	}
+	// Name format: <agent>.pending.<pid>.<timestamp>
+	name := fmt.Sprintf("%s.pending.%d.%d", agent, os.Getpid(), time.Now().Unix())
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		return fmt.Errorf("writing pending marker: %w", err)
+	}
+	return nil
+}
+
+// removePendingMarker removes a pending marker for the given agent.
+// It searches for the marker by agent prefix and removes the oldest one.
+// This is a best-effort cleanup - errors are ignored.
+func removePendingMarker(agent string, rigPath string) {
+	if agent == "" || rigPath == "" {
+		return
+	}
+	dir := pendingMarkersDir(rigPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	// Find and remove the oldest marker for this agent
+	var oldestPath string
+	var oldestTime int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, agent+".pending.") {
+			parts := strings.Split(name, ".")
+			if len(parts) >= 4 {
+				tsStr := parts[len(parts)-1]
+				ts, err := strconv.ParseInt(tsStr, 10, 64)
+				if err == nil {
+					if oldestPath == "" || ts < oldestTime {
+						oldestPath = filepath.Join(dir, name)
+						oldestTime = ts
+					}
+				}
+			}
+		}
+	}
+	if oldestPath != "" {
+		_ = os.Remove(oldestPath)
+	}
+}
+
 // poolBeadLookup reads the type and labels the routing policy needs. A var so
 // tests can drive the policy without a live database.
 var poolBeadLookup = func(townRoot, beadID string) (poolBead, error) {
@@ -282,22 +398,35 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 // gave no --agent. It reads the bead's type and labels, attaches
 // localAttemptLabel when the idle-seat fill branch fires, and returns the agent
 // to use ("" = role default) with a one-line reason naming that agent.
-func resolvePolecatPoolAgent(townRoot, beadID string) (agent, reason string) {
-	return poolRoute(townRoot, beadID, true)
+// rigPath is used to write pending markers that track in-progress spawns.
+func resolvePolecatPoolAgent(townRoot, beadID, rigPath string) (agent, reason string) {
+	return poolRoute(townRoot, beadID, rigPath, true)
 }
 
 // peekPolecatPoolAgent is resolvePolecatPoolAgent without the label write:
 // `gt sling --dry-run` must print the route it would take without consuming
 // the bead's one local attempt.
+// It uses the town root as the rig path for pending marker operations.
 func peekPolecatPoolAgent(townRoot, beadID string) (agent, reason string) {
-	return poolRoute(townRoot, beadID, false)
+	// Use the town root as the rig path for pending marker operations.
+	// This ensures the peek returns the same count as resolvePolecatPoolAgent.
+	return poolRoute(townRoot, beadID, townRoot, false)
 }
 
-func poolRoute(townRoot, beadID string, attachLabel bool) (agent, reason string) {
+func poolRoute(townRoot, beadID, rigPath string, attachLabel bool) (agent, reason string) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil || ts == nil || ts.PolecatPool == nil {
 		return "", ""
 	}
+	// Write a pending marker BEFORE counting sessions.
+	// This ensures concurrent slings see each other's pending spawns.
+	if err := writePendingMarker(ts.PolecatPool.LocalAgent, rigPath); err != nil {
+		// Non-fatal: we can still proceed without the marker,
+		// but the pool cap protection won't work as well.
+		reason = "pool: warning: could not write pending marker (" + err.Error() + ")"
+	}
+	// Clean up the marker when we return (best-effort)
+	defer removePendingMarker(ts.PolecatPool.LocalAgent, rigPath)
 	// A bead lookup failure is not fatal: the policy falls back to the seat
 	// count and the reason says so, so a seat-only decision never passes for a
 	// deliberate route (B1).
@@ -317,7 +446,7 @@ func poolRoute(townRoot, beadID string, attachLabel bool) (agent, reason string)
 		}
 		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback
 	}
-	agent, reason = choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now())
+	agent, reason = choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now(), rigPath)
 	if beadErr != nil {
 		reason = fmt.Sprintf("%s [bead %s unreadable: %v]", reason, beadID, beadErr)
 	}

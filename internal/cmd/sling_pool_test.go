@@ -63,7 +63,7 @@ func TestChoosePoolAgent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, reason := choosePoolAgent(c.pool, c.bead, c.sessions, now)
+			got, reason := choosePoolAgent(c.pool, c.bead, c.sessions, now, "")
 			if got != c.want {
 				t.Errorf("agent = %q, want %q (reason: %s)", got, c.want, reason)
 			}
@@ -83,7 +83,7 @@ func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
 		{name: "gt-a", agent: "local-coder-polecat", created: now.Add(-time.Hour)},
 		{name: "gt-b", agent: "local-coder-polecat", created: now.Add(-30 * time.Minute)},
 	}
-	agent, reason := choosePoolAgent(pool, poolBead{Type: "task", Labels: []string{"route:local"}}, full, now)
+	agent, reason := choosePoolAgent(pool, poolBead{Type: "task", Labels: []string{"route:local"}}, full, now, "")
 	if agent != "deepseek-flash" {
 		t.Errorf("route:local with no seat free must overflow, got %q", agent)
 	}
@@ -91,7 +91,7 @@ func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
 		t.Errorf("reason = %q, want %q", reason, want)
 	}
 	// A spent local attempt outranks the bead's type but not an explicit label.
-	agent, reason = choosePoolAgent(pool, poolBead{Type: "bug", Labels: []string{"local-attempt:1", "route:local"}}, nil, now)
+	agent, reason = choosePoolAgent(pool, poolBead{Type: "bug", Labels: []string{"local-attempt:1", "route:local"}}, nil, now, "")
 	if agent != "local-coder-polecat" {
 		t.Errorf("route:local beats local-attempt:1, got %q (%s)", agent, reason)
 	}
@@ -165,11 +165,11 @@ func TestListPolecatSessions(t *testing.T) {
 		}
 	}
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "30s", OverflowAgent: "deepseek-flash"}
-	if a, r := choosePoolAgent(pool, poolBead{}, got, now); a != "local-coder-polecat" {
+	if a, r := choosePoolAgent(pool, poolBead{}, got, now, ""); a != "local-coder-polecat" {
 		t.Errorf("one local (marble, 1m ago) with a 30s gap and room for one more: want local, got %q (%s)", a, r)
 	}
 	pool.MinSpawnGap = "5m"
-	if a, r := choosePoolAgent(pool, poolBead{}, got, now); a != "deepseek-flash" {
+	if a, r := choosePoolAgent(pool, poolBead{}, got, now, ""); a != "deepseek-flash" {
 		t.Errorf("marble 1m ago with a 5m gap: want overflow, got %q (%s)", a, r)
 	}
 }
@@ -181,7 +181,7 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
 		t.Fatal(err)
 	}
-	if a, r := resolvePolecatPoolAgent(townRoot, ""); a != "" || r != "" {
+	if a, r := resolvePolecatPoolAgent(townRoot, "", ""); a != "" || r != "" {
 		t.Errorf("no pool: got %q %q", a, r)
 	}
 	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"}
@@ -193,17 +193,17 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	newPoolSessionLister = func() sessionLister {
 		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	}
-	if a, _ := resolvePolecatPoolAgent(townRoot, ""); a != "local-coder-polecat" {
+	if a, _ := resolvePolecatPoolAgent(townRoot, "", townRoot); a != "local-coder-polecat" {
 		t.Errorf("empty town: got %q", a)
 	}
 	newPoolSessionLister = func() sessionLister {
 		return &fakeLister{sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}}, created: map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)}}
 	}
-	if a, _ := resolvePolecatPoolAgent(townRoot, ""); a != "deepseek-flash" {
+	if a, _ := resolvePolecatPoolAgent(townRoot, "", townRoot); a != "deepseek-flash" {
 		t.Errorf("full pool: got %q", a)
 	}
 	newPoolSessionLister = func() sessionLister { return &fakeLister{err: errors.New("no server")} }
-	if a, r := resolvePolecatPoolAgent(townRoot, ""); a != "deepseek-flash" || !strings.Contains(r, "cannot list sessions") {
+	if a, r := resolvePolecatPoolAgent(townRoot, "", townRoot); a != "deepseek-flash" || !strings.Contains(r, "cannot list sessions") {
 		t.Errorf("lister failure must fall back to overflow: got %q %q", a, r)
 	}
 	// Misconfigured pool (max_local 0) says so instead of "no pool".
@@ -214,7 +214,7 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	newPoolSessionLister = func() sessionLister {
 		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	}
-	if a, r := resolvePolecatPoolAgent(townRoot, ""); a != "" || !strings.Contains(r, "max_local") {
+	if a, r := resolvePolecatPoolAgent(townRoot, "", townRoot); a != "" || !strings.Contains(r, "max_local") {
 		t.Errorf("misconfigured pool: got %q %q", a, r)
 	}
 }
@@ -261,8 +261,8 @@ func fakePoolTown(t *testing.T, bead poolBead, lookupErr, addErr error) (string,
 func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
 	townRoot, added := fakePoolTown(t, poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
 
-	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b")
-	want := "pool: local seat 2/3 -> local-coder-polecat (idle-seat fill, local-attempt:1)"
+	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b", townRoot)
+	want := "pool: local seat 3/3 -> local-coder-polecat (idle-seat fill, local-attempt:1)"
 	if agent != "local-coder-polecat" || reason != want {
 		t.Fatalf("got %q %q, want %q %q", agent, reason, "local-coder-polecat", want)
 	}
@@ -283,7 +283,7 @@ func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
 // A bead that did not go to the idle-seat fill branch is never labeled.
 func TestResolvePoolAgentNoLabelForShapedRoute(t *testing.T) {
 	townRoot, added := fakePoolTown(t, poolBead{ID: "gt-b", Type: "task"}, nil, nil)
-	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b")
+	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b", townRoot)
 	if agent != "local-coder-polecat" || !strings.HasSuffix(reason, "(type=task)") {
 		t.Fatalf("got %q %q", agent, reason)
 	}
@@ -296,7 +296,7 @@ func TestResolvePoolAgentNoLabelForShapedRoute(t *testing.T) {
 // reason says why rather than passing the seat-only decision off as a route.
 func TestResolvePoolAgentBeadLookupFailure(t *testing.T) {
 	townRoot, added := fakePoolTown(t, poolBead{}, errors.New("bd: database not found"), nil)
-	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b")
+	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b", townRoot)
 	if agent != "local-coder-polecat" {
 		t.Errorf("seat-only decision should still take the free seat, got %q (%s)", agent, reason)
 	}
@@ -312,7 +312,7 @@ func TestResolvePoolAgentBeadLookupFailure(t *testing.T) {
 // the agent, and says the label did not land.
 func TestResolvePoolAgentLabelWriteFailure(t *testing.T) {
 	townRoot, _ := fakePoolTown(t, poolBead{ID: "gt-b", Type: "bug"}, nil, errors.New("dolt is down"))
-	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b")
+	agent, reason := resolvePolecatPoolAgent(townRoot, "gt-b", townRoot)
 	if agent != "local-coder-polecat" {
 		t.Errorf("a failed label write must not change the route, got %q", agent)
 	}
