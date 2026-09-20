@@ -1341,6 +1341,11 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		defer cancel()
 	}
 
+	// Lint gates get special handling for lock contention
+	if isLintGate(name) {
+		return e.runGateWithLintRetry(gateCtx, name, gate, start)
+	}
+
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = e.workDir
@@ -1377,6 +1382,130 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		Error:   errMsg,
 		Elapsed: elapsed,
 	}
+}
+
+// isLintGate reports whether this gate is a lint gate (based on name).
+func isLintGate(name string) bool {
+	return strings.Contains(strings.ToLower(name), "lint")
+}
+
+// runGateWithLintRetry runs a gate with lint contention retry logic.
+func (e *Engineer) runGateWithLintRetry(ctx context.Context, name string, gate *GateConfig, start time.Time) GateResult {
+	var lastResult GateResult
+
+	attemptRunner := func() lintAttempt {
+		gateCtx := ctx
+		if gate.Timeout > 0 {
+			var cancel context.CancelFunc
+			gateCtx, cancel = context.WithTimeout(ctx, gate.Timeout)
+			defer cancel()
+		}
+
+		cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
+		util.SetDetachedProcessGroup(cmd)
+		cmd.Dir = e.workDir
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		output := strings.TrimSpace(stderr.String() + stdout.String())
+
+		return lintAttempt{
+			err:    err,
+			output: output,
+		}
+	}
+
+	onRetry := func(attempt, attempts int, wait time.Duration) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: another golangci-lint holds the lock (attempt %d/%d); retrying in %s\n", name, attempt, attempts, wait.Round(time.Second))
+	}
+
+	result := retryLintLockContention(ctx, attemptRunner, onRetry)
+
+	elapsed := time.Since(start)
+
+	if result.err == nil {
+		return GateResult{
+			Name:    name,
+			Success: true,
+			Elapsed: elapsed,
+		}
+	}
+
+	// Determine the error message based on whether retries were used
+	errMsg := fmt.Sprintf("%v", result.err)
+	if result.retries > 0 {
+		errMsg = fmt.Sprintf("another golangci-lint held the lock across %d retries (a concurrent gate or polecat) — nothing was linted; re-run the gate once the other lint finishes", result.retries)
+	} else if ctx.Err() == context.DeadlineExceeded {
+		errMsg = fmt.Sprintf("timed out after %v", gate.Timeout)
+	}
+
+	// Get stderr for additional context (cap at 500 chars)
+	cmd := exec.CommandContext(ctx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Dir = e.workDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run() // Don't fail on this, just capture stderr for context
+	stderrStr := strings.TrimSpace(stderr.String())
+	if stderrStr != "" {
+		if len(stderrStr) > 500 {
+			stderrStr = stderrStr[:500] + "..."
+		}
+		if !strings.Contains(errMsg, stderrStr) {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, stderrStr)
+		}
+	}
+
+	return GateResult{
+		Name:    name,
+		Success: false,
+		Error:   errMsg,
+		Elapsed: elapsed,
+	}
+}
+
+// retryLintLockContention calls attempt until it succeeds or its failure stops
+// looking like golangci-lint's lock, waiting lintLockRetryDelay between tries
+// (len+1 attempts at most). attempt runs the lint command once and reports
+// that attempt's own output; onRetry, when non-nil, is called before each wait
+// so the caller can attribute the delay in their own log.
+//
+// The retry count and the waits are not the only bounds: ctx must also carry a
+// deadline (roomForRetry refuses one that does not), and if it expires while
+// waiting, the last attempt's error is returned unchanged rather than a
+// truncated attempt's.
+func retryLintLockContention(ctx context.Context, attempt func() lintAttempt, onRetry func(attempt, attempts int, wait time.Duration)) lockRetryOutcome {
+	for n := 0; ; n++ {
+		got := attempt()
+		if got.err == nil {
+			return lockRetryOutcome{retries: n}
+		}
+		if n >= len(lintLockRetryDelay) || !isLintLockContention(got.output) ||
+			!roomForRetry(ctx, lintLockRetryDelay[n]) {
+			return lockRetryOutcome{err: got.err, retries: n}
+		}
+		wait := lintLockRetryDelay[n]
+		if onRetry != nil {
+			onRetry(n+1, len(lintLockRetryDelay)+1, wait)
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lockRetryOutcome{err: got.err, retries: n}
+		case <-timer.C:
+		}
+	}
+}
+
+// lockRetryOutcome is retryLintLockContention's result. retries is the number
+// of waits it spent on the lock, which is what lets a caller explain a failure
+// that was contention rather than a finding.
+type lockRetryOutcome struct {
+	err     error
+	retries int
 }
 
 // runGates executes all pre-merge gates (backward-compatible entry point).
