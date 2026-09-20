@@ -182,6 +182,8 @@ type WorkerRow struct {
 	IssueTitle   string        // Issue title (truncated)
 	WorkStatus   string        // working, stale, stuck, idle
 	AgentType    string        // "polecat" (ephemeral sessions) or "refinery" (permanent)
+	Agent        string        // Coding agent name (e.g., "deepseek-flash", "claude")
+	MRStatus     string        // Merge request status (e.g., "ready", "missing", "blocked")
 }
 
 // MergeQueueRow represents a PR in the merge queue.
