@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cmd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
@@ -2029,4 +2031,97 @@ func eventSummary(eventType, actor string, payload map[string]interface{}) strin
 	default:
 		return eventType
 	}
+}
+
+// FetchLocalPool fetches local polecat pool information including llama-server slots
+// and current local polecat sessions.
+func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
+	// Load town settings to get polecat pool config
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(f.townRoot))
+	if err != nil || ts == nil || ts.PolecatPool == nil {
+		return nil, nil // No pool configured
+	}
+
+	pool := ts.PolecatPool
+
+	data := &LocalPoolData{
+		MaxLocal:      pool.MaxLocal,
+		LocalAgent:    pool.LocalAgent,
+		OverflowAgent: pool.OverflowAgent,
+	}
+
+	// Parse min_spawn_gap for display
+	if pool.MinSpawnGap != "" {
+		// Validate the duration format
+		if _, err := time.ParseDuration(pool.MinSpawnGap); err == nil {
+			data.MinSpawnGap = pool.MinSpawnGap
+		}
+	}
+
+	// Get current local polecat sessions
+	sessions, err := f.listPolecatSessions()
+	if err != nil {
+		// Fall back to tmux-based session count
+		return data, nil
+	}
+
+	// Count local polecats (those with GT_AGENT matching local_agent)
+	localCount := 0
+	for _, s := range sessions {
+		if strings.TrimSpace(s.agent) == pool.LocalAgent {
+			localCount++
+		}
+	}
+	data.LocalSeats = localCount
+
+	// Try to fetch llama-server slots info
+	// If llama-server is down, we still return data with slots = 0
+	slotsBusy, slotsTotal := f.fetchLlamaServerSlots()
+	data.SlotsBusy = slotsBusy
+	data.SlotsTotal = slotsTotal
+
+	return data, nil
+}
+
+// fetchLlamaServerSlots fetches slot information from llama-server.
+// Returns (busy_slots, total_slots).
+func (f *LiveConvoyFetcher) fetchLlamaServerSlots() (int, int) {
+	// Use a short timeout for the HTTP request
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Try to fetch slots from llama-server
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://127.0.0.1:8099/slots", nil)
+	if err != nil {
+		return 0, 0
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Server is down or not reachable
+		return 0, 0
+	}
+	defer resp.Body.Close()
+
+	// Parse JSON response
+	var slots []struct {
+		ID          int `json:"id"`
+		IsProcessing bool `json:"is_processing"`
+		NCtx        int `json:"n_ctx"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&slots); err != nil {
+		return 0, 0
+	}
+
+	total := len(slots)
+	busy := 0
+	for _, slot := range slots {
+		if slot.IsProcessing {
+			busy++
+		}
+	}
+
+	return busy, total
 }

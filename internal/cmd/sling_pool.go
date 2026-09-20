@@ -228,12 +228,12 @@ type sessionLister interface {
 
 var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 
-// listPolecatSessions returns every live polecat session with its agent and
+// ListPolecatSessions returns every live polecat session with its agent and
 // creation time. Polecats are identified by the GT_ROLE their session
 // carries ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on
 // the same server are not counted. GT_AGENT is written into the session
 // environment at spawn (SessionStartOptions.Agent / AgentEnv fallback).
-func listPolecatSessions(t sessionLister) ([]poolSession, error) {
+func ListPolecatSessions(t sessionLister) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
@@ -594,7 +594,7 @@ func poolRoute(townRoot, beadID string, live bool) (agent, reason string) {
 	if beadID != "" {
 		bead, beadErr = poolBeadLookup(townRoot, beadID)
 	}
-	sessions, err := listPolecatSessions(newPoolSessionLister())
+	sessions, err := ListPolecatSessions(newPoolSessionLister())
 	if err != nil {
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather

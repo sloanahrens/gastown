@@ -272,6 +272,68 @@
                 </div>
             </div>
 
+            <!-- Local Pool Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>⚙️ Local Pool</h2>
+                    {{if .LocalPool}}
+                        {{if .LocalPool.Error}}
+                        <span class="count error">{{.LocalPool.Error}}</span>
+                        {{else}}
+                        <span class="count">{{.LocalPool.LocalSeats}}/{{.LocalPool.MaxLocal}}</span>
+                        {{end}}
+                    {{else}}
+                        <span class="count">—</span>
+                    {{end}}
+                    <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+                    <button class="expand-btn">Expand</button>
+                </div>
+                <div class="panel-body">
+                    {{if .LocalPool}}
+                        {{if .LocalPool.Error}}
+                        <div class="empty-state">
+                            <p>{{.LocalPool.Error}}</p>
+                        </div>
+                        {{else}}
+                        <div class="local-pool-info">
+                            <div class="pool-stat">
+                                <span class="pool-stat-label">Local seats</span>
+                                <span class="pool-stat-value">{{.LocalPool.LocalSeats}}/{{.LocalPool.MaxLocal}}</span>
+                            </div>
+                            {{if .LocalPool.SlotsTotal}}
+                            <div class="pool-stat">
+                                <span class="pool-stat-label">Slots busy</span>
+                                <span class="pool-stat-value">{{.LocalPool.SlotsBusy}}/{{.LocalPool.SlotsTotal}}</span>
+                            </div>
+                            {{end}}
+                            {{if .LocalPool.LocalAgent}}
+                            <div class="pool-stat">
+                                <span class="pool-stat-label">Local agent</span>
+                                <span class="pool-stat-value">{{.LocalPool.LocalAgent}}</span>
+                            </div>
+                            {{end}}
+                            {{if .LocalPool.OverflowAgent}}
+                            <div class="pool-stat">
+                                <span class="pool-stat-label">Overflow agent</span>
+                                <span class="pool-stat-value">{{.LocalPool.OverflowAgent}}</span>
+                            </div>
+                            {{end}}
+                            {{if .LocalPool.MinSpawnGap}}
+                            <div class="pool-stat">
+                                <span class="pool-stat-label">Min spawn gap</span>
+                                <span class="pool-stat-value">{{.LocalPool.MinSpawnGap}}</span>
+                            </div>
+                            {{end}}
+                        </div>
+                        {{end}}
+                    {{else}}
+                    <div class="empty-state">
+                        <p>Local pool not configured</p>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+
             <!-- Crew Panel (named, long-lived workers) -->
             <div class="panel" id="crew-panel">
                 <div class="panel-header">

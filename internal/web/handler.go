@@ -202,14 +202,23 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		sessions    []SessionRow
 		hooks       []HookRow
 		mayor       *MayorStatus
-		issues      []IssueRow
-		activity    []ActivityRow
-		wg          sync.WaitGroup
+		issues       []IssueRow
+		activity     []ActivityRow
+		locals       *LocalPoolData
+		wg           sync.WaitGroup
 	)
 
 	// Run all fetches in parallel with error logging
-	wg.Add(14)
+	wg.Add(15)
 
+	go func() {
+		defer wg.Done()
+		var err error
+		locals, err = h.fetcher.FetchLocalPool()
+		if err != nil {
+			log.Printf("dashboard: FetchLocalPool failed: %v", err)
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		var err error
@@ -358,6 +367,7 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		Mayor:       mayor,
 		Issues:      enrichIssuesWithAssignees(issues, hooks),
 		Activity:    activity,
+		LocalPool:   locals,
 		Summary:     summary,
 		Expand:      expandPanel,
 		CSRFToken:   h.csrfToken,
