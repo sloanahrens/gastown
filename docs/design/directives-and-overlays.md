@@ -29,23 +29,37 @@ formula they are running.
 **File layout:**
 
 ```
+~/gt/directives/_common.md             # Town-level, every role
+~/gt/<rig>/directives/_common.md       # Rig-level, every role in that rig
 ~/gt/directives/<role>.md              # Town-level (all rigs)
-~/gt/<rig>/directives/<role>.md        # Rig-level (wins by appearing last)
+~/gt/<rig>/directives/<role>.md        # Rig-level
 ```
+
+`_common.md` is reserved for policy that is not role-specific — host rules,
+testing norms. It exists so that such policy has one home rather than a copy in
+every role's file (R2 of `docs/writing-for-agents.md`).
 
 **Injection point:** After the role template, before context files and handoff
 content. Directives carry an authority marker: "Rig Policy — overrides formula
 instructions where they conflict."
 
-**Precedence:** Town and rig directives **concatenate**. If both exist, the
-combined output is `<town content>\n<rig content>`. The rig directive gets the
-last word, so it effectively overrides the town directive on conflicting
-instructions.
+**Precedence:** Every file that exists **concatenates**, broadest first and
+most specific last — town `_common`, rig `_common`, town `<role>`, rig
+`<role>`. The role's own file gets the last word, so it overrides the shared
+policy on conflicting instructions, and within each pair the rig file overrides
+the town file.
+
+**A file named for no role is never loaded.** `config.LoadRoleDirective` reads
+`<name>.md` only for a name in `config.AllRoles()` or `_common`, so a typo such
+as `refiner.md` is dead from the moment it is written. `gt directive list`
+flags it `UNUSED (no such role)` and `gt doctor`'s `unused-directives` check
+warns with the path. Neither one deletes: a misnamed file may be a keeper the
+operator meant to rename.
 
 **Implementation:**
 - Loader: `internal/config/directives.go` → `LoadRoleDirective(role, townRoot, rigName) string`
-- Integration: `internal/cmd/prime_output.go` → `outputRoleDirectives(ctx RoleContext)`
-- Called in the `gt prime` pipeline after `outputPrimeContext()`
+- Scan: `internal/config/directives.go` → `ScanDirectiveFiles(townRoot, rigName)`
+- Integration: `internal/cmd/prime_output.go` → `outputRoleDirectives(ctx RoleContext)`, called from the `directives` part of the `gt prime` payload in `internal/cmd/prime.go`
 
 ### Level 2: Formula Overlays
 
@@ -132,9 +146,6 @@ Follow existing patterns in the codebase.
 ```
 
 ## CLI Commands
-
-> **Note:** CLI commands are being added in gt-3kg.5. The interface below
-> reflects the planned design.
 
 ### Directive Commands
 
@@ -310,3 +321,4 @@ effect immediately on the next `gt prime`.
 | `internal/cmd/prime_output.go` | `outputRoleDirectives()` integration |
 | `internal/cmd/prime_molecule.go` | `applyFormulaOverlays()` integration |
 | `internal/doctor/overlay_health_check.go` | Doctor check and auto-fix |
+| `internal/doctor/unused_directive_check.go` | Doctor check for directive files no role loads (reports, never deletes) |

@@ -128,6 +128,12 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		}
 	}
 
+	// A misnamed file is dead for every role, so this runs before the
+	// content check below rather than inside it: the roles most likely to act
+	// on the warning (mayor, witness) are exactly the ones that have a
+	// directive of their own and would never reach the early return.
+	outputUnusedDirectiveWarning(w, townRoot, rigName)
+
 	content := config.LoadRoleDirective(role, townRoot, rigName)
 	if content == "" {
 		explainf("Role directives: no directive files found (checked %s", townPath)
@@ -179,6 +185,36 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 		return
 	}
 	fmt.Fprintln(w, content)
+}
+
+// outputUnusedDirectiveWarning lists the directive files that no role loads.
+// A scan failure prints nothing: prime is not the place to report a broken
+// directives directory, and gt doctor already carries that result.
+func outputUnusedDirectiveWarning(w io.Writer, townRoot, rigName string) {
+	files, err := config.ScanDirectiveFiles(townRoot, rigName)
+	if err != nil {
+		return
+	}
+
+	var unused []config.DirectiveFile
+	for _, f := range files {
+		if f.Unused() {
+			unused = append(unused, f)
+		}
+	}
+	if len(unused) == 0 {
+		return
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, style.Warning.Render("## Unused Directive Files (no agent role loads these)"))
+	fmt.Fprintln(w)
+	for _, f := range unused {
+		fmt.Fprintf(w, "- `%s` — no role named %q\n", f.Path, f.Role)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Rename each file to a role name, or move shared policy into `%s.md`, which every role loads (see `%s directive list`).\n",
+		config.SharedDirectiveName, cli.Name())
 }
 
 func outputPrimeContextFallback(ctx RoleContext) {

@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -44,7 +43,7 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 	role := args[0]
 
 	if !isValidRole(role) {
-		return fmt.Errorf("unknown role %q — valid roles: %s", role, strings.Join(config.AllRoles(), ", "))
+		return fmt.Errorf("unknown role %q — valid names: %s", role, knownRolesHelp())
 	}
 
 	townRoot, rigName, err := resolveDirectiveContext(directiveEditRig)
@@ -68,7 +67,11 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// Create with a helpful header comment
-		initial := fmt.Sprintf("<!-- Directive for role: %s -->\n<!-- This content is injected at prime time. -->\n\n", role)
+		appliesTo := "role: " + role
+		if role == config.SharedDirectiveName {
+			appliesTo = "every role"
+		}
+		initial := fmt.Sprintf("<!-- Directive for %s -->\n<!-- This content is injected at prime time. -->\n\n", appliesTo)
 		if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
 			return fmt.Errorf("creating directive file: %w", err)
 		}

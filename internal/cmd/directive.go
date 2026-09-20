@@ -23,14 +23,20 @@ Subcommands:
 File layout:
   Town-level: <townRoot>/directives/<role>.md
   Rig-level:  <townRoot>/<rig>/directives/<role>.md
+  Every role: <townRoot>/directives/_common.md and the same name in a rig
 
-Resolution: Town and rig directives are concatenated (town first, rig last).
-Rig-level content gets the last word.
+Resolution: every file that exists is concatenated, broadest first, most
+specific last — town _common, rig _common, town <role>, rig <role> — so the
+most specific file gets the last word. A file named for no role is never
+rendered at all; 'gt directive list' flags it as UNUSED and 'gt doctor' warns.
+Put policy that is not role-specific in _common.md rather than copying it into
+each role's file.
 
 Examples:
   gt directive show polecat             # Show active polecat directive
   gt directive show witness --rig sky   # Show witness directive for sky rig
   gt directive edit crew                # Edit crew directive (rig-level)
+  gt directive edit _common             # Edit policy that every role loads
   gt directive list                     # List all directive files`,
 	RunE: requireSubcommand,
 }

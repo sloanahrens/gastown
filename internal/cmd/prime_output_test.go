@@ -198,3 +198,75 @@ func TestOutputCommandQuickReferenceBootBlocksRawTmux(t *testing.T) {
 		t.Fatalf("Boot quick reference still calls raw tmux merely unreliable:\n%s", output)
 	}
 }
+
+func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
+	t.Parallel()
+
+	writeUnusedFixture := func(t *testing.T, roleFile string) string {
+		t.Helper()
+		townRoot := t.TempDir()
+		writeDirective(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
+		if roleFile != "" {
+			writeDirective(t, filepath.Join(townRoot, "directives", roleFile+".md"), "Role policy.")
+		}
+		writeDirective(t, filepath.Join(townRoot, "myrig", "directives", "host-hygiene.md"), "Host rules.")
+		// A backup is not a directive; it must not be reported as one.
+		writeDirective(t, filepath.Join(townRoot, "myrig", "directives", "refinery.md.bak"), "Old refinery.")
+		return townRoot
+	}
+
+	// The warning is independent of whether the current role has a directive:
+	// the roles most able to fix a misnamed file are the ones that have one.
+	t.Run("warns for a role that has its own directive", func(t *testing.T) {
+		t.Parallel()
+		ctx := RoleContext{Role: RoleMayor, TownRoot: writeUnusedFixture(t, "mayor"), Rig: "myrig"}
+
+		var buf bytes.Buffer
+		outputRoleDirectives(ctx, &buf, false)
+		out := buf.String()
+
+		if !strings.Contains(out, "## Town Directives") || !strings.Contains(out, "Role policy.") {
+			t.Errorf("expected the role's own directive, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Unused Directive Files") {
+			t.Errorf("expected the unused-file warning, got:\n%s", out)
+		}
+		if !strings.Contains(out, "host-hygiene") {
+			t.Errorf("expected the misnamed file named, got:\n%s", out)
+		}
+		if strings.Contains(out, "refinery.md.bak") {
+			t.Errorf("a .bak file is not a directive, got:\n%s", out)
+		}
+	})
+
+	t.Run("warns for a role with no directive of its own", func(t *testing.T) {
+		t.Parallel()
+		ctx := RoleContext{Role: RolePolecat, TownRoot: writeUnusedFixture(t, ""), Rig: "myrig"}
+
+		var buf bytes.Buffer
+		outputRoleDirectives(ctx, &buf, false)
+		out := buf.String()
+
+		if strings.Contains(out, "## Town Directives") {
+			t.Errorf("expected no directive header, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Unused Directive Files") {
+			t.Errorf("expected the unused-file warning, got:\n%s", out)
+		}
+	})
+
+	t.Run("quiet when every file is named for a role", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeDirective(t, filepath.Join(townRoot, "directives", "mayor.md"), "Mayor policy.")
+		writeDirective(t, filepath.Join(townRoot, "directives", "polecat.md"), "Polecat policy.")
+
+		ctx := RoleContext{Role: RoleMayor, TownRoot: townRoot, Rig: "myrig"}
+
+		var buf bytes.Buffer
+		outputRoleDirectives(ctx, &buf, false)
+		if out := buf.String(); strings.Contains(out, "Unused Directive Files") {
+			t.Errorf("expected no warning, got:\n%s", out)
+		}
+	})
+}
