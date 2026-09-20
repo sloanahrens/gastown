@@ -1254,6 +1254,255 @@ func TestRun_ReusesRecordedRejectionWithoutRecordingReviewedHead(t *testing.T) {
 	}
 }
 
+// reRehearsedHead returns a second commit carrying the same diff as
+// fixture.head — same tree, same parent, different message — which is the
+// shape a fresh rehearsal of an unchanged branch produces. gt mq review merges
+// the branch onto its target in a throwaway worktree on every invocation, so a
+// second invocation's head is never the first's commit even when the diff is
+// byte-identical. That head movement is what the reuse lookup has to survive
+// (gt-qa2p), and the patch-id is asserted unchanged so a test built on this
+// head is about a moved head and not a changed diff. label distinguishes one
+// re-rehearsal from the next: without it two invocations in the same second
+// would build the identical commit.
+func reRehearsedHead(t *testing.T, fixture *reviewFixture, label string) string {
+	t.Helper()
+	g := git.NewGit(fixture.repoDir)
+	tree, err := g.Rev(fixture.head + "^{tree}")
+	if err != nil {
+		t.Fatalf("rev tree of %s: %v", fixture.head, err)
+	}
+	msg := fmt.Sprintf("rehearsal merge for om review (%s)", label)
+	cmd := exec.Command("git", "commit-tree", tree, "-p", fixture.base, "-m", msg)
+	cmd.Dir = fixture.repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("commit-tree: %v", err)
+	}
+	head := strings.TrimSpace(string(out))
+	if head == fixture.head {
+		t.Fatalf("rehearsed head is %s, the same commit as the fixture's: the test needs a different one", head)
+	}
+	before, err := g.PatchID(fixture.base, fixture.head)
+	if err != nil {
+		t.Fatalf("PatchID of the first head: %v", err)
+	}
+	after, err := g.PatchID(fixture.base, head)
+	if err != nil {
+		t.Fatalf("PatchID of the second head: %v", err)
+	}
+	if before != after {
+		t.Fatalf("patch-id moved with the commit (%s -> %s): the test needs an unchanged diff", before, after)
+	}
+	return head
+}
+
+// TestRun_ReusesRecordedVerdictOnANewRehearsalHead is the gt-qa2p regression:
+// the same diff rehearsed onto a fresh head is answered from its recorded
+// verdict, so a caller cannot re-roll a rejected diff by invoking the command
+// again. Before this, three invocations against one MR produced three verdicts
+// for one patch-id (0.56, 0.62, 0.84 against a 0.60 threshold) because the
+// lookup was keyed to a rehearsal head that is new every time.
+//
+// The head recorded for the push precondition is asserted too: it must name
+// the commit the note is on, not this invocation's rehearsal commit, or the
+// precondition would refuse to push an MR the gate just approved.
+func TestRun_ReusesRecordedVerdictOnANewRehearsalHead(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recordVerdict(t, fixture, recordedNoteFor(t, fixture, 0.74, "approve"))
+	head2 := reRehearsedHead(t, fixture, "second invocation")
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.50, Verdict: "request_changes"})
+			return "", 1, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = head2
+
+	result := Run(context.Background(), req, deps)
+
+	if execCalls != 0 {
+		t.Errorf("gate invoked %d time(s), want 0: this diff already has a verdict, whatever commit it was rehearsed onto", execCalls)
+	}
+	if result.Exit != 0 || !result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 0/true (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	if result.Note.Score != 0.74 || result.Note.Verdict != "approve" {
+		t.Errorf("Note = %.2f/%s, want the recorded 0.74/approve", result.Note.Score, result.Note.Verdict)
+	}
+
+	updated, err := store.GetIssue(context.Background(), "gt-mr-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
+	if fields == nil || fields.EditorialReviewedHead != fixture.head {
+		t.Fatalf("editorial_reviewed_head = %+v, want the reviewed head %s (the commit the note is on)", fields, fixture.head)
+	}
+	// The precondition reads the note by that head, so the recorded value has
+	// to be a commit this clone can actually read the note from.
+	if _, err := ReadNote(deps.Git, fields.EditorialReviewedHead); err != nil {
+		t.Errorf("ReadNote at the recorded reviewed head: %v", err)
+	}
+	if _, perr := CheckPrecondition(deps.Git, req.Config, []LandedMR{{
+		MRID:         "gt-mr-1",
+		ReviewedHead: fields.EditorialReviewedHead,
+		Base:         fixture.base,
+		Head:         head2,
+	}}); perr != nil {
+		t.Errorf("CheckPrecondition after a reused approve = %s, want the push to be authorized", perr.Reason)
+	}
+}
+
+// TestRun_ReusesRecordedRejectionOnANewRehearsalHead is the other half: a
+// rejected diff stays rejected when it is rehearsed onto a new head, and still
+// leaves no reviewed head behind.
+func TestRun_ReusesRecordedRejectionOnANewRehearsalHead(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recordVerdict(t, fixture, recordedNoteFor(t, fixture, 0.50, "request_changes"))
+	head2 := reRehearsedHead(t, fixture, "second invocation")
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.84, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = head2
+
+	result := Run(context.Background(), req, deps)
+
+	if execCalls != 0 {
+		t.Errorf("gate invoked %d time(s), want 0: this diff already has a verdict", execCalls)
+	}
+	if result.Exit != 1 || !result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 1/true (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	updated, _ := store.GetIssue(context.Background(), "gt-mr-1")
+	if fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description}); fields != nil && fields.EditorialReviewedHead != "" {
+		t.Errorf("editorial_reviewed_head = %q, want unset on a rejected diff", fields.EditorialReviewedHead)
+	}
+}
+
+// TestRun_ReusesTheLatestVerdictRecordedForADiff pins which verdict governs
+// when a re-roll has left more than one for the same diff, and that a plain
+// invocation picks up the re-roll rather than the verdict it replaced. The
+// answer has to agree with what CheckPrecondition will accept at push time, or
+// a review reporting approve would be refused a push by its own re-roll.
+func TestRun_ReusesTheLatestVerdictRecordedForADiff(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	superseded := recordedNoteFor(t, fixture, 0.74, "approve")
+	superseded.ReviewedAt = time.Now().UTC().Add(-time.Minute)
+	recordVerdict(t, fixture, superseded)
+
+	// The re-roll's verdict, on a new head: same diff, later, rejected.
+	head2 := reRehearsedHead(t, fixture, "second invocation")
+	rolled := recordedNoteFor(t, fixture, 0.50, "request_changes")
+	rolled.HeadSHA = head2
+	rolled.ReviewedAt = time.Now().UTC()
+	if err := WriteNote(git.NewGit(fixture.repoDir), rolled); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+	head3 := reRehearsedHead(t, fixture, "third invocation")
+	if head3 == head2 {
+		t.Fatalf("third rehearsal head is head2 (%s): the lookup would answer from the note on it, not from the notes ref", head3)
+	}
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.9, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = head3
+
+	result := Run(context.Background(), req, deps)
+
+	if execCalls != 0 {
+		t.Errorf("gate invoked %d time(s), want 0: this diff already has a verdict", execCalls)
+	}
+	if result.Exit != 1 || !result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 1/true (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	if result.Note.Score != 0.50 || result.Note.Verdict != "request_changes" {
+		t.Errorf("Note = %.2f/%s, want the re-rolled 0.50/request_changes", result.Note.Score, result.Note.Verdict)
+	}
+}
+
+// TestRun_RerollOnANewRehearsalHeadCarriesTheVerdictItReplaces covers the
+// deliberate re-roll on the MR path: om runs, and the note it writes records
+// the verdict it replaced even though that verdict was recorded on a different
+// rehearsal commit. A re-roll that left no trace is what gt-bveg exists to
+// stop, and on this path the verdict being replaced is never on the same
+// commit (gt-qa2p).
+func TestRun_RerollOnANewRehearsalHeadCarriesTheVerdictItReplaces(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recorded := recordedNoteFor(t, fixture, 0.74, "approve")
+	recordVerdict(t, fixture, recorded)
+	head2 := reRehearsedHead(t, fixture, "second invocation")
+
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.50, Verdict: "request_changes"})
+			return "", 1, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = head2
+	req.Reroll = true
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Exit != 1 || result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 1/false (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	attempts := result.Note.Attempts
+	if len(attempts) != 2 {
+		t.Fatalf("Attempts = %+v, want the replaced verdict and this one", attempts)
+	}
+	if attempts[0].Score != 0.74 || attempts[0].Verdict != "approve" {
+		t.Errorf("Attempts[0] = %+v, want the replaced 0.74/approve", attempts[0])
+	}
+	if !attempts[0].ReviewedAt.Equal(recorded.ReviewedAt) {
+		t.Errorf("Attempts[0].ReviewedAt = %v, want the replaced verdict's %v", attempts[0].ReviewedAt, recorded.ReviewedAt)
+	}
+	if attempts[1].Score != 0.50 || attempts[1].Verdict != "request_changes" {
+		t.Errorf("Attempts[1] = %+v, want this review's 0.50/request_changes", attempts[1])
+	}
+	if result.Note.HeadSHA != head2 {
+		t.Errorf("Note.HeadSHA = %s, want the head this review rehearsed (%s)", result.Note.HeadSHA, head2)
+	}
+}
+
 // TestRun_RerollReReviewsAndRecordsAttemptHistory covers the deliberate
 // re-roll: om runs, its verdict replaces the recorded one, and the note
 // carries both — so the re-roll that used to be invisible is the one thing

@@ -50,16 +50,22 @@ type Note struct {
 	Attempt    int       `json:"attempt"`
 	ReviewedAt time.Time `json:"reviewed_at"`
 
-	// Attempts is every verdict recorded for this head, oldest first, the
-	// last entry repeating the top-level score/verdict/attempt above. An
-	// om review is an LLM call, so a second invocation on an unchanged diff
-	// re-rolls a near-threshold score rather than measuring anything, and
-	// the verdict that comes back can differ from the one it replaces
-	// (gt-bveg). Written only when there is more than one attempt, so a
-	// re-roll is visible on the proof instead of silent and every other
-	// note round-trips unchanged. Absent means a single recorded verdict or
-	// a note predating this field; the top-level fields are the latest
-	// verdict either way.
+	// Attempts is every verdict this note's diff has been given, oldest
+	// first, the last entry repeating the top-level score/verdict/attempt
+	// above. An om review is an LLM call, so a second invocation on an
+	// unchanged diff re-rolls a near-threshold score rather than measuring
+	// anything, and the verdict that comes back can differ from the one it
+	// replaces (gt-bveg). Written only when there is more than one attempt,
+	// so a re-roll is visible on the proof instead of silent and every
+	// other note round-trips unchanged. Absent means a single recorded
+	// verdict or a note predating this field; the top-level fields are the
+	// latest verdict either way.
+	//
+	// The history is keyed by diff, not by commit: the MR path rehearses a
+	// fresh merge commit on every invocation, so the verdict a re-roll
+	// replaces is almost never attached to the commit the new note is
+	// written on (gt-qa2p). Its entries are read from whichever note
+	// FindVerdictForDiff selected as the one being replaced.
 	Attempts []NoteAttempt `json:"attempts,omitempty"`
 
 	// TimeoutSeconds records a backend-timeout override this review ran
@@ -184,4 +190,78 @@ func ReadNote(g *git.Git, sha string) (*Note, error) {
 		return nil, fmt.Errorf("unmarshal note on %s: %w", sha, err)
 	}
 	return &n, nil
+}
+
+// RecordedVerdict is a verdict found under NotesRef together with the commit
+// its note is attached to — the commit a reader must name to read the
+// verdict back (ReadNote) or to copy it forward (CopyNotesToLanded, which
+// uses git notes copy). That commit is not necessarily the note's own
+// HeadSHA field: a copy leaves the field naming the commit the verdict was
+// first written on, and an annotated object need not exist at all for its
+// note to be readable.
+type RecordedVerdict struct {
+	Commit string
+	Note   Note
+}
+
+// FindVerdictForDiff returns the verdict that already answers for a diff, or
+// nil when the notes ref holds none: the most recently reviewed note whose
+// patch-id and deployed rubric match and whose verdict is one this pipeline
+// would accept, at or above minVersion. It is recordedVerdictApplies, run
+// over the whole notes ref instead of one known commit.
+//
+// The lookup is keyed on the diff rather than on the commit the note sits on
+// because the MR path has no stable commit to key on. gt mq review rehearses
+// the branch onto its target afresh on every invocation, so the rehearsal
+// head — the commit a note is written on — differs on every call for a
+// byte-identical diff. Keying reuse on that head left the gt-bveg guard inert
+// on exactly the path it exists for: three invocations against one MR
+// produced three verdicts for one patch-id (0.56, 0.62, 0.84 against a 0.60
+// threshold), so a caller could roll a rejected diff until it cleared
+// (gt-qa2p). Notes on rehearsal heads are also routinely unreachable from any
+// branch by the time the verdict is needed, which is why the notes ref rather
+// than the commit graph is what is scanned (see git.Git.NotesList).
+//
+// The most recently reviewed match governs, because that is the verdict the
+// MR's push is authorized by: an answer that disagreed with what
+// CheckPrecondition will accept would wedge the MR on a review reporting
+// approve. The MR id is deliberately not part of the key — a re-minted or
+// resubmitted MR carrying the same diff is the same measurement, and scoping
+// the lookup to one MR would hand a caller the same roll-until-it-clears
+// bypass one bead id further along. A deliberate --reroll is what supersedes
+// a recorded verdict, and it says so on the proof (see Note.Attempts).
+func FindVerdictForDiff(g *git.Git, patchID, rubricSHA, minVersion string) (*RecordedVerdict, error) {
+	entries, err := g.NotesList(NotesRef)
+	if err != nil {
+		return nil, fmt.Errorf("list notes in refs/notes/%s: %w", NotesRef, err)
+	}
+	var best *RecordedVerdict
+	for _, e := range entries {
+		var n Note
+		if err := json.Unmarshal([]byte(e.Content), &n); err != nil {
+			// The ref is shared with every writer that ever touched it, so
+			// an unreadable note elsewhere must not make this diff's
+			// verdict unfindable.
+			continue
+		}
+		if !recordedVerdictApplies(&n, patchID, rubricSHA, minVersion) {
+			continue
+		}
+		if best == nil || reviewedLaterThan(n, best.Note) {
+			best = &RecordedVerdict{Commit: e.Annotated, Note: n}
+		}
+	}
+	return best, nil
+}
+
+// reviewedLaterThan reports whether a is a later verdict than b: by when it
+// was reviewed, and by reviewed head when two were reviewed in the same
+// instant (a batch reviewing the same diff from two branches), so which
+// verdict governs is deterministic rather than dependent on the order the
+// notes ref happens to list them in.
+func reviewedLaterThan(a, b Note) bool {
+	if !a.ReviewedAt.Equal(b.ReviewedAt) {
+		return a.ReviewedAt.After(b.ReviewedAt)
+	}
+	return a.HeadSHA > b.HeadSHA
 }

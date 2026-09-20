@@ -139,6 +139,164 @@ func TestNoteJSON_MatchesSpecFieldNames(t *testing.T) {
 	}
 }
 
+// The note lookup keys on the diff, never on the commit a note sits on or on
+// the MR that asked for it (gt-qa2p). These tests annotate stand-in shas they
+// never create: the lookup reads the notes ref only, and a note's annotated
+// object need not exist to be readable — which is exactly why a verdict keyed
+// to a rehearsal head survives that head's disappearance.
+const (
+	diffLookedFor  = "patch-id-of-the-diff-being-reviewed"
+	diffOther      = "patch-id-of-some-other-diff"
+	rubricDeployed = "rubric-sha-now-deployed"
+	rubricOther    = "rubric-sha-since-retired"
+)
+
+// recordedNote builds a note as a review would have written it.
+func recordedNote(patchID, rubric, verdict, omVersion string, reviewedAt time.Time) Note {
+	return Note{
+		OMVersion:    omVersion,
+		RubricSHA256: rubric,
+		Rig:          "gastown",
+		MR:           "gt-mr-1",
+		Worker:       "marble",
+		BaseSHA:      "base",
+		PatchID:      patchID,
+		Score:        0.74,
+		Verdict:      verdict,
+		Attempt:      1,
+		ReviewedAt:   reviewedAt,
+	}
+}
+
+// writeNoteOn attaches n to sha, standing in for the review that wrote it.
+func writeNoteOn(t *testing.T, g *git.Git, sha string, n Note) {
+	t.Helper()
+	n.HeadSHA = sha
+	if err := WriteNote(g, n); err != nil {
+		t.Fatalf("WriteNote on %s: %v", sha, err)
+	}
+}
+
+// TestFindVerdictForDiff_IgnoresVerdictsThatDoNotApply pins that widening the
+// lookup from one head to the whole notes ref did not widen what counts as a
+// verdict for this diff: the same four conditions recordedVerdictApplies
+// applies to the note on a known head still decide, so answering from a note
+// about something else is not possible.
+func TestFindVerdictForDiff_IgnoresVerdictsThatDoNotApply(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		note Note
+		min  string
+	}{
+		{"another diff", recordedNote(diffOther, rubricDeployed, "approve", "1.4.0", time.Unix(100, 0)), ""},
+		{"another rubric", recordedNote(diffLookedFor, rubricOther, "approve", "1.4.0", time.Unix(100, 0)), ""},
+		{"a verdict this pipeline would not have accepted", recordedNote(diffLookedFor, rubricDeployed, "abstain", "1.4.0", time.Unix(100, 0)), ""},
+		{"below the om version floor", recordedNote(diffLookedFor, rubricDeployed, "approve", "0.9.0", time.Unix(100, 0)), "1.0.0"},
+		{"below the floor by carrying no version at all", recordedNote(diffLookedFor, rubricDeployed, "approve", "", time.Unix(100, 0)), "1.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := git.NewGit(initTestRepo(t))
+			writeNoteOn(t, g, "1111111111111111111111111111111111111111", tc.note)
+
+			got, err := FindVerdictForDiff(g, diffLookedFor, rubricDeployed, tc.min)
+			if err != nil {
+				t.Fatalf("FindVerdictForDiff: %v", err)
+			}
+			if got != nil {
+				t.Fatalf("FindVerdictForDiff = verdict %q for %s on %s, want none: the note does not answer for this diff",
+					got.Note.Verdict, got.Note.PatchID, got.Commit)
+			}
+		})
+	}
+}
+
+// TestFindVerdictForDiff_AbsentNotesRefIsNoVerdict pins that "nothing was ever
+// reviewed here" and "nothing matching was found" are the same answer and not
+// an error: an absent ref is a first review, which must proceed.
+func TestFindVerdictForDiff_AbsentNotesRefIsNoVerdict(t *testing.T) {
+	g := git.NewGit(initTestRepo(t))
+
+	got, err := FindVerdictForDiff(g, diffLookedFor, rubricDeployed, "")
+	if err != nil {
+		t.Fatalf("FindVerdictForDiff on an absent notes ref: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("FindVerdictForDiff = %+v, want none", got)
+	}
+}
+
+// TestFindVerdictForDiff_MostRecentlyReviewedMatchGoverns pins which verdict
+// answers when several do, and that the MR id is deliberately not part of the
+// key. The re-rolled verdict is the one the MR's push is authorized by, and a
+// re-minted MR carrying the same diff is the same measurement: scoping the
+// lookup to the MR would hand a caller the roll-until-it-clears bypass one
+// bead id further along.
+func TestFindVerdictForDiff_MostRecentlyReviewedMatchGoverns(t *testing.T) {
+	g := git.NewGit(initTestRepo(t))
+	first := recordedNote(diffLookedFor, rubricDeployed, "request_changes", "1.4.0", time.Unix(1000, 0).UTC())
+	first.MR, first.Score = "gt-mr-1", 0.56
+	rolled := recordedNote(diffLookedFor, rubricDeployed, "approve", "1.4.0", time.Unix(2000, 0).UTC())
+	rolled.MR, rolled.Score = "gt-mr-9", 0.84
+
+	writeNoteOn(t, g, "1111111111111111111111111111111111111111", first)
+	writeNoteOn(t, g, "2222222222222222222222222222222222222222", rolled)
+
+	got, err := FindVerdictForDiff(g, diffLookedFor, rubricDeployed, "")
+	if err != nil {
+		t.Fatalf("FindVerdictForDiff: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindVerdictForDiff = none, want the re-rolled verdict")
+	}
+	if got.Commit != "2222222222222222222222222222222222222222" || got.Note.Score != 0.84 {
+		t.Errorf("governed by %s (score %.2f), want the later verdict on 2222222 (score 0.84)",
+			got.Commit, got.Note.Score)
+	}
+}
+
+// TestFindVerdictForDiff_SkipsUnparseableNotes pins that one unreadable note
+// does not make a diff's verdict unfindable: the ref is shared with every
+// writer that ever touched it.
+func TestFindVerdictForDiff_SkipsUnparseableNotes(t *testing.T) {
+	g := git.NewGit(initTestRepo(t))
+	if err := g.NotesAdd(NotesRef, "1111111111111111111111111111111111111111", "not json"); err != nil {
+		t.Fatalf("NotesAdd: %v", err)
+	}
+	want := recordedNote(diffLookedFor, rubricDeployed, "approve", "1.4.0", time.Unix(1000, 0).UTC())
+	writeNoteOn(t, g, "2222222222222222222222222222222222222222", want)
+
+	got, err := FindVerdictForDiff(g, diffLookedFor, rubricDeployed, "")
+	if err != nil {
+		t.Fatalf("FindVerdictForDiff: %v", err)
+	}
+	if got == nil || got.Commit != "2222222222222222222222222222222222222222" {
+		t.Fatalf("FindVerdictForDiff = %+v, want the parseable note on 2222222", got)
+	}
+}
+
+// TestReviewedLaterThan_IsDeterministicOnATimestampTie pins the tie-break that
+// keeps "which verdict governs" independent of the order the notes ref lists
+// them in — two notes reviewed in the same instant must still order the same
+// way every run.
+func TestReviewedLaterThan_IsDeterministicOnATimestampTie(t *testing.T) {
+	at := time.Unix(1000, 0).UTC()
+	lo := Note{HeadSHA: "1111111111111111111111111111111111111111", ReviewedAt: at}
+	hi := Note{HeadSHA: "9999999999999999999999999999999999999999", ReviewedAt: at}
+
+	if !reviewedLaterThan(hi, lo) || reviewedLaterThan(lo, hi) {
+		t.Errorf("same-instant verdicts did not order by reviewed head")
+	}
+	if reviewedLaterThan(hi, hi) {
+		t.Errorf("a verdict is not later than itself")
+	}
+
+	later := hi
+	later.ReviewedAt = at.Add(time.Second)
+	if !reviewedLaterThan(later, hi) {
+		t.Errorf("a later reviewed_at did not win over the head sha")
+	}
+}
+
 func TestAttemptHistory_CarriesEveryPriorVerdictForward(t *testing.T) {
 	first := NoteAttempt{Score: 0.74, Verdict: "approve", Attempt: 1, ReviewedAt: time.Unix(1000, 0).UTC()}
 	second := NoteAttempt{Score: 0.50, Verdict: "request_changes", Attempt: 2, ReviewedAt: time.Unix(2000, 0).UTC()}
