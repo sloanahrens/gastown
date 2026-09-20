@@ -629,8 +629,8 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 	// verifyStartupNudgeDelivery should detect idle state and retry.
 	// We can't easily assert the retry happened, but we verify it doesn't panic/hang.
 	// Use a goroutine with timeout to prevent test hanging.
-	// Timeout accounts for DefaultStartupNudgeVerifyDelay (25s) * DefaultStartupNudgeMaxRetries (2)
-	// plus overhead = ~60s. Use 90s for safety.
+	// fastStartupNudgeRig sets the verify delay to 200ms, so the retry loop
+	// itself takes well under a second; 90s is only a hang guard.
 	done := make(chan struct{})
 	go func() {
 		m.verifyStartupNudgeDelivery(sessionName, rc, "check your hook")
@@ -793,8 +793,8 @@ func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
 		t.Errorf("goroutine launch blocked caller for %v; expected <500ms (async regression)", elapsed)
 	}
 
-	// Goroutine side: must complete within (maxRetries * verifyDelay) + overhead.
-	// Default: 2 retries * 25s = 50s. Allow 90s for slow CI.
+	// Goroutine side: fastStartupNudgeRig sets the verify delay to 200ms, so
+	// the retry loop finishes in well under a second; 90s is only a hang guard.
 	select {
 	case <-goroutineDone:
 	case <-time.After(90 * time.Second):

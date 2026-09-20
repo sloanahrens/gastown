@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/util"
@@ -179,5 +180,28 @@ func TestSetProcessGroup_InstallsCancelHook(t *testing.T) {
 
 	if cmd.Cancel == nil {
 		t.Fatal("SetProcessGroup() should install a cancel hook")
+	}
+}
+
+// Under `go test` os.Executable() is the test binary. Exec'ing it as the
+// nudge-poller runs the whole suite again, detached, and every StartPoller
+// site inside that run spawns another — the same recursion the daemon's
+// boot-triage guard exists for (gt-0mbw found it through a fake tmux that
+// made a Deacon look alive). StartPoller must refuse before Start.
+func TestStartPoller_RefusesTestBinary(t *testing.T) {
+	prev := pollerExecutable
+	t.Cleanup(func() { pollerExecutable = prev })
+
+	for _, name := range []string{"daemon.test", "daemon.test.exe"} {
+		exe := filepath.Join(t.TempDir(), name)
+		pollerExecutable = func() (string, error) { return exe, nil }
+		townRoot := t.TempDir()
+		_, err := StartPoller(townRoot, "gt-deacon")
+		if err == nil || !strings.Contains(err.Error(), "test binary") {
+			t.Fatalf("StartPoller with %s: err=%v, want a refusal naming the test binary", name, err)
+		}
+		if _, statErr := os.Stat(pollerPidFile(townRoot, "gt-deacon")); statErr == nil {
+			t.Fatalf("StartPoller wrote a pid file although it refused to spawn %s", name)
+		}
 	}
 }
