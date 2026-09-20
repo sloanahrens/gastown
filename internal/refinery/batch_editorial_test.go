@@ -25,16 +25,38 @@ import (
 // internal/refinery/editorial's own reviewStore for the same purpose.
 type batchReviewStore struct {
 	beadsdk.Storage
-	mu     sync.Mutex
-	issues map[string]*beadsdk.Issue
+	mu           sync.Mutex
+	issues       map[string]*beadsdk.Issue
+	closeReasons map[string]string
 }
 
 func newBatchReviewStore(issues ...*beadsdk.Issue) *batchReviewStore {
-	s := &batchReviewStore{issues: make(map[string]*beadsdk.Issue, len(issues))}
+	s := &batchReviewStore{
+		issues:       make(map[string]*beadsdk.Issue, len(issues)),
+		closeReasons: make(map[string]string),
+	}
 	for _, issue := range issues {
 		s.issues[issue.ID] = issue
 	}
 	return s
+}
+
+// CloseIssue backs the reject close (closeTerminalMR -> CloseWithReason) so a
+// batch-review test can observe that a request_changes candidate's MR was
+// closed as rejected, and with what reason (gt-bsmp).
+func (s *batchReviewStore) CloseIssue(_ context.Context, id, reason, _, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	issue, ok := s.issues[id]
+	if !ok {
+		return fmt.Errorf("issue %s not found", id)
+	}
+	now := time.Now()
+	issue.Status = beadsdk.StatusClosed
+	issue.ClosedAt = &now
+	issue.UpdatedAt = now
+	s.closeReasons[id] = reason
+	return nil
 }
 
 func (s *batchReviewStore) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {

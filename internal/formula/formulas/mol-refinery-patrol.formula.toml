@@ -388,13 +388,16 @@ process-branch as if this step had been skipped.
 
 The batch run rehearses each candidate onto the target, runs the om editorial
 review on each one (bounded parallelism), and then stacks only the approved
-members. A member that gets request_changes or an infra failure is DROPPED
-FROM THE BATCH AND LEFT QUEUED, untouched; nothing is closed and no
-FIX_NEEDED is sent from the batch path (the deacon's editorial redispatch
-handles it). A member whose patch-id changed once stacked is ejected the same
-way. Do NOT pre-review candidates here. On an editorial_required rig the
-batch lands only members that hold an approve note, which the run itself
-produced.
+members. A member whose review comes back request_changes is DROPPED FROM THE
+BATCH AND REJECTED (gt-bsmp): the run closes its MR bead with a `rejected:
+EDITORIAL REJECTION ...` reason and hands its source bead to dead-worker
+recovery, which writes the MERGE REJECTION notes and mails RECOVERED_BEAD to
+the deacon. Send no FIX_NEEDED from this step — the deacon's redispatch owns
+the resubmit. A member that fails for an infra reason (exit 2) is left queued
+and untouched: that is not a verdict on its diff, so the next cycle reviews it
+again. A member whose patch-id changed once stacked is ejected the same way.
+Do NOT pre-review candidates here. On an editorial_required rig the batch
+lands only members that hold an approve note, which the run itself produced.
 
 **Step 3: Assemble, gate, and land the batch — as a background call**
 
@@ -803,7 +806,19 @@ per MR for no reason.
   Target: <target-branch>
   MR: <mr-bead-id>"
   ```
-- Do NOT close the MR bead. Do NOT delete the polecat branch.
+- **Close the MR bead as rejected** (gt-bsmp). The verdict IS the rejection,
+  and an MR left `ready` behind it is a rejected diff the queue re-rehearses
+  and re-reviews on an unchanged head every cycle — a re-roll that comes back
+  approve satisfies the push precondition for a diff a reviewer already
+  rejected (gt-bveg). Close it with the verdict as the reason:
+  ```bash
+  gt mq reject <rig> <mr-bead-id> --no-recover --reason "EDITORIAL REJECTION (attempt <N>): om gate request_changes, <score>, <n> findings"
+  ```
+  `--no-recover` because the polecat-liveness check and the dead-polecat
+  RECOVERED_BEAD redispatch above are this step's own; a second recovery would
+  hand the deacon a second redispatch request for the same bead.
+- Leave the polecat branch in place — the next polecat fixes forward on it,
+  which is what makes this a resubmit rather than a fresh start.
 - Archive the MERGE_READY message and skip to loop-check.
 
 **Exit 2 — execution error (never an approval):** `gt mq review` could not
@@ -832,7 +847,8 @@ never as an approval or a skip.)
   ```
 - Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
 
-Track: review exit code, failure class (exit 2 only)."""
+Track: review exit code, failure class (exit 2 only), MR closed as rejected
+(exit 1 only)."""
 
 [[steps]]
 id = "handle-failures"
@@ -900,7 +916,23 @@ If any check or test FAILED:
         ```
      The redispatched polecat reads the MERGE REJECTION note, checks out
      the existing branch, and fixes forward.
-   - **Do NOT close the MR bead** — the fix will be resubmitted
+   - **Close the MR bead as rejected** (gt-bsmp) when the gate ran and the
+     branch caused the failure. The fix is resubmitted as a NEW MR from this
+     same branch, so an MR left `ready` here only keeps a rejected diff
+     merge-eligible: the queue re-gates (and, on an editorial_required rig,
+     re-reviews) it on the unchanged head every cycle until something else
+     clears it. Close it with the failure as the reason:
+     ```bash
+     gt mq reject <rig> <mr-bead-id> --no-recover --reason "GATE REJECTION: <failure-type> - <error summary>"
+     ```
+     `--no-recover` because the polecat-liveness check and the RECOVERED_BEAD
+     redispatch above are this step's own; a second recovery would hand the
+     deacon a second redispatch request for the same bead.
+   - **An infra failure is not a gate rejection — leave the MR open** and
+     escalate the gate problem instead. A timeout, an `exit 127`, an empty
+     gate command and a gate that would not launch all say nothing about the
+     branch, and closing on a gate flap dequeues every MR in the queue and
+     sends every worker off to fix nothing.
    - **Do NOT delete the branch** — the next session needs it for the fix
    - **Do NOT reopen the source issue when the polecat is ALIVE** — it is
      still working on it (reopen ONLY in the dead-polecat case above)
@@ -927,6 +959,8 @@ If any check or test FAILED:
 - [ ] FIX_NEEDED sent to polecat (with failure details)
 - [ ] Bead updated with MERGE REJECTION notes (marker + branch)
 - [ ] Polecat liveness checked; if dead → bead reopened + RECOVERED_BEAD sent to deacon
+- [ ] MR bead closed as rejected, or left open because the gate never ran
+      (infra) and the gate problem escalated
 - [ ] Temp branch cleaned up (NOT the polecat branch!)
 - [ ] MERGE_READY message archived
 
