@@ -431,8 +431,11 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		return fmt.Errorf("git commit: %w", err)
 	}
 
-	// Successful commit — clear any spike baseline since HEAD is now up to date.
-	removeSpikeBaseline(gitRepo)
+	// Note: DO NOT remove the spike baseline here. The baseline file (.spike-counts.json)
+	// stores the actual previous export count, not the git HEAD count. If we remove it
+	// after every commit, the next run will fall back to git show HEAD:<path> which may
+	// read stale/transient counts (bug gt-qo0e). Instead, keep the baseline until it's
+	// verified trustworthy (when the count is stable vs the baseline within threshold).
 
 	// Push requires a remote. This is the OFFSITE layer — a repo with commits
 	// but no remote is data sitting on the same disk it started on, which is
@@ -858,7 +861,29 @@ func filterTestPollution(data []byte) ([]byte, int) {
 
 // previousCommitLineCount returns the line count of a file in the previous git
 // commit (HEAD). Returns 0, nil if the file doesn't exist in HEAD (first export).
+//
+// This function first checks for a .spike-counts.json baseline file (which stores
+// the actual previous run's count) and uses that as the authoritative baseline.
+// Only if no baseline exists does it fall back to reading from git show HEAD:<path>.
+// This prevents false spike alarms caused by git show reading stale/transient counts.
 func previousCommitLineCount(gitRepo, relPath string) (int, error) {
+	// First, check for a spike baseline file - this is the authoritative source
+	// for the previous count, as it records what was actually exported last time.
+	spikeBase := loadSpikeBaseline(gitRepo)
+	if spikeBase != nil {
+		// The baseline file stores counts with database names as keys.
+		// The relPath is like "db/issues.jsonl", so extract "db" as the key.
+		db := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(filepath.Base(relPath)))
+		// Try the db name as key (e.g., "db" for path "db/issues.jsonl")
+		if baseCount, ok := spikeBase.Counts[db]; ok && baseCount > 0 {
+			return baseCount, nil
+		}
+		// Also try the issues.jsonl filename as a key (fallback)
+		if baseCount, ok := spikeBase.Counts[filepath.Base(relPath)]; ok && baseCount > 0 {
+			return baseCount, nil
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
 
@@ -952,7 +977,10 @@ func ensureGitIgnore(gitRepo, entry string) {
 	}
 }
 
-// removeSpikeBaseline removes the spike baseline file after a successful commit.
+// removeSpikeBaseline removes the spike baseline file when the baseline is
+// no longer needed (e.g., when counts have stabilized and the git HEAD count
+// is now trustworthy). This should only be called when the baseline has been
+// verified as stale, not after every successful commit.
 func removeSpikeBaseline(gitRepo string) {
 	os.Remove(filepath.Join(gitRepo, spikeBaselineFile))
 }
