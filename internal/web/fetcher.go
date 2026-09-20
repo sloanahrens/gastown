@@ -650,9 +650,9 @@ func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time
 	// Construct session name
 	sessionName := session.PolecatSessionName(session.PrefixFor(rig), polecat)
 
-	// Query tmux for session activity
-	// Format: session_activity returns unix timestamp
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}|#{session_activity}",
+	// Query tmux for the window's activity clock (unix seconds); the session
+	// clock freezes at creation for a detached session (gt-vcfs).
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}|#{window_activity}",
 		"-f", fmt.Sprintf("#{==:#{session_name},%s}", sessionName))
 	if err != nil {
 		return nil
@@ -2049,8 +2049,12 @@ func (f *LiveConvoyFetcher) FetchQueues() ([]QueueRow, error) {
 
 // FetchSessions returns active tmux sessions with role detection.
 func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
-	// List tmux sessions
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	// List tmux sessions. window_activity, not session_activity: the session
+	// clock only advances for a session with an attached client, so every
+	// detached agent showed its creation time (gt-vcfs). The window clock
+	// advances on real pane output — a live agent's spinner counts, so it
+	// distinguishes alive from dead, not busy from idle.
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		return nil, nil // tmux not running or no sessions
 	}
@@ -2167,8 +2171,9 @@ func (f *LiveConvoyFetcher) FetchMayor() (*MayorStatus, error) {
 	// Get the actual mayor session name (e.g., "hq-mayor")
 	mayorSessionName := session.MayorSessionName()
 
-	// Check if mayor tmux session exists
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	// Check if mayor tmux session exists. window_activity: the session clock
+	// only moves while a client is attached (gt-vcfs).
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		// tmux not running or no sessions
 		return status, nil

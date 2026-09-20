@@ -2086,3 +2086,93 @@ func TestFetchWorkersTakesIssueFromInventoryWhenHqMapMisses(t *testing.T) {
 		t.Errorf("opal = issue %q status %q, want empty/idle", opal.IssueID, opal.WorkStatus)
 	}
 }
+
+// tmux's session_activity only advances for a session with an attached
+// client, so a detached agent reported its creation time all evening; the
+// panel must read the pane's window_activity instead (gt-vcfs).
+func TestFetchSessionsReadsWindowActivityNotSessionActivity(t *testing.T) {
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+
+	now := time.Now().Unix()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "tmux" {
+			return nil, fmt.Errorf("unexpected command %q", name)
+		}
+		format := args[len(args)-1]
+		if !strings.Contains(format, "#{window_activity}") {
+			return nil, fmt.Errorf("list-sessions format %q does not ask for window_activity", format)
+		}
+		if strings.Contains(format, "#{session_activity}") {
+			return nil, fmt.Errorf("list-sessions format %q still asks for session_activity", format)
+		}
+		return bytes.NewBufferString(fmt.Sprintf("hq-deacon:%d\n", now)), nil
+	}
+
+	f := &LiveConvoyFetcher{cmdTimeout: 5 * time.Second, registry: session.NewPrefixRegistry()}
+	rows, err := f.FetchSessions()
+	if err != nil {
+		t.Fatalf("FetchSessions() error = %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(rows), rows)
+	}
+	if want := formatTimestamp(time.Unix(now, 0)); rows[0].Activity != want {
+		t.Errorf("Activity = %q, want %q (window_activity)", rows[0].Activity, want)
+	}
+}
+
+// windowActivityOnlyTmux is a fake tmux that answers list-sessions with the
+// given rows only when the format reads the window clock; asking for the
+// frozen session clock is an error, so any reader that reverts fails.
+func windowActivityOnlyTmux(t *testing.T, rows string) func(time.Duration, string, ...string) (*bytes.Buffer, error) {
+	t.Helper()
+	return func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "tmux" {
+			return nil, fmt.Errorf("unexpected command %q", name)
+		}
+		for _, a := range args {
+			if strings.Contains(a, "#{session_activity}") {
+				return nil, fmt.Errorf("list-sessions format %q asks for session_activity", a)
+			}
+		}
+		return bytes.NewBufferString(rows), nil
+	}
+}
+
+// The Mayor tile and the convoy panel's tracked-issue activity read the same
+// clock as the Sessions panel; the mayor session is usually attached, which
+// hid the freeze there (gt-vcfs).
+func TestFetchMayorReadsWindowActivity(t *testing.T) {
+	now := time.Now().Unix()
+	withMayorFetcherHooks(
+		t,
+		func(string, string) (string, error) { return "codex", nil },
+		windowActivityOnlyTmux(t, fmt.Sprintf("hq-mayor:%d\n", now)),
+	)
+	f := &LiveConvoyFetcher{
+		townRoot:             t.TempDir(),
+		mayorActiveThreshold: 24 * time.Hour,
+		tmuxCmdTimeout:       time.Second,
+	}
+	status, err := f.FetchMayor()
+	if err != nil {
+		t.Fatalf("FetchMayor: %v", err)
+	}
+	if !status.IsAttached || status.LastActivity == "" {
+		t.Fatalf("mayor = %+v, want attached with activity from window_activity", status)
+	}
+}
+
+func TestSessionActivityForAssigneeReadsWindowActivity(t *testing.T) {
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	now := time.Now().Unix()
+	fetcherRunCmd = windowActivityOnlyTmux(t, fmt.Sprintf("gt-agate|%d\n", now))
+
+	f := &LiveConvoyFetcher{cmdTimeout: 5 * time.Second}
+	got := f.getSessionActivityForAssignee("gastown/polecats/agate")
+	if got == nil || got.Unix() != now {
+		t.Fatalf("activity = %v, want %d from window_activity", got, now)
+	}
+}
