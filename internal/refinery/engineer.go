@@ -228,6 +228,12 @@ type MRInfo struct {
 	CreatedAt       time.Time  // MR creation time
 	BlockedBy       string     // Task ID blocking this MR
 
+	// Labels are the MR bead's labels. The batch reviewer needs them because
+	// editorial.RetirementLabel — the mark that lets a deliberate rubric
+	// retirement past the criterion-deletion guard — lives here and nowhere
+	// else in the MR's data (gt-2oi0).
+	Labels []string
+
 	// Pre-verification fields (Phase 3: polecat-owned rebasing)
 	// When set, the refinery can skip gates if VerifiedBase matches target HEAD.
 	PreVerified     bool      // Polecat ran full gates after rebasing onto target
@@ -2382,6 +2388,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		CreatedAt:             createdAt,
 		UpdatedAt:             updatedAt,
 		Assignee:              issue.Assignee,
+		Labels:                issue.Labels,
 	}
 }
 

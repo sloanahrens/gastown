@@ -64,6 +64,13 @@ type ReviewRequest struct {
 	Attempt       int
 	PriorFindings []PriorFinding
 
+	// RubricRetirement marks an MR whose stated purpose is to retire rubric
+	// criteria — the MR bead carries RetirementLabel — and lets it through
+	// the criterion-deletion guard in Run. False everywhere else, including
+	// every batch member: retiring a criterion must be a decision someone
+	// took, never one an unattended review made.
+	RubricRetirement bool
+
 	// Config is the rig's resolved merge_queue.editorial config.
 	Config config.EditorialConfig
 }
@@ -202,6 +209,21 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		return failureResult(deps, req, Tooling, fmt.Sprintf("patch-id: %v", err), 0)
 	}
 
+	// The rubric guard runs before the gate script, not after a verdict: the
+	// script reviews the diff against the DEPLOYED rubric, so a branch that
+	// swaps a criterion out is scored by the criteria it did not touch and
+	// comes back approve. Nothing later re-reads the proposed rubric (gt-2oi0).
+	rubricDeltas, err := DiffRubricAt(deps.Git, req.RepoDir, manifest.Rubric.Path, mergeBase, head)
+	if err != nil {
+		return failureResult(deps, req, Tooling, fmt.Sprintf("rubric check: %v", err), 0)
+	}
+	if len(rubricDeltas) > 0 && !req.RubricRetirement {
+		return failureResult(deps, req, RubricRegression, FormatRubricRegression(rubricDeltas), 0)
+	}
+	// Recorded on the note only when a retirement was actually exercised, so
+	// the note answers "was a criterion given up here?" for every review.
+	retiredRubric := len(rubricDeltas) > 0
+
 	tmpDir, err := os.MkdirTemp("", "gt-mq-review-*")
 	if err != nil {
 		return failureResult(deps, req, Tooling, fmt.Sprintf("mktemp: %v", err), 0)
@@ -303,6 +325,9 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		// the note distinguishes "used the rig default" from "was allowed
 		// N seconds" (see Note.TimeoutSeconds).
 		TimeoutSeconds: req.TimeoutSeconds,
+		// True only when this review carried a retirement through the rubric
+		// guard (see Note.RubricRetirement).
+		RubricRetirement: retiredRubric,
 	}
 	if v.PriorFindings != nil {
 		note.PriorFindings.Resolved = v.PriorFindings.Resolved

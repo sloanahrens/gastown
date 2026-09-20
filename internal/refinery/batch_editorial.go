@@ -127,7 +127,12 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 				RehearsedHead: rehearsedHeads[i],
 				Attempt:       attempt,
 				PriorFindings: editorial.BuildPriorFindings(e.beads, mr.SourceIssue, attempt),
-				Config:        cfg,
+				// Read off the MR bead: without it a labeled rubric
+				// retirement would be refused here but honored by the
+				// single-MR path, for no reason the label's author could
+				// see (gt-2oi0).
+				RubricRetirement: editorial.HasRetirementLabel(mr.Labels),
+				Config:           cfg,
 			}
 			results[i] = editorial.Run(ctx, req, deps)
 		}(i, mr)
