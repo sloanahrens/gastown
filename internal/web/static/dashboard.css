@@ -2001,6 +2001,34 @@
             color: var(--text-muted);
         }
 
+        /* Gate panel: the headline lines above the slot table, then the
+           role-class detail column. */
+        .gate-summary {
+            list-style: none;
+            margin: 0 0 10px 0;
+            padding: 0;
+        }
+
+        .gate-summary li {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            padding: 2px 0;
+        }
+
+        .gate-summary li:first-child {
+            color: var(--text-primary);
+        }
+
+        .gate-roles {
+            margin-top: 10px;
+        }
+
+        .gate-detail {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            white-space: normal;
+        }
+
         .empty-state p {
             font-size: 0.8rem;
         }

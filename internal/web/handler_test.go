@@ -32,6 +32,7 @@ type MockConvoyFetcher struct {
 	Mayor       *MayorStatus
 	Issues      []IssueRow
 	Activity    []ActivityRow
+	Gate        *GateStatus
 	Error       error
 }
 
@@ -89,6 +90,10 @@ func (m *MockConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 
 func (m *MockConvoyFetcher) FetchActivity() ([]ActivityRow, error) {
 	return m.Activity, nil
+}
+
+func (m *MockConvoyFetcher) FetchGate() (*GateStatus, error) {
+	return m.Gate, nil
 }
 
 func TestConvoyHandler_RendersTemplate(t *testing.T) {
@@ -1063,6 +1068,10 @@ func (m *MockConvoyFetcherWithErrors) FetchActivity() ([]ActivityRow, error) {
 	return nil, nil
 }
 
+func (m *MockConvoyFetcherWithErrors) FetchGate() (*GateStatus, error) {
+	return nil, errFetchFailed
+}
+
 // TestConvoyHandler_TemplateErrorReturns500 verifies that template execution errors
 // return a proper 500 status code, not 200 (which would happen if we wrote directly
 // to the ResponseWriter and it failed mid-execution).
@@ -1263,6 +1272,7 @@ func (m *CountingMockFetcher) FetchIssues() ([]IssueRow, error)     { return m.i
 func (m *CountingMockFetcher) FetchActivity() ([]ActivityRow, error) {
 	return m.inner.FetchActivity()
 }
+func (m *CountingMockFetcher) FetchGate() (*GateStatus, error) { return m.inner.FetchGate() }
 
 func TestConvoyHandler_NonFatalErrors(t *testing.T) {
 	mock := &MockConvoyFetcherWithErrors{

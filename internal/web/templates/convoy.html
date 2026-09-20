@@ -806,6 +806,79 @@
                 </div>
             </div>
 
+            <!-- Gate Panel: the container-gate slot pool ('gt slot status') -->
+            <div class="panel" id="gate-panel">
+                <div class="panel-header">
+                    <h2>🚦 Gate</h2>
+                    <span class="count{{if .Gate}}{{if .Gate.Busy}} count-alert{{end}}{{end}}">{{if .Gate}}{{.Gate.HeldCount}}/{{.Gate.Total}}{{end}}</span>
+                    <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+                    <button class="expand-btn">Expand</button>
+                </div>
+                <div class="panel-body">
+                    {{if .Gate}}
+                    <ul class="gate-summary">
+                        {{range .Gate.Summaries}}<li>{{.}}</li>{{end}}
+                    </ul>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Slot</th>
+                                <th>State</th>
+                                <th>Holder</th>
+                                <th>PID</th>
+                                <th>Since</th>
+                                <th>Age</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Gate.Slots}}
+                            <tr>
+                                <td>
+                                    {{.Index}}{{if .Reserved}} <span class="badge badge-cyan">reserved</span>{{end}}
+                                </td>
+                                <td>
+                                    {{if eq .State "held"}}<span class="badge badge-yellow">held</span>
+                                    {{else if eq .State "stale"}}<span class="badge badge-red">stale</span>
+                                    {{else}}<span class="badge badge-green">free</span>{{end}}
+                                </td>
+                                <td>{{if .Role}}{{.Role}}{{else}}—{{end}}</td>
+                                <td>{{if .PID}}{{.PID}}{{else}}—{{end}}</td>
+                                <td>{{if .Since}}{{.Since}}{{else}}—{{end}}</td>
+                                <td>{{if .Age}}{{.Age}}{{else}}—{{end}}</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                    <table class="gate-roles">
+                        <thead>
+                            <tr>
+                                <th>Role</th>
+                                <th>State</th>
+                                <th>Doing</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Gate.Roles}}
+                            <tr>
+                                <td>{{.Label}}</td>
+                                <td>
+                                    {{if eq .State "held"}}<span class="badge badge-yellow">held</span>
+                                    {{else if eq .State "stale"}}<span class="badge badge-red">stale</span>
+                                    {{else}}<span class="badge badge-muted">free</span>{{end}}
+                                </td>
+                                <td class="gate-detail">{{.Detail}}</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                    {{else}}
+                    <div class="empty-state">
+                        <p>Gate state unavailable</p>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+
             <!-- Queues Panel (optional, only show if there are queues) -->
             {{if .Queues}}
             <div class="panel">

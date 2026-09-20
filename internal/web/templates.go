@@ -29,6 +29,7 @@ type ConvoyData struct {
 	Mayor       *MayorStatus
 	Issues      []IssueRow
 	Activity    []ActivityRow
+	Gate        *GateStatus
 	Summary     *DashboardSummary
 	Expand      string // Panel to show fullscreen (from ?expand=name)
 	CSRFToken   string // Token for CSRF protection on POST requests
