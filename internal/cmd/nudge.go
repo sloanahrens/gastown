@@ -221,8 +221,56 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			return deliverWaitIdle(t, townRoot, sessionName, message, sender)
 		}
 
-		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
+		if err := t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts); err != nil {
+			return err
+		}
+		// Delivery succeeded; now check the target actually acted on it.
+		if warning := immediateConsumptionWarning(t, sessionName); warning != "" {
+			fmt.Fprint(os.Stderr, warning)
+		}
+		return nil
 	}
+}
+
+// immediateTurnProbeWindow is how long immediate mode watches the pane for a
+// reaction before reporting that the target did not start a turn. Var so tests
+// can shorten it.
+var immediateTurnProbeWindow = 3 * time.Second
+
+// immediateConsumptionWarning watches a target for a reaction to a nudge that
+// immediate mode has just delivered, and returns a warning line when the target
+// took the input without acting on it. It returns "" when there is nothing to
+// report.
+//
+// This exists because "the pty took the keystrokes" and "the agent acted on
+// them" are different claims, and only the first was ever being verified
+// (gt-eigw): on 2026-09-09 be-refinery accepted an immediate nudge, an Enter
+// keystroke and mail, started no turn for any of them, and sat idle for ~15
+// minutes while the daemon logged "Refinery for beads already running,
+// skipping spawn" on every heartbeat. Every delivery had reported success.
+//
+// It reports rather than fails. Delivery genuinely succeeded — the text left
+// the composer — and the target may still act on it later, so a non-zero exit
+// here would make every caller (patrols, slings, operators) treat a delivered
+// nudge as an undelivered one. The warning is the signal; the recovery stays
+// the operator's or the patrol's, per tmux.SubmitPendingInput's contract.
+func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
+	verdict, err := t.WaitForInputConsumed(sessionName, immediateTurnProbeWindow)
+	if err != nil {
+		// An unobservable pane says nothing about the nudge. Stay quiet: a
+		// warning here would fire for every agent without prompt detection.
+		return ""
+	}
+	if verdict != tmux.InputConsumptionNotConsumed {
+		return ""
+	}
+	return fmt.Sprintf(
+		"immediate: %s accepted the nudge but started no turn within %s — its input is "+
+			"still stranded in the composer/queue, which is how a wedged session presents "+
+			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
+			"that session ('gt refinery restart <rig>' for a refinery, 'gt witness restart "+
+			"<rig>' for a witness).\n",
+		sessionName, immediateTurnProbeWindow, sessionName)
 }
 
 // deliverWaitIdle waits for the target to become idle (prompt visible), then

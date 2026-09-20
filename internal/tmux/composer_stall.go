@@ -247,3 +247,185 @@ func (t *Tmux) SubmitPendingInput(target string, queued bool) error {
 	}
 	return nil
 }
+
+// Input-consumption liveness (gt-eigw).
+//
+// Every other liveness signal in the town answers "is the process alive?".
+// None answers "is it consuming what we give it?" — and on 2026-09-09 those
+// were different questions. be-refinery sat at the prompt for ~15 minutes with
+// wait-idle nudges stranded in Claude Code's input queue: the pane process was
+// alive, so the daemon logged "Refinery for beads already running, skipping
+// spawn" every four minutes while three MRs, one of them P0, aged unclaimed
+// behind it. An Enter keystroke, an immediate-mode nudge and mail all failed to
+// start a turn. Only 'gt refinery restart beads' cleared it.
+//
+// DetectComposerStall (above) answers this over a MINUTES-scale window, which
+// is what a patrol can afford: input pending AND no output for the whole frozen
+// window. The probe below answers it over the SECONDS-scale window a delivery
+// needs — after typing a nudge and pressing Enter, did the target react at all?
+//
+// The verdict is deliberately four-valued rather than two. The one thing this
+// probe must never do is call a healthy target wedged: the previous attempt at
+// gt-eigw rejected idle targets and was correctly blocked for it. So a strand is
+// claimed only on positive evidence — input still demonstrably sitting in the
+// composer or queue at the end of the window. A clean composer that simply
+// produced no output is Inconclusive, never NotConsumed: the turn may have
+// completed before the first observation.
+
+// InputConsumption classifies whether a session consumed input it was given.
+type InputConsumption int
+
+const (
+	// InputConsumptionInconclusive means nothing was observed either way: the
+	// pane produced no output, but it also holds no unsubmitted input, so the
+	// turn may simply have finished before the first observation. Callers must
+	// not treat this as a healthy verdict or as a wedged one.
+	InputConsumptionInconclusive InputConsumption = iota
+	// InputConsumptionUnknown means the pane could not be observed at all —
+	// the capture failed, or the agent has no prompt prefix to reason about.
+	InputConsumptionUnknown
+	// InputConsumptionStartedTurn means the agent is generating: a busy
+	// indicator is on screen. The input was consumed.
+	InputConsumptionStartedTurn
+	// InputConsumptionPaneChanged means the pane produced output that was not
+	// there at the baseline. The input was consumed.
+	InputConsumptionPaneChanged
+	// InputConsumptionNotConsumed means the pane produced no output at all
+	// while still holding unsubmitted input. That input will not be acted on
+	// without intervention — this is the wedged state.
+	InputConsumptionNotConsumed
+)
+
+// Consumed reports whether the verdict is positive evidence that the session
+// acted on the input. Inconclusive and Unknown are both false: no evidence of
+// consumption is not evidence of a strand, and callers must distinguish them
+// via NotConsumed.
+func (c InputConsumption) Consumed() bool {
+	return c == InputConsumptionStartedTurn || c == InputConsumptionPaneChanged
+}
+
+func (c InputConsumption) String() string {
+	switch c {
+	case InputConsumptionStartedTurn:
+		return "turn-started"
+	case InputConsumptionPaneChanged:
+		return "pane-changed"
+	case InputConsumptionNotConsumed:
+		return "not-consumed"
+	case InputConsumptionUnknown:
+		return "unknown"
+	default:
+		return "inconclusive"
+	}
+}
+
+// inputConsumptionPollInterval is how often the probe re-reads the pane while
+// waiting for a reaction. It is a var so tests can shrink it.
+var inputConsumptionPollInterval = 250 * time.Millisecond
+
+// consumptionVerdict folds a baseline pane capture and a later one into a
+// verdict. Pure, so the classification is testable against captured panes
+// without a tmux server.
+//
+// Order matters: positive evidence wins first, because a working agent
+// legitimately holds queued input (the running turn owns it) and a repaint
+// routinely lands in the same capture as a still-visible queue footer.
+func consumptionVerdict(baseline, current, promptPrefix string) InputConsumption {
+	if strings.TrimSpace(promptPrefix) == "" {
+		return InputConsumptionUnknown
+	}
+
+	// analyzeComposerState already ranks busy above every pending state, so a
+	// busy indicator here means a turn is running and owns whatever is queued.
+	if analyzeComposerState(current, promptPrefix).State == ComposerBusy {
+		return InputConsumptionStartedTurn
+	}
+
+	if current != baseline {
+		return InputConsumptionPaneChanged
+	}
+
+	// Byte-identical capture. Only now is a strand claimable — and only if the
+	// input is still demonstrably in the composer or the input queue.
+	//
+	// FRAGILITY: this reads the capture the nudge text was typed into, so a
+	// nudge body that literally contains a busy marker ("esc to interrupt")
+	// would read as StartedTurn above. That direction is safe — it reports a
+	// healthy session as healthy — but it does mean the probe can be blinded
+	// by a coincidence, never triggered by one.
+	if analyzeComposerState(current, promptPrefix).State == ComposerPending {
+		return InputConsumptionNotConsumed
+	}
+	return InputConsumptionInconclusive
+}
+
+// captureForConsumption takes the pane snapshot the probe reasons about. -e is
+// required for the dim attribute analyzeComposerState reads; -S -25 matches the
+// depth DetectComposerStall uses, which covers the composer, the queued-message
+// list above it and the footer below it.
+func (t *Tmux) captureForConsumption(session string) (string, error) {
+	content, err := t.run("capture-pane", "-p", "-e", "-t", session, "-S", "-25")
+	if err != nil {
+		return "", fmt.Errorf("capturing pane for %q: %w", session, err)
+	}
+	return content, nil
+}
+
+// WaitForInputConsumed reports whether a session acted on input it was just
+// given, within window. It takes its own baseline capture and then watches for
+// a reaction; a session that is already mid-repaint when the baseline is taken
+// still counts, because any subsequent change is a reaction.
+//
+// It returns as soon as there is positive evidence (a turn started, or the pane
+// changed) and otherwise waits out the whole window before judging — returning
+// NotConsumed early would misreport a target that is merely slow to start.
+//
+// This cannot hang a caller: window bounds it, and it never blocks on the
+// session itself. An error means the pane could not be observed at all; a nil
+// error with InputConsumptionInconclusive means the pane was observed and had
+// nothing to say either way.
+func (t *Tmux) WaitForInputConsumed(session string, window time.Duration) (InputConsumption, error) {
+	if strings.TrimSpace(session) == "" {
+		return InputConsumptionUnknown, fmt.Errorf("input-consumption probe: no session given")
+	}
+	promptPrefix := readyPromptPrefixForSession(t, session)
+	if strings.TrimSpace(promptPrefix) == "" {
+		return InputConsumptionUnknown, fmt.Errorf(
+			"input-consumption probe for %q: agent has no prompt prefix, cannot classify", session)
+	}
+
+	baseline, err := t.captureForConsumption(session)
+	if err != nil {
+		return InputConsumptionUnknown, err
+	}
+
+	deadline := time.Now().Add(window)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		sleep := inputConsumptionPollInterval
+		if remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+
+		current, err := t.captureForConsumption(session)
+		if err != nil {
+			return InputConsumptionUnknown, err
+		}
+		verdict := consumptionVerdict(baseline, current, promptPrefix)
+		if verdict.Consumed() {
+			return verdict, nil
+		}
+	}
+
+	// The window elapsed with no reaction. Re-read once and judge: only a pane
+	// that is still holding the input is a strand.
+	final, err := t.captureForConsumption(session)
+	if err != nil {
+		return InputConsumptionUnknown, err
+	}
+	return consumptionVerdict(baseline, final, promptPrefix), nil
+}

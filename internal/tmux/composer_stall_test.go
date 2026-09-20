@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fixtures below are pane captures. The busy and idle-clean ones were taken
@@ -391,5 +393,328 @@ func TestDetectComposerStallQueuedFooterIsStalledAndQueued(t *testing.T) {
 	}
 	if !stall.Stalled || !stall.Queued {
 		t.Errorf("queued footer on a frozen session: stalled=%v queued=%v, want both true", stall.Stalled, stall.Queued)
+	}
+}
+
+// --- Input-consumption liveness (gt-eigw) --------------------------------
+
+// consumptionVerdict is the whole classification, and it is pure, so every case
+// here is a captured pane rather than a live session. The fixtures are the same
+// live captures TestAnalyzeComposerState uses.
+func TestConsumptionVerdict(t *testing.T) {
+	t.Parallel()
+	const prefix = DefaultReadyPromptPrefix
+
+	tests := []struct {
+		name     string
+		baseline string
+		current  string
+		prefix   string
+		want     InputConsumption
+	}{
+		{
+			// The gt-eigw signature: the pane is byte-identical across the
+			// window and the input is still sitting in Claude Code's queue.
+			name:     "frozen pane still holding queued input is not consumed",
+			baseline: queuedMessagesPane,
+			current:  queuedMessagesPane,
+			prefix:   prefix,
+			want:     InputConsumptionNotConsumed,
+		},
+		{
+			name:     "frozen pane still holding typed input is not consumed",
+			baseline: pendingTypedPane,
+			current:  pendingTypedPane,
+			prefix:   prefix,
+			want:     InputConsumptionNotConsumed,
+		},
+		{
+			// The case the previous attempt got wrong: an idle target whose
+			// composer is clean and whose turn may already have finished. That
+			// is no evidence of a strand, and must never read as one.
+			name:     "frozen pane with a clean composer is inconclusive",
+			baseline: liveIdleCleanPane,
+			current:  liveIdleCleanPane,
+			prefix:   prefix,
+			want:     InputConsumptionInconclusive,
+		},
+		{
+			// Dim placeholder text is not input, so a frozen prompt showing it
+			// is idle, not stranded.
+			name:     "frozen pane showing dim placeholder is inconclusive",
+			baseline: dimPlaceholderPane,
+			current:  dimPlaceholderPane,
+			prefix:   prefix,
+			want:     InputConsumptionInconclusive,
+		},
+		{
+			name:     "busy indicator means the turn started",
+			baseline: liveIdleCleanPane,
+			current:  liveBusyPane,
+			prefix:   prefix,
+			want:     InputConsumptionStartedTurn,
+		},
+		{
+			// Busy wins over a still-visible queue footer: the running turn owns
+			// whatever is queued behind it.
+			name:     "busy indicator beats a queued footer",
+			baseline: queuedMessagesPane,
+			current:  queuedMessagesPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+			prefix:   prefix,
+			want:     InputConsumptionStartedTurn,
+		},
+		{
+			// A pane already busy at the baseline is a session that is working;
+			// whatever we handed it is in the turn's queue.
+			name:     "pane busy at the baseline counts as started",
+			baseline: liveBusyPane,
+			current:  liveBusyPane,
+			prefix:   prefix,
+			want:     InputConsumptionStartedTurn,
+		},
+		{
+			// The input was acted on: the transcript grew.
+			name:     "pane output means the input was consumed",
+			baseline: liveIdleCleanPane,
+			current:  "⏺ Resume the patrol.\n\n" + liveIdleCleanPane,
+			prefix:   prefix,
+			want:     InputConsumptionPaneChanged,
+		},
+		{
+			// Consumed and back to idle: the queued input is gone, so there is
+			// nothing stranded even though the pane is quiet now.
+			name:     "queue drained back to a clean composer is pane-changed",
+			baseline: queuedMessagesPane,
+			current:  liveIdleCleanPane,
+			prefix:   prefix,
+			want:     InputConsumptionPaneChanged,
+		},
+		{
+			name:     "agent without a prompt prefix is unknown",
+			baseline: queuedMessagesPane,
+			current:  queuedMessagesPane,
+			prefix:   "",
+			want:     InputConsumptionUnknown,
+		},
+		{
+			name:     "no composer line in the capture is inconclusive",
+			baseline: "⏺ Build finished.\n  ⏵⏵ bypass permissions on",
+			current:  "⏺ Build finished.\n  ⏵⏵ bypass permissions on",
+			prefix:   prefix,
+			want:     InputConsumptionInconclusive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := consumptionVerdict(tt.baseline, tt.current, tt.prefix); got != tt.want {
+				t.Errorf("consumptionVerdict() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInputConsumptionString(t *testing.T) {
+	t.Parallel()
+	for verdict, want := range map[InputConsumption]string{
+		InputConsumptionInconclusive: "inconclusive",
+		InputConsumptionUnknown:      "unknown",
+		InputConsumptionStartedTurn:  "turn-started",
+		InputConsumptionPaneChanged:  "pane-changed",
+		InputConsumptionNotConsumed:  "not-consumed",
+	} {
+		if got := verdict.String(); got != want {
+			t.Errorf("InputConsumption(%d).String() = %q, want %q", verdict, got, want)
+		}
+	}
+}
+
+// Only the two positive verdicts count as consumption: neither "no evidence"
+// verdict may be mistaken for a healthy session by a caller that forgets to
+// distinguish them.
+func TestInputConsumptionConsumed(t *testing.T) {
+	t.Parallel()
+	tests := map[InputConsumption]bool{
+		InputConsumptionInconclusive: false,
+		InputConsumptionUnknown:      false,
+		InputConsumptionStartedTurn:  true,
+		InputConsumptionPaneChanged:  true,
+		InputConsumptionNotConsumed:  false,
+	}
+	for verdict, want := range tests {
+		if got := verdict.Consumed(); got != want {
+			t.Errorf("%s.Consumed() = %v, want %v", verdict, got, want)
+		}
+	}
+}
+
+// fakeTmuxCaptures installs a tmux shim that returns captures[i] for the i-th
+// capture-pane call and repeats the last entry thereafter, so a test can drive
+// the probe through a sequence of pane states. It returns the call-count file
+// so a test can assert how many times the pane was read.
+func fakeTmuxCaptures(t *testing.T, captures []string) (logPath, countPath string) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
+	}
+	if len(captures) == 0 {
+		t.Fatal("fakeTmuxCaptures needs at least one capture")
+	}
+
+	binDir := t.TempDir()
+	logPath = filepath.Join(binDir, "tmux.log")
+	countPath = filepath.Join(binDir, "capture.count")
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(`printf '%s\n' "$*" >> "` + logPath + `"` + "\n")
+	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
+	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
+	b.WriteString("\tesac; done\n")
+	b.WriteString(`if [ "$sub" = "capture-pane" ]; then` + "\n")
+	b.WriteString(`  n=$(cat "` + countPath + `" 2>/dev/null || echo 0)` + "\n")
+	b.WriteString(`  echo $((n+1)) > "` + countPath + `"` + "\n")
+	b.WriteString("  case \"$n\" in\n")
+	for i, capture := range captures {
+		if i == len(captures)-1 {
+			break
+		}
+		b.WriteString("\t" + strconv.Itoa(i) + ") printf '%s' '" + capture + "'; exit 0;;\n")
+	}
+	b.WriteString("\t*) printf '%s' '" + captures[len(captures)-1] + "'; exit 0;;\n")
+	b.WriteString("  esac\n")
+	b.WriteString("fi\n")
+	b.WriteString("exit 0\n")
+
+	scriptPath := filepath.Join(binDir, "tmux")
+	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath, countPath
+}
+
+// withFastConsumptionPolling shrinks the probe's poll interval for the duration
+// of a test. It is package state, so callers must not run in parallel with it.
+func withFastConsumptionPolling(t *testing.T) {
+	t.Helper()
+	original := inputConsumptionPollInterval
+	inputConsumptionPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { inputConsumptionPollInterval = original })
+}
+
+func captureCallCount(t *testing.T, countPath string) int {
+	t.Helper()
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parsing capture count %q: %v", data, err)
+	}
+	return n
+}
+
+// The wedged session from gt-eigw: the pane never changes and the input stays
+// queued, so the probe must report NotConsumed rather than a successful
+// delivery.
+func TestWaitForInputConsumedDetectsWedgedSession(t *testing.T) {
+	withFastConsumptionPolling(t)
+	_, countPath := fakeTmuxCaptures(t, []string{queuedMessagesPane})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict != InputConsumptionNotConsumed {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionNotConsumed)
+	}
+	// One baseline read plus at least one observation: the verdict has to be
+	// reached by watching, not by reading once.
+	if got := captureCallCount(t, countPath); got < 2 {
+		t.Errorf("capture-pane called %d time(s), want the pane to be observed over the window", got)
+	}
+}
+
+// A healthy target that starts a turn must be reported as consumed, and the
+// probe must return as soon as it sees the reaction rather than waiting out the
+// window.
+func TestWaitForInputConsumedReturnsOnTurnStart(t *testing.T) {
+	withFastConsumptionPolling(t)
+	// Impossible to satisfy honestly in wall-clock terms with a long window:
+	// the probe can only succeed early.
+	_, countPath := fakeTmuxCaptures(t, []string{queuedMessagesPane, liveBusyPane})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 10*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict != InputConsumptionStartedTurn {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionStartedTurn)
+	}
+	if got := captureCallCount(t, countPath); got > 3 {
+		t.Errorf("capture-pane called %d times before returning, want an early return", got)
+	}
+}
+
+// The probe must wait out the whole window before judging: a target that is
+// slow to start is not a wedged one. Here the pane is frozen and pending for
+// the first observations and only repaints later.
+func TestWaitForInputConsumedWaitsBeforeJudging(t *testing.T) {
+	withFastConsumptionPolling(t)
+	repainted := "⏺ Resuming the patrol.\n\n" + liveIdleCleanPane
+	_, countPath := fakeTmuxCaptures(t, []string{
+		queuedMessagesPane,
+		queuedMessagesPane,
+		queuedMessagesPane,
+		queuedMessagesPane,
+		repainted,
+	})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 2*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict != InputConsumptionPaneChanged {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionPaneChanged)
+	}
+	if got := captureCallCount(t, countPath); got < 5 {
+		t.Errorf("capture-pane called %d times, want the probe to keep watching past a slow start", got)
+	}
+}
+
+// An idle target whose composer is clean is inconclusive, never a strand. This
+// is the regression guard for the rejection of attempt 1 (gt-eigw).
+func TestWaitForInputConsumedIdleTargetIsInconclusive(t *testing.T) {
+	withFastConsumptionPolling(t)
+	fakeTmuxCaptures(t, []string{liveIdleCleanPane})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict == InputConsumptionNotConsumed {
+		t.Fatal("an idle target with a clean composer was reported as not consuming input")
+	}
+	if verdict != InputConsumptionInconclusive {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionInconclusive)
+	}
+}
+
+func TestWaitForInputConsumedRejectsEmptySession(t *testing.T) {
+	tm := NewTmuxWithSocket("gt-test-consumption")
+	verdict, err := tm.WaitForInputConsumed("  ", time.Second)
+	if err == nil {
+		t.Fatal("expected an error for an empty session name")
+	}
+	if verdict != InputConsumptionUnknown {
+		t.Errorf("verdict = %s, want %s", verdict, InputConsumptionUnknown)
 	}
 }

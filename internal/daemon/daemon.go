@@ -103,6 +103,12 @@ type Daemon struct {
 	// in-process (gt-fo2k). Lazily created; safe for concurrent use.
 	scripts     *scriptRunner
 	scriptsOnce sync.Once
+
+	// consumption rate-limits the daemon's "alive but consuming no input"
+	// escalation to one per session per interval (gt-eigw). Lazily created;
+	// safe for concurrent use.
+	consumption     *consumptionEscalator
+	consumptionOnce sync.Once
 	// findDogFn overrides dog selection in tests; nil uses the real pack.
 	findDogFn func() *dog.Dog
 
@@ -1971,6 +1977,10 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 		if err == witness.ErrAlreadyRunning {
 			// Already running - this is the expected case
 			d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
+			// "Running" is decided by session and process existence, which a
+			// session that consumes no input also satisfies. Probe it, so a
+			// wedged witness is not skipped indefinitely (gt-eigw).
+			d.probeRunningWitness(rigName)
 			return
 		}
 		d.logger.Printf("Error starting witness for %s: %v", rigName, err)
@@ -2065,6 +2075,10 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			// Already running - this is the expected case when fix is working
 			d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
+			// The check above cannot see a session that is alive but consuming
+			// no input -- exactly the state be-refinery was in for ~15 minutes
+			// while three MRs aged behind it (gt-eigw). Probe it.
+			d.probeRunningRefinery(rigName)
 			return
 		}
 		if errors.Is(err, refinery.ErrSafetyStopped) {
