@@ -19,6 +19,14 @@ import (
 // waits the holder out and retries a bounded number of times before it reports
 // anything, and writes every wait to the verify log and the polecat's pane so
 // the delay is attributable rather than looking like a hung agent (gt-hkhu).
+//
+// gt-taoz: the retry below no longer fires for this town's own lint_command.
+// .golangci.yml sets run.allow-serial-runners, which makes a contended
+// golangci-lint wait for the module lock inside the lint instead of failing,
+// and the Makefile's lint target — plus the refinery's batch gate, which chains
+// it verbatim — now inherit that. The branch stays for the callers that cannot
+// see that config: a rig whose lint_command is a bare `golangci-lint run`, or
+// any lint_command run in a repo that has not adopted the setting.
 const lintLockContentionMarker = "parallel golangci-lint is running"
 
 // lintLockRetryDelay is how long the gate waits before each retry of a
