@@ -202,6 +202,31 @@ const EnvAgentReady = "GT_AGENT_READY"
 // test that deliberately needs the live/default tmux socket. See gt-yav3.
 const AllowLiveTmuxEnv = "BEADS_TEST_ALLOW_LIVE_TMUX"
 
+// refuseLiveSessionCreate fails a create that would land on the tmux server the
+// test process itself runs inside, where the session reads as a phantom polecat
+// (gt-2bj). Creation rather than NewTmux, so tests that only read keep working
+// without a harness.
+func (t *Tmux) refuseLiveSessionCreate() error {
+	if !testing.Testing() || os.Getenv(AllowLiveTmuxEnv) == "1" {
+		return nil
+	}
+	live := SocketFromEnv()
+	if live == "" {
+		return nil
+	}
+	// An empty socketName is not the default server: tmux honors $TMUX ahead of
+	// it, so the two both resolve to the server this process runs inside.
+	if t.socketName != "" && t.socketName != live {
+		return nil
+	}
+	return fmt.Errorf(
+		"tmux: refusing to create a session on %q — a test binary inheriting $TMUX resolves "+
+			"to the live tmux server this process runs inside (gt-2bj); route the test through "+
+			"the hermetic harness (internal/testutil) or an explicit "+
+			"tmux.NewTmuxWithSocket(\"gt-test-...\"), or set %s=1 to override",
+		live, AllowLiveTmuxEnv)
+}
+
 // NewTmux creates a new Tmux wrapper using the initialized town socket.
 // Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
 // Empty socket means use the default tmux server.
@@ -304,6 +329,9 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 }
 
 func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
+	if err := t.refuseLiveSessionCreate(); err != nil {
+		return err
+	}
 	if err := t.ensureNewSessionSocketSafe(); err != nil {
 		return err
 	}
