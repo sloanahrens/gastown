@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lintlock"
 )
 
 // initVerifyTestGoRepo builds a tiny Go module with two packages (pkga,
@@ -83,9 +85,9 @@ func stubVerifyGate(
 // seconds.
 func stubLintLockRetryDelay(t *testing.T, delays ...time.Duration) {
 	t.Helper()
-	prev := lintLockRetryDelay
-	lintLockRetryDelay = delays
-	t.Cleanup(func() { lintLockRetryDelay = prev })
+	prev := lintlock.RetryDelay
+	lintlock.RetryDelay = delays
+	t.Cleanup(func() { lintlock.RetryDelay = prev })
 }
 
 // stubVerifyProgress shortens the gate's progress interval so a test can
@@ -302,16 +304,20 @@ func runGitOut(t *testing.T, dir string, args ...string) string {
 
 // TestLintFailureDetail pins what a failed lint attempt is allowed to tell the
 // polecat. Only a lint that ran to completion may ask for findings to be fixed;
-// lock contention the retries already proved, and a budget that ran out while
-// the lint was still going (gt-taoz: run.allow-serial-runners makes a contended
-// golangci-lint block on the lock rather than exit with the marker), both
-// linted nothing (gt-xsty).
+// lock contention, a lint that stopped at golangci-lint's own timeout, and a
+// budget that ran out while the lint was still going (gt-taoz:
+// run.allow-serial-runners makes a contended golangci-lint block on the lock
+// rather than exit with the marker) all linted nothing (gt-xsty).
+//
+// The verdicts come from the final attempt rather than from a retry count, so a
+// lint that contended once and then reported a real finding is sent back as a
+// finding (gt-ijqw, om-gate attempt 1 major).
 func TestLintFailureDetail(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name          string
-		retries       int
+		outcome       lintlock.Outcome
 		budgetExpired bool
 		want          string
 		notWant       string
@@ -323,19 +329,26 @@ func TestLintFailureDetail(t *testing.T) {
 		},
 		{
 			name:    "lock contention the retries already proved",
-			retries: 2,
+			outcome: lintlock.Outcome{Err: errors.New("exit 2"), Waits: 2, Contended: true, Unfinished: true},
 			want:    "held the lock across 2 retries",
 			notWant: "fix the lint findings",
 		},
 		{
+			name:    "golangci-lint's own timeout",
+			outcome: lintlock.Outcome{Err: errors.New("exit 1"), Unfinished: true},
+			want:    "stopped without reporting findings",
+			notWant: "fix the lint findings",
+		},
+		{
 			name:          "the budget ran out while the lint was still going",
+			outcome:       lintlock.Outcome{Err: errors.New("signal: killed")},
 			budgetExpired: true,
 			want:          "killed at its 1m budget without finishing",
 			notWant:       "fix the lint findings",
 		},
 		{
 			name:          "both: contention is the more specific story",
-			retries:       2,
+			outcome:       lintlock.Outcome{Err: errors.New("exit 2"), Waits: 2, Contended: true, Unfinished: true},
 			budgetExpired: true,
 			want:          "held the lock across 2 retries",
 			notWant:       "fix the lint findings",
@@ -344,12 +357,12 @@ func TestLintFailureDetail(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := lintFailureDetail(tc.retries, tc.budgetExpired, time.Minute)
+			got := lintFailureDetail(tc.outcome, tc.budgetExpired, time.Minute)
 			if !strings.Contains(got, tc.want) {
-				t.Errorf("lintFailureDetail(%d, %v) = %q, want it to contain %q", tc.retries, tc.budgetExpired, got, tc.want)
+				t.Errorf("lintFailureDetail(%+v, %v) = %q, want it to contain %q", tc.outcome, tc.budgetExpired, got, tc.want)
 			}
 			if strings.Contains(got, tc.notWant) {
-				t.Errorf("lintFailureDetail(%d, %v) = %q, must not contain %q", tc.retries, tc.budgetExpired, got, tc.notWant)
+				t.Errorf("lintFailureDetail(%+v, %v) = %q, must not contain %q", tc.outcome, tc.budgetExpired, got, tc.notWant)
 			}
 		})
 	}

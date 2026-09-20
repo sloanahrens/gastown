@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lintlock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -295,17 +296,17 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
 		ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
 		var got preVerificationGateOutcome
-		runGate := func() lintAttempt {
+		runGate := func() lintlock.Attempt {
 			from := fileSize(logFile)
 			got = runPreVerificationGate(ctx, worktree, ng.cmd, logFile)
-			return lintAttempt{err: got.err, output: readLogFrom(logPath, from)}
+			return lintlock.Attempt{Err: got.err, Output: readLogFrom(logPath, from)}
 		}
 		if ng.name == "lint" {
 			// gt-xsty: lint is the only gate with a cross-process lock
 			// (golangci-lint's), so a concurrent lint is waited out rather
 			// than costing the submission its pre-verified stamp. This gate's
 			// own 10m bound is the retry budget.
-			_ = retryLintLockContention(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
+			_ = lintlock.Retry(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
 				fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
 			})
 		} else {
