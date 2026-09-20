@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -37,20 +38,47 @@ func (o dsnOpts) queryString() string {
 	return strings.Join(parts, "&")
 }
 
-// localDoltSocketPath returns Dolt's default unix socket path for a given
-// port if a unix socket is currently accepting connections at that path;
-// otherwise returns "". Mirrors the path-derivation logic already in this
-// package (see internal/doltserver/doltserver.go cleanStaleDoltSocket):
-// Dolt listens on /tmp/mysql.sock on port 3306, /tmp/mysql.{port}.sock for
-// any other port.
+// doltSocketDialTimeout bounds a single connect attempt against the socket,
+// and doltSocketDialAttempts bounds how many times a *timed out* attempt is
+// retried. A live unix socket accepts in microseconds — a timeout means this
+// process was descheduled, not that Dolt is absent. Retrying gives the
+// scheduler another chance instead of silently demoting a live socket to TCP
+// on a loaded host, which is itself a production bug: the caller then pays a
+// TIME_WAIT entry per close, the very thing the socket transport exists to
+// avoid (gt-hvzy.3 / gt-bzkt).
 //
-// Declared as a var (not const) so unit tests can swap it for a temp-dir
-// socket without depending on a real Dolt server.
-var localDoltSocketPath = func(port int) string {
-	p := "/tmp/mysql.sock"
-	if port != 0 && port != 3306 {
-		p = fmt.Sprintf("/tmp/mysql.%d.sock", port)
+// Only timeouts are retried. ECONNREFUSED / ENOENT mean the socket file is
+// stale, which is the common case on a box with no Dolt running; those return
+// immediately so the probe stays cheap.
+const (
+	doltSocketDialTimeout  = 100 * time.Millisecond
+	doltSocketDialAttempts = 3
+)
+
+// doltSocketDial performs the connect. Declared as a var so the retry policy
+// above can be asserted deterministically (attempt count on timeout vs.
+// refusal) without inducing real scheduler starvation in a test.
+var doltSocketDial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout(network, addr, timeout)
+}
+
+// doltSocketPathForPort derives Dolt's default unix socket path for a port.
+// Mirrors the path-derivation logic already in this package (see
+// internal/doltserver/doltserver.go cleanStaleDoltSocket): Dolt listens on
+// /tmp/mysql.sock on port 3306, /tmp/mysql.{port}.sock for any other port.
+func doltSocketPathForPort(port int) string {
+	if port == 0 || port == 3306 {
+		return "/tmp/mysql.sock"
 	}
+	return fmt.Sprintf("/tmp/mysql.%d.sock", port)
+}
+
+// probeDoltSocket returns p (the path of a live unix socket accepting
+// connections) or "" if nothing is listening there.
+//
+// Separated from path derivation so tests can point the probe at a temp-dir
+// socket and assert its retry policy directly, without a real Dolt server.
+func probeDoltSocket(p string) string {
 	info, err := os.Stat(p)
 	if err != nil {
 		return ""
@@ -58,12 +86,30 @@ var localDoltSocketPath = func(port int) string {
 	if info.Mode()&os.ModeSocket == 0 {
 		return ""
 	}
-	conn, err := net.DialTimeout("unix", p, 100*time.Millisecond)
-	if err != nil {
-		return ""
+	for attempt := 0; attempt < doltSocketDialAttempts; attempt++ {
+		conn, err := doltSocketDial("unix", p, doltSocketDialTimeout)
+		if err == nil {
+			_ = conn.Close()
+			return p
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			// Definitively refused or gone: the socket file is stale.
+			// Retrying cannot help, and the caller must fall back to TCP.
+			return ""
+		}
 	}
-	_ = conn.Close()
-	return p
+	return ""
+}
+
+// localDoltSocketPath returns Dolt's default unix socket path for a given
+// port if a unix socket is currently accepting connections at that path;
+// otherwise returns "".
+//
+// Declared as a var (not const) so unit tests can swap it for a temp-dir
+// socket without depending on a real Dolt server.
+var localDoltSocketPath = func(port int) string {
+	return probeDoltSocket(doltSocketPathForPort(port))
 }
 
 func formatDoltDSN(user, network, address, dbName string, opts dsnOpts) string {

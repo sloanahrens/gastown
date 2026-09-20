@@ -5510,9 +5510,13 @@ func TestBuildStartupCommand_SetsGTProcessNames(t *testing.T) {
 // agentOverride is respected even when findTownRootFromCwd fails.
 // This is a regression test for the bug where `gt deacon start --agent codex`
 // would still launch Claude if run from outside the town directory.
+//
+// Must NOT be t.Parallel(): it resets the process-global agent registry and
+// calls os.Chdir, both of which are process-wide state that parallel siblings
+// such as TestGetSessionIDEnvVar read (gt-hvzy.3 / gt-5v82).
 func TestBuildStartupCommandWithAgentOverride_UsesOverrideWhenNoTownRoot(t *testing.T) {
-	t.Parallel()
 	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
 
 	// Change to a directory that is definitely NOT in a Gas Town workspace
 	// by using a temp directory with no mayor/town.json
