@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Factory Worker API
 
 Design for the API boundary between Gas Town and AI agent runtimes.

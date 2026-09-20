@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Ledger Export Triggers
 
 > **Status**: Design — addresses gt-ayk

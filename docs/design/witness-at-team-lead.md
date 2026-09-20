@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Witness AT Team Lead: Implementation Spec
 
 > **Status: Future architecture — NOT YET IMPLEMENTED**

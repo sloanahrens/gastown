@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Abandoned: unknown. Not maintained.
+
 # Overnight-watch fixes: implementation plan
 
 > **For agentic workers:** This plan is executed by the town. Phase 0 is applied by the operator session by hand. Every other task becomes one rig bead (gt- or om-) with the task text as its description; the polecat that takes it follows mol-polecat-work (TDD, `make lint`, `GOFLAGS=-p=8 make test`, `gt done`). Steps use checkbox syntax for tracking.

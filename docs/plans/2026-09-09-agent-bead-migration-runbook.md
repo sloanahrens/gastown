@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Merged in: gt-7vy. Not maintained.
+
 # Agent-bead migration — Task 6 runbook (2026-09-09)
 
 Epic gt-a6g · Task bead gt-7vy · Spec `2026-09-09-agent-bead-migration-design.md` · Plan `2026-09-09-agent-bead-migration-plan.md`

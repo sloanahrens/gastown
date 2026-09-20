@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Merged in: gt-a6g. Not maintained.
+
 # Agent-Bead Migration Completion Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

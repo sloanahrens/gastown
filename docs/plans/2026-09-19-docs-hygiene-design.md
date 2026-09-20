@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Superseded by: gt-nj23 (epic). Not maintained.
+
 # Docs and comments hygiene: one standard, a gate, and a weekly audit
 
 Date: 2026-09-19. Epic: gt-nj23. Decisions were grilled and approved by Sloan on 2026-09-19 in the operator session; this document is the record.

@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Agent API Touch-Point Inventory
 
 Complete catalog of all GT↔agent integration points, mapped to source code

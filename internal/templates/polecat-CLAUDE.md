@@ -299,7 +299,7 @@ Your work goes through the merge queue:
 
 ## Self-Managed Session Lifecycle
 
-> See [Polecat Lifecycle](docs/polecat-lifecycle.md) for the full three-layer architecture.
+> See [Polecat Lifecycle](docs/concepts/polecat-lifecycle.md) for the full three-layer architecture.
 
 **You own your session cadence.** The Witness monitors but doesn't force recycles.
 

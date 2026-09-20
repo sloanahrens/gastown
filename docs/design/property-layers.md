@@ -359,7 +359,7 @@ bd update role-deacon --add-label=patrol:muted --remove-label=patrol:active
 
 *Events are the source of truth. Labels are the cache.*
 
-For Boot triage and degraded mode details, see [Watchdog Chain](watchdog-chain.md).
+For Boot triage and degraded mode details, see [Watchdog Chain](dog-infrastructure.md).
 
 ## Role Directives and Formula Overlays
 

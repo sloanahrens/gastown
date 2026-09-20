@@ -1,10 +1,12 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Model-Aware Molecule Constraints
 
 > Plan for adding model-specific constraints to molecule steps with subscription-aware routing.
 
 **Status**: In Progress
 **Owner**: Design
-**Related**: [molecules.md](../concepts/molecules.md) | [agent-provider-interface.md](agent-provider-interface.md)
+**Related**: [molecules.md](../concepts/molecules.md) | [agent-provider-integration.md](../agent-provider-integration.md)
 
 ---
 

@@ -1,3 +1,5 @@
+> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+
 # Mol Mall Design
 
 > **Status: Vision document** — Phase 1 (local formulas) exists. Phases 2-5 (registry, publishing, federation) are not implemented.
