@@ -24,8 +24,8 @@ const (
 	// memoryInjectMaxChars bounds the whole "# Agent Memories" section. The
 	// per-entry cap alone would still let a large enough corpus crowd out the
 	// rest of prime, and this corpus only grows, so the section as a whole is
-	// capped too.
-	memoryInjectMaxChars = 12000
+	// capped too. Reduced from 12000 to 3000 to fit the 9000-char hook budget.
+	memoryInjectMaxChars = 3000
 	// memoryExampleMaxChars bounds the example key echoed in the footer, so the
 	// fixed trailer cannot grow with a pathological key.
 	memoryExampleMaxChars = 60
@@ -39,11 +39,13 @@ type memoryEntry struct {
 }
 
 // collectMemories groups the kv store's memories by type, each group sorted by
-// key so prime output is stable across sessions.
+// key so prime output is stable across sessions. Accepts both gt. and memory.
+// prefixes for keys.
 func collectMemories(kvs map[string]string) map[string][]memoryEntry {
 	grouped := make(map[string][]memoryEntry)
 	for k, v := range kvs {
-		if !strings.HasPrefix(k, memoryKeyPrefix) {
+		// Accept both gt.* and memory.* prefixes
+		if !strings.HasPrefix(k, memoryKeyPrefix) && !strings.HasPrefix(k, "memory.") {
 			continue
 		}
 		memType, shortKey := parseMemoryKey(k)

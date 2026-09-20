@@ -298,7 +298,12 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
 		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
 		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
-		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(cwd) }) },
+		memories: func() string {
+			if shouldRenderMemories(string(ctx.Role)) {
+				return captureOutput(func() { runPrimeMemoryInject(string(ctx.Role), cwd) })
+			}
+			return ""
+		},
 		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
 		startup: func() string {
 			if primeContinuationMode {
@@ -634,17 +639,22 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 // runPrime renders the two as separate payload sections; this wrapper keeps
 // the combined behavior for callers and tests.
 func runPrimeExternalTools(ctx RoleContext, cwd string) {
-	runPrimeMemoryInject(cwd)
+	runPrimeMemoryInject(string(ctx.Role), cwd)
 	runPrimeMailInject(ctx, cwd)
 }
 
-// runPrimeMemoryInject renders the memory index section (skipped in dry-run).
-func runPrimeMemoryInject(cwd string) {
+// runPrimeMemoryInject renders the memory index section (skipped in dry-run or
+// for patrol roles that don't need memories).
+func runPrimeMemoryInject(role, cwd string) {
 	if primeDryRun {
 		explain(true, "memory injection: skipped in dry-run mode")
 		return
 	}
-	runMemoryInject(cwd)
+	if shouldRenderMemories(role) {
+		runMemoryInject(cwd)
+	} else {
+		explain(true, fmt.Sprintf("memory injection: skipped for role %s (memories only for mayor/crew)", role))
+	}
 }
 
 // runPrimeMailInject renders pending mail (skipped in dry-run and for patrol roles).
@@ -660,9 +670,23 @@ func runPrimeMailInject(ctx RoleContext, cwd string) {
 	runMailCheckInject(cwd)
 }
 
+// shouldSkipStartupMailInject returns true if the role is a patrol role that
+// should not receive mail injection during prime.
 func shouldSkipStartupMailInject(role string) bool {
 	switch strings.ToLower(role) {
 	case string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot):
+		return true
+	default:
+		return false
+	}
+}
+
+// shouldRenderMemories returns true if the role should see the agent memories
+// index in prime output. Only mayor and crew get memories; patrol roles skip
+// this section since formulas carry their rules.
+func shouldRenderMemories(role string) bool {
+	switch strings.ToLower(role) {
+	case string(RoleMayor), "crew":
 		return true
 	default:
 		return false

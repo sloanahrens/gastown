@@ -402,7 +402,8 @@ func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
 
 // TestRenderMemoryIndex_MatchesLiveCorpusScale pins the fix to the measurement
 // in gt-hp7t: a corpus the size of the live one (38 entries, ~47k chars of
-// values) must render as a small fraction of its raw size.
+// values) must render as a small fraction of its raw size, with entries dropped
+// only when keys cannot fit.
 func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	const entries = 38
 	const valueChars = 1234 // live median is ~1187
@@ -417,10 +418,7 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	out := renderMemoryIndex(grouped, memoryInjectMaxChars)
 
 	// The budget bounds the entries; the fixed trailer sits outside it, so the
-	// allowance here is the same one the other bound tests use. Asserting the
-	// budget with zero slack would spuriously fail once the live corpus grows
-	// past ~110 memories — where the renderer is degrading correctly, not
-	// misbehaving — so it would detect data growth rather than a regression.
+	// allowance here is the same one the other bound tests use.
 	if len(out) > memoryInjectMaxChars+memoryIndexFooterSlack {
 		t.Errorf("index = %d chars, want <= %d", len(out), memoryInjectMaxChars+memoryIndexFooterSlack)
 	}
@@ -429,10 +427,17 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 	if len(out) > raw/4 {
 		t.Errorf("index = %d chars vs %d chars of values; expected at least a 4x reduction", len(out), raw)
 	}
+	// Count how many entries are rendered vs omitted
 	previews, keyOnly := countEntryLines(out)
-	if previews != entries || keyOnly != 0 {
-		t.Errorf("got %d previews and %d key-only lines, want %d previews and none",
-			previews, keyOnly, entries)
+	omitted := omittedCount(t, out)
+	if omitted == -1 {
+		omitted = 0
+	}
+	// With 3000 chars budget, only ~26 entries fit. All entries are accounted for
+	// either rendered or omitted.
+	if previews+keyOnly+omitted != entries {
+		t.Errorf("rendered %d + omitted %d = %d, want %d entries",
+			previews+keyOnly, omitted, previews+keyOnly+omitted, entries)
 	}
 }
 

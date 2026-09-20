@@ -114,9 +114,16 @@ func runRemember(cmd *cobra.Command, args []string) error {
 }
 
 // parseMemoryKey extracts the type and short key from a full kv key.
-// Handles both typed keys (memory.<type>.<key>) and legacy keys (memory.<key>).
+// Handles both typed keys (gt.<type>.<key> or memory.<type>.<key>) and
+// legacy keys (gt.<key> or memory.<key>).
 func parseMemoryKey(kvKey string) (memType, shortKey string) {
-	rest := strings.TrimPrefix(kvKey, memoryKeyPrefix)
+	// Accept both gt. and memory. prefixes
+	prefix := memoryKeyPrefix // "gt."
+	if strings.HasPrefix(kvKey, "memory.") {
+		prefix = "memory."
+	}
+
+	rest := strings.TrimPrefix(kvKey, prefix)
 	if rest == "" {
 		return "general", ""
 	}
