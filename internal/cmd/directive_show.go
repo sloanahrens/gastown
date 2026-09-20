@@ -37,7 +37,7 @@ func runDirectiveShow(cmd *cobra.Command, args []string) error {
 
 	// Validate role
 	if !isValidRole(role) {
-		return fmt.Errorf("unknown role %q — valid roles: %s", role, strings.Join(config.AllRoles(), ", "))
+		return fmt.Errorf("unknown role %q — valid names: %s", role, knownRolesHelp())
 	}
 
 	townRoot, rigName, err := resolveDirectiveContext(directiveShowRig)
@@ -45,42 +45,24 @@ func runDirectiveShow(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	townPath := filepath.Join(townRoot, "directives", role+".md")
-	rigPath := ""
-	if rigName != "" {
-		rigPath = filepath.Join(townRoot, rigName, "directives", role+".md")
-	}
-
-	content := config.LoadRoleDirective(role, townRoot, rigName)
-	if content == "" {
+	sources := config.RoleDirectiveSources(role, townRoot, rigName)
+	if len(sources) == 0 {
 		fmt.Printf("No directive found for role %q\n", role)
-		fmt.Printf("  Checked: %s\n", townPath)
-		if rigPath != "" {
-			fmt.Printf("  Checked: %s\n", rigPath)
+		fmt.Printf("  Checked: %s\n", filepath.Join(townRoot, "directives", role+".md"))
+		if rigName != "" {
+			fmt.Printf("  Checked: %s\n", filepath.Join(townRoot, rigName, "directives", role+".md"))
 		}
+		fmt.Printf("  Also consulted: the %s.md files at both levels\n", config.SharedDirectiveName)
 		fmt.Println("\nUse 'gt directive edit' to create one.")
 		return nil
 	}
 
-	// Determine sources
-	hasTown := fileHasContent(townPath)
-	hasRig := rigPath != "" && fileHasContent(rigPath)
-
-	// Print source annotation
-	switch {
-	case hasTown && hasRig:
-		fmt.Printf("# Directive: %s (town + rig:%s)\n", role, rigName)
-		fmt.Printf("# Town: %s\n", townPath)
-		fmt.Printf("# Rig:  %s\n", rigPath)
-	case hasRig:
-		fmt.Printf("# Directive: %s (rig:%s)\n", role, rigName)
-		fmt.Printf("# Source: %s\n", rigPath)
-	default:
-		fmt.Printf("# Directive: %s (town)\n", role)
-		fmt.Printf("# Source: %s\n", townPath)
+	fmt.Printf("# Directive: %s\n", role)
+	for _, path := range sources {
+		fmt.Printf("# Source: %s\n", path)
 	}
 	fmt.Println()
-	fmt.Println(content)
+	fmt.Println(config.LoadRoleDirective(role, townRoot, rigName))
 
 	return nil
 }
@@ -103,14 +85,18 @@ func resolveDirectiveContext(explicitRig string) (townRoot, rigName string, err 
 	return townRoot, rigName, nil
 }
 
-// isValidRole checks if a role name is in the known roles list.
+// isValidRole reports whether role can name a directive file: a known agent
+// role, or the shared name that every role loads.
 func isValidRole(role string) bool {
-	for _, r := range config.AllRoles() {
-		if r == role {
-			return true
-		}
-	}
-	return false
+	return role == config.SharedDirectiveName || config.IsKnownRole(role)
+}
+
+// knownRolesHelp lists the names a directive file may take.
+func knownRolesHelp() string {
+	roles := make([]string, 0, len(config.AllRoles())+1)
+	roles = append(roles, config.SharedDirectiveName)
+	roles = append(roles, config.AllRoles()...)
+	return strings.Join(roles, ", ")
 }
 
 // fileHasContent returns true if the file exists and has non-whitespace content.

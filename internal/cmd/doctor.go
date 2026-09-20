@@ -98,6 +98,9 @@ Lifecycle checks (fixable):
 Formula overlay checks (fixable):
   - overlay-health           Check formula overlay step IDs are valid (fixable)
 
+Directive checks:
+  - unused-directives        Detect directive files not named for an agent role
+
 Migration checks:
   - town-claude-md           Check town-root CLAUDE.md matches embedded version (fixable)
 
@@ -252,6 +255,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())
 	d.Register(doctor.NewOverlayHealthCheck())
+	d.Register(doctor.NewUnusedDirectiveCheck())
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewRigNameMismatchCheck())
 	d.Register(doctor.NewRigConfigSyncCheck())      // Check all registered rigs have config.json

@@ -339,13 +339,18 @@ before context files and handoff content. Operator policy that overrides formula
 instructions where they conflict.
 
 ```
+~/gt/directives/_common.md             # Town-level, every role
 ~/gt/directives/<role>.md              # Town-level (all rigs)
+~/gt/<rig>/directives/_common.md       # Rig-level, every role in that rig
 ~/gt/<rig>/directives/<role>.md        # Rig-level
 ```
 
-Both levels concatenate (rig content appears last and wins conflicts).
-Implemented in `internal/config/directives.go` (`LoadRoleDirective`),
-integrated via `outputRoleDirectives()` in `internal/cmd/prime_output.go`.
+Every file that exists concatenates, broadest first, so the most specific
+appears last and wins conflicts. A file named for no role loads for no one:
+`gt directive list` marks it `UNUSED (no such role)` and `gt doctor` warns.
+Implemented in `internal/config/directives.go` (`LoadRoleDirective`,
+`ScanDirectiveFiles`), integrated via `outputRoleDirectives()` in
+`internal/cmd/prime_output.go`.
 
 ### Formula Overlays
 

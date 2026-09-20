@@ -23,7 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependency-closure-based enforcement test requires every package whose tests
   can reach Dolt, beads, or `gt`/`bd` subprocesses to run under the harness.
 
+- **`_common.md`, a directive that every role loads** (gt-72kp) — policy that
+  is not role-specific, such as host-hygiene and testing norms, previously had
+  no home: it was either copied into each role's file or written to a filename
+  no role resolved, which is how two rig directives sat dead since creation.
+  `~/gt/directives/_common.md` and its rig-level twin now render for every
+  role, ahead of the role's own file so the role keeps the last word.
+
 ### Fixed
+
+- **A directive file named for no role is now reported instead of silently
+  ignored** (gt-72kp) — `config.LoadRoleDirective` reads `<name>.md` only for a
+  built-in role name, so `host-hygiene.md` and `testing.md` were listed by `gt
+  directive list` as roles `host-hygiene` and `testing` that no agent has, and
+  their content reached nobody. `gt directive list` marks such a file `UNUSED
+  (no such role)`, `gt doctor`'s new `unused-directives` check warns with the
+  path, and `gt prime` prints the same list for every role — including the ones
+  that have a directive of their own, since they are the ones able to fix it.
+  The check embeds `BaseCheck` and so cannot be auto-fixed: `gt doctor --fix`
+  never deletes a directive file, because a misnamed keeper is indistinguishable
+  from junk and the deletion would be town-wide and unrecoverable. A directory
+  that cannot be read yields `StatusSkipped`, not a false all-clear.
 
 - **`gt done`'s default test-verify gate no longer self-deadlocks** (gt-pnkd)
   — the gate that runs a polecat's changed packages before an MR bead is

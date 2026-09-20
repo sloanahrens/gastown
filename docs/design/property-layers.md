@@ -374,14 +374,21 @@ Per-role Markdown files that modify agent behavior at prime time:
 SYSTEM LAYER:   Embedded role template (compiled in)
                         │ if directive exists
                         ▼
-TOWN LAYER:     ~/gt/directives/<role>.md
+TOWN LAYER:     ~/gt/directives/_common.md      (every role)
+                ~/gt/directives/<role>.md
                         │ concatenated with
                         ▼
-RIG LAYER:      ~/gt/<rig>/directives/<role>.md
+RIG LAYER:      ~/gt/<rig>/directives/_common.md (every role)
+                ~/gt/<rig>/directives/<role>.md
 ```
 
-Both town and rig directives concatenate. Rig content appears last and wins
-conflicts (same as CSS specificity — later rules override earlier ones).
+Every file that exists concatenates, broadest first: town `_common`, rig
+`_common`, town `<role>`, rig `<role>`. The most specific file appears last and
+wins conflicts (same as CSS specificity — later rules override earlier ones).
+
+A file named for no role loads for no one. `gt directive list` marks it
+`UNUSED (no such role)`, `gt doctor` warns, and `gt prime` prints the list;
+none of them delete it.
 
 ### Overlays (Formula Modifications)
 
