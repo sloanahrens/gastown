@@ -250,6 +250,9 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 			CallerContext: "epic-sling",
 			TownRoot:      townRoot,
 			BeadsDir:      filepath.Join(townRoot, ".beads"),
+
+			// Feeder replay of work already chosen for dispatch; see SlingParams.
+			SkipDuplicateCheck: true,
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), c.ID, err)

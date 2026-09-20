@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,12 @@ type SlingParams struct {
 	CallerContext    string // Identifies the caller for shutdown messages (e.g., "queue-dispatch", "batch-sling")
 	TownRoot         string
 	BeadsDir         string
+
+	// SkipDuplicateCheck disables the pre-dispatch content duplicate check
+	// (gt-mcq). Set by the bulk feeders — scheduler, convoy, and epic dispatch —
+	// which re-dispatch work the mayor already chose to sling: the check earns
+	// its cost when a bead is first picked up, not on every queue replay.
+	SkipDuplicateCheck bool
 }
 
 // SlingResult captures the outcome of executeSling for caller-level tracking.
@@ -185,6 +192,28 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	if isDeferredBead(info) && !explicitForce {
 		result.ErrMsg = "deferred"
 		return result, fmt.Errorf("bead %s is deferred (use --force to override)", params.BeadID)
+	}
+
+	// Content duplicate check (gt-mcq): refuse a bead whose named tests and
+	// files already appear on open or recently-closed work in this rig. Placed
+	// after the already-hooked guard so an idempotent re-sling of the same bead
+	// is not reported as a duplicate of itself, and skipped under --force, which
+	// is the documented override.
+	var dupCandidate *duplicateCandidate
+	if !params.SkipDuplicateCheck && !params.Force {
+		var matches []duplicateMatch
+		var checkErr error
+		dupCandidate, matches, checkErr = checkSlingDuplicates(townRoot, params.BeadID, info)
+		if checkErr != nil {
+			fmt.Printf("  %s %v\n", style.Dim.Render("Warning:"), checkErr)
+		}
+		if decision := decideSlingDuplicates(params.BeadID, matches); decision.Message != "" {
+			if decision.Blocked {
+				result.ErrMsg = errSlingDuplicateContent.Error()
+				return result, errors.New(decision.Message)
+			}
+			fmt.Print(decision.Message)
+		}
 	}
 
 	if params.RigName != "" {
@@ -422,6 +451,10 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	fmt.Printf("  %s Work attached to %s\n", style.Bold.Render("✓"), spawnInfo.PolecatName)
+
+	// The bead is dispatched now, so later dispatches in this process should
+	// see it in the pool even though their snapshot predates this hook.
+	noteSlingCandidateDispatched(townRoot, dupCandidate)
 
 	// 8. Log sling event
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))

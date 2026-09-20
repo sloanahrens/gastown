@@ -96,6 +96,8 @@ type beadInfo struct {
 	Status       string           `json:"status"`
 	Assignee     string           `json:"assignee"`
 	Description  string           `json:"description"`
+	Design       string           `json:"design,omitempty"`
+	Notes        string           `json:"notes,omitempty"`
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
 	IssueType    string           `json:"issue_type,omitempty"`

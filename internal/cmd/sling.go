@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -64,6 +65,14 @@ Spawning Options (when target is a rig):
   gt sling gp-abc greenplace --create               # Create polecat if missing
   gt sling gp-abc greenplace --force                # Ignore unread mail
   gt sling gp-abc greenplace --account work         # Use specific Claude account
+
+Content Duplicate Guard:
+  Before dispatch, the bead's named test functions and file paths are compared
+  against the rig's open and recently-closed beads. Two beads describing one
+  defect from different vantage points share no keywords, but they do name the
+  same tests. A shared test name refuses the sling; a shared file alone warns
+  and proceeds. --force overrides.
+  gt sling gt-abc greenplace --force                # Sling despite the overlap
 
 Natural Language Args:
   gt sling gt-abc --args "patch release"
@@ -713,6 +722,32 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Content duplicate check (gt-mcq): refuse a bead whose named tests and
+	// files already appear on open or recently-closed work in this rig. Placed
+	// after the already-hooked guard so an idempotent re-sling of the same bead
+	// is not reported as a duplicate of itself, and before resolveTarget so a
+	// refusal costs no side effects. --force is the documented override, and a
+	// dry run reports the overlap without refusing.
+	var dupCandidate *duplicateCandidate
+	if !force {
+		var matches []duplicateMatch
+		var checkErr error
+		dupCandidate, matches, checkErr = checkSlingDuplicates(townRoot, beadID, info)
+		if checkErr != nil {
+			fmt.Printf("%s %v\n", style.Dim.Render("Warning:"), checkErr)
+		}
+		decision := decideSlingDuplicates(beadID, matches)
+		switch {
+		case decision.Blocked && !slingDryRun:
+			return errors.New(decision.Message)
+		case decision.Blocked:
+			fmt.Printf("%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
+			fmt.Print(decision.Message)
+		case decision.Message != "":
+			fmt.Print(decision.Message)
+		}
+	}
+
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
 	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
 	// and scheduler dispatch already use the unified path. Single-sling is deferred
@@ -1066,6 +1101,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 	slingSteps.step("hook")
+
+	// The bead is dispatched now, so later dispatches in this process should
+	// see it in the pool even though their snapshot predates this hook.
+	noteSlingCandidateDispatched(townRoot, dupCandidate)
 
 	// Emit a propulsion signal if the target is the mayor.
 	// This allows the ACP propeller to react to hook changes event-driven.

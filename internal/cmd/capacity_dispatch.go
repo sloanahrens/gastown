@@ -729,6 +729,9 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         targetBeadsDir,
+
+		// Queue replay of work the mayor already slung; see SlingParams.
+		SkipDuplicateCheck: true,
 	}
 
 	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
