@@ -40,18 +40,84 @@ const shellPromptWaitTimeout = 30 * time.Second
 // shellPromptPollInterval is how often waitForShellPrompt re-checks the pane.
 const shellPromptPollInterval = 100 * time.Millisecond
 
+// serverReadyTimeout bounds the wait for the package's tmux server to answer a
+// command. The server outlives every test (TestMain's sentinel sees to that), so
+// hitting it means the socket is wedged, not merely busy.
+const serverReadyTimeout = 5 * time.Second
+
+// bindingLookupTimeout bounds the wait for a builtin key binding to read back
+// non-empty. See defaultKeyBinding for why the read is retried at all.
+const bindingLookupTimeout = 2 * time.Second
+
+// requireTestServer blocks until the package's tmux server answers commands.
+//
+// TestMain's sentinel keeps the server alive, but "alive" is not "answering":
+// the server can still be coming up when the first tests run, and a test that
+// killed the last session takes it down for the moment it takes tmux to start
+// it again. A command issued in either window fails with "server exited
+// unexpectedly" rather than doing what it was asked.
+//
+// Skips rather than fails when the server never answers: an absent server is an
+// environment fault, not a product defect — the policy waitForShellPrompt
+// follows.
+func requireTestServer(t *testing.T, tm *Tmux) {
+	t.Helper()
+	deadline := time.Now().Add(serverReadyTimeout)
+	for time.Now().Before(deadline) {
+		if _, err := tm.run("list-sessions", "-F", ""); err == nil {
+			return
+		}
+		time.Sleep(shellPromptPollInterval)
+	}
+	t.Skipf("tmux server on socket %q did not answer list-sessions within %s; the environment cannot supply this test's precondition (gt-rdvq)",
+		tm.socketName, serverReadyTimeout)
+}
+
+// defaultKeyBinding reads a builtin binding (prefix-n is next-window, say) from
+// the package's test server, waiting out the server rather than racing it.
+//
+// lookupKeyBinding reports a failed list-keys as "", and getKeyBinding folds
+// that into the same "" it uses for "no such binding" — so a single query made
+// in the window requireTestServer describes reads as "the binding is gone".
+// That is what TestGetKeyBinding_CapturesDefaultBinding saw under the full suite
+// at -p=8: "" for prefix-n, on a server whose builtin table had the binding all
+// along (gt-rdvq).
+//
+// Bounded, never a fixed sleep: the server answering is the precondition, and an
+// empty result after the bound is returned to the caller to judge, so a binding
+// that is genuinely absent still fails the test.
+func defaultKeyBinding(t *testing.T, tm *Tmux, table, key string) string {
+	t.Helper()
+	requireTestServer(t, tm)
+
+	deadline := time.Now().Add(bindingLookupTimeout)
+	for {
+		if got := tm.getKeyBinding(table, key); got != "" {
+			return got
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(shellPromptPollInterval)
+	}
+}
+
 // waitForShellPrompt blocks until the session's pane shows a shell prompt,
 // which is the precondition a number of tmux tests silently assume.
 //
-// tmux runs the user's login shell as the pane's initial process, so the first
-// prompt is not free: on a machine whose ~/.zshrc sources something slow
-// (nvm.sh and the node it pulls in, for instance) it took 4.4-5.4s to appear
-// in every new session (gt-32pv). Tests that start measuring before the prompt
-// is up are measuring shell startup rather than the code under test:
+// The prompt is not free to wait for: tmux runs a shell as the pane's initial
+// process, and a login shell that sources something slow (nvm.sh and the node it
+// pulls in, for instance) took 4.4-5.4s to reach its first prompt in every new
+// session (gt-n0jv). Tests that start measuring before the prompt is up are
+// measuring shell startup rather than the code under test:
 // AcceptWorkspaceTrustDialog and AcceptBypassPermissionsWarning both early-exit
 // on a prompt indicator, and sendEnterVerified decides whether Enter was
 // processed by comparing pane content before and after — none of that is
 // meaningful against a still-blank pane.
+//
+// TestMain pins a shell that reads no startup file on the test server, which
+// puts the prompt ~100ms out and makes this a barrier (gt-n0jv); the wait below
+// is what covers the tests that create their own server or another socket.
 //
 // Skips rather than fails when the prompt never appears: an absent shell prompt
 // is an environment fault, not a product defect.
@@ -3026,7 +3092,7 @@ func TestGetKeyBinding_CapturesDefaultBinding(t *testing.T) {
 	// This works without a running tmux server because list-keys
 	// returns builtin defaults. Skip if already a GT binding (e.g.,
 	// when running inside an active gastown session).
-	result := tm.getKeyBinding("prefix", "n")
+	result := defaultKeyBinding(t, tm, "prefix", "n")
 	if result == "" && tm.isGTBinding("prefix", "n") {
 		t.Skip("prefix-n is already a GT binding in this environment")
 	}
@@ -3039,7 +3105,7 @@ func TestGetKeyBinding_CapturesDefaultBindingWithArgs(t *testing.T) {
 	tm := newTestTmux(t)
 
 	// prefix-s is "choose-tree -Zs" by default — tests multi-word command parsing
-	result := tm.getKeyBinding("prefix", "s")
+	result := defaultKeyBinding(t, tm, "prefix", "s")
 	if !strings.Contains(result, "choose-tree") {
 		t.Errorf("expected binding to contain 'choose-tree', got %q", result)
 	}
