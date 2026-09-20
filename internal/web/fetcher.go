@@ -17,7 +17,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/cmd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
@@ -2124,4 +2123,56 @@ func (f *LiveConvoyFetcher) fetchLlamaServerSlots() (int, int) {
 	}
 
 	return busy, total
+}
+
+// poolSession is a polecat session for the local pool fetcher.
+type poolSession struct {
+	name    string
+	agent   string // GT_AGENT in the tmux session environment
+	created time.Time
+}
+
+// listPolecatSessions returns every live polecat session with its agent and
+// creation time. Polecats are identified by the GT_ROLE their session
+// carries ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on
+// the same server are not counted. GT_AGENT is written into the session
+// environment at spawn (SessionStartOptions.Agent / AgentEnv fallback).
+func (f *LiveConvoyFetcher) listPolecatSessions() ([]poolSession, error) {
+	// List all tmux sessions
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+
+	names := strings.TrimSpace(stdout.String())
+	if names == "" {
+		return nil, nil
+	}
+
+	var out []poolSession
+	for _, name := range strings.Split(names, "\n") {
+		if name == "" {
+			continue
+		}
+
+		// Get GT_ROLE environment variable
+		stdout, err = f.runTmuxCmd("show-environment", "-t", name, "GT_ROLE")
+		if err != nil {
+			continue
+		}
+		role := strings.TrimSpace(stdout.String())
+		if !strings.Contains(role, "/polecats/") {
+			continue
+		}
+
+		// Get GT_AGENT environment variable
+		stdout, err = f.runTmuxCmd("show-environment", "-t", name, "GT_AGENT")
+		if err != nil {
+			continue
+		}
+		agent := strings.TrimSpace(stdout.String())
+
+		out = append(out, poolSession{name: name, agent: agent, created: time.Now()})
+	}
+	return out, nil
 }
