@@ -32,6 +32,7 @@ type MockConvoyFetcher struct {
 	Mayor       *MayorStatus
 	Issues      []IssueRow
 	Activity    []ActivityRow
+	LocalPool   *LocalPoolData
 	Error       error
 }
 
@@ -89,6 +90,10 @@ func (m *MockConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 
 func (m *MockConvoyFetcher) FetchActivity() ([]ActivityRow, error) {
 	return m.Activity, nil
+}
+
+func (m *MockConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
+	return m.LocalPool, nil
 }
 
 func TestConvoyHandler_RendersTemplate(t *testing.T) {
@@ -1005,6 +1010,7 @@ type MockConvoyFetcherWithErrors struct {
 	Convoys         []ConvoyRow
 	MergeQueueError error
 	WorkersError    error
+	LocalPool       *LocalPoolData
 }
 
 func (m *MockConvoyFetcherWithErrors) FetchConvoys() ([]ConvoyRow, error) {
@@ -1061,6 +1067,10 @@ func (m *MockConvoyFetcherWithErrors) FetchIssues() ([]IssueRow, error) {
 
 func (m *MockConvoyFetcherWithErrors) FetchActivity() ([]ActivityRow, error) {
 	return nil, nil
+}
+
+func (m *MockConvoyFetcherWithErrors) FetchLocalPool() (*LocalPoolData, error) {
+	return m.LocalPool, nil
 }
 
 // TestConvoyHandler_TemplateErrorReturns500 verifies that template execution errors
@@ -1262,6 +1272,9 @@ func (m *CountingMockFetcher) FetchMayor() (*MayorStatus, error)    { return m.i
 func (m *CountingMockFetcher) FetchIssues() ([]IssueRow, error)     { return m.inner.FetchIssues() }
 func (m *CountingMockFetcher) FetchActivity() ([]ActivityRow, error) {
 	return m.inner.FetchActivity()
+}
+func (m *CountingMockFetcher) FetchLocalPool() (*LocalPoolData, error) {
+	return m.inner.FetchLocalPool()
 }
 
 func TestConvoyHandler_NonFatalErrors(t *testing.T) {

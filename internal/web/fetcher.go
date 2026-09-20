@@ -2101,7 +2101,7 @@ func (f *LiveConvoyFetcher) fetchLlamaServerSlots() (int, int) {
 		// Server is down or not reachable
 		return 0, 0
 	}
-	defer resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Parse JSON response
 	var slots []struct {
