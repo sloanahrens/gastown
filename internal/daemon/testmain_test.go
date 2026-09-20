@@ -16,11 +16,10 @@ import (
 // tripwire that fails the run if state leaks into a live town.
 //
 // WithDolt starts an ephemeral Dolt container for this package's tests.
-// convoy_manager_test.go calls setupTestStore which sets BEADS_TEST_MODE=1,
-// causing the beads SDK to create testdb_<hash> databases. By routing those
-// to an isolated container (via BEADS_DOLT_PORT), the databases are destroyed
-// when the container is terminated at cleanup — preventing orphan
-// accumulation in the shared production Dolt data dir.
+// BEADS_TEST_MODE=1 below makes the beads SDK create testdb_<hash> databases.
+// By routing those to an isolated container (via BEADS_DOLT_PORT), the
+// databases are destroyed when the container is terminated at cleanup —
+// preventing orphan accumulation in the shared production Dolt data dir.
 //
 // When Docker is unavailable, Dolt-needing tests self-skip via setupTestStore
 // → beadsdk.Open failure. Non-Dolt tests (e.g. boot_spawn_frequency_test.go)
@@ -31,6 +30,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "daemon TestMain: %v\n", err)
 		os.Exit(1)
 	}
+
+	// BEADS_TEST_MODE is process-wide rather than per-test-setenv so the
+	// store-backed tests stay eligible for t.Parallel (gt-fx3c): t.Setenv
+	// panics inside a parallel test, which pinned all 32 setupTestStore
+	// callers to serial execution. Setting it once here is sufficient
+	// because no daemon test calls testutil.HermeticTest, the only thing
+	// that re-scrubs BEADS_* mid-run.
+	_ = os.Setenv("BEADS_TEST_MODE", "1")
 
 	// Isolate tmux sessions on a package-specific socket.
 	// handler_test.go creates tmux.NewTmux() instances that query has-session;

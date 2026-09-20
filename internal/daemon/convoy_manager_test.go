@@ -18,9 +18,11 @@ import (
 
 // setupTestStore opens a real beads database for integration tests.
 // Skips if unavailable. Caller must run cleanup when done.
+//
+// BEADS_TEST_MODE is set once in TestMain, not here: t.Setenv would forbid
+// t.Parallel in every caller (gt-fx3c).
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
-	t.Setenv("BEADS_TEST_MODE", "1")
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	doltPath := filepath.Join(beadsDir, "dolt")
@@ -50,6 +52,7 @@ type scanTestOpts struct {
 type scanTestPaths struct {
 	binDir       string
 	townRoot     string
+	gtPath       string // absolute path to the mock gt binary
 	slingLogPath string // sling call log; absent if sling was never called
 	checkLogPath string // convoy check call log; absent if check was never called
 }
@@ -108,17 +111,18 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	return scanTestPaths{
 		binDir:       binDir,
 		townRoot:     townRoot,
+		gtPath:       filepath.Join(binDir, "gt"),
 		slingLogPath: slingLogPath,
 		checkLogPath: checkLogPath,
 	}
 }
 
 func TestEventPoll_DetectsCloseEvents(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -167,6 +171,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 }
 
 func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -207,6 +212,7 @@ func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
 }
 
 func TestManagerLifecycle_StartStop(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -226,9 +232,8 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -236,6 +241,7 @@ exit 0
 }
 
 func TestScanStranded_FeedsReadyIssues(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -245,7 +251,7 @@ func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	data, err := os.ReadFile(paths.slingLogPath)
@@ -259,6 +265,7 @@ func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 }
 
 func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -267,7 +274,7 @@ func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 		strandedJSON: `[{"id":"hq-empty1","title":"Empty","ready_count":0,"ready_issues":[]}]`,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	data, err := os.ReadFile(paths.checkLogPath)
@@ -280,6 +287,7 @@ func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 }
 
 func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -297,7 +305,7 @@ func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Convoy check must NOT have been called — grace period should protect it.
@@ -320,6 +328,7 @@ func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 }
 
 func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -332,7 +341,7 @@ func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 		strandedJSON: strandedJSON,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	data, err := os.ReadFile(paths.checkLogPath)
@@ -345,6 +354,7 @@ func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 }
 
 func TestScanStranded_NoStrandedConvoys(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -358,7 +368,7 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Negative: sling must not have been called
@@ -380,6 +390,7 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 }
 
 func TestScanStranded_DispatchFailure(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -398,7 +409,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	logMu.Lock()
@@ -427,6 +438,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 }
 
 func TestConvoyManager_DoubleStop_Idempotent(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -441,10 +453,9 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0"), 0755); err != nil {
 		t.Fatalf("write mock bd: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	townRoot := t.TempDir()
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -453,6 +464,7 @@ exit 0
 }
 
 func TestStart_DoubleCall_Guarded(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -476,7 +488,6 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logMu sync.Mutex
 	var logged []string
@@ -486,7 +497,7 @@ exit 0
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	// First Start should succeed
 	if err := m.Start(); err != nil {
@@ -527,6 +538,7 @@ exit 0
 }
 
 func TestEventPoll_LazyStoreOpening(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -583,6 +595,7 @@ func TestEventPoll_LazyStoreOpening(t *testing.T) {
 }
 
 func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
+	t.Parallel()
 	noop := func(string, ...interface{}) {}
 	m := NewConvoyManager("/tmp", noop, "gt", 0, nil, nil, nil)
 	if m.scanInterval != defaultStrandedScanInterval {
@@ -597,6 +610,7 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 }
 
 func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
+	t.Parallel()
 	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
 	var result []strandedConvoyInfo
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
@@ -620,6 +634,7 @@ func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
 }
 
 func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -645,14 +660,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -696,6 +710,7 @@ exit 0
 }
 
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -730,14 +745,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -780,6 +794,7 @@ exit 0
 }
 
 func TestFeedFirstReady_AllIssuesFail_LogsNoneDispatchable(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -805,14 +820,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -835,6 +849,7 @@ exit 0
 }
 
 func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -860,14 +875,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -895,6 +909,7 @@ exit 0
 }
 
 func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -925,6 +940,7 @@ exit 0
 }
 
 func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -955,6 +971,7 @@ exit 0
 }
 
 func TestScan_FindStrandedError_LogsAndContinues(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -997,6 +1014,7 @@ exit 0
 }
 
 func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1031,6 +1049,7 @@ func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
 }
 
 func TestFeedFirstReady_UnknownRig_Skips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1057,14 +1076,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1092,6 +1110,7 @@ exit 0
 }
 
 func TestFeedFirstReady_ParkedRig_Skips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1155,6 +1174,7 @@ exit 0
 }
 
 func TestFeedFirstReady_EmptyReadyIssues_NoOp(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1173,14 +1193,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1203,6 +1222,7 @@ exit 0
 }
 
 func TestFeedFirstReady_PassesDaemonActor(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1228,9 +1248,8 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-xprwe",
@@ -1260,7 +1279,7 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 		t.Skip("skipping on Windows")
 	}
 
-	townRoot, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var mu sync.Mutex
@@ -1269,7 +1288,7 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-agent1",
@@ -1311,7 +1330,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 		t.Skip("skipping on Windows")
 	}
 
-	townRoot, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var mu sync.Mutex
@@ -1320,7 +1339,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-noagent",
@@ -1352,6 +1371,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 }
 
 func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1408,14 +1428,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1451,6 +1470,7 @@ exit 0
 }
 
 func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1479,9 +1499,8 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1501,6 +1520,7 @@ exit 0
 }
 
 func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1515,7 +1535,7 @@ func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	if _, err := os.Stat(paths.slingLogPath); err == nil {
@@ -1536,6 +1556,7 @@ func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 }
 
 func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1545,7 +1566,7 @@ func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	data, err := os.ReadFile(paths.slingLogPath)
@@ -1558,6 +1579,7 @@ func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
 }
 
 func TestScan_ContextCancelled_MidIteration(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1612,7 +1634,6 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logMu sync.Mutex
 	var logged []string
@@ -1622,7 +1643,7 @@ exit 0
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
 
 	// Run scan in a goroutine and cancel context after a brief delay
 	done := make(chan struct{})
@@ -1658,6 +1679,7 @@ exit 0
 }
 
 func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1680,7 +1702,7 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Verify ready convoys were dispatched via sling
@@ -1726,6 +1748,7 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 // --- P0: Stop() closes lazily-opened stores ---
 
 func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1770,6 +1793,7 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 }
 
 func TestStop_ClosesMultipleStores(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1816,6 +1840,7 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 // --- P0: Multi-rig event poll ---
 
 func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1875,6 +1900,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 }
 
 func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1946,6 +1972,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 // --- P1: Parked rig skipping ---
 
 func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2027,6 +2054,7 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 }
 
 func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2075,6 +2103,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 // --- P2: High-water mark monotonicity ---
 
 func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2130,6 +2159,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 }
 
 func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2207,6 +2237,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 }
 
 func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2264,6 +2295,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 // TestPollAllStores_CrossStoreDedup verifies that a close event seen from
 // multiple stores is only processed once (GH #1798).
 func TestPollAllStores_CrossStoreDedup(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2316,6 +2348,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 }
 
 func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2389,6 +2422,7 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 }
 
 func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2423,7 +2457,6 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -2446,6 +2479,7 @@ exit 0
 // --- hq store nil guard ---
 
 func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2504,6 +2538,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 // TestRecoveryMode_SetOnPollError verifies that recoveryMode is set when
 // an event poll encounters an error (Dolt unavailable).
 func TestRecoveryMode_SetOnPollError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2543,6 +2578,7 @@ func TestRecoveryMode_SetOnPollError(t *testing.T) {
 // TestRecoveryMode_ClearedAfterSuccessfulScan verifies that a successful
 // scan() call clears recovery mode.
 func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2572,6 +2608,7 @@ func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
 // TestScanMu_PreventsConcurrentScans verifies that concurrent scan() calls
 // are serialized by scanMu (no duplicate convoy checks).
 func TestScanMu_PreventsConcurrentScans(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2614,6 +2651,7 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 // TestStartupSweep_RunsAfterDelay verifies that runStartupSweep calls scan()
 // after the startup delay.
 func TestStartupSweep_RunsAfterDelay(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2652,6 +2690,7 @@ func TestStartupSweep_RunsAfterDelay(t *testing.T) {
 // TestDoltRecoveryCallback_Fires verifies that the Dolt server manager fires
 // the recovery callback when transitioning from unhealthy to healthy.
 func TestDoltRecoveryCallback_Fires(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dsm := NewDoltServerManager(tmpDir, DefaultDoltServerConfig(tmpDir), func(string, ...interface{}) {})
 
@@ -2688,6 +2727,7 @@ func TestDoltRecoveryCallback_Fires(t *testing.T) {
 // TestDoltRecoveryCallback_NoFireWhenAlreadyHealthy verifies that the callback
 // does NOT fire when the signal file was not present (already healthy).
 func TestDoltRecoveryCallback_NoFireWhenAlreadyHealthy(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dsm := NewDoltServerManager(tmpDir, DefaultDoltServerConfig(tmpDir), func(string, ...interface{}) {})
 
@@ -2712,6 +2752,7 @@ func TestDoltRecoveryCallback_NoFireWhenAlreadyHealthy(t *testing.T) {
 // TestDoltRecoveryCallback_NilSafe verifies that clearUnhealthySignal does
 // not panic when no callback is registered.
 func TestDoltRecoveryCallback_NilSafe(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dsm := NewDoltServerManager(tmpDir, DefaultDoltServerConfig(tmpDir), func(string, ...interface{}) {})
 
@@ -2810,7 +2851,7 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 // feedTestRig sets up the minimal town fixture feedFirstReady needs: a routes
 // file mapping the gt- prefix to a rig, and a mock `gt` that records sling
 // invocations. Returns the town root, the sling log path, and the log sink.
-func feedTestRig(t *testing.T) (townRoot, slingLogPath string, logged *[]string) {
+func feedTestRig(t *testing.T) (townRoot, gtPath, slingLogPath string, logged *[]string) {
 	t.Helper()
 
 	binDir := t.TempDir()
@@ -2834,10 +2875,9 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	logged = &[]string{}
-	return townRoot, slingLogPath, logged
+	return townRoot, filepath.Join(binDir, "gt"), slingLogPath, logged
 }
 
 // withOriginBranches replaces the origin branch-listing seam for a test.
@@ -2859,7 +2899,7 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 		t.Skip("skipping on Windows")
 	}
 
-	townRoot, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) {
 		return []string{
 			"polecat/pearl/gt-stranded1+mu72g5cz",
@@ -2873,7 +2913,7 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -2919,7 +2959,7 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 		t.Skip("skipping on Windows")
 	}
 
-	townRoot, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	})
@@ -2927,7 +2967,7 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -2951,7 +2991,7 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 // one against an unreachable remote blocks the whole scan for the query
 // timeout.
 func TestOriginBranches_CachesPerScan(t *testing.T) {
-	townRoot, _, _ := feedTestRig(t)
+	townRoot, gtPath, _, _ := feedTestRig(t)
 
 	var calls int32
 	withOriginBranches(t, func(rigRoot string) ([]string, error) {
@@ -2959,7 +2999,7 @@ func TestOriginBranches_CachesPerScan(t *testing.T) {
 		return []string{"polecat/pearl/gt-issue1+mu72g5cz"}, nil
 	})
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
 
 	for i := 0; i < 5; i++ {
 		m.survivingBranchFor("gt", "gt-issue1")

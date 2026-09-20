@@ -13,6 +13,7 @@ type metadataWriter interface {
 }
 
 func TestCheckBeadsStoreCompatibility_AllowsMatchingVersion(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -31,6 +32,7 @@ func TestCheckBeadsStoreCompatibility_AllowsMatchingVersion(t *testing.T) {
 }
 
 func TestCheckBeadsStoreCompatibility_RejectsNewerWorkspaceVersion(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 

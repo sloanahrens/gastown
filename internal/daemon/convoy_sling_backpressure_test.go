@@ -20,7 +20,7 @@ const refusalStderr = "Error: spawning polecat: sling refused: gastown has 13 re
 // refuses to sling while refuseFlag exists and succeeds once it is removed.
 // Every invocation is appended to the sling log verbatim, so a test can prove
 // the feeder called nothing else on a deferred bead.
-func backpressureFeedRig(t *testing.T, refuseFlag string) (townRoot, slingLogPath string) {
+func backpressureFeedRig(t *testing.T, refuseFlag string) (townRoot, gtPath, slingLogPath string) {
 	t.Helper()
 
 	binDir := t.TempDir()
@@ -47,9 +47,7 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	return townRoot, slingLogPath
+	return townRoot, filepath.Join(binDir, "gt"), slingLogPath
 }
 
 // newBackpressureLogger collects the feeder's log lines.
@@ -73,13 +71,13 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
 		t.Fatalf("write refuse flag: %v", err)
 	}
-	townRoot, slingLogPath := backpressureFeedRig(t, refuseFlag)
+	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	})
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -142,13 +140,13 @@ func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
 		t.Fatalf("write refuse flag: %v", err)
 	}
-	townRoot, slingLogPath := backpressureFeedRig(t, refuseFlag)
+	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
 	withOriginBranches(t, func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	})
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -195,6 +193,7 @@ func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 // A false positive would swallow a real dispatch failure as a deferral, so the
 // parser must answer only for the refusal line.
 func TestSlingBackpressureReason(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
