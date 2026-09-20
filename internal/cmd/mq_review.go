@@ -30,12 +30,13 @@ var mqReviewCmd = &cobra.Command{
 	Long: `Run the om editorial gate against a merge request — the single invoker of om.
 
 Rehearses the MR onto its target (or reviews an already-rehearsed head with
---rehearsed), asserts the harness manifest version, invokes the rig's
-editorial gate script, classifies the outcome, retries once for transient
-failures, and on a verdict writes a git note (proof, refs/notes/om) and a
-receipt bead (aggregation). An approve verdict records
-editorial_reviewed_head on the MR bead; a verdict carrying major findings
-still gets follow-up beads filed even when it approves.
+--rehearsed), asserts the harness manifest version, refuses a diff that drops
+or rewrites an existing .om.json criterion unless the MR bead carries the
+rubric-retirement label, invokes the rig's editorial gate script, classifies
+the outcome, retries once for transient failures, and on a verdict writes a
+git note (proof, refs/notes/om) and a receipt bead (aggregation). An approve
+verdict records editorial_reviewed_head on the MR bead; a verdict carrying
+major findings still gets follow-up beads filed even when it approves.
 
 --timeout overrides the rig's .om.json backend timeout for this one review,
 for the case where a diff legitimately needs longer than the rig default
@@ -153,7 +154,10 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		// flag — see ReviewRequest.TimeoutSeconds.
 		TimeoutSeconds: mqReviewTimeout,
 		PriorFindings:  editorial.BuildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
-		Config:         editorialCfg,
+		// The MR bead is where a deliberate rubric retirement is marked —
+		// see editorial.RetirementLabel.
+		RubricRetirement: editorial.HasRetirementLabel(issue.Labels),
+		Config:           editorialCfg,
 	}
 
 	deps := editorial.Deps{
