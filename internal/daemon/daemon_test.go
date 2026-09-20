@@ -697,7 +697,7 @@ func TestDaemon_StartsManagerAndScanner(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
-	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil, nil)
+	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil, nil, nil)
 	if err := manager.Start(); err != nil {
 		t.Fatalf("manager Start: %v", err)
 	}
@@ -716,7 +716,7 @@ func TestDaemon_StopsManagerAndScanner(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
-	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil, nil)
+	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil, nil, nil)
 	if err := manager.Start(); err != nil {
 		t.Fatalf("manager Start: %v", err)
 	}

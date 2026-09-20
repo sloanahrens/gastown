@@ -149,7 +149,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -195,7 +195,7 @@ func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should NOT have logged any close detection
@@ -549,7 +549,7 @@ func TestEventPoll_LazyStoreOpening(t *testing.T) {
 	}
 
 	// Start with nil stores but with an opener — should NOT exit immediately
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil, nil, nil)
 
 	// Before any poll ticks, stores should be nil
 	if m.stores != nil {
@@ -1009,7 +1009,7 @@ func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
 	}
 
 	townRoot := t.TempDir()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil, nil, nil)
 
 	// Cancel the manager's context so GetAllEventsSince receives a cancelled context
 	m.cancel()
@@ -1125,7 +1125,7 @@ exit 0
 
 	// isRigParked returns true for "shippercrm"
 	parked := func(rig string) bool { return rig == "shippercrm" }
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, parked)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, parked, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-park1",
@@ -1415,7 +1415,7 @@ exit 0
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1481,7 +1481,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1741,7 +1741,7 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil, nil, nil)
 
 	// Simulate lazy opening (as runEventPoll does when stores are nil)
 	m.stores = m.openStores()
@@ -1788,7 +1788,7 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 	m.Stop()
 
 	// Both stores should have been closed
@@ -1857,7 +1857,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 		"shippercrm": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -1920,7 +1920,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -1998,7 +1998,7 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 		return rig == "shippercrm"
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, isParked)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, isParked, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2056,7 +2056,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 	alwaysParked := func(string) bool { return true }
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked)
+		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2102,7 +2102,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]beadsdk.Storage{"hq": store}, nil, nil, nil, nil)
 
 	// First poll: should detect our close event
 	m.seeded.Store(true)
@@ -2156,7 +2156,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]beadsdk.Storage{"hq": store}, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2246,7 +2246,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]beadsdk.Storage{"hq": store}, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2299,7 +2299,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2349,7 +2349,7 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 
 	// First poll: only hq has a close event
 	m.pollStoresSnapshot(m.stores)
@@ -2430,7 +2430,7 @@ exit 0
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2477,7 +2477,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2767,7 +2767,7 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 			}
 
 			before := time.Now()
-			m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+			m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil, nil, nil)
 
 			hadError := m.pollStoresSnapshot(m.stores)
 			after := time.Now()
