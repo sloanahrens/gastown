@@ -39,14 +39,19 @@ git note (proof, refs/notes/om) and a receipt bead (aggregation). An approve
 verdict records editorial_reviewed_head on the MR bead; a verdict carrying
 major findings still gets follow-up beads filed even when it approves.
 
-A head that already carries a recorded verdict for the same diff and the same
-deployed rubric is answered from that note without invoking om: the gate is an
-LLM, so a second invocation on an unchanged diff re-rolls a near-threshold
-score rather than measuring anything, and a caller free to re-roll can roll a
-defective diff until it clears the threshold (gt-bveg). --reroll re-invokes om
-deliberately; the note then records every attempt it has seen, so a re-roll
-leaves a trace instead of replacing the previous verdict. Before relying on
-that history, read Note.Attempts in internal/refinery/editorial/note.go.
+A diff that already carries a recorded verdict for the same deployed rubric is
+answered from that note without invoking om: the gate is an LLM, so a second
+invocation on an unchanged diff re-rolls a near-threshold score rather than
+measuring anything, and a caller free to re-roll can roll a defective diff
+until it clears the threshold (gt-bveg). The lookup is keyed on the diff's
+patch-id, not on the reviewed commit, because this command rehearses a fresh
+merge commit on every invocation — keying on that head left the guard inert
+on exactly the path it exists for (gt-qa2p). A reuse records the head the
+verdict was found on as the MR's editorial_reviewed_head, so the push
+precondition finds that note. --reroll re-invokes om deliberately; the note
+then records every attempt it has seen, so a re-roll leaves a trace instead
+of replacing the previous verdict. Before relying on that history, read
+Note.Attempts in internal/refinery/editorial/note.go.
 
 --timeout overrides the rig's .om.json backend timeout for this one review,
 for the case where a diff legitimately needs longer than the rig default
@@ -182,7 +187,7 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	return editorial.Run(context.Background(), req, deps), nil
 }
 
-// reusedSuffix marks output answered from a head's recorded verdict rather
+// reusedSuffix marks output answered from a diff's recorded verdict rather
 // than from a review run now. The exit code is the same either way, so this
 // line is the only thing separating "om approved this" from "om approved this
 // the first time it was asked" — a caller that cannot tell the two apart
@@ -191,7 +196,7 @@ func reusedSuffix(result editorial.ReviewResult) string {
 	if !result.Reused {
 		return ""
 	}
-	return " [recorded verdict reused: head unchanged, om not re-invoked — pass --reroll to re-review]"
+	return " [recorded verdict reused: same diff, om not re-invoked — pass --reroll to re-review]"
 }
 
 func printMQReviewResult(result editorial.ReviewResult) {

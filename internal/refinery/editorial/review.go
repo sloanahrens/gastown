@@ -64,7 +64,7 @@ type ReviewRequest struct {
 	Attempt       int
 	PriorFindings []PriorFinding
 
-	// Reroll re-reviews a head that already carries a recorded verdict,
+	// Reroll re-reviews a diff that already carries a recorded verdict,
 	// replacing it. False everywhere by default, including every batch
 	// member: the gate is an LLM, so re-invoking it on an unchanged diff
 	// re-rolls a near-threshold score instead of measuring anything, and a
@@ -93,7 +93,7 @@ type ReviewResult struct {
 	Retries int
 	Stderr  string
 
-	// Reused reports that Note is the head's already-recorded verdict,
+	// Reused reports that Note is the diff's already-recorded verdict,
 	// returned without invoking om — see ReviewRequest.Reroll. Only the
 	// invocation differs; Exit carries the same meaning either way.
 	Reused bool
@@ -239,23 +239,30 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	// the note answers "was a criterion given up here?" for every review.
 	retiredRubric := len(rubricDeltas) > 0
 
-	// The verdict already recorded on this head, read before the decision to
-	// review at all: it answers the head outright when it still applies, and
-	// is carried into the new note's attempt history when it does not.
-	prev, err := ReadNote(deps.Git, head)
-	if err != nil && !errors.Is(err, git.ErrNoNote) {
-		// Not knowing whether this head was already reviewed is not a state
+	// The verdict this review answers for or replaces, read before the
+	// decision to review at all: it answers the diff outright when it still
+	// applies, and is carried into the new note's attempt history when it
+	// does not.
+	prior, err := priorVerdict(deps.Git, head, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
+	if err != nil {
+		// Not knowing whether this diff was already reviewed is not a state
 		// to re-roll from: an unreadable note would be silently replaced.
-		return failureResult(deps, req, Tooling, fmt.Sprintf("read recorded verdict on %s: %v", head, err), 0)
+		return failureResult(deps, req, Tooling, fmt.Sprintf("read recorded verdict for diff %s: %v", patchID, err), 0)
 	}
-	if !req.Reroll && recordedVerdictApplies(prev, patchID, manifest.Rubric.SHA256, cfg.MinVersion) {
-		if prev.Verdict == "approve" {
-			if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
+	if prior != nil && !req.Reroll && recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion) {
+		if prior.Note.Verdict == "approve" {
+			// Record the head the note was found on — the reviewed head —
+			// not this invocation's rehearsal commit. No note exists on the
+			// latter (that is why the lookup had to scan), and the push
+			// precondition finds the note by reading editorial_reviewed_head
+			// (CheckPrecondition), so pointing it at a commit with no note
+			// would refuse the push on a review that had just approved.
+			if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
 				return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
 			}
-			return ReviewResult{Exit: 0, Note: prev, Reused: true}
+			return ReviewResult{Exit: 0, Note: &prior.Note, Reused: true}
 		}
-		return ReviewResult{Exit: 1, Note: prev, Reused: true}
+		return ReviewResult{Exit: 1, Note: &prior.Note, Reused: true}
 	}
 
 	tmpDir, err := os.MkdirTemp("", "gt-mq-review-*")
@@ -368,11 +375,15 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		note.PriorFindings.Unresolved = v.PriorFindings.Unresolved
 		note.PriorFindings.Regressed = v.PriorFindings.Regressed
 	}
-	// This note replaces whatever verdict head carried, so it carries that
-	// verdict forward: the diff a re-review scored is often byte-identical to
-	// the one it replaces, and a replaced score with no trace of the score it
+	// This note replaces the verdict prior named, so it carries that verdict
+	// forward: the diff a re-review scored is often byte-identical to the one
+	// it replaces, and a replaced score with no trace of the score it
 	// replaced is what made the gate's nondeterminism invisible (gt-bveg).
-	if history := attemptHistory(prev, attemptOf(&note)); len(history) > 1 {
+	var priorNote *Note
+	if prior != nil {
+		priorNote = &prior.Note
+	}
+	if history := attemptHistory(priorNote, attemptOf(&note)); len(history) > 1 {
 		note.Attempts = history
 	}
 
@@ -577,6 +588,31 @@ func RehearseBranch(g *git.Git, target, branch string) (head, tempBranch string,
 	return head, tempBranch, nil
 }
 
+// priorVerdict returns the verdict a review of this diff answers for or
+// replaces, or nil when the diff carries none.
+//
+// The note on head itself wins when there is one, applicable or not: it is
+// the verdict recorded for exactly this commit, which is what a re-review
+// replaces and what a reuse answers from. Only when head carries no note at
+// all does the search widen to the whole notes ref — the MR path's normal
+// case, since it rehearses a new merge commit every invocation, so the head a
+// verdict was written on is never the head a later invocation computes
+// (gt-qa2p).
+//
+// A note that cannot be read is an error, not an empty result: a caller must
+// not re-roll a diff whose recorded verdict it could not see.
+func priorVerdict(g *git.Git, head, patchID, rubricSHA, minVersion string) (*RecordedVerdict, error) {
+	note, err := ReadNote(g, head)
+	switch {
+	case err == nil:
+		return &RecordedVerdict{Commit: head, Note: *note}, nil
+	case errors.Is(err, git.ErrNoNote):
+		return FindVerdictForDiff(g, patchID, rubricSHA, minVersion)
+	default:
+		return nil, err
+	}
+}
+
 // recordedVerdictApplies reports whether prev still answers for a head:
 // same diff (patch-id), same deployed rubric, a verdict this pipeline would
 // itself have accepted, and an om version still above the configured floor.
@@ -602,7 +638,9 @@ func recordedVerdictApplies(prev *Note, patchID, rubricSHA, minVersion string) b
 // ensureEditorialReviewedHead records head on the MR bead unless it is
 // already there. The review that wrote the note has normally recorded it
 // already, and a bead write costs a Dolt commit, so the reused-verdict path
-// asks first rather than re-recording the same head.
+// asks first rather than re-recording the same head. On a reuse the head is
+// the commit the note was found on, which is what the field is for: the push
+// precondition reads it to find the note without scanning.
 func ensureEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
 	if issue, err := b.Show(mrID); err == nil {
 		if fields := beads.ParseMRFields(issue); fields != nil && fields.EditorialReviewedHead == head {
