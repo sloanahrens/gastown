@@ -244,12 +244,18 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			reason := ""
 			if !db.countKnown {
 				reason = " (count unknown)"
-				unknownCount++
 			}
 			if refusal := db.preflight.refusal(maintainForceDiverged); refusal != "" {
 				tags += fmt.Sprintf(" %s", style.Warning.Render("→ REFUSED: "+refusal))
 				refusedCount++
 			} else {
+				// unknownCount feeds the "flattened, not skipped" line below,
+				// so it counts only databases that will actually flatten — an
+				// unknown count on a refused database was not flattened, and
+				// saying so was the whole point of gt-racu.
+				if !db.countKnown {
+					unknownCount++
+				}
 				tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
 				flattenCount++
 			}
@@ -268,7 +274,8 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Unknown commit counts: %d (flattened, not skipped)\n", unknownCount)
 	}
 	if refusedCount > 0 {
-		fmt.Printf("  Refused (diverged remote): %d — re-run with --force-diverged to flatten anyway\n", refusedCount)
+		fmt.Printf("  Refused: %d (remote diverged or unverifiable — see reasons above)\n", refusedCount)
+		fmt.Printf("  Re-run with --force-diverged to flatten anyway\n")
 	}
 
 	if maintainDryRun {
