@@ -16,17 +16,14 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+// setupTestRegistry confirms the package-wide registry TestMain installed
+// ("testrig" → "xut") is in place; see testmain_test.go for why it is no
+// longer swapped per test.
 func setupTestRegistry(t *testing.T) {
 	t.Helper()
-	// Use a prefix that won't collide with real gastown sessions.
-	// The "tr" prefix conflicts with actual rigs running on the host
-	// (e.g., tr-refinery, tr-witness), causing tests that assert
-	// "no session exists" to fail in gastown workspaces.
-	reg := session.NewPrefixRegistry()
-	reg.Register("xut", "testrig")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	if got := session.DefaultRegistry().PrefixForRig("testrig"); got != "xut" {
+		t.Fatalf("session prefix for testrig = %q, want xut (installed by TestMain)", got)
+	}
 }
 
 func setupTestManager(t *testing.T) (*Manager, string) {
@@ -49,6 +46,7 @@ func setupTestManager(t *testing.T) (*Manager, string) {
 }
 
 func TestManager_StartForegroundDeprecated(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 	err := mgr.Start(true, "")
 	if err == nil {
@@ -60,6 +58,7 @@ func TestManager_StartForegroundDeprecated(t *testing.T) {
 }
 
 func TestManager_SessionName(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	want := "xut-refinery"
@@ -371,6 +370,7 @@ esac
 }
 
 func TestManager_IsRunning_NoSession(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	// Without a tmux session, IsRunning should return false
@@ -389,6 +389,7 @@ func TestManager_IsRunning_NoSession(t *testing.T) {
 }
 
 func TestManager_Status_NotRunning(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	// Without a tmux session, Status should return ErrNotRunning
@@ -401,6 +402,7 @@ func TestManager_Status_NotRunning(t *testing.T) {
 }
 
 func TestManager_Queue_NoBeads(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	// Queue returns error when no beads database exists
@@ -466,6 +468,7 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 }
 
 func TestManager_FindMR_NoBeads(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	// FindMR returns error when no beads database exists
@@ -478,6 +481,7 @@ func TestManager_FindMR_NoBeads(t *testing.T) {
 }
 
 func TestManager_RegisterMR_Deprecated(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	mr := &MergeRequest{
@@ -495,6 +499,7 @@ func TestManager_RegisterMR_Deprecated(t *testing.T) {
 }
 
 func TestManager_Retry_Deprecated(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	// Retry is deprecated and should not error, just print a message
@@ -532,6 +537,7 @@ func TestCompareScoredIssues_UsesDeterministicIDTieBreaker(t *testing.T) {
 }
 
 func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -582,6 +588,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 }
 
 func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -695,6 +702,7 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 // NOT stub mgr.recoverDeadWorker — it exercises the real recovery wiring
 // from NewManager end to end.
 func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -740,6 +748,7 @@ func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
 // entirely, regardless of the source bead's state or close_reason — the
 // explicit operator opt-out for superseded/duplicate/cancelled MRs.
 func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -792,6 +801,7 @@ func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
 // the CLI used to print an unconditional "(not closed - work not done)"
 // that was false whenever the bead was already closed).
 func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -855,6 +865,7 @@ func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
 }
 
 func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -901,6 +912,7 @@ func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
 }
 
 func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -955,6 +967,7 @@ func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t 
 }
 
 func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -1003,6 +1016,7 @@ func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
 }
 
 func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -1045,6 +1059,7 @@ func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 }
 
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
+	t.Parallel()
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
@@ -1074,6 +1089,7 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 }
 
 func TestManager_PostMerge_NotFound(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 
 	_, err := mgr.PostMerge("nonexistent-mr-id")

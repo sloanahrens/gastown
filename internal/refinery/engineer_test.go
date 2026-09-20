@@ -218,6 +218,7 @@ esac
 }
 
 func TestEngineerCloseMRWithReasonRecordsMergeCommitAndClearsActiveMR(t *testing.T) {
+	t.Parallel()
 	e, b, mrIssue, agentIssue, _ := setupEngineerTerminalCloseTest(t, "gt-wisp-old")
 
 	if err := e.closeMRWithReason(&MRInfo{ID: mrIssue.ID, AgentBead: agentIssue.ID}, string(CloseReasonMerged), "abc123"); err != nil {
@@ -238,6 +239,7 @@ func TestEngineerCloseMRWithReasonRecordsMergeCommitAndClearsActiveMR(t *testing
 }
 
 func TestEngineerCloseMRWithReasonRejectsAndClearsMatchingActiveMR(t *testing.T) {
+	t.Parallel()
 	e, b, mrIssue, agentIssue, srcIssue := setupEngineerTerminalCloseTest(t, "gt-wisp-old")
 
 	if err := e.closeMRWithReason(&MRInfo{ID: mrIssue.ID, AgentBead: agentIssue.ID}, "rejected: policy failed"); err != nil {
@@ -251,6 +253,7 @@ func TestEngineerCloseMRWithReasonRejectsAndClearsMatchingActiveMR(t *testing.T)
 }
 
 func TestEngineerCloseMRWithReasonAlreadyTerminalRetriesActiveMRCleanup(t *testing.T) {
+	t.Parallel()
 	e, b, mrIssue, agentIssue, _ := setupEngineerTerminalCloseTest(t, "gt-wisp-old")
 	issue, err := b.Show(mrIssue.ID)
 	if err != nil {
@@ -274,6 +277,7 @@ func TestEngineerCloseMRWithReasonAlreadyTerminalRetriesActiveMRCleanup(t *testi
 }
 
 func TestEngineerCloseMRWithReasonDoesNotClearNewerActiveMR(t *testing.T) {
+	t.Parallel()
 	e, b, mrIssue, agentIssue, _ := setupEngineerTerminalCloseTest(t, "gt-wisp-newer")
 
 	if err := e.closeMRWithReason(&MRInfo{ID: mrIssue.ID, AgentBead: agentIssue.ID}, "rejected: policy failed"); err != nil {
@@ -284,6 +288,7 @@ func TestEngineerCloseMRWithReasonDoesNotClearNewerActiveMR(t *testing.T) {
 }
 
 func TestEngineerCloseMRWithReasonNormalizesSuperseded(t *testing.T) {
+	t.Parallel()
 	e, b, mrIssue, agentIssue, _ := setupEngineerTerminalCloseTest(t, "gt-wisp-old")
 
 	if err := e.closeMRWithReason(&MRInfo{ID: mrIssue.ID, AgentBead: agentIssue.ID}, "superseded by gt-wisp-new"); err != nil {

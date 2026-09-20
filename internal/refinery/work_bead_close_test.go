@@ -263,6 +263,7 @@ func TestCloseMergedWorkBead_CloseErrorThenTerminalRaceSucceeds(t *testing.T) {
 }
 
 func TestManagerIssueToMRIncludesAgentBead(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupTestManager(t)
 	issue := &beads.Issue{
 		ID:          "gt-mr",

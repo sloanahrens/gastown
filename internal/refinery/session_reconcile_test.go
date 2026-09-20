@@ -17,6 +17,7 @@ import (
 // used to arrive here as "agent dead" and the caller killed a healthy session.
 // Unknown state must never authorize a kill.
 func TestDecideSessionReconcile_LivenessErrorIsNotDeath(t *testing.T) {
+	t.Parallel()
 	outcome, reason, detail := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:  false,
 		LivenessDetail: "tmux show-environment: server exited unexpectedly",
@@ -39,6 +40,7 @@ func TestDecideSessionReconcile_LivenessErrorIsNotDeath(t *testing.T) {
 // (daemon heartbeat, gt up, gt start --all, patrol formulas) saw the session
 // its predecessor had just created as a zombie and killed it.
 func TestDecideSessionReconcile_BootingSessionIsNotAZombie(t *testing.T) {
+	t.Parallel()
 	for _, age := range []time.Duration{0, time.Second, 10 * time.Second, constants.SessionBootGracePeriod - time.Millisecond} {
 		outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 			LivenessKnown:   true,
@@ -58,6 +60,7 @@ func TestDecideSessionReconcile_BootingSessionIsNotAZombie(t *testing.T) {
 // TestDecideSessionReconcile_AbstainsWhileSuiteRuns pins the gate-awareness
 // requirement: a restart must never land mid-suite and lose the run.
 func TestDecideSessionReconcile_AbstainsWhileSuiteRuns(t *testing.T) {
+	t.Parallel()
 	outcome, reason, detail := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -82,6 +85,7 @@ func TestDecideSessionReconcile_AbstainsWhileSuiteRuns(t *testing.T) {
 // a long-lived session with a suite running is kept by the suite gate, not by
 // the boot grace, so the log names the real reason.
 func TestDecideSessionReconcile_SuiteGateBeatsBootGrace(t *testing.T) {
+	t.Parallel()
 	outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -102,6 +106,7 @@ func TestDecideSessionReconcile_SuiteGateBeatsBootGrace(t *testing.T) {
 // re-verification: an agent that finishes booting during the grace period is
 // kept rather than killed.
 func TestDecideSessionReconcile_RecheckKeepsRecoveredSession(t *testing.T) {
+	t.Parallel()
 	outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -122,6 +127,7 @@ func TestDecideSessionReconcile_RecheckKeepsRecoveredSession(t *testing.T) {
 // TOCTOU branch: another caller already replaced the session, so killing now
 // would destroy that caller's work.
 func TestDecideSessionReconcile_RecheckKeepsReplacedSession(t *testing.T) {
+	t.Parallel()
 	outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -141,6 +147,7 @@ func TestDecideSessionReconcile_RecheckKeepsReplacedSession(t *testing.T) {
 // TestDecideSessionReconcile_HealthySessionIsKept is the ordinary case: the
 // policy must not have become so conservative that it churns live refineries.
 func TestDecideSessionReconcile_HealthySessionIsKept(t *testing.T) {
+	t.Parallel()
 	outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown: true,
 		Alive:         true,
@@ -158,6 +165,7 @@ func TestDecideSessionReconcile_HealthySessionIsKept(t *testing.T) {
 // a session well past the boot grace, whose agent is confirmed dead, with no
 // suite running, must still be replaced — otherwise recovery would be lost.
 func TestDecideSessionReconcile_GenuineZombieIsKilled(t *testing.T) {
+	t.Parallel()
 	outcome, reason, detail := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -181,6 +189,7 @@ func TestDecideSessionReconcile_GenuineZombieIsKilled(t *testing.T) {
 // is treated as unknown, because only that one is ambiguous between "booting"
 // and "dead".
 func TestDecideSessionReconcile_UnknownAgeStillKills(t *testing.T) {
+	t.Parallel()
 	outcome, _, _ := DecideSessionReconcile(SessionReconcileFacts{
 		LivenessKnown:   true,
 		Alive:           false,
@@ -198,6 +207,7 @@ func TestDecideSessionReconcile_UnknownAgeStillKills(t *testing.T) {
 // and recreated, which emitted a second session_start — repeated across callers
 // and daemon restarts, that is the 4-8-in-90s burst.
 func TestTwoConcurrentStartersDoNotPingPong(t *testing.T) {
+	t.Parallel()
 	// Caller A creates the session; caller B arrives 3s later while Claude is
 	// still booting and cannot be detected yet.
 	bFacts := SessionReconcileFacts{

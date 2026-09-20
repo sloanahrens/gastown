@@ -148,6 +148,7 @@ func TestIsGolangciLintGate(t *testing.T) {
 // one chained shell command could not say which step broke, so a failing lint
 // read as the batch's own test failure.
 func TestRunBatchSteps_NamesTheGateThatFailed(t *testing.T) {
+	t.Parallel()
 	e := newLintGateEngineer(t)
 	testRan := filepath.Join(e.workDir, "test-ran")
 
@@ -190,6 +191,7 @@ func TestRunBatchSteps_WaitsOutTheLintLock(t *testing.T) {
 // got from RetryFlakyTests: the batch's test step still re-runs a flaky
 // failure, which is the other way an innocent MR gets ejected.
 func TestRunBatchStep_TestStepKeepsTheFlakeRetry(t *testing.T) {
+	t.Parallel()
 	e := newLintGateEngineer(t)
 	e.config.RetryFlakyTests = 2
 	firstRun := filepath.Join(e.workDir, "first-run")
