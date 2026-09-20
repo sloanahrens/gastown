@@ -5,9 +5,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"syscall"
 	"testing"
 )
+
+// impossiblePID is a PID no supported platform can allocate, so a test can put
+// the ACP pid file into the "stale" state without racing the host's own
+// processes — a live mayor among them (gt-toc1). It is above every platform's
+// ceiling (99998 on Darwin, 1<<22 on Linux) and, not being a multiple of 4, it
+// is not one of the strides Windows allocates PIDs at either.
+// TestImpossiblePIDIsNotLive asserts the bound rather than trusting it.
+const impossiblePID = 1<<23 + 1
 
 func TestWriteAndRemoveACPPid(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -83,7 +90,7 @@ func TestIsACPActive_DeadProcess(t *testing.T) {
 	}
 
 	pidPath := ACPPidFilePath(tmpDir)
-	deadPid := 999999
+	deadPid := impossiblePID
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(deadPid)), 0644); err != nil {
 		t.Fatalf("failed to write PID file: %v", err)
 	}
@@ -229,6 +236,18 @@ func containsSubstring(s, substr string) bool {
 	return false
 }
 
+// TestImpossiblePIDIsNotLive holds the stale-PID tests to their fixture: if a
+// platform ever reports impossiblePID as live — a larger PID cap, or a
+// detection path with a side effect this bound did not anticipate — then
+// TestRemoveACPPid_RemovesStalePid and TestIsACPActive_DeadProcess are no
+// longer testing what they claim, and failing here says so instead of leaving
+// them to fail intermittently somewhere else.
+func TestImpossiblePIDIsNotLive(t *testing.T) {
+	if acpProcessAlive(impossiblePID) {
+		t.Fatalf("PID %d reports as live; the stale-PID tests need a PID this platform cannot allocate", impossiblePID)
+	}
+}
+
 func TestRemoveACPPid_RemovesStalePid(t *testing.T) {
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -236,12 +255,8 @@ func TestRemoveACPPid_RemovesStalePid(t *testing.T) {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
 
-	initialPid := syscall.Getpid() - 10000
-	if initialPid < 1 {
-		initialPid = 1
-	}
 	pidPath := ACPPidFilePath(tmpDir)
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(initialPid)), 0644); err != nil {
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(impossiblePID)), 0644); err != nil {
 		t.Fatalf("failed to write stale PID file: %v", err)
 	}
 
