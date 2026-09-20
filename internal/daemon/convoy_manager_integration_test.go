@@ -570,7 +570,7 @@ func TestConvoyManager_ParkedRig_SkipsFeedOnEventPoll(t *testing.T) {
 		IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
 	}
 	task2 := &beadsdk.Issue{
-		ID: "gt-parked2", Title: "Task 2 (ready but rig parked)",
+		ID: "gt-parked2", Title: "Task 2 (ready but rig parked, nil)",
 		Status: beadsdk.StatusOpen, Priority: 3,
 		IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
 	}
@@ -635,7 +635,7 @@ exit 0
 	// isRigParked returns true for "gt" rig
 	parked := func(rig string) bool { return rig == "gt" }
 	stores := map[string]beadsdk.Storage{"hq": store}
-	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, parked)
+	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, parked, nil)
 	// Skip seeding so pollStoresSnapshot processes events immediately.
 	m.seeded.Store(true)
 	m.pollStoresSnapshot(stores)
