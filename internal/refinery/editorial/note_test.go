@@ -138,3 +138,40 @@ func TestNoteJSON_MatchesSpecFieldNames(t *testing.T) {
 		}
 	}
 }
+
+func TestAttemptHistory_CarriesEveryPriorVerdictForward(t *testing.T) {
+	first := NoteAttempt{Score: 0.74, Verdict: "approve", Attempt: 1, ReviewedAt: time.Unix(1000, 0).UTC()}
+	second := NoteAttempt{Score: 0.50, Verdict: "request_changes", Attempt: 2, ReviewedAt: time.Unix(2000, 0).UTC()}
+	third := NoteAttempt{Score: 0.81, Verdict: "approve", Attempt: 3, ReviewedAt: time.Unix(3000, 0).UTC()}
+
+	legacy := &Note{Score: first.Score, Verdict: first.Verdict, Attempt: first.Attempt, ReviewedAt: first.ReviewedAt}
+	recorded := &Note{
+		Score: second.Score, Verdict: second.Verdict, Attempt: second.Attempt, ReviewedAt: second.ReviewedAt,
+		Attempts: []NoteAttempt{first, second},
+	}
+
+	for _, tc := range []struct {
+		name string
+		prev *Note
+		want []NoteAttempt
+	}{
+		{"no prior note", nil, []NoteAttempt{third}},
+		// A note written before Attempts existed keeps its only verdict.
+		{"prior note without history", legacy, []NoteAttempt{first, third}},
+		// A note that already carries history is not re-summarised, so its
+		// own top-level verdict is neither duplicated nor dropped.
+		{"prior note with history", recorded, []NoteAttempt{first, second, third}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := attemptHistory(tc.prev, third)
+			if len(got) != len(tc.want) {
+				t.Fatalf("attemptHistory = %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("attemptHistory[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

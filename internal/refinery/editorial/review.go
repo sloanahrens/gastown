@@ -64,6 +64,16 @@ type ReviewRequest struct {
 	Attempt       int
 	PriorFindings []PriorFinding
 
+	// Reroll re-reviews a head that already carries a recorded verdict,
+	// replacing it. False everywhere by default, including every batch
+	// member: the gate is an LLM, so re-invoking it on an unchanged diff
+	// re-rolls a near-threshold score instead of measuring anything, and a
+	// caller free to re-roll can roll a defective diff until it clears the
+	// threshold — the fail-open path through the town's headline gate
+	// (gt-bveg). A deliberate re-roll is recorded in the note's attempt
+	// history either way (see Note.Attempts).
+	Reroll bool
+
 	// RubricRetirement marks an MR whose stated purpose is to retire rubric
 	// criteria — the MR bead carries RetirementLabel — and lets it through
 	// the criterion-deletion guard in Run. False everywhere else, including
@@ -82,6 +92,11 @@ type ReviewResult struct {
 	Class   FailureClass // set only when Exit == 2
 	Retries int
 	Stderr  string
+
+	// Reused reports that Note is the head's already-recorded verdict,
+	// returned without invoking om — see ReviewRequest.Reroll. Only the
+	// invocation differs; Exit carries the same meaning either way.
+	Reused bool
 }
 
 // ExecFunc runs the gate script at path with args in dir and returns its
@@ -224,6 +239,25 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	// the note answers "was a criterion given up here?" for every review.
 	retiredRubric := len(rubricDeltas) > 0
 
+	// The verdict already recorded on this head, read before the decision to
+	// review at all: it answers the head outright when it still applies, and
+	// is carried into the new note's attempt history when it does not.
+	prev, err := ReadNote(deps.Git, head)
+	if err != nil && !errors.Is(err, git.ErrNoNote) {
+		// Not knowing whether this head was already reviewed is not a state
+		// to re-roll from: an unreadable note would be silently replaced.
+		return failureResult(deps, req, Tooling, fmt.Sprintf("read recorded verdict on %s: %v", head, err), 0)
+	}
+	if !req.Reroll && recordedVerdictApplies(prev, patchID, manifest.Rubric.SHA256, cfg.MinVersion) {
+		if prev.Verdict == "approve" {
+			if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
+				return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
+			}
+			return ReviewResult{Exit: 0, Note: prev, Reused: true}
+		}
+		return ReviewResult{Exit: 1, Note: prev, Reused: true}
+	}
+
 	tmpDir, err := os.MkdirTemp("", "gt-mq-review-*")
 	if err != nil {
 		return failureResult(deps, req, Tooling, fmt.Sprintf("mktemp: %v", err), 0)
@@ -333,6 +367,13 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		note.PriorFindings.Resolved = v.PriorFindings.Resolved
 		note.PriorFindings.Unresolved = v.PriorFindings.Unresolved
 		note.PriorFindings.Regressed = v.PriorFindings.Regressed
+	}
+	// This note replaces whatever verdict head carried, so it carries that
+	// verdict forward: the diff a re-review scored is often byte-identical to
+	// the one it replaces, and a replaced score with no trace of the score it
+	// replaced is what made the gate's nondeterminism invisible (gt-bveg).
+	if history := attemptHistory(prev, attemptOf(&note)); len(history) > 1 {
+		note.Attempts = history
 	}
 
 	if note.Verdict == "approve" {
@@ -534,6 +575,41 @@ func RehearseBranch(g *git.Git, target, branch string) (head, tempBranch string,
 		return "", "", err
 	}
 	return head, tempBranch, nil
+}
+
+// recordedVerdictApplies reports whether prev still answers for a head:
+// same diff (patch-id), same deployed rubric, a verdict this pipeline would
+// itself have accepted, and an om version still above the configured floor.
+// A note failing any of the four is not a recorded verdict for this review —
+// the diff, the criteria it was scored against, or the bar it must clear has
+// moved — so the review proceeds and replaces it. The version floor is the
+// push precondition's, not a second one: answering from a note the
+// precondition then refuses would wedge the MR on a review that reports
+// approve.
+func recordedVerdictApplies(prev *Note, patchID, rubricSHA, minVersion string) bool {
+	if prev == nil {
+		return false
+	}
+	if prev.Verdict != "approve" && prev.Verdict != "request_changes" {
+		return false
+	}
+	if prev.PatchID != patchID || prev.RubricSHA256 != rubricSHA {
+		return false
+	}
+	return !omVersionBelowFloor(prev.OMVersion, minVersion)
+}
+
+// ensureEditorialReviewedHead records head on the MR bead unless it is
+// already there. The review that wrote the note has normally recorded it
+// already, and a bead write costs a Dolt commit, so the reused-verdict path
+// asks first rather than re-recording the same head.
+func ensureEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
+	if issue, err := b.Show(mrID); err == nil {
+		if fields := beads.ParseMRFields(issue); fields != nil && fields.EditorialReviewedHead == head {
+			return nil
+		}
+	}
+	return setEditorialReviewedHead(b, mrID, head)
 }
 
 // setEditorialReviewedHead records the reviewed head on the MR bead so the

@@ -5,12 +5,25 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
 // NotesRef is the git notes ref that carries the om verdict proof,
 // attached to the reviewed head commit under refs/notes/<NotesRef>.
 const NotesRef = "om"
+
+// NoteAttempt is one verdict recorded for a reviewed head, frozen as it was
+// written. Score and Verdict are what a re-review of the same diff can
+// disagree with; ReviewedAt orders the history.
+type NoteAttempt struct {
+	Score         float64   `json:"score"`
+	Verdict       string    `json:"verdict"`
+	Attempt       int       `json:"attempt"`
+	OMVersion     string    `json:"om_version,omitempty"`
+	FindingsCount int       `json:"findings_count"`
+	ReviewedAt    time.Time `json:"reviewed_at"`
+}
 
 // Note is the durable proof that om produced a verdict for a review. It is
 // written to refs/notes/om on the reviewed head commit and survives DB
@@ -36,6 +49,18 @@ type Note struct {
 	} `json:"prior_findings"`
 	Attempt    int       `json:"attempt"`
 	ReviewedAt time.Time `json:"reviewed_at"`
+
+	// Attempts is every verdict recorded for this head, oldest first, the
+	// last entry repeating the top-level score/verdict/attempt above. An
+	// om review is an LLM call, so a second invocation on an unchanged diff
+	// re-rolls a near-threshold score rather than measuring anything, and
+	// the verdict that comes back can differ from the one it replaces
+	// (gt-bveg). Written only when there is more than one attempt, so a
+	// re-roll is visible on the proof instead of silent and every other
+	// note round-trips unchanged. Absent means a single recorded verdict or
+	// a note predating this field; the top-level fields are the latest
+	// verdict either way.
+	Attempts []NoteAttempt `json:"attempts,omitempty"`
 
 	// TimeoutSeconds records a backend-timeout override this review ran
 	// with (ReviewRequest.TimeoutSeconds, the CLI's --timeout flag), so the
@@ -91,6 +116,46 @@ type Note struct {
 	// equals PatchID before copying, which is what makes the note reachable
 	// proof on that commit.
 	PatchIDVerified bool `json:"patch_id_verified,omitempty"`
+}
+
+// omVersionBelowFloor reports whether v is below min, the bar a note's
+// recorded om version must clear to count as proof. Empty and "dev" (the
+// unset-ldflags default) are below any floor, matching AssertVersion —
+// CompareVersions would otherwise silently map them to 0.0.0. An empty min is
+// no floor at all.
+func omVersionBelowFloor(v, min string) bool {
+	if min == "" {
+		return false
+	}
+	return v == "" || v == "dev" || deps.CompareVersions(v, min) < 0
+}
+
+// attemptOf renders a note's own top-level verdict as a history entry.
+func attemptOf(n *Note) NoteAttempt {
+	return NoteAttempt{
+		Score:         n.Score,
+		Verdict:       n.Verdict,
+		Attempt:       n.Attempt,
+		OMVersion:     n.OMVersion,
+		FindingsCount: n.FindingsCount,
+		ReviewedAt:    n.ReviewedAt,
+	}
+}
+
+// attemptHistory returns the ordered history to record alongside current on a
+// head that already carried prev: prev's own history, or prev's top-level
+// verdict when prev predates Attempts, followed by current. prev may be nil,
+// in which case the result holds current alone.
+func attemptHistory(prev *Note, current NoteAttempt) []NoteAttempt {
+	history := make([]NoteAttempt, 0, 2)
+	if prev != nil {
+		if len(prev.Attempts) > 0 {
+			history = append(history, prev.Attempts...)
+		} else {
+			history = append(history, attemptOf(prev))
+		}
+	}
+	return append(history, current)
 }
 
 // WriteNote marshals n and attaches it as a git note on n.HeadSHA under

@@ -1128,3 +1128,307 @@ func TestRun_GateBaseIsMergeBaseNotMovedTarget(t *testing.T) {
 		t.Errorf("Note.BaseSHA = %q, want %s", result.Note.BaseSHA, fixture.base)
 	}
 }
+
+// recordVerdict attaches n as the note on fixture's head, standing in for the
+// review that produced it.
+func recordVerdict(t *testing.T, fixture *reviewFixture, n Note) {
+	t.Helper()
+	n.HeadSHA = fixture.head
+	if err := WriteNote(git.NewGit(fixture.repoDir), n); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+}
+
+// recordedNoteFor builds the note a first review of fixture's head would have
+// written, with the patch-id Run itself computes for that head.
+func recordedNoteFor(t *testing.T, fixture *reviewFixture, score float64, verdict string) Note {
+	t.Helper()
+	patchID, err := git.NewGit(fixture.repoDir).PatchID(fixture.base, fixture.head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	return Note{
+		OMVersion:  "1.4.0",
+		Rig:        "gastown",
+		MR:         "gt-mr-1",
+		Worker:     "marble",
+		BaseSHA:    fixture.base,
+		HeadSHA:    fixture.head,
+		PatchID:    patchID,
+		Score:      score,
+		Verdict:    verdict,
+		Attempt:    1,
+		ReviewedAt: time.Now().UTC().Add(-time.Minute),
+	}
+}
+
+// TestRun_ReusesRecordedVerdictOnUnchangedHead pins the gt-bveg guard: a head
+// that already carries a verdict for this diff and this rubric is answered
+// from the note, so the gate is not re-invoked and a near-threshold score
+// cannot be re-rolled into a different verdict.
+func TestRun_ReusesRecordedVerdictOnUnchangedHead(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recordVerdict(t, fixture, recordedNoteFor(t, fixture, 0.74, "approve"))
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.50, Verdict: "request_changes"})
+			return "", 1, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if execCalls != 0 {
+		t.Errorf("gate invoked %d time(s), want 0: this diff already has a verdict", execCalls)
+	}
+	if result.Exit != 0 || !result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 0/true (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	if result.Note.Score != 0.74 || result.Note.Verdict != "approve" {
+		t.Errorf("Note = %.2f/%s, want the recorded 0.74/approve", result.Note.Score, result.Note.Verdict)
+	}
+	got, err := ReadNote(deps.Git, fixture.head)
+	if err != nil {
+		t.Fatalf("ReadNote: %v", err)
+	}
+	if got.Score != 0.74 || got.Verdict != "approve" {
+		t.Errorf("note on disk = %.2f/%s, want the recorded 0.74/approve", got.Score, got.Verdict)
+	}
+	if got.Attempts != nil {
+		t.Errorf("Attempts = %+v, want none: a reused verdict is not a fresh attempt", got.Attempts)
+	}
+	// The push precondition reads the MR bead for the reviewed head, so an
+	// approve answered from the note must still leave it pointing there.
+	updated, err := store.GetIssue(context.Background(), "gt-mr-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
+	if fields == nil || fields.EditorialReviewedHead != fixture.head {
+		t.Errorf("editorial_reviewed_head = %v, want %s", fields, fixture.head)
+	}
+}
+
+// TestRun_ReusesRecordedRejectionWithoutRecordingReviewedHead is the other
+// half: a rejected head answered from its note stays rejected, and still
+// leaves no reviewed head behind (gt-wx2p owns making that visible to the
+// queue; this only refuses to launder the rejection into an approval).
+func TestRun_ReusesRecordedRejectionWithoutRecordingReviewedHead(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recordVerdict(t, fixture, recordedNoteFor(t, fixture, 0.50, "request_changes"))
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.80, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if execCalls != 0 {
+		t.Errorf("gate invoked %d time(s), want 0: this diff already has a verdict", execCalls)
+	}
+	if result.Exit != 1 || !result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 1/true (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	updated, _ := store.GetIssue(context.Background(), "gt-mr-1")
+	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
+	if fields != nil && fields.EditorialReviewedHead != "" {
+		t.Errorf("editorial_reviewed_head = %q, want unset on a rejected head", fields.EditorialReviewedHead)
+	}
+}
+
+// TestRun_RerollReReviewsAndRecordsAttemptHistory covers the deliberate
+// re-roll: om runs, its verdict replaces the recorded one, and the note
+// carries both — so the re-roll that used to be invisible is the one thing
+// the proof now shows.
+func TestRun_RerollReReviewsAndRecordsAttemptHistory(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recorded := recordedNoteFor(t, fixture, 0.74, "approve")
+	recordVerdict(t, fixture, recorded)
+
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
+				Score: 0.50, Verdict: "request_changes",
+				Findings: []verdictFinding{{Title: "a", Severity: "minor"}, {Title: "b", Severity: "major"}},
+			})
+			return "", 1, nil
+		},
+	}
+	req := fixture.request()
+	req.Reroll = true
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Exit != 1 || result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 1/false (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	attempts := result.Note.Attempts
+	if len(attempts) != 2 {
+		t.Fatalf("Attempts = %+v, want the replaced verdict and this one", attempts)
+	}
+	if attempts[0].Score != 0.74 || attempts[0].Verdict != "approve" || attempts[0].Attempt != 1 {
+		t.Errorf("Attempts[0] = %+v, want the replaced 0.74/approve attempt 1", attempts[0])
+	}
+	if !attempts[0].ReviewedAt.Equal(recorded.ReviewedAt) {
+		t.Errorf("Attempts[0].ReviewedAt = %v, want the replaced verdict's %v", attempts[0].ReviewedAt, recorded.ReviewedAt)
+	}
+	if attempts[1].Score != 0.50 || attempts[1].Verdict != "request_changes" || attempts[1].Attempt != req.Attempt {
+		t.Errorf("Attempts[1] = %+v, want this review's 0.50/request_changes attempt %d", attempts[1], req.Attempt)
+	}
+	if attempts[1].FindingsCount != 2 {
+		t.Errorf("Attempts[1].FindingsCount = %d, want 2", attempts[1].FindingsCount)
+	}
+
+	got, err := ReadNote(deps.Git, fixture.head)
+	if err != nil {
+		t.Fatalf("ReadNote: %v", err)
+	}
+	if len(got.Attempts) != 2 || got.Score != 0.50 || got.Verdict != "request_changes" {
+		t.Errorf("note on disk = %.2f/%s with %d attempts, want 0.50/request_changes with 2",
+			got.Score, got.Verdict, len(got.Attempts))
+	}
+}
+
+// TestRun_RecordedVerdictAppliesOnlyToTheDiffAndRubricItScored pins the three
+// ways a recorded verdict stops applying. Each must re-review rather than
+// answer from a verdict about something else — and must still carry the
+// superseded verdict into the new note's history.
+func TestRun_RecordedVerdictAppliesOnlyToTheDiffAndRubricItScored(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Note)
+	}{
+		{"patch-id moved", func(n *Note) { n.PatchID = "a-diff-this-head-no-longer-carries" }},
+		{"rubric moved", func(n *Note) { n.RubricSHA256 = "a-rubric-this-rig-no-longer-deploys" }},
+		{"recorded verdict unusable", func(n *Note) { n.Verdict = "abstain" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBDForReview(t)
+			fixture := newReviewFixture(t)
+			store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+			recorded := recordedNoteFor(t, fixture, 0.74, "approve")
+			tc.mutate(&recorded)
+			recordVerdict(t, fixture, recorded)
+
+			execCalls := 0
+			deps := Deps{
+				Git:      git.NewGit(fixture.repoDir),
+				Beads:    beads.NewWithStore(fixture.repoDir, store),
+				Recorder: plugin.NewRecorder(t.TempDir()),
+				Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+					execCalls++
+					writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.80, Verdict: "approve"})
+					return "", 0, nil
+				},
+			}
+
+			result := Run(context.Background(), fixture.request(), deps)
+
+			if execCalls != 1 {
+				t.Errorf("gate invoked %d time(s), want 1: the recorded verdict does not answer for this review", execCalls)
+			}
+			if result.Exit != 0 || result.Reused {
+				t.Fatalf("Exit/Reused = %d/%v, want 0/false (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+			}
+			if len(result.Note.Attempts) != 2 {
+				t.Errorf("Attempts = %+v, want the superseded verdict carried forward", result.Note.Attempts)
+			}
+		})
+	}
+}
+
+// TestRun_FirstAttemptRecordsNoHistory pins the default path: a note for a
+// head reviewed once says so by omission, so every existing note shape
+// round-trips unchanged.
+func TestRun_FirstAttemptRecordsNoHistory(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q)", result.Exit, result.Stderr)
+	}
+	if result.Note.Attempts != nil {
+		t.Errorf("Attempts = %+v, want none on a head's first review", result.Note.Attempts)
+	}
+	raw, err := deps.Git.NotesShow(NotesRef, fixture.head)
+	if err != nil {
+		t.Fatalf("NotesShow: %v", err)
+	}
+	if strings.Contains(raw, "attempts") {
+		t.Errorf("note JSON carries attempts on a first review: %s", raw)
+	}
+}
+
+// TestRun_RecordedVerdictBelowVersionFloorIsNotReused pins the fourth way a
+// recorded verdict stops applying: the push precondition refuses a note whose
+// om is below cfg.MinVersion, so answering from one would report approve for
+// an MR that can never push.
+func TestRun_RecordedVerdictBelowVersionFloorIsNotReused(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recorded := recordedNoteFor(t, fixture, 0.74, "approve")
+	recorded.OMVersion = "0.9.0"
+	recordVerdict(t, fixture, recorded)
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.80, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.Config.MinVersion = "1.0.0"
+
+	result := Run(context.Background(), req, deps)
+
+	if execCalls != 1 {
+		t.Errorf("gate invoked %d time(s), want 1: the recorded note is below the version floor", execCalls)
+	}
+	if result.Exit != 0 || result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 0/false (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	if len(result.Note.Attempts) != 2 {
+		t.Errorf("Attempts = %+v, want the superseded verdict carried forward", result.Note.Attempts)
+	}
+}

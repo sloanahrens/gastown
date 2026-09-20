@@ -22,6 +22,7 @@ var (
 	mqReviewForce     bool
 	mqReviewAttempt   int
 	mqReviewTimeout   int
+	mqReviewReroll    bool
 )
 
 var mqReviewCmd = &cobra.Command{
@@ -37,6 +38,15 @@ the outcome, retries once for transient failures, and on a verdict writes a
 git note (proof, refs/notes/om) and a receipt bead (aggregation). An approve
 verdict records editorial_reviewed_head on the MR bead; a verdict carrying
 major findings still gets follow-up beads filed even when it approves.
+
+A head that already carries a recorded verdict for the same diff and the same
+deployed rubric is answered from that note without invoking om: the gate is an
+LLM, so a second invocation on an unchanged diff re-rolls a near-threshold
+score rather than measuring anything, and a caller free to re-roll can roll a
+defective diff until it clears the threshold (gt-bveg). --reroll re-invokes om
+deliberately; the note then records every attempt it has seen, so a re-roll
+leaves a trace instead of replacing the previous verdict. Before relying on
+that history, read Note.Attempts in internal/refinery/editorial/note.go.
 
 --timeout overrides the rig's .om.json backend timeout for this one review,
 for the case where a diff legitimately needs longer than the rig default
@@ -61,6 +71,7 @@ func init() {
 	mqReviewCmd.Flags().BoolVar(&mqReviewForce, "force", false, "Review even when merge_queue.editorial.required is false for the rig")
 	mqReviewCmd.Flags().IntVar(&mqReviewAttempt, "attempt", 1, "Resubmit attempt number recorded on the note")
 	mqReviewCmd.Flags().IntVar(&mqReviewTimeout, "timeout", 0, "Override the rig's .om.json backend timeout for this review, in whole seconds (passed to om, recorded on the om note)")
+	mqReviewCmd.Flags().BoolVar(&mqReviewReroll, "reroll", false, "Re-review a head that already carries a recorded verdict for the same diff and rubric, replacing it (recorded in the note's attempt history)")
 	mqCmd.AddCommand(mqReviewCmd)
 }
 
@@ -153,6 +164,7 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		// 0 (unset) means "use the rig's .om.json timeout" and passes no
 		// flag — see ReviewRequest.TimeoutSeconds.
 		TimeoutSeconds: mqReviewTimeout,
+		Reroll:         mqReviewReroll,
 		PriorFindings:  editorial.BuildPriorFindings(bd, fields.SourceIssue, mqReviewAttempt),
 		// The MR bead is where a deliberate rubric retirement is marked —
 		// see editorial.RetirementLabel.
@@ -170,6 +182,18 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	return editorial.Run(context.Background(), req, deps), nil
 }
 
+// reusedSuffix marks output answered from a head's recorded verdict rather
+// than from a review run now. The exit code is the same either way, so this
+// line is the only thing separating "om approved this" from "om approved this
+// the first time it was asked" — a caller that cannot tell the two apart
+// cannot tell a re-roll from a review either.
+func reusedSuffix(result editorial.ReviewResult) string {
+	if !result.Reused {
+		return ""
+	}
+	return " [recorded verdict reused: head unchanged, om not re-invoked — pass --reroll to re-review]"
+}
+
 func printMQReviewResult(result editorial.ReviewResult) {
 	if mqReviewJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -178,7 +202,7 @@ func printMQReviewResult(result editorial.ReviewResult) {
 	} else {
 		switch result.Exit {
 		case 0:
-			fmt.Printf("approve (score %.2f)\n", result.Note.Score)
+			fmt.Printf("approve (score %.2f)%s\n", result.Note.Score, reusedSuffix(result))
 			if result.Stderr != "" {
 				// Non-fatal follow-up work that didn't stop the approve
 				// (e.g. filing a major finding's follow-up bead failed) —
@@ -187,7 +211,7 @@ func printMQReviewResult(result editorial.ReviewResult) {
 				fmt.Fprintln(os.Stderr, result.Stderr)
 			}
 		case 1:
-			fmt.Printf("request_changes (score %.2f, %d finding(s))\n", result.Note.Score, result.Note.FindingsCount)
+			fmt.Printf("request_changes (score %.2f, %d finding(s))%s\n", result.Note.Score, result.Note.FindingsCount, reusedSuffix(result))
 		default:
 			fmt.Printf("failed: %s\n", result.Class)
 			if result.Stderr != "" {

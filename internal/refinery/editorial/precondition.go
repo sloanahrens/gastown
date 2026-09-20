@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -90,10 +89,7 @@ func CheckPrecondition(g *git.Git, cfg config.EditorialConfig, mrs []LandedMR) (
 			return nil, &PreconditionError{Class: Precondition, MR: mr.MRID, Reason: ReasonVerdictNotApprove}
 		}
 
-		// Empty or "dev" (the unset-ldflags default) is treated as below any
-		// floor, matching AssertVersion — CompareVersions would otherwise
-		// silently map an empty string to 0.0.0.
-		if cfg.MinVersion != "" && (note.OMVersion == "" || note.OMVersion == "dev" || deps.CompareVersions(note.OMVersion, cfg.MinVersion) < 0) {
+		if omVersionBelowFloor(note.OMVersion, cfg.MinVersion) {
 			return nil, &PreconditionError{Class: Precondition, MR: mr.MRID, Reason: ReasonVersionBelowMin}
 		}
 
