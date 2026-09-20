@@ -36,6 +36,7 @@ type ConvoyFetcher interface {
 	FetchMayor() (*MayorStatus, error)
 	FetchIssues() ([]IssueRow, error)
 	FetchActivity() ([]ActivityRow, error)
+	FetchLocalPool() (*LocalPoolData, error)
 	FetchGate() (*GateStatus, error)
 }
 
@@ -184,7 +185,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fetchAndRender runs all 15 fetchers in parallel and renders the template.
+// fetchAndRender runs all 17 fetchers in parallel and renders the template.
 // Returns the rendered HTML bytes, or nil on template error.
 func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []byte {
 	ctx, cancel := context.WithTimeout(r.Context(), h.fetchTimeout)
@@ -207,12 +208,21 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		mayor          *MayorStatus
 		issues         []IssueRow
 		activity       []ActivityRow
+		locals         *LocalPoolData
 		wg             sync.WaitGroup
 	)
 
 	// Run all fetches in parallel with error logging
-	wg.Add(16)
+	wg.Add(17)
 
+	go func() {
+		defer wg.Done()
+		var err error
+		locals, err = h.fetcher.FetchLocalPool()
+		if err != nil {
+			log.Printf("dashboard: FetchLocalPool failed: %v", err)
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		var err error
@@ -376,6 +386,7 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		Mayor:          mayor,
 		Issues:         enrichIssuesWithAssignees(issues, hooks),
 		Activity:       activity,
+		LocalPool:      locals,
 		Summary:        summary,
 		Expand:         expandPanel,
 		CSRFToken:      h.csrfToken,

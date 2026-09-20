@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,6 +220,13 @@ type LiveConvoyFetcher struct {
 	mergesTotal int
 	mergesAt    time.Time
 	countMerges countMergesFunc
+
+	// Local Pool panel: llama-server's /slots endpoint (empty means
+	// defaultLlamaSlotsURL) and the breaker that holds the poll off while the
+	// server is down. listPoolAgents overrides the tmux seat read in tests.
+	llamaSlotsURL  string
+	llamaBreaker   fetchCircuitBreaker
+	listPoolAgents poolAgentLister
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -2550,4 +2559,174 @@ func eventSummary(eventType, actor string, payload map[string]interface{}) strin
 	default:
 		return eventType
 	}
+}
+
+// defaultLlamaSlotsURL is llama-server's slot listing. The dashboard and the
+// pool's local agent share one box, so the address is fixed; tests point the
+// fetcher's llamaSlotsURL elsewhere.
+const defaultLlamaSlotsURL = "http://127.0.0.1:8099/slots"
+
+// llamaSlotsTimeout bounds one /slots poll: a page render waits on it, and a
+// wedged server must not hold the page.
+const llamaSlotsTimeout = 2 * time.Second
+
+// poolAgentLister returns the GT_AGENT of every live polecat session. The
+// production read goes to tmux; tests supply a fake.
+type poolAgentLister func() ([]string, error)
+
+// FetchLocalPool reports the pool's local seats against llama-server's slots.
+// It returns nil when the town has no polecat_pool, which keeps the panel off
+// the page; a failed seat or slot read sets the matching *Err field so the
+// panel says what is unreadable instead of reporting a zero.
+func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(f.townRoot))
+	if err != nil {
+		return nil, fmt.Errorf("reading town settings: %w", err)
+	}
+	if ts == nil || ts.PolecatPool == nil {
+		return nil, nil
+	}
+	pool := ts.PolecatPool
+
+	data := &LocalPoolData{
+		MaxLocal:      pool.MaxLocal,
+		LocalAgent:    pool.LocalAgent,
+		OverflowAgent: pool.OverflowAgent,
+	}
+	// A gap that does not parse is left out: rendered beside the real
+	// settings it would read as the value in force.
+	if gap := strings.TrimSpace(pool.MinSpawnGap); gap != "" {
+		if _, err := time.ParseDuration(gap); err == nil {
+			data.MinSpawnGap = gap
+		}
+	}
+
+	agents, err := f.poolAgents()
+	if err != nil {
+		data.SeatsErr = "seats unreadable"
+	} else {
+		// An unset local_agent matches nothing: every polecat session carries
+		// an empty GT_AGENT and would otherwise count as a local seat.
+		for _, agent := range agents {
+			if pool.LocalAgent != "" && agent == pool.LocalAgent {
+				data.LocalSeats++
+			}
+		}
+	}
+
+	busy, total, err := f.llamaServerSlots()
+	if err != nil {
+		data.SlotsErr = "llama-server: down"
+	} else {
+		data.SlotsBusy, data.SlotsTotal = busy, total
+	}
+	return data, nil
+}
+
+// llamaServerSlots counts llama-server's busy slots and its total. Failures go
+// through the breaker so a down server costs one request per backoff window
+// rather than one per render.
+func (f *LiveConvoyFetcher) llamaServerSlots() (int, int, error) {
+	if !f.llamaBreaker.allow() {
+		return 0, 0, errors.New("backing off after a failed slots poll")
+	}
+
+	url := f.llamaSlotsURL
+	if url == "" {
+		url = defaultLlamaSlotsURL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), llamaSlotsTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		f.llamaBreaker.recordFailure()
+		return 0, 0, err
+	}
+	resp, err := (&http.Client{Timeout: llamaSlotsTimeout}).Do(req)
+	if err != nil {
+		f.llamaBreaker.recordFailure()
+		return 0, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		f.llamaBreaker.recordFailure()
+		return 0, 0, fmt.Errorf("slots: %s", resp.Status)
+	}
+
+	var slots []struct {
+		ID           int  `json:"id"`
+		IsProcessing bool `json:"is_processing"`
+		NCtx         int  `json:"n_ctx"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&slots); err != nil {
+		f.llamaBreaker.recordFailure()
+		return 0, 0, err
+	}
+	f.llamaBreaker.recordSuccess()
+
+	busy := 0
+	for _, s := range slots {
+		if s.IsProcessing {
+			busy++
+		}
+	}
+	return busy, len(slots), nil
+}
+
+// poolAgents returns the GT_AGENT of every live polecat session, or the
+// lister's error. A polecat is a session whose GT_ROLE is
+// "<rig>/polecats/<name>", which keeps witnesses, refineries and dogs on the
+// same socket out of the seat count; GT_AGENT is written at spawn
+// (SessionStartOptions.Agent / AgentEnv fallback). A polecat session without
+// the variable reports an empty agent and so never counts as a local seat.
+func (f *LiveConvoyFetcher) poolAgents() ([]string, error) {
+	if f.listPoolAgents != nil {
+		return f.listPoolAgents()
+	}
+	names, err := f.tmuxSessionNames()
+	if err != nil {
+		return nil, err
+	}
+	var agents []string
+	for _, name := range names {
+		role, err := f.tmuxSessionEnv(name, "GT_ROLE")
+		if err != nil || !strings.Contains(role, "/polecats/") {
+			continue
+		}
+		agent, _ := f.tmuxSessionEnv(name, "GT_AGENT")
+		agents = append(agents, agent)
+	}
+	return agents, nil
+}
+
+// tmuxSessionNames lists the town socket's session names.
+func (f *LiveConvoyFetcher) tmuxSessionNames() ([]string, error) {
+	out, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, name := range strings.Split(out.String(), "\n") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// tmuxSessionEnv reads one variable from a session's environment. tmux prints
+// "KEY=value" (psmux prints every variable), so the line is split on the first
+// "=" and the key compared; a variable the session does not carry is an error,
+// which callers read as absent.
+func (f *LiveConvoyFetcher) tmuxSessionEnv(session, key string) (string, error) {
+	out, err := f.runTmuxCmd("show-environment", "-t", session, key)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if name, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok && name == key {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("tmux: %s carries no %s", session, key)
 }

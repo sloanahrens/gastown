@@ -272,6 +272,37 @@
                 </div>
             </div>
 
+            <!-- Local Pool Panel: the pool's local seats, and llama-server's slots -->
+            {{if .LocalPool}}
+            <div class="panel" id="local-pool-panel">
+                <div class="panel-header">
+                    <h2>⚙️ Local Pool</h2>
+                    <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+                    <button class="expand-btn">Expand</button>
+                </div>
+                <div class="mq-tile" title="Local polecat seats against max_local, and llama-server slots in use">
+                    <span class="mq-tile-label">local seats</span>
+                    <span class="mq-tile-value">{{if .LocalPool.SeatsErr}}{{.LocalPool.SeatsErr}}{{else}}{{.LocalPool.LocalSeats}}/{{.LocalPool.MaxLocal}}{{end}}</span>
+                    <span class="mq-tile-label">slots busy</span>
+                    <span class="mq-tile-value">{{if .LocalPool.SlotsErr}}{{.LocalPool.SlotsErr}}{{else}}{{.LocalPool.SlotsBusy}}/{{.LocalPool.SlotsTotal}}{{end}}</span>
+                </div>
+                <div class="panel-body">
+                    <div class="mq-tile" title="The polecat_pool new polecats are routed against">
+                        <span class="mq-tile-label">local agent</span>
+                        <span class="mq-tile-rig">{{.LocalPool.LocalAgent}}</span>
+                        {{if .LocalPool.OverflowAgent}}
+                        <span class="mq-tile-label">overflow</span>
+                        <span class="mq-tile-rig">{{.LocalPool.OverflowAgent}}</span>
+                        {{end}}
+                        {{if .LocalPool.MinSpawnGap}}
+                        <span class="mq-tile-label">min spawn gap</span>
+                        <span class="mq-tile-rig">{{.LocalPool.MinSpawnGap}}</span>
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+            {{end}}
+
             <!-- Crew Panel (named, long-lived workers) -->
             <div class="panel" id="crew-panel">
                 <div class="panel-header">
