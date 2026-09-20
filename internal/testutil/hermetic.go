@@ -92,6 +92,10 @@ type Hermetic struct {
 	// harness bound via tmux.SetDefaultSocket, or "" when tmux isn't
 	// installed or isolation was bypassed via AllowLiveTmuxEnv.
 	TmuxSocket string
+	// LiveTmuxSocket is the socket of the tmux server this test process was
+	// launched inside (from the ambient $TMUX), or "" when it was not started
+	// from a tmux pane. Finish tripwires on test sessions found there.
+	LiveTmuxSocket string
 
 	cfg  hermeticConfig
 	snap *townSnapshot
@@ -171,7 +175,13 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// was a documented but dead opt-out (gt-yav3 MR1 bounce).
 	allowLiveTmux := os.Getenv(AllowLiveTmuxEnv) == "1"
 
+	// Same reason as allowLiveTmux: scrubInheritedTmuxVars removes this, and
+	// the tripwire in Finish compares against the server the test process was
+	// itself launched inside. Captured here, before the scrub.
+	h.LiveTmuxSocket = tmux.SocketFromEnv()
+
 	scrubProcessEnv(externalDolt)
+	scrubInheritedTmuxVars()
 
 	if allowLiveTmux {
 		if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
@@ -285,6 +295,24 @@ func (h *Hermetic) Finish(code int) int {
 		_ = os.Remove(filepath.Join(tmux.SocketDir(), h.TmuxSocket))
 	}
 
+	if h.LiveTmuxSocket != "" {
+		if leaks := liveTmuxTestSessions(h.LiveTmuxSocket); len(leaks) > 0 {
+			fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
+			fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: tests created %d session(s) on the live tmux server %q\n",
+				len(leaks), h.LiveTmuxSocket)
+			for _, l := range leaks {
+				fmt.Fprintf(os.Stderr, "  - %s\n", l)
+			}
+			fmt.Fprintf(os.Stderr, "A session named gt-test-* on the live server reads as a phantom polecat\n")
+			fmt.Fprintf(os.Stderr, "in the roster and is a target for auto-nuke (gt-2bj). Name a session\n")
+			fmt.Fprintf(os.Stderr, "socket (tmux -L gt-test-<something>) instead of using the inherited one.\n")
+			fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+
 	if h.snap != nil {
 		if leaks := h.snap.diff(); len(leaks) > 0 {
 			fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
@@ -333,6 +361,51 @@ func scrubProcessEnv(keepDolt bool) {
 		}
 		_ = os.Unsetenv(name)
 	}
+}
+
+// liveTmuxVars are the session-identity variables an agent shell exports and
+// tmux honors ahead of its own default socket.
+var liveTmuxVars = []string{"TMUX", "TMUX_PANE", "TMUX_TMPDIR"}
+
+// scrubInheritedTmuxVars drops the invoking agent's tmux identity, so a bare
+// `tmux` in a test or its subprocess cannot reach the live town server. No
+// socket-scoped wrapper covers a shell-out; the scrub does (gt-2bj).
+func scrubInheritedTmuxVars() {
+	for _, v := range liveTmuxVars {
+		_ = os.Unsetenv(v)
+	}
+}
+
+// liveTmuxTestSessions returns the gt-test-* sessions running on the given
+// socket, each with the pane pid and cwd that identify what left it behind.
+// Phantoms live under two minutes, so a name alone is not evidence (gt-2bj).
+func liveTmuxTestSessions(socket string) []string {
+	tm := tmux.NewTmuxWithSocket(socket)
+	names, err := tm.ListSessions()
+	if err != nil {
+		return nil
+	}
+	var leaks []string
+	for _, name := range names {
+		if !strings.HasPrefix(name, "gt-test-") {
+			continue
+		}
+		var evidence []string
+		if pid, err := tm.GetPanePID(name); err == nil && pid != "" {
+			evidence = append(evidence, "pane_pid="+pid)
+		}
+		if cwd, err := tm.PaneCurrentPath(name); err == nil && cwd != "" {
+			evidence = append(evidence, "cwd="+cwd)
+		}
+		sort.Strings(evidence)
+		if len(evidence) == 0 {
+			leaks = append(leaks, name)
+			continue
+		}
+		leaks = append(leaks, fmt.Sprintf("%s (%s)", name, strings.Join(evidence, " ")))
+	}
+	sort.Strings(leaks)
+	return leaks
 }
 
 // writeSandboxGitConfig gives the sandbox HOME a deterministic git identity,

@@ -3,12 +3,31 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
 
+// testTmuxSocket is the socket this package's tmux commands are scoped to. The
+// package cannot reach internal/tmux or internal/testutil for it: tmux imports
+// internal/config, so either import is a cycle from a test in this package.
+// Unscoped, the integration test's `tmux new-session` lands on the server the
+// invoking agent shell runs inside and reads as a phantom polecat (gt-2bj).
+var testTmuxSocket = fmt.Sprintf("gt-test-config-%d", os.Getpid())
+
+// testTmuxCommand builds a tmux command scoped to testTmuxSocket: -L outranks
+// the inherited $TMUX, so every tmux call in this package must go through it.
+func testTmuxCommand(args ...string) *exec.Cmd {
+	return exec.Command("tmux", append([]string{"-L", testTmuxSocket}, args...)...)
+}
+
 func TestMain(m *testing.M) {
+	// Drop the invoking pane's tmux identity for the whole process, so a bare
+	// `tmux` added to a test later cannot reach the live server either.
+	_ = os.Unsetenv("TMUX")
+	_ = os.Unsetenv("TMUX_PANE")
+
 	stubDir, err := os.MkdirTemp("", "gt-agent-bin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create stub dir: %v\n", err)
@@ -46,6 +65,12 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("GT_AGENT_STUB_BIN_DIR", stubDir)
 
 	code := m.Run()
+
+	// The isolated server outlives the test that started it: kill it whole, so
+	// no socket file or stray server is left for the next run to trip over.
+	if _, err := exec.LookPath("tmux"); err == nil {
+		_ = exec.Command("tmux", "-L", testTmuxSocket, "kill-server").Run()
+	}
 
 	_ = os.Setenv("PATH", originalPath)
 	_ = os.Unsetenv("GT_AGENT_STUB_BIN_DIR")
