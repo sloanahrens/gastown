@@ -563,6 +563,27 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 	}
 }
 
+// fastStartupNudgeRig returns a rig whose town (the parent of the rig dir)
+// configures a 200ms startup-nudge verify delay. verifyStartupNudgeDelivery
+// reads operational.session.startup_nudge_verify_delay from
+// <townRoot>/settings/config.json with townRoot = Dir(rig.Path); left at the
+// compiled-in default the two retries sleep 25s each, and every test that
+// drives the retry loop against a live fake pane paid ~57s for nothing
+// (gt-0mbw).
+func fastStartupNudgeRig(t *testing.T) *rig.Rig {
+	t.Helper()
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	cfg := `{"type":"town-settings","version":1,"operational":{"session":{"startup_nudge_verify_delay":"200ms"}}}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	return &rig.Rig{Name: "test-rig", Path: filepath.Join(townRoot, "test-rig")}
+}
+
 // TestVerifyStartupNudgeDelivery_IdleAgent tests that verifyStartupNudgeDelivery
 // detects an idle agent (at prompt, no busy indicator) and retries the nudge.
 // Uses a real tmux session with a shell prompt that matches the ReadyPromptPrefix.
@@ -590,7 +611,7 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
 	time.Sleep(300 * time.Millisecond)
 
-	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	r := fastStartupNudgeRig(t)
 	m := NewSessionManager(tm, r)
 
 	rc := &config.RuntimeConfig{
@@ -737,7 +758,7 @@ func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
 	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
 	time.Sleep(300 * time.Millisecond)
 
-	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	r := fastStartupNudgeRig(t)
 	m := NewSessionManager(tm, r)
 
 	rc := &config.RuntimeConfig{

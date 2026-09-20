@@ -53,6 +53,15 @@ if [[ "$cmd" == "has-session" ]]; then
   exit 0
 fi
 
+# The pane already runs claude. The very-stale path respawns the Deacon and
+# then waits in tmux.WaitForCommand for the pane command to stop being a
+# shell; with no answer here GetPaneCommand errors and the wait runs the
+# whole constants.ClaudeStartTimeout (180s) before the test can finish.
+if [[ "$cmd" == "display-message" ]]; then
+  echo "claude"
+  exit 0
+fi
+
 exit 0
 `
 	path := filepath.Join(dir, "tmux")
