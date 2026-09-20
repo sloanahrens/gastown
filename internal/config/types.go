@@ -2055,8 +2055,8 @@ func NewEscalationConfig() *EscalationConfig {
 	}
 }
 
-// PolecatPool bounds how many polecats run on the local model at once.
-// See TownSettings.PolecatPool.
+// PolecatPool bounds how many polecats run at once: max_local on the local
+// model, max_overflow on the overflow agent. See TownSettings.PolecatPool.
 type PolecatPool struct {
 	// LocalAgent is the agent alias to use while the pool has room.
 	LocalAgent string `json:"local_agent"`
@@ -2067,6 +2067,9 @@ type PolecatPool struct {
 	// OverflowAgent is used when the pool is full or a spawn is too soon.
 	// Empty means the normal role_agents resolution.
 	OverflowAgent string `json:"overflow_agent,omitempty"`
+	// MaxOverflow is the number of live polecat sessions allowed on
+	// OverflowAgent. Zero leaves the overflow seat uncapped.
+	MaxOverflow int `json:"max_overflow,omitempty"`
 }
 
 // MinSpawnGapD returns the parsed MinSpawnGap, or zero when unset/invalid.
@@ -2079,4 +2082,10 @@ func (p *PolecatPool) MinSpawnGapD() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// OverflowCapped reports whether the pool bounds live polecats on
+// OverflowAgent: max_overflow set, and an agent whose sessions to count.
+func (p *PolecatPool) OverflowCapped() bool {
+	return p != nil && p.MaxOverflow > 0 && p.OverflowAgent != ""
 }

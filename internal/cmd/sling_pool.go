@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,10 @@ import (
 // session also costs a 20-25k-token prefill during which every decoding
 // slot starves. So the pool caps how many polecats run locally, spaces
 // their spawns, and sends the rest to the overflow agent.
+//
+// The overflow seat is a seat too (gt-jzr1): capped at max_overflow, it
+// turns a full local pool into a refused sling rather than an unbounded run
+// of overflow spawns (10 polecats on a 3+3 town, spend pace $2.62/h).
 //
 // Bead-shape routing (gt-t8h1, plan Task 4 / design B1+B3) layers on top: the
 // pool used to decide from the seat count alone, so a hard bug and a doc tweak
@@ -127,28 +132,32 @@ type poolSession struct {
 // being slung, and the live polecat sessions. It is pure: the only side effect
 // in routing — attaching localAttemptLabel — belongs to the caller. It returns
 // "" when the pool does not apply (unset, or no local agent) so the caller
-// falls back to role_agents.
+// falls back to role_agents, and refused when no seat is free, so the caller
+// stops the sling instead of spawning past a cap.
 //
-// Every reason names the agent it chose, except the three "the pool does not
-// apply" lines, which name no agent because the caller has yet to pick one.
-func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSession, now time.Time) (agent, reason string) {
+// Every reason names the agent it chose or the seat it could not take, except
+// the three "the pool does not apply" lines, which name no agent because the
+// caller has yet to pick one.
+func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSession, now time.Time) (agent, reason string, refused bool) {
 	switch {
 	case pool == nil:
-		return "", "pool: no polecat pool configured"
+		return "", "pool: no polecat pool configured", false
 	case pool.LocalAgent == "":
-		return "", "pool: polecat_pool has no local_agent; using the role default"
+		return "", "pool: polecat_pool has no local_agent; using the role default", false
 	case pool.MaxLocal <= 0:
-		return "", fmt.Sprintf("pool: polecat_pool max_local is %d; using the role default", pool.MaxLocal)
+		return "", fmt.Sprintf("pool: polecat_pool max_local is %d; using the role default", pool.MaxLocal), false
 	}
-	local := 0
+	local, over := 0, 0
 	var newest time.Time
 	for _, s := range sessions {
-		if s.agent != pool.LocalAgent {
-			continue
-		}
-		local++
-		if s.created.After(newest) {
-			newest = s.created
+		switch {
+		case s.agent == pool.LocalAgent:
+			local++
+			if s.created.After(newest) {
+				newest = s.created
+			}
+		case pool.OverflowAgent != "" && s.agent == pool.OverflowAgent:
+			over++
 		}
 	}
 	gap := pool.MinSpawnGapD()
@@ -157,28 +166,49 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 	// closer together than min_spawn_gap cost more than they buy.
 	tooSoon := gap > 0 && local > 0 && now.Sub(newest) < gap
 	overflow := poolAgentName(pool.OverflowAgent)
+	// The overflow seat's own cap (gt-jzr1). Uncapped it grows with every
+	// sling a full local pool turns away, and the spend it was meant to move
+	// off the GPU comes back as an unbounded bill.
+	overflowFull := pool.OverflowCapped() && over >= pool.MaxOverflow
 
+	// refuse is the one place a spent cap becomes a decision: why names what
+	// pushed the bead to the overflow seat, so a bead refused by its own shape
+	// reads differently from one refused because the town is out of seats.
+	refuse := func(why string) (string, string, bool) {
+		return pool.OverflowAgent, fmt.Sprintf("pool: overflow full (%d/%d) -> no seat (%s)", over, pool.MaxOverflow, why), true
+	}
 	// localSeat is the one place the seat line is built: it is contractual
 	// output, and it is what tells a reader which seat the polecat took.
-	localSeat := func(why string) (string, string) {
-		return pool.LocalAgent, fmt.Sprintf("pool: local seat %d/%d -> %s (%s)", local+1, pool.MaxLocal, pool.LocalAgent, why)
+	localSeat := func(why string) (string, string, bool) {
+		return pool.LocalAgent, fmt.Sprintf("pool: local seat %d/%d -> %s (%s)", local+1, pool.MaxLocal, pool.LocalAgent, why), false
 	}
 	// seat decides a bead that wants the local agent (or has no preference),
 	// applying the seat count and then the stagger. want names the branch for
 	// the reason line.
-	seat := func(want string) (string, string) {
+	seat := func(want string) (string, string, bool) {
 		switch {
 		case local >= pool.MaxLocal:
-			return pool.OverflowAgent, fmt.Sprintf("pool: local full (%d/%d) -> %s", local, pool.MaxLocal, overflow)
+			if overflowFull {
+				return refuse("local full")
+			}
+			return pool.OverflowAgent, fmt.Sprintf("pool: local full (%d/%d) -> %s", local, pool.MaxLocal, overflow), false
 		case tooSoon:
-			return pool.OverflowAgent, fmt.Sprintf("pool: stagger %s since last local spawn -> %s", now.Sub(newest).Round(time.Second), overflow)
+			if overflowFull {
+				return refuse("stagger " + now.Sub(newest).Round(time.Second).String() + " since last local spawn")
+			}
+			return pool.OverflowAgent, fmt.Sprintf("pool: stagger %s since last local spawn -> %s", now.Sub(newest).Round(time.Second), overflow), false
 		}
 		return localSeat(want)
 	}
-	// overflow sends the bead to the overflow agent and says why the bead's own
-	// shape (not the pool's state) made that call.
-	overflowFor := func(why string) (string, string) {
-		return pool.OverflowAgent, fmt.Sprintf("pool: overflow -> %s (%s)", overflow, why)
+	// overflowFor sends the bead to the overflow agent, refuses when that seat
+	// is capped out — an explicit route:flash label names a seat class, it does
+	// not license spawning past the cap — and says why the bead's own shape (not
+	// the pool's state) made the call.
+	overflowFor := func(why string) (string, string, bool) {
+		if overflowFull {
+			return refuse(why)
+		}
+		return pool.OverflowAgent, fmt.Sprintf("pool: overflow -> %s (%s)", overflow, why), false
 	}
 
 	// 1. Explicit routing wins over everything below, including a spent local
@@ -389,10 +419,16 @@ func beginPoolSeatDecision(townRoot string, live bool, sessions []poolSession) (
 	return append(sessions, poolSeatClaimSessions(townRoot, processPoolSeatClaims.ownID())...), d
 }
 
-// claimFor takes a seat for the route the caller chose. Only a local seat is
-// claimed: the overflow agent has no cap to protect.
+// claimFor takes a seat for the route the caller chose: the local seat always,
+// the overflow seat when it is capped. A cap nothing claims is the gt-eoi9 race
+// again, on the seat whose slings are all overflow routes with no stagger to
+// slow them down.
 func (d *poolSeatDecision) claimFor(agent string, pool *config.PolecatPool, beadID string) {
-	if d.lock == nil || agent != pool.LocalAgent {
+	if d.lock == nil || pool == nil {
+		return
+	}
+	capped := agent == pool.LocalAgent || (agent == pool.OverflowAgent && pool.OverflowCapped())
+	if !capped {
 		return
 	}
 	claim, err := writePoolSeatClaim(d.townRoot, agent, beadID)
@@ -564,27 +600,49 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 }
 
 // resolvePolecatPoolAgent applies the town's polecat_pool to a sling that
-// gave no --agent. It reads the bead's type and labels, claims a local seat
-// while it decides (so a sling racing this one sees the seat as taken),
-// attaches localAttemptLabel when the idle-seat fill branch fires, and returns
-// the agent to use ("" = role default) with a one-line reason naming that agent.
-func resolvePolecatPoolAgent(townRoot, beadID string) (agent, reason string) {
-	return poolRoute(townRoot, beadID, true)
+// gave no --agent. It reads the bead's type and labels, claims the seat it
+// routes to while it decides (so a sling racing this one sees the seat as
+// taken), attaches localAttemptLabel when the idle-seat fill branch fires, and
+// returns the agent to use ("" = role default) with a one-line reason naming
+// that agent. It returns errPoolBackpressure when every seat the bead could
+// take is at its cap and force is false.
+func resolvePolecatPoolAgent(townRoot, beadID string, force bool) (agent, reason string, err error) {
+	return poolRoute(townRoot, beadID, true, force)
 }
 
 // peekPolecatPoolAgent is resolvePolecatPoolAgent without the side effects:
-// `gt sling --dry-run` must print the route it would take without claiming a
-// seat or consuming the bead's one local attempt.
-func peekPolecatPoolAgent(townRoot, beadID string) (agent, reason string) {
-	return poolRoute(townRoot, beadID, false)
+// `gt sling --dry-run` must print the route it would take — a refusal included,
+// since that is the route a live sling would take — without claiming a seat or
+// consuming the bead's one local attempt.
+func peekPolecatPoolAgent(townRoot, beadID string, force bool) (agent, reason string, err error) {
+	return poolRoute(townRoot, beadID, false, force)
 }
+
+// errPoolBackpressure identifies a pool refusal so callers and tests can match
+// it with errors.Is without parsing the message.
+var errPoolBackpressure = errors.New("polecat pool backpressure")
+
+// poolBackpressureError is the typed refusal: every seat the bead could take is
+// at its cap. The message leads with `sling refused:`, the marker that tells
+// the convoy feeder to defer the bead instead of failing it (see
+// internal/daemon/convoy_sling_backpressure.go), carries the pool's own reason
+// line and names the way through.
+type poolBackpressureError struct {
+	Reason string
+}
+
+func (e *poolBackpressureError) Error() string {
+	return "sling refused: " + e.Reason + "; pass --force to spawn anyway"
+}
+
+func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
 // poolRoute decides the route. live distinguishes a sling that will spawn from
 // a dry run: only a live sling claims a seat or writes labels.
-func poolRoute(townRoot, beadID string, live bool) (agent, reason string) {
+func poolRoute(townRoot, beadID string, live, force bool) (agent, reason string, err error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil || ts == nil || ts.PolecatPool == nil {
-		return "", ""
+		return "", "", nil
 	}
 	// A bead lookup failure is not fatal: the policy falls back to the seat
 	// count and the reason says so, so a seat-only decision never passes for a
@@ -598,12 +656,15 @@ func poolRoute(townRoot, beadID string, live bool) (agent, reason string) {
 	if err != nil {
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather
-		// than risk over-filling the GPU.
+		// than risk over-filling the GPU. A town whose sessions cannot be
+		// counted is not a town at its cap, so the overflow cap stays off
+		// here too — the refusal below would otherwise stop every sling on a
+		// tmux hiccup.
 		fallback := "the role default"
 		if ts.PolecatPool.OverflowAgent != "" {
 			fallback = ts.PolecatPool.OverflowAgent
 		}
-		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback
+		return ts.PolecatPool.OverflowAgent, "pool: cannot list sessions (" + err.Error() + "), using " + fallback, nil
 	}
 	if live {
 		// The claim this process holds stood for its previous spawn, whose
@@ -613,8 +674,8 @@ func poolRoute(townRoot, beadID string, live bool) (agent, reason string) {
 	}
 	sessions, seat := beginPoolSeatDecision(townRoot, live, sessions)
 	defer seat.done()
-	agent, reason = choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now())
-	if live {
+	agent, reason, refused := choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now())
+	if live && !refused {
 		seat.claimFor(agent, ts.PolecatPool, beadID)
 	}
 	if beadErr != nil {
@@ -623,10 +684,16 @@ func poolRoute(townRoot, beadID string, live bool) (agent, reason string) {
 	if seat.note != "" {
 		reason = fmt.Sprintf("%s [%s]", reason, seat.note)
 	}
+	if refused {
+		if !force {
+			return agent, reason, &poolBackpressureError{Reason: reason}
+		}
+		reason = fmt.Sprintf("%s [--force: spawning past the overflow cap]", reason)
+	}
 	if live && beadID != "" && strings.Contains(reason, idleFillReason) {
 		if err := poolBeadLabelAdd(townRoot, beadID, localAttemptLabel); err != nil {
 			reason = fmt.Sprintf("%s [%s label failed: %v]", reason, localAttemptLabel, err)
 		}
 	}
-	return agent, reason
+	return agent, reason, nil
 }
