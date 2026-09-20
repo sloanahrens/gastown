@@ -78,10 +78,10 @@ YOUR_AGENT_BEAD=$(gt agents resolve --role witness --rig {{rig}})
 ```
 This must resolve exactly one bead ID. If it fails, STOP and report the error. If it reports multiple results, STOP and report the ambiguity — manual disambiguation is required.
 
-Then use await-signal with exponential backoff to wait for activity:
+Then use await-event with exponential backoff to wait for activity on the rig-scoped witness channel:
 
 ```bash
-gt mol step await-signal --agent-bead "$YOUR_AGENT_BEAD" \
+gt mol step await-event --channel witness --rig {{rig}} --agent-bead "$YOUR_AGENT_BEAD" --cleanup \
   --backoff-base 30s --backoff-mult 2 --backoff-max 5m
 ```
 

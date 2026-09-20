@@ -1232,10 +1232,10 @@ Refresh the heartbeat again immediately before the long idle wait:
 gt deacon heartbeat "pre-await checkpoint"
 ```
 
-Use await-signal with exponential backoff to wait for activity:
+Use await-event with exponential backoff to wait for activity on the town-scoped witness channel:
 
 ```bash
-gt mol step await-signal --agent-bead hq-deacon \
+gt mol step await-event --channel witness --rig town --agent-bead hq-deacon --cleanup \
   --backoff-base 60s --backoff-mult 2 --backoff-max 15m
 ```
 
