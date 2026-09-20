@@ -802,7 +802,15 @@ func SupportsSessionResume(agentName string) bool {
 // GetSessionIDEnvVar returns the environment variable name for storing session IDs
 // for a given agent. Returns empty string if the agent doesn't use env vars for this.
 func GetSessionIDEnvVar(agentName string) string {
-	info := GetAgentPresetByName(agentName)
+	// Read the field while still holding registryMu instead of via
+	// GetAgentPresetByName, whose returned pointer outlives its lock scope.
+	// Callers of this function treat the result as an invariant property of
+	// the agent (gt-hvzy.3), so the answer must not depend on where a
+	// concurrent reset/fixture-load happened to land.
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	initRegistryLocked()
+	info := globalRegistry.Agents[agentName]
 	if info == nil {
 		return ""
 	}
@@ -1107,12 +1115,21 @@ func NewExampleAgentRegistry() *AgentRegistry {
 
 // ResetRegistryForTesting clears all registry state.
 // This is intended for use in tests only to ensure test isolation.
+//
+// The registry is left holding a freshly initialized copy of the built-in
+// presets rather than nil. Readers that call initRegistryLocked() (every
+// public accessor does) would rebuild from builtinPresets anyway, so the
+// observable state is unchanged — but the nil window is gone. A concurrent
+// reader can no longer observe a registry "without claude" if a reset lands
+// between its lock acquisition and its read. That window was the exact shape
+// of the TestGetSessionIDEnvVar flake (gt-hvzy.3 / gt-5v82).
 func ResetRegistryForTesting() {
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	globalRegistry = nil
 	loadedPaths = make(map[string]bool)
 	registryInitialized = false
+	globalRegistry = nil
+	initRegistryLocked()
 }
 
 // RegisterAgentForTesting adds a custom agent preset to the registry.

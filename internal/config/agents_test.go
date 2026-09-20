@@ -194,8 +194,11 @@ func TestLoadAgentRegistry(t *testing.T) {
 		t.Fatalf("failed to write test config: %v", err)
 	}
 
-	// Reset global registry for test isolation
+	// Reset global registry for test isolation. t.Cleanup (not a trailing
+	// ResetRegistryForTesting call) so a t.Fatal mid-test still restores the
+	// builtin registry before any parallel sibling runs (gt-hvzy.3).
 	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
 
 	// Load should succeed
 	if err := LoadAgentRegistry(configPath); err != nil {
@@ -217,9 +220,6 @@ func TestLoadAgentRegistry(t *testing.T) {
 	if claude == nil {
 		t.Fatal("built-in 'claude' not found after loading registry")
 	}
-
-	// Reset for other tests
-	ResetRegistryForTesting()
 }
 
 func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
@@ -277,8 +277,13 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 	}
 }
 
+// TestResolveProcessNames must NOT be t.Parallel(): its subtests call
+// RegisterAgentForTesting and ResetRegistryForTesting against the
+// process-global agent registry. Go defers every parallel test until the
+// sequential pass has finished, so keeping this test sequential guarantees
+// its mutations can never overlap a parallel reader such as
+// TestGetSessionIDEnvVar (gt-hvzy.3).
 func TestResolveProcessNames(t *testing.T) {
-	t.Parallel()
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
@@ -1536,8 +1541,9 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 	}
 }
 
+// TestResolveACPConfig must NOT be t.Parallel(): it resets the
+// process-global agent registry. See TestResolveProcessNames (gt-hvzy.3).
 func TestResolveACPConfig(t *testing.T) {
-	t.Parallel()
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
@@ -1621,8 +1627,9 @@ func TestSupportsACPWithCustomAgent(t *testing.T) {
 	}
 }
 
+// TestGetACPCommand must NOT be t.Parallel(): it resets the process-global
+// agent registry. See TestResolveProcessNames (gt-hvzy.3).
 func TestGetACPCommand(t *testing.T) {
-	t.Parallel()
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
