@@ -171,21 +171,28 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-
-	// Check if already running
-	running, pid, err := daemon.IsRunning(townRoot)
+	via, pid, err := startDaemon(townRoot)
 	if err != nil {
-		return fmt.Errorf("checking daemon status: %w", err)
+		return err
 	}
-	if running {
-		return fmt.Errorf("daemon already running (PID %d)", pid)
+	if via != "" {
+		fmt.Printf("%s Daemon started under %s (PID %d)\n", style.Bold.Render("✓"), via, pid)
+	} else {
+		fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
 	}
+	return nil
+}
 
+// spawnDaemonProcess starts 'gt daemon run' as a detached child of this
+// process — the right thing only when no supervisor is provisioned (see
+// startDaemon) — and returns the PID of the daemon now holding the lock
+// (ours, or a concurrent starter's that won the race).
+func spawnDaemonProcess(townRoot string) (int, error) {
 	// Start daemon in background
 	// We use 'gt daemon run' as the actual daemon process
 	gtPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("finding executable: %w", err)
+		return 0, fmt.Errorf("finding executable: %w", err)
 	}
 
 	daemonCmd := exec.Command(gtPath, "daemon", "run")
@@ -198,40 +205,20 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	util.SetDetachedProcessGroup(daemonCmd)
 
 	if err := daemonCmd.Start(); err != nil {
-		return fmt.Errorf("starting daemon: %w", err)
+		return 0, fmt.Errorf("starting daemon: %w", err)
 	}
 
-	// Poll for daemon to initialize and acquire the lock (up to 3s)
-	var started bool
-	for range 30 {
-		time.Sleep(100 * time.Millisecond)
-		running, pid, err = daemon.IsRunning(townRoot)
-		if err != nil {
-			return fmt.Errorf("checking daemon status: %w", err)
-		}
-		if running {
-			started = true
-			break
-		}
-	}
-	if !started {
+	// Poll for daemon to initialize and acquire the lock (up to 3s). If a
+	// concurrent starter won the race our child exited without the lock and
+	// the PID file names the winner — that daemon is as good as ours.
+	pid, err := waitForDaemon(townRoot)
+	if err != nil {
 		if msg := readDaemonStartupFailure(townRoot, daemonCmd.Process.Pid); msg != "" {
-			return fmt.Errorf("daemon failed to start: %s", msg)
+			return 0, fmt.Errorf("daemon failed to start: %s", msg)
 		}
-		return fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
+		return 0, err
 	}
-
-	// Check if our spawned process is the one that won the race.
-	// If another concurrent start won, our process would have exited after
-	// failing to acquire the lock, and the PID file would have a different PID.
-	if pid != daemonCmd.Process.Pid {
-		// Another daemon won the race - that's fine, report it
-		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
-		return nil
-	}
-
-	fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
-	return nil
+	return pid, nil
 }
 
 func runDaemonStop(cmd *cobra.Command, args []string) error {

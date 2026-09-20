@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,7 +30,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -106,16 +103,6 @@ func emitUpJSON(w io.Writer, services []ServiceStatus) error {
 // exhaustion. Each agent start spawns a tmux session and runs gt prime, so
 // more than ~10 concurrent starts can saturate CPU and cause timeouts.
 const maxConcurrentAgentStarts = 10
-
-// daemonStartupGrace is how long to wait after spawning the daemon process
-// before verifying it started. The daemon needs time to write its PID file.
-// On Windows, DETACHED_PROCESS startup is slower so we allow extra time.
-var daemonStartupGrace = func() time.Duration {
-	if runtime.GOOS == "windows" {
-		return 2 * time.Second
-	}
-	return 300 * time.Millisecond
-}()
 
 var upCmd = &cobra.Command{
 	Use:     "up",
@@ -535,39 +522,17 @@ func ensureDaemon(townRoot string) error {
 		return nil
 	}
 
-	// Start daemon
-	gtPath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command(gtPath, "daemon", "run")
-	cmd.Dir = townRoot
-	// Detach from parent I/O for background daemon (uses its own logging)
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	util.SetDetachedProcessGroup(cmd)
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	// Wait for daemon to initialize
-	time.Sleep(daemonStartupGrace)
-
-	// Verify it started
-	running, _, err = daemon.IsRunning(townRoot)
-	if err != nil {
-		return err
-	}
-	if !running {
-		if msg := readDaemonStartupFailure(townRoot, cmd.Process.Pid); msg != "" {
-			return fmt.Errorf("daemon failed to start: %s", msg)
+	// Start it — through the provisioned supervisor when there is one
+	// (gt-3jrm: a daemon spawned here by hand leaves a KeepAlive launchd job
+	// respawn-looping against it).
+	if _, _, err := startDaemon(townRoot); err != nil {
+		// A concurrent starter (gt mayor, another gt up) may have won the
+		// race between the check above and the start; that is success.
+		if running, _, chk := daemonIsRunning(townRoot); chk == nil && running {
+			return nil
 		}
-		return fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
+		return err
 	}
-
 	return nil
 }
 
