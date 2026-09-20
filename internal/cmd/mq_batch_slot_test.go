@@ -57,12 +57,12 @@ func TestAcquireBatchGateSlot_SkipsWhenNoGateCommand(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	h, err := acquireBatchGateSlot(townRoot, "gastown", "")
+	h, err := acquireBatchGateSlot(townRoot, "gastown", false)
 	if err != nil {
-		t.Fatalf("acquireBatchGateSlot with empty gateCmd: %v", err)
+		t.Fatalf("acquireBatchGateSlot with no gate configured: %v", err)
 	}
 	if h != nil {
-		t.Fatalf("acquireBatchGateSlot with empty gateCmd returned a non-nil handle: %+v", h)
+		t.Fatalf("acquireBatchGateSlot with no gate configured returned a non-nil handle: %+v", h)
 	}
 
 	rep, err := slot.Status(townRoot)
@@ -81,12 +81,12 @@ func TestAcquireBatchGateSlot_AcquiresWhenGateCommandConfigured(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	h, err := acquireBatchGateSlot(townRoot, "gastown", "make test")
+	h, err := acquireBatchGateSlot(townRoot, "gastown", true)
 	if err != nil {
-		t.Fatalf("acquireBatchGateSlot with gateCmd set: %v", err)
+		t.Fatalf("acquireBatchGateSlot with a gate configured: %v", err)
 	}
 	if h == nil {
-		t.Fatalf("acquireBatchGateSlot with gateCmd set returned a nil handle")
+		t.Fatalf("acquireBatchGateSlot with a gate configured returned a nil handle")
 	}
 
 	rep, err := slot.Status(townRoot)
@@ -147,12 +147,12 @@ func TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	h, err := acquireBatchGateSlot(townRoot, "gastown", "make test")
+	h, err := acquireBatchGateSlot(townRoot, "gastown", true)
 	if err != nil {
 		t.Fatalf("acquireBatchGateSlot: %v", err)
 	}
 	if h == nil {
-		t.Fatalf("acquireBatchGateSlot returned a nil handle with gateCmd set")
+		t.Fatalf("acquireBatchGateSlot returned a nil handle with a gate configured")
 	}
 	defer h.Release()
 
@@ -199,13 +199,13 @@ func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 	townRoot := os.Getenv(mqBatchReentrantTownRootEnvVar)
 
 	start := time.Now()
-	h, err := acquireBatchGateSlot(townRoot, "gastown", "make test")
+	h, err := acquireBatchGateSlot(townRoot, "gastown", true)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("reentrant child acquireBatchGateSlot: %v", err)
 	}
 	if h == nil {
-		t.Fatalf("reentrant child acquireBatchGateSlot returned a nil handle with gateCmd set")
+		t.Fatalf("reentrant child acquireBatchGateSlot returned a nil handle with a gate configured")
 	}
 	if elapsed > time.Second {
 		t.Fatalf("child acquireBatchGateSlot took %s — expected the near-instant reentrant fast path, not a poll/wait", elapsed)

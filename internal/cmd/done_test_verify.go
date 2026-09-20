@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lintlock"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -739,10 +740,10 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		// (gt-xsty).
 		lintCtx, lintCancel := context.WithTimeout(context.Background(), lintVerifyTimeout)
 		lintStart := time.Now()
-		outcome := retryLintLockContention(lintCtx, func() lintAttempt {
+		outcome := lintlock.Retry(lintCtx, func() lintlock.Attempt {
 			from := fileSize(logFile)
 			err := runVerifySuite(lintCtx, worktree, lint, env, logFile)
-			return lintAttempt{err: err, output: readLogFrom(logPath, from)}
+			return lintlock.Attempt{Err: err, Output: readLogFrom(logPath, from)}
 		}, func(attempt, attempts int, wait time.Duration) {
 			reportVerifyProgress(logFile, fmt.Sprintf("lint lock held by another golangci-lint (attempt %d/%d); retrying in %s", attempt, attempts, wait.Round(time.Second)))
 		})
@@ -753,15 +754,15 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		budgetExpired := errors.Is(lintCtx.Err(), context.DeadlineExceeded)
 		lintCancel()
 		result.lintElapsed = time.Since(lintStart)
-		if outcome.err != nil {
+		if outcome.Err != nil {
 			exitCode := -1
 			var exitErr *exec.ExitError
-			if errors.As(outcome.err, &exitErr) {
+			if errors.As(outcome.Err, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
 			fmt.Fprintf(logFile, "=== lint failed (exit %d) ===\n", exitCode)
 			tail := readLogTail(logPath, 4000)
-			detail := lintFailureDetail(outcome.retries, budgetExpired, lintVerifyTimeout)
+			detail := lintFailureDetail(outcome, budgetExpired, lintVerifyTimeout)
 			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — %s (no tests were run; full log: %s):\n%s", exitCode, lint, detail, logPath, tail)
 		}
 		result.lintRan = true

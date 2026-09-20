@@ -224,21 +224,32 @@ func newBatchConfig(max int) *refinery.BatchConfig {
 	return cfg
 }
 
-// buildBatchGateCommand chains the rig's configured setup/typecheck/lint/
-// build/test commands into a single "&&"-joined shell command, run in that
-// order so each step gates the next (mirrors the single-MR formula's
-// run-tests step). Returns "" if none are configured.
-func buildBatchGateCommand(mq *config.MergeQueueConfig) string {
+// buildBatchGateSteps returns the rig's configured setup/typecheck/lint/build/
+// test commands in the order each gates the next (mirrors the single-MR
+// formula's run-tests step). Returns nil if none are configured.
+//
+// Named steps rather than one "&&"-joined command: the batch could not say
+// which step failed, and it ran the rig's `make lint` with nothing to wait out
+// golangci-lint's module lock, so a contended lint was reported as the
+// batch's own test failure and every MR in it was ejected as a culprit
+// (gt-ijqw).
+func buildBatchGateSteps(mq *config.MergeQueueConfig) []refinery.GateStep {
 	if mq == nil {
-		return ""
+		return nil
 	}
-	var steps []string
-	for _, c := range []string{mq.SetupCommand, mq.TypecheckCommand, mq.LintCommand, mq.BuildCommand, mq.TestCommand} {
-		if strings.TrimSpace(c) != "" {
-			steps = append(steps, c)
+	var steps []refinery.GateStep
+	for _, s := range []refinery.GateStep{
+		{Name: "setup", Cmd: mq.SetupCommand},
+		{Name: "typecheck", Cmd: mq.TypecheckCommand},
+		{Name: "lint", Cmd: mq.LintCommand},
+		{Name: "build", Cmd: mq.BuildCommand},
+		{Name: "test", Cmd: mq.TestCommand},
+	} {
+		if strings.TrimSpace(s.Cmd) != "" {
+			steps = append(steps, s)
 		}
 	}
-	return strings.Join(steps, " && ")
+	return steps
 }
 
 func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
@@ -304,8 +315,8 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 // Split out from runMQBatchRun so the acquire-around-batch behavior is
 // testable without a full cobra/rig/engine harness (gt-tuiy attempt 2: this
 // path shipped with no test coverage).
-func acquireBatchGateSlot(townRoot, rigName, gateCmd string) (*slot.Handle, error) {
-	if gateCmd == "" {
+func acquireBatchGateSlot(townRoot, rigName string, hasGate bool) (*slot.Handle, error) {
+	if !hasGate {
 		return nil, nil
 	}
 	return slot.AcquirePool(townRoot, rigName+"/refinery-batch", batchSlotTimeout, containerGatePool(townRoot))
@@ -333,10 +344,11 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 
 	eng := refinery.NewEngineer(r)
 
-	gateCmd := buildBatchGateCommand(mq)
-	if gateCmd != "" {
+	gateSteps := buildBatchGateSteps(mq)
+	hasGate := len(gateSteps) > 0
+	if hasGate {
 		eng.Config().RunTests = true
-		eng.Config().TestCommand = gateCmd
+		eng.Config().BatchGateSteps = gateSteps
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s No setup/typecheck/lint/build/test commands configured for '%s' — batch will land with zero verification\n", style.Dim.Render("⚠"), rigName)
 	}
@@ -393,7 +405,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	target := r.DefaultBranch()
 	ctx := context.Background()
 
-	h, slotErr := acquireBatchGateSlot(townRoot, rigName, gateCmd)
+	h, slotErr := acquireBatchGateSlot(townRoot, rigName, hasGate)
 	if slotErr != nil {
 		return fmt.Errorf("acquiring container-gate slot for batch gate: %w", slotErr)
 	}
