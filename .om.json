@@ -6,6 +6,7 @@
   "threshold": 0.6,
   "depth": "standard",
   "timeout": 900,
+  "context_file": "docs/writing-for-agents.md",
   "rubric": [
     {
       "name": "correctness",
@@ -36,6 +37,11 @@
       "name": "fail-open-branch",
       "weight": 2,
       "guidance": "Any check, gate, guard, or measurement whose failure path emits the same value as its success path is a finding, even when the local change is correct."
+    },
+    {
+      "name": "docs-and-comments",
+      "weight": 2,
+      "guidance": "A change that alters behaviour updates every doc and comment that describes it. New or edited docs and comments follow the rules R1-R13 in the repository context (docs/writing-for-agents.md); cite the rule id in a finding. A stale or contradicted line in an agent-facing file (AGENTS.md, internal/templates/polecat-CLAUDE.md, a directive, a formula description, a plugin.md, docs/HOOKS.md) is major; elsewhere minor. This criterion moves the score; it does not block alone."
     }
   ]
 }
