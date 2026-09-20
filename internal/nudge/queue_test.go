@@ -654,19 +654,32 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 }
 
-// TestDeferredNudgeDeliveredAfterDelay uses a very short DeliverAfter to confirm
-// that the same nudge is skipped on first Drain and delivered on a second Drain
-// after the deadline elapses.
+// TestDeferredNudgeDeliveredAfterDelay confirms that the same nudge is skipped
+// by Drain while its DeliverAfter is in the future and delivered once the
+// deadline has passed.
+//
+// The deferral is moved past the deadline by rewriting the queued entry
+// (expireDeliverAfter), not by sleeping through it. An earlier version used a
+// 50ms window and a 60ms sleep; on a loaded host (the full suite at -p=8 on
+// the same box) the gap between Enqueue and the first Drain could exceed 50ms,
+// so the "not ready yet" assertion failed against correct production code.
+// The window is now far larger than any plausible scheduling jitter, and the
+// transition is driven by the same DeliverAfter field Drain reads — no
+// wall-clock race in either direction (gt-v25y).
 func TestDeferredNudgeDeliveredAfterDelay(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-test-deferred-sequence"
 
-	shortDelay := QueuedNudge{
+	// Far longer than any plausible pause between the Enqueue and the first
+	// Drain, so "not ready yet" is a property of the code, not of the host.
+	const deferral = 30 * time.Second
+
+	deferred := QueuedNudge{
 		Sender:       "system",
 		Message:      "reply via mail",
-		DeliverAfter: time.Now().Add(50 * time.Millisecond),
+		DeliverAfter: time.Now().Add(deferral),
 	}
-	if err := Enqueue(townRoot, session, shortDelay); err != nil {
+	if err := Enqueue(townRoot, session, deferred); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
@@ -679,8 +692,9 @@ func TestDeferredNudgeDeliveredAfterDelay(t *testing.T) {
 		t.Fatalf("first Drain: got %d nudges, want 0 (deferred not ready)", len(nudges))
 	}
 
-	// Wait for deadline.
-	time.Sleep(60 * time.Millisecond)
+	// Move the deadline into the past — the same state a real elapse would
+	// leave behind, without waiting for one.
+	expireDeliverAfter(t, townRoot, session)
 
 	// Second Drain: ready now.
 	nudges, err = Drain(townRoot, session)
@@ -799,6 +813,23 @@ func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
 // "the requeue backoff window elapsed" without sleeping for the real backoff.
 func clearDeliverAfter(t *testing.T, townRoot, session string) {
 	t.Helper()
+	setDeliverAfter(t, townRoot, session, time.Time{})
+}
+
+// expireDeliverAfter rewrites every queued nudge for a session with a
+// DeliverAfter just in the past — the state a real deferral leaves behind once
+// its deadline elapses. Tests use it to exercise the deferred -> ready
+// transition without a wall-clock sleep that a loaded host can outrun.
+func expireDeliverAfter(t *testing.T, townRoot, session string) {
+	t.Helper()
+	setDeliverAfter(t, townRoot, session, time.Now().Add(-time.Second))
+}
+
+// setDeliverAfter rewrites the DeliverAfter of every queued nudge for a
+// session. The queue files are the same ones Drain reads, so a test that
+// edits them is testing the real deferral check rather than racing it.
+func setDeliverAfter(t *testing.T, townRoot, session string, when time.Time) {
+	t.Helper()
 
 	dir := queueDir(townRoot, session)
 	entries, err := os.ReadDir(dir)
@@ -821,7 +852,7 @@ func clearDeliverAfter(t *testing.T, townRoot, session string) {
 		if err := json.Unmarshal(data, &n); err != nil {
 			t.Fatalf("unmarshal %s: %v", entry.Name(), err)
 		}
-		n.DeliverAfter = time.Time{}
+		n.DeliverAfter = when
 		out, err := json.Marshal(n)
 		if err != nil {
 			t.Fatalf("marshal %s: %v", entry.Name(), err)
