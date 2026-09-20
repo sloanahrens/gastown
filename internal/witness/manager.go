@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -88,12 +87,7 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 // witnessDir returns the working directory for the witness.
 // Prefers witness/rig/ for existing legacy clones, otherwise uses witness/.
 func (m *Manager) witnessDir() string {
-	witnessRigDir := filepath.Join(m.rig.Path, "witness", "rig")
-	if _, err := os.Stat(witnessRigDir); err == nil {
-		return witnessRigDir
-	}
-
-	return filepath.Join(m.rig.Path, "witness")
+	return WitnessDir(m.rig.Path)
 }
 
 func (m *Manager) prepareWitnessDir(townRoot string) (string, error) {

@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 	worktreeintegrity "github.com/steveyegge/gastown/internal/worktree"
 )
@@ -222,6 +223,16 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return nil
 	}
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
+
+	// A fresh witness session must not inherit its predecessor's patrol counter
+	// (gt-oabl). This runs in the SessionStart hook path, the only funnel every
+	// witness session passes through — a handoff respawns the pane, and the
+	// daemon restarts sessions, without going through witness.Manager.Start().
+	// It runs before session setup so a failure later in this prime still
+	// leaves the counter cleared for the session it starts.
+	if msg := resetWitnessPatrolState(ctx); msg != "" {
+		fmt.Println(msg)
+	}
 
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
@@ -512,6 +523,48 @@ func signalAgentReady() {
 // causing the agent to re-initialize instead of continuing. (GH#1965)
 func isCompactResume() bool {
 	return primeHookSource == "compact" || primeHookSource == "resume" || primeHandoffReason == "compaction"
+}
+
+// primeResetsWitnessPatrolState reports whether this prime is the SessionStart
+// hook of a fresh witness session.
+//
+// The witness's loop-or-exit step hands off once its patrol_count reaches the
+// ceiling in the rendered role prompt, and nothing else ever resets that
+// counter, so a value inherited from a predecessor makes every new session hand
+// off after a single cycle and idle at the prompt — the om witness stalled at
+// patrol_count 602 this way (gt-oabl). Session start is the one moment where
+// "patrols this session" is well defined, so it is where the reset belongs.
+//
+// Only a fresh session qualifies. Compaction and resume continue the session
+// that owns the counter, and a bare `gt prime` (no --hook) is a context read,
+// not a session start.
+func primeResetsWitnessPatrolState(role Role, hookMode bool, source string) bool {
+	if !hookMode || role != RoleWitness {
+		return false
+	}
+	return source == "startup" || source == "clear"
+}
+
+// resetWitnessPatrolState clears a witness session's inherited patrol counter
+// and returns a status line for the agent's context, or "" when it did nothing.
+// Failures are reported, never fatal: a state file we cannot read must not stop
+// a witness from starting.
+func resetWitnessPatrolState(ctx RoleContext) string {
+	if primeDryRun || !primeResetsWitnessPatrolState(ctx.Role, primeHookMode, primeHookSource) {
+		return ""
+	}
+	if ctx.TownRoot == "" || ctx.Rig == "" {
+		return ""
+	}
+
+	changed, err := witness.ResetPatrolState(witness.WitnessDir(filepath.Join(ctx.TownRoot, ctx.Rig)))
+	if err != nil {
+		return fmt.Sprintf("[prime] witness patrol state not reset: %v", err)
+	}
+	if !changed {
+		return ""
+	}
+	return "[prime] witness patrol_count reset to 0 for this session"
 }
 
 // warnRoleMismatch outputs a prominent warning if GT_ROLE disagrees with cwd detection.
