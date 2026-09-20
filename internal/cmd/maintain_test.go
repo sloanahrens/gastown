@@ -22,6 +22,13 @@ func TestMaintainCommand_Registered(t *testing.T) {
 			} else if f.DefValue != "100" {
 				t.Errorf("expected threshold default 100, got %s", f.DefValue)
 			}
+			// The divergence pre-flight is opt-OUT: flatten refuses by default
+			// and --force-diverged turns the guard off.
+			if f := cmd.Flags().Lookup("force-diverged"); f == nil {
+				t.Error("expected --force-diverged flag")
+			} else if f.DefValue != "false" {
+				t.Errorf("expected --force-diverged default false, got %s", f.DefValue)
+			}
 
 			if cmd.GroupID != GroupServices {
 				t.Errorf("expected GroupServices, got %s", cmd.GroupID)
@@ -121,5 +128,86 @@ func TestMaintainDBInfo(t *testing.T) {
 func TestMaintainConstants(t *testing.T) {
 	if defaultMaintainThreshold != 100 {
 		t.Errorf("expected default threshold 100, got %d", defaultMaintainThreshold)
+	}
+}
+
+// TestMaintainPreflightRefusal drives every branch of the flatten guard. The
+// guard exists because flatten rewrites the commit graph: squashing a database
+// whose remote has moved on makes the two histories disagree, and the
+// force-push that follows a flatten then deletes the remote-only commits.
+func TestMaintainPreflightRefusal(t *testing.T) {
+	fetchErr := errors.New("DOLT_FETCH origin: dial tcp 127.0.0.1:443: connect: connection refused")
+
+	tests := []struct {
+		name          string
+		preflight     maintainPreflight
+		forceDiverged bool
+		wantRefusal   string
+	}{
+		{
+			name:      "no remote clears the guard",
+			preflight: maintainPreflight{},
+		},
+		{
+			name:      "remote verified as not diverged clears the guard",
+			preflight: maintainPreflight{Remote: "origin"},
+		},
+		{
+			name:        "diverged refuses with the required message",
+			preflight:   maintainPreflight{Remote: "origin", Diverged: true},
+			wantRefusal: "diverged from origin; pass --force-diverged",
+		},
+		{
+			// The load-bearing case: a pre-flight that could not run is not a
+			// pass. Only a completed check licenses the destructive write.
+			name:        "failed check refuses instead of passing",
+			preflight:   maintainPreflight{Remote: "origin", Err: fetchErr},
+			wantRefusal: "cannot verify remote (DOLT_FETCH origin: dial tcp 127.0.0.1:443: connect: connection refused) — pass --force-diverged to flatten anyway",
+		},
+		{
+			name:        "unreachable remote with no name known still refuses",
+			preflight:   maintainPreflight{Err: errors.New("list remotes: connection refused")},
+			wantRefusal: "cannot verify remote (list remotes: connection refused) — pass --force-diverged to flatten anyway",
+		},
+		{
+			// A failed check on a database that also looked diverged reports
+			// the uncertainty, not the divergence: the divergence was read from
+			// a check that did not finish.
+			name:        "failure outranks a partial divergence reading",
+			preflight:   maintainPreflight{Remote: "origin", Diverged: true, Err: fetchErr},
+			wantRefusal: "cannot verify remote (DOLT_FETCH origin: dial tcp 127.0.0.1:443: connect: connection refused) — pass --force-diverged to flatten anyway",
+		},
+		{
+			name:          "--force-diverged overrides a detected divergence",
+			preflight:     maintainPreflight{Remote: "origin", Diverged: true},
+			forceDiverged: true,
+		},
+		{
+			name:          "--force-diverged overrides a failed check",
+			preflight:     maintainPreflight{Remote: "origin", Err: fetchErr},
+			forceDiverged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.preflight.refusal(tt.forceDiverged); got != tt.wantRefusal {
+				t.Errorf("refusal(forceDiverged=%v) = %q, want %q", tt.forceDiverged, got, tt.wantRefusal)
+			}
+		})
+	}
+}
+
+// TestMaintainPreflightRefusalIsNotSilent pins the property the guard would
+// lose if someone "simplified" the failed-check branch to a pass: a pre-flight
+// error must never be reported as cleared.
+func TestMaintainPreflightRefusalIsNotSilent(t *testing.T) {
+	failed := maintainPreflight{Remote: "origin", Err: errors.New("boom")}
+	if failed.refusal(false) == "" {
+		t.Fatal("a failed pre-flight cleared the guard — flatten would proceed unverified")
+	}
+	unchecked := maintainPreflight{Remote: "origin"}
+	if unchecked.refusal(false) != "" {
+		t.Fatal("a verified, undiverged remote was refused — the guard would never clear")
 	}
 }

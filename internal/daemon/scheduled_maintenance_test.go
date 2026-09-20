@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -285,5 +286,98 @@ func TestIsPatrolEnabledScheduledMaintenance(t *testing.T) {
 	config.Patrols.ScheduledMaintenance.Enabled = true
 	if !IsPatrolEnabled(config, "scheduled_maintenance") {
 		t.Error("expected scheduled_maintenance enabled when Enabled=true")
+	}
+}
+
+func TestMaintenanceMode(t *testing.T) {
+	withMode := func(mode string) *DaemonPatrolConfig {
+		return &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: true, Mode: mode},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		config *DaemonPatrolConfig
+		want   string
+	}{
+		{"nil config defaults to monitor", nil, MaintenanceModeMonitor},
+		{"empty config defaults to monitor", &DaemonPatrolConfig{}, MaintenanceModeMonitor},
+		{"empty mode defaults to monitor", withMode(""), MaintenanceModeMonitor},
+		{"explicit monitor", withMode("monitor"), MaintenanceModeMonitor},
+		{"explicit flatten", withMode("flatten"), MaintenanceModeFlatten},
+		{"flatten is matched case-insensitively", withMode("FLATTEN"), MaintenanceModeFlatten},
+		{"flatten tolerates surrounding space", withMode("  flatten  "), MaintenanceModeFlatten},
+		// The load-bearing cases: only the exact word arms the destructive
+		// path. A typo at 03:00 must escalate, not rewrite every database.
+		{"typo stays monitor", withMode("flaten"), MaintenanceModeMonitor},
+		{"unknown mode stays monitor", withMode("compact"), MaintenanceModeMonitor},
+		{"monitor with trailing junk stays monitor", withMode("monitor flatten"), MaintenanceModeMonitor},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := maintenanceMode(tt.config); got != tt.want {
+				t.Errorf("maintenanceMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaintenanceMonitorMessage(t *testing.T) {
+	targets := []maintenanceTarget{
+		{name: "gastown", commits: 1524},
+		{name: "hq", commits: 1204},
+	}
+	msg := maintenanceMonitorMessage(targets, 1000)
+
+	// Every over-threshold database must be named with its count: the
+	// escalation is the only thing a human sees, and "something is over
+	// threshold" is not actionable without the numbers.
+	for _, want := range []string{"gastown", "1524", "hq", "1204", "1000", MaintenanceModeMonitor} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("monitor message missing %q:\n%s", want, msg)
+		}
+	}
+	// And it must say the thing that matters: nothing was rewritten.
+	if !strings.Contains(msg, "Nothing was rewritten") {
+		t.Errorf("monitor message does not state that nothing was rewritten:\n%s", msg)
+	}
+
+	single := maintenanceMonitorMessage([]maintenanceTarget{{name: "om", commits: 7}}, 5)
+	if !strings.Contains(single, "om") || !strings.Contains(single, "7") {
+		t.Errorf("single-target message missing name or count:\n%s", single)
+	}
+}
+
+func TestTailLines(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		n      int
+		want   []string
+	}{
+		{"empty output", "", 5, nil},
+		{"whitespace only", "\n\n  \n", 5, nil},
+		{"fewer lines than n", "a\nb", 5, []string{"a", "b"}},
+		{"exactly n", "a\nb", 2, []string{"a", "b"}},
+		{"more lines than n keeps the tail", "a\nb\nc\nd", 2, []string{"c", "d"}},
+		{"trailing newline is not a line", "a\nb\n", 5, []string{"a", "b"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tailLines([]byte(tt.output), tt.n)
+			if len(got) != len(tt.want) {
+				t.Fatalf("tailLines(%q, %d) = %q, want %q", tt.output, tt.n, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("tailLines(%q, %d) = %q, want %q", tt.output, tt.n, got, tt.want)
+				}
+			}
+		})
 	}
 }

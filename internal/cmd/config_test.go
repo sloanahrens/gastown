@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // setupTestTown creates a minimal Gas Town workspace for testing.
@@ -981,6 +982,49 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		}
 		if err := setMaintenanceConfig(townRoot, "maintenance.threshold", "abc"); err == nil {
 			t.Error("expected error for non-numeric threshold")
+		}
+	})
+
+	t.Run("set maintenance.mode validates the mode list", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+
+		for _, mode := range []string{"monitor", "flatten"} {
+			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err != nil {
+				t.Errorf("setMaintenanceConfig(mode=%q) unexpected error: %v", mode, err)
+			}
+		}
+
+		// The daemon treats anything but an exact "flatten" as monitor, so an
+		// invalid value would be safe but silent. Refusing it at the point of
+		// entry is what keeps daemon.json honest.
+		for _, mode := range []string{"", "Monitor", "compact", "flaten"} {
+			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err == nil {
+				t.Errorf("setMaintenanceConfig(mode=%q) expected error", mode)
+			}
+		}
+	})
+
+	t.Run("get maintenance.mode reports the stored value or the default", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+
+		readMode := func() string {
+			return strings.TrimSpace(captureStdout(t, func() {
+				if err := getMaintenanceConfig(townRoot, "maintenance.mode"); err != nil {
+					t.Errorf("getMaintenanceConfig(mode) failed: %v", err)
+				}
+			}))
+		}
+
+		// Unset reads as the default the daemon will use.
+		if got := readMode(); got != daemon.MaintenanceModeMonitor {
+			t.Errorf("unset maintenance.mode reads as %q, want %q", got, daemon.MaintenanceModeMonitor)
+		}
+
+		if err := setMaintenanceConfig(townRoot, "maintenance.mode", daemon.MaintenanceModeFlatten); err != nil {
+			t.Fatalf("setMaintenanceConfig(mode=flatten) failed: %v", err)
+		}
+		if got := readMode(); got != daemon.MaintenanceModeFlatten {
+			t.Errorf("maintenance.mode reads as %q after being set to flatten", got)
 		}
 	})
 

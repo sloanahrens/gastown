@@ -314,6 +314,35 @@ escalation threshold is deliberately set well above the plugin's so that a
 busy cycle's escalations cannot re-trigger the patrol on their own output.
 Compaction itself is unchanged SQL — see below.
 
+**Flattening a diverged database is refused.** A flatten rewrites the commit
+graph, so if the database's remote holds commits the local history does not,
+squashing locally makes the two disagree and the next force-push deletes the
+remote-only commits. `gt maintain` therefore fetches each candidate database's
+remote and refuses to flatten any whose remote has moved on:
+
+```
+  gt: refused — diverged from origin; pass --force-diverged
+  Refused to flatten: 1 (gt)
+```
+
+A pre-flight that could not run at all — an unreachable remote, a failed
+query — refuses too. Only a completed check licenses the flatten; "could not
+verify" and "verified safe" are different facts. `--force-diverged` skips the
+check, and a refusal exits non-zero with the rest of the maintenance run
+(backup, reap, gc) still complete.
+
+Note the consequence for an unpushed flatten: the remote keeps pointing at
+pre-flatten history, so the next run reports the database as diverged until
+someone pushes. That is the intended reading — the remote really does hold
+commits local no longer has.
+
+`scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
+escalates with the commit counts and rewrites nothing; `flatten` runs
+`gt maintain --force`, which is still subject to the pre-flight above. Set it
+with `gt config set maintenance.mode flatten`; any value other than the exact
+word `flatten` — including a typo — is treated as `monitor`, so a misspelling
+cannot arm the destructive path.
+
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):
 https://www.dolthub.com/blog/2023-10-02-scheduled-events/

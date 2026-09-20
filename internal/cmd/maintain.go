@@ -31,9 +31,10 @@ const (
 )
 
 var (
-	maintainForce     bool
-	maintainDryRun    bool
-	maintainThreshold int
+	maintainForce         bool
+	maintainDryRun        bool
+	maintainThreshold     int
+	maintainForceDiverged bool
 )
 
 var maintainCmd = &cobra.Command{
@@ -50,6 +51,13 @@ This encapsulates the maintenance procedure:
   3. Flatten databases over commit threshold
   4. Run dolt_gc() on each database
 
+Before flattening anything, each candidate database is checked against its
+Dolt remote: if the remote holds commits this database does not have, the
+flatten is refused. Flattening rewrites the commit graph, so squashing a
+database that has diverged from its remote makes the two histories disagree
+and any later force-push drops the remote-only commits. Pass --force-diverged
+to skip the check and flatten regardless.
+
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
 
@@ -57,7 +65,8 @@ Examples:
   gt maintain                # Interactive (shows plan, asks confirmation)
   gt maintain --force        # Non-interactive (daemon/cron use)
   gt maintain --dry-run      # Preview what would happen
-  gt maintain --threshold 50 # Custom commit threshold`,
+  gt maintain --threshold 50 # Custom commit threshold
+  gt maintain --force-diverged  # Flatten even over a diverged remote`,
 	RunE: runMaintain,
 }
 
@@ -65,6 +74,7 @@ func init() {
 	maintainCmd.Flags().BoolVar(&maintainForce, "force", false, "Non-interactive mode (skip confirmation)")
 	maintainCmd.Flags().BoolVar(&maintainDryRun, "dry-run", false, "Preview without making changes")
 	maintainCmd.Flags().IntVar(&maintainThreshold, "threshold", defaultMaintainThreshold, "Commit count threshold for flatten")
+	maintainCmd.Flags().BoolVar(&maintainForceDiverged, "force-diverged", false, "Flatten even when a database's remote has diverged (skips the pre-flight)")
 	rootCmd.AddCommand(maintainCmd)
 }
 
@@ -77,6 +87,68 @@ type maintainDBInfo struct {
 	countKnown bool
 	countErr   error
 	hasBackup  bool
+	// preflight is the remote-divergence check for this database. It is only
+	// populated for databases the plan means to flatten; a database that is
+	// below threshold is never fetched.
+	preflight maintainPreflight
+}
+
+// maintainPreflight is the outcome of the remote-divergence check for one
+// database.
+//
+// It is a guard, so every way it can fail ends in a refusal: flattening a
+// database whose remote has moved on makes the two histories disagree, and the
+// force-push that follows a flatten then deletes the remote-only commits.
+// "Could not check" is refused alongside "checked, diverged" because only a
+// completed check licenses the destructive write.
+type maintainPreflight struct {
+	// Remote names the remote the check ran against, or "" when the database
+	// has no remote — in which case there is nothing a flatten could destroy.
+	Remote string
+	// Diverged is true when the remote holds commits absent from local history.
+	Diverged bool
+	// Err is set when the check could not complete (unreachable remote, query
+	// failure). It is not a pass.
+	Err error
+}
+
+// refusal returns the reason this database must not be flattened, or "" when
+// the pre-flight cleared it. forceDiverged is --force-diverged, which skips the
+// check (and therefore every refusal it could produce).
+func (p maintainPreflight) refusal(forceDiverged bool) string {
+	if forceDiverged {
+		return ""
+	}
+	if p.Err != nil {
+		return fmt.Sprintf("cannot verify remote (%v) — pass --force-diverged to flatten anyway", p.Err)
+	}
+	if p.Diverged {
+		return fmt.Sprintf("diverged from %s; pass --force-diverged", p.Remote)
+	}
+	return ""
+}
+
+// maintainCheckDivergence runs the pre-flight for one database: fetch its
+// remote and report whether the remote has commits this database lacks.
+//
+// A database with no remote, or with no push yet, clears the check. Any error
+// is handed back inside the result rather than raised, because callers need to
+// refuse per-database while still finishing the rest of the maintenance run.
+func maintainCheckDivergence(config *doltserver.Config, dbName string) maintainPreflight {
+	db, err := maintainOpenDB(config, dbName)
+	if err != nil {
+		return maintainPreflight{Err: err}
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), doltserver.DivergenceFetchTimeout)
+	defer cancel()
+
+	div, err := doltserver.FetchAndVerify(ctx, db, dbName)
+	if err != nil {
+		return maintainPreflight{Remote: div.Remote, Err: err}
+	}
+	return maintainPreflight{Remote: div.Remote, Diverged: div.Diverged}
 }
 
 // needsFlatten reports whether the flatten phase should process this database.
@@ -152,11 +224,17 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			info.countKnown = true
 		}
 		info.hasBackup = maintainHasBackup(config.DataDir, dbName)
+		// Pre-flight only what the plan would flatten: the check costs a
+		// network fetch, and a database below threshold is never touched.
+		if info.needsFlatten(maintainThreshold) && !maintainForceDiverged {
+			info.preflight = maintainCheckDivergence(config, dbName)
+		}
 		dbInfos = append(dbInfos, info)
 	}
 
 	// Display plan.
 	flattenCount := 0
+	refusedCount := 0
 	backupCount := 0
 	unknownCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
@@ -168,8 +246,13 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 				reason = " (count unknown)"
 				unknownCount++
 			}
-			tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
-			flattenCount++
+			if refusal := db.preflight.refusal(maintainForceDiverged); refusal != "" {
+				tags += fmt.Sprintf(" %s", style.Warning.Render("→ REFUSED: "+refusal))
+				refusedCount++
+			} else {
+				tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
+				flattenCount++
+			}
 		}
 		if db.hasBackup {
 			tags += fmt.Sprintf(" %s", style.Dim.Render("[backup]"))
@@ -183,6 +266,9 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
 	if unknownCount > 0 {
 		fmt.Printf("  Unknown commit counts: %d (flattened, not skipped)\n", unknownCount)
+	}
+	if refusedCount > 0 {
+		fmt.Printf("  Refused (diverged remote): %d — re-run with --force-diverged to flatten anyway\n", refusedCount)
 	}
 
 	if maintainDryRun {
@@ -240,10 +326,20 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 
 	// Phase 4: Flatten (server up).
 	totalFlattened := 0
-	if flattenCount > 0 {
+	var refused []string
+	if flattenCount > 0 || refusedCount > 0 {
 		fmt.Printf("\n%s Flattening databases...\n", style.Bold.Render("●"))
 		for _, db := range dbInfos {
 			if !db.needsFlatten(maintainThreshold) {
+				continue
+			}
+			// The same predicate the plan rendered, applied at the statement
+			// that actually destroys history. The verdict is the plan phase's
+			// — the operator confirmed that plan, and a second fetch here
+			// could refuse a flatten the plan promised.
+			if reason := db.preflight.refusal(maintainForceDiverged); reason != "" {
+				fmt.Printf("  %s %s: refused — %s\n", style.Warning.Render("!"), db.name, reason)
+				refused = append(refused, db.name)
 				continue
 			}
 			if err := maintainFlattenDB(config, db.name); err != nil {
@@ -282,6 +378,17 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Wisps reaped: %d\n", totalReaped)
 	fmt.Printf("  Databases flattened: %d\n", totalFlattened)
 	fmt.Printf("  Databases gc'd: %d\n", gcCount)
+
+	// A refusal is not a successful run. Backup, reap and gc did their work,
+	// but the flatten the operator asked for did not happen and will not be
+	// retried — so exit non-zero and say which databases were left alone.
+	// Scheduled maintenance escalates on a non-zero exit, which is how the
+	// refusal reaches a human (see internal/daemon/scheduled_maintenance.go).
+	if len(refused) > 0 {
+		fmt.Printf("  Refused to flatten: %d (%s)\n", len(refused), strings.Join(refused, ", "))
+		return fmt.Errorf("refused to flatten %d database(s) with a diverged or unverifiable remote: %s",
+			len(refused), strings.Join(refused, ", "))
+	}
 
 	return nil
 }

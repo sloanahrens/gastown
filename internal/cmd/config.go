@@ -634,6 +634,10 @@ Supported keys:
   maintenance.window          Maintenance window start time in HH:MM (e.g., "03:00")
   maintenance.interval        How often: "daily", "weekly", "monthly", or duration
   maintenance.threshold       Commit count threshold (default: 1000)
+  maintenance.mode            What to do over threshold: "monitor" (default) escalates
+                              with the commit counts and rewrites nothing;
+                              "flatten" runs gt maintain --force, which squashes
+                              the commit history of every database over threshold
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Enable/disable wisp reaper (true/false)
@@ -680,6 +684,7 @@ Supported keys:
   maintenance.window          Maintenance window start time (HH:MM)
   maintenance.interval        How often: daily, weekly, monthly, or duration
   maintenance.threshold       Commit count threshold
+  maintenance.mode            monitor (escalate only) or flatten (rewrite history)
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Wisp reaper enabled (true/false)
@@ -785,7 +790,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 		townSettings.Polecat.TargetCleanPolicy = parsed.String()
 
-	case "maintenance.window", "maintenance.interval", "maintenance.threshold":
+	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode":
 		return setMaintenanceConfig(townRoot, key, value)
 
 	case "dolt.port":
@@ -812,7 +817,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -886,7 +891,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 			value = polecat.DefaultTargetCleanPolicy().String()
 		}
 
-	case "maintenance.window", "maintenance.interval", "maintenance.threshold":
+	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode":
 		return getMaintenanceConfig(townRoot, key)
 
 	case "dolt.port":
@@ -904,7 +909,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	fmt.Println(value)
@@ -965,6 +970,19 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 			return fmt.Errorf("invalid threshold %q: expected positive integer", value)
 		}
 		mc.Threshold = &n
+
+	case "maintenance.mode":
+		// Validated here so a typo is refused at the point of entry. The
+		// daemon treats anything but an exact "flatten" as monitor
+		// (maintenanceMode), so an invalid value that reached daemon.json by
+		// hand would be safe but silent — better to never write one.
+		switch value {
+		case daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten:
+			mc.Mode = value
+		default:
+			return fmt.Errorf("invalid mode %q: expected %s or %s",
+				value, daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten)
+		}
 	}
 
 	if err := daemon.SavePatrolConfig(townRoot, patrolConfig); err != nil {
@@ -1012,6 +1030,17 @@ func getMaintenanceConfig(townRoot, key string) error {
 			}
 		}
 		value = strconv.Itoa(threshold)
+
+	case "maintenance.mode":
+		value = daemon.MaintenanceModeMonitor // default
+		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.ScheduledMaintenance != nil {
+			// Read the raw field, not maintenanceMode(), so `gt config get`
+			// reports what the file says. A hand-edited typo must be visible
+			// here rather than silently reported as the monitor default.
+			if m := patrolConfig.Patrols.ScheduledMaintenance.Mode; m != "" {
+				value = m
+			}
+		}
 	}
 
 	fmt.Println(value)
