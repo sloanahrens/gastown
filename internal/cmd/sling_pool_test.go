@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -319,4 +323,198 @@ func TestResolvePoolAgentLabelWriteFailure(t *testing.T) {
 	if !strings.Contains(reason, idleFillReason) || !strings.Contains(reason, "local-attempt:1 label failed") {
 		t.Errorf("reason should carry both the route and the failure: %q", reason)
 	}
+}
+
+// ── Seat claims (gt-eoi9) ───────────────────────────────────────────────────
+
+const (
+	claimLocal    = "local-coder-polecat"
+	claimOverflow = "deepseek-flash"
+)
+
+// fakeRacingPoolTown wires a town with local seats and, unless a gap is given,
+// no stagger at all — so the seat count alone decides. The tmux server has not
+// heard of any of the slings racing each other, which is the moment the cap
+// used to break.
+func fakeRacingPoolTown(t *testing.T, maxLocal int, minSpawnGap string, liveLocal int) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{
+		LocalAgent:    claimLocal,
+		MaxLocal:      maxLocal,
+		MinSpawnGap:   minSpawnGap,
+		OverflowAgent: claimOverflow,
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	origLister, origLookup := newPoolSessionLister, poolBeadLookup
+	origClaims := processPoolSeatClaims
+	t.Cleanup(func() {
+		newPoolSessionLister, poolBeadLookup = origLister, origLookup
+		processPoolSeatClaims = origClaims
+	})
+
+	sessions := map[string]map[string]string{}
+	created := map[string]time.Time{}
+	for i := 0; i < liveLocal; i++ {
+		name := fmt.Sprintf("gt-live-%d", i)
+		sessions[name] = map[string]string{"GT_ROLE": "gastown/polecats/live", "GT_AGENT": claimLocal}
+		created[name] = time.Now().Add(-time.Hour)
+	}
+	newPoolSessionLister = func() sessionLister { return &fakeLister{sessions: sessions, created: created} }
+	poolBeadLookup = func(_, beadID string) (poolBead, error) {
+		return poolBead{ID: beadID, Type: "task"}, nil
+	}
+	return townRoot
+}
+
+// slingFromAnotherProcess decides as a fresh `gt sling` would: an empty claim
+// store of its own, while the claims other slings wrote are on disk.
+func slingFromAnotherProcess(t *testing.T, townRoot, beadID string) (string, string) {
+	t.Helper()
+	processPoolSeatClaims = &poolSeatClaimStore{}
+	return resolvePolecatPoolAgent(townRoot, beadID)
+}
+
+// The gt-eoi9 bug: three slings started in parallel each counted the same live
+// sessions, so each read "local pool 1/2" and spawned locally, putting three
+// polecats on a two-seat pool (opal, shale and agate all local). The seat claim
+// the first sling leaves behind is what the second counts instead.
+func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+
+	a1, r1 := slingFromAnotherProcess(t, townRoot, "gt-a")
+	a2, r2 := slingFromAnotherProcess(t, townRoot, "gt-b")
+	a3, r3 := slingFromAnotherProcess(t, townRoot, "gt-c")
+
+	if a1 != claimLocal || a2 != claimLocal {
+		t.Fatalf("the two seats go to the first two slings: got %q (%s) and %q (%s)", a1, r1, a2, r2)
+	}
+	if !strings.Contains(r1, "local seat 1/2") || !strings.Contains(r2, "local seat 2/2") {
+		t.Errorf("each sling must see the seat it took: %q, %q", r1, r2)
+	}
+	if a3 != claimOverflow || !strings.Contains(r3, "local full (2/2)") {
+		t.Errorf("the third sling must overflow with the cap full, got %q (%s)", a3, r3)
+	}
+}
+
+// A claim also moves the stagger clock: a second sling inside min_spawn_gap
+// overflows even though the pool has room, which is the same prefill guard a
+// second spawn seconds after the first would get from a live session.
+func TestPoolSeatClaimFeedsTheStagger(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 3, "4m", 1)
+
+	if a, r := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
+		t.Fatalf("one live local, one seat free, gap long past: want local, got %q (%s)", a, r)
+	}
+	a, r := slingFromAnotherProcess(t, townRoot, "gt-b")
+	if a != claimOverflow || !strings.Contains(r, "stagger") {
+		t.Errorf("a sling racing the spawn it cannot see yet is a stagger, got %q (%s)", a, r)
+	}
+}
+
+// The claim lives exactly as long as the seat is invisible to tmux: StartSession
+// drops it, and the live session counts instead — one seat either way, never
+// both and never neither.
+func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+	if a, r := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
+		t.Fatalf("empty pool: want the local seat, got %q (%s)", a, r)
+	}
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+		t.Fatalf("a local route must claim a seat, got %d claims", len(claims))
+	}
+
+	// StartSession: the tmux session is now the record of that seat.
+	releasePoolSeatClaim()
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+		t.Fatalf("StartSession must drop the claim, %d left", len(claims))
+	}
+
+	// A second sling in a fresh process counts the live session, not a phantom
+	// claim: seat 2 of 2, which is what a double-count would call "full".
+	newPoolSessionLister = func() sessionLister {
+		return &fakeLister{
+			sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": claimLocal}},
+			created:  map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)},
+		}
+	}
+	a, r := slingFromAnotherProcess(t, townRoot, "gt-b")
+	if a != claimLocal || !strings.Contains(r, "local seat 2/2") {
+		t.Errorf("the live session must count as one seat, got %q (%s)", a, r)
+	}
+}
+
+// A dry run reads the claims — so it prints the route a real sling would take —
+// but claims nothing and drops nothing.
+func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+
+	if a, _ := peekPolecatPoolAgent(townRoot, "gt-a"); a != claimLocal {
+		t.Fatalf("empty pool: the preview route should be the local seat, got %q", a)
+	}
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+		t.Fatalf("a dry run must not claim a seat, got %d claims", len(claims))
+	}
+
+	if a, _ := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
+		t.Fatalf("live sling: want the local seat, got %q", a)
+	}
+	// Seen from another process, that claim is the second seat taken.
+	processPoolSeatClaims = &poolSeatClaimStore{}
+	if _, r := peekPolecatPoolAgent(townRoot, "gt-b"); !strings.Contains(r, "local seat 2/2") {
+		t.Errorf("the preview must count the seat another sling claimed: %q", r)
+	}
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+		t.Errorf("a dry run must not drop another sling's claim, %d left", len(claims))
+	}
+}
+
+// A claim whose sling is gone cannot become a session, so the seat is free: a
+// crashed sling must not shadow a seat for the TTL, and a claim held too long
+// by a process that lingers must not shadow one forever.
+func TestPoolSeatClaimCleanupDropsCrashedAndStaleSlingers(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+	crashed, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
+		ID: "crashed-1", PID: reapedPID(t), Agent: claimLocal, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
+		ID: "stale-1", PID: os.Getpid(), Agent: claimLocal, CreatedAt: time.Now().Add(-poolSeatClaimTTL - time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
+		ID: "held-1", PID: os.Getpid(), Agent: claimLocal, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupStalePoolSeatClaims(townRoot, time.Now())
+
+	got := readPoolSeatClaims(townRoot)
+	if len(got) != 1 || got[0].ID != held.ID {
+		t.Fatalf("only the live, fresh claim survives, got %v (crashed=%s stale=%s held=%s)",
+			got, crashed.ID, stale.ID, held.ID)
+	}
+}
+
+// reapedPID returns a PID that is certainly not alive: a child that has exited
+// and been waited for. processAlive reads it as a slinger that is gone.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("reaping a child PID is unix-specific")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("cannot reap a child process: %v", err)
+	}
+	return cmd.Process.Pid
 }

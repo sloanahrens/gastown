@@ -412,6 +412,13 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // sees its work when gt prime runs on session start.
 // Returns the pane ID after session start.
 func (s *SpawnedPolecatInfo) StartSession() (string, error) {
+	// The tmux session this starts is what the pool counts, so the seat claim
+	// this process made for it (sling_pool.go) is redundant the moment the
+	// session exists — and holding both would read one polecat as two seats.
+	// Releasing on the way out also covers the failure paths, where no session
+	// will ever appear and the seat must not stay claimed.
+	defer releasePoolSeatClaim()
+
 	if s.SessionStarted() {
 		return s.Pane, nil
 	}
