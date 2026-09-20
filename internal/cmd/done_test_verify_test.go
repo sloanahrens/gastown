@@ -343,7 +343,7 @@ func TestLintFailureDetail(t *testing.T) {
 			name:          "the budget ran out while the lint was still going",
 			outcome:       lintlock.Outcome{Err: errors.New("signal: killed")},
 			budgetExpired: true,
-			want:          "killed at its 1m0s budget without finishing",
+			want:          "killed at its 1m budget without finishing",
 			notWant:       "fix the lint findings",
 		},
 		{

@@ -36,7 +36,7 @@ func lintFailureDetail(outcome lintlock.Outcome, budgetExpired bool, budget time
 	case outcome.Unfinished:
 		return "golangci-lint stopped without reporting findings — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run gt done once other lints have"
 	case budgetExpired:
-		return fmt.Sprintf("the lint was killed at its %s budget without finishing — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run gt done once other lints have", budget.Round(time.Second))
+		return fmt.Sprintf("the lint was killed at its %s budget without finishing — nothing was linted and no finding is reported; a concurrent golangci-lint holding the module lock is the likeliest reason it never finished, so re-run gt done once other lints have", humanDuration(budget))
 	default:
 		return "fix the lint findings before resubmitting"
 	}

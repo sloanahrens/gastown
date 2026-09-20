@@ -1371,7 +1371,7 @@ func (e *Engineer) runGolangciLintGate(ctx context.Context, name string, gate *G
 	}
 
 	onRetry := func(attemptNo, attempts int, wait time.Duration) {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: golangci-lint did not get the lock (attempt %d/%d); retrying in %s\n", name, attemptNo, attempts, wait.Round(time.Second))
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: another golangci-lint holds the lock (attempt %d/%d); retrying in %s\n", name, attemptNo, attempts, wait.Round(time.Second))
 	}
 
 	outcome := lintlock.Retry(ctx, attempt, onRetry)

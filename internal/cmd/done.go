@@ -307,7 +307,7 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 			// than costing the submission its pre-verified stamp. This gate's
 			// own 10m bound is the retry budget.
 			_ = lintlock.Retry(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
-				fmt.Fprintf(logFile, "=== gate lint: golangci-lint did not get the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
+				fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
 			})
 		} else {
 			runGate()
