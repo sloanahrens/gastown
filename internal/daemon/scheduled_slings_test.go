@@ -386,9 +386,7 @@ exit 0
 	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt"}
+	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
 	got, err := r.listBeads(context.Background(), "gastown", docAuditEntry.label())
 	if err != nil {
 		t.Fatalf("listBeads: %v", err)
