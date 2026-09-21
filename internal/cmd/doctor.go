@@ -236,6 +236,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewClaudeBinaryCheck())
 	d.Register(doctor.NewGroqCompoundCheck())
 	d.Register(doctor.NewDoltServerReachableCheck())
+	// Surface the silent Dolt-outage gap: Dolt down + dolt_server patrol
+	// disabled means no automatic detection/recovery (gt-9war).
+	d.Register(doctor.NewDoltServerPatrolCheck())
 
 	d.Register(doctor.NewTownGitCheck())
 	d.Register(doctor.NewTownRootBranchCheck())
