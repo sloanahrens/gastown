@@ -52,8 +52,11 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	// Kill the test tmux server and restore the original socket state.
-	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	// Kill the test tmux server and restore the original socket state. Going
+	// through KillServer rather than a bare `tmux kill-server` is what unlinks
+	// the socket file: tmux leaves it behind, so every run of this package used
+	// to add one file to /tmp/tmux-<uid> that nothing removed (gt-20di).
+	_ = NewTmuxWithSocket(socket).KillServer()
 	SetDefaultSocket("")
 
 	os.Exit(code)

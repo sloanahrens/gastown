@@ -60,7 +60,9 @@ func TestIsolatedSocketStillCreatesSession(t *testing.T) {
 	t.Setenv(AllowLiveTmuxEnv, "")
 
 	socket := uniqueSocketName(t, "gt-test-liveguard")
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
+	// KillServer, not a bare `tmux kill-server`: it unlinks the socket file,
+	// which tmux leaves behind when the server exits (gt-20di).
+	t.Cleanup(func() { _ = NewTmuxWithSocket(socket).KillServer() })
 
 	if err := NewTmuxWithSocket(socket).NewSession("gt-test-liveguard-isolated", ""); err != nil {
 		t.Fatalf("NewSession on %q: %v", socket, err)

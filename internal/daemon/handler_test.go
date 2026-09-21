@@ -146,8 +146,12 @@ func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
 	requireTmux(t)
 
 	oldSocket := tmux.GetDefaultSocket()
-	socketName := fmt.Sprintf("gt-test-dog-stale-%d", time.Now().UnixNano())
+	socketName := constants.TestSocketName("gt-test-dog-stale")
 	tmux.SetDefaultSocket(socketName)
+	// This test runs on its own socket rather than the package one, so it owns
+	// tearing that server down: killing the last session leaves the server (and
+	// its socket file) behind, which tmux.KillServer clears (gt-20di).
+	t.Cleanup(func() { _ = tmux.NewTmuxWithSocket(socketName).KillServer() })
 	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
 
 	townRoot := t.TempDir()
@@ -788,8 +792,11 @@ func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
 	requireTmux(t)
 
 	oldSocket := tmux.GetDefaultSocket()
-	socketName := fmt.Sprintf("gt-test-dog-cleanup-%d", time.Now().UnixNano())
+	socketName := constants.TestSocketName("gt-test-dog-cleanup")
 	tmux.SetDefaultSocket(socketName)
+	// Same as TestDetectStaleWorkingDogs_KillsSessionBeforeClearing: this test
+	// owns the server it binds, so it tears it down (gt-20di).
+	t.Cleanup(func() { _ = tmux.NewTmuxWithSocket(socketName).KillServer() })
 	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
 
 	townRoot := t.TempDir()

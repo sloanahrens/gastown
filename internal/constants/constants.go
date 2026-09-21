@@ -2,7 +2,11 @@
 // Centralizing these magic strings improves maintainability and consistency.
 package constants
 
-import "time"
+import (
+	"fmt"
+	"os"
+	"time"
+)
 
 // Timing constants for session management and tmux operations.
 //
@@ -388,6 +392,26 @@ func RoleEmoji(role string) string {
 // SupportedShells lists shell binaries that Gas Town can detect and work with.
 // Used to identify if a tmux pane is at a shell prompt vs running a command.
 var SupportedShells = []string{"bash", "zsh", "sh", "fish", "tcsh", "ksh", "pwsh", "powershell"}
+
+// TestSocketName builds the tmux socket name a test should run its private
+// server on: <prefix>-<nanoseconds>-<pid>.
+//
+// The pid is last because a socket outlives the process that made it: tmux
+// keeps a server running when the test binary that started it is killed before
+// its cleanup runs, and the name is the only evidence left of who to blame.
+// internal/doctor's tmux-test-socket check reads the trailing field as the owner
+// pid and reaps the server once that pid is gone — and leaves the server alone
+// while it is alive. A socket not ending in its owner's pid is one nothing can
+// safely collect (gt-20di).
+//
+// The nanosecond field is what keeps two sockets in one test binary apart.
+//
+// It lives in this leaf package because every caller can reach it:
+// internal/tmux and internal/testutil both need it, and internal/config sits
+// below internal/tmux and so cannot import it from there.
+func TestSocketName(prefix string) string {
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), os.Getpid())
+}
 
 // Path helpers construct common paths.
 

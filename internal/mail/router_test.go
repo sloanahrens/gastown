@@ -1809,10 +1809,13 @@ func requireNotifyTestSocket(t *testing.T) string {
 	// Sanitize: tmux socket names cannot contain slashes or dots.
 	safe := strings.NewReplacer("/", "-", ".", "-").Replace(t.Name())
 	socket := fmt.Sprintf("gt-test-%s-%d", safe, os.Getpid())
-	// Pre-kill any stale server on this socket (e.g., from a crashed prior run).
-	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	// tmux.KillServer, not a bare `tmux kill-server`: it unlinks the socket
+	// file too, which tmux leaves behind when its server exits (gt-20di). The
+	// pre-kill clears a server left by a run that died before its cleanup.
+	tm := tmux.NewTmuxWithSocket(socket)
+	_ = tm.KillServer()
 	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = tm.KillServer()
 	})
 	return socket
 }

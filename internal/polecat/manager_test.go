@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1128,7 +1129,7 @@ func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
-	tm := tmux.NewTmuxWithSocket(fmt.Sprintf("gt-test-reconcile-%d", time.Now().UnixNano()))
+	tm := tmux.NewTmuxWithSocket(constants.TestSocketName("gt-test-reconcile"))
 	t.Cleanup(func() { _ = tm.KillServer() })
 
 	m := NewManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm)

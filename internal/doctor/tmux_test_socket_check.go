@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,12 +17,36 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// testSocketName matches the sockets hermetic test runs create: a gt-test-
-// prefix followed by the pid of the test process that bound it. The pid is what
-// makes a leftover distinguishable from a run in flight — the socket outlives
-// its owner when the test process is killed before its cleanup runs, and then
-// keeps a tmux server and its sessions alive indefinitely (gt-2bj).
-var testSocketName = regexp.MustCompile(`^gt-test-.*?(\d+)$`)
+// testSocketName extracts the owning pid from a socket name: the trailing digit
+// run, which constants.TestSocketName puts there. The pid is what tells a
+// leftover from a run in flight, so a name without one is a socket this check
+// cannot attribute (gt-2bj).
+var testSocketName = regexp.MustCompile(`^(?:gt-test|gt-h9z)-.*?(\d+)$`)
+
+// maxOwnerPid bounds what the trailing field may be read as. A pid fits in
+// int32 on every platform gt supports; anything larger is a timestamp, which is
+// always "dead" as a pid — the reading that would let this check kill a running
+// test's server (gt-20di).
+const maxOwnerPid = math.MaxInt32
+
+// testSocketFamilies are the socket-name prefixes gt's suites bind their private
+// servers to. A socket outside them is never touched: the town's own socket
+// lives in the same directory.
+var testSocketFamilies = []string{"gt-test-", "gt-h9z-"}
+
+// testSessionFamilies are the session-name prefixes those suites create. A
+// server holding anything else is left running even when its owner is gone — an
+// auto-nuke against the wrong session is the failure this guard exists to
+// prevent (gt-2bj). The cost: internal/daemon names its sessions after
+// production (hq-dog-<name>) on a gt-test-* socket, so that server is not
+// collectable while it lives.
+var testSessionFamilies = []string{"gt-test-", "gt-h9z-"}
+
+// staleSocketMinAge is how long a socket file must have sat with nothing
+// listening before it counts as residue. The file exists for a moment before
+// its server is listening on it, so sweeping on "nothing answers" alone could
+// unlink a socket out from under a server that is mid-bind.
+const staleSocketMinAge = 2 * time.Minute
 
 // testSocketProbe is the subset of tmux operations this check needs on a
 // candidate socket. Injected in tests.
@@ -33,9 +58,10 @@ type testSocketProbe interface {
 }
 
 // TmuxTestSocketCheck reports tmux servers left behind by test runs that died
-// before their cleanup. Their sessions are gt-test-* named, which is the shape
-// the roster reads as a phantom polecat: no worktree, no agent bead, and a
-// candidate for auto-nuke (gt-2bj).
+// before their cleanup, and the socket files every test server leaves behind.
+// A leftover server's sessions are test-named, which is the shape the roster
+// reads as a phantom polecat: no worktree, no agent bead, and a candidate for
+// auto-nuke (gt-2bj).
 type TmuxTestSocketCheck struct {
 	FixableCheck
 
@@ -49,6 +75,7 @@ type TmuxTestSocketCheck struct {
 	probeForTest     func(socket string) testSocketProbe // override for the real tmux client
 	pidAliveForTest  func(pid int) bool                  // override for os.FindProcess
 	servingForTest   func(path string) bool              // override for socketServing
+	socketAgeForTest func(path string) time.Duration     // override for the file's mtime
 }
 
 // NewTmuxTestSocketCheck creates a check for abandoned test tmux servers.
@@ -86,6 +113,19 @@ func (c *TmuxTestSocketCheck) serving(path string) bool {
 	return socketServing(path)
 }
 
+// socketAge is how long the socket file has existed. A file that cannot be
+// stat'd reads as brand new, which keeps an unreadable entry out of the sweep.
+func (c *TmuxTestSocketCheck) socketAge(path string) time.Duration {
+	if c.socketAgeForTest != nil {
+		return c.socketAgeForTest(path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0
+	}
+	return time.Since(info.ModTime())
+}
+
 // ownerAlive reports whether the test process named in the socket still exists.
 func (c *TmuxTestSocketCheck) ownerAlive(pid int) bool {
 	if c.pidAliveForTest != nil {
@@ -101,36 +141,66 @@ func (c *TmuxTestSocketCheck) ownerAlive(pid int) bool {
 	return sigErr == nil || errors.Is(sigErr, syscall.EPERM)
 }
 
+// isTestSocketName reports whether the socket belongs to one of the test
+// families this check owns.
+func isTestSocketName(socket string) bool {
+	for _, family := range testSocketFamilies {
+		if strings.HasPrefix(socket, family) {
+			return true
+		}
+	}
+	return false
+}
+
 // allTestSessions reports whether every session on the socket is test-named.
 // A socket serving anything else is not ours to kill.
 func allTestSessions(sessions []string) bool {
 	for _, s := range sessions {
-		if !strings.HasPrefix(s, "gt-test-") {
+		if !hasAnyPrefix(s, testSessionFamilies) {
 			return false
 		}
 	}
 	return true
 }
 
+// hasAnyPrefix reports whether s starts with one of the prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // candidateOwnerPid extracts the owning test process's pid from a socket name.
+// It reports false when the trailing field is not a plausible pid, which means
+// the socket does not name its owner (constants.TestSocketName puts the pid
+// last for exactly this reason).
 func candidateOwnerPid(socket string) (int, bool) {
 	m := testSocketName.FindStringSubmatch(socket)
 	if m == nil {
 		return 0, false
 	}
 	pid, err := strconv.Atoi(m[1])
-	if err != nil || pid <= 0 {
+	if err != nil || pid <= 0 || pid > maxOwnerPid {
 		return 0, false
 	}
 	return pid, true
 }
 
 // Run reports every test socket whose owner is gone and whose server still
-// answers with only gt-test-* sessions. A live owner means a run is in flight,
-// and a non-test session means the socket serves something the check must not
-// kill. Sockets whose server already exited are counted, not reported: they are
-// litter (1,200+ files on a host that runs the suite often) whose removal is
-// what keeps the scan off a tmux spawn per file.
+// answers with only test sessions. A live owner means a run is in flight, and a
+// non-test session means the socket serves something the check must not kill.
+// Sockets whose server already exited are counted, not reported: they are
+// litter whose removal keeps the scan off a tmux spawn per file.
+//
+// The two halves need different evidence. Killing a live server needs its owner
+// identified and confirmed gone, because a running test's server must survive
+// the sweep. Removing a file nothing is listening on needs neither — an unserved
+// socket is residue whoever made it, and requiring an owner pid there is what let
+// the litter accumulate, since a pid recycled onto an unrelated live process
+// made the file uncollectable forever (gt-20di).
 func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	c.leftovers = nil
 	c.staleFiles = nil
@@ -148,17 +218,26 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	var evidence []string
 	for _, e := range entries {
 		socket := e.Name()
-		pid, ok := candidateOwnerPid(socket)
-		if !ok || c.ownerAlive(pid) {
+		if !isTestSocketName(socket) {
 			continue
 		}
-		if !c.serving(filepath.Join(c.socketDir(), socket)) {
-			c.staleFiles = append(c.staleFiles, socket)
+		path := filepath.Join(c.socketDir(), socket)
+		if !c.serving(path) {
+			if c.socketAge(path) >= staleSocketMinAge {
+				c.staleFiles = append(c.staleFiles, socket)
+			}
+			continue
+		}
+
+		pid, ok := candidateOwnerPid(socket)
+		if !ok || c.ownerAlive(pid) {
 			continue
 		}
 		probe := c.probe(socket)
 		sessions, err := probe.ListSessions()
 		if err != nil || len(sessions) == 0 {
+			// The dial answered but tmux does not: the server exited between
+			// the two, leaving the file behind (gt-2bj).
 			c.staleFiles = append(c.staleFiles, socket)
 			continue
 		}

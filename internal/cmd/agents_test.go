@@ -540,6 +540,29 @@ func TestSocketDisplayName_TestSocket(t *testing.T) {
 	}
 }
 
+func TestTestSocketPackage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		socket string
+		want   string
+	}{
+		{"gt-test-tmux-12345", "tmux"},
+		{"gt-test-cmd-67890", "cmd"},
+		// constants.TestSocketName appends both a unique nanosecond field and
+		// the owning pid, so the tail has more than one numeric field.
+		{"gt-test-tmux-1758012345678901234-12345", "tmux"},
+		{"gt-test-dog-stale-1758012345678901234-12345", "dog-stale"},
+		{"gt-test-91506", "91506"},
+		{"gt-test-sentinel", "sentinel"},
+		{"my-custom-socket", "my-custom-socket"},
+	}
+	for _, tt := range tests {
+		if got := testSocketPackage(tt.socket); got != tt.want {
+			t.Errorf("testSocketPackage(%q) = %q, want %q", tt.socket, got, tt.want)
+		}
+	}
+}
+
 func TestBuildMenuAction_TestSocket(t *testing.T) {
 	t.Parallel()
 	action := buildMenuAction("gt-test-tmux-12345", "test-session")

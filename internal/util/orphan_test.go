@@ -303,9 +303,12 @@ func tmuxSocketSession(t *testing.T, socketName, sessionName string) int {
 	return pid
 }
 
-// killTmuxServer kills a tmux server by socket name.
+// killTmuxServer kills a tmux server by socket name. It goes through
+// tmux.KillServer rather than a bare `tmux kill-server` because that also
+// unlinks the socket file, which tmux leaves behind when its server exits
+// (gt-20di).
 func killTmuxServer(socketName string) {
-	_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
+	_ = tmux.NewTmuxWithSocket(socketName).KillServer()
 }
 
 func TestGetTmuxSessionPIDs_CrossSocket(t *testing.T) {
