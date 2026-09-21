@@ -229,6 +229,7 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 		// unreachable; under the harness that would leak server processes
 		// (observed during gt-lwi verification). bd honors this variable.
 		"BEADS_DOLT_AUTO_START": "0",
+		BeadsCircuitDirEnv:      sandboxCircuitDir(h.HomeDir),
 	}
 	if h.RealTownRoot != "" {
 		// Workspace resolution (workspace.Find and gt subprocesses) refuses
@@ -346,6 +347,21 @@ func (h *Hermetic) Finish(code int) int {
 var bdTelemetryOff = map[string]string{
 	"BD_DISABLE_METRICS":     "1",
 	"BD_DISABLE_EVENT_FLUSH": "1",
+}
+
+// BeadsCircuitDirEnv is bd's override for the directory its Dolt
+// circuit-breaker state files live in (beads internal/storage/dolt/circuit.go,
+// testCircuitBreakerDirEnv). Test-spawned bd must not write the real
+// $TMPDIR/beads-circuit, which every production bd start reads in full
+// (gt-tkz7, be-0v4).
+const BeadsCircuitDirEnv = "BEADS_TEST_CIRCUIT_DIR"
+
+// sandboxCircuitDir is where a sandbox's bd keeps circuit-breaker state. The
+// directory is created so bd never depends on the sandbox layout for it.
+func sandboxCircuitDir(home string) string {
+	dir := filepath.Join(home, ".cache", "beads-circuit")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
 }
 
 // scrubProcessEnv removes every GT_*, BD_* and BEADS_* variable from the
@@ -547,6 +563,7 @@ func HermeticTest(t testing.TB) string {
 		"GT_TOWN_ROOT":          town,
 		HermeticEnvVar:          "1",
 		"BEADS_DOLT_AUTO_START": "0",
+		BeadsCircuitDirEnv:      sandboxCircuitDir(home),
 	}
 	if realRoot, err := workspace.FindFromCwd(); err == nil && realRoot != "" {
 		testEnvs[workspace.EnvForbiddenTownRoot] = realRoot
