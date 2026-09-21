@@ -196,6 +196,13 @@ type ComposerStall struct {
 //
 // When the composer is not pending, Inactivity is left unmeasured and Stalled
 // is false: this check never reports a bare quiet session as stalled.
+//
+// A busy indicator in the pane does NOT suppress the detection if the session
+// has been silent for the full frozen window. A stale busy indicator (from a
+// previous turn that has ended) can linger in the capture and would otherwise
+// blind the detector to a real stall (gt-ncon). The activity check is the
+// authoritative signal: if the session has produced no output for frozenFor,
+// the busy indicator is stale and the pending input is stranded.
 func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (ComposerStall, error) {
 	result := ComposerStall{Session: session, FrozenFor: frozenFor}
 
@@ -212,6 +219,37 @@ func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (Com
 	result.State = probe.State
 	result.Queued = probe.Queued
 	result.Evidence = probe.Evidence
+
+	// If the pane is busy, check the activity to distinguish a genuinely
+	// working agent from a stalled one with a stale busy indicator (gt-ncon).
+	// A stale busy indicator can linger in the pane capture after a turn ends,
+	// and would otherwise blind the detector to a real stall.
+	if probe.State == ComposerBusy {
+		activity, err := t.GetWindowActivity(session)
+		if err != nil {
+			return result, fmt.Errorf("reading activity for %q: %w", session, err)
+		}
+		result.Inactivity = time.Since(activity)
+		// If the session has been silent for the frozen window, the busy
+		// indicator is stale and the agent is stalled. Re-probe the pane to
+		// see if there's pending input that was hidden by the busy indicator.
+		if result.Inactivity >= frozenFor {
+			// The pane is silent and shows a busy indicator. This is the
+			// gt-ncon signature: a stale busy indicator masking a real stall.
+			// Re-classify the pane without the busy check to see if there's
+			// pending input.
+			reprobe := analyzeComposerStateNoBusy(content, readyPromptPrefixForSession(t, session))
+			if reprobe.State == ComposerPending {
+				result.State = ComposerPending
+				result.Queued = reprobe.Queued
+				result.Evidence = "stale busy indicator masking pending input (gt-ncon)"
+				result.Stalled = true
+			}
+		}
+		return result, nil
+	}
+
+	// If the pane is not pending, there's nothing to detect.
 	if probe.State != ComposerPending {
 		return result, nil
 	}
@@ -223,6 +261,49 @@ func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (Com
 	result.Inactivity = time.Since(activity)
 	result.Stalled = result.Inactivity >= frozenFor
 	return result, nil
+}
+
+// analyzeComposerStateNoBusy is like analyzeComposerState but skips the busy
+// indicator check. It is used by DetectComposerStall to re-probe a pane that
+// shows a busy indicator but has been silent for the frozen window — the
+// signature of a stale busy indicator masking a real stall (gt-ncon).
+func analyzeComposerStateNoBusy(escContent, promptPrefix string) composerProbe {
+	if strings.TrimSpace(promptPrefix) == "" {
+		return composerProbe{State: ComposerUnknown, Evidence: "no prompt prefix for this agent"}
+	}
+
+	plain, dim := stripAnsiTrackDim(escContent)
+	lines, lineDims := splitRunesAndDim(plain, dim)
+
+	// The queued-message footer renders below the composer, so it can be
+	// visible while the composer line itself is empty.
+	for _, line := range lines {
+		if hasQueuedMessagesFooter(string(line)) {
+			return composerProbe{
+				State:    ComposerPending,
+				Queued:   true,
+				Evidence: "queued-messages footer visible",
+			}
+		}
+	}
+
+	// Walk up to the last composer line in the capture and read what follows
+	// the prompt prefix.
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !matchesPromptPrefix(string(lines[i]), promptPrefix) {
+			continue
+		}
+		content, contentDim := composerContent(lines[i], lineDims[i], promptPrefix)
+		if len(content) == 0 || allDim(contentDim) {
+			return composerProbe{State: ComposerClean, Evidence: "composer empty"}
+		}
+		return composerProbe{
+			State:    ComposerPending,
+			Evidence: fmt.Sprintf("composer holds unsubmitted text: %q", truncateRunes(string(content), 60)),
+		}
+	}
+
+	return composerProbe{State: ComposerUnknown, Evidence: "no composer line in capture"}
 }
 
 // SubmitPendingInput flushes input a pane is already holding, without typing
