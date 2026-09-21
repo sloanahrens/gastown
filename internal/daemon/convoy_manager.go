@@ -95,6 +95,11 @@ type ConvoyManager struct {
 	// Parked rigs are skipped during event polling. May be nil (never parked).
 	isRigParked func(string) bool
 
+	// convoyStatus reads one convoy's status, reporting false when it cannot be
+	// read. Nil reads it from the town store the daemon was started with; a test
+	// supplies one to drive the closed-convoy guard without a Dolt server.
+	convoyStatus func(convoyID string) (string, bool)
+
 	gtPath string
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
@@ -613,6 +618,17 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// A convoy the operator closed between the stranded scan and here must
+		// not be fed. The scan's list is a snapshot from the top of the cycle
+		// (findStranded) and the checks above it are not cheap, so a close
+		// lands inside the window: closing hq-cv-smk2e --force still left the
+		// daemon re-slinging its bead seconds later (gt-4lbz). The check sits
+		// as close to the sling as it can, since that window is what it closes.
+		if !m.convoyOpen(c.ID) {
+			m.logger("Convoy %s: closed since the stranded scan — %s not fed", c.ID, issueID)
+			return
+		}
+
 		// Re-dispatch with the agent the bead was slung with, never the rig
 		// default: the rig default is what silently re-routed mayor-ruled
 		// beads after a failed sling (gt-yg24).
@@ -659,6 +675,42 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// convoyOpen reports whether the convoy is still open, so the feeder can skip
+// one the operator closed after the stranded scan read it.
+func (m *ConvoyManager) convoyOpen(convoyID string) bool {
+	status, ok := m.convoyStatusOf(convoyID)
+	if !ok {
+		// Fail open: the stranded scan already read this convoy as open, and a
+		// status the town store cannot answer must not stop the feeder.
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "closed", "tombstone":
+		return false
+	}
+	return true
+}
+
+// convoyStatusOf reads one convoy's status from the town-level store the
+// convoys live in, reporting false when it cannot be read. m.convoyStatus
+// stands in for that read in tests.
+func (m *ConvoyManager) convoyStatusOf(convoyID string) (string, bool) {
+	if m.convoyStatus != nil {
+		return m.convoyStatus(convoyID)
+	}
+	m.storesMu.Lock()
+	store := m.stores["hq"]
+	m.storesMu.Unlock()
+	if store == nil {
+		return "", false
+	}
+	issue, err := store.GetIssue(m.ctx, convoyID)
+	if err != nil || issue == nil {
+		return "", false
+	}
+	return string(issue.Status), true
 }
 
 // listOriginBranchesFn is a seam for tests. Production uses

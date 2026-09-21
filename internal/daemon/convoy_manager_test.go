@@ -712,6 +712,81 @@ exit 0
 	}
 }
 
+// A convoy the operator closed between the stranded scan and the dispatch must
+// not be fed (gt-4lbz). The scan's list is a snapshot from the top of the
+// cycle, so closing hq-cv-smk2e --force still left its bead re-slung seconds
+// later; the guard re-reads the status as close to the sling as it can.
+func TestFeedFirstReady_SkipsConvoyClosedSinceScan(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+
+	// The convoy the snapshot named is closed by the time the feed runs.
+	m.convoyStatus = func(string) (string, bool) { return "closed", true }
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Closed under the feeder",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	})
+
+	if data, err := os.ReadFile(slingLogPath); err == nil && len(data) > 0 {
+		t.Errorf("a closed convoy must not feed, but the feeder slung: %q", string(data))
+	}
+	closedLogged := false
+	for _, s := range logged {
+		if strings.Contains(s, "closed since the stranded scan") {
+			closedLogged = true
+			break
+		}
+	}
+	if !closedLogged {
+		t.Errorf("expected the close to be logged, got: %v", logged)
+	}
+
+	// A status that cannot be read fails open: the stranded scan already said
+	// the convoy is open, and a store hiccup must not stop the feeder.
+	m.convoyStatus = func(string) (string, bool) { return "", false }
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv2",
+		Title:       "Status unreadable",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	})
+	if data, err := os.ReadFile(slingLogPath); err != nil || !strings.Contains(string(data), "gt-issue1") {
+		t.Errorf("an unreadable status must fail open and feed, got %q (err=%v)", string(data), err)
+	}
+}
+
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {

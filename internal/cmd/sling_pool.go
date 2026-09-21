@@ -131,23 +131,29 @@ type poolSession struct {
 }
 
 // choosePoolAgent decides the agent for a new polecat given the pool, the bead
-// being slung, and the live polecat sessions. It is pure: the only side effect
-// in routing — attaching localAttemptLabel — belongs to the caller. It returns
-// "" when the pool does not apply (unset, or no local agent) so the caller
-// falls back to role_agents, and refused when no seat is free, so the caller
-// stops the sling instead of spawning past a cap.
+// being slung, the agent the caller asked for, and the live polecat sessions.
+// It is pure: the only side effect in routing — attaching localAttemptLabel —
+// belongs to the caller. It returns "" with an empty reason when the pool has
+// no opinion, so the caller keeps the agent it asked for (or role_agents when
+// it asked for none), and refused when no seat is free, so the caller stops the
+// sling instead of spawning past a cap.
 //
-// Every reason names the agent it chose or the seat it could not take, except
-// the three "the pool does not apply" lines, which name no agent because the
+// requested is the agent named on the command line (--agent), including the
+// agent a convoy recorded at sling time. It is admitted only when it names one
+// of the pool's own seats: the bead's route:* label and that seat's cap decide,
+// exactly as they do for a sling that named no agent. An agent the pool does
+// not own leaves it nothing to admit (gt-4lbz).
+//
+// Every reason names the agent it chose or the seat it could not take. The
+// three lines that name no agent — no pool configured, no local_agent, and a
+// requested agent the pool does not own — are empty or say so, because the
 // caller has yet to pick one.
-func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSession, now time.Time) (agent, reason string, refused bool) {
+func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, sessions []poolSession, now time.Time) (agent, reason string, refused bool) {
 	switch {
 	case pool == nil:
 		return "", "pool: no polecat pool configured", false
 	case pool.LocalAgent == "":
 		return "", "pool: polecat_pool has no local_agent; using the role default", false
-	case pool.MaxLocal <= 0:
-		return "", fmt.Sprintf("pool: polecat_pool max_local is %d; using the role default", pool.MaxLocal), false
 	}
 	local, over := 0, 0
 	var newest time.Time
@@ -189,6 +195,16 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 	// the reason line.
 	seat := func(want string) (string, string, bool) {
 		switch {
+		case pool.MaxLocal <= 0:
+			// The local seat is closed: max_local 0 in a configured pool reads
+			// as "no local dispatch" (gt-4lbz). A bead that wants it takes the
+			// overflow seat or none — handing it to the role default instead
+			// would spawn on the very seat the operator just emptied, which is
+			// how a max_local 0 town kept growing local polecats.
+			if overflowFull {
+				return refuse(fmt.Sprintf("no local seats (max_local %d)", pool.MaxLocal))
+			}
+			return pool.OverflowAgent, fmt.Sprintf("pool: no local seats (max_local %d) -> %s", pool.MaxLocal, overflow), false
 		case local >= pool.MaxLocal:
 			if overflowFull {
 				return refuse("local full")
@@ -227,7 +243,22 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 	if bead.hasLabel(localAttemptLabel) {
 		return overflowFor(localAttemptLabel + " failed")
 	}
-	// 3. Bead shape.
+	// 3. The agent the caller asked for. It names a seat, it does not license
+	//    taking one: a request for a seat the pool owns is admitted by that
+	//    seat's own rules, so `--agent=<local>` on a full local pool goes to the
+	//    overflow agent or is refused rather than over-filling the GPU. An agent
+	//    the pool does not own is not the pool's to admit, and the request
+	//    stands untouched (gt-4lbz).
+	if requested != "" {
+		switch requested {
+		case pool.LocalAgent:
+			return seat("requested " + requested)
+		case pool.OverflowAgent:
+			return overflowFor("requested " + requested)
+		}
+		return "", "", false
+	}
+	// 4. Bead shape.
 	if bead.hasLabel(reworkLabel) {
 		return seat(reworkLabel)
 	}
@@ -250,7 +281,7 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 		}
 		return overflowFor("type=" + beadTypeLabel(bead))
 	}
-	// 4. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
+	// 5. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
 	//    count alone decides, as it did before B1.
 	return seat("type=" + beadTypeLabel(bead))
 }
@@ -606,23 +637,24 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 		Run()
 }
 
-// resolvePolecatPoolAgent applies the town's polecat_pool to a sling that
-// gave no --agent. It reads the bead's type and labels, claims the seat it
+// resolvePolecatPoolAgent applies the town's polecat_pool to a sling, whatever
+// agent it asked for. It reads the bead's type and labels, claims the seat it
 // routes to while it decides (so a sling racing this one sees the seat as
 // taken), attaches localAttemptLabel when the idle-seat fill branch fires, and
-// returns the agent to use ("" = role default) with a one-line reason naming
-// that agent. It returns errPoolBackpressure when every seat the bead could
-// take is at its cap and force is false.
-func resolvePolecatPoolAgent(townRoot, beadID string, force bool) (agent, reason string, err error) {
-	return poolRoute(townRoot, beadID, true, force)
+// returns the agent to use with a one-line reason naming that agent. An empty
+// agent with an empty reason means the pool has no opinion and the caller's own
+// choice stands. It returns errPoolBackpressure when every seat the bead could
+// take is at its cap.
+func resolvePolecatPoolAgent(townRoot, beadID, requested string) (agent, reason string, err error) {
+	return poolRoute(townRoot, beadID, requested, true)
 }
 
 // peekPolecatPoolAgent is resolvePolecatPoolAgent without the side effects:
 // `gt sling --dry-run` must print the route it would take — a refusal included,
 // since that is the route a live sling would take — without claiming a seat or
 // consuming the bead's one local attempt.
-func peekPolecatPoolAgent(townRoot, beadID string, force bool) (agent, reason string, err error) {
-	return poolRoute(townRoot, beadID, false, force)
+func peekPolecatPoolAgent(townRoot, beadID, requested string) (agent, reason string, err error) {
+	return poolRoute(townRoot, beadID, requested, false)
 }
 
 // errPoolBackpressure identifies a pool refusal so callers and tests can match
@@ -632,21 +664,31 @@ var errPoolBackpressure = errors.New("polecat pool backpressure")
 // poolBackpressureError is the typed refusal: every seat the bead could take is
 // at its cap. The message leads with `sling refused:`, the marker that tells
 // the convoy feeder to defer the bead instead of failing it (see
-// internal/daemon/convoy_sling_backpressure.go), carries the pool's own reason
-// line and names the way through.
+// internal/daemon/convoy_sling_backpressure.go), and carries the pool's own
+// reason line.
+//
+// There is no flag that spawns past the cap, deliberately (gt-4lbz). Every
+// automated redispatch path — the convoy feeder, the deacon's RECOVERED_BEAD
+// redispatch, the dead-holder auto-force in sling.go — carries --force for the
+// safety guards it also needs, so a cap that --force opens is a cap no
+// automated path is actually held by: those are the two spawns (a 4th flash
+// session with max_overflow 3, and local spawns with max_local 0) this guard
+// exists to stop. Capacity is a property of the town, so it is raised where it
+// is declared — polecat_pool.max_local / max_overflow — which the pool reads on
+// every sling.
 type poolBackpressureError struct {
 	Reason string
 }
 
 func (e *poolBackpressureError) Error() string {
-	return "sling refused: " + e.Reason + "; pass --force to spawn anyway"
+	return "sling refused: " + e.Reason + "; raise polecat_pool.max_local/max_overflow to spawn"
 }
 
 func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
 // poolRoute decides the route. live distinguishes a sling that will spawn from
 // a dry run: only a live sling claims a seat or writes labels.
-func poolRoute(townRoot, beadID string, live, force bool) (agent, reason string, err error) {
+func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason string, err error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil || ts == nil || ts.PolecatPool == nil {
 		return "", "", nil
@@ -681,7 +723,7 @@ func poolRoute(townRoot, beadID string, live, force bool) (agent, reason string,
 	}
 	sessions, seat := beginPoolSeatDecision(townRoot, live, sessions)
 	defer seat.done()
-	agent, reason, refused := choosePoolAgent(ts.PolecatPool, bead, sessions, time.Now())
+	agent, reason, refused := choosePoolAgent(ts.PolecatPool, bead, requested, sessions, time.Now())
 	if live && !refused {
 		seat.claimFor(agent, ts.PolecatPool, beadID)
 	}
@@ -692,10 +734,7 @@ func poolRoute(townRoot, beadID string, live, force bool) (agent, reason string,
 		reason = fmt.Sprintf("%s [%s]", reason, seat.note)
 	}
 	if refused {
-		if !force {
-			return agent, reason, &poolBackpressureError{Reason: reason}
-		}
-		reason = fmt.Sprintf("%s [--force: spawning past the overflow cap]", reason)
+		return agent, reason, &poolBackpressureError{Reason: reason}
 	}
 	if live && beadID != "" && strings.Contains(reason, idleFillReason) {
 		if err := poolBeadLabelAdd(townRoot, beadID, localAttemptLabel); err != nil {

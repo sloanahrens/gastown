@@ -226,17 +226,16 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		}
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
-			if opts.Agent == "" {
-				// peek, not resolve: a dry run prints the route it would take
-				// but must not attach local-attempt:1 to the bead. A refusal is
-				// printed as the refusal a live sling would raise, since that is
-				// the route it would take.
-				_, reason, poolErr := peekPolecatPoolAgent(opts.TownRoot, opts.HookBead, opts.Force)
-				if poolErr != nil {
-					fmt.Printf("  %s\n", poolErr)
-				} else if reason != "" {
-					fmt.Printf("  %s\n", reason)
-				}
+			// peek, not resolve: a dry run prints the route it would take
+			// but must not attach local-attempt:1 to the bead. A refusal is
+			// printed as the refusal a live sling would raise, since that is
+			// the route it would take. The pool is asked whatever --agent says,
+			// so the preview matches the live sling (gt-4lbz).
+			_, reason, poolErr := peekPolecatPoolAgent(opts.TownRoot, opts.HookBead, opts.Agent)
+			if poolErr != nil {
+				fmt.Printf("  %s\n", poolErr)
+			} else if reason != "" {
+				fmt.Printf("  %s\n", reason)
 			}
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
 			result.Pane = "<new-pane>"
