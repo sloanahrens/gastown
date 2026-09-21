@@ -1272,6 +1272,148 @@ func TestCleanupStatusFromWorkState(t *testing.T) {
 	}
 }
 
+// TestResolveDoneAgentIdentityAlwaysNamesThePolecat pins hq-vx224's other half:
+// gt done's agent-bead writes (done-intent label, checkpoints, active_mr,
+// completion metadata, agent_state, cleanup_status) are all guarded by
+// `agentBeadID != ""`, and getAgentBeadID returns "" for a rig-less context.
+// The context is therefore seeded from the polecat identity that gt done has
+// already validated (BD_ACTOR + GT_ROLE/GT_RIG/GT_POLECAT), so a degraded env
+// or cwd detection can no longer make gt done complete without recording
+// anything.
+func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
+	t.Run("undetectable environment still names the polecat", func(t *testing.T) {
+		// Neither GT_ROLE nor a recognizable working directory: role detection
+		// can contribute nothing.
+		t.Setenv("GT_ROLE", "")
+		t.Setenv("GT_RIG", "")
+		t.Setenv("GT_POLECAT", "")
+		t.Setenv("GT_CREW", "")
+		notATown := t.TempDir()
+
+		ctx, actor := resolveDoneAgentIdentity(notATown, notATown, "gastown", "flint")
+		if actor != "" {
+			t.Errorf("actor = %q, want empty: ActorString degrades to \"unknown\" for an undetected role, and that must not replace the validated sender on the \"[done]\" log line", actor)
+		}
+		if ctx.Role != RolePolecat || ctx.Rig != "gastown" || ctx.Polecat != "flint" {
+			t.Fatalf("ctx = %+v, want the validated polecat identity preserved", ctx)
+		}
+		if id := getAgentBeadID(ctx); id == "" {
+			t.Fatal("agent bead ID must resolve for a polecat gt done: an empty ID skips every agent-bead write, including the cleanup_status self-report")
+		} else if !strings.Contains(id, "flint") {
+			t.Fatalf("agent bead ID %q does not name the polecat", id)
+		}
+	})
+
+	t.Run("detected identity wins and supplies the log actor", func(t *testing.T) {
+		t.Setenv("GT_ROLE", "polecat")
+		t.Setenv("GT_RIG", "gastown")
+		t.Setenv("GT_POLECAT", "flint")
+		// GT_CREW is read before GT_POLECAT when GetRoleWithContext fills a
+		// simple role's identity from env. TestDeriveSessionName (costs_test.go)
+		// leaves GT_CREW=max in the process env — its subtests unset GT_* on
+		// entry but their cleanup only re-sets values that were non-empty when
+		// saved, so keys a subtest cleared are never restored to empty. Clearing
+		// it here keeps this test's result independent of what ran before it.
+		t.Setenv("GT_CREW", "")
+
+		ctx, actor := resolveDoneAgentIdentity(t.TempDir(), t.TempDir(), "ignored-rig", "ignored-polecat")
+		if actor != "gastown/polecats/flint" {
+			t.Errorf("actor = %q, want %q", actor, "gastown/polecats/flint")
+		}
+		if ctx.Rig != "gastown" || ctx.Polecat != "flint" {
+			t.Fatalf("ctx = %+v, want the detected identity to refine the seeded one", ctx)
+		}
+	})
+}
+
+// TestResolveCleanupStatusForSelfReportIsTotal pins hq-vx224: gt done's
+// self-report must never resolve to an empty string, because an empty
+// cleanup_status is what "cleanup_status=<missing>" reads and no later writer
+// ever fills it in (reclaim.go). An unobservable state is recorded as
+// "unknown" instead — still fail-closed at every gate, but distinguishable
+// from "gt done never ran".
+func TestResolveCleanupStatusForSelfReportIsTotal(t *testing.T) {
+	tests := []struct {
+		name       string
+		computed   string
+		observed   string
+		wantStatus string
+	}{
+		{name: "computed wins", computed: "clean", observed: "has_stash", wantStatus: "clean"},
+		{name: "failed push records the dirty fact", computed: "unpushed", wantStatus: "has_unpushed"},
+		{name: "unobserved falls back to a fresh observation", observed: "clean", wantStatus: "clean"},
+		{name: "explicit unknown is re-observed", computed: "unknown", observed: "has_uncommitted", wantStatus: "has_uncommitted"},
+		{name: "nothing observable still records unknown", computed: "", observed: "", wantStatus: "unknown"},
+		{name: "unparseable computed value is not dropped", computed: "dirty-ish", observed: "", wantStatus: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveCleanupStatusForSelfReport(tt.computed, tt.observed)
+			if string(got) != tt.wantStatus {
+				t.Fatalf("resolveCleanupStatusForSelfReport(%q, %q) = %q, want %q",
+					tt.computed, tt.observed, string(got), tt.wantStatus)
+			}
+			if string(got) == "" {
+				t.Fatal("resolved cleanup status must never be empty: the agent bead would be left with cleanup_status=<missing>")
+			}
+		})
+	}
+}
+
+// TestSelfReportCleanupStatusAlwaysWrites verifies that the self-report is not
+// skipped on the paths that used to skip it: the write is made for a failed
+// push (when updateAgentStateAfterSubmission bails out before recording
+// anything) and for a status that cannot be observed at all.
+func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
+	// A directory that is not a git repository: every observation attempt in
+	// observeCleanupStatus fails, which is the "cannot observe" case.
+	notARepo := gitpkg.NewGit(t.TempDir())
+
+	tests := []struct {
+		name        string
+		computed    string
+		wantWritten string
+	}{
+		{name: "successful completion records clean", computed: "clean", wantWritten: "clean"},
+		{name: "failed push records has_unpushed", computed: "unpushed", wantWritten: "has_unpushed"},
+		{name: "unobservable state records unknown", computed: "", wantWritten: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updater := &fakeCleanupUpdater{}
+			selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "gt-gastown-polecat-jasper", tt.computed)
+
+			if updater.calls != 1 {
+				t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1 (the write must never be skipped)", updater.calls)
+			}
+			if updater.id != "gt-gastown-polecat-jasper" {
+				t.Errorf("wrote to agent bead %q, want %q", updater.id, "gt-gastown-polecat-jasper")
+			}
+			if updater.status != tt.wantWritten {
+				t.Errorf("cleanup status written = %q, want %q", updater.status, tt.wantWritten)
+			}
+		})
+	}
+
+	t.Run("missing agent bead id is loud, not silent", func(t *testing.T) {
+		updater := &fakeCleanupUpdater{}
+		selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "", "clean")
+		if updater.calls != 0 {
+			t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 0 with no agent bead ID", updater.calls)
+		}
+	})
+
+	t.Run("write failure is non-fatal", func(t *testing.T) {
+		updater := &fakeCleanupUpdater{err: errors.New("dolt is sad")}
+		selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "gt-gastown-polecat-jasper", "clean")
+		if updater.calls != 1 {
+			t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
+		}
+	})
+}
+
 // TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
 // only done-intent labels while preserving other labels.
 func TestClearDoneIntentLabel(t *testing.T) {
