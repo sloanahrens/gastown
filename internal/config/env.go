@@ -738,6 +738,108 @@ func AgentEnvSimple(role, rig, agentName string) map[string]string {
 	})
 }
 
+// ExpandEnvRefs returns a copy of env with ${VAR} references in each value
+// replaced by VAR's value in the process environment.
+//
+// Only the braced form expands, so a value that legitimately contains a bare
+// dollar sign — a password, a shell snippet, a prompt template — is passed
+// through verbatim, and ShellQuote still quotes it. Shell parameter-expansion
+// syntax such as ${VAR:-default} is left alone for the same reason: it is not
+// a variable reference this function can resolve, so deciding what it means
+// belongs to whoever wrote it.
+//
+// A reference to an unset variable expands to the empty string, so a missing
+// credential reaches the provider as an empty value instead of authenticating
+// with the literal sentinel text. ValidateAgentConfig rejects such an agent,
+// and an agent resolved out of settings stops at BuildStartupCommand instead.
+func ExpandEnvRefs(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return env
+	}
+	expanded := make(map[string]string, len(env))
+	for k, v := range env {
+		expanded[k] = expandEnvRefs(v)
+	}
+	return expanded
+}
+
+// expandEnvRefs replaces ${VAR} references in s with VAR's process
+// environment value, leaving everything else in place.
+func expandEnvRefs(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		name, end, ok := envRefAt(s, i)
+		if ok {
+			b.WriteString(os.Getenv(name))
+			i = end
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// envRefNames returns the variable names s references as ${VAR}, in order of
+// appearance and without duplicates.
+func envRefNames(s string) []string {
+	var names []string
+	seen := make(map[string]bool)
+	for i := 0; i < len(s); {
+		name, end, ok := envRefAt(s, i)
+		if !ok {
+			i++
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+		i = end
+	}
+	return names
+}
+
+// envRefAt reports whether a ${VAR} reference starts at s[i], returning the
+// variable name and the index just past the closing brace.
+func envRefAt(s string, i int) (name string, end int, ok bool) {
+	if i+1 >= len(s) || s[i] != '$' || s[i+1] != '{' {
+		return "", 0, false
+	}
+	rest := s[i+2:]
+	close := strings.IndexByte(rest, '}')
+	if close < 0 {
+		return "", 0, false
+	}
+	name = rest[:close]
+	if !isEnvVarName(name) {
+		return "", 0, false
+	}
+	return name, i + 2 + close + 1, true
+}
+
+// isEnvVarName reports whether name can be looked up with os.Getenv: a
+// non-empty run of letters, digits, and underscores that does not start with a
+// digit. Anything else is shell syntax envRefAt has no value for.
+func isEnvVarName(name string) bool {
+	for i, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return name != ""
+}
+
 // ShellQuote returns a shell-safe quoted string.
 // Values containing special characters are wrapped in single quotes.
 // Single quotes within the value are escaped using the '\” idiom.

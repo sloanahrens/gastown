@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -250,7 +249,7 @@ func claudeHaikuPreset() *RuntimeConfig {
 // OpenAI-compatible endpoint by overriding two Anthropic SDK env vars:
 //
 //	ANTHROPIC_BASE_URL  = https://api.groq.com/openai/v1
-//	ANTHROPIC_API_KEY   =   (resolved at spawn time from the shell env)
+//	ANTHROPIC_API_KEY   = ${GROQ_API_KEY}  (a reference; see ExpandEnvRefs)
 //
 // This gives you:
 //   - Groq compound-beta reasoning on patrol/utility roles including polecat (low cost, fast)
@@ -260,16 +259,11 @@ func claudeHaikuPreset() *RuntimeConfig {
 // Prerequisite: export GROQ_API_KEY=gsk_... in your shell before starting gt.
 func groqCompoundPreset() *RuntimeConfig {
 	// Derive from the canonical AgentGroqCompound builtin so Command, Args,
-	// Env, and all normalisation logic stay in one place (agents.go).
-	rc := RuntimeConfigFromPreset(AgentGroqCompound)
-	// Resolve $GROQ_API_KEY at preset creation time so the settings file
-	// records the live key value rather than a shell-expansion sentinel.
-	if rc != nil && rc.Env != nil {
-		if v, ok := rc.Env["ANTHROPIC_API_KEY"]; ok && v == "$GROQ_API_KEY" {
-			rc.Env["ANTHROPIC_API_KEY"] = os.Getenv("GROQ_API_KEY")
-		}
-	}
-	return rc
+	// Env, and all normalisation logic stay in one place (agents.go). The Env
+	// keeps the ${GROQ_API_KEY} reference rather than the key's value: the
+	// reference is what ApplyCostTier writes into settings, and ExpandEnvRefs
+	// resolves it at spawn (gt-yih1).
+	return RuntimeConfigFromPreset(AgentGroqCompound)
 }
 
 // ApplyCostTier writes the tier's agent and role_agents configuration to town settings.

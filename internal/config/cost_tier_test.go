@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -257,9 +256,12 @@ func TestCostTierAgents(t *testing.T) {
 		if groq.Env["ANTHROPIC_MODEL"] != "compound-beta" {
 			t.Errorf("groq-compound ANTHROPIC_MODEL = %q, want compound-beta", groq.Env["ANTHROPIC_MODEL"])
 		}
-		// Verify the preset reads GROQ_API_KEY from the environment (not a hardcoded value)
-		if groq.Env["ANTHROPIC_API_KEY"] != os.Getenv("GROQ_API_KEY") {
-			t.Errorf("groq-compound ANTHROPIC_API_KEY = %q, want value of GROQ_API_KEY env var", groq.Env["ANTHROPIC_API_KEY"])
+		// The tier persists the ${GROQ_API_KEY} reference, not the key's value:
+		// ApplyCostTier writes this RuntimeConfig into settings/config.json, and
+		// a live key there would put the secret on disk. The reference resolves
+		// at spawn instead (gt-yih1).
+		if got := groq.Env["ANTHROPIC_API_KEY"]; got != "${GROQ_API_KEY}" {
+			t.Errorf("groq-compound ANTHROPIC_API_KEY = %q, want the %q reference (never the key)", got, "${GROQ_API_KEY}")
 		}
 	})
 }

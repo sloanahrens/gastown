@@ -50,7 +50,7 @@ const (
 	// Groq's OpenAI-compatible API endpoint. The claude binary acts as the SDK
 	// proxy; ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY are overridden at runtime
 	// to redirect traffic to api.groq.com. GROQ_API_KEY must be set in the shell
-	// environment — it is read dynamically and never stored in config files.
+	// environment — see the preset's Env for how the key reaches the agent.
 	AgentGroqCompound AgentPreset = "groq-compound"
 )
 
@@ -506,7 +506,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 	// Anthropic SDK environment variables that control the backend:
 	//
 	//   ANTHROPIC_BASE_URL  → https://api.groq.com/openai/v1
-	//   ANTHROPIC_API_KEY   → $GROQ_API_KEY  (read from the shell env at spawn time)
+	//   ANTHROPIC_API_KEY   → ${GROQ_API_KEY}  (the process environment's key)
 	//
 	// The model flag --model groq/compound-beta selects Groq's compound
 	// reasoning model. Because the transport is the Claude binary, all Gas
@@ -516,7 +516,10 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 	// Prerequisites:
 	//   export GROQ_API_KEY=gsk_...
 	//
-	// The key is resolved at agent spawn time — never stored in config files.
+	// ${GROQ_API_KEY} is a reference, not a literal: ExpandEnvRefs resolves it
+	// when the agent env is built for spawn, so the ${} form is what cost tiers
+	// persist and the key itself never reaches config.json. A role that lands
+	// here without GROQ_API_KEY set is caught by ValidateAgentConfig.
 	AgentGroqCompound: {
 		Name:    AgentGroqCompound,
 		Command: "claude",
@@ -526,7 +529,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Env: map[string]string{
 			"ANTHROPIC_BASE_URL": "https://api.groq.com/openai/v1",
 			"ANTHROPIC_MODEL":    "compound-beta",
-			"ANTHROPIC_API_KEY":  "$GROQ_API_KEY",
+			"ANTHROPIC_API_KEY":  "${GROQ_API_KEY}",
 		},
 		ProcessNames:         []string{"node", "claude"},
 		SessionIDEnv:         "CLAUDE_SESSION_ID",

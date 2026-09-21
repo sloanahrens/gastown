@@ -1713,3 +1713,122 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 		}
 	})
 }
+
+func TestExpandEnvRefs(t *testing.T) {
+	t.Setenv("GT_TEST_KEY", "gsk_live_value")
+	t.Setenv("GT_TEST_URL", "https://example.test/v1")
+
+	tests := []struct {
+		name string
+		in   map[string]string
+		want map[string]string
+	}{
+		{
+			name: "nil env is returned unchanged",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "bare dollar sign is left for ShellQuote to quote",
+			in:   map[string]string{"LITERAL": "$NOT_A_REF", "PLAIN": "no refs"},
+			want: map[string]string{"LITERAL": "$NOT_A_REF", "PLAIN": "no refs"},
+		},
+		{
+			name: "braced reference is replaced with the environment value",
+			in:   map[string]string{"ANTHROPIC_API_KEY": "${GT_TEST_KEY}"},
+			want: map[string]string{"ANTHROPIC_API_KEY": "gsk_live_value"},
+		},
+		{
+			name: "reference embedded in a larger value is replaced in place",
+			in:   map[string]string{"JOINED": "prefix-${GT_TEST_KEY}-suffix"},
+			want: map[string]string{"JOINED": "prefix-gsk_live_value-suffix"},
+		},
+		{
+			name: "several references in one value all resolve",
+			in:   map[string]string{"BOTH": "${GT_TEST_KEY}@${GT_TEST_URL}"},
+			want: map[string]string{"BOTH": "gsk_live_value@https://example.test/v1"},
+		},
+		{
+			name: "unset reference expands to empty rather than the sentinel text",
+			in:   map[string]string{"MISSING": "${GT_TEST_UNSET_VAR}"},
+			want: map[string]string{"MISSING": ""},
+		},
+		{
+			name: "shell parameter expansion is not a reference",
+			in:   map[string]string{"SHELL": "${GT_TEST_UNSET_VAR:-fallback}"},
+			want: map[string]string{"SHELL": "${GT_TEST_UNSET_VAR:-fallback}"},
+		},
+		{
+			name: "unterminated brace is left alone",
+			in:   map[string]string{"BROKEN": "${GT_TEST_KEY"},
+			want: map[string]string{"BROKEN": "${GT_TEST_KEY"},
+		},
+		{
+			name: "empty braces are not a reference",
+			in:   map[string]string{"EMPTY": "${}"},
+			want: map[string]string{"EMPTY": "${}"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExpandEnvRefs(tt.in)
+			if tt.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("ExpandEnvRefs(nil) = %v, want empty", got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("ExpandEnvRefs(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+			for k, want := range tt.want {
+				if got[k] != want {
+					t.Errorf("ExpandEnvRefs(%v)[%q] = %q, want %q", tt.in, k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+func TestExpandEnvRefsDoesNotMutateInput(t *testing.T) {
+	t.Setenv("GT_TEST_KEY", "gsk_live_value")
+	in := map[string]string{"ANTHROPIC_API_KEY": "${GT_TEST_KEY}"}
+
+	ExpandEnvRefs(in)
+
+	if in["ANTHROPIC_API_KEY"] != "${GT_TEST_KEY}" {
+		t.Errorf("input mutated: ANTHROPIC_API_KEY = %q, want the reference preserved", in["ANTHROPIC_API_KEY"])
+	}
+}
+
+func TestEnvRefNames(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "no references", in: "plain", want: nil},
+		{name: "bare dollar is not a reference", in: "$PLAIN", want: nil},
+		{name: "one reference", in: "${ALPHA}", want: []string{"ALPHA"}},
+		{name: "duplicates collapse", in: "${ALPHA}-${ALPHA}", want: []string{"ALPHA"}},
+		{name: "order of appearance is kept", in: "${BETA}${ALPHA}", want: []string{"BETA", "ALPHA"}},
+		{name: "shell default syntax is not a reference", in: "${ALPHA:-x}", want: nil},
+		{name: "leading digit is not a name", in: "${1ALPHA}", want: nil},
+		{name: "underscores and digits are a name", in: "${A_1}", want: []string{"A_1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := envRefNames(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("envRefNames(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("envRefNames(%q)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

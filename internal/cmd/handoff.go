@@ -945,7 +945,9 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		} else {
 			runtimeConfig = config.ResolveAgentConfig(townRoot, rigPath)
 		}
-		agentEnv = runtimeConfig.Env
+		// Resolve ${VAR} references the same way the first-spawn path does, so
+		// a handoff re-exports the key rather than the reference (gt-yih1).
+		agentEnv = config.ExpandEnvRefs(runtimeConfig.Env)
 		envMap["GT_ROLE"] = gtRole
 		envMap["BD_ACTOR"] = gtRole
 		envMap["GIT_AUTHOR_NAME"] = gtRole
