@@ -1,0 +1,98 @@
+description = """
+Nudge the mayor when polecat seats are free and a rig has actionable ready work.
+
+The mayor is purely event-driven: it wakes on a slot opening, an escalation, or
+mail. A "no dispatch" decision therefore self-extinguishes — declining to sling
+opens no slot, so nothing wakes the mayor again, and with no polecat running the
+town sits idle with work on the board. On 2026-09-21 the town sat idle
+03:41-09:07 (5.5 hours) with 362 ready beads in gastown.
+
+This patrol is the timer that decision does not self-provide. It measures the
+seat picture and the ready work, and nudges the mayor with both numbers. It does
+not sling: dispatch stays the mayor's call, and a daemon that dispatched on its
+own would be a second, dumber scheduler.
+
+## ZFC Exemption
+
+This formula is used for **observability tracking only** — the Go code in
+mayor_dispatch.go is the executor. The patrol is exempt from agent-driven
+formula execution (ZFC) because:
+
+1. The measurement is a read of live state (tmux sessions, Dolt) that has to be
+   taken at a known instant, not reasoned about by an agent
+2. The nudge budget is the cadence itself; an agent deciding when to nudge adds
+   a second cadence on top of the first
+3. The patrol never writes to the town — it reports and stops
+
+The daemon pours this molecule, executes the Go code, and closes/fails each step
+for observability.
+
+## Dog Contract
+
+The daemon:
+1. Runs `gt daemon dispatch-check --json`, which measures free polecat seats
+   from the pool model every spawn path admits against, and counts actionable
+   P0-P2 ready beads per rig
+2. Nudges the mayor with the seat count and the per-rig counts when seats are
+   free and work exists
+3. Stays silent when no seat model is configured, no seat is free, or every rig
+   with work is over its merge-queue ceiling
+
+## Safety
+
+- Read-only against the town: it nudges and records a wisp, and never slings
+- A nudge honours the mayor's DND setting, and delivers through the queue when
+  the mayor is mid-turn rather than interrupting it
+- Bead families that are bookkeeping rather than work (agent beads, escalations,
+  merge slots, messages, epics) are excluded, so the count is dispatchable work
+- The wisp records which numbers produced the decision, including the cycles
+  that decided not to nudge"""
+formula = "mol-dog-mayor-dispatch"
+version = 1
+
+[squash]
+trigger = "on_complete"
+template_type = "work"
+include_metrics = true
+
+[[steps]]
+id = "inspect"
+title = "Inspect free seats and actionable ready work"
+description = """
+Run `gt daemon dispatch-check --json` and read the seat picture and per-rig ready
+counts from it.
+
+The check measures seats from polecat_pool (the admission point every spawn path
+reads), falling back to scheduler.max_polecats when no pool is configured, and
+counts actionable P0-P2 ready beads per rig. Bookkeeping bead families
+(gt:agent, gt:escalation, gt:merge-slot, gt:merge-request, gt:message, ...) and
+epics are excluded, and parked or docked rigs are left out.
+
+**Exit criteria:** Seat count and per-rig ready counts are in hand, or the check
+failed and its error is reported."""
+
+[[steps]]
+id = "nudge"
+title = "Nudge the mayor on a free seat"
+needs = ["inspect"]
+description = """
+Deliver the check's nudge text to the mayor via `gt nudge`, or record why no
+nudge was warranted.
+
+The patrol nudges only when all three hold: a seat model is configured, at least
+one seat is free, and at least one rig outside its merge-queue ceiling has ready
+work. Otherwise the step closes as skipped with the reason — silence is the
+common outcome and the receipt should say so.
+
+**Exit criteria:** The nudge was delivered, or the skip reason recorded, or the
+delivery failure reported."""
+
+[[steps]]
+id = "report"
+title = "Report dispatch decision"
+needs = ["nudge"]
+description = """
+Log the cycle's numbers: free seats, actionable ready beads, and whether a nudge
+went out.
+
+**Exit criteria:** Summary logged."""

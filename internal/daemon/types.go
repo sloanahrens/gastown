@@ -131,6 +131,7 @@ type PatrolsConfig struct {
 	MainBranchTest         *MainBranchTestConfig          `json:"main_branch_test,omitempty"`
 	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
 	QuotaResume            *QuotaDogConfig                `json:"quota_resume,omitempty"`
+	MayorDispatch          *MayorDispatchConfig           `json:"mayor_dispatch,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
@@ -328,6 +329,19 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.QuotaResume.Enabled
+	}
+	// mayor_dispatch defaults ON for the same reason quota_resume does: the
+	// failure it exists for is silence. The mayor is event-driven, so a "no
+	// dispatch" decision opens no slot and wakes it again — on 2026-09-21 the
+	// town sat idle 5.5h with 362 ready beads, and no config entry in
+	// mayor/daemon.json was needed to make that happen. A patrol that has to be
+	// switched on cannot prevent the state it was written for. An explicit
+	// config entry can still disable it (gt-59o9).
+	if patrol == "mayor_dispatch" {
+		if config == nil || config.Patrols == nil || config.Patrols.MayorDispatch == nil {
+			return true
+		}
+		return config.Patrols.MayorDispatch.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

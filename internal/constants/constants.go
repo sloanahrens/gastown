@@ -348,6 +348,9 @@ const (
 	// MolDogBackup is the Dolt backup dog formula name.
 	MolDogBackup = "mol-dog-backup"
 
+	// MolDogMayorDispatch is the idle-seat dispatch check formula name.
+	MolDogMayorDispatch = "mol-dog-mayor-dispatch"
+
 	// MolConvoyFeed is the convoy feeder formula name.
 	MolConvoyFeed = "mol-convoy-feed"
 
