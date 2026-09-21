@@ -1115,13 +1115,39 @@ func (t *Tmux) ServerPID() int {
 	return pid
 }
 
-// KillServer terminates the entire tmux server and all sessions.
+// KillServer terminates the entire tmux server and all sessions, and unlinks
+// the socket file the server leaves behind.
 func (t *Tmux) KillServer() error {
 	_, err := t.run("kill-server")
-	if errors.Is(err, ErrNoServer) {
-		return nil // Already dead
+	if err != nil && !errors.Is(err, ErrNoServer) {
+		return err
 	}
-	return err
+	// ErrNoServer is not an early return: the socket file a dead server left is
+	// the residue this call exists to clear.
+	t.removeDeadSocketFile()
+	return nil
+}
+
+// removeDeadSocketFile unlinks this server's socket file once no server answers
+// on it. tmux never unlinks a socket when its server exits, so the file
+// outlived every kill and nothing pruned it — one per test server per run
+// (gt-20di).
+func (t *Tmux) removeDeadSocketFile() {
+	if !t.ownsSocketFile() {
+		return
+	}
+	unlinkDeadSocketFile(filepath.Join(SocketDir(), t.socketName))
+}
+
+// ownsSocketFile reports whether the file at this wrapper's socket path belongs
+// to a server this wrapper started, and so may be unlinked after the kill.
+//
+// Named sockets only: an empty socketName is not "no socket". tmux honors $TMUX
+// and its own default ahead of gt, so that path holds the town's server — one
+// this process never started and must not delete. The noTownSocket sentinel
+// names a socket that does not exist by design.
+func (t *Tmux) ownsSocketFile() bool {
+	return t.socketName != "" && t.socketName != "default" && t.socketName != noTownSocket
 }
 
 // SetExitEmpty controls the tmux exit-empty server option.

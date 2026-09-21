@@ -352,13 +352,31 @@ for dogdir in ~/gt/deacon/dogs/*/; do
 done
 ```
 
-**5. Report**
+**5. Abandoned test tmux servers and socket files**
+
+Every `go test` run binds its own tmux server on a `gt-test-*` (or `gt-h9z-*`)
+socket and kills it on the way out. A run that is killed before its cleanup
+leaves the server up, and tmux never unlinks a socket when a server exits, so
+the files pile up in the socket directory `/tmp/tmux-<uid>` — the same one the
+town's own server binds in, and nothing else prunes them.
+
+```bash
+gt doctor --check tmux-test-socket --fix 2>&1 | tail -5
+```
+
+The check only touches sockets whose name carries a test-family prefix. It kills
+a live server only when the pid in the socket name is dead and every session on
+it is test-named (anything else means the socket serves something real); it
+removes a file only when nothing answers on it and it has sat that way past the
+bind window. The town socket is outside the families and is never touched.
+
+**6. Report**
 
 Log counts of cleaned items. If any items were cleaned, include counts in a
 brief summary for the patrol digest:
 
 ```
-Test pollution cleanup: rogue_dolt=N stale_dirs=N stale_pids=N dead_worktrees=N
+Test pollution cleanup: rogue_dolt=N stale_dirs=N stale_pids=N dead_worktrees=N test_tmux=N
 ```
 
 If all counts are 0, log "Test pollution cleanup: clean" and move on.
@@ -369,6 +387,7 @@ If all counts are 0, log "Test pollution cleanup: clean" and move on.
 - NEVER remove PID files where the PID is still alive
 - NEVER prune worktrees for dogs with live tmux sessions
 - NEVER prune a worktree with committed-but-unpushed commits (`git log --branches --not --remotes` non-empty) — a clean working tree is not proof the content itself is safe
+- NEVER hand-remove or hand-kill a tmux socket outside the test families; `gt doctor --check tmux-test-socket` owns that decision and refuses the town socket by construction
 
 **Exit criteria:** All dead-process pollution cleaned and counts logged."""
 

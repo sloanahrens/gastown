@@ -68,6 +68,42 @@ func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
 	}
 }
 
+// socketUnlinkWait bounds how long unlinkDeadSocketFile waits for a just-killed
+// server's socket to stop answering, and socketUnlinkInterval is its re-check
+// period. kill-server returns once the server has exited, but the closed socket
+// keeps completing connections ~11ms longer on macOS, so a single dial right
+// after the kill still sees a listener.
+const (
+	socketUnlinkWait     = 500 * time.Millisecond
+	socketUnlinkInterval = 10 * time.Millisecond
+)
+
+// unlinkDeadSocketFile removes a socket file nothing is listening on, and
+// leaves it in place otherwise. tmux does not unlink its socket when the server
+// exits, so without this the file outlives its server forever (gt-20di).
+//
+// A live listener is left alone: a refused connection is the only proof that
+// nothing is behind the file. That also covers a path that cannot be dialed at
+// all — a plain file sitting where a socket belongs, the shape gt-h9z guards
+// against — which is not this function's state to change.
+func unlinkDeadSocketFile(socketPath string) {
+	deadline := time.Now().Add(socketUnlinkWait)
+	for {
+		stale, err := unixSocketStale(socketPath)
+		if err != nil {
+			return
+		}
+		if stale {
+			_ = os.Remove(socketPath)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(socketUnlinkInterval)
+	}
+}
+
 func unixSocketStale(socketPath string) (bool, error) {
 	conn, err := net.DialTimeout("unix", socketPath, newSessionSocketDialTimeout)
 	if err != nil {

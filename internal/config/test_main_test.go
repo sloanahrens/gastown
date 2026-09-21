@@ -66,10 +66,16 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	// The isolated server outlives the test that started it: kill it whole, so
-	// no socket file or stray server is left for the next run to trip over.
+	// The isolated server outlives the test that started it: kill it whole and
+	// unlink its socket file. tmux does not remove the file when a server
+	// exits, so killing alone still left one file behind per run (gt-20di).
+	// The unlink is inlined rather than reached through internal/tmux because
+	// this package sits below it (see testTmuxSocket above).
 	if _, err := exec.LookPath("tmux"); err == nil {
 		_ = exec.Command("tmux", "-L", testTmuxSocket, "kill-server").Run()
+		// Same path as tmux.SocketDir(): /tmp directly, not os.TempDir(), which
+		// on macOS resolves to the per-user $TMPDIR under /var/folders.
+		_ = os.Remove(filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()), testTmuxSocket))
 	}
 
 	_ = os.Setenv("PATH", originalPath)

@@ -18,8 +18,10 @@ func requireTestSocket(t *testing.T) string {
 		t.Skip("tmux not installed")
 	}
 	socket := fmt.Sprintf("gt-test-hook-%d", os.Getpid())
+	// KillServer, not a bare `tmux kill-server`: it unlinks the socket file,
+	// which tmux leaves behind when the server exits (gt-20di).
 	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = NewTmuxWithSocket(socket).KillServer()
 	})
 	return socket
 }

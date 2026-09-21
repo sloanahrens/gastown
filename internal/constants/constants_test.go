@@ -1,6 +1,9 @@
 package constants
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -152,5 +155,23 @@ func TestMayorQuotaPath(t *testing.T) {
 	expect := "/town/mayor/quota.json"
 	if got != expect {
 		t.Errorf("MayorQuotaPath = %q, want %q", got, expect)
+	}
+}
+
+// TestTestSocketName pins the shape the doctor's tmux-test-socket check reads:
+// the owning pid is the trailing field, and the name is unique per call.
+func TestTestSocketName(t *testing.T) {
+	name := TestSocketName("gt-test-tmux")
+	if !strings.HasPrefix(name, "gt-test-tmux-") {
+		t.Fatalf("TestSocketName() = %q, want the gt-test-tmux- prefix", name)
+	}
+	if !strings.HasSuffix(name, fmt.Sprintf("-%d", os.Getpid())) {
+		t.Errorf("TestSocketName() = %q, want it to end with the owning pid %d", name, os.Getpid())
+	}
+	if again := TestSocketName("gt-test-tmux"); again == name {
+		t.Errorf("two calls returned the same name %q", name)
+	}
+	if strings.ContainsAny(name, "/ .") {
+		t.Errorf("TestSocketName() = %q, want no character tmux rejects in a socket name", name)
 	}
 }

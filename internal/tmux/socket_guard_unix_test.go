@@ -11,11 +11,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func uniqueSocketName(t *testing.T, prefix string) string {
 	t.Helper()
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	return constants.TestSocketName(prefix)
 }
 
 func socketPathForTest(t *testing.T, socket string) string {

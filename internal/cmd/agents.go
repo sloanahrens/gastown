@@ -361,13 +361,22 @@ func filterAndSortSessions(sessionNames []string, includePolecats bool) []*Agent
 
 // testSocketPackage extracts the package name from a gt-test-* socket name.
 // e.g., "gt-test-tmux-12345" -> "tmux", "gt-test-cmd-67890" -> "cmd".
+//
+// A socket can carry more than one trailing numeric field: constants.TestSocketName
+// ends the name with the nanoseconds that make it unique and then the pid that
+// makes a leftover attributable, e.g. "gt-test-tmux-1758-12345" -> "tmux". So
+// the tail is trimmed field by field rather than just once.
+//
 // Returns the full socket name if the format doesn't match.
 func testSocketPackage(socket string) string {
 	trimmed := strings.TrimPrefix(socket, "gt-test-")
-	if idx := strings.LastIndex(trimmed, "-"); idx > 0 {
-		return trimmed[:idx]
+	for {
+		idx := strings.LastIndex(trimmed, "-")
+		if idx <= 0 || strings.TrimLeft(trimmed[idx+1:], "0123456789") != "" {
+			return trimmed
+		}
+		trimmed = trimmed[:idx]
 	}
-	return trimmed
 }
 
 // displayLabel returns the menu display label for an agent.

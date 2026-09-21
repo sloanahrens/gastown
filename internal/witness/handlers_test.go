@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -1728,7 +1729,7 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 	}
 
 	townRoot := t.TempDir()
-	socket := fmt.Sprintf("gt-test-gf6t-%d", time.Now().UnixNano())
+	socket := constants.TestSocketName("gt-test-gf6t")
 	tm := tmux.NewTmuxWithSocket(socket)
 	t.Cleanup(func() { _ = tm.KillServer() })
 
@@ -1781,7 +1782,7 @@ func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T)
 	}
 
 	townRoot := t.TempDir()
-	socket := fmt.Sprintf("gt-test-z7vr-%d", time.Now().UnixNano())
+	socket := constants.TestSocketName("gt-test-z7vr")
 	tm := tmux.NewTmuxWithSocket(socket)
 	t.Cleanup(func() { _ = tm.KillServer() })
 
