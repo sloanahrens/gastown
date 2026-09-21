@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -114,11 +115,11 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 		}
 		result.Checked++
 
-		status, closeReason, ok := getBeadStatusAndCloseReason(bd, workDir, mr.SourceIssue)
-		if !ok || status == "" {
+		record, ok := getBeadRecord(bd, workDir, mr.SourceIssue)
+		if !ok || record.Status == "" {
 			continue // source issue not found/unreachable — can't assert collapse
 		}
-		if status != string(beads.StatusClosed) {
+		if record.Status != string(beads.StatusClosed) {
 			continue // still open, or a non-close terminal state (e.g. tombstone) — no collapse
 		}
 
@@ -135,7 +136,7 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 		// pending_mr naming a purged or already-closed MR leaves the issue
 		// closed with nothing in flight — still a collapse candidate, exactly
 		// as for the branch-driven scan.
-		if named := pendingMRFromCloseReason(closeReason); named != "" && openMRs.byID[named] {
+		if named := pendingMRFromCloseReason(record.CloseReason); named != "" && openMRs.byID[named] {
 			continue
 		}
 
@@ -228,12 +229,23 @@ type BranchStrandFinding struct {
 	CloseReason string // The bead's recorded close reason, if any
 }
 
+// SupersededBranch is a candidate the scan declined to report because the
+// issue's own record already adjudicated it: a rejected attempt, followed by
+// a closure through the merge queue. Reported alongside the findings so a
+// suppressed branch is visible rather than silently dropped.
+type SupersededBranch struct {
+	IssueID string `json:"issue"`        // The closed source issue
+	Branch  string `json:"branch"`       // The branch recorded as rejected
+	MRID    string `json:"mr,omitempty"` // MR named by the close reason, i.e. the later submission
+}
+
 // DetectStrandedBranchesResult holds the aggregate result of a stranded-branch scan.
 type DetectStrandedBranchesResult struct {
 	Checked     int  // number of closed-issue polecat branches examined
 	MRLookupRan bool // whether the open merge-request queue was successfully resolved
 	OpenMRsSeen int  // number of open MRs in the resolved queue
 	Findings    []BranchStrandFinding
+	Superseded  []SupersededBranch // candidates suppressed as adjudicated, not stranded
 	Errors      []error
 }
 
@@ -420,6 +432,12 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 //     consulted. The first shipped version never consulted it, and duly
 //     reported "has no MR" for 11 of 13 findings against the live rig, every
 //     one of them an MR sitting in the open queue.
+//   - Superseded attempts (gt-hsum): an attempt the issue records as rejected,
+//     reworked, and re-landed under a different branch leaves its own rejected
+//     branch behind. Nothing on the target references the issue (the rework's
+//     commit carries no issue token) and the landing MR is purged, so git
+//     state cannot tell it from a strand; the issue's own record can, and
+//     those candidates are returned in Superseded rather than dropped.
 //
 // Because the finding asserts the absence of an MR, an unavailable MR
 // lookup cannot produce a finding at all: refs.ListOpenMRs is required, and
@@ -461,13 +479,13 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			continue // no issue encoded in the branch name — nothing to check
 		}
 
-		status, closeReason, found := getBeadStatusAndCloseReason(bd, workDir, meta.Issue)
-		if !found || status != string(beads.StatusClosed) {
+		record, found := getBeadRecord(bd, workDir, meta.Issue)
+		if !found || record.Status != string(beads.StatusClosed) {
 			continue // bead unreachable, or not closed — no collapse to report
 		}
 		result.Checked++
 
-		if isDeliberateDiscard(closeReason) {
+		if isDeliberateDiscard(record.CloseReason) {
 			continue // closed with an explicit "no-changes:" abandonment, not a strand
 		}
 
@@ -475,7 +493,21 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 		// carries this branch, or is named by a pending_mr close reason means
 		// the landing vehicle exists and the branch is simply not merged yet
 		// (gt-akap). Reported as a strand only if the queue does not cover it.
-		if mrID := openMRs.covers(meta.Issue, branch, closeReason); mrID != "" {
+		if mrID := openMRs.covers(meta.Issue, branch, record.CloseReason); mrID != "" {
+			continue
+		}
+
+		// An attempt the issue itself records as rejected, followed by a
+		// closure through the merge queue, is a superseded branch rather than
+		// an unnoticed strand (gt-hsum). Checked before the target grep: it is
+		// pure record inspection, and a recorded rejection is the more
+		// specific adjudication when both hold.
+		if supersededByRecord(record, branch) {
+			result.Superseded = append(result.Superseded, SupersededBranch{
+				IssueID: meta.Issue,
+				Branch:  branch,
+				MRID:    pendingMRFromCloseReason(record.CloseReason),
+			})
 			continue
 		}
 
@@ -491,7 +523,7 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 		finding := BranchStrandFinding{
 			IssueID:     meta.Issue,
 			Branch:      branch,
-			CloseReason: closeReason,
+			CloseReason: record.CloseReason,
 		}
 		result.Findings = append(result.Findings, finding)
 		reportBranchStrand(bd, workDir, rigName, targetBranch, finding, result.OpenMRsSeen, router)
@@ -510,36 +542,96 @@ func isDeliberateDiscard(closeReason string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(closeReason)), "no-changes:")
 }
 
-// getBeadStatusAndCloseReason returns a bead's status and close reason, and
-// true if the lookup succeeded. Mirrors getBeadStatus but also surfaces
-// close_reason, needed to distinguish a genuine strand from a deliberate
-// discard (gt-3ii).
+// beadRecord is the slice of a source bead's state the scans reason over.
+type beadRecord struct {
+	Status      string
+	CloseReason string
+	Notes       string
+}
+
+// getBeadRecord returns a bead's status, close reason, and notes, and whether
+// the lookup succeeded. The close reason separates a genuine strand from a
+// deliberate discard (gt-3ii); the notes carry the refinery's merge-rejection
+// record, which adjudicates rejected branches (gt-hsum).
 //
-// Observed 2026-09-19 against the live town: the installed bd's `show --json`
-// omits close_reason entirely (with and without --long), so closeReason
-// comes back empty and both close-reason filters here — isDeliberateDiscard
-// and the pending_mr fallback in OpenMRSet.covers — are inert on this
-// version, even though `bd list --status=closed --json` does return the
-// field. An empty reason is treated as "unknown", never as evidence, so the
-// scan degrades to status+git review rather than mis-reporting; the gap is
-// filed as gt-n899 rather than papered over here.
-func getBeadStatusAndCloseReason(bd *BdCli, workDir, beadID string) (status, closeReason string, ok bool) {
+// A field bd does not return reads as empty, which every caller treats as
+// "unknown" rather than as evidence. Verified 2026-09-21 against the live
+// town: `bd show --json` returns both fields for a bead that has them, checked
+// on om-i0p and gt-2ok0 (gt-n899 probed an absent field, not this path).
+func getBeadRecord(bd *BdCli, workDir, beadID string) (beadRecord, bool) {
 	if beadID == "" {
-		return "", "", false
+		return beadRecord{}, false
 	}
 	output, err := bd.Exec(workDir, "show", beadID, "--json")
 	if err != nil || output == "" {
-		return "", "", false
+		return beadRecord{}, false
 	}
 	var issues []struct {
 		Status      string `json:"status"`
 		CloseReason string `json:"close_reason"`
+		Notes       string `json:"notes"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
 		// Valid response but no results — bead was reaped/deleted.
-		return "", "", true
+		return beadRecord{}, true
 	}
-	return issues[0].Status, issues[0].CloseReason, true
+	return beadRecord{
+		Status:      issues[0].Status,
+		CloseReason: issues[0].CloseReason,
+		Notes:       issues[0].Notes,
+	}, true
+}
+
+// supersededByRecord reports whether the issue's own record already adjudicates
+// this branch as a rejected attempt rather than an unnoticed strand (gt-hsum):
+// a merge-rejection record naming the branch, plus a closure through the merge
+// queue afterwards.
+//
+// Both halves are load-bearing. A rejection alone can still leave a collapse —
+// the attempt failed and the issue sits closed with nothing in force — so it
+// suppresses only when the close reason shows the issue went back through the
+// merge queue. The pair is the system's own record of "this branch was passed
+// over"; deriving that verdict from git state instead is the false positive
+// this closes.
+//
+// The record is read rather than the MR because MR beads are purged on merge,
+// so a landed MR cannot be looked up once its fix is in force — exactly the
+// state being suppressed.
+func supersededByRecord(record beadRecord, branch string) bool {
+	if pendingMRFromCloseReason(record.CloseReason) == "" {
+		return false
+	}
+	return rejectedBranchFromNotes(record.Notes, branch)
+}
+
+// rejectedBranchFromNotes reports whether the issue's notes carry a
+// merge-rejection record naming branch.
+//
+// The record is the refinery's merge-rejection note
+// (refinery.MergeRejectionNoteMarker), whose "Branch:" line names the rejected
+// branch. The polecat work formula's resume path already greps for that
+// marker, so the field is an existing contract rather than one this scan
+// invents. The line is compared against the candidate by value, so unrelated
+// prose in the notes cannot suppress a finding.
+func rejectedBranchFromNotes(notes, branch string) bool {
+	want := normalizeBranchRef(branch)
+	if want == "" || !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
+		return false
+	}
+	// Notes accumulate one record per attempt, so only the text following a
+	// marker can belong to a rejection.
+	for _, block := range strings.Split(notes, refinery.MergeRejectionNoteMarker)[1:] {
+		for _, line := range strings.Split(block, "\n") {
+			key, value, found := strings.Cut(line, ":")
+			if !found || !strings.EqualFold(strings.TrimSpace(key), "branch") {
+				continue
+			}
+			if normalizeBranchRef(value) == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reportBranchStrand persists a branch-strand finding to the source issue
@@ -617,15 +709,23 @@ func StateCollapseSummary(mr *DetectStateCollapseResult, branches *DetectStrande
 		mrChecked, mrRan = mr.Checked, mr.MRLookupRan
 		findings += len(mr.Findings)
 	}
-	branchChecked, branchRan := 0, false
+	branchChecked, branchRan, superseded := 0, false, 0
 	if branches != nil {
 		branchChecked, branchRan = branches.Checked, branches.MRLookupRan
 		findings += len(branches.Findings)
+		superseded = len(branches.Superseded)
+	}
+
+	// Suppressions are named, never silent: "0 findings" and "0 findings, 3
+	// branches adjudicated" are different claims about the rig.
+	suppressed := ""
+	if superseded > 0 {
+		suppressed = fmt.Sprintf("; %d superseded branch(es) suppressed as already adjudicated", superseded)
 	}
 
 	if findings > 0 {
-		return fmt.Sprintf("Found %d state collapse(s) in %s (%d open MR(s), %d closed-issue branch(es) checked)",
-			findings, rigName, mrChecked, branchChecked), false
+		return fmt.Sprintf("Found %d state collapse(s) in %s (%d open MR(s), %d closed-issue branch(es) checked%s)",
+			findings, rigName, mrChecked, branchChecked, suppressed), false
 	}
 	switch {
 	case !mrRan && !branchRan:
@@ -640,6 +740,6 @@ func StateCollapseSummary(mr *DetectStateCollapseResult, branches *DetectStrande
 			"so the branch-driven check judged no branch (%d open MR(s) were checked by the MR-driven check). "+
 			"Unchecked is not a clean result.", rigName, mrChecked), false
 	}
-	return fmt.Sprintf("No state collapse found (checked %d open MR(s) — lookup ran; %d closed-issue branch(es) checked in %s)",
-		mrChecked, branchChecked, rigName), true
+	return fmt.Sprintf("No state collapse found (checked %d open MR(s) — lookup ran; %d closed-issue branch(es) checked%s in %s)",
+		mrChecked, branchChecked, suppressed, rigName), true
 }
