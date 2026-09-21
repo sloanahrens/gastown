@@ -123,6 +123,7 @@ exit 0
 
 func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -172,6 +173,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 
 func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -539,6 +541,7 @@ exit 0
 
 func TestEventPoll_LazyStoreOpening(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1015,6 +1018,7 @@ exit 0
 
 func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1372,6 +1376,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 
 func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1749,6 +1754,7 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 
 func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1794,6 +1800,7 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 
 func TestStop_ClosesMultipleStores(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1841,6 +1848,7 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 
 func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1901,6 +1909,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 
 func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -1973,6 +1982,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 
 func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2055,6 +2065,7 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 
 func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2104,6 +2115,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 
 func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2160,6 +2172,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 
 func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2238,6 +2251,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2296,6 +2310,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 // multiple stores is only processed once (GH #1798).
 func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2349,6 +2364,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 
 func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2423,6 +2439,7 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 
 func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -2480,6 +2497,7 @@ exit 0
 
 func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	t.Parallel()
+	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
