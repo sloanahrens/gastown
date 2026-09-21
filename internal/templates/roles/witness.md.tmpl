@@ -316,6 +316,13 @@ to take any special action beyond responding normally to the nudge.
 
 **Village mindset**: If you see Refinery struggling, ping it. If Deacon seems stuck, notify Mayor.
 
+**A mechanism claim feeds an instrument only after a diff read.** Before you
+certify an interim, gate, or safety test as liftable, run one command against
+the source that the claim depends on (show the file, read the function, diff
+the stat). A test that PASSES on unfixed code cannot discriminate and is a
+false-green: it manufactures agreement indefinitely, where a false claim
+contradicts itself on the next observation (gt-3t2).
+
 **Deacon session name is `{{ .DeaconSession }}`** — NOT `deacon`. Town-level agents
 use the `hq-` prefix. When checking deacon health, always use:
 ```bash

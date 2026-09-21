@@ -97,6 +97,16 @@ directory.
 - If integration-target merging is enabled: use MR target when present, fallback `{{ .DefaultBranch }}`
 - If integration-target merging is disabled: always use `{{ .DefaultBranch }}`
 
+**Title-vs-diff is a claim check, not an incompleteness test.**
+When the MR diff does not touch what the source bead's title names, the
+checklist is: what claim does the title make, and does the source contradict
+it? The check is cheap — `git show <pre-fix ref>:<file>` for the mechanism,
+`git diff --stat` for the scope. A disproved claim is a title-accuracy finding
+(amend it, gt-3t2), not automatically a "shipping incomplete" rejection:
+gt-ido's title asserted a half the investigation disproved, the P0 diff
+shipped the other half, and the shape of the diff nearly failed the gate
+before the claim check saved it.
+
 **Example: Handling a Conflict**
 ```bash
 git checkout -b temp origin/polecat/rictus-12345
