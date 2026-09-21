@@ -332,6 +332,38 @@ func goTestPackageArgs(rest []string) []string {
 	return pkgs
 }
 
+// isWholeRepoPackageArg reports whether arg is the whole-repo wildcard in
+// either of its true forms — a bare "..." or "./...". go runs every package
+// in the module for these; a "." or "./" (the cwd's own package) is NOT a
+// wildcard and is judged against the cwd instead. A module-prefixed
+// "github.com/steveyegge/gastown/..." normalizes to the bare "..." and is
+// caught the same way (gt-1lko).
+func isWholeRepoPackageArg(arg string) bool {
+	return arg == "..." || arg == "./..."
+}
+
+// cwdPackagePath resolves the hook's own working directory to the repo-relative
+// Go import path of the package the tests would run in, e.g.
+// "<...>/gastown/internal/beads" -> "internal/beads"; the module root itself
+// resolves to "" (an ancestor of every package). It reports ok=false only when
+// the cwd is outside this module, where go finds no package to judge (gt-1lko).
+func cwdPackagePath() (path string, ok bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	if idx := strings.LastIndex(cwd, "/gastown/"); idx >= 0 {
+		return cwd[idx+len("/gastown/"):], true
+	}
+	// The module root itself (a path ENDING in "/gastown", no trailing slash)
+	// has no "/gastown/" segment to match, so it is handled here: it resolves
+	// to "" — an ancestor of every package.
+	if idx := strings.LastIndex(cwd, "/gastown"); idx >= 0 && idx == len(cwd)-len("/gastown") {
+		return "", true
+	}
+	return "", false
+}
+
 // normalizeGoPackageArg strips the module-path prefix, leading "./", and
 // trailing "/..." / "/" from a go test package argument, so
 // "./internal/beads/...", "internal/beads/...", and
@@ -353,20 +385,34 @@ func normalizeGoPackageArg(arg string) string {
 // arguments) cover the whole repo, or which entries of containerSuitePackages
 // they overlap with. An arg overlaps a listed package if it names that
 // package exactly, names an ancestor directory of it (e.g. "internal/..."
-// covers "internal/beads"), or names a path inside it. A bare "go test"
-// with no package arguments is NOT treated as whole-repo — go resolves that
-// to only the current directory's package, which this guard cannot verify
-// without also knowing the invocation's cwd; failing to block here is safer
-// than guessing (see tap_guard_dangerous.go's false-positive history).
+// covers "internal/beads"), or names a path inside it. A "." or "./" arg is
+// the cwd's own package, resolved against the hook's working directory and
+// judged like any other — it is not a wildcard and is not skipped (gt-1lko).
+// A bare "go test" with no package arguments is likewise resolved to the cwd
+// package (from the module root that is every package, so it matches the
+// whole list; only a cwd outside the module allows it through — the
+// conservative fail-open of tap_guard_dangerous.go's false-positive history).
 func containerSuitePackagesIntersect(pkgArgs []string) (wholeRepo bool, matched []string) {
 	if len(pkgArgs) == 0 {
-		return false, nil
+		pkgArgs = []string{"."} // no args: go tests the cwd's package
 	}
+	cwdPkg, cwdKnown := cwdPackagePath()
 	seen := map[string]bool{}
 	for _, arg := range pkgArgs {
-		p := normalizeGoPackageArg(arg)
-		if p == "" {
+		var p string
+		switch {
+		case isWholeRepoPackageArg(arg):
 			return true, nil
+		case arg == "." || arg == "./":
+			if !cwdKnown {
+				continue // cwd outside the module: nothing to judge
+			}
+			p = cwdPkg
+		default:
+			p = normalizeGoPackageArg(arg)
+			if p == "" {
+				return true, nil
+			}
 		}
 		for _, pkg := range containerSuitePackages {
 			if p == pkg || strings.HasPrefix(pkg, p+"/") || strings.HasPrefix(p, pkg+"/") {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 	}{
 		{"whole repo", "go test ./...", true},
 		{"whole repo, counted", "go test -count=1 ./...", true},
+		{"whole repo, bare dots", "go test ...", true},
+		{"whole repo, module prefixed", "go test github.com/steveyegge/gastown/...", true},
 		{"whole internal/cmd", "go test ./internal/cmd/", true},
 		{"whole internal/cmd with dots", "go test ./internal/cmd/...", true},
 		{"whole internal/daemon counted", "go test ./internal/daemon/ -count=1", true},
@@ -65,8 +68,44 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 22 {
-		t.Errorf("blocked %d of %d cases, want exactly 22", blocked, len(tests))
+	if blocked != 24 {
+		t.Errorf("blocked %d of %d cases, want exactly 24", blocked, len(tests))
+	}
+}
+
+// TestEvaluatePolecatTestScope_Cwd pins the in-directory '.'/'./' leg the om
+// rework requires: 'go test .' is the cwd's OWN package, so a polecat running
+// it from a heavy package directory must still be blocked (the earlier
+// unconditional skip was the fail-open hole), while the same command from a
+// light directory is allowed. The rule resolves '.' against os.Getwd() — the
+// same source its role detection already reads — so the test drives the
+// behaviour by chdir'ing, not by faking command text (gt-1lko).
+func TestEvaluatePolecatTestScope_Cwd(t *testing.T) {
+	cases := []struct {
+		name    string
+		relDir  string // created under a fresh <tmp>/gastown/<relDir>
+		command string
+		blocked bool
+	}{
+		{"heavy package cwd", "internal/cmd", "go test .", true},
+		{"heavy package cwd, dot-slash", "internal/cmd", "go test ./", true},
+		{"heavy package cwd, no args", "internal/cmd", "go test", true},
+		{"heavy subpackage cwd", "internal/refinery", "go test .", true},
+		{"light package cwd", "internal/style", "go test .", false},
+		{"light package cwd, dot-slash", "internal/style", "go test ./", false},
+		{"light package cwd, no args", "internal/style", "go test", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir() + "/gastown/" + tc.relDir
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			t.Chdir(dir)
+			if reason, _ := evaluatePolecatTestScope(tc.command); (reason != "") != tc.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked=%v (reason %q), want %v", tc.command, reason != "", reason, tc.blocked)
+			}
+		})
 	}
 }
 

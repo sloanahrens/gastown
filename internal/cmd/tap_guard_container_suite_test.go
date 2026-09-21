@@ -24,6 +24,11 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test ancestor dir covering container packages", "GT_TEST_DOCKER=1 go test ./internal/...", true},
 		{"go test whole repo wildcard", "GT_TEST_DOCKER=1 go test ./...", true},
 		{"go test bare dots", "GT_TEST_DOCKER=1 go test ...", true},
+		{"go test module-prefixed whole repo wildcard", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
+		{"go test bare dots, module prefixed", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
+		// In-directory runs resolve '.'/'./' against the test's own cwd
+		// (internal/cmd, a container package) — covered by the chdir-driven
+		// TestEvaluateContainerSuiteCommand_Cwd below, not this table.
 		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/refinery/...", true},
 		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
 		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
@@ -72,17 +77,70 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 	}
 }
 
+// TestEvaluateContainerSuiteCommand_Cwd pins the in-directory '.'/'./' leg
+// the om rework requires: 'go test .' is the cwd's OWN package, so it must be
+// judged against that package. With the container opt-in on, running it from
+// a container-backed package directory is blocked (gt-1lko); from a light
+// package it is allowed. With the opt-in OFF nothing can start a container,
+// so the same command stays allowed either way — the pre-existing gate.
+// Resolving against os.Getwd() (the same source the role detection already
+// reads) means the test drives the behaviour by chdir'ing, not by faking
+// command text.
+func TestEvaluateContainerSuiteCommand_Cwd(t *testing.T) {
+	cases := []struct {
+		name    string
+		relDir  string // created under a fresh <tmp>/gastown/<relDir>
+		command string
+		blocked bool
+	}{
+		// opt-in on: in-directory runs are judged against the cwd package.
+		{"docker on, container package cwd", "internal/beads", "GT_TEST_DOCKER=1 go test .", true},
+		{"docker on, container package cwd, dot-slash", "internal/beads", "GT_TEST_DOCKER=1 go test ./", true},
+		{"docker on, container package cwd, no args", "internal/beads", "GT_TEST_DOCKER=1 go test", true},
+		{"docker on, light package cwd", "internal/style", "GT_TEST_DOCKER=1 go test .", false},
+		{"docker on, light package cwd, no args", "internal/style", "GT_TEST_DOCKER=1 go test", false},
+		// opt-in off: nothing can reach Docker, in-directory or otherwise.
+		{"docker off, container package cwd", "internal/beads", "go test .", false},
+		{"docker off, container package cwd, no args", "internal/beads", "go test", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(dockerTestsEnv, "")
+			dir := t.TempDir() + "/gastown/" + tc.relDir
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			t.Chdir(dir)
+			if reason, _ := evaluateContainerSuiteCommand(tc.command); (reason != "") != tc.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked=%v (reason %q), want %v", tc.command, reason != "", reason, tc.blocked)
+			}
+		})
+	}
+}
+
 func TestContainerSuitePackagesIntersect(t *testing.T) {
-	t.Parallel()
+	// Chdir to a known light package so the no-args cwd resolution is
+	// independent of where the test binary happens to run (not t.Parallel —
+	// t.Chdir is process-global); the cwd-dependent in-directory cases are
+	// in TestEvaluateContainerSuiteCommand_Cwd.
+	lightDir := t.TempDir() + "/gastown/internal/style"
+	if err := os.MkdirAll(lightDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Chdir(lightDir)
 	tests := []struct {
 		name      string
 		pkgArgs   []string
 		wantWhole bool
 		wantCount int
 	}{
-		{"no args", nil, false, 0},
+		// No args: go tests the cwd's package (internal/style here — light).
+		{"no args (cwd = light package)", nil, false, 0},
 		{"whole repo dots", []string{"./..."}, true, 0},
 		{"bare ellipsis", []string{"..."}, true, 0},
+		{"module-prefixed whole repo", []string{"github.com/steveyegge/gastown/..."}, true, 0},
+		// '.'/'./' are the cwd's package, resolved against os.Getwd() — the
+		// cwd-dependent behaviour is pinned in TestEvaluateContainerSuiteCommand_Cwd.
 		{"exact container package", []string{"./internal/beads/..."}, false, 1},
 		{"ancestor covers multiple container packages", []string{"./internal/..."}, false, len(containerSuitePackages)},
 		{"non-container package", []string{"./internal/style/..."}, false, 0},

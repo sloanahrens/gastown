@@ -84,11 +84,32 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 			hasRun = true
 		}
 	}
+	args := goTestPackageArgs(rest)
+	if len(args) == 0 {
+		args = []string{"."} // no args: go tests the cwd's package
+	}
+	// A "."/"./" arg is the cwd's own package, resolved against the hook's
+	// working directory and judged against the heavy list; it is not a
+	// wildcard and is not skipped (gt-1lko). If the cwd is outside this
+	// module there is nothing to judge and it is allowed — the same
+	// conservative fail-open as the no-arg case.
+	cwdPkg, cwdKnown := cwdPackagePath()
 	var heavy []string
-	for _, arg := range goTestPackageArgs(rest) {
-		norm := normalizeGoPackageArg(arg)
-		if norm == "" {
+	for _, arg := range args {
+		var norm string
+		switch {
+		case isWholeRepoPackageArg(arg):
 			return "polecat 'go test' of the whole repo", []string{arg}
+		case arg == "." || arg == "./":
+			if !cwdKnown {
+				continue
+			}
+			norm = cwdPkg
+		default:
+			norm = normalizeGoPackageArg(arg)
+			if norm == "" {
+				return "polecat 'go test' of the whole repo", []string{arg}
+			}
 		}
 		switch {
 		case heavyTestPackages[norm] || heavyTestPackages[topTwoPathSegments(norm)]:
