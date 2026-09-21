@@ -1287,6 +1287,7 @@ func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
 		t.Setenv("GT_ROLE", "")
 		t.Setenv("GT_RIG", "")
 		t.Setenv("GT_POLECAT", "")
+		t.Setenv("GT_CREW", "")
 		notATown := t.TempDir()
 
 		ctx, actor := resolveDoneAgentIdentity(notATown, notATown, "gastown", "flint")
@@ -1307,6 +1308,13 @@ func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
 		t.Setenv("GT_ROLE", "polecat")
 		t.Setenv("GT_RIG", "gastown")
 		t.Setenv("GT_POLECAT", "flint")
+		// GT_CREW is read before GT_POLECAT when GetRoleWithContext fills a
+		// simple role's identity from env. TestDeriveSessionName (costs_test.go)
+		// leaves GT_CREW=max in the process env — its subtests unset GT_* on
+		// entry but their cleanup only re-sets values that were non-empty when
+		// saved, so keys a subtest cleared are never restored to empty. Clearing
+		// it here keeps this test's result independent of what ran before it.
+		t.Setenv("GT_CREW", "")
 
 		ctx, actor := resolveDoneAgentIdentity(t.TempDir(), t.TempDir(), "ignored-rig", "ignored-polecat")
 		if actor != "gastown/polecats/flint" {
