@@ -661,6 +661,66 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	}
 }
 
+// TestShellFedHeredocBodyIsInspected pins gt-9g0y: a heredoc body whose
+// reader line runs a shell is a script that shell executes, so it is checked
+// like any other nested shell command. Stripping it with the data bodies —
+// which is what gt-mkrj did — left it checked by nothing at all.
+func TestShellFedHeredocBodyIsInspected(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"bash reads the body from stdin", "bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"sh with a strip-tabs delimiter", "sh <<-'EOF'\n\tsudo rm -rf /\n\tEOF"},
+		{"shell invoked with -s", "bash -s <<EOF\ngit push --force origin main\nEOF"},
+		{"body piped into a shell", "cat <<'EOF' | bash\ngit clean -fd\nEOF"},
+		{"invoker split across a line continuation", "bash \\\n  <<'EOF'\ngit reset --hard\nEOF"},
+		// bash -c runs its argument, but the body is still bash's stdin: the
+		// "$(cat)" here expands to the body, which is then what runs.
+		{"body read back through the -c substitution", "bash -c \"$(cat)\" <<'EOF'\nsudo rm -rf /\nEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — a shell invoker runs the heredoc body", tt.command)
+			}
+		})
+	}
+}
+
+// TestHeredocBodyStaysOpaqueWithoutAShellReader keeps gt-9g0y from widening
+// gt-mkrj: only a shell in command position on the heredoc's line makes the
+// body code. A reader that cannot run it leaves the body as data.
+func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"interpreter that is not a shell", "python3 - <<'EOF'\nsudo rm -rf /\nEOF"},
+		{"shell name as an argument", "echo bash <<'EOF'\ngit reset --hard\nEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
+// TestShellFedHeredocRecursesThroughNestedBodies pins that a shell-fed body is
+// judged by the same nested-command walk as a bash -c payload: a shell between
+// the outer body and the dangerous command does not end the inspection.
+func TestShellFedHeredocRecursesThroughNestedBodies(t *testing.T) {
+	t.Parallel()
+	command := "bash <<'A'\nbash <<'B'\ngit reset --hard\nB\nA"
+	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
+		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the inner body is a nested shell command", command)
+	}
+}
+
 // TestNestedShellCPositionalArgsAreNotConcatenated pins the gt-mkrj fix to
 // nestedCommands: "<shell> -c" takes exactly one command-string argument;
 // anything after it is a positional parameter ($0, $1, ...) passed to that
