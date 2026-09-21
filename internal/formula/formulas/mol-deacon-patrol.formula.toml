@@ -58,6 +58,7 @@ Abbreviated patrol rules:
 - **dog-pool-maintenance**: SKIP.
 - **dog-health-check**: SKIP.
 - **orphan-check**: SKIP.
+- **rogue-bd-check**: SKIP.
 - **session-gc**: SKIP.
 - **wisp-compact**: SKIP.
 - **compact-report**: SKIP.
@@ -72,7 +73,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 15
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -968,9 +969,61 @@ Skip dispatch - nothing to do.
 **Exit criteria:** Orphan scan dispatched to dog (if needed)."""
 
 [[steps]]
+id = "rogue-bd-check"
+title = "Detect rogue bd binaries"
+needs = ["orphan-check"]
+description = """
+**DETECT ONLY** - Scan agent worktrees for rogue `bd` executables.
+
+An agent that builds or symlinks its own `bd` inside an agent worktree
+shadows the town's beads release: that fork can carry a different schema
+and migrate town databases behind the town's back. Any executable file
+named `bd` under an agent directory is a finding (gt-li4t).
+
+**Run the check:**
+```bash
+fail=0; for agg in ~/gt/*/polecats ~/gt/*/crew ~/gt/*/refinery ~/gt/*/witness ~/gt/*/mayor ~/gt/mayor ~/gt/deacon/dogs; do [ -d "$agg" ] || continue; find "$agg" -maxdepth 4 \\( -type f -o -type l \\) -name bd -perm -u+x -print || fail=1; done; echo "rogue-bd-check fail=$fail"
+```
+
+Name the aggregate directories in one `find` and the town's
+dangerous-command guard refuses the walk (tap guard dangerous-command,
+gt-6e2l) — and a refused check prints nothing, which reads exactly like a
+clean one. One `find` per aggregate directory, each capped by `-maxdepth 4`
+so the walk never enters a repo's object store, is allowed and bounded.
+
+`-type l` catches a symlinked `bd`. `-perm -u+x` skips a copy already
+neutralized with `chmod 644`. `~/gt/mayor` is listed separately: the
+town-level mayor tree does not match `~/gt/*/mayor`.
+
+**Verdict** - read the hits and the trailing `fail=` together:
+- No hits, `fail=0`: log `Rogue bd check: clean`.
+- Any hit: a finding - handle it below.
+- `fail=1`, a non-zero exit, or a `DANGEROUS COMMAND BLOCKED` banner: the
+  check did not complete. Log `Rogue bd check: INCONCLUSIVE` and mail the
+  Mayor. Reserve "clean" for a check that ran.
+
+**Handling a finding** - report the path, its mtime, and the owning agent
+(the agent name in the path), then neutralize it with the mayor-approved
+action (removal is NOT approved):
+
+```bash
+chmod 644 <path>
+```
+
+A found binary is evidence: read its path and mtime, never execute it, and
+neutralize it — a `bd` run is what migrates a database.
+
+```bash
+gt mail send mayor/ -s "ROGUE_BD <path>" -m "Rogue executable bd: <path> (mtime <mtime>, owner <agent>). Neutralized (chmod 644). Please file a root-cause bead."
+```
+
+**Exit criteria:** The check ran, and every hit is reported, neutralized,
+and mailed to the Mayor - or the run logged `clean` with `fail=0`."""
+
+[[steps]]
 id = "session-gc"
 title = "Detect cleanup needs"
-needs = ["orphan-check"]
+needs = ["rogue-bd-check"]
 description = """
 **DETECT ONLY** - Check if cleanup is needed and dispatch to dog.
 
@@ -1299,7 +1352,7 @@ After await-signal returns (either by signal or timeout):
 gt patrol report --summary "<brief summary>" \
   --steps "heartbeat:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
-The --steps flag is REQUIRED. List ALL 26 steps with their actual status.
+The --steps flag is REQUIRED. List ALL 27 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created
