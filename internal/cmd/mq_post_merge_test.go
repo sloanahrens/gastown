@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,15 +53,54 @@ type fakeMQPostMergeGit struct {
 	landedFiles     []string
 	diffErr         error
 
-	verifiedCommits []string
-	deletedBranches []string
-	deletedHeads    []string
-	localDeleted    []string
+	// Orphan-branch cleanup fixtures (runOrphanMQPostMerge).
+	defaultBranch string
+	targetRef     string
+	pruneErr      error
+	preserved     bool
+	unpreserved   int
+	preserveErr   error
+
+	verifiedCommits  []string
+	deletedBranches  []string
+	deletedHeads     []string
+	localDeleted     []string
+	prunedRemotes    []string
+	preservedAgainst []string
+	targetRefs       []string
 }
 
 func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, commit string) error {
 	g.verifiedCommits = append(g.verifiedCommits, commit)
 	return g.verifyErr
+}
+
+func (g *fakeMQPostMergeGit) PushRemoteRefTargetStatus(_ string, ref git.RemoteRef, target string) (git.BranchPreservationStatus, error) {
+	g.preservedAgainst = append(g.preservedAgainst, ref.Name)
+	g.targetRefs = append(g.targetRefs, target)
+	if g.preserveErr != nil {
+		return git.BranchPreservationStatus{}, g.preserveErr
+	}
+	return git.BranchPreservationStatus{Preserved: g.preserved, UnpreservedPatchCount: g.unpreserved}, nil
+}
+
+func (g *fakeMQPostMergeGit) RemoteDefaultBranch() string {
+	if g.defaultBranch == "" {
+		return "main"
+	}
+	return g.defaultBranch
+}
+
+func (g *fakeMQPostMergeGit) CleanDefaultBranchBaseRef(remote, defaultBranch string) string {
+	if g.targetRef != "" {
+		return g.targetRef
+	}
+	return remote + "/" + defaultBranch
+}
+
+func (g *fakeMQPostMergeGit) FetchPrune(remote string) error {
+	g.prunedRemotes = append(g.prunedRemotes, remote)
+	return g.pruneErr
 }
 
 func (g *fakeMQPostMergeGit) HasOpenPullRequest(git.PullRequestRef) bool {
@@ -374,5 +416,396 @@ func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
 	}
 	if len(rigGit.deletedBranches) != 0 {
 		t.Fatalf("branch deleted when source matched target: %v", rigGit.deletedBranches)
+	}
+}
+
+// --- Orphaned-branch cleanup (gt-qjp2) ---------------------------------------
+//
+// A branch whose MR bead is gone has no commit_sha, PR identity, or source
+// issue to read, so the orphan path proves the delete against the branch's own
+// live remote tip instead.
+
+const testMQOrphanBranch = "polecat/test/gt-orphan"
+const testMQOrphanTip = "0ddball0ddball0ddball0ddball0ddball0dd"
+
+func testMQOrphanGit() *fakeMQPostMergeGit {
+	return &fakeMQPostMergeGit{preserved: true, remoteTip: testMQOrphanTip, localHead: testMQOrphanTip}
+}
+
+func TestRunOrphanMQPostMerge_DeletesBranchPreservedOnTarget(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+
+	cleanup, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err != nil {
+		t.Fatalf("runOrphanMQPostMerge: %v", err)
+	}
+	if cleanup.Target != "origin/main" {
+		t.Fatalf("cleanup.Target = %q, want origin/main", cleanup.Target)
+	}
+	if len(rigGit.prunedRemotes) != 1 || rigGit.prunedRemotes[0] != "origin" {
+		t.Fatalf("pruned remotes = %v, want [origin] (the comparison ref must be current)", rigGit.prunedRemotes)
+	}
+	if len(rigGit.preservedAgainst) != 1 || rigGit.preservedAgainst[0] != "refs/heads/"+testMQOrphanBranch {
+		t.Fatalf("preservation checked for %v, want [refs/heads/%s]", rigGit.preservedAgainst, testMQOrphanBranch)
+	}
+	if len(rigGit.targetRefs) != 1 || rigGit.targetRefs[0] != "origin/main" {
+		t.Fatalf("preservation targets = %v, want [origin/main]", rigGit.targetRefs)
+	}
+	if !cleanup.RemoteDeleted || len(rigGit.deletedBranches) != 1 || rigGit.deletedBranches[0] != testMQOrphanBranch {
+		t.Fatalf("remote delete = cleanup=%+v branches=%v", cleanup, rigGit.deletedBranches)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != testMQOrphanTip {
+		t.Fatalf("deleted heads = %v, want [%s] (the tip that was verified)", rigGit.deletedHeads, testMQOrphanTip)
+	}
+	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 {
+		t.Fatalf("local delete = cleanup=%+v local=%v", cleanup, rigGit.localDeleted)
+	}
+}
+
+func TestRunOrphanMQPostMerge_RefusesBranchNotPreservedOnTarget(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.preserved = false
+	rigGit.unpreserved = 3
+
+	cleanup, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "not preserved on origin/main") || !strings.Contains(err.Error(), "3 patch-unique commits") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want unpreserved-branch refusal", err)
+	}
+	if len(rigGit.deletedBranches) != 0 || len(rigGit.localDeleted) != 0 {
+		t.Fatalf("branch deleted despite failed preservation: remote=%v local=%v", rigGit.deletedBranches, rigGit.localDeleted)
+	}
+	if cleanup.RemoteDeleted || cleanup.LocalDeleted {
+		t.Fatalf("cleanup claims a delete it did not do: %+v", cleanup)
+	}
+}
+
+// TestRunOrphanMQPostMerge_RefusesMergeTargetBranch covers the guard the MR
+// path gets from verifyMQPostMergeProof's source/target check: asked to clean
+// "main" by name, the preservation proof would pass trivially (the target is
+// preserved on itself) and the branch would be deleted.
+func TestRunOrphanMQPostMerge_RefusesMergeTargetBranch(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"main", "master", "HEAD", "refs/heads/main"} {
+		rigGit := testMQOrphanGit()
+
+		_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, branch, false, "")
+		if err == nil || !strings.Contains(err.Error(), "merge target") {
+			t.Fatalf("runOrphanMQPostMerge(%q) error = %v, want merge-target refusal", branch, err)
+		}
+		if len(rigGit.deletedBranches) != 0 {
+			t.Fatalf("runOrphanMQPostMerge(%q) deleted %v", branch, rigGit.deletedBranches)
+		}
+		if len(rigGit.prunedRemotes) != 0 {
+			t.Fatalf("runOrphanMQPostMerge(%q) hit the network before refusing", branch)
+		}
+	}
+}
+
+func TestRunOrphanMQPostMerge_RefusesMergeTargetBranchWhenDefaultIsNotMain(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.defaultBranch = "trunk"
+
+	_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, "trunk", false, "")
+	if err == nil || !strings.Contains(err.Error(), "merge target") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want merge-target refusal", err)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted: %v", rigGit.deletedBranches)
+	}
+}
+
+func TestRunOrphanMQPostMerge_OpenPRLeavesRemoteBranch(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.openPR = true
+
+	cleanup, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err != nil {
+		t.Fatalf("runOrphanMQPostMerge: %v", err)
+	}
+	if !cleanup.OpenPR {
+		t.Fatalf("cleanup.OpenPR = false, cleanup=%+v", cleanup)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("remote branch deleted despite open PR: %v", rigGit.deletedBranches)
+	}
+	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 {
+		t.Fatalf("local branch cleanup = %v, want [%s]", rigGit.localDeleted, testMQOrphanBranch)
+	}
+}
+
+// TestRunOrphanMQPostMerge_MissingRemoteBranchIsNotSuccess keeps a typo'd MR id
+// from reading as a completed cleanup: with no MR bead and no such branch,
+// nothing was cleaned and the caller has to hear that.
+func TestRunOrphanMQPostMerge_MissingRemoteBranchIsNotSuccess(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.remoteTip = ""
+
+	cleanup, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "no branch") || !strings.Contains(err.Error(), "nothing to clean") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want a nothing-to-clean failure", err)
+	}
+	if cleanup.RemoteDeleted || cleanup.AlreadyGone {
+		t.Fatalf("cleanup claims an outcome it did not reach: %+v", cleanup)
+	}
+	if len(rigGit.preservedAgainst) != 0 || len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("no-op acted anyway: preserved=%v deleted=%v", rigGit.preservedAgainst, rigGit.deletedBranches)
+	}
+}
+
+// TestRunOrphanMQPostMerge_RefusesNonPolecatBranch keeps the orphan path inside
+// the command's remit: a release or integration branch can satisfy the
+// preservation proof while being a ref nobody asked post-merge to clean.
+func TestRunOrphanMQPostMerge_RefusesNonPolecatBranch(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"release/1.2", "integration/epic-a", "develop", "adam/26/9/feature"} {
+		rigGit := testMQOrphanGit()
+
+		_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, branch, false, "")
+		if err == nil || !strings.Contains(err.Error(), "polecat/") {
+			t.Fatalf("runOrphanMQPostMerge(%q) error = %v, want non-polecat refusal", branch, err)
+		}
+		if len(rigGit.prunedRemotes) != 0 || len(rigGit.deletedBranches) != 0 {
+			t.Fatalf("runOrphanMQPostMerge(%q) acted before refusing: %v %v", branch, rigGit.prunedRemotes, rigGit.deletedBranches)
+		}
+	}
+}
+
+func TestRunOrphanMQPostMerge_PreservationErrorFailsClosed(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.preserveErr = errors.New("candidate refs/heads/x changed while pruning")
+
+	_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "changed while pruning") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want the comparison failure", err)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted after a failed comparison: %v", rigGit.deletedBranches)
+	}
+}
+
+func TestRunOrphanMQPostMerge_FetchFailureFailsClosed(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+	rigGit.pruneErr = errors.New("no network")
+
+	_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "no network") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want the fetch failure", err)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted after a failed fetch: %v", rigGit.deletedBranches)
+	}
+}
+
+func TestRunOrphanMQPostMerge_RefusesMRShapingFlags(t *testing.T) {
+	t.Parallel()
+	rigGit := testMQOrphanGit()
+
+	_, err := runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, true, "")
+	if err == nil || !strings.Contains(err.Error(), "--skip-branch-delete") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want --skip-branch-delete refusal", err)
+	}
+
+	_, err = runOrphanMQPostMerge(t.TempDir(), rigGit, testMQOrphanBranch, false, "2bb0bf7f")
+	if err == nil || !strings.Contains(err.Error(), "--landed-commit") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want --landed-commit refusal", err)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted despite refused flags: %v", rigGit.deletedBranches)
+	}
+}
+
+func TestRunOrphanMQPostMerge_NormalizesRefArg(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []string{
+		testMQOrphanBranch,
+		"refs/heads/" + testMQOrphanBranch,
+		"origin/" + testMQOrphanBranch,
+		"refs/remotes/origin/" + testMQOrphanBranch,
+		"  " + testMQOrphanBranch + "  ",
+	} {
+		rigGit := testMQOrphanGit()
+
+		cleanup, err := runOrphanMQPostMerge(t.TempDir(), rigGit, ref, false, "")
+		if err != nil {
+			t.Fatalf("runOrphanMQPostMerge(%q): %v", ref, err)
+		}
+		if cleanup.Branch != testMQOrphanBranch {
+			t.Fatalf("runOrphanMQPostMerge(%q) branch = %q, want %q", ref, cleanup.Branch, testMQOrphanBranch)
+		}
+		if len(rigGit.preservedAgainst) != 1 || rigGit.preservedAgainst[0] != "refs/heads/"+testMQOrphanBranch {
+			t.Fatalf("runOrphanMQPostMerge(%q) checked %v", ref, rigGit.preservedAgainst)
+		}
+	}
+}
+
+func TestResolveMQPostMerge_FallsBackToOrphanWhenMRBeadIsGone(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{findErr: refinery.ErrMRNotFound}
+	rigGit := testMQOrphanGit()
+
+	result, cleanup, orphan, err := resolveMQPostMerge(mgr, t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err != nil {
+		t.Fatalf("resolveMQPostMerge: %v", err)
+	}
+	if !orphan {
+		t.Fatal("orphan = false, want the orphan path")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil for branch-only cleanup", result)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called with no MR bead")
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the branch deleted", cleanup)
+	}
+}
+
+// TestResolveMQPostMerge_KeepsRefusalsOnMRPath is the difference between "the MR
+// is gone" and "the MR is here and this cleanup is refused": only the former
+// may take the orphan path, or a refused MR would have its branch deleted by
+// name instead of by proof.
+func TestResolveMQPostMerge_KeepsRefusalsOnMRPath(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR(), postMergeErr: errors.New("MR status is not open or terminal")}
+	rigGit := &fakeMQPostMergeGit{preserved: true, remoteTip: testMQOrphanTip, localHead: testMQOrphanTip}
+
+	_, _, orphan, err := resolveMQPostMerge(mgr, t.TempDir(), rigGit, testMQPostMergeMR().Branch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "MR status is not open or terminal") {
+		t.Fatalf("resolveMQPostMerge error = %v, want the MR refusal", err)
+	}
+	if orphan {
+		t.Fatal("orphan = true for an MR that exists but refused cleanup")
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted by the orphan path after an MR refusal: %v", rigGit.deletedBranches)
+	}
+}
+
+// TestResolveMQPostMerge_ReportsBothFailures keeps the operator's next step
+// visible when neither path applies.
+func TestResolveMQPostMerge_ReportsBothFailures(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{findErr: refinery.ErrMRNotFound}
+	rigGit := testMQOrphanGit()
+	rigGit.preserved = false
+
+	_, _, orphan, err := resolveMQPostMerge(mgr, t.TempDir(), rigGit, testMQOrphanBranch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "merge request not found") || !strings.Contains(err.Error(), "not preserved on origin/main") {
+		t.Fatalf("resolveMQPostMerge error = %v, want both the missing MR and the unpreserved branch", err)
+	}
+	if orphan {
+		t.Fatal("orphan = true after the orphan path failed")
+	}
+}
+
+// initOrphanCleanupRepo builds a clone whose origin carries a polecat branch,
+// optionally squash-merged into main, so the orphan path runs against a real
+// remote rather than a fake. (gt-qjp2)
+func initOrphanCleanupRepo(t *testing.T, squashMerge bool) (clone, branch string) {
+	t.Helper()
+	tmp := t.TempDir()
+	originPath := filepath.Join(tmp, "origin.git")
+	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", originPath)
+
+	clone = filepath.Join(tmp, "clone")
+	runOrphanCleanupGit(t, tmp, "clone", originPath, clone)
+	runOrphanCleanupGit(t, clone, "config", "user.email", "polecat@example.com")
+	runOrphanCleanupGit(t, clone, "config", "user.name", "Polecat Test")
+
+	writeOrphanCleanupFile(t, clone, "README.md", "seed\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "seed main")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", "main")
+
+	branch = testMQOrphanBranch
+	runOrphanCleanupGit(t, clone, "checkout", "-b", branch)
+	writeOrphanCleanupFile(t, clone, "work.txt", "polecat work\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "polecat work")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", branch)
+
+	if !squashMerge {
+		return clone, branch
+	}
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--squash", branch)
+	runOrphanCleanupGit(t, clone, "commit", "-m", "merge squash")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	return clone, branch
+}
+
+func runOrphanCleanupGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeOrphanCleanupFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// orphanCleanupRealGit is a real *git.Git with the PR guard stubbed out. A
+// temp-dir origin is not a GitHub repo, so the guard's lookup fails and
+// HasOpenPullRequest reports it as protected (gas-fk4), which would hide the
+// deletion this test is about. The guard's own behaviour is covered by the
+// fake-git tests.
+type orphanCleanupRealGit struct {
+	*git.Git
+}
+
+func (orphanCleanupRealGit) HasOpenPullRequest(git.PullRequestRef) bool { return false }
+
+// TestRunOrphanMQPostMerge_RealRemoteSquashMergedBranch pins the composition
+// the fake cannot: the ref name the proof fetches (refs/heads/<branch>), the
+// comparison ref (origin/main), and the lease delete at the live tip all have
+// to agree with real git for a branch the refinery squash-merged to go away.
+func TestRunOrphanMQPostMerge_RealRemoteSquashMergedBranch(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, true)
+
+	cleanup, err := runOrphanMQPostMerge(t.TempDir(), orphanCleanupRealGit{git.NewGit(clone)}, branch, false, "")
+	if err != nil {
+		t.Fatalf("runOrphanMQPostMerge: %v", err)
+	}
+	if cleanup.Target != "origin/main" {
+		t.Fatalf("cleanup.Target = %q, want origin/main", cleanup.Target)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote != "" {
+		t.Fatalf("remote branch survived cleanup: %s", remote)
+	}
+}
+
+// TestRunOrphanMQPostMerge_RealRemoteRefusesUnmergedBranch is the same
+// composition on the refusing side: a branch whose work is not on main must
+// still be there afterwards.
+func TestRunOrphanMQPostMerge_RealRemoteRefusesUnmergedBranch(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, false)
+
+	_, err := runOrphanMQPostMerge(t.TempDir(), orphanCleanupRealGit{git.NewGit(clone)}, branch, false, "")
+	if err == nil || !strings.Contains(err.Error(), "not preserved on origin/main") {
+		t.Fatalf("runOrphanMQPostMerge error = %v, want unpreserved-branch refusal", err)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote == "" {
+		t.Fatal("remote branch deleted despite unmerged work")
 	}
 }

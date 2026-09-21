@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt mq post-merge` can clean a branch whose MR bead is gone** (gt-qjp2) —
+  the command read the branch name from the MR bead, so once that bead was
+  closed and purged the only record of the branch went with it: no argument
+  could name it and no other tool deletes it, which is how a dozen refs
+  accumulated in one rig. An argument that resolves to no MR bead is now read
+  as a branch name and the branch is cleaned on its own, under the rails the
+  MR path already had — the current remote tip must be preserved on the
+  default branch, an open PR still protects the branch, and the delete is
+  lease-guarded at the tip that was verified. Only a missing MR bead takes
+  that path, so existing refusals are unchanged; merge targets are refused by
+  name, `--skip-branch-delete` and `--landed-commit` are refused because both
+  shape MR cleanup, and a ref naming neither an MR nor an existing `polecat/`
+  branch is an error rather than a silent no-op.
+
 - **A directive file named for no role is now reported instead of silently
   ignored** (gt-72kp) — `config.LoadRoleDirective` reads `<name>.md` only for a
   built-in role name, so `host-hygiene.md` and `testing.md` were listed by `gt

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -178,7 +180,7 @@ var mqPostMergeSkipBranchDelete bool
 var mqPostMergeLandedCommit string
 
 var mqPostMergeCmd = &cobra.Command{
-	Use:   "post-merge <rig> <mr-id>",
+	Use:   "post-merge <rig> <mr-id-or-branch>",
 	Short: "Run post-merge cleanup (close MR, delete branch)",
 	Long: `Perform post-merge cleanup after a successful merge.
 
@@ -189,7 +191,17 @@ This command consolidates post-merge steps into a single atomic operation:
 	 4. Delete the remote polecat branch at the submitted head (unless --skip-branch-delete)
 
 Designed for use by the refinery formula after a successful merge to main.
-The branch name is read from the MR bead, so no manual branch argument is needed.
+The branch name is read from the MR bead, so the MR id alone addresses the branch.
+
+When <ref> resolves to no MR bead — the MR was closed and purged, taking the
+only record of its branch with it — <ref> is read as a branch name and the
+branch is cleaned on its own. Branch-only cleanup deletes nothing else, and
+only when the current remote tip is preserved on the default branch, no PR is
+open on the branch, and the delete is lease-guarded at the tip it verified. It
+refuses --skip-branch-delete and --landed-commit, which shape MR cleanup and
+have nothing to act on without an MR. Only a polecat/ work branch is a
+candidate; a ref that names neither an MR nor an existing polecat branch is an
+error, not a no-op.
 
 The default proof checks the submitted commit_sha for reachability from the
 target (exact tip, ancestor, or a content-preserving rebase via patch-id).
@@ -204,7 +216,8 @@ diff), so an unrelated on-target commit is rejected too.
 Examples:
   gt mq post-merge gastown gt-mr-abc123
   gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete
-  gt mq post-merge gastown gt-mr-abc123 --landed-commit 2bb0bf7f`,
+  gt mq post-merge gastown gt-mr-abc123 --landed-commit 2bb0bf7f
+  gt mq post-merge gastown polecat/Nux/gt-xyz    # orphaned branch, MR bead gone`,
 	Args: cobra.ExactArgs(2),
 	RunE: runMQPostMerge,
 }
@@ -217,6 +230,10 @@ type mqPostMergeManager interface {
 type mqPostMergeGit interface {
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
+	PushRemoteRefTargetStatus(remote string, ref git.RemoteRef, target string) (git.BranchPreservationStatus, error)
+	RemoteDefaultBranch() string
+	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
+	FetchPrune(remote string) error
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
@@ -227,6 +244,7 @@ type mqPostMergeGit interface {
 
 type mqPostMergeBranchCleanup struct {
 	Branch        string
+	Target        string // orphan cleanup: ref the branch's work had to be preserved on
 	NoBranch      bool
 	Skipped       bool
 	Disabled      bool
@@ -605,7 +623,7 @@ func runMQConflict(_ *cobra.Command, args []string) error {
 
 func runMQPostMerge(_ *cobra.Command, args []string) error {
 	rigName := args[0]
-	mrID := args[1]
+	ref := args[1]
 
 	mgr, r, _, err := getRefineryManager(rigName)
 	if err != nil {
@@ -616,11 +634,40 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete, mqPostMergeLandedCommit)
+	result, branchCleanup, orphan, err := resolveMQPostMerge(mgr, r.Path, rigGit, ref, mqPostMergeSkipBranchDelete, mqPostMergeLandedCommit)
 	if err != nil {
-		return fmt.Errorf("post-merge cleanup: %w", err)
+		return err
+	}
+	if orphan {
+		printMQPostMergeOrphan(branchCleanup)
+		return nil
 	}
 
+	printMQPostMergeResult(result, branchCleanup)
+	return nil
+}
+
+// resolveMQPostMerge runs the MR-driven cleanup and, when ref resolves to no MR
+// bead, cleans the branch it names on its own (gt-qjp2). Only a missing MR bead
+// takes the orphan path: every other failure is a refusal to act on a real MR
+// and stays one.
+func resolveMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, ref string, skipBranchDelete bool, landedCommit string) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, bool, error) {
+	result, cleanup, err := runVerifiedMQPostMerge(mgr, rigPath, rigGit, ref, skipBranchDelete, landedCommit)
+	if err == nil {
+		return result, cleanup, false, nil
+	}
+	if !errors.Is(err, refinery.ErrMRNotFound) {
+		return nil, mqPostMergeBranchCleanup{}, false, fmt.Errorf("post-merge cleanup: %w", err)
+	}
+
+	orphanCleanup, orphanErr := runOrphanMQPostMerge(rigPath, rigGit, ref, skipBranchDelete, landedCommit)
+	if orphanErr != nil {
+		return nil, mqPostMergeBranchCleanup{}, false, fmt.Errorf("post-merge cleanup: %w; orphaned-branch cleanup for %q: %v", err, ref, orphanErr)
+	}
+	return nil, orphanCleanup, true, nil
+}
+
+func printMQPostMergeResult(result *refinery.PostMergeResult, branchCleanup mqPostMergeBranchCleanup) {
 	mr := result.MR
 	fmt.Printf("%s Post-merge: %s\n", style.Bold.Render("✓"), mr.ID)
 	fmt.Printf("  Branch: %s\n", mr.Branch)
@@ -652,8 +699,118 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	if branchCleanup.LocalDeleted {
 		fmt.Printf("  %s Deleted local branch: %s\n", style.Success.Render("✓"), mr.Branch)
 	}
+}
 
-	return nil
+func printMQPostMergeOrphan(cleanup mqPostMergeBranchCleanup) {
+	fmt.Printf("%s Orphaned branch cleanup: %s\n", style.Bold.Render("✓"), cleanup.Branch)
+	fmt.Printf("  %s\n", style.Dim.Render("(no MR bead; branch-only cleanup)"))
+
+	switch {
+	case cleanup.Disabled:
+		fmt.Printf("  %s Branch delete disabled by config\n", style.Dim.Render("○"))
+	case cleanup.AlreadyGone:
+		fmt.Printf("  %s Remote branch already absent\n", style.Dim.Render("○"))
+	case cleanup.OpenPR:
+		fmt.Printf("  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), cleanup.Branch)
+	case cleanup.RemoteDeleted:
+		fmt.Printf("  %s Deleted remote branch: %s (preserved on %s)\n", style.Success.Render("✓"), cleanup.Branch, cleanup.Target)
+	}
+
+	if cleanup.LocalDeleted {
+		fmt.Printf("  %s Deleted local branch: %s\n", style.Success.Render("✓"), cleanup.Branch)
+	}
+}
+
+// runOrphanMQPostMerge deletes a branch whose MR bead is gone, the one case the
+// MR-driven path cannot name (gt-qjp2). It adds no new safety reasoning: the
+// branch's current remote tip must be preserved on the default branch by the
+// same comparison post-merge's merge proof is built on, an open PR still
+// protects the branch (gas-fk4), and the delete is a lease delete at the tip
+// that was verified.
+func runOrphanMQPostMerge(rigPath string, rigGit mqPostMergeGit, branchRef string, skipBranchDelete bool, landedCommit string) (mqPostMergeBranchCleanup, error) {
+	branch := normalizeMQBranchName(branchRef)
+	cleanup := mqPostMergeBranchCleanup{Branch: branch}
+	if branch == "" {
+		return cleanup, fmt.Errorf("empty branch name")
+	}
+	if skipBranchDelete {
+		return cleanup, fmt.Errorf("branch %s: --skip-branch-delete leaves nothing to clean without an MR bead", branch)
+	}
+	if strings.TrimSpace(landedCommit) != "" {
+		return cleanup, fmt.Errorf("branch %s: --landed-commit attests to an MR, and there is none", branch)
+	}
+
+	defaultBranch := rigGit.RemoteDefaultBranch()
+	target := rigGit.CleanDefaultBranchBaseRef("origin", defaultBranch)
+	cleanup.Target = target
+	// Post-merge's own source/target guard, widened to the branches a merge
+	// target is known by: any of them would pass the preservation proof
+	// trivially, because the target is preserved on itself.
+	for _, protected := range []string{defaultBranch, "main", "master", "HEAD"} {
+		if branch == protected {
+			return cleanup, fmt.Errorf("branch %s is a merge target, not a work branch; refusing to delete it", branch)
+		}
+	}
+	// Post-merge cleans polecat work branches. Anything else the operator names
+	// — an integration branch, a release branch whose tip is an ancestor of the
+	// target and so trivially preserving — is out of the command's remit, and
+	// the MR path never had to say so because a MR records a work branch.
+	if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+		return cleanup, fmt.Errorf("post-merge cleans %s branches; %s is not one", constants.BranchPolecatPrefix, branch)
+	}
+
+	if !mqDeleteMergedBranchesEnabled(rigPath) {
+		cleanup.Disabled = true
+		return cleanup, nil
+	}
+
+	// The comparison ref has to be current: a stale origin/main refuses a
+	// branch whose work did land, which reads as a bug in this command rather
+	// than as the safety rail it is.
+	if targetRemote := git.RemoteForRef(target); targetRemote != "" {
+		if err := rigGit.FetchPrune(targetRemote); err != nil {
+			return cleanup, fmt.Errorf("refreshing %s to compare %s against %s: %w", targetRemote, branch, target, err)
+		}
+	}
+
+	tip, err := rigGit.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		return cleanup, fmt.Errorf("read remote tip of %s: %w", branch, err)
+	}
+	if tip == "" {
+		// The MR path reports an absent branch as success because the MR records
+		// that the branch existed. Nothing here does: an argument naming neither
+		// an MR nor a branch on the remote is a typo, not a cleanup.
+		return cleanup, fmt.Errorf("no branch %q on the push remote; nothing to clean", branch)
+	}
+
+	// The fetch inside PushRemoteRefTargetStatus is what makes a remote-only
+	// branch comparable at all; its hash check is what keeps the tip this
+	// command verified and the tip it deletes the same one.
+	status, err := rigGit.PushRemoteRefTargetStatus("origin", git.RemoteRef{Name: "refs/heads/" + branch, Hash: tip}, target)
+	if err != nil {
+		return cleanup, err
+	}
+	if !status.Preserved {
+		return cleanup, fmt.Errorf("branch %s at %s is not preserved on %s (%d patch-unique commits); refusing to delete it",
+			branch, tip, target, status.UnpreservedPatchCount)
+	}
+
+	cleaned, err := cleanupMQPostMergeBranch(rigPath, rigGit, &refinery.MergeRequest{Branch: branch, CommitSHA: tip}, false)
+	cleaned.Target = target
+	return cleaned, err
+}
+
+// normalizeMQBranchName reduces an operator-supplied ref to the branch name
+// post-merge deletes branches by.
+func normalizeMQBranchName(ref string) string {
+	ref = strings.TrimSpace(ref)
+	ref = strings.TrimPrefix(ref, "refs/heads/")
+	ref = strings.TrimPrefix(ref, "refs/remotes/")
+	if remote := git.RemoteForRef(ref); remote != "" {
+		ref = strings.TrimPrefix(ref, remote+"/")
+	}
+	return strings.TrimSpace(ref)
 }
 
 func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool, landedCommit string) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
