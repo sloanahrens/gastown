@@ -16,6 +16,10 @@ import (
 	"fmt"
 )
 
+// ErrMergeSlotNotHolder reports a release refused because another holder owns
+// the merge slot — the caller holds no lease, so there is nothing to release.
+var ErrMergeSlotNotHolder = errors.New("merge slot held by another holder")
+
 // MergeSlotStatus represents the result of checking a merge slot.
 type MergeSlotStatus struct {
 	ID        string   `json:"id"`
@@ -179,7 +183,7 @@ func (b *Beads) MergeSlotRelease(holder string) error {
 		return nil // Already available
 	}
 	if holder != "" && data.Holder != holder {
-		return fmt.Errorf("slot release failed: held by %q, not %q", data.Holder, holder)
+		return fmt.Errorf("%w: held by %q, not %q", ErrMergeSlotNotHolder, data.Holder, holder)
 	}
 
 	// Clear holder; promote first waiter if any.
