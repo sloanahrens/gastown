@@ -1766,6 +1766,89 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 	}
 }
 
+// TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone is the gt-z7vr
+// regression: flint's gt done pushed, main moved, and the polecat rebased while
+// its done-intent aged past the stuck timeout. The witness restarted it
+// mid-rebase on age alone, which left a same-named origin branch at the
+// pre-rebase tip and cost an operator force push one session later (gt-bf5x).
+// A live session whose transcript advanced after the done-intent is working.
+func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	socket := fmt.Sprintf("gt-test-z7vr-%d", time.Now().UnixNano())
+	tm := tmux.NewTmuxWithSocket(socket)
+	t.Cleanup(func() { _ = tm.KillServer() })
+
+	sessionName := "gt-test-flint"
+	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	// Declare the pane's process name so IsAgentAlive matches it as "alive".
+	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
+		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
+	}
+	if !tm.IsAgentAlive(sessionName) {
+		t.Fatal("precondition failed: fake session should report agent alive")
+	}
+
+	now := time.Now()
+	doneIntent := &DoneIntent{ExitType: "COMPLETED", Timestamp: now.Add(-5 * time.Minute)}
+	witCfg := &config.WitnessThresholds{DoneIntentStuckTimeout: "1m"}
+	bd, _ := fakeBd()
+	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-3s52"}
+
+	restarts := 0
+	oldObserve, oldRestart := observeDoneIntentActivity, restartStuckSession
+	restartStuckSession = func(string, string, string) error {
+		restarts++
+		return nil
+	}
+	t.Cleanup(func() {
+		observeDoneIntentActivity, restartStuckSession = oldObserve, oldRestart
+	})
+
+	detect := func(act RealActivity) (ZombieResult, bool) {
+		observeDoneIntentActivity = func(*tmux.Tmux, string, string, string) RealActivity { return act }
+		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "flint", sessionName, tm, doneIntent, witCfg, snap, "")
+	}
+
+	// Work in flight: the transcript advanced a minute ago, after the done-intent.
+	working := RealActivity{
+		Session: sessionName, Polecat: "flint", AgentAlive: true, ObservedAt: now,
+		LastActivity: now.Add(-time.Minute), ActivitySource: ActivitySourceTranscript,
+	}
+	if zombie, found := detect(working); found {
+		t.Fatalf("live session working after its done-intent was flagged as zombie: %+v", zombie)
+	}
+	if restarts != 0 {
+		t.Fatalf("restarted a live polecat on done-intent age alone (%d restart(s))", restarts)
+	}
+
+	// Control: nothing since the done-intent, so the restart still fires — the
+	// gate must leave stuck-in-done reachable for a gt done wedged outside a
+	// bounded stage, which is the case the timeout exists for (gt-azmw).
+	stuck := RealActivity{
+		Session: sessionName, Polecat: "flint", AgentAlive: true, ObservedAt: now,
+		LastActivity: now.Add(-10 * time.Minute), ActivitySource: ActivitySourceTranscript,
+	}
+	zombie, found := detect(stuck)
+	if !found {
+		t.Fatal("expected stuck-in-done for a session with no work since its done-intent")
+	}
+	if zombie.Classification != ZombieStuckInDone {
+		t.Errorf("Classification = %q, want %q", zombie.Classification, ZombieStuckInDone)
+	}
+	if restarts != 1 {
+		t.Errorf("restarts = %d, want 1", restarts)
+	}
+}
+
 func TestResetAbandonedBead_EmptyHookBead(t *testing.T) {
 	t.Parallel()
 	// resetAbandonedBead should return false for empty hookBead

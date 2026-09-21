@@ -1718,6 +1718,14 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 	return result
 }
 
+// observeDoneIntentActivity is the real-activity probe the stuck-in-done gate
+// runs; a seam so tests can supply a snapshot without a live tmux session.
+var observeDoneIntentActivity = ObserveRealActivity
+
+// restartStuckSession is the restart the stuck-in-done gate performs; a seam so
+// tests can assert the decision without spawning `gt session restart`.
+var restartStuckSession = RestartPolecatSession
+
 // detectZombieLiveSession checks a polecat with a live tmux session for zombie indicators:
 // stuck done-intent, dead agent process, or closed bead while still running.
 //
@@ -1768,7 +1776,26 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// Legacy detection: Check for done-intent stuck too long (polecat hung in gt done).
 	// gt-dsgp: Restart instead of nuke — the session is stuck trying to exit,
 	// a fresh start will let it retry or pick up its hook cleanly.
+	//
+	// gt-z7vr: the age makes this a candidate, not a verdict. A polecat whose
+	// gt done runs a long gate, or which is resolving a rebase after main moved
+	// during gt done, passes the timeout while alive and producing output;
+	// restarting it there interrupts the rebase and leaves a same-named origin
+	// branch at the pre-rebase tip, which one session later reads as real
+	// divergence and needs an operator force push (gt-bf5x). So the restart also
+	// requires the transcript to show no work since the done-intent was written.
 	if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
+		// TOCTOU guard (gt-0pst): Re-check session liveness before restarting.
+		// The session could have exited normally between our initial check and here.
+		if alive, _ := t.HasSession(sessionName); !alive {
+			return ZombieResult{}, false
+		}
+		// Not positive evidence of a wedge: return before the later checks, which
+		// assume no done-intent is in flight and would nudge a healthy polecat
+		// that is still inside gt done.
+		if !observeDoneIntentActivity(t, polecatName, sessionName, "").ConfirmsStoppedWork(doneIntent.Timestamp) {
+			return ZombieResult{}, false
+		}
 		zombie := ZombieResult{
 			PolecatName:    polecatName,
 			AgentState:     snapState,
@@ -1777,15 +1804,10 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			WasActive:      true,
 			Action:         fmt.Sprintf("restarted-stuck-session (done-intent age=%v)", time.Since(doneIntent.Timestamp).Round(time.Second)),
 		}
-		// TOCTOU guard (gt-0pst): Re-check session liveness before restarting.
-		// The session could have exited normally between our initial check and here.
-		if alive, _ := t.HasSession(sessionName); !alive {
-			return ZombieResult{}, false
-		}
 		// Clear ALL done-intent labels before restart so the polecat doesn't
 		// immediately re-trigger stuck-in-done on the next patrol cycle (gt-wmpy).
 		clearAllDoneIntentLabels(beads.New(workDir).ForAgentBead(), agentBeadID, snap)
-		if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
+		if err := restartStuckSession(workDir, rigName, polecatName); err != nil {
 			zombie.Error = err
 			zombie.Action = fmt.Sprintf("restart-stuck-session-failed: %v", err)
 		}

@@ -266,6 +266,22 @@ func (a RealActivity) Age(now time.Time) (time.Duration, bool) {
 	return now.Sub(a.LastActivity), true
 }
 
+// ConfirmsStoppedWork reports whether the snapshot is positive evidence that
+// the session did no real work after since.
+//
+// Only the transcript answers this: Claude Code appends to it on conversation
+// events, not on terminal redraws, so a transcript no newer than since proves
+// no turn has progressed. A live process and a redrawing pane are consistent
+// with both work and a wedge, so a snapshot that cannot date the session
+// confirms nothing and returns false — the caller must then leave the session
+// alone (gt-z7vr).
+func (a RealActivity) ConfirmsStoppedWork(since time.Time) bool {
+	if !a.AgentAlive || a.ActivitySource != ActivitySourceTranscript || a.LastActivity.IsZero() {
+		return false
+	}
+	return !a.LastActivity.After(since)
+}
+
 // IsStaleCandidate reports whether the snapshot's last real activity is older
 // than threshold. This is NOT a stall verdict — it only marks a polecat worth
 // re-sampling. Call AssessStall with two samples before acting.
