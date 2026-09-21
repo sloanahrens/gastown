@@ -2,9 +2,17 @@ package witness
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+// recentTimestamp returns a timestamp inside the renotify window, for fixtures
+// standing in for a report a previous patrol just wrote.
+func recentTimestamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
 
 func TestDetectStateCollapse_NilBd(t *testing.T) {
 	t.Parallel()
@@ -1054,5 +1062,185 @@ func TestIsDeliberateDiscard(t *testing.T) {
 		if got := isDeliberateDiscard(c.reason); got != c.want {
 			t.Errorf("isDeliberateDiscard(%q) = %v, want %v", c.reason, got, c.want)
 		}
+	}
+}
+
+// TestDetectStateCollapse_PersistingFindingIsReportedOnce covers the gt-vwry
+// "no dedupe" half for this producer: a state collapse that survives across
+// patrol cycles would otherwise append an identical comment (and mail the
+// mayor an identical urgent notice) once per cycle, leaving one durable record
+// per firing with nothing to tell the eleventh from the first.
+func TestDetectStateCollapse_PersistingFindingIsReportedOnce(t *testing.T) {
+	t.Parallel()
+
+	// First run: the issue carries no prior report.
+	firstBd, firstMock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr" {
+				return `[{"status":"closed"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	refs := fakeBranchRefSourceWithMRs(nil, nil, []OpenMRRef{
+		{ID: "gt-mr-collapsed", Status: "open", SourceIssue: "gt-wdr", Branch: "polecat/topaz/gt-wdr+abc", Target: "main"},
+	})
+
+	result := DetectStateCollapse(firstBd, refs, "/work", "gastown", nil)
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+	if logStr := strings.Join(firstMock.calls, "\n"); !strings.Contains(logStr, "comments add gt-wdr") {
+		t.Fatalf("the first patrol must record the finding; log:\n%s", logStr)
+	}
+
+	// Second run: the same condition, with the first run's comment now on the
+	// bead. It must not be recorded again.
+	priorComment := `[{"text":"STATE-COLLAPSE: this issue is closed but its merge request gt-mr-collapsed is still open (branch=\"polecat/topaz/gt-wdr+abc\" target=\"main\").","created_at":"` + recentTimestamp() + `"}]`
+	secondBd, secondMock := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr":
+				return `[{"status":"closed"}]`, nil
+			case len(args) > 1 && args[0] == "comments" && args[1] == "gt-wdr":
+				return priorComment, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result = DetectStateCollapse(secondBd, refs, "/work", "gastown", nil)
+	if len(result.Findings) != 1 {
+		t.Fatalf("the condition still holds, so it must still be a finding: %+v", result.Findings)
+	}
+	if logStr := strings.Join(secondMock.calls, "\n"); strings.Contains(logStr, "comments add") {
+		t.Errorf("a finding already reported must not be recorded again; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStateCollapse_StaleReportIsRepeated is the window's other side: a
+// genuine collapse nobody has acted on must not go quiet just because the first
+// notice is old.
+func TestDetectStateCollapse_StaleReportIsRepeated(t *testing.T) {
+	t.Parallel()
+
+	oldComment := `[{"text":"STATE-COLLAPSE: this issue is closed but its merge request gt-mr-collapsed is still open (branch=\"polecat/topaz/gt-wdr+abc\" target=\"main\").","created_at":"2026-01-01T00:00:00Z"}]`
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr":
+				return `[{"status":"closed"}]`, nil
+			case len(args) > 1 && args[0] == "comments" && args[1] == "gt-wdr":
+				return oldComment, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	refs := fakeBranchRefSourceWithMRs(nil, nil, []OpenMRRef{
+		{ID: "gt-mr-collapsed", Status: "open", SourceIssue: "gt-wdr", Branch: "polecat/topaz/gt-wdr+abc", Target: "main"},
+	})
+
+	DetectStateCollapse(bd, refs, "/work", "gastown", nil)
+
+	if logStr := strings.Join(mock.calls, "\n"); !strings.Contains(logStr, "comments add gt-wdr") {
+		t.Errorf("a report older than the renotify window must be repeated; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStateCollapse_CommentReadFailureStillReports pins the failure
+// direction: a read that fails reports rather than stays silent. A duplicate
+// comment costs a redundant line; a suppressed one costs a collapse nobody
+// hears about.
+func TestDetectStateCollapse_CommentReadFailureStillReports(t *testing.T) {
+	t.Parallel()
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr":
+				return `[{"status":"closed"}]`, nil
+			case len(args) > 1 && args[0] == "comments":
+				return "", errors.New("dolt unavailable")
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	refs := fakeBranchRefSourceWithMRs(nil, nil, []OpenMRRef{
+		{ID: "gt-mr-collapsed", Status: "open", SourceIssue: "gt-wdr", Branch: "polecat/topaz/gt-wdr+abc", Target: "main"},
+	})
+
+	DetectStateCollapse(bd, refs, "/work", "gastown", nil)
+
+	if logStr := strings.Join(mock.calls, "\n"); !strings.Contains(logStr, "comments add gt-wdr") {
+		t.Errorf("a failed comment read must report, not stay silent; log:\n%s", logStr)
+	}
+}
+
+// TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker covers the helper
+// directly, including the case that makes silent skipping safe: a timestamp the
+// helper cannot parse is treated as current, so an unreadable record cannot
+// make a standing collapse re-report on every single cycle.
+func TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	const marker = "merge request gt-mr-1 is still"
+
+	tests := []struct {
+		name     string
+		comments string
+		execErr  bool
+		want     bool
+	}{
+		{
+			name:     "recent matching comment suppresses",
+			comments: `[{"text":"... ` + marker + ` open ...","created_at":"2026-09-21T11:00:00Z"}]`,
+			want:     true,
+		},
+		{
+			name:     "old matching comment does not suppress",
+			comments: `[{"text":"... ` + marker + ` open ...","created_at":"2026-09-20T11:00:00Z"}]`,
+			want:     false,
+		},
+		{
+			name:     "recent comment about a different condition does not suppress",
+			comments: `[{"text":"... merge request gt-mr-2 is still open ...","created_at":"2026-09-21T11:00:00Z"}]`,
+			want:     false,
+		},
+		{
+			name:     "unparseable timestamp suppresses",
+			comments: `[{"text":"... ` + marker + ` open ...","created_at":"not a timestamp"}]`,
+			want:     true,
+		},
+		{
+			name:     "no comments does not suppress",
+			comments: `[]`,
+			want:     false,
+		},
+		{
+			name:     "unreadable comments do not suppress",
+			comments: "",
+			execErr:  true,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bd, _ := mockBd(
+				func(args []string) (string, error) {
+					if tt.execErr {
+						return "", errors.New("bd failed")
+					}
+					return tt.comments, nil
+				},
+				func(args []string) error { return nil },
+			)
+			if got := alreadyReportedRecently(bd, "/work", "gt-wdr", marker, now); got != tt.want {
+				t.Errorf("alreadyReportedRecently() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

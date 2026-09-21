@@ -28,6 +28,13 @@ type EscalationFields struct {
 	LastReescalatedAt string // When last re-escalated (empty if never)
 	LastReescalatedBy string // Who last re-escalated (empty if never)
 	Fingerprint       string // Stable duplicate-suppression label
+	// Occurrences counts how many times this alert has fired. A recurring
+	// alert (jsonl spike, main-branch test failure) bumps this instead of
+	// minting a new bead per firing (gt-vwry).
+	Occurrences int
+	// LastSeenAt is when the alert most recently fired, i.e. when
+	// Occurrences was last bumped (empty if never re-fired).
+	LastSeenAt string
 }
 
 // FormatEscalationDescription creates a description string from escalation fields.
@@ -102,6 +109,13 @@ func FormatEscalationDescription(title string, fields *EscalationFields) string 
 		lines = append(lines, "fingerprint: null")
 	}
 
+	lines = append(lines, fmt.Sprintf("occurrences: %d", fields.Occurrences))
+	if fields.LastSeenAt != "" {
+		lines = append(lines, fmt.Sprintf("last_seen_at: %s", fields.LastSeenAt))
+	} else {
+		lines = append(lines, "last_seen_at: null")
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -159,6 +173,12 @@ func ParseEscalationFields(description string) *EscalationFields {
 			fields.LastReescalatedBy = value
 		case "fingerprint":
 			fields.Fingerprint = value
+		case "occurrences":
+			if n, err := strconv.Atoi(value); err == nil {
+				fields.Occurrences = n
+			}
+		case "last_seen_at":
+			fields.LastSeenAt = value
 		}
 	}
 
@@ -278,6 +298,116 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	// Close the issue
 	_, err = target.run("close", id, "--reason="+reason)
 	return err
+}
+
+// BumpEscalation records another firing of an already-open escalation instead
+// of minting a new bead for it (gt-vwry).
+//
+// A recurring alert — a jsonl export spike, a main-branch test failure, a
+// state-collapse condition — fires on every patrol cycle it still holds. Before
+// this, each firing ran the full create path, so a condition that persisted for
+// a night left a dozen identical P0/P1 records behind. Occurrences and
+// LastSeenAt make the recurrence legible on the one bead that represents the
+// alert, which is the same bead `gt escalate clear` later closes when the
+// condition clears.
+//
+// Severity, reason and source are refreshed to the latest firing when
+// non-empty: an alert that escalates in severity, or whose latest evidence
+// differs from the first firing's, should say so. Returns the new occurrence
+// count.
+func (b *Beads) BumpEscalation(id, severity, reason, source string) (int, error) {
+	target := b.forIssueID(id)
+	issue, err := target.Show(id)
+	if err != nil {
+		return 0, err
+	}
+	if !HasLabel(issue, "gt:escalation") {
+		return 0, fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+	}
+
+	fields := ParseEscalationFields(issue.Description)
+	// An escalation created before gt-vwry has no occurrences line at all;
+	// its first bump is its second firing, so seed from the fields rather
+	// than assuming the bead's own creation was counted.
+	if fields.Occurrences == 0 {
+		fields.Occurrences = 1
+	}
+	fields.Occurrences++
+	fields.LastSeenAt = time.Now().Format(time.RFC3339)
+	if severity != "" {
+		fields.Severity = severity
+	}
+	if reason != "" {
+		fields.Reason = reason
+	}
+	if source != "" {
+		fields.Source = source
+	}
+
+	description := FormatEscalationDescription(issue.Title, fields)
+	if err := target.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return 0, err
+	}
+	return fields.Occurrences, nil
+}
+
+// CloseEscalationsByFingerprint closes every open escalation carrying the given
+// fingerprint label and reports the IDs it closed.
+//
+// This is the "auto-close on clear" half of gt-vwry: the producer that raised a
+// keyed alert re-checks its condition on the next cycle and clears the key when
+// the condition no longer holds (branch merged, main green, spike gone). A key
+// that matches nothing is not an error — that is the ordinary case for a
+// producer that calls clear on every healthy cycle.
+func (b *Beads) CloseEscalationsByFingerprints(fingerprintLabels []string, closedBy, reason string) ([]string, error) {
+	wanted := make(map[string]bool, len(fingerprintLabels))
+	for _, label := range fingerprintLabels {
+		if label != "" {
+			wanted[label] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+
+	// One open-escalation listing serves every key: a producer clearing its
+	// whole owned set on a healthy cycle must not cost one query per key.
+	open, err := b.ListEscalations()
+	if err != nil {
+		return nil, err
+	}
+
+	var closed []string
+	var errs []error
+	for _, issue := range open {
+		if !matchesAnyLabel(issue, wanted) {
+			continue
+		}
+		if err := b.CloseEscalation(issue.ID, closedBy, reason); err != nil {
+			errs = append(errs, fmt.Errorf("closing %s: %w", issue.ID, err))
+			continue
+		}
+		closed = append(closed, issue.ID)
+	}
+	if len(errs) > 0 {
+		return closed, errors.Join(errs...)
+	}
+	return closed, nil
+}
+
+// CloseEscalationsByFingerprint is the single-key form of
+// CloseEscalationsByFingerprints.
+func (b *Beads) CloseEscalationsByFingerprint(fingerprintLabel, closedBy, reason string) ([]string, error) {
+	return b.CloseEscalationsByFingerprints([]string{fingerprintLabel}, closedBy, reason)
+}
+
+func matchesAnyLabel(issue *Issue, wanted map[string]bool) bool {
+	for _, label := range issue.Labels {
+		if wanted[label] {
+			return true
+		}
+	}
+	return false
 }
 
 // GetEscalationBead retrieves an escalation bead by ID.

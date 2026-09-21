@@ -340,6 +340,24 @@ func TestShouldBeWisp(t *testing.T) {
 			msg:  &Message{Subject: "plugin: compactor-dog"},
 			want: true,
 		},
+		{
+			// gt-vwry: the escalation's own record is an ephemeral
+			// escalation bead; this mail is the delivery copy, and persisting
+			// it durably left a P0/P1 task row per firing with no owner.
+			name: "escalation copy from the mayor's alert",
+			msg:  &Message{Subject: "[HIGH] main branch test failures:", Type: TypeEscalation},
+			want: true,
+		},
+		{
+			name: "escalation copy that does not look like one by subject",
+			msg:  &Message{Subject: "Dolt: server unreachable", Type: TypeEscalation},
+			want: true,
+		},
+		{
+			name: "ordinary task mail is still durable",
+			msg:  &Message{Subject: "Please review this PR", Type: TypeTask},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

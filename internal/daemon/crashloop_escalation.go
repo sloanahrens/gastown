@@ -41,5 +41,5 @@ func (d *Daemon) escalateCrashLoopSkip(agentID, detail string) {
 	if detail != "" {
 		msg += " Detail: " + detail
 	}
-	d.escalate("crash-loop", msg)
+	d.escalateAlert("crash-loop:"+agentID, "crash-loop", msg)
 }

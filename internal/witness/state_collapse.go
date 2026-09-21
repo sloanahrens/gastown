@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -162,10 +163,63 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 	return result
 }
 
+// stateCollapseRenotifyAfter bounds how long one state-collapse finding stays
+// reported before a later patrol says it again.
+//
+// Both detectors run on every patrol, so a condition that persists would
+// otherwise append an identical comment — and send an identical urgent mail to
+// the mayor — once per cycle, leaving one durable record per firing with
+// nothing to tell the eleventh from the first (gt-vwry). Reporting is
+// therefore suppressed while a matching report is already on the bead, and
+// resumes once that report is older than this window: a genuine collapse that
+// nobody has acted on yet must not go quiet just because the first notice is
+// old, and the mail copy is a wisp that a reaper can collect.
+const stateCollapseRenotifyAfter = 12 * time.Hour
+
+// alreadyReportedRecently reports whether the issue already carries a comment
+// identifying this same condition, added within the renotify window.
+//
+// A read failure reports "not reported" — the cost of a duplicate comment is a
+// redundant line, while the cost of a silent skip is a collapse nobody hears
+// about, and only one of those is recoverable.
+func alreadyReportedRecently(bd *BdCli, workDir, issueID, marker string, now time.Time) bool {
+	out, err := bd.Exec(workDir, "comments", issueID, "--json")
+	if err != nil {
+		return false
+	}
+	var comments []beads.Comment
+	if err := json.Unmarshal([]byte(out), &comments); err != nil {
+		return false
+	}
+	for _, c := range comments {
+		if !strings.Contains(c.Text, marker) {
+			continue
+		}
+		createdAt, err := time.Parse(time.RFC3339, c.CreatedAt)
+		if err != nil {
+			// Unparseable timestamp: the record exists and cannot be aged
+			// out, so treat it as current rather than re-reporting forever.
+			return true
+		}
+		if now.Sub(createdAt) < stateCollapseRenotifyAfter {
+			return true
+		}
+	}
+	return false
+}
+
 // reportStateCollapse persists a state-collapse finding to the source issue
 // (bead comment) and escalates it to the rig's mayor by mail, falling back
 // to a tmux nudge if mail delivery fails.
 func reportStateCollapse(bd *BdCli, workDir, rigName string, f StateCollapseFinding, router *mail.Router) {
+	// The MR id is what makes this finding this finding: the status it is stuck
+	// in, and the branch, can change between patrols without the condition
+	// itself being new.
+	marker := fmt.Sprintf("merge request %s is still", f.MRID)
+	if alreadyReportedRecently(bd, workDir, f.IssueID, marker, time.Now()) {
+		return
+	}
+
 	comment := fmt.Sprintf(
 		"STATE-COLLAPSE: this issue is closed but its merge request %s is still %s "+
 			"(branch=%q target=%q). The fix is recorded as done but may not be in force — "+
@@ -643,6 +697,13 @@ func rejectedBranchFromNotes(notes, branch string) bool {
 // the escalation so the reader can tell an absence-of-MR that was actually
 // established from one that was assumed (gt-akap).
 func reportBranchStrand(bd *BdCli, workDir, rigName, targetBranch string, f BranchStrandFinding, openMRsSeen int, router *mail.Router) {
+	// The stranded branch is what identifies this finding; the queue size
+	// quoted in the body moves between patrols without the strand being new.
+	marker := fmt.Sprintf("branch %q was never merged", f.Branch)
+	if alreadyReportedRecently(bd, workDir, f.IssueID, marker, time.Now()) {
+		return
+	}
+
 	comment := fmt.Sprintf(
 		"STATE-COLLAPSE (stranded branch): this issue is closed but branch %q was never merged into origin/%s "+
 			"and no open merge-request covers it (checked against the rig's open MR queue: %d MR(s)). "+

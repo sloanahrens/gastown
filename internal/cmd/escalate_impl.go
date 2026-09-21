@@ -86,7 +86,15 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 
 	// Create escalation bead
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	fingerprintLabel := escalationFingerprintLabel(escalateFingerprint)
+
+	// Every alert carries a stable key so that a recurring condition upserts
+	// onto the one bead that represents it rather than minting a fresh P0/P1
+	// record per firing (gt-vwry). An explicit --fingerprint wins; otherwise
+	// the key is derived from the source and description, which is enough for
+	// producers that pass a stable class string (the daemon's patrol readers
+	// pass "jsonl_git_backup: ..." / "main_branch_test: ..." titles).
+	alertKey := escalationAlertKey(escalateSource, description)
+	fingerprintLabel := escalationFingerprintLabel(alertKey)
 	if fingerprintLabel != "" {
 		matches, err := bd.ListEscalationsByFingerprint(fingerprintLabel)
 		if err != nil {
@@ -94,17 +102,23 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		}
 		if len(matches) > 0 {
 			existing := matches[0]
+			occurrences, err := bd.BumpEscalation(existing.ID, severity, escalateReason, escalateSource)
+			if err != nil {
+				return fmt.Errorf("recording repeat of escalation %s: %w", existing.ID, err)
+			}
 			if escalateJSON {
 				result := map[string]interface{}{
 					"id":          existing.ID,
-					"status":      "duplicate_suppressed",
+					"status":      "duplicate_recorded",
 					"fingerprint": fingerprintLabel,
+					"occurrences": occurrences,
 				}
 				out, _ := json.MarshalIndent(result, "", "  ")
 				fmt.Println(string(out))
 			} else {
-				fmt.Printf("%s Duplicate escalation suppressed: %s\n", style.Bold.Render("✓"), existing.ID)
+				fmt.Printf("%s Repeat escalation recorded on %s (occurrence %d)\n", style.Bold.Render("✓"), existing.ID, occurrences)
 				fmt.Printf("  Fingerprint: %s\n", fingerprintLabel)
+				fmt.Printf("  Clear when resolved with: gt escalate clear --fingerprint %q\n", alertKey)
 			}
 			return nil
 		}
@@ -246,6 +260,90 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runEscalateClear closes open escalations that share an alert key, because the
+// condition that raised them no longer holds (gt-vwry).
+//
+// Keys are taken from repeated --fingerprint flags verbatim, and/or derived
+// from --source plus the positional description the same way runEscalate
+// derives them — so a producer that raised an alert with
+// `gt escalate -s HIGH --source X "Y"` can clear it with
+// `gt escalate clear --source X "Y"` and no bookkeeping. A producer that owns
+// several keys (the daemon's patrol readers) clears them all in one call, which
+// costs one listing rather than one per key.
+//
+// Clearing a key that matches nothing is the healthy-path case, not a failure:
+// a producer re-checks every cycle, and on the cycle where the condition is
+// gone the first clear wins while every later one is a no-op that must not
+// turn a patrol into an error. Exit status is therefore 0 either way.
+func runEscalateClear(cmd *cobra.Command, args []string) error {
+	// Keys come from repeated --fingerprint flags and/or one derived from
+	// --source plus the positional description.
+	keys := make([]string, 0, len(escalateClearKeys)+1)
+	keys = append(keys, escalateClearKeys...)
+	if derived := escalationAlertKey(escalateSource, strings.Join(args, " ")); strings.TrimSpace(derived) != "" {
+		keys = append(keys, derived)
+	}
+
+	labels := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if label := escalationFingerprintLabel(key); label != "" {
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return fmt.Errorf("clear requires --fingerprint or a description (see gt escalate clear --help)")
+	}
+
+	closedBy := detectSender()
+	if closedBy == "" {
+		closedBy = "unknown"
+	}
+
+	// Find workspace
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	reason := escalateClearReason
+	if reason == "" {
+		reason = fmt.Sprintf("condition cleared: %s", strings.Join(keys, ", "))
+	}
+
+	bd := beads.New(beads.ResolveBeadsDir(townRoot))
+	closed, err := bd.CloseEscalationsByFingerprints(labels, closedBy, reason)
+	if err != nil {
+		return fmt.Errorf("clearing escalations for %s: %w", strings.Join(keys, ", "), err)
+	}
+
+	for _, id := range closed {
+		_ = events.LogFeed(events.TypeEscalationClosed, closedBy, map[string]interface{}{
+			"id":     id,
+			"keys":   strings.Join(keys, ","),
+			"reason": reason,
+			"source": "auto-clear",
+		})
+	}
+
+	if escalateJSON {
+		result := map[string]interface{}{
+			"keys":   keys,
+			"closed": closed,
+			"count":  len(closed),
+		}
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	}
+
+	if len(closed) == 0 {
+		fmt.Printf("%s Nothing to clear for %s\n", style.Bold.Render("✓"), strings.Join(keys, ", "))
+		return nil
+	}
+	fmt.Printf("%s Cleared %d escalation(s) for %s: %s\n", style.Bold.Render("✓"), len(closed), strings.Join(keys, ", "), strings.Join(closed, ", "))
+	return nil
+}
+
 // reasonDisplay renders an escalation's reason field for human-readable
 // output, making an absent reason explicit rather than printing nothing.
 // gt-umx6: a silently omitted reason line was mistaken for lost escalation
@@ -265,6 +363,30 @@ func escalationFingerprintLabel(raw string) string {
 	}
 	sum := sha256.Sum256([]byte(raw))
 	return fmt.Sprintf("escalation-fp:%x", sum[:6])
+}
+
+// escalationAlertKey is the stable identity of an alert: its class (source,
+// when the producer names one) plus its subject. Two firings of the same
+// condition produce the same key, which is what lets runEscalate record the
+// repeat on the existing bead instead of minting a new one (gt-vwry), and what
+// `gt escalate clear` later matches on to auto-close it once the condition
+// clears.
+//
+// An explicit --fingerprint is returned verbatim: a producer that knows its
+// alert's identity (a bead id, a branch, a polecat) should say so rather than
+// have one inferred from prose that may embed varying detail.
+func escalationAlertKey(source, description string) string {
+	if key := strings.TrimSpace(escalateFingerprint); key != "" {
+		return key
+	}
+	subject := strings.Join(strings.Fields(description), " ")
+	if subject == "" {
+		return ""
+	}
+	if src := strings.TrimSpace(source); src != "" {
+		return src + ": " + subject
+	}
+	return subject
 }
 
 type deliveryStatus struct {

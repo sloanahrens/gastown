@@ -461,9 +461,53 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter alert records (gt-vwry)
+		if isAlertRecord(issue) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered
+}
+
+// isAlertRecord reports whether an issue is a record of an alert rather than
+// work someone can pick up: an escalation, an escalation delivery copy, or a
+// stale record left by an alert producer before those producers keyed and
+// auto-closed their alerts (gt-vwry).
+//
+// These are excluded from the dashboard Ready list for the same reason agent
+// and rig identity beads are: they have no owner and nobody can "do" them.
+// They outrank real work (a critical escalation is a P0), so when a recurring
+// condition fired on every patrol cycle they crowded the top of the list and
+// the mayor, reading it as a queue of urgent work, declined to dispatch for
+// hours. Escalations remain visible where they belong — `gt escalate list`,
+// the mailbox, and the source bead's comments.
+//
+// Detection is by label where labels are present, falling back to the
+// escalation title envelope ("[HIGH] ..."), because bd ready --json does not
+// always populate labels and the records predating the label already exist.
+func isAlertRecord(issue *beads.Issue) bool {
+	for _, label := range issue.Labels {
+		switch {
+		case label == "gt:escalation",
+			label == "msg-type:escalation",
+			strings.HasPrefix(label, "escalation-fp:"):
+			return true
+		}
+	}
+	return isEscalationTitle(issue.Title)
+}
+
+// isEscalationTitle matches the title envelope gt escalate puts on both the
+// escalation bead and its delivery mail copy: "[<SEVERITY>] <description>".
+func isEscalationTitle(title string) bool {
+	for _, sev := range []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"} {
+		if strings.HasPrefix(title, "["+sev+"] ") {
+			return true
+		}
+	}
+	return false
 }
 
 // filterReadyIssuesByRoute keeps only issues whose prefix route matches the
