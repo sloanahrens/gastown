@@ -41,7 +41,10 @@ Two independent checks run:
     and no queue entry exists as a reminder. The branch check resolves the
     rig's open MR queue first and skips any issue whose fix is still in
     flight (gt-akap: a source issue self-closed as "pending_mr: <mr>" while
-    the MR waits in the queue is the ordinary workflow, not a strand).
+    the MR waits in the queue is the ordinary workflow, not a strand). It
+    also skips a branch the issue's own notes record as a rejected attempt
+    that a later submission superseded (gt-hsum); those are listed
+    separately under "suppressed" so they stay visible.
 
 Closing a source issue normally happens alongside closing its MR during a
 merge. Earlier instances of this pattern were each caught by an agent
@@ -71,17 +74,18 @@ func init() {
 
 // PatrolStateCollapseOutput is the JSON output format for `gt patrol state-collapse`.
 type PatrolStateCollapseOutput struct {
-	Rig            string                         `json:"rig"`
-	Checked        int                            `json:"checked"`
-	MRLookupRan    bool                           `json:"mr_lookup_ran"`
-	OpenMRs        int                            `json:"open_mrs,omitempty"`
-	Findings       []witness.StateCollapseFinding `json:"findings,omitempty"`
-	BranchChecked  int                            `json:"branch_checked"`
-	BranchMRLookup bool                           `json:"branch_mr_lookup_ran"`
-	BranchOpenMRs  int                            `json:"branch_open_mrs,omitempty"`
-	BranchFindings []witness.BranchStrandFinding  `json:"branch_findings,omitempty"`
-	Errors         []string                       `json:"errors,omitempty"`
-	AllClear       bool                           `json:"all_clear"`
+	Rig              string                         `json:"rig"`
+	Checked          int                            `json:"checked"`
+	MRLookupRan      bool                           `json:"mr_lookup_ran"`
+	OpenMRs          int                            `json:"open_mrs,omitempty"`
+	Findings         []witness.StateCollapseFinding `json:"findings,omitempty"`
+	BranchChecked    int                            `json:"branch_checked"`
+	BranchMRLookup   bool                           `json:"branch_mr_lookup_ran"`
+	BranchOpenMRs    int                            `json:"branch_open_mrs,omitempty"`
+	BranchFindings   []witness.BranchStrandFinding  `json:"branch_findings,omitempty"`
+	BranchSuperseded []witness.SupersededBranch     `json:"branch_superseded,omitempty"`
+	Errors           []string                       `json:"errors,omitempty"`
+	AllClear         bool                           `json:"all_clear"`
 }
 
 // openMRRefSource returns a witness.BranchRefSource input that resolves the
@@ -185,17 +189,18 @@ func runPatrolStateCollapse(cmd *cobra.Command, args []string) error {
 			errs = append(errs, e.Error())
 		}
 		out := PatrolStateCollapseOutput{
-			Rig:            rigName,
-			Checked:        result.Checked,
-			MRLookupRan:    result.MRLookupRan,
-			OpenMRs:        result.OpenMRsSeen,
-			Findings:       result.Findings,
-			BranchChecked:  branchResult.Checked,
-			BranchMRLookup: branchResult.MRLookupRan,
-			BranchOpenMRs:  branchResult.OpenMRsSeen,
-			BranchFindings: branchResult.Findings,
-			Errors:         errs,
-			AllClear:       allClear,
+			Rig:              rigName,
+			Checked:          result.Checked,
+			MRLookupRan:      result.MRLookupRan,
+			OpenMRs:          result.OpenMRsSeen,
+			Findings:         result.Findings,
+			BranchChecked:    branchResult.Checked,
+			BranchMRLookup:   branchResult.MRLookupRan,
+			BranchOpenMRs:    branchResult.OpenMRsSeen,
+			BranchFindings:   branchResult.Findings,
+			BranchSuperseded: branchResult.Superseded,
+			Errors:           errs,
+			AllClear:         allClear,
 		}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -217,6 +222,12 @@ func runPatrolStateCollapse(cmd *cobra.Command, args []string) error {
 	for _, f := range branchResult.Findings {
 		fmt.Printf("  - %s is CLOSED but branch %s was never merged and no open MR covers it (target=%s)\n",
 			f.IssueID, f.Branch, targetBranch)
+	}
+	// Suppressions are printed, not silent: a suppressed branch was examined
+	// and adjudicated, which is a different fact from one that was never seen.
+	for _, s := range branchResult.Superseded {
+		fmt.Printf("  ~ %s: branch %s suppressed — recorded as rejected, issue re-closed via %s\n",
+			s.IssueID, s.Branch, s.MRID)
 	}
 
 	for _, e := range result.Errors {

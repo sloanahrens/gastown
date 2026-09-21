@@ -1,6 +1,7 @@
 package witness
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -394,6 +395,38 @@ func TestStateCollapseSummary_FindingsReported(t *testing.T) {
 	}
 }
 
+// TestStateCollapseSummary_NamesSuppressions pins that a suppressed branch is
+// a stated fact, not a silent drop: "0 findings" and "0 findings, 1 branch
+// adjudicated" are different claims about the rig (gt-hsum).
+func TestStateCollapseSummary_NamesSuppressions(t *testing.T) {
+	t.Parallel()
+	mr := &DetectStateCollapseResult{MRLookupRan: true, Checked: 2}
+	branches := &DetectStrandedBranchesResult{
+		MRLookupRan: true,
+		Checked:     1,
+		Superseded:  []SupersededBranch{{IssueID: "om-i0p", Branch: "polecat/opal/om-i0p+mu9vzh49"}},
+	}
+
+	summary, allClear := StateCollapseSummary(mr, branches, "om")
+
+	if !allClear {
+		t.Errorf("allClear = false, want true — suppressions are not findings: %q", summary)
+	}
+	if !strings.Contains(summary, "1 superseded branch(es) suppressed") {
+		t.Errorf("summary = %q, want the suppression count", summary)
+	}
+
+	// The same count must survive alongside a real finding.
+	mr.Findings = []StateCollapseFinding{{IssueID: "om-a"}}
+	summary, allClear = StateCollapseSummary(mr, branches, "om")
+	if allClear {
+		t.Error("allClear = true, want false with a finding present")
+	}
+	if !strings.Contains(summary, "1 superseded branch(es) suppressed") {
+		t.Errorf("summary = %q, want the suppression count beside the finding count", summary)
+	}
+}
+
 func TestStateCollapseSummary_NilResults(t *testing.T) {
 	t.Parallel()
 
@@ -709,6 +742,162 @@ func TestDetectStrandedBranches_OpenMRByPendingCloseReasonNotFlagged(t *testing.
 	if len(result.Findings) != 0 {
 		t.Errorf("expected no findings when the close reason names an open MR, got %+v", result.Findings)
 	}
+}
+
+// supersededNotes is the merge-rejection record the refinery writes into a
+// source bead's notes, as it appears on the live om-i0p bead (gt-hsum): the
+// marker, the reviewer's prose, then the structured trailer naming the
+// rejected branch.
+const supersededNotes = `MERGE REJECTION (attempt 1): editorial - REJECTED: fail-open regression in a security boundary.
+
+The word-boundary regex drops names where "claude" abuts an alphanumeric.
+
+Reopening om-i0p for redispatch. The rejected head is d384225.
+Branch: polecat/opal/om-i0p+mu9vzh49
+Target: main
+MR: [deleted:om-wisp-loh]`
+
+// TestDetectStrandedBranches_SupersededAttemptNotFlagged is the gt-hsum
+// regression: the live om-i0p shape, where the flagged branch is the issue's
+// rejected first attempt. Its rework landed under a different branch, so
+// nothing on target references the issue and the landing MR was purged —
+// git state alone cannot distinguish it from a strand. The issue's own
+// record can, and it must not be re-flagged every patrol cycle.
+func TestDetectStrandedBranches_SupersededAttemptNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw","notes":` +
+					jsonString(supersededNotes) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// om-wisp-wlw is absent from the queue — the landing MR was purged after
+	// merging, which is what made this recur.
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "om-wisp-unrelated", SourceIssue: "om-something-else"},
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no finding for an adjudicated rejected attempt, got %+v", result.Findings)
+	}
+	if len(result.Superseded) != 1 {
+		t.Fatalf("Superseded = %d, want 1: %+v", len(result.Superseded), result.Superseded)
+	}
+	if got := result.Superseded[0]; got.IssueID != "om-i0p" || got.Branch != branch || got.MRID != "om-wisp-wlw" {
+		t.Errorf("Superseded[0] = %+v, want om-i0p / %s / om-wisp-wlw", got, branch)
+	}
+	if logStr := strings.Join(mock.calls, "\n"); strings.Contains(logStr, "comments add om-i0p") {
+		t.Errorf("a suppressed candidate must not be commented; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStrandedBranches_RejectionOfAnotherBranchStillFlagged keeps the
+// suppression branch-scoped: a rejection record for a different attempt of
+// the same issue explains nothing about this branch.
+func TestDetectStrandedBranches_RejectionOfAnotherBranchStillFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw","notes":` +
+					jsonString(strings.Replace(supersededNotes, branch, "polecat/opal/om-i0p+othereattempt", 1)) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Superseded) != 0 {
+		t.Errorf("Superseded = %+v, want none — the record names a different branch", result.Superseded)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+}
+
+// TestDetectStrandedBranches_RejectionWithoutQueueClosureStillFlagged pins the
+// other half of the rule: a recorded rejection alone does not suppress. A
+// rejected attempt whose issue is closed for any other reason can still be a
+// collapse — the retry never entered the queue — so it stays reportable.
+func TestDetectStrandedBranches_RejectionWithoutQueueClosureStillFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"fixed, closing by hand","notes":` +
+					jsonString(supersededNotes) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Superseded) != 0 {
+		t.Errorf("Superseded = %+v, want none — the closure never re-entered the queue", result.Superseded)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+}
+
+func TestRejectedBranchFromNotes(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+
+	secondAttempt := supersededNotes + `
+
+MERGE REJECTION (attempt 2): tests - FAILED: gate red.
+Branch: polecat/opal/om-i0p+secondattempt
+Target: main
+MR: om-wisp-xyz`
+
+	cases := []struct {
+		name   string
+		notes  string
+		branch string
+		want   bool
+	}{
+		{"record naming the branch", supersededNotes, branch, true},
+		{"refs/heads prefix on either side", supersededNotes, "refs/heads/" + branch, true},
+		{"padding around the value", strings.Replace(supersededNotes, "Branch: ", "branch:   ", 1), branch, true},
+		{"later attempt names the branch", secondAttempt, "polecat/opal/om-i0p+secondattempt", true},
+		{"record for another branch", supersededNotes, "polecat/opal/om-other+xyz", false},
+		{"no rejection record", "just some notes about the fix", branch, false},
+		{"marker without a branch line", "MERGE REJECTION (attempt 1): see thread above", branch, false},
+		{"branch named only in prose", "MERGE REJECTION (attempt 1): unlike " + branch +
+			" this one kept the probe\ntarget: main", branch, false},
+		{"empty notes", "", branch, false},
+	}
+	for _, c := range cases {
+		if got := rejectedBranchFromNotes(c.notes, c.branch); got != c.want {
+			t.Errorf("%s: rejectedBranchFromNotes(...) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// jsonString renders s as a JSON string literal, so a test fixture can embed
+// multi-line bead notes in the `bd show --json` payload a mock returns.
+func jsonString(s string) string {
+	quoted, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(quoted)
 }
 
 // TestDetectStrandedBranches_ClosedMRSameSourceIssueStillFlagged is the
