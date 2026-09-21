@@ -126,6 +126,26 @@ func (dm *dogMol) closeStep(stepSlug string) {
 	}
 }
 
+// skipStep closes a molecule step that ran and decided not to act, recording
+// why. A skipped step is not a failure — a patrol whose correct outcome is
+// silence has to be able to say so, or its receipt reads as a run that never
+// happened (gt-59o9).
+func (dm *dogMol) skipStep(stepSlug, reason string) {
+	if dm.rootID == "" {
+		return
+	}
+
+	stepID, ok := dm.stepIDs[stepSlug]
+	if !ok {
+		dm.logger.Printf("dog_molecule: skipStep %q: unknown step (known: %v)", stepSlug, dm.knownSteps())
+		return
+	}
+
+	if err := dm.closeWisp(stepID, "--reason", "skipped: "+reason); err != nil {
+		dm.logger.Printf("dog_molecule: skip step %s (%s) failed after %d attempts (non-fatal): %v", stepSlug, stepID, dogCloseMaxAttempts, err)
+	}
+}
+
 // failStep marks a molecule step as failed with a reason.
 func (dm *dogMol) failStep(stepSlug, reason string) {
 	if dm.rootID == "" {
@@ -331,6 +351,8 @@ func (dm *dogMol) discoverSteps() {
 			dm.stepIDs["offsite"] = child.ID
 		case strings.Contains(titleLower, "rotat"):
 			dm.stepIDs["rotate"] = child.ID
+		case strings.Contains(titleLower, "nudge"):
+			dm.stepIDs["nudge"] = child.ID
 		}
 	}
 }

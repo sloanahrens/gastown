@@ -187,6 +187,12 @@ type Daemon struct {
 
 	// scheduledSlingEscalate defaults to d.escalate; tests capture it.
 	scheduledSlingEscalate func(source, message string)
+
+	// mayorDispatchRunning is the single-flight guard for the mayor_dispatch
+	// patrol, on its own goroutine: the cycle shells out to `gt daemon
+	// dispatch-check` and then nudges, either of which can take tens of
+	// seconds, and running them inline would hold the tick loop (gt-59o9).
+	mayorDispatchRunning atomic.Bool
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -797,6 +803,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Quota resume ticker started (interval %v)", interval)
 	}
 
+	// Start the idle-seat dispatch check ticker if configured. The mayor is
+	// event-driven and a "no dispatch" decision opens no slot, so once it
+	// declines with no polecats running nothing wakes it again; this ticker is
+	// the timer that decision does not self-provide (gt-59o9).
+	var mayorDispatchTicker *time.Ticker
+	var mayorDispatchChan <-chan time.Time
+	if d.isPatrolActive("mayor_dispatch") {
+		interval := mayorDispatchInterval(d.patrolConfig)
+		mayorDispatchTicker = time.NewTicker(interval)
+		mayorDispatchChan = mayorDispatchTicker.C
+		defer mayorDispatchTicker.Stop()
+		d.logger.Printf("Mayor dispatch ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -924,6 +944,16 @@ func (d *Daemon) Run() (err error) {
 			// (gt-749e).
 			if !d.isShutdownInProgress() {
 				d.runQuotaResume()
+			}
+
+		case <-mayorDispatchChan:
+			// Idle-seat dispatch check — nudges the mayor when polecat seats
+			// are free and a rig has actionable ready work. Dispatched onto its
+			// own goroutine (never awaited here): the cycle shells out to the
+			// check and then nudges, and the nudge's wait-idle mode alone can
+			// hold for 15s (gt-59o9).
+			if !d.isShutdownInProgress() {
+				d.triggerMayorDispatch()
 			}
 
 		case <-timer.C:

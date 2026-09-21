@@ -130,6 +130,33 @@ type poolSession struct {
 	created time.Time
 }
 
+// poolSeatCounts counts the live polecat sessions sitting on each of the pool's
+// seats, and reports the newest local spawn — the timestamp the stagger guard
+// reads. A nil pool, or one with no local_agent, has no seats to count.
+//
+// This is the pool's one count of itself, shared by the admission decision
+// (choosePoolAgent) and the idle-seat patrol (gt daemon dispatch-check). The
+// patrol must not count seats its own way: a nudge that named room the next
+// sling would refuse is worse than no nudge, because it spends the mayor's
+// attention to produce a refusal (gt-59o9).
+func poolSeatCounts(pool *config.PolecatPool, sessions []poolSession) (local, overflow int, newestLocal time.Time) {
+	if pool == nil || pool.LocalAgent == "" {
+		return 0, 0, time.Time{}
+	}
+	for _, s := range sessions {
+		switch {
+		case s.agent == pool.LocalAgent:
+			local++
+			if s.created.After(newestLocal) {
+				newestLocal = s.created
+			}
+		case pool.OverflowAgent != "" && s.agent == pool.OverflowAgent:
+			overflow++
+		}
+	}
+	return local, overflow, newestLocal
+}
+
 // choosePoolAgent decides the agent for a new polecat given the pool, the bead
 // being slung, the agent the caller asked for, and the live polecat sessions.
 // It is pure: the only side effect in routing — attaching localAttemptLabel —
@@ -155,19 +182,7 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	case pool.LocalAgent == "":
 		return "", "pool: polecat_pool has no local_agent; using the role default", false
 	}
-	local, over := 0, 0
-	var newest time.Time
-	for _, s := range sessions {
-		switch {
-		case s.agent == pool.LocalAgent:
-			local++
-			if s.created.After(newest) {
-				newest = s.created
-			}
-		case pool.OverflowAgent != "" && s.agent == pool.OverflowAgent:
-			over++
-		}
-	}
+	local, over, newest := poolSeatCounts(pool, sessions)
 	gap := pool.MinSpawnGapD()
 	// The prefill guard. Every fresh local session spends 20-25k tokens of
 	// prefill during which the decoding slots starve, so two local spawns
