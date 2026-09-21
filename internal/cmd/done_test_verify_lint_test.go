@@ -16,8 +16,8 @@ import (
 
 // TestRunDefaultTestVerification_Lint covers the rig lint_command inside gt
 // done's default gate: it runs slot-free before the tests, a failure refuses
-// the submission without spending a suite run, and it still runs when every
-// changed package was deferred to the refinery.
+// the submission without spending a suite run, and it still runs when the
+// changed packages include container-backed ones (gt-btw1: no deferral).
 func TestRunDefaultTestVerification_Lint(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
@@ -83,35 +83,36 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		}
 	})
 
-	t.Run("every changed package deferred: lint still runs, tests skipped", func(t *testing.T) {
+	t.Run("container-backed package changed: lint still runs, then the full suite runs in a slot", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "only internal/cmd")
 
+		acquired := false
 		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
-			t.Error("slot acquired although every changed package was deferred")
+			acquired = true
 			return func() {}, nil
 		}, nil)
 
 		marker := filepath.Join(dir, "lint-ran")
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: "echo ok > '" + marker + "'"}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-deferred-role")
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-container-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
 		if !result.lintRan {
-			t.Errorf("lint did not run for an all-deferred change: %+v", result)
+			t.Errorf("lint did not run: %+v", result)
 		}
 		if _, statErr := os.Stat(marker); statErr != nil {
 			t.Errorf("lint command did not run: %v", statErr)
 		}
-		if result.ran || !strings.Contains(result.skipReason, "refinery") || len(result.deferredPackages) != 1 {
-			t.Errorf("tests should be skipped with the refinery reason: %+v", result)
+		if !result.ran || !result.success {
+			t.Errorf("tests did not run after lint (no deferral under gt-btw1): %+v", result)
 		}
-		if result.slotUsed {
-			t.Error("slotUsed = true for a lint-only gate")
+		if !result.slotUsed || !acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want true/true: the full suite may spin containers", result.slotUsed, acquired)
 		}
 	})
 

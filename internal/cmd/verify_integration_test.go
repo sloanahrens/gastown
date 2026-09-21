@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,9 +16,9 @@ import (
 )
 
 // TestRunDefaultTestVerification guards the core gt-h9kf behavior: gt done's
-// default (non-opt-in) test gate must actually run the branch's changed
-// package tests and refuse when they fail, succeed when they pass, and skip
-// cleanly when there is nothing to verify.
+// default (non-opt-in) test gate must actually run the rig's hermetic
+// test_command (gt-btw1) and refuse when it fails, succeed when it passes,
+// and skip cleanly when there is nothing to verify.
 func TestRunDefaultTestVerification(t *testing.T) {
 	// runDefaultTestVerification's slot.Acquire call checks `docker ps`
 	// regardless of townRoot (gt-jqif): even though every subtest below
@@ -87,8 +86,8 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		if !result.ran || !result.success {
 			t.Fatalf("result = %+v, want ran=true success=true", result)
 		}
-		if result.scope != "packages" {
-			t.Errorf("scope = %q, want %q", result.scope, "packages")
+		if result.scope != "full" {
+			t.Errorf("scope = %q, want %q", result.scope, "full")
 		}
 		if len(result.packages) != 1 || !strings.HasSuffix(result.packages[0], "/pkga") {
 			t.Errorf("packages = %v, want exactly one entry ending in /pkga", result.packages)
@@ -187,16 +186,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		return dir
 	}
 
-	t.Run("run budget scales and the Makefile -timeout reaches the command", func(t *testing.T) {
-		if _, err := exec.LookPath("make"); err != nil {
-			t.Skip("make not available")
-		}
+	t.Run("the gate runs the rig's full hermetic test_command under the floor budget and a slot", func(t *testing.T) {
 		dir := newRepoWithTwoChangedPackages(t)
-		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\tgo test -timeout 20m ./...\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", "Makefile")
-		runGitIn(t, dir, "commit", "-q", "-m", "add Makefile")
 
 		var gotTimeout time.Duration
 		var calls []runCall
@@ -211,8 +202,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		includeContainers := true // slot-path assertions below need the gate to take a slot (gt-yihz)
-		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test", TestVerifyIncludeContainerPackages: &includeContainers}
+		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test"}
 		g := git.NewGit(dir)
 		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/budget-role")
 		if err != nil {
@@ -225,11 +215,10 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		if gotTimeout != defaultTestVerifySlotTimeout {
 			t.Errorf("slot timeout = %s, want the %s default", gotTimeout, defaultTestVerifySlotTimeout)
 		}
-		if !strings.Contains(calls[0].script, "-timeout 20m") {
-			t.Errorf("script = %q, want the Makefile's -timeout 20m stated explicitly", calls[0].script)
-		}
-		if !strings.Contains(calls[0].script, "pkga") || !strings.Contains(calls[0].script, "pkgb") {
-			t.Errorf("script = %q, want both changed packages", calls[0].script)
+		// gt-btw1: the command is the rig's own hermetic test_command, not a
+		// derived go test over the changed packages.
+		if calls[0].script != "GOFLAGS=-p=6 make test" {
+			t.Errorf("script = %q, want the rig's full test_command", calls[0].script)
 		}
 		// Env parity (gt-fa3s): the rig's configured test_command environment
 		// must reach the gate. slot.Acquire's reentrant marker may also be
@@ -237,16 +226,26 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		if !containsEnv(calls[0].env, "GOFLAGS=-p=6") {
 			t.Errorf("env is missing GOFLAGS=-p=6 from test_command")
 		}
-		// 20m per package × 2 changed packages = a 40m run budget.
+		// The full suite cannot be scaled by a changed-package count, so the
+		// run budget is the floor (gt-btw1).
 		gotBudget := time.Until(calls[0].deadline)
-		if gotBudget < 39*time.Minute || gotBudget > 41*time.Minute {
-			t.Errorf("run budget ≈ %s, want ≈40m (20m per package × 2)", gotBudget.Round(time.Minute))
+		if gotBudget < 29*time.Minute || gotBudget > 31*time.Minute {
+			t.Errorf("run budget ≈ %s, want ≈30m (the full-suite floor)", gotBudget.Round(time.Minute))
 		}
-		if result.runBudget != 40*time.Minute {
-			t.Errorf("result.runBudget = %s, want 40m", result.runBudget)
+		if result.runBudget != defaultTestVerifyRunFloor {
+			t.Errorf("result.runBudget = %s, want the %s floor", result.runBudget, defaultTestVerifyRunFloor)
 		}
 		if result.slotTimeout != defaultTestVerifySlotTimeout {
 			t.Errorf("result.slotTimeout = %s, want %s", result.slotTimeout, defaultTestVerifySlotTimeout)
+		}
+		if !result.slotUsed {
+			t.Error("slotUsed = false, want true: the full suite may spin containers")
+		}
+		if result.scope != "full" {
+			t.Errorf("scope = %q, want %q", result.scope, "full")
+		}
+		if len(result.packages) != 2 {
+			t.Errorf("packages = %v, want both changed packages recorded for the MR bead", result.packages)
 		}
 
 		// The resolve-before-you-run header is the artifact gt-pnkd's victims
@@ -256,14 +255,14 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			t.Fatalf("reading verify log: %v", readErr)
 		}
 		logText := string(logBytes)
-		for _, want := range []string{"run budget: 40m", "slot cap: 1h", "Makefile", "env (inherited from test_command): GOFLAGS=-p=6"} {
+		for _, want := range []string{"run budget: 30m", "slot cap: 1h", "full test_command", "env (inherited from test_command): GOFLAGS=-p=6"} {
 			if !strings.Contains(logText, want) {
 				t.Errorf("verify log is missing %q:\n%s", want, logText)
 			}
 		}
 	})
 
-	t.Run("test_verify_command overrides the derived go test and fills {packages}", func(t *testing.T) {
+	t.Run("test_verify_command replaces the full test_command and fills {packages}", func(t *testing.T) {
 		dir := newRepoWithTwoChangedPackages(t)
 		var script string
 		stubVerifyGate(t,
@@ -301,8 +300,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		includeContainers := true // contention only exists when the gate takes a slot (gt-yihz)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifySlotTimeout: "5m", TestVerifyIncludeContainerPackages: &includeContainers}
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifySlotTimeout: "5m"}
 		g := git.NewGit(dir)
 		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/contention-role")
 		if err == nil {
@@ -356,12 +354,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		// The slot-wait progress path only exists when the gate takes a slot,
-		// which since gt-yihz means the rig opted its container-backed
-		// packages back into gt done's gate (pkga/pkgb spin nothing, so the
-		// default would run them slot-free).
-		includeContainers := true
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyIncludeContainerPackages: &includeContainers}
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 		g := git.NewGit(dir)
 		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/progress-role")
 		if err != nil {
@@ -452,15 +445,15 @@ func TestChangedGoPackages(t *testing.T) {
 	})
 }
 
-// TestRunDefaultTestVerification_DefersContainerPackages covers gt-yihz: the
-// Docker suite runs once per submission, in the refinery's gate, so gt done's
-// own gate leaves container-backed packages alone and needs no slot for the
-// rest.
-func TestRunDefaultTestVerification_DefersContainerPackages(t *testing.T) {
+// TestRunDefaultTestVerification_AlwaysSlots covers gt-btw1: the gate runs the
+// rig's full hermetic test_command, which may spin containers, so it always
+// takes a container-gate slot (gt-yihz) — there is no deferral to the
+// refinery.
+func TestRunDefaultTestVerification_AlwaysSlots(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	t.Run("container-backed package deferred, plain package runs without a slot", func(t *testing.T) {
+	t.Run("container-backed package changed: the full suite runs inside a slot", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		changePkga(t, dir)
@@ -475,65 +468,26 @@ func TestRunDefaultTestVerification_DefersContainerPackages(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/defer-role")
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/slot-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
 		if !result.ran || !result.success {
 			t.Fatalf("result = %+v, want ran=true success=true", result)
 		}
-		if len(result.packages) != 1 || !strings.HasSuffix(result.packages[0], "/pkga") {
-			t.Errorf("packages = %v, want only pkga", result.packages)
+		if len(result.packages) != 2 {
+			t.Errorf("packages = %v, want both changed packages recorded for the MR bead", result.packages)
 		}
-		if len(result.deferredPackages) != 1 || !strings.HasSuffix(result.deferredPackages[0], "/internal/cmd") {
-			t.Errorf("deferredPackages = %v, want only internal/cmd", result.deferredPackages)
-		}
-		if result.slotUsed {
-			t.Error("slotUsed = true, want false when nothing in scope spins containers")
-		}
-		if acquired {
-			t.Error("the gate acquired a container-gate slot for a container-free package set")
-		}
-		log, _ := os.ReadFile(result.logPath)
-		if !strings.Contains(string(log), "deferred to the refinery gate") || !strings.Contains(string(log), "container-gate slot: not needed") {
-			t.Errorf("verify log does not explain the deferral / no-slot decision:\n%s", log)
+		if !result.slotUsed || !acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want true/true: the full suite may spin containers", result.slotUsed, acquired)
 		}
 	})
 
-	t.Run("only container-backed packages changed: skips with reason, takes no slot", func(t *testing.T) {
+	t.Run("only container-backed packages changed: the full suite still runs inside a slot", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "only internal/cmd")
-
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
-			t.Error("slot acquired although every changed package was deferred")
-			return func() {}, nil
-		}, nil)
-
-		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/all-deferred-role")
-		if err != nil {
-			t.Fatalf("runDefaultTestVerification: %v", err)
-		}
-		if result.ran {
-			t.Errorf("ran = true, want false: %+v", result)
-		}
-		if !strings.Contains(result.skipReason, "refinery") || !strings.Contains(result.skipReason, "internal/cmd") {
-			t.Errorf("skipReason = %q, want the refinery-owns-it explanation naming the package", result.skipReason)
-		}
-		if len(result.deferredPackages) != 1 {
-			t.Errorf("deferredPackages = %v, want the one container package", result.deferredPackages)
-		}
-	})
-
-	t.Run("test_verify_include_container_packages restores the slot-gated full run", func(t *testing.T) {
-		dir, _ := initVerifyTestGoRepo(t)
-		addContainerBackedPackage(t, dir)
-		changePkga(t, dir)
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "touch both")
 
 		acquired := false
 		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
@@ -541,18 +495,17 @@ func TestRunDefaultTestVerification_DefersContainerPackages(t *testing.T) {
 			return func() {}, nil
 		}, nil)
 
-		include := true
 		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyIncludeContainerPackages: &include}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/include-role")
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/slot-all-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
-		if !result.ran || !result.success || len(result.packages) != 2 {
-			t.Fatalf("result = %+v, want both packages run", result)
+		if !result.ran || !result.success {
+			t.Fatalf("result = %+v, want ran=true success=true (no deferral under gt-btw1)", result)
 		}
-		if len(result.deferredPackages) != 0 || !result.slotUsed || !acquired {
-			t.Errorf("include flag: deferred=%v slotUsed=%v acquired=%v, want none/true/true", result.deferredPackages, result.slotUsed, acquired)
+		if !result.slotUsed || !acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want true/true", result.slotUsed, acquired)
 		}
 	})
 }

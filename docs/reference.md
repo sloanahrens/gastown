@@ -146,9 +146,9 @@ Town-level role defaults live in `mayor/config.json` under:
 | `typecheck_command` | `string` | `""` | Type check command (e.g., `tsc --noEmit`) |
 | `lint_command` | `string` | `""` | Lint command (e.g., `eslint .`) |
 | `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it. |
-| `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty derives `max(30m, per-package -timeout × changed packages)`, where the per-package value comes from the Makefile test target or `test_command`. Slot wait is never counted against it. |
+| `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty uses the 30m floor (the gate runs the rig's full hermetic `test_command`, so there is no changed-package count to scale by). Slot wait is never counted against it. |
 | `test_verify_slot_timeout` | `string` | `"60m"` | How long `gt done`'s default test-verify gate waits for the container-gate slot. Exceeding it is reported as slot contention, not a test failure. |
-| `test_verify_command` | `string` | `""` | Overrides the gate's command on a Go rig; `{packages}` is replaced with the changed-package list, e.g. `make test PKGS='{packages}'`. |
+| `test_verify_command` | `string` | `""` | Overrides the gate's command, replacing the rig's full hermetic `test_command`; `{packages}` is replaced with the changed-package list — the route to scoped verification. |
 | `build_command` | `string` | `""` | Build command (e.g., `go build ./...`) |
 | `on_conflict` | `string` | `"assign_back"` | Conflict strategy: `assign_back` or `auto_rebase` |
 | `delete_merged_branches` | `bool` | `true` | Delete source branches after merging |

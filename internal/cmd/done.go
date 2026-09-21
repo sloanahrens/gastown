@@ -2164,24 +2164,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				}
 				if verify.skipReason != "" {
 					style.PrintWarning("gt done: skipping default test-verify: %s", verify.skipReason)
-					if len(verify.deferredPackages) > 0 {
-						description += fmt.Sprintf("\ntest_verify_deferred_container_packages: %s", strings.Join(verify.deferredPackages, ","))
-					}
 				} else if verify.ran {
-					if verify.scope == "packages" {
-						fmt.Printf("%s Default test-verify passed (packages: %s)\n", style.Bold.Render("✓"), strings.Join(verify.packages, " "))
-					} else {
-						fmt.Printf("%s Default test-verify passed (full test_command)\n", style.Bold.Render("✓"))
-					}
+					fmt.Printf("%s Default test-verify passed (full test_command)\n", style.Bold.Render("✓"))
 					description += "\ntest_verified: true"
 					description += fmt.Sprintf("\ntest_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
 					description += fmt.Sprintf("\ntest_verified_sha: %s", commitSHA)
 					description += fmt.Sprintf("\ntest_verified_scope: %s", verify.scope)
 					if len(verify.packages) > 0 {
 						description += fmt.Sprintf("\ntest_verified_packages: %s", strings.Join(verify.packages, ","))
-					}
-					if len(verify.deferredPackages) > 0 {
-						description += fmt.Sprintf("\ntest_verify_deferred_container_packages: %s", strings.Join(verify.deferredPackages, ","))
 					}
 					description += fmt.Sprintf("\ntest_verified_slot_used: %t", verify.slotUsed)
 					description += "\ntest_verified_exit: 0"

@@ -110,85 +110,28 @@ func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
 
 func TestResolveTestVerifyBudgets(t *testing.T) {
 
-	writeMakefile := func(t *testing.T, body string) string {
-		t.Helper()
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return dir
-	}
-
-	makefileBody := "test:\n\tgo test -timeout 20m ./...\n"
-
-	t.Run("defaults scale with the changed-package count", func(t *testing.T) {
+	t.Run("defaults: slot cap from the slot CLI default, run budget at the floor", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir() // no Makefile
-		b := resolveTestVerifyBudgets(&config.MergeQueueConfig{TestCommand: "go test ./..."}, dir, "go test ./...", 2)
-		if b.perPackage != defaultTestVerifyPerPackageTimeout {
-			t.Errorf("perPackage = %s, want the %s default", b.perPackage, defaultTestVerifyPerPackageTimeout)
+		b := resolveTestVerifyBudgets(&config.MergeQueueConfig{TestCommand: "go test ./..."})
+		if b.runTimeout != defaultTestVerifyRunFloor {
+			t.Errorf("runTimeout = %s, want the %s floor (gt-btw1: the gate runs the full suite, so there is nothing to scale by)", b.runTimeout, defaultTestVerifyRunFloor)
 		}
-		// 20m × 2 packages = 40m, above the 30m floor.
-		if b.runTimeout != 40*time.Minute {
-			t.Errorf("runTimeout = %s, want 40m (20m per package × 2)", b.runTimeout)
+		if !strings.Contains(b.runSource, "full test_command") {
+			t.Errorf("runSource = %q, want it to explain the full-suite floor", b.runSource)
 		}
 		if b.slotTimeout != defaultTestVerifySlotTimeout {
 			t.Errorf("slotTimeout = %s, want %s", b.slotTimeout, defaultTestVerifySlotTimeout)
-		}
-		if !strings.Contains(b.runSource, "2 changed package(s)") {
-			t.Errorf("runSource = %q, want it to explain the scaling", b.runSource)
-		}
-	})
-
-	t.Run("the 30m floor applies to a single cheap package", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		b := resolveTestVerifyBudgets(&config.MergeQueueConfig{TestCommand: "go test ./..."}, dir, "go test ./...", 1)
-		if b.runTimeout != defaultTestVerifyRunFloor {
-			t.Errorf("runTimeout = %s, want the %s floor (gt-pnkd: a 10m budget was the bug)", b.runTimeout, defaultTestVerifyRunFloor)
-		}
-	})
-
-	t.Run("the Makefile test target's -timeout wins over the default", func(t *testing.T) {
-		t.Parallel()
-		if _, err := exec.LookPath("make"); err != nil {
-			t.Skip("make not available")
-		}
-		dir := writeMakefile(t, makefileBody)
-		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test"}
-		b := resolveTestVerifyBudgets(mq, dir, mq.TestCommand, 2)
-		if b.perPackage != 20*time.Minute {
-			t.Errorf("perPackage = %s, want 20m read from the Makefile", b.perPackage)
-		}
-		if !strings.Contains(b.perSource, "Makefile") {
-			t.Errorf("perSource = %q, want it to name the Makefile", b.perSource)
-		}
-		if b.runTimeout != 40*time.Minute {
-			t.Errorf("runTimeout = %s, want 40m", b.runTimeout)
-		}
-	})
-
-	t.Run("a -timeout in test_command is used when there is no Makefile", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		b := resolveTestVerifyBudgets(&config.MergeQueueConfig{TestCommand: "go test -timeout 25m ./..."}, dir, "go test -timeout 25m ./...", 2)
-		if b.perPackage != 25*time.Minute {
-			t.Errorf("perPackage = %s, want 25m from test_command", b.perPackage)
-		}
-		if b.runTimeout != 50*time.Minute {
-			t.Errorf("runTimeout = %s, want 50m", b.runTimeout)
 		}
 	})
 
 	t.Run("rig config overrides both budgets", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
 		mq := &config.MergeQueueConfig{
 			TestCommand:           "go test ./...",
 			TestVerifyRunTimeout:  "90m",
 			TestVerifySlotTimeout: "15m",
 		}
-		b := resolveTestVerifyBudgets(mq, dir, mq.TestCommand, 3)
+		b := resolveTestVerifyBudgets(mq)
 		if b.runTimeout != 90*time.Minute {
 			t.Errorf("runTimeout = %s, want 90m", b.runTimeout)
 		}
@@ -202,13 +145,12 @@ func TestResolveTestVerifyBudgets(t *testing.T) {
 
 	t.Run("invalid durations fall back and say so", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
 		mq := &config.MergeQueueConfig{
 			TestCommand:           "go test ./...",
 			TestVerifyRunTimeout:  "banana",
 			TestVerifySlotTimeout: "-5m",
 		}
-		b := resolveTestVerifyBudgets(mq, dir, mq.TestCommand, 1)
+		b := resolveTestVerifyBudgets(mq)
 		if b.runTimeout != defaultTestVerifyRunFloor {
 			t.Errorf("runTimeout = %s, want the derived floor", b.runTimeout)
 		}
@@ -220,58 +162,6 @@ func TestResolveTestVerifyBudgets(t *testing.T) {
 		}
 		if !strings.Contains(b.slotSource, "-5m") {
 			t.Errorf("slotSource = %q, want it to flag the rejected override", b.slotSource)
-		}
-	})
-}
-
-func TestSplitCommandEnvPrefixAndMakeTarget(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		command  string
-		wantEnv  []string
-		wantArgv []string
-		wantMake string
-		wantOK   bool
-	}{
-		{"GOFLAGS=-p=6 make test", []string{"GOFLAGS=-p=6"}, []string{"make", "test"}, "test", true},
-		{"FOO=1 BAR=2 make -j4 build", []string{"FOO=1", "BAR=2"}, []string{"make", "-j4", "build"}, "build", true},
-		{"make", nil, []string{"make"}, "test", true},
-		{"go test ./...", nil, []string{"go", "test", "./..."}, "", false},
-		{"sh -c 'FOO=1 make test'", nil, []string{"sh", "-c", "'FOO=1", "make", "test'"}, "", false},
-		{"1=1 make test", nil, []string{"1=1", "make", "test"}, "", false},
-		{"make FOO=bar test", nil, []string{"make", "FOO=bar", "test"}, "test", true},
-	}
-
-	for _, tc := range tests {
-		env, argv := splitCommandEnvPrefix(tc.command)
-		if strings.Join(env, ",") != strings.Join(tc.wantEnv, ",") {
-			t.Errorf("splitCommandEnvPrefix(%q) env = %v, want %v", tc.command, env, tc.wantEnv)
-		}
-		if strings.Join(argv, ",") != strings.Join(tc.wantArgv, ",") {
-			t.Errorf("splitCommandEnvPrefix(%q) argv = %v, want %v", tc.command, argv, tc.wantArgv)
-		}
-		target, ok := makeTarget(tc.command)
-		if ok != tc.wantOK || target != tc.wantMake {
-			t.Errorf("makeTarget(%q) = (%q, %v), want (%q, %v)", tc.command, target, ok, tc.wantMake, tc.wantOK)
-		}
-	}
-}
-
-func TestTimeoutFromCommandText(t *testing.T) {
-
-	t.Run("reads both flag spellings and keeps the largest", func(t *testing.T) {
-		t.Parallel()
-		d, ok := timeoutFromCommandText("go test -timeout=5m ./a\ngo test -timeout 20m ./b\n")
-		if !ok || d != 20*time.Minute {
-			t.Errorf("= (%s, %v), want (20m, true) — the budget must cover the slowest invocation", d, ok)
-		}
-	})
-
-	t.Run("no flag is not an error", func(t *testing.T) {
-		t.Parallel()
-		if d, ok := timeoutFromCommandText("pytest -q"); ok {
-			t.Errorf("= (%s, true), want ok=false", d)
 		}
 	})
 }
