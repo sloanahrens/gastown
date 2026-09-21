@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,10 +28,13 @@ const (
 	defaultMainBranchTestInterval = 60 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
 
-	// maxDiagnosticLines bounds how many matching failure lines go into the
-	// escalation body — enough for the mayor to triage without a rerun,
-	// short enough to stay readable.
-	maxDiagnosticLines = 40
+	// maxDiagnosticLines bounds how many diagnostic lines go into the
+	// escalation body. The body is filtered rather than tailed, so it holds
+	// only failure evidence; the cap is a backstop against a pathological run
+	// (hundreds of failing tests) making the escalation unreadable, not a
+	// budget the useful evidence has to fit inside. The full output is always
+	// persisted to disk first (gt-1s2g, gt-f57o).
+	maxDiagnosticLines = 200
 
 	// mainBranchTestSlotTimeout bounds how long the main_branch_test patrol
 	// waits for the container-gate slot before giving up on a rig's run,
@@ -48,37 +52,174 @@ const (
 // diagnosticLinePattern matches the lines worth surfacing from a failing
 // test/build run: test failures, panics, and build errors. Plain "ok"
 // lines from passing packages are excluded so a long run with one early
-// failure doesn't bury it under trailing successes (gt-1s2g).
-var diagnosticLinePattern = regexp.MustCompile(`^(FAIL|--- FAIL|panic:|# |.*\[build failed\])`)
+// failure doesn't bury it under trailing successes (gt-1s2g). Leading
+// whitespace is allowed because a failing subtest's block is reported
+// indented under its parent (gt-f57o).
+var diagnosticLinePattern = regexp.MustCompile(`^\s*(FAIL|--- FAIL|panic:|# |.*\[build failed\])`)
 
-// extractDiagnosticLines returns the first maxDiagnosticLines lines of output
-// that match diagnosticLinePattern, in their original order.
+// failedTestLine is the marker go test prints for each failing test; the
+// assertion block naming what actually broke follows it, indented deeper.
+const failedTestLine = "--- FAIL"
+
+// extractDiagnosticLines returns up to maxDiagnosticLines lines of output that
+// diagnose a failure, in their original order: pattern matches (FAIL/panic/
+// build errors), plus — for every "--- FAIL: TestName" line — the assertion
+// block that follows it.
+//
+// The assertion block matters as much as the marker: "--- FAIL:
+// TestWidgetRenders" says a test failed, while the block under it
+// ("widget_test.go:42: expected 3, got 4") says why. That block matches no
+// pattern of its own, so a filter that keeps only pattern matches reports
+// failures with no cause (gt-f57o).
 func extractDiagnosticLines(output string) []string {
+	lines := strings.Split(output, "\n")
+
 	var diagnostic []string
-	for _, line := range strings.Split(output, "\n") {
-		if diagnosticLinePattern.MatchString(line) {
-			diagnostic = append(diagnostic, line)
-			if len(diagnostic) >= maxDiagnosticLines {
+	appendLine := func(line string) bool { // false once the cap is reached
+		if len(diagnostic) >= maxDiagnosticLines {
+			return false
+		}
+		diagnostic = append(diagnostic, line)
+		return true
+	}
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if !diagnosticLinePattern.MatchString(line) {
+			continue
+		}
+		if !appendLine(line) {
+			break
+		}
+		if !strings.HasPrefix(strings.TrimSpace(line), failedTestLine) {
+			continue
+		}
+
+		// Consume this test's assertion block: every following line that is
+		// blank-free and indented deeper than the "--- FAIL" line. A blank
+		// line or a line at the same depth starts something else. A nested
+		// "--- FAIL" for a subtest is itself indented deeper, so it and its
+		// own block are consumed here and never re-appended by the outer
+		// loop.
+		indent := leadingIndentWidth(line)
+		for j := i + 1; j < len(lines); j++ {
+			next := lines[j]
+			if strings.TrimSpace(next) == "" || leadingIndentWidth(next) <= indent {
 				break
 			}
+			if !appendLine(next) {
+				break
+			}
+			i = j
 		}
 	}
 	return diagnostic
 }
 
+// leadingIndentWidth returns how many leading space/tab characters a line has
+// (a tab counts as one). Only relative depth matters here: go test indents a
+// failing test's assertion block deeper than its "--- FAIL" line.
+func leadingIndentWidth(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
 // writeMainBranchTestLog captures the full output of a failed run to
-// ~/gt/logs/main_branch_test/<rig>-<ts>.log so the mayor can inspect it
-// without rerunning the test (gt-1s2g).
-func writeMainBranchTestLog(townRoot, rigName, output string) (string, error) {
+// <townRoot>/logs/main_branch_test/<rig>-<sha>-<ts>.log so the mayor can
+// inspect it without rerunning the test. The tested head is in the name
+// because the temporary worktree the run happened in is removed afterwards,
+// taking the output with it — without the sha in the name, a log could not be
+// matched to the verdict it belongs to (gt-1s2g, gt-f57o).
+func writeMainBranchTestLog(townRoot, rigName, commit, output string) (string, error) {
 	dir := filepath.Join(townRoot, "logs", "main_branch_test")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating log dir: %w", err)
 	}
-	logPath := filepath.Join(dir, fmt.Sprintf("%s-%s.log", rigName, time.Now().UTC().Format("20060102T150405Z")))
+	logPath := filepath.Join(dir, fmt.Sprintf("%s-%s-%s.log", rigName, shortCommit(commit), time.Now().UTC().Format("20060102T150405Z")))
 	if err := os.WriteFile(logPath, []byte(output), 0644); err != nil {
 		return "", fmt.Errorf("writing log file: %w", err)
 	}
 	return logPath, nil
+}
+
+// shortCommit abbreviates a commit sha for a log line or filename. An
+// undetermined head (commitTested already logged why) still gets a readable
+// label rather than an empty segment, since the log is worth keeping either
+// way.
+func shortCommit(commit string) string {
+	if commit == "" {
+		return "unknown"
+	}
+	if len(commit) > 12 {
+		return commit[:12]
+	}
+	return commit
+}
+
+// hostLoad is a snapshot of the host-utilization numbers a main_branch_test
+// verdict is qualified by, so the mayor can tell a real regression from a
+// saturated box without rerunning the suite by hand (gt-f57o).
+type hostLoad struct {
+	// IdlePercent estimates how much of the CPU is idle.
+	IdlePercent float64
+	// Load1 is the 1-minute load average the estimate came from.
+	Load1 float64
+	// NumCPU is the core count the load was measured against.
+	NumCPU int
+}
+
+func (h hostLoad) String() string {
+	return fmt.Sprintf("CPU idle %.1f%% (load1 %.2f on %d cores)", h.IdlePercent, h.Load1, h.NumCPU)
+}
+
+// measureHostLoad reads the current host utilization.
+func measureHostLoad() hostLoad {
+	h := hostLoad{Load1: loadAverage1(), NumCPU: runtime.NumCPU()}
+	h.IdlePercent = computeCPUIdlePercent(h.Load1, h.NumCPU)
+	return h
+}
+
+// measureHostLoadFn is the seam tests use to pin a host-load reading;
+// production always measures the real host (see stubHostLoad). Without it the
+// skip decision could only be tested by saturating the actual machine
+// (gt-f57o, same pattern as slot.SetContainerListerForTest).
+var measureHostLoadFn = measureHostLoad
+
+// computeCPUIdlePercent converts a 1-minute load average into an idle
+// percentage: load 0 is 100% idle, load == cores is 0% idle, and more load
+// than cores clamps to 0. A non-positive core count reports 100 — nothing
+// readable means nothing to gate on, and the gate must fail open rather than
+// into a skipped cycle nobody asked for.
+func computeCPUIdlePercent(load1 float64, numCPU int) float64 {
+	if numCPU <= 0 {
+		return 100
+	}
+	idle := 100 * (1 - load1/float64(numCPU))
+	if idle < 0 {
+		return 0
+	}
+	if idle > 100 {
+		return 100
+	}
+	return idle
+}
+
+// hostBusyReason returns why a cycle must be skipped because the host is too
+// busy for a red verdict to be trustworthy, or "" when the cycle should run.
+// A pure function of the measured values, so the decision is testable without
+// a saturated host (gt-f57o).
+//
+// A floor outside (0, 100] means the gate is off: 0 or less disables it, and
+// a percentage above 100 could never be met, which would skip every cycle
+// forever. Both run rather than let a config typo silently starve the patrol
+// that catches regressions in main.
+func hostBusyReason(minIdlePercent float64, host hostLoad) string {
+	if minIdlePercent <= 0 || minIdlePercent > 100 {
+		return ""
+	}
+	if host.IdlePercent >= minIdlePercent {
+		return ""
+	}
+	return fmt.Sprintf("host busy: %s < %.0f%% idle minimum", host, minIdlePercent)
 }
 
 // MainBranchTestConfig holds configuration for the main_branch_test patrol.
@@ -98,6 +239,19 @@ type MainBranchTestConfig struct {
 
 	// Rigs limits testing to specific rigs. If empty, all rigs are tested.
 	Rigs []string `json:"rigs,omitempty"`
+
+	// MinCPUIdlePercent is the minimum estimated CPU idle percentage required
+	// before a cycle starts. Below it the host is too busy for a red verdict
+	// to be trustworthy — the suite's own contention produces failures that
+	// pass in isolation — so the cycle is skipped and logged as
+	// "skipped: host busy" instead of escalating a false FAILED (gt-f57o).
+	//
+	// Disabled by default (0), like the sibling spawn-pressure gate
+	// (operational.daemon.pressure_cpu_threshold, also opt-in): a gate that
+	// skips by default can silently stop the patrol that catches regressions
+	// in main. Set 25 to skip a cycle when less than a quarter of the host's
+	// CPU is idle. Values outside (0, 100] are treated as disabled.
+	MinCPUIdlePercent *float64 `json:"min_cpu_idle_percent,omitempty"`
 }
 
 // mainBranchTestInterval returns the configured interval, or the default (30m).
@@ -130,6 +284,16 @@ func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
 		return config.Patrols.MainBranchTest.Rigs
 	}
 	return nil
+}
+
+// mainBranchTestMinCPUIdlePercent returns the configured CPU-idle floor, or 0
+// (host-busy gate disabled) when unset.
+func mainBranchTestMinCPUIdlePercent(config *DaemonPatrolConfig) float64 {
+	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil &&
+		config.Patrols.MainBranchTest.MinCPUIdlePercent != nil {
+		return *config.Patrols.MainBranchTest.MinCPUIdlePercent
+	}
+	return 0
 }
 
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
@@ -227,6 +391,28 @@ func (d *Daemon) runMainBranchTests() {
 	}
 
 	d.logger.Printf("main_branch_test: starting patrol cycle")
+
+	// Opt-in host-busy gate: on a saturated host the suite's own contention
+	// produces failures that pass in isolation, so a red verdict from such a
+	// run is not evidence of a regression (gt-f57o). Disabled unless
+	// patrols.main_branch_test.min_cpu_idle_percent is set, and every skip is
+	// logged with the measured values so a silently-never-running patrol is
+	// visible in the daemon log rather than inferred from a missing cycle.
+	if minIdle := mainBranchTestMinCPUIdlePercent(d.patrolConfig); minIdle > 0 {
+		host := measureHostLoadFn()
+		if reason := hostBusyReason(minIdle, host); reason != "" {
+			d.logger.Printf("main_branch_test: skipped: %s", reason)
+			return
+		}
+		// Say which of the two "did not skip" cases this is: a floor above
+		// 100 is a config typo the gate ignores, and reporting it as a
+		// satisfied minimum would make the typo invisible forever.
+		if minIdle > 100 {
+			d.logger.Printf("main_branch_test: ignoring out-of-range min_cpu_idle_percent %.0f (valid range (0,100]); running cycle", minIdle)
+		} else {
+			d.logger.Printf("main_branch_test: host is idle enough to run: %s >= %.0f%% minimum", host, minIdle)
+		}
+	}
 
 	rigNames := d.getKnownRigs()
 	if len(rigNames) == 0 {
@@ -438,24 +624,30 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDi
 
 // runCommandOnWorktree runs a single shell command in the given worktree directory.
 // On failure it captures the full output to a log file and builds an error
-// carrying the failing rig, the commit tested, the lines that actually
-// diagnose the failure (FAIL/panic/build-error lines, not a blind tail that
-// can be all-"ok" noise from later packages), and the log path so the mayor
-// can triage without rerunning (gt-1s2g).
+// carrying the failing rig, the commit tested, the host load at start and end
+// of the run, the lines that actually diagnose the failure (FAIL/panic/
+// build-error lines and their assertions, not a blind tail that can be
+// all-"ok" noise from later packages), and the log path so the mayor can
+// triage without rerunning (gt-1s2g, gt-f57o).
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, workDir, label, command string) error {
-	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
+	// The tested head goes in the log line: a verdict that cannot be matched
+	// to a head cannot be checked against the refinery's green run on the
+	// same commit (gt-f57o).
+	d.logger.Printf("main_branch_test: %s: running %s on %s: %s", rigName, label, shortCommit(commit), command)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
 	util.SetDetachedProcessGroup(cmd)
 
+	startHost := measureHostLoadFn()
 	output, err := cmd.CombinedOutput()
+	endHost := measureHostLoadFn()
 	if err == nil {
 		return nil
 	}
 
-	logPath, logErr := writeMainBranchTestLog(d.config.TownRoot, rigName, string(output))
+	logPath, logErr := writeMainBranchTestLog(d.config.TownRoot, rigName, commit, string(output))
 	if logErr != nil {
 		d.logger.Printf("main_branch_test: %s: warning: could not write diagnostic log: %v", rigName, logErr)
 	}
@@ -478,6 +670,11 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 	if commit != "" {
 		fmt.Fprintf(&body, "commit: %s\n", commit)
 	}
+	// Contention context, so a red that is really this town's documented
+	// full-suite flakiness is distinguishable from a regression without
+	// re-running the package by hand (gt-f57o).
+	fmt.Fprintf(&body, "host at start: %s\n", startHost)
+	fmt.Fprintf(&body, "host at end: %s\n", endHost)
 	body.WriteString(strings.Join(diagnostic, "\n"))
 	if logPath != "" {
 		fmt.Fprintf(&body, "\nlog: %s", logPath)
