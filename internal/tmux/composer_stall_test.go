@@ -198,6 +198,51 @@ func TestTruncateRunes(t *testing.T) {
 	}
 }
 
+// analyzeComposerStateNoBusy skips the busy indicator check, so it can see
+// pending input that a stale busy indicator would otherwise mask (gt-ncon).
+func TestAnalyzeComposerStateNoBusy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		pane       string
+		prefix     string
+		want       ComposerState
+		wantQueued bool
+	}{
+		{
+			name:       "stale busy indicator with queued footer is pending",
+			pane:       queuedMessagesPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+			prefix:     DefaultReadyPromptPrefix,
+			want:       ComposerPending,
+			wantQueued: true,
+		},
+		{
+			name:   "stale busy indicator with typed input is pending",
+			pane:   pendingTypedPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+			prefix: DefaultReadyPromptPrefix,
+			want:   ComposerPending,
+		},
+		{
+			name:   "stale busy indicator with empty composer is clean",
+			pane:   liveIdleCleanPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+			prefix: DefaultReadyPromptPrefix,
+			want:   ComposerClean,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := analyzeComposerStateNoBusy(tt.pane, tt.prefix)
+			if got.State != tt.want {
+				t.Errorf("state = %s, want %s (evidence: %s)", got.State, tt.want, got.Evidence)
+			}
+			if got.Queued != tt.wantQueued {
+				t.Errorf("queued = %v, want %v", got.Queued, tt.wantQueued)
+			}
+		})
+	}
+}
+
 // fakeTmuxLogging installs a tmux shim on PATH that records its argv and
 // returns canned stdout keyed by the tmux subcommand. Returns the log path.
 //
@@ -285,11 +330,12 @@ func TestSubmitPendingInputKeystrokes(t *testing.T) {
 
 // DetectComposerStall must never report a stall on a pane that is busy, no
 // matter how the composer looks — this is the false positive the witness hit
-// live at 2026-09-18 16:13.
+// live at 2026-09-18 16:13. A genuinely busy pane has recent activity because
+// it's actively producing output.
 func TestDetectComposerStallBusyPaneIsNotStalled(t *testing.T) {
 	fakeTmuxLogging(t, map[string]string{
 		"capture-pane":    liveBusyPane,
-		"display-message": "0",
+		"display-message": "@now", // A genuinely busy pane has recent activity
 		"has-session":     "",
 	})
 	tm := NewTmuxWithSocket("gt-test-composer-stall")
@@ -303,6 +349,29 @@ func TestDetectComposerStallBusyPaneIsNotStalled(t *testing.T) {
 	}
 	if stall.Stalled {
 		t.Error("busy pane reported as stalled")
+	}
+}
+
+// A stale busy indicator (from a previous turn that has ended) with old
+// activity and pending input is the gt-ncon signature: the detector must
+// report a stall, not be blinded by the stale indicator.
+func TestDetectComposerStallStaleBusyIndicatorIsStalled(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":    pendingTypedPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+		"display-message": "0", // Old activity: the busy indicator is stale
+		"has-session":     "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+
+	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
+	if err != nil {
+		t.Fatalf("DetectComposerStall: %v", err)
+	}
+	if stall.State != ComposerPending {
+		t.Errorf("state = %s, want pending (stale busy indicator should be ignored)", stall.State)
+	}
+	if !stall.Stalled {
+		t.Error("stale busy indicator with pending input should be reported as stalled")
 	}
 }
 
