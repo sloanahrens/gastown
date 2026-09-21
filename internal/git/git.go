@@ -1245,6 +1245,42 @@ func (g *Git) PatchID(base, head string) (string, error) {
 	return fields[0], nil
 }
 
+// PatchIDs returns the stable patch-id of each non-merge commit in base..head
+// (git log --no-merges -p base..head | git patch-id --stable), one entry per
+// commit, in git log's order (newest first).
+//
+// PatchID collapses a whole range into a single id; this keeps the commits
+// separate so a caller can ask whether every change one branch carries is also
+// present in another — a rebase preserves each commit's patch-id even though
+// it rewrites every sha, and a branch that adds commits on top of another's
+// keeps the ones it inherited. That question is what distinguishes "same work,
+// plus new commits" from "someone else's work this branch does not have".
+//
+// An empty range yields an empty slice rather than an error: "this branch has
+// no commits of its own" is a state callers need to reason about, unlike a
+// diff that failed to compute.
+func (g *Git) PatchIDs(base, head string) ([]string, error) {
+	log, err := g.run("log", "--no-merges", "-p", "--no-color", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(log) == "" {
+		return nil, nil
+	}
+	out, err := g.runWithStdin(log, "patch-id", "--stable")
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		// Each line is "<patch-id> <commit-id>"; only the patch-id matters here.
+		if fields := strings.Fields(line); len(fields) > 0 {
+			ids = append(ids, fields[0])
+		}
+	}
+	return ids, nil
+}
+
 // NotesAdd attaches content as a note on commit under the given notes ref,
 // overwriting any note already there (git notes --ref <ref> add -f -m).
 func (g *Git) NotesAdd(ref, commit, content string) error {

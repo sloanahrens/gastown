@@ -1391,6 +1391,20 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		if fetchErr := g.Fetch(fetchRemote); fetchErr != nil {
 			style.PrintWarning("could not fetch %s before contamination check: %v (proceeding with local refs)", fetchRemote, fetchErr)
 		}
+
+		// Does this branch already exist where this run will push it? Every
+		// branch push on this path targets origin (the refspec built further
+		// down is branch:branch against it), so ask about origin/<branch> —
+		// not whichever remote the fetch above followed. In a fork-backed rig
+		// that fetch is upstream's, which leaves origin/<branch> stale enough
+		// to miss a push from an earlier dispatch and mistake a reused branch
+		// for a new one (gt-i0z3). Drives both the auto-rebase gate below and
+		// the commit-message squash gate further down, which must agree.
+		_, pushedReason := branchAlreadyOnRemote(g, "origin", branch, fetchRemote != "origin")
+		if pushedCheckpointBranch(checkpoints[CheckpointPushed]) == branch {
+			pushedReason = "prior push checkpoint exists"
+		}
+
 		contam, err := g.CheckBranchContamination(contaminationBase)
 		if err == nil && contam.Behind > 0 {
 			const warnThreshold = 50
@@ -1415,9 +1429,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// already rebases such branches itself in step 2). Treat an
 			// existing origin/<branch> the same way the commit-message squash
 			// step below already does: as proof this branch was pushed before.
-			_, originHasBranchErr := g.Rev("origin/" + branch)
-			alreadyPushed := pushedCheckpointBranch(checkpoints[CheckpointPushed]) == branch || originHasBranchErr == nil
-			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
+			// pushedReason names which of the two proved it (gt-i0z3).
+			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, pushedReason)
 			if rebaseErr != nil {
 				return rebaseErr
 			}
@@ -1458,9 +1471,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// title becomes the subject. Skipped when the branch was already
 		// pushed (resume checkpoint, or the agent pushed manually — polecat
 		// branch names are session-unique, so an existing origin/<branch>
-		// means this session pushed it) — rewriting history then would break
-		// the later non-force push.
-		if _, revErr := g.Rev("origin/" + branch); pushedCheckpointBranch(checkpoints[CheckpointPushed]) != branch && revErr != nil {
+		// means this session pushed it, and gt-i0z3 made the ref read behind
+		// pushedReason refresh first) — rewriting history then would break the
+		// later non-force push.
+		if pushedReason == "" {
 			if squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(sourceIssueForNoMerge, issueID)); squashErr != nil {
 				style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
 			} else if squashed > 0 {
@@ -1747,8 +1761,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		if pushErr != nil {
 			// Both push attempts failed non-fast-forward. Before alarming as
 			// possible work loss, check whether origin already has this branch
-			// from an earlier dispatch/rebase with identical content (gt-bf5x) —
-			// if so, it's safe to leased-force-push rather than raise a false
+			// from an earlier dispatch/rebase carrying the same work (gt-bf5x)
+			// — if so, it's safe to leased-force-push rather than raise a false
 			// alarm.
 			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
 			if recovered {
@@ -1759,9 +1773,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
 				if diagnosis != "" {
 					errMsg = fmt.Sprintf("%s (%s)", errMsg, diagnosis)
-					if recoverErr != nil {
-						errMsg = fmt.Sprintf("%s [recovery attempt: %v]", errMsg, recoverErr)
-					}
+				}
+				// Report the recovery failure independently of the diagnosis:
+				// the two say different things (why recovery was refused vs.
+				// why the attempt itself broke), and the fetch/comparison
+				// errors that produce a diagnosis-less failure are exactly the
+				// ones a reader needs to see (gt-i0z3).
+				if recoverErr != nil {
+					errMsg = fmt.Sprintf("%s [recovery attempt: %v]", errMsg, recoverErr)
 				}
 				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
