@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 )
@@ -236,6 +238,216 @@ func TestPushedCheckpointRequiresMatchingCommit(t *testing.T) {
 	t.Run("legacy values still resolve to their branch", func(t *testing.T) {
 		if got := pushedCheckpointBranch(branch); got != branch {
 			t.Errorf("pushedCheckpointBranch(%q) = %q, want %q", branch, got, branch)
+		}
+	})
+}
+
+// noSleep is the sleep injection for tests that must not wait out the retry
+// delay. Returning immediately keeps them fast without changing which code path
+// runs; the budget itself is pinned by
+// TestLandBranchPushBeforeMRStaysBoundedAndFailsClosed.
+func noSleep(time.Duration) {}
+
+// TestLandBranchPushBeforeMRProceedsWhenOriginAlreadyHasTheCommit is the
+// gt-0opm regression test: the first assertion failed the way a remote query
+// races the ref update it asks about, while origin already holds the commit.
+// The submission must go through rather than exit on the failed attempt.
+func TestLandBranchPushBeforeMRProceedsWhenOriginAlreadyHasTheCommit(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+	const branch = "polecat/emerald/gt-0opm"
+
+	g, head := seedRepoWithCommit(t, tmp, remote, branch)
+	if err := g.Push("origin", branch+":"+branch, false); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	townRoot := filepath.Join(tmp, "town")
+
+	// The first assertion fails the way a transient remote query does. The
+	// second is the real one, against real origin.
+	verifyCalls := 0
+	verify := func() error {
+		verifyCalls++
+		if verifyCalls == 1 {
+			return errors.New("verified_push_failed: unable to read origin/" + branch + ": connection reset")
+		}
+		return verifyPushLandedBeforeMR(g, townRoot, "gastown", branch, head)
+	}
+	pushCalls := 0
+	attemptPush := func() error {
+		pushCalls++
+		return g.Push("origin", branch+":"+branch, false)
+	}
+
+	recovered, err := landBranchPushBeforeMR(attemptPush, verify, noSleep)
+	if err != nil {
+		t.Fatalf("landBranchPushBeforeMR = %v, want nil: origin has the commit", err)
+	}
+	if !recovered {
+		t.Error("recovered = false, want true: the landing was only proven by the retry")
+	}
+	if pushCalls != 1 {
+		t.Errorf("push attempts = %d, want 1", pushCalls)
+	}
+	if verifyCalls != 2 {
+		t.Errorf("verify calls = %d, want 2", verifyCalls)
+	}
+}
+
+// TestLandBranchPushBeforeMRRetriesOnceWhenTheFirstSendFailed covers the other
+// half of gt-0opm: the push command itself reported failure. One re-send is
+// allowed, and it is what proves the landing — a re-query alone could not.
+func TestLandBranchPushBeforeMRRetriesOnceWhenTheFirstSendFailed(t *testing.T) {
+	t.Parallel()
+
+	first := true
+	verify := func() error {
+		if first {
+			first = false
+			return errors.New("verified_push_failed: branch missing after push")
+		}
+		return nil
+	}
+	pushCalls := 0
+	attemptPush := func() error {
+		pushCalls++
+		return nil // the re-send lands
+	}
+
+	recovered, err := landBranchPushBeforeMR(attemptPush, verify, noSleep)
+	if err != nil {
+		t.Fatalf("landBranchPushBeforeMR = %v, want nil", err)
+	}
+	if !recovered {
+		t.Error("recovered = false, want true")
+	}
+	if pushCalls != 1 {
+		t.Errorf("push attempts = %d, want 1", pushCalls)
+	}
+}
+
+// TestLandBranchPushBeforeMRSkipsTheRetryWhenTheLandingIsAlreadyProven is the
+// negative control: a push that proves out on its first assertion must not
+// re-send anything or wait at all. Without this the retry would be a tax on
+// every ordinary submission.
+func TestLandBranchPushBeforeMRSkipsTheRetryWhenTheLandingIsAlreadyProven(t *testing.T) {
+	t.Parallel()
+
+	pushCalls, slept := 0, 0
+	recovered, err := landBranchPushBeforeMR(
+		func() error { pushCalls++; return nil },
+		func() error { return nil },
+		func(time.Duration) { slept++ },
+	)
+	if err != nil {
+		t.Fatalf("landBranchPushBeforeMR = %v, want nil", err)
+	}
+	if recovered {
+		t.Error("recovered = true, want false: nothing needed recovering")
+	}
+	if pushCalls != 0 {
+		t.Errorf("push attempts = %d, want 0", pushCalls)
+	}
+	if slept != 0 {
+		t.Errorf("sleeps = %d, want 0", slept)
+	}
+}
+
+// TestLandBranchPushBeforeMRStaysBoundedAndFailsClosed pins the retry budget —
+// this path runs when a submission has already failed, so every extra attempt
+// holds a polecat's slot open — and that the outcome stays fail-closed, with no
+// branch reported as landed that origin does not have.
+func TestLandBranchPushBeforeMRStaysBoundedAndFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	pushCalls, verifyCalls, slept := 0, 0, 0
+	pushErr := errors.New("remote hung up")
+	recovered, err := landBranchPushBeforeMR(
+		func() error { pushCalls++; return pushErr },
+		func() error { verifyCalls++; return errors.New("verified_push_failed: branch missing after push") },
+		func(time.Duration) { slept++ },
+	)
+	if err == nil {
+		t.Fatal("landBranchPushBeforeMR = nil, want failure: origin never received the commit")
+	}
+	if recovered {
+		t.Error("recovered = true, want false")
+	}
+	if slept != len(pushLandingRetryDelays) {
+		t.Errorf("sleeps = %d, want %d (the retry budget)", slept, len(pushLandingRetryDelays))
+	}
+	if pushCalls != len(pushLandingRetryDelays) {
+		t.Errorf("push attempts = %d, want %d (the retry budget)", pushCalls, len(pushLandingRetryDelays))
+	}
+	if verifyCalls != len(pushLandingRetryDelays)+1 {
+		t.Errorf("verify calls = %d, want %d", verifyCalls, len(pushLandingRetryDelays)+1)
+	}
+	// Both failures must survive into the message: the assertion says where
+	// origin stands, the push error says why the re-send broke.
+	if !strings.Contains(err.Error(), "verified_push_failed") {
+		t.Errorf("error = %q, want the assertion failure", err)
+	}
+	if !strings.Contains(err.Error(), pushErr.Error()) {
+		t.Errorf("error = %q, want the retry push error %q", err, pushErr)
+	}
+}
+
+// TestLandBranchPushBeforeMRRejectingRemoteStillFails is the gt-2wqt guard
+// against the retry weakening it. A remote that refuses the push must never be
+// talked into "landed" by a retry: the assertion is the same remote query, so
+// re-running it cannot turn a refusal into a subtree the refinery would merge.
+func TestLandBranchPushBeforeMRRejectingRemoteStillFails(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := writeRejectingRemote(t, tmp, "remote.git")
+	const branch = "polecat/emerald/gt-0opm-rejected"
+
+	g, head := seedRepoWithCommit(t, tmp, remote, branch)
+	townRoot := filepath.Join(tmp, "town")
+
+	recovered, err := landBranchPushBeforeMR(
+		func() error { return g.Push("origin", branch+":"+branch, false) },
+		func() error { return verifyPushLandedBeforeMR(g, townRoot, "gastown", branch, head) },
+		noSleep,
+	)
+	if err == nil {
+		t.Fatal("landBranchPushBeforeMR = nil, want failure: the remote refuses the push")
+	}
+	if recovered {
+		t.Error("recovered = true, want false: nothing landed")
+	}
+	if !strings.Contains(err.Error(), "no MR created") {
+		t.Errorf("error = %q, want it to say no MR was created", err)
+	}
+}
+
+// TestUnlandedPushMessageNamesTheHalfThatFailed: the push-command error and the
+// origin assertion answer different questions, and a reader of a stranded
+// submission needs both — unless there was no push error, in which case the
+// assertion is the whole story.
+func TestUnlandedPushMessageNamesTheHalfThatFailed(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/emerald/gt-0opm"
+	verifyErr := errors.New("verified_push_failed: branch is not at the commit this merge request would declare")
+
+	t.Run("assertion only", func(t *testing.T) {
+		got := unlandedPushMessage(branch, nil, "", verifyErr)
+		if got != verifyErr.Error() {
+			t.Errorf("unlandedPushMessage = %q, want the assertion error verbatim", got)
+		}
+	})
+
+	t.Run("push error and assertion", func(t *testing.T) {
+		got := unlandedPushMessage(branch, errors.New("push timed out"), "origin has unrelated commits", verifyErr)
+		for _, want := range []string{"push timed out", "origin has unrelated commits", verifyErr.Error()} {
+			if !strings.Contains(got, want) {
+				t.Errorf("unlandedPushMessage = %q, want it to contain %q", got, want)
+			}
+		}
+		if !strings.Contains(got, branch) {
+			t.Errorf("unlandedPushMessage = %q, want it to name the branch", got)
 		}
 	})
 }
