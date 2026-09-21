@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/slot"
 )
@@ -304,7 +306,7 @@ func TestExtractDiagnosticLines_CapsAtMax(t *testing.T) {
 
 func TestWriteMainBranchTestLog(t *testing.T) {
 	townRoot := t.TempDir()
-	logPath, err := writeMainBranchTestLog(townRoot, "gastown", goTestFixtureOneFailingPackage)
+	logPath, err := writeMainBranchTestLog(townRoot, "gastown", "37ab61b2c4d1e5f6", goTestFixtureOneFailingPackage)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -317,6 +319,314 @@ func TestWriteMainBranchTestLog(t *testing.T) {
 	}
 	if string(data) != goTestFixtureOneFailingPackage {
 		t.Errorf("log file content mismatch")
+	}
+}
+
+// TestWriteMainBranchTestLog_NamesTheTestedHead is the gt-f57o requirement
+// that a persisted log can be matched to the head it was produced from: the
+// temporary worktree is removed after the run, so the log file is the only
+// surviving record, and a log named only by rig and timestamp cannot be tied
+// to the verdict it belongs to.
+func TestWriteMainBranchTestLog_NamesTheTestedHead(t *testing.T) {
+	townRoot := t.TempDir()
+	logPath, err := writeMainBranchTestLog(townRoot, "gastown", "37ab61b2c4d1e5f6a7b8", goTestFixtureOneFailingPackage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if base := filepath.Base(logPath); !strings.Contains(base, "37ab61b2c4d1") {
+		t.Errorf("expected the tested head in the log filename, got %q", base)
+	}
+
+	// An undetermined head still yields a usable name rather than an empty
+	// segment or a bare "gastown-.log".
+	logPath, err = writeMainBranchTestLog(townRoot, "gastown", "", goTestFixtureOneFailingPackage)
+	if err != nil {
+		t.Fatalf("unexpected error for unknown head: %v", err)
+	}
+	if base := filepath.Base(logPath); !strings.HasPrefix(base, "gastown-unknown-") {
+		t.Errorf("expected an 'unknown' segment for an undetermined head, got %q", base)
+	}
+}
+
+// TestExtractDiagnosticLines_KeepsAssertionAfterFail is the gt-f57o core
+// requirement: the escalation must name the failing TEST and what it
+// asserted, not just the package. A "--- FAIL: TestX" marker with no
+// assertion line says a test failed but not what broke, and the assertion
+// line matches no failure pattern of its own.
+func TestExtractDiagnosticLines_KeepsAssertionAfterFail(t *testing.T) {
+	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage)
+	joined := strings.Join(diagnostic, "\n")
+
+	if !strings.Contains(joined, "--- FAIL: TestWidgetRenders") {
+		t.Errorf("expected the failing test name, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "widget_test.go:42: expected 3, got 4") {
+		t.Errorf("expected the assertion line that follows the failing test, got:\n%s", joined)
+	}
+}
+
+// TestExtractDiagnosticLines_KeepsNestedSubtestBlock covers the shape go test
+// prints for a failing subtest: the subtest's "--- FAIL" and its assertion are
+// both indented deeper than the parent's block, so a filter that anchored on
+// column zero, or that consumed only one line per marker, would lose them.
+func TestExtractDiagnosticLines_KeepsNestedSubtestBlock(t *testing.T) {
+	const fixture = `--- FAIL: TestParent (0.00s)
+    --- FAIL: TestParent/sub (0.00s)
+        parent_test.go:88: got 1, want 2
+FAIL
+FAIL	github.com/steveyegge/gastown/internal/parent	0.050s
+`
+	joined := strings.Join(extractDiagnosticLines(fixture), "\n")
+	if !strings.Contains(joined, "parent_test.go:88: got 1, want 2") {
+		t.Errorf("expected the nested subtest assertion, got:\n%s", joined)
+	}
+	if strings.Count(joined, "--- FAIL: TestParent/sub (0.00s)") != 1 {
+		t.Errorf("expected the nested failure to appear exactly once, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "internal/parent") {
+		t.Errorf("expected the failing package summary, got:\n%s", joined)
+	}
+}
+
+// TestExtractDiagnosticLines_CapHoldsWithAssertionBlocks proves the cap is
+// enforced even when every entry carries an assertion block, which can consume
+// two lines per marker.
+func TestExtractDiagnosticLines_CapHoldsWithAssertionBlocks(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < maxDiagnosticLines; i++ {
+		sb.WriteString("--- FAIL: TestSomething\n    something_test.go:1: boom\n")
+	}
+	diagnostic := extractDiagnosticLines(sb.String())
+	if len(diagnostic) > maxDiagnosticLines {
+		t.Errorf("expected at most %d lines, got %d", maxDiagnosticLines, len(diagnostic))
+	}
+}
+
+func TestComputeCPUIdlePercent(t *testing.T) {
+	tests := []struct {
+		name   string
+		load1  float64
+		numCPU int
+		want   float64
+	}{
+		{"fully idle host", 0, 8, 100},
+		{"half the cores busy", 4, 8, 50},
+		{"all cores busy", 8, 8, 0},
+		{"oversubscribed clamps to zero", 40, 8, 0},
+		{"unreadable core count fails open", 40, 0, 100},
+		{"negative load is nonsense, reads as idle", -1, 8, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computeCPUIdlePercent(tt.load1, tt.numCPU); got != tt.want {
+				t.Errorf("computeCPUIdlePercent(%v, %d) = %v, want %v", tt.load1, tt.numCPU, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHostBusyReason pins the skip decision, including the two configurations
+// that must NOT skip: an unset floor (the default) and an out-of-range one,
+// since a floor above 100 could never be met and would skip every cycle
+// forever — the "silently starve the patrol" failure the gate must not have.
+func TestHostBusyReason(t *testing.T) {
+	busy := hostLoad{IdlePercent: 4.0, Load1: 7.68, NumCPU: 8}
+	idle := hostLoad{IdlePercent: 87.5, Load1: 1.0, NumCPU: 8}
+
+	tests := []struct {
+		name     string
+		minIdle  float64
+		host     hostLoad
+		wantSkip bool
+	}{
+		{"saturated host trips the gate", 25, busy, true},
+		{"idle host runs", 25, idle, false},
+		{"floor disabled by default", 0, busy, false},
+		{"floor above 100 cannot starve the patrol", 150, busy, false},
+		{"exactly at the floor runs", 25, hostLoad{IdlePercent: 25, Load1: 6, NumCPU: 8}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := hostBusyReason(tt.minIdle, tt.host)
+			if tt.wantSkip {
+				if reason == "" {
+					t.Fatalf("expected host-busy skip for %+v with floor %v", tt.host, tt.minIdle)
+				}
+				// The skip must carry the numbers that justify it, so a
+				// skipped patrol is diagnosable from the log alone.
+				for _, want := range []string{"host busy", "CPU idle", "load1", "cores"} {
+					if !strings.Contains(reason, want) {
+						t.Errorf("skip reason %q missing %q", reason, want)
+					}
+				}
+				return
+			}
+			if reason != "" {
+				t.Errorf("expected no skip for %+v with floor %v, got %q", tt.host, tt.minIdle, reason)
+			}
+		})
+	}
+}
+
+// TestHostLoadString pins the shape of the host line the escalation body
+// carries, since the mayor reads it to tell a regression from contention.
+func TestHostLoadString(t *testing.T) {
+	got := (hostLoad{IdlePercent: 4.3, Load1: 7.65, NumCPU: 8}).String()
+	want := "CPU idle 4.3% (load1 7.65 on 8 cores)"
+	if got != want {
+		t.Errorf("hostLoad.String() = %q, want %q", got, want)
+	}
+}
+
+// TestMinCPUIdlePercentConfigWiring proves the gate is actually configurable
+// from patrols.main_branch_test — a knob that parses nowhere is not a knob.
+func TestMinCPUIdlePercentConfigWiring(t *testing.T) {
+	if got := mainBranchTestMinCPUIdlePercent(nil); got != 0 {
+		t.Errorf("expected the gate disabled with nil config, got %v", got)
+	}
+
+	var config DaemonPatrolConfig
+	raw := `{"type":"daemon-patrol-config","version":1,"patrols":{"main_branch_test":{"enabled":true,"min_cpu_idle_percent":25}}}`
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := mainBranchTestMinCPUIdlePercent(&config); got != 25 {
+		t.Errorf("expected configured floor 25, got %v", got)
+	}
+
+	// Unconfigured patrol: still disabled, not a zero-value pointer surprise.
+	var other DaemonPatrolConfig
+	if err := json.Unmarshal([]byte(`{"patrols":{"main_branch_test":{"enabled":true}}}`), &other); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := mainBranchTestMinCPUIdlePercent(&other); got != 0 {
+		t.Errorf("expected the gate disabled when unset, got %v", got)
+	}
+}
+
+// stubHostLoad pins the host-load reading for the duration of t so the
+// host-busy decision is testable without saturating the real machine.
+func stubHostLoad(t *testing.T, h hostLoad) {
+	t.Helper()
+	prev := measureHostLoadFn
+	measureHostLoadFn = func() hostLoad { return h }
+	t.Cleanup(func() { measureHostLoadFn = prev })
+}
+
+// TestRunMainBranchTests_SkipsWhenHostBusy is the gt-f57o acceptance case for
+// "run it while the box is saturated, the runner reports skipped, not FAILED":
+// with the gate configured, a busy host must end the cycle as a labelled skip
+// — not a red verdict, and not a cycle that quietly runs anyway.
+func TestRunMainBranchTests_SkipsWhenHostBusy(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 4.0, Load1: 7.68, NumCPU: 8})
+
+	minIdle := 25.0
+	var logged bytes.Buffer
+	d := &Daemon{
+		logger: log.New(&logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{Enabled: true, MinCPUIdlePercent: &minIdle},
+			},
+		},
+	}
+
+	d.runMainBranchTests()
+
+	out := logged.String()
+	if !strings.Contains(out, "skipped: host busy") {
+		t.Errorf("expected a host-busy skip, got:\n%s", out)
+	}
+	if strings.Contains(out, "FAILED") {
+		t.Errorf("a busy host must not produce a FAILED verdict:\n%s", out)
+	}
+	if strings.Contains(out, "starting patrol cycle") && strings.Contains(out, "patrol cycle complete") {
+		t.Errorf("expected the cycle to stop at the skip, not run to completion:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_RunsWhenHostIdleEnough is the guard's other half: the
+// gate must not skip a cycle it has no reason to skip.
+func TestRunMainBranchTests_RunsWhenHostIdleEnough(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 87.5, Load1: 1.0, NumCPU: 8})
+
+	minIdle := 25.0
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()}, // no rigs.json — the cycle finds no rigs and returns
+		logger: log.New(&logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{Enabled: true, MinCPUIdlePercent: &minIdle},
+			},
+		},
+	}
+
+	d.runMainBranchTests()
+
+	out := logged.String()
+	if strings.Contains(out, "skipped: host busy") {
+		t.Errorf("an idle host must not be skipped:\n%s", out)
+	}
+	if !strings.Contains(out, "host is idle enough to run") {
+		t.Errorf("expected the gate to record why it ran:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_HostBusyGateDisabledByDefault is the regression test
+// for the reviewer's objection to the first attempt at this gate: it must not
+// skip by default. With no configured floor, even a saturated host runs the
+// cycle, so a config typo or an unset knob can never silently stop the patrol
+// that catches regressions in main.
+func TestRunMainBranchTests_HostBusyGateDisabledByDefault(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8})
+
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{Enabled: true},
+			},
+		},
+	}
+
+	d.runMainBranchTests()
+
+	if out := logged.String(); strings.Contains(out, "skipped: host busy") {
+		t.Errorf("the host-busy gate must be opt-in, but it skipped:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_OutOfRangeFloorIsNotSilent covers the other way this
+// gate could starve the patrol: a floor above 100 can never be met, so the
+// cycle must both run and say in the log that the configured floor was
+// rejected. A misconfiguration that looks like a satisfied minimum would be
+// invisible in exactly the situation the gate exists to make legible.
+func TestRunMainBranchTests_OutOfRangeFloorIsNotSilent(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8})
+
+	minIdle := 150.0
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{Enabled: true, MinCPUIdlePercent: &minIdle},
+			},
+		},
+	}
+
+	d.runMainBranchTests()
+
+	out := logged.String()
+	if strings.Contains(out, "skipped: host busy") {
+		t.Errorf("an out-of-range floor must not skip every cycle:\n%s", out)
+	}
+	if !strings.Contains(out, "ignoring out-of-range min_cpu_idle_percent") {
+		t.Errorf("expected the rejected floor to be reported, got:\n%s", out)
 	}
 }
 
@@ -357,6 +667,186 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 		if strings.HasPrefix(strings.TrimSpace(line), "ok") {
 			t.Errorf("expected no passing-package lines in body, got:\n%s", body)
 		}
+	}
+}
+
+// fixtureEchoCommand is the command shape internal/daemon's own tests use to
+// exercise the extractor against realistic go test output: the whole fixture
+// as a printf argument. It is also the shape that fabricated a failure on
+// 2026-09-21 — the runner echoes the command it runs, so the fixture's
+// "--- FAIL: ..." and "FAIL\t<pkg>\t<secs>s" lines landed at column 0 of the
+// run's log and the extractor reported them as the failing package (gt-f57o,
+// second defect).
+func fixtureEchoCommand() string {
+	return "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
+}
+
+// TestRunCommandOnWorktree_LogCannotFabricateFailures is the regression test
+// for the second defect on this bead: the run's own log lines must not look
+// like test failures. The mayor was handed 'FAIL
+// github.com/steveyegge/gastown/internal/widget' — a package that does not
+// exist — because the log line announcing the command echoed a fixture with
+// newlines in it, putting go-test-shaped lines at column 0 of the log the
+// extractor reads. Before the command was flattened onto one line, the
+// extractor found four fabricated lines here.
+func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logged, "", 0),
+	}
+
+	_ = d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", fixtureEchoCommand())
+
+	if fabricated := extractDiagnosticLines(logged.String()); len(fabricated) != 0 {
+		t.Errorf("the runner's own log lines must not read as test failures, got:\n%s", strings.Join(fabricated, "\n"))
+	}
+}
+
+// TestExtractDiagnosticLines_IgnoresIndentedMarkers is the same defect one
+// layer down: go test indents a failing test's output — its log lines, its
+// failure message — past column 0, so go-test-shaped text there is context,
+// not a verdict. Anchoring the pattern at column 0 is what separates the two;
+// an indented copy may still appear in the body as a block under a real
+// marker (that is how a nested subtest's assertion gets in), but it can never
+// stand as a failure on its own.
+func TestExtractDiagnosticLines_IgnoresIndentedMarkers(t *testing.T) {
+	const fixtureInAMessage = `--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage (0.01s)
+    main_branch_test_runner_test.go:344: expected body to name the failing package, got:
+        --- FAIL: TestWidgetRenders (0.00s)
+        widget_test.go:42: expected 3, got 4
+        FAIL
+        FAIL	github.com/steveyegge/gastown/internal/widget	0.030s
+FAIL
+FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
+`
+	diagnostic := extractDiagnosticLines(fixtureInAMessage)
+	joined := strings.Join(diagnostic, "\n")
+
+	if !strings.Contains(joined, "--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage") {
+		t.Errorf("expected the real failing test marker, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "FAIL\tgithub.com/steveyegge/gastown/internal/daemon") {
+		t.Errorf("expected the real failing package, got:\n%s", joined)
+	}
+
+	for _, line := range diagnostic {
+		if leadingIndentWidth(line) != 0 {
+			continue // block context under a real marker, not a verdict
+		}
+		if strings.Contains(line, "internal/widget") || strings.Contains(line, "TestWidgetRenders") {
+			t.Errorf("a line go test wrote as test output was reported as a failure marker: %q", line)
+		}
+	}
+}
+
+// TestOneLine pins the sanitizer: a log entry is one line, and nothing echoed
+// into it may add another.
+func TestOneLine(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single line unchanged", "GOFLAGS=-p=8 make test", "GOFLAGS=-p=8 make test"},
+		{"newlines escaped", "printf 'a\n--- FAIL: TestX\nFAIL'", `printf 'a\n--- FAIL: TestX\nFAIL'`},
+		{"crlf escaped", "a\r\nb", `a\nb`},
+		{"bare carriage return escaped", "a\rb", `a\nb`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := oneLine(tt.in); got != tt.want {
+				t.Errorf("oneLine(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("length bounded", func(t *testing.T) {
+		got := oneLine(strings.Repeat("x", maxLoggedCommandChars+50))
+		if len(got) != maxLoggedCommandChars+3 {
+			t.Errorf("expected %d chars plus an ellipsis, got %d", maxLoggedCommandChars, len(got))
+		}
+	})
+
+	t.Run("multi-byte runes are not split", func(t *testing.T) {
+		got := oneLine(strings.Repeat("é", maxLoggedCommandChars+50))
+		if !utf8.ValidString(got) {
+			t.Errorf("oneLine produced invalid UTF-8: %q", got)
+		}
+	})
+}
+
+// TestRunCommandOnWorktree_LogLineNamesTheTestedHead is the gt-f57o
+// requirement that a verdict be matchable to a head: the run's log line must
+// carry the commit under test, so three red verdicts can be compared against
+// the heads the refinery verified green instead of being indistinguishable
+// "gastown: running test" entries.
+func TestRunCommandOnWorktree_LogLineNamesTheTestedHead(t *testing.T) {
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logged, "", 0),
+	}
+
+	if err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6", t.TempDir(), "test", "exit 0"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if out := logged.String(); !strings.Contains(out, "running test on 37ab61b2c4d1") {
+		t.Errorf("expected the tested head in the log line, got: %s", out)
+	}
+}
+
+// TestRunCommandOnWorktree_BodyNamesTestAndHostLoad is the gt-f57o acceptance
+// case: an escalation must let the mayor triage without re-running the
+// package by hand — the failing test and its assertion, the tested sha, and
+// the host load the verdict was produced under.
+func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8})
+
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
+
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6a7b8", t.TempDir(), "test", cmd)
+	if err == nil {
+		t.Fatal("expected error from failing command")
+	}
+
+	body := err.Error()
+	for _, want := range []string{
+		"--- FAIL: TestWidgetRenders",              // the failing test
+		"widget_test.go:42: expected 3, got 4",     // what it asserted
+		"commit: 37ab61b2c4d1e5f6a7b8",             // the head tested
+		"host at start: CPU idle 3.5% (load1 7.72", // contention context
+		"host at end: CPU idle 3.5% (load1 7.72",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected body to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	// The body's log path must name a file that really holds the full output:
+	// the worktree the run happened in is deleted afterwards, so a body
+	// pointing at a log that was never written leaves the mayor with the same
+	// rerun-by-hand problem as before (gt-f57o).
+	idx := strings.Index(body, "log: ")
+	if idx < 0 {
+		t.Fatalf("expected a log path in the body, got:\n%s", body)
+	}
+	logPath := strings.TrimSpace(body[idx+len("log: "):])
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("body named log %q, which could not be read: %v", logPath, readErr)
+	}
+	if string(data) != goTestFixtureOneFailingPackage {
+		t.Errorf("persisted log does not hold the full combined output")
+	}
+	if !strings.Contains(filepath.Base(logPath), "37ab61b2c4d1") {
+		t.Errorf("expected the tested head in the log filename, got %q", filepath.Base(logPath))
 	}
 }
 
