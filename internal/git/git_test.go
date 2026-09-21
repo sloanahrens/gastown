@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func initTestRepo(t *testing.T) string {
@@ -3908,6 +3909,67 @@ func TestBranchTargetStatusPreservesSquashMergedAdvancedTarget(t *testing.T) {
 	}
 	if status.Preserved || status.UnpreservedPatchCount == 0 {
 		t.Fatalf("BranchTargetStatus after extra work = %+v, want unpreserved work", status)
+	}
+}
+
+// revParse returns the SHA a ref resolves to in dir.
+func revParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-c", "protocol.file.allow=always", "rev-parse", ref)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse %s in %s: %v\n%s", ref, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestFetchDefaultBranchWithTimeoutRefreshesStaleDefaultBranch covers the
+// refresh that makes a content comparison against the default branch mean
+// anything: a scan running in a clone that stopped fetching must be able to
+// pull main forward, or it judges today's work by yesterday's main forever.
+func TestFetchDefaultBranchWithTimeoutRefreshesStaleDefaultBranch(t *testing.T) {
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	if got := g.RemoteDefaultBranch(); got != mainBranch {
+		t.Fatalf("RemoteDefaultBranch() = %q, want %q", got, mainBranch)
+	}
+
+	// Advance main through a second clone, so the first clone's view is stale.
+	other := filepath.Join(filepath.Dir(localDir), "other")
+	if out, err := exec.Command("git", "clone", remoteDir, other).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	runGit(t, other, "checkout", mainBranch)
+	if err := os.WriteFile(filepath.Join(other, "landed.txt"), []byte("landed\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, other, "add", "landed.txt")
+	runGit(t, other, "commit", "-m", "advance main")
+	runGit(t, other, "push", "origin", mainBranch)
+
+	advanced := revParse(t, other, "HEAD")
+	if stale := revParse(t, localDir, "origin/"+mainBranch); stale == advanced {
+		t.Fatalf("fixture is not exercising a stale view: both at %s", stale)
+	}
+
+	if err := g.FetchDefaultBranchWithTimeout("origin", 30*time.Second); err != nil {
+		t.Fatalf("FetchDefaultBranchWithTimeout: %v", err)
+	}
+	if got := revParse(t, localDir, "origin/"+mainBranch); got != advanced {
+		t.Errorf("origin/%s = %s after fetch, want %s", mainBranch, got, advanced)
+	}
+}
+
+// TestFetchDefaultBranchWithTimeoutErrorsOnUnreachableRemote pins the failure
+// direction: a broken remote ends the fetch, it does not stall the scan.
+func TestFetchDefaultBranchWithTimeoutErrorsOnUnreachableRemote(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	runGit(t, localDir, "remote", "set-url", "origin", filepath.Join(localDir, "does-not-exist.git"))
+
+	if err := g.FetchDefaultBranchWithTimeout("origin", 30*time.Second); err == nil {
+		t.Error("FetchDefaultBranchWithTimeout() = nil, want an error for an unreachable remote")
 	}
 }
 
