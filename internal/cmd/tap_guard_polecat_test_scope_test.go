@@ -26,6 +26,11 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"subpackage of a heavy package", "go test ./internal/cmd/sub/", true},
 		{"ancestor wildcard covering heavy packages", "go test ./internal/...", true},
 		{"bare ancestor wildcard", "go test internal/...", true},
+		// "." and "./" name only the current package, not the repo (om
+		// review of gt-wisp-7sy: they were misclassified whole-repo and
+		// blocked every in-directory `go test .`).
+		{"current package dot", "go test .", false},
+		{"current package dot with dots", "go test ./", false},
 		// make test is `go test ./...` by another name; the wrapper and an env
 		// prefix change nothing about the host CPU it burns (gt-v6se).
 		{"make test", "make test", true},

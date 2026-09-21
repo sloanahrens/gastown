@@ -88,7 +88,15 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 	for _, arg := range goTestPackageArgs(rest) {
 		norm := normalizeGoPackageArg(arg)
 		if norm == "" {
-			return "polecat 'go test' of the whole repo", []string{arg}
+			// "." and "./" name only the current package — go resolves
+			// them to the package in the cwd, not the repo. Only a bare
+			// "..." / "./..." is whole-repo (om review of gt-wisp-7sy:
+			// normalization erased "." to "", the whole-repo marker, and
+			// the rule blocked every in-directory `go test .`).
+			if isWholeRepoPackageArg(arg) {
+				return "polecat 'go test' of the whole repo", []string{arg}
+			}
+			continue
 		}
 		switch {
 		case heavyTestPackages[norm] || heavyTestPackages[topTwoPathSegments(norm)]:

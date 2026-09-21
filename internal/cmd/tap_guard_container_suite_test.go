@@ -83,6 +83,10 @@ func TestContainerSuitePackagesIntersect(t *testing.T) {
 		{"no args", nil, false, 0},
 		{"whole repo dots", []string{"./..."}, true, 0},
 		{"bare ellipsis", []string{"..."}, true, 0},
+		// "." and "./" name only the current package, not the repo: judged
+		// like any other single-package path (om review of gt-wisp-7sy).
+		{"current package dot", []string{"."}, false, 0},
+		{"current package dot with slash", []string{"./"}, false, 0},
 		{"exact container package", []string{"./internal/beads/..."}, false, 1},
 		{"ancestor covers multiple container packages", []string{"./internal/..."}, false, len(containerSuitePackages)},
 		{"non-container package", []string{"./internal/style/..."}, false, 0},

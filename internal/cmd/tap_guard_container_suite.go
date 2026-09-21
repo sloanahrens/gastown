@@ -353,11 +353,15 @@ func normalizeGoPackageArg(arg string) string {
 // arguments) cover the whole repo, or which entries of containerSuitePackages
 // they overlap with. An arg overlaps a listed package if it names that
 // package exactly, names an ancestor directory of it (e.g. "internal/..."
-// covers "internal/beads"), or names a path inside it. A bare "go test"
-// with no package arguments is NOT treated as whole-repo — go resolves that
-// to only the current directory's package, which this guard cannot verify
-// without also knowing the invocation's cwd; failing to block here is safer
-// than guessing (see tap_guard_dangerous.go's false-positive history).
+// covers "internal/beads"), or names a path inside it. "." and "./" name
+// only the current package, so they are judged exactly like any other
+// single-package path against the listing (om review of gt-wisp-7sy: they
+// were classified whole-repo because normalization erased them to "", the
+// whole-repo marker). A bare "go test" with no package arguments is NOT
+// treated as whole-repo — go resolves that to only the current directory's
+// package, which this guard cannot verify without also knowing the
+// invocation's cwd; failing to block here is safer than guessing (see
+// tap_guard_dangerous.go's false-positive history).
 func containerSuitePackagesIntersect(pkgArgs []string) (wholeRepo bool, matched []string) {
 	if len(pkgArgs) == 0 {
 		return false, nil
@@ -365,8 +369,11 @@ func containerSuitePackagesIntersect(pkgArgs []string) (wholeRepo bool, matched 
 	seen := map[string]bool{}
 	for _, arg := range pkgArgs {
 		p := normalizeGoPackageArg(arg)
-		if p == "" {
+		if p == "" && isWholeRepoPackageArg(arg) {
 			return true, nil
+		}
+		if p == "" {
+			continue // "." / "./" name only the cwd's package; nothing more to judge
 		}
 		for _, pkg := range containerSuitePackages {
 			if p == pkg || strings.HasPrefix(pkg, p+"/") || strings.HasPrefix(p, pkg+"/") {
@@ -378,6 +385,14 @@ func containerSuitePackagesIntersect(pkgArgs []string) (wholeRepo bool, matched 
 		}
 	}
 	return false, matched
+}
+
+// isWholeRepoPackageArg reports whether a go test package argument covers the
+// whole repo: a bare "..." or "./...". The single-character "." and "./"
+// name only the current package (their normalization result is "") but are
+// not whole-repo.
+func isWholeRepoPackageArg(arg string) bool {
+	return arg == "..." || arg == "./..."
 }
 
 // printContainerSuiteBlock prints the standard block banner to stderr,
