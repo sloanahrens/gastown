@@ -457,6 +457,10 @@ git status              # Must be clean (no uncommitted changes)
 git log --oneline -3    # Verify your commits are present
 ```
 
+**Title check before submit.** If the work disproved or changed your bead's
+title, amend it before running `{{ cmd }} done` — the submit step of
+`mol-polecat-work` carries the pre-flight and its exit criterion.
+
 Then submit: **`{{ cmd }} done`** ← MANDATORY FINAL STEP
 
 This single command verifies git is clean and submits your branch to the merge

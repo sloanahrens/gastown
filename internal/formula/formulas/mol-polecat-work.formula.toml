@@ -578,6 +578,19 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 `gt done` will reject zero-commit branches for polecats.
 
+**Pre-flight: Is your bead's title still true?**
+Every later reader sees a bead's title before the diff, and the title outlives
+the investigation that produced it. If the work DISPROVED or changed the
+title's claim — a hypothesis that did not hold, a scope that shrank or
+redirected — amend the title before submitting:
+```bash
+bd update {{issue}} --title "DISPROVEN: <original claim>; <what actually shipped>"
+```
+Prefixing `DISPROVEN:` is the cheap default; restating the title to what
+shipped is equivalent. Exit criterion: `bd show {{issue}}` no longer asserts
+anything the work disproved, because the title becomes the merged commit
+subject and the next reader's premise (gt-3t2).
+
 **Run gt done:**
 ```bash
 # For code tasks (gt done lints and tests your changed non-container packages,

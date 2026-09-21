@@ -264,7 +264,10 @@ When your work is done, follow this checklist — **the final step is REQUIRED**
        → every file listed is one you changed for this issue. A file you never
          touched, or a big negative line count, means your tree is stale:
          rebase your changes (Git Operations) — never reset onto origin/main.
-[ ] 5. Self-clean:        gt done   ← MANDATORY FINAL STEP
+[ ] 5. Title check: if the work disproved or changed your bead's title, amend
+       it before submitting — the title pre-flight in your formula's submit
+       step (mol-polecat-work) has the command and the exit criterion.
+[ ] 6. Self-clean:        gt done   ← MANDATORY FINAL STEP
 ```
 
 **Quality gates are not optional.** Worktrees may not trigger pre-commit hooks,
