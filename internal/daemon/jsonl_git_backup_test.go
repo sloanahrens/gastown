@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -1066,4 +1067,211 @@ func keys(m map[string]interface{}) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+// ageIndexLock writes an index.lock in gitRepo aged by age, standing in for a
+// lock a killed git process orphaned, and returns its path.
+func ageIndexLock(t *testing.T, gitRepo string, age time.Duration) string {
+	t.Helper()
+	lockPath := gitIndexLockPath(gitRepo)
+	if err := os.WriteFile(lockPath, nil, 0644); err != nil {
+		t.Fatalf("writing %s: %v", lockPath, err)
+	}
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(lockPath, when, when); err != nil {
+		t.Fatalf("aging %s: %v", lockPath, err)
+	}
+	return lockPath
+}
+
+func TestRunGitCmd_TimeoutIsDistinguishable(t *testing.T) {
+	// gt-1aj2: callers clear an orphaned index lock when a command is killed on
+	// its deadline, so a timeout must be tellable apart from a normal git error.
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	// An already-expired budget is the state a killed command ends in.
+	if err := d.runGitCmd(gitRepo, time.Nanosecond, "add", "-A", "."); !errors.Is(err, errGitCmdTimeout) {
+		t.Fatalf("expired budget: got %v, want errGitCmdTimeout", err)
+	}
+
+	if err := d.runGitCmd(gitRepo, 30*time.Second, "not-a-git-command"); err == nil || errors.Is(err, errGitCmdTimeout) {
+		t.Fatalf("real git failure: got %v, want a plain error", err)
+	}
+}
+
+func TestIsIndexLockExistsError(t *testing.T) {
+	tests := []struct {
+		name   string
+		errMsg string
+		want   bool
+	}{
+		{"git fatal", "fatal: Unable to create '/repo/.git/index.lock': File exists.", true},
+		{"git alternative phrasing", "fatal: Unable to create '/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository", true},
+		{"missing file", "fatal: pathspec 'x' did not match any files", false},
+		{"index lock named but unrelated", "error: index.lock is not a valid object name", false},
+		{"push auth failure", "fatal: Authentication failed for 'https://github.com/x/y'", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIndexLockExistsError(errors.New(tt.errMsg)); got != tt.want {
+				t.Errorf("isIndexLockExistsError(%q) = %v, want %v", tt.errMsg, got, tt.want)
+			}
+		})
+	}
+	if isIndexLockExistsError(nil) {
+		t.Error("isIndexLockExistsError(nil) = true, want false")
+	}
+}
+
+func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	t.Run("stale is removed", func(t *testing.T) {
+		gitRepo := t.TempDir()
+		initGitRepo(t, gitRepo)
+		lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
+		if !d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
+			t.Fatal("expected a lock older than the grace period to be cleared")
+		}
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Errorf("lock still present, stat err = %v", err)
+		}
+	})
+
+	t.Run("fresh is left for its owner", func(t *testing.T) {
+		gitRepo := t.TempDir()
+		initGitRepo(t, gitRepo)
+		lockPath := ageIndexLock(t, gitRepo, 0)
+		if d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
+			t.Fatal("a lock younger than the grace period must not be cleared")
+		}
+		if _, err := os.Stat(lockPath); err != nil {
+			t.Errorf("fresh lock should still exist: %v", err)
+		}
+	})
+
+	t.Run("absent is a no-op", func(t *testing.T) {
+		gitRepo := t.TempDir()
+		initGitRepo(t, gitRepo)
+		if d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
+			t.Error("no lock on disk should report nothing cleared")
+		}
+	})
+}
+
+func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
+	// A lock written after a command started is that command's own orphan.
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+	started := time.Now().Add(-time.Second)
+	lockPath := ageIndexLock(t, gitRepo, 0)
+	if !d.clearIndexLockModifiedSince(gitRepo, started) {
+		t.Fatal("expected a lock written after the command started to be cleared")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("lock still present, stat err = %v", err)
+	}
+
+	// A lock predating the command belongs to somebody else.
+	gitRepo2 := t.TempDir()
+	initGitRepo(t, gitRepo2)
+	lockPath2 := ageIndexLock(t, gitRepo2, time.Hour)
+	if d.clearIndexLockModifiedSince(gitRepo2, time.Now()) {
+		t.Fatal("a lock older than the command must not be cleared")
+	}
+	if _, err := os.Stat(lockPath2); err != nil {
+		t.Errorf("pre-existing lock should still exist: %v", err)
+	}
+}
+
+func TestRunGitIndexCmd_RecoversFromStaleLock(t *testing.T) {
+	// A lock orphaned by a dead tick must not fail the next one (gt-1aj2).
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+	if err := os.WriteFile(filepath.Join(gitRepo, "new.jsonl"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if err := d.runGitIndexCmd(gitRepo, 30*time.Second, "add", "-A", "."); err != nil {
+		t.Fatalf("stale index lock should be cleared and the command retried: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("stale lock should be gone, stat err = %v", err)
+	}
+
+	out, err := exec.Command("git", "-C", gitRepo, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	if !contains(string(out), "new.jsonl") {
+		t.Errorf("add should have staged new.jsonl, got: %q", out)
+	}
+}
+
+func TestRunGitIndexCmd_LeavesFreshLock(t *testing.T) {
+	// A lock with a live owner is not an orphan: failing is correct, and the
+	// lock must survive so the real owner can finish.
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+	lockPath := ageIndexLock(t, gitRepo, 0)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	err := d.runGitIndexCmd(gitRepo, 30*time.Second, "add", "-A", ".")
+	if err == nil {
+		t.Fatal("expected the live lock to fail the command")
+	}
+	if !isIndexLockExistsError(err) {
+		t.Errorf("expected an index.lock error, got: %v", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Errorf("a live owner's lock must not be removed: %v", statErr)
+	}
+}
+
+func TestCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testing.T) {
+	// End-to-end for gt-1aj2: the tick after a killed `git add` used to fail
+	// with "index.lock: File exists" forever, and three such ticks escalated.
+	root := t.TempDir()
+	gitRepo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(gitRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, gitRepo)
+
+	remote := filepath.Join(root, "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", gitRepo, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	dbDir := filepath.Join(gitRepo, "testdb")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 5)
+	lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
+		t.Fatalf("tick after a stale index lock should succeed, got: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("stale lock should have been cleared, stat err = %v", err)
+	}
+
+	out, err := exec.Command("git", "-C", remote, "log", "--all", "--format=%s").Output()
+	if err != nil {
+		t.Fatalf("git log on remote: %v", err)
+	}
+	if !contains(string(out), "backup") {
+		t.Errorf("expected the backup commit to reach the remote, got: %q", out)
+	}
 }
