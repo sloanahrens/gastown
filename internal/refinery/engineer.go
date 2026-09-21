@@ -314,6 +314,7 @@ type Engineer struct {
 	mergeSlotRelease      func(holder string) error
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
+	mergeSlotStaleAfter   time.Duration // Per-push lease TTL (0 = defaultMergeSlotStaleAfter)
 	recoverDeadWorker     func(deadWorkerRecoveryRequest) bool
 	testAllowSyntheticMRs bool               // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
 	editorialExec         editorial.ExecFunc // Gate-script invoker for batch editorial reviews; production: editorial.RunGateScript, tests override with a stub.
@@ -1154,9 +1155,6 @@ func (e *Engineer) acquireMainPushSlot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("ensure merge slot exists: %w", err)
 	}
 
-	seq := atomic.AddUint64(&mergeSlotSeq, 1)
-	holder := fmt.Sprintf("%s/refinery/push/%d-%d", e.rig.Name, time.Now().UnixNano(), seq)
-
 	// The conflict-resolution path holds the slot with holder "rigName/refinery".
 	// Both push and conflict-resolution run in the same single-threaded refinery
 	// agent, so if our own rig holds the slot for conflict resolution, we can
@@ -1166,6 +1164,32 @@ func (e *Engineer) acquireMainPushSlot(ctx context.Context) (string, error) {
 	backoff := e.mergeSlotRetryBackoff
 	if backoff == 0 {
 		backoff = 500 * time.Millisecond
+	}
+
+	// acquireOnce performs one attempt: it reports the holder to release, or
+	// the holder that refused us, or neither when the conflict-resolution path
+	// owns the slot. The holder is stamped per attempt so its encoded age is
+	// the lease's real age, retries included.
+	acquireOnce := func() (acquired string, refusedBy string, ok bool, err error) {
+		seq := atomic.AddUint64(&mergeSlotSeq, 1)
+		holder := fmt.Sprintf("%s/refinery/push/%d-%d", e.rig.Name, time.Now().UnixNano(), seq)
+
+		status, err := e.mergeSlotAcquire(holder, false)
+		if err != nil {
+			return "", "", false, fmt.Errorf("acquire merge slot %s (%s): %w", slotID, holder, err)
+		}
+		if status == nil {
+			return "", "", false, fmt.Errorf("acquire merge slot %s (%s): empty status", slotID, holder)
+		}
+		if status.Available || status.Holder == holder {
+			return holder, "", true, nil
+		}
+		// Slot held by our own conflict-resolution path — safe to proceed.
+		if status.Holder == selfConflictHolder {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Merge slot held by conflict-resolution path, proceeding\n")
+			return "", "", true, nil // No holder to release — conflict-resolution owns the slot
+		}
+		return "", status.Holder, false, nil
 	}
 
 	for attempt := 0; attempt <= e.mergeSlotMaxRetries; attempt++ {
@@ -1179,20 +1203,24 @@ func (e *Engineer) acquireMainPushSlot(ctx context.Context) (string, error) {
 			backoff = min(backoff*2, 10*time.Second)
 		}
 
-		status, err := e.mergeSlotAcquire(holder, false)
+		acquired, refusedBy, ok, err := acquireOnce()
 		if err != nil {
-			return "", fmt.Errorf("acquire merge slot %s (%s): %w", slotID, holder, err)
+			return "", err
 		}
-		if status == nil {
-			return "", fmt.Errorf("acquire merge slot %s (%s): empty status", slotID, holder)
+		if ok {
+			return acquired, nil
 		}
-		if status.Available || status.Holder == holder {
-			return holder, nil
-		}
-		// Slot held by our own conflict-resolution path — safe to proceed.
-		if status.Holder == selfConflictHolder {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Merge slot held by conflict-resolution path, proceeding\n")
-			return "", nil // No holder to release — conflict-resolution owns the slot
+
+		// A lease its owner abandoned mid-push never clears on its own, so
+		// take it now instead of waiting out a backoff for it (gt-pp44).
+		if e.reclaimStalePushLease(refusedBy) {
+			acquired, _, ok, err = acquireOnce()
+			if err != nil {
+				return "", err
+			}
+			if ok {
+				return acquired, nil
+			}
 		}
 	}
 
@@ -1592,15 +1620,14 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		AgentBead:   mr.AgentBead,
 	})
 
-	// Release merge slot if this was a conflict resolution
-	// The slot is held while conflict resolution is in progress
+	// Release the conflict-resolution lease. The bare rig/refinery identity is
+	// createConflictResolutionTaskForMR's, and it is held across a dispatched
+	// task, so this merge is its only release point; a refusal means this merge
+	// held no conflict lease, which is the ordinary case — a push releases the
+	// different per-push identity it acquired (gt-pp44).
 	holder := e.rig.Name + "/refinery"
-	if err := e.mergeSlotRelease(holder); err != nil {
-		// Best-effort: slot release failures are always non-fatal.
-		// Slot may not have been held (optional acquisition) or may have expired.
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Note: merge slot release: %v\n", err)
-	} else {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Released merge slot\n")
+	if err := e.mergeSlotRelease(holder); err != nil && !errors.Is(err, beads.ErrMergeSlotNotHolder) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not release conflict-resolution merge slot: %v\n", err)
 	}
 	if err := e.verifyMRInfoPostMergeProof(mr); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Post-merge proof failed for %s: %v\n", mr.ID, err)
@@ -2148,19 +2175,34 @@ func (e *Engineer) createConflictResolutionTaskForMR(mr *MRInfo, _ ProcessResult
 		// Try to acquire the merge slot
 		holder := e.rig.Name + "/refinery"
 		status, err := e.mergeSlotAcquire(holder, false)
-		if err != nil {
+		if status != nil && !status.Available && status.Holder != "" && status.Holder != holder {
+			// A per-push lease its owner abandoned defers every conflict task
+			// forever, and when no push follows, nothing else reclaims it
+			// (gt-pp44) — so clear it and contend for real.
+			if e.reclaimStalePushLease(status.Holder) {
+				retryStatus, retryErr := e.mergeSlotAcquire(holder, false)
+				switch {
+				case retryErr != nil:
+					err = retryErr
+				case retryStatus != nil:
+					status = retryStatus
+				}
+			}
+		}
+		switch {
+		case err != nil:
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not acquire merge slot: %v\n", err)
 			// Continue anyway - slot is optional
-		} else if status == nil {
+		case status == nil:
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: merge slot returned nil status\n")
 			// Continue anyway - slot is optional
-		} else if !status.Available && status.Holder != "" && status.Holder != holder {
+		case !status.Available && status.Holder != "" && status.Holder != holder:
 			// Slot is held by someone else - skip creating the task
 			// The MR stays in queue and will retry when slot is released
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Merge slot held by %s - deferring conflict resolution\n", status.Holder)
 			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s will retry after current resolution completes\n", mr.ID)
 			return "", nil // Not an error - just deferred
-		} else {
+		default:
 			slotHolder = holder
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Acquired merge slot: %s\n", slotID)
 		}
