@@ -6426,3 +6426,131 @@ func TestBuildStartupCommandWithAgentOverrideSetsGTAgentForOpenCode(t *testing.T
 		t.Errorf("opencode should not get Claude --settings, got: %q", cmd)
 	}
 }
+
+// The groq-compound builtin stores a ${GROQ_API_KEY} reference in its Env, not
+// the key. Resolving it at spawn is what makes the builtin usable without a
+// cost tier; ShellQuote would otherwise export the five-character literal
+// (gt-yih1).
+func TestBuildStartupCommand_GroqCompoundResolvesKeyReference(t *testing.T) {
+	const liveKey = "gsk_test_key_12345"
+	t.Setenv("GROQ_API_KEY", liveKey)
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	townSettings.RoleAgents = map[string]string{constants.RoleWitness: string(AgentGroqCompound)}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+
+	if !strings.Contains(cmd, "ANTHROPIC_API_KEY="+liveKey) {
+		t.Errorf("startup command does not export the resolved key: %q", cmd)
+	}
+	if strings.Contains(cmd, "${GROQ_API_KEY}") || strings.Contains(cmd, "$GROQ_API_KEY") {
+		t.Errorf("startup command still carries the unexpanded reference: %q", cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL=https://api.groq.com/openai/v1") {
+		t.Errorf("startup command does not route to Groq: %q", cmd)
+	}
+}
+
+func TestValidateAgentConfig_ReportsUnsetEnvReference(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "")
+
+	err := ValidateAgentConfig(string(AgentGroqCompound), nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when the referenced variable is unset")
+	}
+	if !strings.Contains(err.Error(), "GROQ_API_KEY") {
+		t.Errorf("error should name the unset variable, got: %v", err)
+	}
+}
+
+func TestValidateAgentConfig_AcceptsSetEnvReference(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "gsk_test_key_12345")
+
+	if err := ValidateAgentConfig(string(AgentGroqCompound), nil, nil); err != nil {
+		t.Errorf("groq-compound should validate once GROQ_API_KEY is set, got: %v", err)
+	}
+}
+
+// The cost tier persists groq-compound as a custom agent holding the
+// ${GROQ_API_KEY} reference — the path that used to be the only one that
+// worked, and only by writing the live key into settings. Spawning it must
+// still export the key, now without the key ever landing on disk (gt-yih1).
+func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing.T) {
+	const liveKey = "gsk_tier_key_67890"
+	t.Setenv("GROQ_API_KEY", liveKey)
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	if err := ApplyCostTier(townSettings, TierCustomGroqOpus); err != nil {
+		t.Fatalf("ApplyCostTier: %v", err)
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	persisted := townSettings.Agents[string(AgentGroqCompound)]
+	if persisted == nil {
+		t.Fatal("tier did not persist a groq-compound agent")
+	}
+	if got := persisted.Env["ANTHROPIC_API_KEY"]; got != "${GROQ_API_KEY}" {
+		t.Errorf("persisted ANTHROPIC_API_KEY = %q, want the %q reference (never the key)",
+			got, "${GROQ_API_KEY}")
+	}
+
+	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+
+	if !strings.Contains(cmd, "ANTHROPIC_API_KEY="+liveKey) {
+		t.Errorf("startup command does not export the resolved key: %q", cmd)
+	}
+	if strings.Contains(cmd, "$GROQ_API_KEY") {
+		t.Errorf("startup command still carries the unexpanded reference: %q", cmd)
+	}
+}
+
+// An agent resolved out of settings skips ValidateAgentConfig, so the spawn is
+// where an unset reference has to stop it (gt-yih1).
+func TestBuildStartupCommand_StopsOnUnsetEnvReference(t *testing.T) {
+	t.Setenv("GT_TEST_UNSET_TOKEN", "")
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	townSettings.RoleAgents = map[string]string{constants.RoleWitness: "proxied-agent"}
+	townSettings.Agents["proxied-agent"] = &RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"ANTHROPIC_AUTH_TOKEN": "${GT_TEST_UNSET_TOKEN}"},
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	_, err := BuildStartupCommandFromConfig(AgentEnvConfig{
+		Role:     constants.RoleWitness,
+		Rig:      "testrig",
+		TownRoot: townRoot,
+	}, rigPath, "", "")
+	if err == nil {
+		t.Fatal("expected the spawn to stop on an unset reference")
+	}
+	if !strings.Contains(err.Error(), "GT_TEST_UNSET_TOKEN") {
+		t.Errorf("error should name the unset variable, got: %v", err)
+	}
+}

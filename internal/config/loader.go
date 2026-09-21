@@ -1365,7 +1365,8 @@ func resolveAgentConfigWithOverrideInternal(townRoot, rigPath, agentOverride str
 	return rc, agentName, nil
 }
 
-// ValidateAgentConfig checks if an agent configuration is valid and the binary exists.
+// ValidateAgentConfig checks if an agent configuration is valid, the binary
+// exists, and the env it references can be resolved.
 // Returns an error describing the issue, or nil if valid.
 func ValidateAgentConfig(agentName string, townSettings *TownSettings, rigSettings *RigSettings) error {
 	// Check if agent exists in config
@@ -1379,7 +1380,37 @@ func ValidateAgentConfig(agentName string, townSettings *TownSettings, rigSettin
 		return fmt.Errorf("agent %q binary %q not found in PATH", agentName, rc.Command)
 	}
 
+	// An unset ${VAR} reference would expand to an empty credential and fail
+	// only once the agent is already running, so report it here — callers
+	// treat this as "unusable in this environment" and fall back, which beats
+	// an auth error in a tmux pane nobody is watching (gt-yih1). This covers
+	// an agent named directly (the builtin preset); an agent resolved out of
+	// settings skips this function, and BuildStartupCommandWithAgentOverride
+	// stops the spawn instead.
+	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+		return fmt.Errorf("agent %q env references %s, which is not set in the environment",
+			agentName, strings.Join(missing, ", "))
+	}
+
 	return nil
+}
+
+// unsetEnvRefs returns the ${VAR} names referenced by env values that have no
+// value in the process environment, deduplicated and sorted.
+func unsetEnvRefs(env map[string]string) []string {
+	seen := make(map[string]bool)
+	var missing []string
+	for _, v := range env {
+		for _, name := range envRefNames(v) {
+			if os.Getenv(name) != "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // lookupAgentConfigIfExists looks up an agent by name but returns nil if not found
@@ -2430,8 +2461,10 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 	// Pass rc.Args so wrapper-unwrap can find the real binary.
 	processNames := ResolveProcessNames(rc.ResolvedAgent, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
-	for k, v := range rc.Env {
+	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
+	// resolving any ${VAR} reference here rather than at config load so it
+	// reads the environment of the process doing the spawning.
+	for k, v := range ExpandEnvRefs(rc.Env) {
 		resolvedEnv[k] = v
 	}
 
@@ -2699,8 +2732,20 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	// can find the real agent binary.
 	processNamesOverride := ResolveProcessNames(agentForProcess, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNamesOverride, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
-	for k, v := range rc.Env {
+	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
+	// resolving any ${VAR} reference here rather than at config load so it
+	// reads the environment of the process doing the spawning. An unresolved
+	// reference stops the spawn: this is the only check an agent resolved out
+	// of settings passes (gt-yih1).
+	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+		name := agentForProcess
+		if name == "" {
+			name = rc.Provider
+		}
+		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
+			name, strings.Join(missing, ", "))
+	}
+	for k, v := range ExpandEnvRefs(rc.Env) {
 		resolvedEnv[k] = v
 	}
 
