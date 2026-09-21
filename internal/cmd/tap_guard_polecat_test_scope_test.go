@@ -141,6 +141,10 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 	t.Setenv("GT_POLECAT", "")
 	t.Setenv("GT_REFINERY", "1")
 	t.Setenv("GT_ROLE", "gastown/refinery")
+	// chdir to a neutral dir so the guard's cwd-based polecat fallback
+	// (isPolecatContext) does not fire from a polecat worktree — the refinery
+	// must be allowed regardless of where the suite is run from (gt-tmde).
+	t.Chdir(t.TempDir())
 	withStdin(t, cmd, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
 	if err != nil {
 		t.Errorf("refinery whole-package run must be allowed, got %v", err)
