@@ -1694,6 +1694,20 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		var refspec string
 		var pushErr error
 		var pushedCommitSHA string
+		// Declared here rather than at its assignment below because the
+		// checkpoint resume jumps over that point into afterPush, and a goto may
+		// not carry a variable into scope (gt-0opm).
+		var pushFailureDetail string
+
+		// Use explicit refspec (branch:branch) to create the remote branch.
+		// Without refspec, git push follows the tracking config — polecat branches
+		// track origin/main, so a bare push sends commits to main directly,
+		// bypassing the MR/refinery flow (G20 root cause).
+		//
+		// Built before the checkpoint resume because the landing retry at
+		// afterPush re-sends this refspec, and the MR declares this commit, so
+		// the retry must not be a different push (gt-0opm).
+		refspec = branch + ":" + branch
 
 		// Resume: skip push if already completed in a previous run (gt-aufru).
 		// Validate checkpoint branch matches current branch (ge-sbo: stale checkpoint
@@ -1731,33 +1745,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Detect modified submodules and push each one first.
 		pushSubmoduleChanges(g, baseRef)
 
-		// Use explicit refspec (branch:branch) to create the remote branch.
-		// Without refspec, git push follows the tracking config — polecat branches
-		// track origin/main, so a bare push sends commits to main directly,
-		// bypassing the MR/refinery flow (G20 root cause).
 		fmt.Printf("Pushing branch to remote...\n")
-		refspec = branch + ":" + branch
 		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = g.Push("origin", refspec, false)
-		if pushErr != nil {
-			// Primary push failed — try fallback from the bare repo (GH #1348).
-			// When polecat sessions are reused or worktrees are stale, the worktree's
-			// git context may be broken. But the branch always exists in the bare repo
-			// (.repo.git) because worktree commits share the same object database.
-			style.PrintWarning("primary push failed: %v — trying bare repo fallback...", pushErr)
-			rigPath := filepath.Join(townRoot, rigName)
-			bareRepoPath := filepath.Join(rigPath, ".repo.git")
-			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
-				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = bareGit.Push("origin", refspec, false)
-				if pushErr != nil {
-					style.PrintWarning("bare repo push also failed: %v", pushErr)
-				} else {
-					fmt.Printf("%s Branch pushed via bare repo fallback\n", style.Bold.Render("✓"))
-				}
-			}
-		}
-
+		pushErr = pushBranchToOrigin(g, townRoot, rigName, refspec)
+		// pushFailureDetail carries the divergence diagnosis (and any recovery
+		// error) into the terminal message at afterPush, where the landing retry
+		// decides whether the failure is terminal at all.
 		if pushErr != nil {
 			// Both push attempts failed non-fast-forward. Before alarming as
 			// possible work loss, check whether origin already has this branch
@@ -1769,22 +1762,19 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				fmt.Printf("%s Recovered non-fast-forward push: %s\n", style.Bold.Render("✓"), diagnosis)
 				pushErr = nil
 			} else {
-				pushFailed = true
-				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-				if diagnosis != "" {
-					errMsg = fmt.Sprintf("%s (%s)", errMsg, diagnosis)
-				}
+				// gt-0opm: a failed push command is not yet an unlanded push, so
+				// fall through to afterPush, which re-asserts origin and retries
+				// before this becomes terminal.
+				pushFailureDetail = diagnosis
 				// Report the recovery failure independently of the diagnosis:
 				// the two say different things (why recovery was refused vs.
 				// why the attempt itself broke), and the fetch/comparison
 				// errors that produce a diagnosis-less failure are exactly the
 				// ones a reader needs to see (gt-i0z3).
 				if recoverErr != nil {
-					errMsg = fmt.Sprintf("%s [recovery attempt: %v]", errMsg, recoverErr)
+					pushFailureDetail = fmt.Sprintf("%s [recovery attempt: %v]", pushFailureDetail, recoverErr)
 				}
-				doneErrors = append(doneErrors, errMsg)
-				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
-				goto notifyWitness
+				style.PrintWarning("push failed for branch '%s': %v — re-checking origin before treating the work as unlanded", branch, pushErr)
 			}
 		}
 
@@ -1808,16 +1798,34 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if doneSkipVerify {
 				noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
 				fmt.Printf("%s Branch pushed to origin (verification skipped: --skip-verify)\n", style.Bold.Render("✓"))
-			} else if verifyErr := verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
+			} else if recovered, verifyErr := landBranchPushBeforeMR(
+				func() error { return pushBranchToOrigin(g, townRoot, rigName, refspec) },
+				func() error { return verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA) },
+				time.Sleep,
+			); verifyErr != nil {
+				// gt-0opm: only reached once origin was re-asserted and the push
+				// re-sent, so a first failing attempt never strands the work.
 				pushFailed = true
 				pushVerifyErr = verifyErr
-				errMsg := verifyErr.Error()
+				errMsg := unlandedPushMessage(branch, pushErr, pushFailureDetail, verifyErr)
 				doneErrors = append(doneErrors, errMsg)
 				noteVerifiedPushFailure(sourceBD, cwd, issueID, branch, pushedCommitSHA, verifyErr)
-				style.PrintWarning("%s\nNo merge request created: it would declare a commit origin does not have. Witness will be notified.", errMsg)
+				if pushErr != nil {
+					style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
+				} else {
+					style.PrintWarning("%s\nNo merge request created: it would declare a commit origin does not have. Witness will be notified.", errMsg)
+				}
 				goto notifyWitness
 			} else {
-				fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+				// The gt-0opm recovery: the push command failed and origin has
+				// the commit anyway. Nothing below marks this run failed, so the
+				// MR is created normally.
+				if recovered {
+					fmt.Printf("%s Branch pushed to origin (recovered: the first attempt reported an error, origin has commit %s)\n",
+						style.Bold.Render("✓"), shortSHA(pushedCommitSHA))
+				} else {
+					fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+				}
 			}
 
 			// Fix cleanup_status after successful push (gt-wcr).
@@ -2597,6 +2605,91 @@ func describePushVerificationFailure(g *git.Git, branch, commit string, cause er
 		"  local HEAD:  %s\n"+
 		"  origin/%s:  %s\n"+
 		"  %v", branch, commit, branch, remoteTip, cause)
+}
+
+// pushBranchToOrigin sends refspec to origin, falling back to the rig's bare
+// repo when the worktree's git context cannot reach the remote (GH #1348).
+//
+// The landing retry at afterPush re-sends this same push, so the two share one
+// function rather than two copies of the fallback: a retry that pushed
+// differently from the attempt it retries would verify a state that attempt
+// never aimed at (gt-0opm).
+func pushBranchToOrigin(g *git.Git, townRoot, rigName, refspec string) error {
+	err := g.Push("origin", refspec, false)
+	if err == nil {
+		return nil
+	}
+	style.PrintWarning("primary push failed: %v — trying bare repo fallback...", err)
+	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+	if _, statErr := os.Stat(bareRepoPath); statErr != nil {
+		return err
+	}
+	bareGit := git.NewGitWithDir(bareRepoPath, "")
+	bareErr := bareGit.Push("origin", refspec, false)
+	if bareErr != nil {
+		style.PrintWarning("bare repo push also failed: %v", bareErr)
+		return bareErr
+	}
+	fmt.Printf("%s Branch pushed via bare repo fallback\n", style.Bold.Render("✓"))
+	return nil
+}
+
+// pushLandingRetryDelays is the wait before the single re-attempt a branch push
+// gets after its first attempt failed to prove out on origin (gt-0opm).
+//
+// One retry, not a ladder: the failure this closes is a push whose command
+// reported an error while origin was taking the objects anyway, which resolves
+// in seconds. A remote that is genuinely refusing answers the same way on the
+// retry, and a failed submission must not hold the polecat's slot open.
+var pushLandingRetryDelays = []time.Duration{3 * time.Second}
+
+// landBranchPushBeforeMR delivers the branch to origin and proves the commit
+// arrived, retrying the push and the assertion as one unit. It is the gate
+// between a push whose first attempt failed and the terminal "no merge request
+// created" exit (gt-0opm).
+//
+// A failed first attempt is not a verdict: `git push` reports an error for
+// outcomes that leave the branch on origin anyway — a client-side timeout after
+// the receiving side took the objects, a worktree git context only the bare-repo
+// fallback could work around. Exiting there cost the merge request rather than a
+// retry: the branch was on origin, the issue stayed hooked, and the refinery,
+// blind to anything outside the queue by protocol, had nothing to look at.
+//
+// Origin is queried before anything is re-sent, so a landing already in place is
+// proven without a second push. attemptPush must therefore be idempotent —
+// callers pass the same branch:branch refspec the first attempt used, which is a
+// no-op fast-forward when origin has the commit and fails closed (never a force)
+// when it does not. recovered reports whether the retry was what proved it.
+func landBranchPushBeforeMR(attemptPush, verify func() error, sleep func(time.Duration)) (bool, error) {
+	verifyErr := verify()
+	for i := 0; verifyErr != nil && i < len(pushLandingRetryDelays); i++ {
+		sleep(pushLandingRetryDelays[i])
+		pushErr := attemptPush()
+		if verifyErr = verify(); verifyErr == nil {
+			return true, nil
+		}
+		if pushErr != nil {
+			verifyErr = fmt.Errorf("%w (retry push: %v)", verifyErr, pushErr)
+		}
+	}
+	return false, verifyErr
+}
+
+// unlandedPushMessage renders the terminal gt done error for a submission whose
+// branch never proved out on origin.
+//
+// The push-command error says why the send broke and the assertion says where
+// origin stands; a reader of a strand needs both. When only the assertion
+// failed, it is the whole story (gt-0opm).
+func unlandedPushMessage(branch string, pushErr error, pushFailureDetail string, verifyErr error) string {
+	if pushErr == nil {
+		return verifyErr.Error()
+	}
+	msg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
+	if pushFailureDetail != "" {
+		msg = fmt.Sprintf("%s (%s)", msg, pushFailureDetail)
+	}
+	return fmt.Sprintf("%s [after retry: %v]", msg, verifyErr)
 }
 
 // shouldNudgeRefinery reports whether a gt done invocation may wake the
