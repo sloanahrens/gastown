@@ -2070,6 +2070,10 @@ type PolecatPool struct {
 	// MaxOverflow is the number of live polecat sessions allowed on
 	// OverflowAgent. Zero leaves the overflow seat uncapped.
 	MaxOverflow int `json:"max_overflow,omitempty"`
+	// IdleFill lets an overflow-shaped bead (bug, feature) take a free local
+	// seat rather than the overflow agent. Unset means on, so a town that never
+	// sets it keeps the behavior it already had.
+	IdleFill *bool `json:"idle_fill,omitempty"`
 }
 
 // MinSpawnGapD returns the parsed MinSpawnGap, or zero when unset/invalid.
@@ -2088,4 +2092,10 @@ func (p *PolecatPool) MinSpawnGapD() time.Duration {
 // OverflowAgent: max_overflow set, and an agent whose sessions to count.
 func (p *PolecatPool) OverflowCapped() bool {
 	return p != nil && p.MaxOverflow > 0 && p.OverflowAgent != ""
+}
+
+// IdleFillEnabled reports whether an overflow-shaped bead may take a free
+// local seat; unset or a nil pool means on.
+func (p *PolecatPool) IdleFillEnabled() bool {
+	return p == nil || p.IdleFill == nil || *p.IdleFill
 }

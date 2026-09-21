@@ -13,6 +13,10 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
+// boolp takes the address of a bool for the polecat_pool knobs that are
+// pointers so that unset and false stay distinguishable.
+func boolp(b bool) *bool { return &b }
+
 // TestChoosePoolAgent pins the whole routing table: the agent AND the exact
 // one-line reason, because the line is the only thing a sling prints and
 // "local pool 2/2" vs "local pool full (2/2)" used to read the same (gt-ipk7).
@@ -34,6 +38,11 @@ func TestChoosePoolAgent(t *testing.T) {
 	// both taken with one free, and both taken behind a stagger.
 	capped := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 2}
 	uncapped := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
+	// The idle-seat fill switched off (gt-nn7n), on its own and behind the cap,
+	// plus the same pool spelling the default out.
+	fillOff := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", IdleFill: boolp(false)}
+	fillOn := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", IdleFill: boolp(true)}
+	cappedFillOff := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 2, IdleFill: boolp(false)}
 	cappedFull := []poolSession{
 		s("local-coder-polecat", 30*time.Minute), s("local-coder-polecat", 20*time.Minute), s("local-coder-polecat", 10*time.Minute),
 		s("deepseek-flash", 20*time.Minute), s("deepseek-flash", 10*time.Minute),
@@ -43,6 +52,9 @@ func TestChoosePoolAgent(t *testing.T) {
 		s("deepseek-flash", 20*time.Minute),
 	}
 	overRecent := []poolSession{s("local-coder-polecat", time.Minute), s("deepseek-flash", 20*time.Minute), s("deepseek-flash", 10*time.Minute)}
+	// A free local seat, no stagger, both flash seats taken: the one state
+	// where the fill's own branch and the overflow cap meet.
+	freeSeatBothFlash := []poolSession{s("local-coder-polecat", 10*time.Minute), s("deepseek-flash", 20*time.Minute), s("deepseek-flash", 10*time.Minute)}
 
 	cases := []struct {
 		name        string
@@ -91,6 +103,18 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"one overflow seat free still routes there", capped, poolBead{Type: "bug"}, oneOverflowFree, "deepseek-flash", "pool: overflow -> deepseek-flash (type=bug)", false},
 		{"max_overflow 0 leaves the overflow seat uncapped", uncapped, poolBead{Type: "bug"}, cappedFull, "deepseek-flash", "pool: overflow -> deepseek-flash (type=bug)", false},
 		{"overflow cap without an overflow agent is off", &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MaxOverflow: 2}, poolBead{Type: "bug"}, cappedFull, "", "pool: overflow -> the role default (type=bug)", false},
+
+		// The idle-seat fill knob (gt-nn7n). Off, an overflow-shaped bead goes
+		// to the overflow agent even with a seat free, and the reason names the
+		// knob so the empty seat is not read as the bead's shape overflowing.
+		{"fill off: a bug with a free seat overflows", fillOff, poolBead{Type: "bug"}, busy, "deepseek-flash", "pool: overflow -> deepseek-flash (type=bug, idle_fill off)", false},
+		{"fill off: a feature in an empty town overflows", fillOff, poolBead{Type: "feature"}, nil, "deepseek-flash", "pool: overflow -> deepseek-flash (type=feature, idle_fill off)", false},
+		{"fill off: a full local pool reads the same as before", fillOff, poolBead{Type: "bug"}, full, "deepseek-flash", "pool: overflow -> deepseek-flash (type=bug)", false},
+		{"fill off: a task still takes the free seat", fillOff, poolBead{Type: "task"}, busy, "local-coder-polecat", "pool: local seat 2/3 -> local-coder-polecat (type=task)", false},
+		{"fill off: an unknown shape still follows the seat count", fillOff, poolBead{Type: "epic"}, busy, "local-coder-polecat", "pool: local seat 2/3 -> local-coder-polecat (type=epic)", false},
+		{"fill off: route:local still wins over the switch", fillOff, poolBead{Type: "bug", Labels: []string{routeLocalLabel}}, busy, "local-coder-polecat", "pool: local seat 2/3 -> local-coder-polecat (label route:local)", false},
+		{"fill off: a capped overflow seat refuses the freed bead", cappedFillOff, poolBead{Type: "bug"}, freeSeatBothFlash, "deepseek-flash", "pool: overflow full (2/2) -> no seat (type=bug, idle_fill off)", true},
+		{"fill on: the knob spelling out the default changes nothing", fillOn, poolBead{Type: "bug"}, busy, "local-coder-polecat", "pool: local seat 2/3 -> local-coder-polecat (idle-seat fill, local-attempt:1)", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -297,9 +321,16 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 // pointer to the recorded label writes.
 func fakePoolTown(t *testing.T, bead poolBead, lookupErr, addErr error) (string, *[]string) {
 	t.Helper()
+	return fakePoolTownWithPool(t, &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, bead, lookupErr, addErr)
+}
+
+// fakePoolTownWithPool is fakePoolTown with the pool under test supplied, for
+// the cases where the knob rather than the routing table is what is on trial.
+func fakePoolTownWithPool(t *testing.T, pool *config.PolecatPool, bead poolBead, lookupErr, addErr error) (string, *[]string) {
+	t.Helper()
 	townRoot := t.TempDir()
 	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}
+	ts.PolecatPool = pool
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
 		t.Fatal(err)
 	}
@@ -355,6 +386,26 @@ func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
 	}
 	if len(*added) != 0 {
 		t.Errorf("a dry run must not label the bead, got %v", *added)
+	}
+}
+
+// With idle_fill off, a bug bead with a free seat leaves the seat empty. It
+// must not take local-attempt:1: that label bounds a bead to one local attempt,
+// and this bead never spent one, so labeling it would route the bead to flash
+// forever and retire a label that no longer means what it says (gt-nn7n).
+func TestResolvePoolAgentFillOffLabelsNothing(t *testing.T) {
+	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", IdleFill: boolp(false)}
+	townRoot, added := fakePoolTownWithPool(t, pool, poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
+
+	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", false)
+	if err != nil {
+		t.Fatalf("the fill being off must not refuse the sling: %v", err)
+	}
+	if agent != "deepseek-flash" || !strings.Contains(reason, "idle_fill off") {
+		t.Fatalf("got %q %q, want the overflow agent and the knob named", agent, reason)
+	}
+	if len(*added) != 0 {
+		t.Errorf("a bead that never took a local seat must not be labeled: %v", *added)
 	}
 }
 

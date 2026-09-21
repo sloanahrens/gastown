@@ -34,7 +34,9 @@ import (
 // pool used to decide from the seat count alone, so a hard bug and a doc tweak
 // competed for the same seat. Now the bead's labels and type pick the seat,
 // every decision line names the agent it chose, and a bead that has already
-// spent a local attempt cannot spend a second one.
+// spent a local attempt cannot spend a second one. polecat_pool.idle_fill
+// switches off the one branch that hands an overflow-shaped bead a free local
+// seat (gt-nn7n).
 
 const (
 	// routeLocalLabel and routeFlashLabel are explicit overrides. A bead
@@ -237,8 +239,13 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, sessions []poolSes
 		// overflow-shaped bead takes a seat that has been free for longer than
 		// min_spawn_gap rather than leaving the GPU idle while flash is billed.
 		// The caller attaches localAttemptLabel, which bounds the bead to this
-		// one local attempt.
+		// one local attempt. polecat_pool.idle_fill=false sends the bead to the
+		// overflow agent instead and names the knob, so a seat held open by the
+		// switch does not read as a bead the shape rule overflowed (gt-nn7n).
 		if local < pool.MaxLocal && !tooSoon {
+			if !pool.IdleFillEnabled() {
+				return overflowFor("type=" + beadTypeLabel(bead) + ", idle_fill off")
+			}
 			return localSeat(idleFillReason)
 		}
 		return overflowFor("type=" + beadTypeLabel(bead))

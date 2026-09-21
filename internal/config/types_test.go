@@ -672,3 +672,55 @@ func TestCombineGateSetSHA(t *testing.T) {
 		t.Error("a change to the polecat-side hash must still change the combined hash")
 	}
 }
+
+// --- PolecatPool knobs ---
+
+// The idle-seat fill is the shipped behavior, so only a stored false turns it
+// off; a town that has never written the knob, and a pool that does not exist,
+// both keep it (gt-nn7n).
+func TestPolecatPoolIdleFillEnabled(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		pool *PolecatPool
+		want bool
+	}{
+		{"no pool", nil, true},
+		{"knob unset", &PolecatPool{LocalAgent: "l", MaxLocal: 3}, true},
+		{"knob true", &PolecatPool{IdleFill: boolPtr(true)}, true},
+		{"knob false", &PolecatPool{IdleFill: boolPtr(false)}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.pool.IdleFillEnabled(); got != c.want {
+				t.Errorf("IdleFillEnabled() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// idle_fill: false has to survive a settings round trip: a *bool field that the
+// encoder drops would silently turn the fill back on at the next load.
+func TestPolecatPoolIdleFillRoundTrip(t *testing.T) {
+	t.Parallel()
+	ts := NewTownSettings()
+	ts.PolecatPool = &PolecatPool{LocalAgent: "l", MaxLocal: 3, IdleFill: boolPtr(false)}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SaveTownSettings(path, ts); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"idle_fill": false`) {
+		t.Errorf("saved settings must carry idle_fill: false, got %s", raw)
+	}
+	back, err := LoadOrCreateTownSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.PolecatPool == nil || back.PolecatPool.IdleFillEnabled() {
+		t.Errorf("reloaded pool must report the fill off, got %+v", back.PolecatPool)
+	}
+}
