@@ -1415,10 +1415,10 @@ type MergeQueueConfig struct {
 
 	// TestVerifyRunTimeout overrides the wall-clock run budget for gt done's
 	// default test-verify gate, once the container-gate slot is held (gt-pnkd).
-	// A Go duration string, e.g. "40m". Empty derives the budget from the
-	// rig's own per-package -timeout (Makefile test target or test_command —
-	// 20m as of gt-g8kr) scaled by the number of changed packages, floored at
-	// 30m. The slot wait is never counted against it.
+	// A Go duration string, e.g. "40m". Empty uses the 30m floor: the gate
+	// runs the rig's full hermetic test_command (gt-btw1), so there is no
+	// changed-package count to scale by. The slot wait is never counted
+	// against it.
 	TestVerifyRunTimeout string `json:"test_verify_run_timeout,omitempty"`
 
 	// TestVerifySlotTimeout overrides how long gt done's default test-verify
@@ -1430,23 +1430,13 @@ type MergeQueueConfig struct {
 	TestVerifySlotTimeout string `json:"test_verify_slot_timeout,omitempty"`
 
 	// TestVerifyCommand overrides the command gt done's default test-verify
-	// gate runs on a Go rig, replacing the derived `go test -timeout <per-
-	// package> <changed packages>`. The literal token {packages} is replaced
-	// with the space-joined changed-package list, e.g.
-	// "make test-changed PKGS='{packages}'" — the route to full environment
-	// parity with the refinery's suite for rigs whose test environment lives
-	// inside a Makefile target rather than in a plain env prefix (gt-fa3s).
-	// On a non-Go rig this field is ignored and test_command runs in full.
+	// gate runs, replacing the rig's full hermetic test_command (gt-btw1).
+	// The literal token {packages} is replaced with the space-joined
+	// changed-package list, e.g. "make test-changed PKGS='{packages}'" —
+	// the route to scoped verification for rigs that want the gate to test
+	// only the changed packages rather than the full suite. On a non-Go rig
+	// this field is ignored and test_command runs in full.
 	TestVerifyCommand string `json:"test_verify_command,omitempty"`
-
-	// TestVerifyIncludeContainerPackages restores the pre-gt-yihz behavior
-	// of gt done's default test-verify gate running the Dolt/testcontainers-
-	// backed packages too (inside the container-gate slot). Nil/false (the
-	// default) leaves those packages to the refinery's gate so the Docker
-	// suite runs once per submission: the polecat gate tests only the
-	// changed packages that spin no containers, and does so without taking
-	// a container-gate slot at all.
-	TestVerifyIncludeContainerPackages *bool `json:"test_verify_include_container_packages,omitempty"`
 
 	// LintCommand is the command to run for linting (used by formulas).
 	LintCommand string `json:"lint_command,omitempty"`

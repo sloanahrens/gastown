@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -29,31 +28,25 @@ import (
 // one container-gate slot — so the gate refused for infrastructure reasons on
 // branches whose tests were never run at all. Four one-shot --skip-verify
 // exceptions in 24h were the result, i.e. the exceptions became the process.
-// The fix is not "raise the numbers": it is that the budgets scale with the
-// rig's own configured per-package timeout and the number of changed
-// packages, and that every number in play is surfaceable in the verify log
-// and overridable per rig in settings (merge_queue.test_verify_*).
+// The fix is not "raise the numbers": it is that the budgets are surfaceable
+// in the verify log and overridable per rig in settings
+// (merge_queue.test_verify_*). gt-btw1: the gate now runs the rig's full
+// hermetic test_command, so the run budget is a floor, not a per-package
+// derivation.
 
 // defaultTestVerifySlotTimeout bounds how long gt done waits for the
 // container-gate slot before giving up on the default test-verify gate.
 // Deliberately identical to the container-gate slot's own CLI default
 // (`gt slot run --timeout`, internal/cmd/slot.go): a queue of N suites each
-// holding the slot for its full per-package budget is a legitimate wait, not
-// a failure, and the old 20m cap was reached by a *single* 17m35s holder plus
-// one queued suite. Raise it per rig with merge_queue.test_verify_slot_timeout.
+// holding the slot for its full budget is a legitimate wait, not a failure,
+// and the old 20m cap was reached by a *single* 17m35s holder plus one queued
+// suite. Raise it per rig with merge_queue.test_verify_slot_timeout.
 const defaultTestVerifySlotTimeout = 60 * time.Minute
 
 // defaultTestVerifyRunFloor is the floor for the run budget — the wall-clock
 // bound on the test command once the slot is held. Below this the gate starts
 // reporting legitimate-but-slow suites as hung, which is the bug.
 const defaultTestVerifyRunFloor = 30 * time.Minute
-
-// defaultTestVerifyPerPackageTimeout is the run budget assumed for one
-// changed package when the rig's own per-package -timeout cannot be
-// determined from its Makefile test target or its test_command. 20m matches
-// what the gastown Makefile uses (gt-g8kr raised `go test -timeout` from Go's
-// 10m default); Go's own 10m default is the thing that was too tight.
-const defaultTestVerifyPerPackageTimeout = 20 * time.Minute
 
 // defaultLintVerifyTimeout bounds the rig's lint_command inside gt done's
 // default gate. Lint is static analysis (no Docker, no Dolt, ~7 s on gastown),
@@ -65,12 +58,6 @@ const defaultLintVerifyTimeout = 10 * time.Minute
 // lintVerifyTimeout is the budget the lint gate spends, a var so a test can
 // drive a real expiry instead of waiting out the default.
 var lintVerifyTimeout = defaultLintVerifyTimeout
-
-// makeDryRunTimeout bounds the `make -n <target>` probe that reads the rig's
-// own per-package -timeout out of its test recipe. `make -n` prints the
-// recipe instead of running it, so this is a read of the operator's own
-// config, not an execution of it — but it must still be bounded.
-const makeDryRunTimeout = 30 * time.Second
 
 // testVerifyPackagesPlaceholder is the token merge_queue.test_verify_command
 // may embed to receive the resolved changed-package list, e.g.
@@ -115,13 +102,13 @@ func isContainerSuitePackage(importPath string) bool {
 
 // runVerifySuite runs one shell command for the gate with the given
 // environment, streaming combined output to logFile. A var so tests can
-// substitute a fake runner: the real one shells out to `go test` over the
-// whole changed-package set, which no unit test may do.
+// substitute a fake runner: the real one shells out to the rig's full
+// hermetic test_command (or its test_verify_command override), which no
+// unit test may do.
 var runVerifySuite = func(ctx context.Context, worktree, script string, env []string, logFile *os.File) error {
-	// Trust boundary: script is either `go test` over go-list-resolved
-	// packages from the polecat's own branch, the rig's configured
-	// test_command, or the operator's merge_queue.test_verify_command — same
-	// boundary as runPreVerificationGates.
+	// Trust boundary: script is the rig's configured test_command or the
+	// operator's merge_queue.test_verify_command — same boundary as
+	// runPreVerificationGates.
 	cmd := exec.CommandContext(ctx, "sh", "-c", script) //nolint:gosec // G204
 	cmd.Dir = worktree
 	cmd.Env = env
@@ -139,16 +126,11 @@ type testVerifyResult struct {
 	skipReason string
 
 	success  bool
-	packages []string // populated when scope == "packages"
-	scope    string   // "packages" (Go rig, changed-package scoped) or "full" (rig test_command)
-	// deferredPackages are changed Dolt/testcontainers-backed packages the
-	// gate did NOT run (gt-yihz): the refinery's gate runs the container
-	// suite once per submission, so gt done leaves them alone and needs no
-	// container-gate slot for what remains. Set whether or not anything
-	// else ran (see skipReason for the all-deferred case).
-	deferredPackages []string
-	// slotUsed is false when the gate ran without a container-gate slot
-	// because nothing in scope spins containers.
+	packages []string // the branch's changed packages, recorded for the MR bead (gt-btw1)
+	scope    string   // "full": the gate runs the rig's full hermetic test_command
+	// slotUsed is false only when the gate ran without a container-gate slot;
+	// since the full suite may spin containers the gate always takes one
+	// (gt-yihz).
 	slotUsed bool
 	// lintRan / lintCommand / lintElapsed record the rig's lint_command run
 	// (gt-yihz follow-up): lint is part of the default gate whenever the rig
@@ -171,14 +153,12 @@ type testVerifyResult struct {
 
 // testVerifyBudgets is the resolved budget pair for one gate run, with the
 // provenance of each number so the verify log can explain itself — a log that
-// says "run budget: 40m (Makefile -timeout 20m × 2 changed package(s), floor
-// 30m)" answers the question gt-pnkd's victims could not answer from a frozen
-// header.
+// says "run budget: 30m (derived floor; the rig's own per-package -timeout
+// cannot scale a full-suite run)" answers the question gt-pnkd's victims
+// could not answer from a frozen header.
 type testVerifyBudgets struct {
 	slotTimeout time.Duration
 	slotSource  string
-	perPackage  time.Duration
-	perSource   string
 	runTimeout  time.Duration
 	runSource   string
 }
@@ -340,108 +320,19 @@ func isEnvVarName(s string) bool {
 	return true
 }
 
-// timeoutFlagRe matches a Go `-timeout <dur>` (or `-timeout=<dur>`) flag
-// anywhere in a command's text, which is how both the Makefile test target
-// and a configured test_command state their per-package budget.
-var timeoutFlagRe = regexp.MustCompile(`(?:^|\s)-timeout[= ]([0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*)\b`)
 
-// timeoutFromCommandText returns the largest -timeout value appearing in
-// text. Largest rather than first: the text may mention the flag in a comment
-// or in a faster nested invocation, and the budget must cover the slowest
-// thing that can run.
-func timeoutFromCommandText(text string) (time.Duration, bool) {
-	var best time.Duration
-	found := false
-	for _, m := range timeoutFlagRe.FindAllStringSubmatch(text, -1) {
-		d, err := time.ParseDuration(m[1])
-		if err != nil || d <= 0 {
-			continue
-		}
-		if !found || d > best {
-			best, found = d, true
-		}
-	}
-	return best, found
-}
-
-// makeTarget returns the make target a test_command invokes: the first
-// non-flag, non-assignment word after `make` (so `GOFLAGS=-p=6 make -j4 test`
-// is target "test"), defaulting to "test" for a bare `make`. ok is false when
-// the command does not invoke make at all.
-func makeTarget(testCommand string) (string, bool) {
-	_, argv := splitCommandEnvPrefix(testCommand)
-	if len(argv) == 0 {
-		return "", false
-	}
-	switch filepath.Base(argv[0]) {
-	case "make", "gmake":
-	default:
-		return "", false
-	}
-	for _, tok := range argv[1:] {
-		if strings.HasPrefix(tok, "-") || strings.Contains(tok, "=") {
-			continue
-		}
-		return strings.Trim(tok, `"'`), true
-	}
-	return "test", true
-}
-
-// perPackageTimeoutFromMakefile reads the rig's per-package test timeout out
-// of its own Makefile test target by running `make -n <target>` (which prints
-// the recipe without executing it) and scanning the printed commands for
-// -timeout. Going through make -n rather than parsing Makefile syntax means
-// conditionals, includes and variables are all resolved by make itself, and
-// the value the gate uses is the value the rig actually runs with.
-//
-// Returns ok=false — never an error — whenever the Makefile, the target, or
-// the flag isn't there: the caller falls back to a default, and a rig without
-// a Makefile must not have its gate refuse for a reason it cannot fix.
-func perPackageTimeoutFromMakefile(worktree, testCommand string) (time.Duration, bool) {
-	target, ok := makeTarget(testCommand)
-	if !ok {
-		return 0, false
-	}
-	if _, statErr := os.Stat(filepath.Join(worktree, "Makefile")); statErr != nil {
-		return 0, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), makeDryRunTimeout)
-	defer cancel()
-	//nolint:gosec // G204: target comes from the rig's own test_command; `make -n` prints the recipe instead of running it.
-	cmd := exec.CommandContext(ctx, "make", "-n", target)
-	cmd.Dir = worktree
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, false
-	}
-	return timeoutFromCommandText(string(out))
-}
-
-// resolvePerPackageTimeout determines the per-package test budget the gate
-// should assume for one changed package, preferring the rig's own stated
-// value over any default (gt-pnkd: "the run budget must scale, it must not be
-// a hardcoded 10m").
-func resolvePerPackageTimeout(worktree, testCommand string) (time.Duration, string) {
-	if d, ok := perPackageTimeoutFromMakefile(worktree, testCommand); ok {
-		return d, fmt.Sprintf("Makefile test target -timeout %s", humanDuration(d))
-	}
-	if d, ok := timeoutFromCommandText(testCommand); ok {
-		return d, fmt.Sprintf("test_command -timeout %s", humanDuration(d))
-	}
-	return defaultTestVerifyPerPackageTimeout, fmt.Sprintf(
-		"default -timeout %s (no -timeout in the Makefile test target or test_command)", humanDuration(defaultTestVerifyPerPackageTimeout))
-}
-
-// resolveTestVerifyBudgets turns the rig's configuration and workload into
-// the two budgets the gate runs under: how long to wait for the slot, and how
-// long the suite may run once it has it. Explicit rig config wins; otherwise
-// both scale — the slot cap to the slot's own CLI default, the run budget to
-// the rig's per-package timeout times the number of changed packages.
+// resolveTestVerifyBudgets turns the rig's configuration into the two budgets
+// the gate runs under: how long to wait for the slot, and how long the suite
+// may run once it has it. Explicit rig config wins; otherwise the slot cap
+// takes the slot's own CLI default and the run budget takes the 30m floor —
+// the gate now runs the rig's full test_command, so there is no changed-
+// package count to scale by, and a per-package -timeout cannot bound a whole
+// suite (gt-btw1).
 //
 // The two are deliberately independent (gt-pnkd: "never count slot wait
 // against the run budget"): the run timer starts only after the slot is held,
 // so a deep queue can never eat the budget the suite itself needs.
-func resolveTestVerifyBudgets(mq *config.MergeQueueConfig, worktree, testCommand string, packageCount int) testVerifyBudgets {
+func resolveTestVerifyBudgets(mq *config.MergeQueueConfig) testVerifyBudgets {
 	b := testVerifyBudgets{
 		slotTimeout: defaultTestVerifySlotTimeout,
 		slotSource:  "default — matches `gt slot run --timeout`",
@@ -456,9 +347,6 @@ func resolveTestVerifyBudgets(mq *config.MergeQueueConfig, worktree, testCommand
 		}
 	}
 
-	perPkg, perSrc := resolvePerPackageTimeout(worktree, testCommand)
-	b.perPackage, b.perSource = perPkg, perSrc
-
 	if mq != nil && strings.TrimSpace(mq.TestVerifyRunTimeout) != "" {
 		raw := strings.TrimSpace(mq.TestVerifyRunTimeout)
 		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
@@ -468,18 +356,12 @@ func resolveTestVerifyBudgets(mq *config.MergeQueueConfig, worktree, testCommand
 		b.runSource = fmt.Sprintf("derived — merge_queue.test_verify_run_timeout %q is not a positive duration; ", raw)
 	}
 
-	n := packageCount
-	if n < 1 {
-		n = 1
-	}
-	scaled := perPkg * time.Duration(n)
-	if scaled < defaultTestVerifyRunFloor {
-		scaled = defaultTestVerifyRunFloor
-	}
-	b.runTimeout = scaled
-	b.runSource += fmt.Sprintf(
-		"%s × %d changed package(s), floor %s (each package gets its own per-package budget; -p parallelism only makes it faster)",
-		perSrc, n, humanDuration(defaultTestVerifyRunFloor))
+	// The gate runs the rig's full test_command, so the run budget is the
+	// floor: a per-package -timeout cannot scale a whole-suite run (gt-btw1).
+	// Rigs whose suite legitimately needs longer set
+	// merge_queue.test_verify_run_timeout.
+	b.runTimeout = defaultTestVerifyRunFloor
+	b.runSource += fmt.Sprintf("derived floor %s (the gate runs the rig's full test_command, so there is no changed-package count to scale by)", humanDuration(defaultTestVerifyRunFloor))
 	return b
 }
 
@@ -572,12 +454,13 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 //
 // Unless the caller has already secured a full --pre-verified gate run (see
 // resolvePreVerification in done.go) or the polecat explicitly opted out
-// with --skip-verify, gt done itself tests at least the branch's changed
-// packages before an MR bead can be created: on a Go rig it resolves the
-// changed packages via `go list` and runs `go test` over them; on a rig
-// without that scoping mechanism it runs the rig's full test_command
-// instead. Either way the run happens inside the container-gate slot
-// (internal/slot) since a changed package may itself hold a Docker-backed
+// with --skip-verify, gt done itself runs the rig's hermetic test_command
+// before an MR bead can be created (gt-btw1): the gate used to run a bare
+// `go test` over the changed packages, which bypassed the rig's hermetic
+// test environment (BEADS_TEST_MODE, test-env.sh, Makefile CGO flags) and
+// failed every test-only change in a rig whose package is red on main for
+// ambient-env reasons. The run happens inside the container-gate slot
+// (internal/slot) because the full suite may itself hold a Docker-backed
 // suite. Any failure — the run itself failing, timing out, or changed .go
 // files that resolve to no buildable package — returns an error and the
 // caller must not create the MR bead: that is the refusal gt-h9kf asks for.
@@ -609,9 +492,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// refinery's suite (gt-fa3s).
 	envPrefix, _ := splitCommandEnvPrefix(mq.TestCommand)
 
-	var scope string
+	// The gate runs the rig's full hermetic test_command (gt-btw1), so the
+	// scope is "full" on every rig and the changed-package list is recorded
+	// for the MR bead, not used to scope the run.
+	scope := "full"
 	var pkgs []string
-
 	if isGoRig {
 		resolvedPkgs, changedGo, pkgErr := changedGoPackages(g, worktree, verifiedBase)
 		if pkgErr != nil {
@@ -624,65 +509,26 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			return testVerifyResult{}, fmt.Errorf("gt done: changed .go files since %s did not resolve to any buildable package (go list found none) — refusing to submit an unverified MR; fix the build, or use --skip-verify with justification if this is genuinely not testable", shortSHA(verifiedBase))
 		}
 		pkgs = resolvedPkgs
-		scope = "packages"
-	} else {
-		scope = "full"
 	}
 
-	// gt-yihz: the Docker suite runs ONCE per submission, in the refinery's
-	// gate. Unless the rig opts back in, changed packages that spin
-	// Dolt/testcontainers containers are left to the refinery and the gate
-	// tests only the rest — which needs no container-gate slot, so a polecat
-	// never queues behind the refinery (or another polecat) to run tests
-	// that touch no container.
-	var deferred []string
-	includeContainers := mq.TestVerifyIncludeContainerPackages != nil && *mq.TestVerifyIncludeContainerPackages
-	if isGoRig && !includeContainers {
-		var plain []string
-		for _, p := range pkgs {
-			if isContainerSuitePackage(p) {
-				deferred = append(deferred, p)
-			} else {
-				plain = append(plain, p)
-			}
-		}
-		pkgs = plain
-	}
-	// Every changed package deferred: nothing to test here, but the rig's
-	// lint_command (below) still runs over the tree.
-	allDeferred := isGoRig && !includeContainers && len(pkgs) == 0
-	allDeferredReason := ""
-	if allDeferred {
-		allDeferredReason = fmt.Sprintf("every changed package is container-backed (%s) — the refinery's gate runs those once per submission (gt-yihz); nothing for gt done to test without a container slot",
-			strings.Join(deferred, " "))
-		if strings.TrimSpace(mq.LintCommand) == "" {
-			return testVerifyResult{skipReason: allDeferredReason, deferredPackages: deferred}, nil
-		}
-	}
-	// A non-Go rig's test_command may spin containers, and so may the
-	// container-backed packages when the rig opted them back in.
-	needsSlot := !isGoRig || includeContainers
+	// The full suite may spin Dolt/testcontainers containers (internal/cmd,
+	// internal/refinery, ...), so the run happens inside the container-gate
+	// slot — the same guarantee a non-Go rig's test_command always had.
+	needsSlot := true
 
-	budgets := resolveTestVerifyBudgets(mq, worktree, mq.TestCommand, len(pkgs))
+	budgets := resolveTestVerifyBudgets(mq)
 
-	var testCmd string
-	switch {
-	case allDeferred:
-		testCmd = "" // lint only
-	case isGoRig:
-		if override := strings.TrimSpace(mq.TestVerifyCommand); override != "" {
+	// merge_queue.test_verify_command, when set, is the rig's own scoped
+	// variant of the suite (e.g. "make test-changed PKGS='{packages}'") and
+	// replaces the full test_command; the {packages} token receives the
+	// resolved changed-package list.
+	testCmd := mq.TestCommand
+	if override := strings.TrimSpace(mq.TestVerifyCommand); override != "" {
+		if isGoRig {
 			testCmd = strings.ReplaceAll(override, testVerifyPackagesPlaceholder, strings.Join(pkgs, " "))
-		} else {
-			// The -timeout is stated explicitly rather than left to Go's 10m
-			// default: the value the rig's own Makefile uses (gt-g8kr), and
-			// the same value the outer run budget was scaled from.
-			testCmd = fmt.Sprintf("go test -timeout %s %s", humanDuration(budgets.perPackage), strings.Join(pkgs, " "))
-		}
-	default:
-		if strings.Contains(mq.TestVerifyCommand, testVerifyPackagesPlaceholder) {
+		} else if strings.Contains(override, testVerifyPackagesPlaceholder) {
 			return testVerifyResult{}, fmt.Errorf("gt done: merge_queue.test_verify_command uses %s, but this rig is not a Go module so no changed-package list can be resolved for it — either drop the placeholder or point the gate at the whole suite", testVerifyPackagesPlaceholder)
 		}
-		testCmd = mq.TestCommand
 	}
 
 	logDir := filepath.Join(worktree, constants.DirRuntime)
@@ -707,12 +553,6 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	}
 	fmt.Fprintf(logFile, "run budget: %s (%s)\n", humanDuration(budgets.runTimeout), budgets.runSource)
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
-	if len(deferred) > 0 {
-		fmt.Fprintf(logFile, "deferred to the refinery gate (container-backed): %s\n", strings.Join(deferred, " "))
-	}
-	if !needsSlot {
-		fmt.Fprintf(logFile, "container-gate slot: not needed (no container-backed package in scope)\n")
-	}
 	if len(envPrefix) > 0 {
 		fmt.Fprintf(logFile, "env (inherited from test_command): %s\n", strings.Join(envPrefix, " "))
 	}
@@ -724,13 +564,12 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// Lint first: cheap, slot-free, and a lint failure should not cost a
 	// suite run. The rig's lint_command is the same one the batch gate runs.
 	result := testVerifyResult{
-		scope:            scope,
-		packages:         pkgs,
-		deferredPackages: deferred,
-		slotUsed:         needsSlot && !allDeferred,
-		logPath:          logPath,
-		runBudget:        budgets.runTimeout,
-		slotTimeout:      budgets.slotTimeout,
+		scope:       scope,
+		packages:    pkgs,
+		slotUsed:    needsSlot,
+		logPath:     logPath,
+		runBudget:   budgets.runTimeout,
+		slotTimeout: budgets.slotTimeout,
 	}
 	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
 		result.lintCommand = lint
@@ -767,11 +606,6 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		}
 		result.lintRan = true
 		reportVerifyProgress(logFile, fmt.Sprintf("lint passed in %s", result.lintElapsed.Round(time.Second)))
-	}
-	if allDeferred {
-		reportVerifyProgress(logFile, "no testable package in scope: "+allDeferredReason)
-		result.skipReason = allDeferredReason
-		return result, nil
 	}
 
 	var slotWait time.Duration
