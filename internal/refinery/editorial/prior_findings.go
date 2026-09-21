@@ -10,7 +10,9 @@ import (
 
 // priorFindingLineRE matches the interim MERGE REJECTION finding-line format
 // ("- id:<hex> sev:<severity> <path>:<line> — <title>"); om-gate T10 owns
-// writing these lines and may refine the format.
+// writing these lines and may refine the format. The id identifies the
+// FINDING, not the diff it was found on — see RejectionFinding.ID for what a
+// writer of these lines must not use (gt-2ok0).
 var priorFindingLineRE = regexp.MustCompile(`^-\s*id:(\S+)\s+sev:(\S+)\s+([^:]+):(\d+)\s+—\s+(.*)$`)
 
 // BuildPriorFindings collects prior MERGE REJECTION findings for sourceIssue
@@ -46,5 +48,32 @@ func BuildPriorFindings(bd *beads.Beads, sourceIssue string, attempt int) []Prio
 			Attempt:  attempt,
 		})
 	}
-	return findings
+	return dedupePriorFindings(findings)
+}
+
+// dedupePriorFindings keeps one entry per id — the last line naming that id
+// wins, in first-seen order.
+//
+// om keys its resolved/unresolved/regressed classification on the id and
+// rejects a --prior-findings payload that repeats one, and the gate fails
+// closed, so a repeat here does not spoil one review: it blocks every later
+// review of that source issue. The notes it was parsed from are append-only,
+// so the offending line cannot even be edited out (gt-2ok0). A repeated id is
+// a bookkeeping artifact of the writer, and the cost of collapsing it is one
+// description the reviewer would have rediscovered anyway.
+func dedupePriorFindings(findings []PriorFinding) []PriorFinding {
+	if len(findings) == 0 {
+		return findings
+	}
+	seen := make(map[string]int, len(findings))
+	unique := make([]PriorFinding, 0, len(findings))
+	for _, f := range findings {
+		if i, dup := seen[f.ID]; dup {
+			unique[i] = f
+			continue
+		}
+		seen[f.ID] = len(unique)
+		unique = append(unique, f)
+	}
+	return unique
 }
