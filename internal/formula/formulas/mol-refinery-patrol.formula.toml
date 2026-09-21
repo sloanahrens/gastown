@@ -578,8 +578,9 @@ The merge exits with:
 
 To detect conflict state after merge fails:
 ```bash
-# Check if we're in a conflicted merge state
-test -f .git/MERGE_HEAD && echo "CONFLICT_STATE"
+# The refinery runs in a worktree, where .git is a gitdir pointer file, so a
+# hardcoded .git/ path never resolves — read MERGE_HEAD through git (gt-cdo3)
+git rev-parse -q --verify MERGE_HEAD >/dev/null && echo "CONFLICT_STATE"
 ```
 
 **Step 3: Handle conflicts (if any)**
