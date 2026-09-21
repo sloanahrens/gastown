@@ -141,6 +141,11 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 	t.Setenv("GT_POLECAT", "")
 	t.Setenv("GT_REFINERY", "1")
 	t.Setenv("GT_ROLE", "gastown/refinery")
+	// The guard also reads the cwd (deliberately — see TestIsPolecatContext),
+	// and a polecat worktree's package dir contains "/polecats/", which no
+	// t.Setenv can clear. Escape it the way the crew case below does, or this
+	// sub-case reads red in every polecat's own gate (gt-3008).
+	t.Chdir(t.TempDir())
 	withStdin(t, cmd, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
 	if err != nil {
 		t.Errorf("refinery whole-package run must be allowed, got %v", err)
