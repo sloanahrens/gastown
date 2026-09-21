@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// pollerEntryGrace is how long a test waits before its first append, so the
+// wait it races has already opened the events file and seeked to its end. Bytes
+// written before that seek are invisible for good: the poller starts past them,
+// and half an event never parses, whatever the deadline. Entry is two syscalls
+// on a warm file — sub-millisecond even with the whole package running in
+// parallel — so this only has to beat scheduling jitter (gt-u3x6).
+const pollerEntryGrace = 300 * time.Millisecond
+
 func TestCalculateEffectiveTimeout(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -184,9 +192,9 @@ func TestWaitForEventsFile_Signal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Append a new line after a short delay
+	// Append a new line after the wait is tailing, so the append is one it sees.
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(pollerEntryGrace)
 		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			return
@@ -424,8 +432,9 @@ func TestWaitForEventsFile_WakesOnOwnRigAfterSkippingOthers(t *testing.T) {
 			return
 		}
 		defer f.Close()
+		time.Sleep(pollerEntryGrace)
 		_, _ = f.WriteString(`{"type":"nudge","actor":"dog","payload":{"target":"deacon"}}` + "\n")
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond) // the relevant line must land in a later tick
 		_, _ = f.WriteString(`{"type":"sling","actor":"mayor","payload":{"target":"om/polecats/jasper"}}` + "\n")
 	}()
 
@@ -449,7 +458,10 @@ func TestWaitForEventsFile_WakesOnEventSplitAcrossWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The deadline must outlast the split below (grace + hold) plus a poll tick,
+	// with room for host jitter — it was never the reason this test flaked
+	// (gt-u3x6).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	go func() {
@@ -458,6 +470,7 @@ func TestWaitForEventsFile_WakesOnEventSplitAcrossWrites(t *testing.T) {
 			return
 		}
 		defer f.Close()
+		time.Sleep(pollerEntryGrace)
 		_, _ = f.WriteString(`{"type":"done","actor":"om/pole`)
 		time.Sleep(600 * time.Millisecond) // several poll ticks land mid-line
 		_, _ = f.WriteString(`cats/jasper","payload":{}}` + "\n")
