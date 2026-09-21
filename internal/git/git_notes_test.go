@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -276,4 +277,136 @@ func TestNotesCopy(t *testing.T) {
 	if fromNote != toNote {
 		t.Fatalf("NotesShow(to) != NotesShow(from): %q vs %q", toNote, fromNote)
 	}
+}
+
+// TestPatchIDs_PerCommitAndStableAcrossRebase pins what PatchIDs adds over
+// PatchID: one id per commit, each unchanged by a rebase, so a caller can tell
+// which individual changes two branches share.
+func TestPatchIDs_PerCommitAndStableAcrossRebase(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	a := commitFile(t, dir, "a.txt", "a\n", "add a")
+	b := commitFile(t, dir, "b.txt", "b\n", "add b")
+
+	before, err := g.PatchIDs(base, b)
+	if err != nil {
+		t.Fatalf("PatchIDs before: %v", err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("PatchIDs returned %d ids for a 2-commit range: %v", len(before), before)
+	}
+
+	// Replay the same two commits onto a moved base: every sha changes, every
+	// patch-id must not.
+	runGit(t, dir, "checkout", "-b", "upstream", base)
+	newBase := commitFile(t, dir, "upstream.txt", "upstream progress\n", "unrelated upstream commit")
+	runGit(t, dir, "checkout", "-b", "rebased", newBase)
+	runGit(t, dir, "cherry-pick", a, b)
+	newHead, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD after cherry-pick: %v", err)
+	}
+
+	after, err := g.PatchIDs(newBase, newHead)
+	if err != nil {
+		t.Fatalf("PatchIDs after: %v", err)
+	}
+	if sorted := sortedCopy(after); !equalStrings(sorted, sortedCopy(before)) {
+		t.Fatalf("per-commit patch-ids changed across a rebase:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+// TestPatchIDs_SupersetAfterAddingCommit is the shape the rework-redispatch
+// recovery depends on: the shared commits keep their patch-ids when a new
+// commit is added on top, so "origin's changes are all present locally" is
+// answerable by set containment.
+func TestPatchIDs_SupersetAfterAddingCommit(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	commitFile(t, dir, "a.txt", "a\n", "add a")
+	originHead := commitFile(t, dir, "b.txt", "b\n", "add b")
+	originIDs, err := g.PatchIDs(base, originHead)
+	if err != nil {
+		t.Fatalf("PatchIDs origin: %v", err)
+	}
+
+	localHead := commitFile(t, dir, "fix.txt", "rework fix\n", "rework: address review")
+	localIDs, err := g.PatchIDs(base, localHead)
+	if err != nil {
+		t.Fatalf("PatchIDs local: %v", err)
+	}
+
+	if len(localIDs) != len(originIDs)+1 {
+		t.Fatalf("local range has %d ids, want %d", len(localIDs), len(originIDs)+1)
+	}
+	remaining := map[string]int{}
+	for _, id := range localIDs {
+		remaining[id]++
+	}
+	for _, id := range originIDs {
+		if remaining[id] == 0 {
+			t.Fatalf("origin patch-id %s is not carried by the local range: origin=%v local=%v", id, originIDs, localIDs)
+		}
+		remaining[id]--
+	}
+
+	// The whole-range ids must differ, which is exactly why the per-commit
+	// comparison is what decides this case.
+	originRange, err := g.PatchID(base, originHead)
+	if err != nil {
+		t.Fatalf("PatchID origin range: %v", err)
+	}
+	localRange, err := g.PatchID(base, localHead)
+	if err != nil {
+		t.Fatalf("PatchID local range: %v", err)
+	}
+	if originRange == localRange {
+		t.Fatal("expected whole-range patch-ids to differ once a commit is added")
+	}
+}
+
+// TestPatchIDs_EmptyRange: no commits of its own is a state callers reason
+// about, so it must read as an empty list rather than the error PatchID raises
+// when there is no diff to hash.
+func TestPatchIDs_EmptyRange(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	ids, err := g.PatchIDs(head, head)
+	if err != nil {
+		t.Fatalf("PatchIDs on an empty range: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("PatchIDs on an empty range = %v, want empty", ids)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

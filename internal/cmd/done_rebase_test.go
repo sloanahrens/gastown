@@ -35,13 +35,13 @@ func (f *fakeRebaseGit) AbortRebase() error {
 func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		behind        int
-		preVerified   bool
-		alreadyPushed bool
-		wantRebased   bool
-		wantSkip      string
-		wantCalls     int
+		name         string
+		behind       int
+		preVerified  bool
+		pushedReason string
+		wantRebased  bool
+		wantSkip     string
+		wantCalls    int
 	}{
 		{
 			name:        "not behind: no-op",
@@ -73,28 +73,36 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 			wantCalls:   0,
 		},
 		{
-			name:          "already pushed: skip to avoid divergence",
-			behind:        3,
-			alreadyPushed: true,
-			wantRebased:   false,
-			wantSkip:      "prior push checkpoint exists",
-			wantCalls:     0,
+			name:         "pushed this session: skip, naming the checkpoint",
+			behind:       3,
+			pushedReason: "prior push checkpoint exists",
+			wantRebased:  false,
+			wantSkip:     "prior push checkpoint exists",
+			wantCalls:    0,
 		},
 		{
-			name:          "pre-verified takes precedence over already-pushed",
-			behind:        3,
-			preVerified:   true,
-			alreadyPushed: true,
-			wantRebased:   false,
-			wantSkip:      "--pre-verified is set",
-			wantCalls:     0,
+			name:         "pushed by an earlier dispatch: skip, naming origin/<branch>",
+			behind:       3,
+			pushedReason: "origin/feature already exists on origin from an earlier dispatch",
+			wantRebased:  false,
+			wantSkip:     "origin/feature already exists on origin from an earlier dispatch",
+			wantCalls:    0,
+		},
+		{
+			name:         "pre-verified takes precedence over already-pushed",
+			behind:       3,
+			preVerified:  true,
+			pushedReason: "prior push checkpoint exists",
+			wantRebased:  false,
+			wantSkip:     "--pre-verified is set",
+			wantCalls:    0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeRebaseGit{}
-			rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", tt.behind, tt.preVerified, tt.alreadyPushed)
+			rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", tt.behind, tt.preVerified, tt.pushedReason)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -114,13 +122,169 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 	}
 }
 
+// fakePushedBranchGit lets us drive branchAlreadyOnRemote without a real repo.
+type fakePushedBranchGit struct {
+	revs    map[string]string
+	revErrs map[string]error
+
+	fetchErr   error
+	fetchCalls int
+	fetchArgs  []string
+}
+
+func (f *fakePushedBranchGit) FetchBranch(remote, branch string) error {
+	f.fetchCalls++
+	f.fetchArgs = []string{remote, branch}
+	return f.fetchErr
+}
+
+func (f *fakePushedBranchGit) Rev(ref string) (string, error) {
+	if err, ok := f.revErrs[ref]; ok {
+		return "", err
+	}
+	if sha, ok := f.revs[ref]; ok {
+		return sha, nil
+	}
+	return "", fmt.Errorf("fakePushedBranchGit: unknown ref %q", ref)
+}
+
+// TestBranchAlreadyOnRemote covers the ref read behind gt done's auto-rebase
+// and squash gates: it must name origin/<branch> (not a checkout-time guess),
+// refresh that ref when the earlier fetch went to a different remote, and
+// treat "not pushed yet" as a no, not an error (gt-i0z3).
+func TestBranchAlreadyOnRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		refresh    bool
+		fetchErr   error
+		revErrs    map[string]error
+		revs       map[string]string
+		wantExists bool
+		wantReason string
+		wantFetch  int
+	}{
+		{
+			name:       "ref already local, no refresh asked",
+			revs:       map[string]string{"origin/feature": "sha"},
+			wantExists: true,
+			wantReason: "origin/feature already exists on origin from an earlier dispatch",
+			wantFetch:  0,
+		},
+		{
+			name:       "refresh fetches exactly that one ref",
+			refresh:    true,
+			revs:       map[string]string{"origin/feature": "sha"},
+			wantExists: true,
+			wantReason: "origin/feature already exists on origin from an earlier dispatch",
+			wantFetch:  1,
+		},
+		{
+			name:       "branch never pushed: refresh fails, read misses",
+			refresh:    true,
+			fetchErr:   errors.New("couldn't find remote ref feature"),
+			wantExists: false,
+			wantFetch:  1,
+		},
+		{
+			name:       "branch never pushed, no refresh: read misses",
+			wantExists: false,
+			wantFetch:  0,
+		},
+		{
+			name:     "refresh fails but a stale local ref still counts as pushed",
+			refresh:  true,
+			fetchErr: errors.New("network unreachable"),
+			revs:     map[string]string{"origin/feature": "sha"},
+			// A present-but-stale ref is still evidence this branch was pushed
+			// before, which is all the caller's decision needs — better to skip
+			// a rebase than to rewrite history under an origin ref that exists.
+			wantExists: true,
+			wantReason: "origin/feature already exists on origin from an earlier dispatch",
+			wantFetch:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakePushedBranchGit{revs: tt.revs, revErrs: tt.revErrs, fetchErr: tt.fetchErr}
+			exists, reason := branchAlreadyOnRemote(f, "origin", "feature", tt.refresh)
+			if exists != tt.wantExists {
+				t.Errorf("exists = %v, want %v", exists, tt.wantExists)
+			}
+			if reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+			if f.fetchCalls != tt.wantFetch {
+				t.Errorf("fetch calls = %d, want %d", f.fetchCalls, tt.wantFetch)
+			}
+			if tt.wantFetch > 0 && strings.Join(f.fetchArgs, "|") != "origin|feature" {
+				t.Errorf("fetch args = %v, want [origin feature]", f.fetchArgs)
+			}
+		})
+	}
+}
+
+// TestBranchAlreadyOnRemote_RealRepoRefresh is the gap the refresh exists for,
+// against real git: a clone that predates the branch's push has no
+// origin/<branch> ref at all, so the read only answers correctly after
+// fetching that ref.
+func TestBranchAlreadyOnRemote_RealRepoRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// A later session clones before the branch exists…
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+
+	// …and the branch is pushed afterwards, by an earlier dispatch of the same
+	// branch name (the reuse path).
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature work")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	g := gitpkg.NewGit(work)
+	// Without a refresh the local ref never learned about it — this is how the
+	// gate used to miss a prior push in a rig whose earlier fetch went to a
+	// different remote.
+	if exists, _ := branchAlreadyOnRemote(g, "origin", "feature", false); exists {
+		t.Fatal("precondition failed: origin/feature should not be known before fetching it")
+	}
+	exists, reason := branchAlreadyOnRemote(g, "origin", "feature", true)
+	if !exists {
+		t.Fatal("expected origin/feature to be found after refreshing its ref")
+	}
+	if !strings.Contains(reason, "origin/feature") {
+		t.Errorf("reason = %q, want it to name origin/feature", reason)
+	}
+
+	// A branch nobody pushed is still a clean "no" after a refresh.
+	if exists, reason := branchAlreadyOnRemote(g, "origin", "never-pushed", true); exists || reason != "" {
+		t.Errorf("never-pushed branch = (%v, %q), want (false, \"\")", exists, reason)
+	}
+}
+
 // TestAutoRebaseOnTarget_ConflictAborts verifies that a rebase failure causes
 // AbortRebase to fire and the returned error includes remediation guidance.
 func TestAutoRebaseOnTarget_ConflictAborts(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRebaseGit{rebaseErr: errors.New("CONFLICT (content): merge conflict in foo.txt")}
 
-	rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(fake, "origin/main", 1, false, "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -180,7 +344,7 @@ func TestAutoRebaseOnTarget_RealRepoSuccess(t *testing.T) {
 	testRunGit(t, repo, "checkout", "feature")
 
 	g := gitpkg.NewGit(repo)
-	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,7 +393,7 @@ func TestAutoRebaseOnTarget_RealRepoConflictAborts(t *testing.T) {
 	testRunGit(t, repo, "checkout", "feature")
 
 	g := gitpkg.NewGit(repo)
-	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, false)
+	rebased, skipReason, err := autoRebaseOnTarget(g, "main", 1, false, "")
 	if err == nil {
 		t.Fatal("expected conflict error, got nil")
 	}
@@ -270,6 +434,10 @@ type fakeDivergedPushGit struct {
 	patchIDs   map[[2]string]string
 	patchIDErr error
 
+	// patchIDLists backs PatchIDs (one id per commit in the range).
+	patchIDLists map[[2]string][]string
+	patchIDsErr  error
+
 	leaseErr   error
 	leaseCalls int
 	leaseArgs  []string
@@ -308,6 +476,13 @@ func (f *fakeDivergedPushGit) PatchID(base, head string) (string, error) {
 		return "", f.patchIDErr
 	}
 	return f.patchIDs[[2]string{base, head}], nil
+}
+
+func (f *fakeDivergedPushGit) PatchIDs(base, head string) ([]string, error) {
+	if f.patchIDsErr != nil {
+		return nil, f.patchIDsErr
+	}
+	return f.patchIDLists[[2]string{base, head}], nil
 }
 
 func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
@@ -369,6 +544,10 @@ func TestRecoverDivergedPush_PatchIdenticalRecovers(t *testing.T) {
 			{"base1", "origSHA"}:  "samepatch",
 			{"base2", "localSHA"}: "samepatch",
 		},
+		patchIDLists: map[[2]string][]string{
+			{"base1", "origSHA"}:  {"p1"},
+			{"base2", "localSHA"}: {"p1"},
+		},
 	}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
 	if err != nil {
@@ -400,19 +579,264 @@ func TestRecoverDivergedPush_RealDivergenceRefuses(t *testing.T) {
 			{"base", "origSHA"}:  "patchA",
 			{"base", "localSHA"}: "patchB",
 		},
+		patchIDLists: map[[2]string][]string{
+			{"base", "origSHA"}:  {"patchA"},
+			{"base", "localSHA"}: {"patchB"},
+		},
 	}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if recovered {
-		t.Fatal("must not recover: patch-ids differ, this is real divergence")
+		t.Fatal("must not recover: origin holds a change local does not, this is real divergence")
 	}
-	if !strings.Contains(diagnosis, "NOT patch-identical") {
+	if !strings.Contains(diagnosis, "real divergence") {
 		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "patchA") {
+		t.Errorf("diagnosis = %q, want the unaccounted-for patch-id named", diagnosis)
 	}
 	if f.leaseCalls != 0 {
 		t.Errorf("lease push must not run on real divergence, got %d calls", f.leaseCalls)
+	}
+}
+
+// TestRecoverDivergedPush_ReworkRedispatchRecovers is the gt-i0z3 case: the
+// branch was pushed by an earlier dispatch, the new dispatch rebased it *and*
+// added a fix commit, so the two ranges are not patch-identical while every
+// change origin holds is also held locally. Refusing here (as the pure-rebase
+// check did) is a false "possible work loss" alarm on the exact path every
+// resume takes.
+func TestRecoverDivergedPush_ReworkRedispatchRecovers(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDs: map[[2]string]string{
+			{"base", "origSHA"}:  "rangePatchOld",
+			{"base", "localSHA"}: "rangePatchNew",
+		},
+		patchIDLists: map[[2]string][]string{
+			// origin: the two commits the first dispatch pushed.
+			{"base", "origSHA"}: {"p1", "p2"},
+			// local: the same two, rebased, plus the rework fix commit.
+			{"base", "localSHA"}: {"p1", "p2", "p3-fix"},
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery on the rework-redispatch path, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "rework-redispatch") || !strings.Contains(diagnosis, "no origin work lost") {
+		t.Errorf("diagnosis = %q, want it to name the rework case and rule out work loss", diagnosis)
+	}
+	if f.leaseCalls != 1 {
+		t.Fatalf("expected 1 leased push, got %d", f.leaseCalls)
+	}
+}
+
+// TestRecoverDivergedPush_SquashedButIdenticalRecovers covers the one case the
+// per-commit comparison cannot see: the branch carries byte-identical content
+// but a different commit split (squashed, or amended). Every origin patch-id
+// then looks unaccounted for, so the whole-range comparison has to be the one
+// that clears it.
+func TestRecoverDivergedPush_SquashedButIdenticalRecovers(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDs: map[[2]string]string{
+			{"base", "origSHA"}:  "rangePatch",
+			{"base", "localSHA"}: "rangePatch",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base", "origSHA"}:  {"p1", "p2"},
+			{"base", "localSHA"}: {"p1p2-squashed"},
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery: identical range content, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "content identical") {
+		t.Errorf("diagnosis = %q, want mention of identical content", diagnosis)
+	}
+}
+
+// TestRecoverDivergedPush_OriginCommitNotLocallyHeldRefuses pins the safety
+// rule on the rework path: containing *some* of origin's work is not enough,
+// because containing all of it is what makes the force-push lossless.
+func TestRecoverDivergedPush_OriginCommitNotLocallyHeldRefuses(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDs: map[[2]string]string{
+			{"base", "origSHA"}:  "rangePatchOld",
+			{"base", "localSHA"}: "rangePatchNew",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base", "origSHA"}: {"p1", "someone-elses"},
+			// The rework fix is present, but origin's p2 is missing locally.
+			{"base", "localSHA"}: {"p1", "p3-fix"},
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: origin holds a change local does not")
+	}
+	if !strings.Contains(diagnosis, "real divergence") || !strings.Contains(diagnosis, "someone-elses") {
+		t.Errorf("diagnosis = %q, want real divergence naming the unaccounted-for commit", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run when origin work is missing, got %d calls", f.leaseCalls)
+	}
+}
+
+// TestRecoverDivergedPush_OriginHasNoCommitsOfItsOwn covers a remote ref that
+// carries nothing of its own against the target: there is no origin work to
+// lose, so the push is safe to lease even though nothing about it matches.
+// PatchID cannot answer this case at all (an empty range has no diff to hash),
+// which is why the emptiness is handled before the range comparison.
+func TestRecoverDivergedPush_OriginHasNoCommitsOfItsOwn(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base", "localSHA"}: {"p1"},
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery: origin carries no commits of its own, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "no origin work at risk") {
+		t.Errorf("diagnosis = %q, want it to say there is no origin work at risk", diagnosis)
+	}
+	if f.leaseCalls != 1 {
+		t.Fatalf("expected 1 leased push, got %d", f.leaseCalls)
+	}
+}
+
+// TestRecoverDivergedPush_MissingRangePatchIDIsNotIdentity pins the other half
+// of that rule: when the whole-range comparison yields no id at all, it has
+// proven nothing, so the per-commit comparison must be the one that decides
+// (and here it refuses).
+func TestRecoverDivergedPush_MissingRangePatchIDIsNotIdentity(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		// No patchIDs entries: PatchID answers with "" for both ranges.
+		patchIDLists: map[[2]string][]string{
+			{"base", "origSHA"}:  {"p1"},
+			{"base", "localSHA"}: {"p2"},
+		},
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: an empty patch-id is not proof of identical content")
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+}
+
+func TestRecoverDivergedPush_PatchIDsErrorAborts(t *testing.T) {
+	t.Parallel()
+	f := &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		patchIDsErr: errors.New("git log failed"),
+	}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	if recovered {
+		t.Error("must not recover when the commit comparison itself failed")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty (no comparison result to report)", diagnosis)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestPatchIDsMissingFrom(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		want        []string
+		have        []string
+		wantMissing []string
+	}{
+		{
+			name: "all accounted for",
+			want: []string{"p1", "p2"},
+			have: []string{"p1", "p2", "p3"},
+		},
+		{
+			name:        "one missing, named",
+			want:        []string{"p1", "p2"},
+			have:        []string{"p1", "p3"},
+			wantMissing: []string{"p2"},
+		},
+		{
+			name:        "duplicate on the origin side needs a match each time",
+			want:        []string{"p1", "p1"},
+			have:        []string{"p1"},
+			wantMissing: []string{"p1"},
+		},
+		{
+			name: "duplicates matched",
+			want: []string{"p1", "p1"},
+			have: []string{"p1", "p1", "p2"},
+		},
+		{
+			name:        "empty origin is trivially contained",
+			want:        nil,
+			have:        []string{"p1"},
+			wantMissing: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := patchIDsMissingFrom(tt.want, tt.have)
+			if strings.Join(got, ",") != strings.Join(tt.wantMissing, ",") {
+				t.Errorf("patchIDsMissingFrom = %v, want %v", got, tt.wantMissing)
+			}
+		})
 	}
 }
 
@@ -426,6 +850,10 @@ func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
 		patchIDs: map[[2]string]string{
 			{"base", "origSHA"}:  "samepatch",
 			{"base", "localSHA"}: "samepatch",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base", "origSHA"}:  {"p1"},
+			{"base", "localSHA"}: {"p1"},
 		},
 		leaseErr: errors.New("stale info"),
 	}
@@ -521,6 +949,87 @@ func TestRecoverDivergedPush_RealRepo(t *testing.T) {
 	}
 }
 
+// TestRecoverDivergedPush_RealRepoReworkRedispatch is the end-to-end form of
+// the gt-i0z3 bug against real git: the reused branch is rebased *and* carries
+// a new fix commit, which is what mol-polecat-work's branch-reuse step does on
+// every redispatch. The two ranges are not patch-identical by design, so the
+// pure-rebase-only check called it "real divergence" and raised the possible
+// work-loss alarm on work that was never at risk. Recovery must land all three
+// commits' content.
+func TestRecoverDivergedPush_RealRepoReworkRedispatch(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// First dispatch: two commits, pushed — this is the state origin holds
+	// when the branch comes back for rework.
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature work")
+	writeRepoFile(t, seed, "feature-two.txt", "more feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "more feature work")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	// main advances while the MR waits in the queue.
+	testRunGit(t, seed, "checkout", "main")
+	writeRepoFile(t, seed, "main-new.txt", "advance\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "advance main")
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// Second dispatch: reuse the branch, rebase onto origin/main, then add the
+	// targeted fix commit the rework produced.
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
+	testRunGit(t, work, "fetch", "origin")
+	testRunGit(t, work, "rebase", "origin/main")
+	writeRepoFile(t, work, "rework-fix.txt", "the review fix\n")
+	testRunGit(t, work, "add", ".")
+	testRunGit(t, work, "commit", "-m", "rework: address review feedback")
+
+	g := gitpkg.NewGit(work)
+	if err := g.Push("origin", "feature:feature", false); err == nil {
+		t.Fatal("expected plain push to fail non-fast-forward after rebase + rework commit")
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("expected recovery on the rework-redispatch path, got diagnosis=%q", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "rework-redispatch") {
+		t.Errorf("diagnosis = %q, want it to name the rework case", diagnosis)
+	}
+
+	// Every commit's content must be on origin: the two origin already had,
+	// plus the rework fix, on top of the advanced main.
+	verify := filepath.Join(tmp, "verify")
+	testRunGit(t, tmp, "clone", "--branch", "feature", remote, verify)
+	for _, name := range []string{"main-new.txt", "feature.txt", "feature-two.txt", "rework-fix.txt"} {
+		if _, statErr := os.Stat(filepath.Join(verify, name)); statErr != nil {
+			t.Errorf("%s missing on origin/feature after recovery: %v", name, statErr)
+		}
+	}
+}
+
 // TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence guards the safety
 // side: when origin's tip is real, different work (not the same content
 // rebased), recovery must refuse and leave origin untouched rather than
@@ -581,7 +1090,7 @@ func TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *testing.T) {
 	if recovered {
 		t.Fatal("must not recover: origin has genuinely different content, not just a rebase")
 	}
-	if !strings.Contains(diagnosis, "NOT patch-identical") {
+	if !strings.Contains(diagnosis, "real divergence") {
 		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
 	}
 
