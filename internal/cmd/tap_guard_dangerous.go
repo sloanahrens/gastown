@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -114,16 +115,21 @@ const maxDangerousNestDepth = 3
 
 // evaluateDangerousCommand runs every dangerous-pattern check against
 // command and, up to maxDangerousNestDepth, recurses into any shell command
-// it finds embedded as an argument (bash -c/sh -c/eval) or as a command
-// substitution ($(...) / `...`). Without this, a wrapper like
-// `bash -c "git reset --hard"` was invisible to every check: shlex
-// collapses the quoted payload into a single token, so none of the
-// fragment-based matchers (which require each fragment as its own token)
-// ever fire on it. Quoted text that is NOT one of these shell-executing
-// forms (a SQL string, a mail body, a jq/sed script) deliberately stays
-// opaque — that is where this guard's real false positives have come from
-// (mayor scope, gt-5ihs attempt 2, gt-wisp-db27 finding 4).
+// it finds embedded as an argument (bash -c/sh -c/eval), as a command
+// substitution ($(...) / `...`), or as a heredoc body fed to a shell
+// (bash <<EOF). Without this, a wrapper like `bash -c "git reset --hard"`
+// was invisible to every check: shlex collapses the quoted payload into a
+// single token, so none of the fragment-based matchers (which require each
+// fragment as its own token) ever fire on it. Quoted text that is NOT one of
+// these shell-executing forms (a SQL string, a mail body, a jq/sed script)
+// deliberately stays opaque — that is where this guard's real false
+// positives have come from (mayor scope, gt-5ihs attempt 2, gt-wisp-db27
+// finding 4).
 func evaluateDangerousCommand(command string, depth int, townRoot string) (reason, alternative string) {
+	// Read the shell-fed bodies off the untouched command: stripHeredocBodies
+	// removes them from the text scanned below, and they come back in as
+	// nested commands of their own (gt-9g0y).
+	shellFedBodies := shellFedHeredocBodies(command)
 	command = stripHeredocBodies(command)
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
@@ -179,6 +185,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	}
 	nested := nestedCommands(tokens, lowerTokens)
 	nested = append(nested, commandSubstitutions(command)...)
+	nested = append(nested, shellFedBodies...)
 	for _, n := range nested {
 		if r, alt := evaluateDangerousCommand(n, depth+1, townRoot); r != "" {
 			return r, alt
@@ -226,6 +233,84 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 // ("<<'TAG'", `<<"TAG"`).
 var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
+// heredocSpan is one heredoc redirection found by scanHeredocs: the reader
+// line that owns it (the operator line with the operator removed), the body
+// text, and the body's byte offsets. bodyStart is -1 when the operator line
+// is the command's last line, so no body follows.
+type heredocSpan struct {
+	reader    string
+	body      string
+	bodyStart int
+	bodyEnd   int
+}
+
+// scanHeredocs returns every heredoc in command, in source order. A "<<" that
+// appears inside another heredoc's body is that body's data, not a second
+// heredoc, so it is dropped (gt-mkrj).
+func scanHeredocs(command string) []heredocSpan {
+	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
+	if matches == nil {
+		return nil
+	}
+	var spans []heredocSpan
+	stripped := 0 // end of the last accepted body; nothing before it starts a heredoc
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		if start < stripped {
+			continue // inside a previously accepted heredoc body
+		}
+		allowIndent := command[m[2]:m[3]] == "-"
+		tag := command[m[6]:m[7]]
+		reader := heredocReaderLine(command, start, end)
+
+		nl := strings.IndexByte(command[end:], '\n')
+		if nl < 0 {
+			// No body follows on a later line (e.g. the heredoc marker is
+			// the last thing on the line with nothing after it).
+			spans = append(spans, heredocSpan{reader: reader, bodyStart: -1, bodyEnd: end})
+			stripped = end
+			continue
+		}
+		bodyStart := end + nl + 1
+		bodyEnd := heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
+		spans = append(spans, heredocSpan{
+			reader:    reader,
+			body:      command[bodyStart:bodyEnd],
+			bodyStart: bodyStart,
+			bodyEnd:   bodyEnd,
+		})
+		stripped = bodyEnd
+	}
+	return spans
+}
+
+// heredocReaderLine returns the text of the line the heredoc operator at
+// [start,end) sits on, with the operator itself removed. The text after the
+// operator stays: in "cat <<EOF | bash" the pipeline's command words, not the
+// words before the operator, decide who consumes the body.
+func heredocReaderLine(command string, start, end int) string {
+	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
+	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
+	// over line continuations to keep the invoker on the reader line.
+	for lineStart > 0 {
+		prevEnd := lineStart - 1
+		prevStart := strings.LastIndexByte(command[:prevEnd], '\n') + 1
+		if !strings.HasSuffix(strings.TrimRight(command[prevStart:prevEnd], " \t"), `\`) {
+			break
+		}
+		lineStart = prevStart
+	}
+	lineEnd := strings.IndexByte(command[start:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(command)
+	} else {
+		lineEnd += start
+	}
+	// Drop the continuations themselves: left in place they glue onto the
+	// preceding word and hide it from the token matchers below.
+	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " ")
+}
+
 // stripHeredocBodies removes heredoc body text from command before any
 // tokenization or pattern matching runs. A heredoc body is DATA being
 // written to a file or piped to a command's stdin — the same class of
@@ -235,37 +320,61 @@ var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za
 // an ordinary file write because the DATA it wrote happened to mention a
 // dangerous phrase (gt-mkrj). Strips from just after the "<<TAG" line
 // through the line that is exactly TAG (optionally tab-indented, for the
-// "<<-TAG" form); text outside any heredoc span is left untouched.
+// "<<-TAG" form); text outside any heredoc span is left untouched. A body
+// fed to a shell invoker is not data — see shellFedHeredocBodies.
 func stripHeredocBodies(command string) string {
-	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
-	if matches == nil {
+	spans := scanHeredocs(command)
+	if len(spans) == 0 {
 		return command
 	}
 	var b strings.Builder
 	pos := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		if start < pos {
-			continue // inside a previously-stripped heredoc body
-		}
-		allowIndent := command[m[2]:m[3]] == "-"
-		tag := command[m[6]:m[7]]
-
-		nl := strings.IndexByte(command[end:], '\n')
-		if nl < 0 {
-			// No body follows on a later line (e.g. the heredoc marker is
-			// the last thing on the line with nothing after it) — nothing
-			// to strip.
-			b.WriteString(command[pos:end])
-			pos = end
+	for _, s := range spans {
+		if s.bodyStart < 0 {
 			continue
 		}
-		bodyStart := end + nl + 1
-		b.WriteString(command[pos:bodyStart])
-		pos = heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
+		b.WriteString(command[pos:s.bodyStart])
+		pos = s.bodyEnd
 	}
 	b.WriteString(command[pos:])
 	return b.String()
+}
+
+// shellFedHeredocBodies returns the bodies of heredocs whose reader line
+// names a shell invoker, because that shell runs the body as a script rather
+// than reading it as data (gt-9g0y). Stripping those bodies — gt-mkrj's rule,
+// which holds for every other reader — left "bash <<'EOF' ... git reset
+// --hard ... EOF" inspected by nothing at all. The caller evaluates the
+// returned bodies as nested commands; stripHeredocBodies still removes them
+// from the surrounding text, so they are judged once, as code.
+func shellFedHeredocBodies(command string) []string {
+	var bodies []string
+	for _, span := range scanHeredocs(command) {
+		if span.bodyStart < 0 || strings.TrimSpace(span.body) == "" {
+			continue
+		}
+		if heredocReaderIsShellInvoker(span.reader) {
+			bodies = append(bodies, span.body)
+		}
+	}
+	return bodies
+}
+
+// heredocReaderIsShellInvoker reports whether a shell invoker runs anywhere on
+// the heredoc's line. "cat <<EOF | bash" feeds bash the body just as "bash
+// <<EOF" does, so every pipeline segment counts — judged at command position,
+// so an argument that merely spells "bash" ("echo bash <<EOF") does not.
+func heredocReaderIsShellInvoker(reader string) bool {
+	for _, segment := range splitShellSegments(shellTokenize(reader)) {
+		word, _ := segmentCommandWord(segment)
+		if word == "" {
+			continue
+		}
+		if shellInvokers[strings.ToLower(filepath.Base(word))] {
+			return true
+		}
+	}
+	return false
 }
 
 // heredocTerminatorEnd scans command starting at bodyStart for a line
