@@ -141,20 +141,27 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, err
 	}
 
-	// Polecat model pool: with no explicit --agent, the town's polecat_pool
-	// decides between the local model and the overflow agent from the hooked
-	// bead's shape and the live polecat sessions (see sling_pool.go). The
-	// reason line always names the agent it chose, and a pool whose seats are
-	// all at their cap refuses the sling rather than spawning past the cap.
-	if opts.Agent == "" {
-		agent, reason, poolErr := resolvePolecatPoolAgent(townRoot, opts.HookBead, opts.Force)
-		if poolErr != nil {
-			return nil, poolErr
-		}
-		if reason != "" {
-			fmt.Printf("%s %s\n", style.Dim.Render("→"), reason)
-			opts.Agent = agent
-		}
+	// Polecat model pool: the town's polecat_pool decides the seat from the
+	// hooked bead's shape, its route:* labels and the live polecat sessions
+	// (see sling_pool.go). It is consulted on every spawn path, --agent
+	// included: an agent that names one of the pool's own seats is a request for
+	// that seat and is admitted by that seat's cap, so the agent a convoy
+	// recorded at sling time and the agent the deacon escalates to can no longer
+	// spawn past a full pool (gt-4lbz). An agent the pool does not own leaves it
+	// with no opinion and the request stands. The reason line always names the
+	// agent the pool chose, and a pool whose seats are all at their cap refuses
+	// the sling.
+	poolAgent, poolReason, poolErr := resolvePolecatPoolAgent(townRoot, opts.HookBead, opts.Agent)
+	if poolErr != nil {
+		return nil, poolErr
+	}
+	if poolReason != "" {
+		fmt.Printf("%s %s\n", style.Dim.Render("→"), poolReason)
+	}
+	// Only a seat the pool named replaces the request: an empty agent is the
+	// pool saying it has no opinion, not one saying "the role default".
+	if poolAgent != "" {
+		opts.Agent = poolAgent
 	}
 
 	// Load rig config
@@ -209,6 +216,17 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// Per-bead respawn circuit breaker (clown show #22):
 	// Track how many times this bead has been slung. Block after N attempts
 	// to prevent witness→deacon→sling feedback loops.
+	//
+	// The check runs here, before anything is allocated, but the count is
+	// recorded by recordRespawn at each success below. Counting a sling that
+	// never reached a polecat spent the bead's budget on a process someone
+	// killed: two daemon re-feeds the operator shot down mid-sling took gt-0vh
+	// to its respawn limit with only one polecat ever attached (gt-4lbz).
+	recordRespawn := func() {
+		if opts.HookBead != "" && !opts.Force {
+			witness.RecordBeadRespawn(townRoot, opts.HookBead)
+		}
+	}
 	if opts.HookBead != "" && !opts.Force {
 		if witness.ShouldBlockRespawn(townRoot, opts.HookBead) {
 			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
@@ -219,7 +237,6 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 				opts.HookBead, maxRespawns,
 				opts.HookBead, rigName, opts.HookBead)
 		}
-		witness.RecordBeadRespawn(townRoot, opts.HookBead)
 	}
 
 	if reclaimed, err := reclaimBrokenIdlePolecatForSling(polecatMgr); err != nil {
@@ -299,6 +316,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
 			slingSteps.step("reuse")
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
+			recordRespawn()
 
 			effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
@@ -405,6 +423,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 
 	// Log spawn event to activity feed
 	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
+	recordRespawn()
 
 	effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
