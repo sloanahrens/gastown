@@ -153,6 +153,11 @@ const pushTimeout = 60 * time.Second
 // stuck call blocks the entire scan (gt-ftt).
 const remoteQueryTimeout = 30 * time.Second
 
+// notesFetchTimeout bounds the fetch of the remote notes ref taken on the
+// PushNotes retry path, so a race with another notes writer can never turn a
+// push into an unbounded hang.
+const notesFetchTimeout = 30 * time.Second
+
 // runWithTimeout executes a git command with a deadline. If the command does
 // not finish within the timeout, the process is killed and an error is returned.
 func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _ error) { //nolint:unparam // string return kept for consistency with Run()
@@ -1315,11 +1320,97 @@ func (g *Git) NotesList(ref string) ([]NoteEntry, error) {
 	return entries, nil
 }
 
+// ErrNotesPushConflict is returned by PushNotes when the push was rejected
+// non-fast-forward and merging the remote's notes ref into the local one
+// conflicts — both writers re-keyed the same annotated commit, which no
+// automatic resolution can decide between.
+var ErrNotesPushConflict = errors.New("notes push rejected and remote notes conflict")
+
 // PushNotes pushes the notes ref to remote (git push <remote> refs/notes/<ref>),
 // with the same hang-prevention timeout as Push.
+//
+// A notes ref is an append-only tree keyed per annotated commit, so writers
+// that each add notes for different commits never logically conflict — but git
+// rejects the second push non-fast-forward, because the ref itself moved. With
+// several writers (batch rekey/backfill, per-rig refineries, concurrent
+// `gt mq review` runs) that is routine rather than exceptional, and it used to
+// surface as a bare push failure: the note is written locally, never published,
+// and the caller records record_failed for a race it could have resolved
+// (gt-2rcx). So a non-fast-forward rejection is retried once after merging the
+// remote ref in. The merge is clean whenever the two sides touch different
+// commits; if they re-key the same commit the merge is aborted, the local ref
+// restored, and ErrNotesPushConflict returned — fail-closed, because silently
+// picking a winner would publish one verdict over another.
+//
+// Other push failures (auth, protected ref, unreachable remote) are returned
+// unchanged: retrying them would only repeat the failure.
 func (g *Git) PushNotes(remote, ref string) error {
 	_, err := g.runWithTimeout(pushTimeout, "push", remote, "refs/notes/"+ref)
-	return err
+	if err == nil || !isNonFastForwardPush(err) {
+		return err
+	}
+	if mergeErr := g.mergeRemoteNotes(remote, ref); mergeErr != nil {
+		return fmt.Errorf("%w: %s refs/notes/%s: %v", ErrNotesPushConflict, remote, ref, mergeErr)
+	}
+	if _, err = g.runWithTimeout(pushTimeout, "push", remote, "refs/notes/"+ref); err != nil {
+		// Another writer won again between the merge and this push. Say so,
+		// or the retry looks like the rejection it was meant to resolve.
+		return fmt.Errorf("push refs/notes/%s after merging %s's notes: %w", ref, remote, err)
+	}
+	return nil
+}
+
+// isNonFastForwardPush reports whether err is git's non-fast-forward
+// rejection. Both spellings are matched because git words the rejection
+// differently depending on whether it knows the remote ref's history
+// ("non-fast-forward") or only that it moved ("fetch first").
+func isNonFastForwardPush(err error) bool {
+	var ge *GitError
+	if !errors.As(err, &ge) {
+		return false
+	}
+	return strings.Contains(ge.Stderr, "non-fast-forward") ||
+		strings.Contains(ge.Stderr, "fetch first")
+}
+
+// scratchNotesRef is the ref remote notes are fetched into before a push
+// retry. It is deliberately not refs/notes/<ref>: FetchNotes force-updates
+// that ref, which would discard the local note this push exists to publish.
+func scratchNotesRef(ref string) string {
+	return "refs/notes/" + ref + "-push-scratch"
+}
+
+// mergeRemoteNotes fetches remote's notes ref into a scratch ref and merges it
+// into the local one, so a push rejected non-fast-forward can be retried with
+// both writers' notes present. The scratch ref is deleted on the way out.
+func (g *Git) mergeRemoteNotes(remote, ref string) error {
+	scratch := scratchNotesRef(ref)
+	if _, err := g.runWithTimeout(notesFetchTimeout, "fetch", remote, "+refs/notes/"+ref+":"+scratch); err != nil {
+		var ge *GitError
+		if errors.As(err, &ge) && strings.Contains(ge.Stderr, "couldn't find remote ref") {
+			// The ref the rejected push raced against is gone (deleted, or
+			// just recreated) — there is nothing to merge, and the retry
+			// push will be judged on its own.
+			return nil
+		}
+		return fmt.Errorf("fetch %s %s: %w", remote, scratch, err)
+	}
+	// Best effort: the scratch ref is private to this retry and carries
+	// nothing a later reader needs.
+	defer func() {
+		_, _ = g.run("update-ref", "-d", scratch)
+	}()
+
+	// -s manual: a conflict means both sides re-keyed the same commit, and
+	// manual is the only strategy that refuses to guess. git then leaves the
+	// merge in progress, so abort to restore the pre-merge notes ref.
+	if _, err := g.run("notes", "--ref", ref, "merge", "-s", "manual", scratch); err != nil {
+		if _, abortErr := g.run("notes", "--ref", ref, "merge", "--abort"); abortErr != nil {
+			return fmt.Errorf("merge %s: %w (abort failed, refs/notes/%s may need manual repair: %v)", scratch, err, ref, abortErr)
+		}
+		return fmt.Errorf("merge %s: %w", scratch, err)
+	}
+	return nil
 }
 
 // ErrNoRemoteNotes is returned by FetchNotes when remote has no notes under

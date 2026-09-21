@@ -153,6 +153,10 @@ type reviewFixture struct {
 	rigDir  string
 	base    string
 	head    string
+	// originDir is the bare repo repoDir's origin remote points at — the
+	// notes ref Run pushes to, and so the place a concurrent writer's notes
+	// race shows up.
+	originDir string
 }
 
 func newReviewFixture(t *testing.T) *reviewFixture {
@@ -200,7 +204,7 @@ func newReviewFixture(t *testing.T) *reviewFixture {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	return &reviewFixture{repoDir: repoDir, rigDir: rigDir, base: base, head: head}
+	return &reviewFixture{repoDir: repoDir, rigDir: rigDir, base: base, head: head, originDir: bareDir}
 }
 
 func (f *reviewFixture) request() ReviewRequest {
@@ -714,6 +718,120 @@ func TestRun_NoteWriteFailureAfterVerdictIsRecordFailed(t *testing.T) {
 	if result.Exit != 2 || result.Class != RecordFailed {
 		t.Fatalf("Exit/Class = %d/%q, want 2/record_failed", result.Exit, result.Class)
 	}
+}
+
+// foreignNotesWriter pushes a note for a fresh commit of its own from a clone
+// that shares only origin with the fixture repo — standing in for the other
+// writers of refs/notes/om this path races in production (a batch backfill,
+// another rig's refinery, a concurrent `gt mq review`). It returns the
+// commit it annotated.
+func foreignNotesWriter(t *testing.T, originDir, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-c", "protocol.file.allow=always", "clone", originDir, dir).CombinedOutput(); err != nil {
+		t.Fatalf("clone origin: %v\n%s", err, out)
+	}
+	for _, kv := range [][2]string{{"user.email", "test@test.com"}, {"user.name", "Test User"}} {
+		cmd := exec.Command("git", "config", kv[0], kv[1])
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s: %v\n%s", kv[0], err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "foreign.txt"), []byte("foreign\n"), 0644); err != nil {
+		t.Fatalf("write foreign.txt: %v", err)
+	}
+	for _, args := range [][]string{{"add", "foreign.txt"}, {"commit", "-m", "foreign commit"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	g := git.NewGit(dir)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	if err := g.NotesAdd(NotesRef, head, content); err != nil {
+		t.Fatalf("NotesAdd: %v", err)
+	}
+	if err := g.PushNotes("origin", NotesRef); err != nil {
+		t.Fatalf("foreign PushNotes: %v", err)
+	}
+	return head
+}
+
+// notesPublishedOnOrigin returns the notes origin currently serves, keyed by
+// annotated object, read from a clone that shares nothing else with the
+// fixture repo.
+func notesPublishedOnOrigin(t *testing.T, originDir string) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-c", "protocol.file.allow=always", "clone", originDir, dir).CombinedOutput(); err != nil {
+		t.Fatalf("clone origin: %v\n%s", err, out)
+	}
+	g := git.NewGit(dir)
+	if err := g.FetchNotes("origin", NotesRef); err != nil {
+		t.Fatalf("FetchNotes: %v", err)
+	}
+	entries, err := g.NotesList(NotesRef)
+	if err != nil {
+		t.Fatalf("NotesList: %v", err)
+	}
+	published := make(map[string]string, len(entries))
+	for _, e := range entries {
+		published[e.Annotated] = e.Content
+	}
+	return published
+}
+
+// TestRun_ApproveSurvivesConcurrentNotesPush covers gt-2rcx end to end: a
+// verdict note the rig wrote must still reach origin when another writer
+// pushed to refs/notes/om since this clone's last look. Git rejects that push
+// non-fast-forward, and classifying it record_failed exited 2 on a race the
+// notes ref resolves for free — so Run must land both notes instead.
+func TestRun_ApproveSurvivesConcurrentNotesPush(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	foreignHead := foreignNotesWriter(t, fixture.originDir, `{"mr":"mr-foreign"}`)
+
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.9, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 || result.Class != "" {
+		t.Fatalf("Exit/Class = %d/%q, want 0 (a notes push race must not be record_failed; stderr=%q)", result.Exit, result.Class, result.Stderr)
+	}
+	if _, err := ReadNote(deps.Git, fixture.head); err != nil {
+		t.Fatalf("verdict note unreadable locally after the race: %v", err)
+	}
+
+	published := notesPublishedOnOrigin(t, fixture.originDir)
+	if _, ok := published[fixture.head]; !ok {
+		t.Errorf("the verdict note never reached origin (published: %v)", keysOf(published))
+	}
+	if _, ok := published[foreignHead]; !ok {
+		t.Errorf("the other writer's note was clobbered (published: %v)", keysOf(published))
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func TestRun_ApproveWithMajorFindingsFilesFollowups(t *testing.T) {
