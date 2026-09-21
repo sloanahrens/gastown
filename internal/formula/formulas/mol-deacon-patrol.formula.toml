@@ -58,6 +58,7 @@ Abbreviated patrol rules:
 - **dog-pool-maintenance**: SKIP.
 - **dog-health-check**: SKIP.
 - **orphan-check**: SKIP.
+- **rogue-bd-check**: SKIP.
 - **session-gc**: SKIP.
 - **wisp-compact**: SKIP.
 - **compact-report**: SKIP.
@@ -70,9 +71,25 @@ Abbreviated patrol rules:
 
 When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mode).
 
-The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
+The goal: idle cycles should burn ~10% of the tokens a full patrol uses.
+
+## Inbox Drain: Fork-`bd` Workaround (gt-ovem)
+
+While gt-ovem is pending, `gt mail archive` can fail when it shells out to a
+forked `bd` whose close guard rejects the close (assignee `role/` vs actor
+`role`). **Mayor-approved workaround (town-wide, 2026-09-10, mail hq-wisp-2u588):**
+drain mail with `bd close --force` instead:
+
+```bash
+bd close <mail-wisp> --force --reason archived
+```
+
+Apply this in inbox-check and patrol-cleanup whenever `gt mail archive` fails
+on the close guard — do NOT let inboxes accumulate processed-but-unarchived
+messages while waiting for gt-ovem. Once gt-ovem lands this section can be
+retired and `gt mail archive` is the only path again."""
 formula = "mol-deacon-patrol"
-version = 15
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -138,6 +155,10 @@ gt mail inbox
 gt mail read <id>
 # Handle based on message type
 ```
+
+**Inbox drain (gt-ovem workaround):** If `gt mail archive` fails on the
+fork-`bd` close guard, archive with the mayor-approved workaround instead
+(see the "Inbox Drain" section above): `bd close <mail-wisp> --force --reason archived`.
 
 **HELP / Escalation**:
 Assess and handle or forward to Mayor.
@@ -968,6 +989,50 @@ Skip dispatch - nothing to do.
 **Exit criteria:** Orphan scan dispatched to dog (if needed)."""
 
 [[steps]]
+id = "rogue-bd-check"
+title = "Detect rogue bd binaries (findings, no execution)"
+needs = ["orphan-check"]
+description = """
+**DETECT ONLY** - Scan agent worktrees for rogue `bd` executables.
+
+An agent that builds or symlinks its own `bd` binary inside an agent
+worktree shadows the town's beads release: that fork can run a different
+schema and migrate town databases behind the town's back (see the 09-09
+hq v58 incident and the 2026-09-10 shiny v66 incident — 2nd occurrence in
+2 days). Any executable file named `bd` under agent directories is a
+finding. (Mayor directive 2026-09-10, mail hq-wisp-2u588.)
+
+**Run the check:**
+```bash
+find ~/gt/*/polecats ~/gt/*/crew ~/gt/*/refinery ~/gt/*/witness ~/gt/*/mayor \
+  ~/gt/deacon/dogs -maxdepth 4 -type f -name bd -perm -u+x
+```
+
+**If hits are found** (any line of output is a finding):
+1. Report each hit: path, mtime, owning agent (polecat/crew/dog name from the path).
+2. Do NOT run, source, or `bd`-alias to the found binary — never execute a rogue bd.
+3. Neutralize with the mayor-approved action (removal is NOT approved):
+```bash
+chmod 644 <path>
+```
+4. Report to the Mayor with path, mtime, and owner so the root cause
+   (which agent built it and why) gets a bead:
+```bash
+gt mail send mayor/ -s "ROGUE_BD <path>" \
+  -m "Rogue executable bd detected: <path> (mtime <mtime>, owner <agent>).
+      Neutralized (chmod 644). Please file/assign a root-cause bead."
+```
+
+**If no hits:**
+Log `Rogue bd check: clean` and move on.
+
+**Safety:** Detection + chmod 644 only. Do not delete the binary, do not
+modify PATH, and do not touch town-level installs (~/go/bin, $PATH, or
+anything outside the scanned agent directories).
+
+**Exit criteria:** Check run; findings reported and neutralized (or clean)."""
+
+[[steps]]
 id = "session-gc"
 title = "Detect cleanup needs"
 needs = ["orphan-check"]
@@ -1194,6 +1259,10 @@ If any were missed:
 gt mail archive <message-id>
 ```
 
+If `gt mail archive` fails on the fork-`bd` close guard (gt-ovem still open),
+drain with the mayor-approved workaround instead (see the "Inbox Drain"
+section above): `bd close <mail-wisp> --force --reason archived`.
+
 **Goal**: Inbox should have ≤2 active messages at end of cycle.
 Deacon mail should flow through quickly - no accumulation."""
 
@@ -1281,7 +1350,7 @@ After await-signal returns, check the EFFORT directive in the output:
 - orphan-process-cleanup through fire-notifications: SKIP all
 - heartbeat-mid: SKIP
 - health-scan: Quick status checks only, skip nudges
-- dolt-health through session-gc: SKIP all
+- dolt-health through session-gc: SKIP all (includes rogue-bd-check)
 - wisp-compact through log-maintenance: SKIP all
 - patrol-cleanup: Quick inbox check only
 - context-check: One-sentence self-assessment
@@ -1299,7 +1368,7 @@ After await-signal returns (either by signal or timeout):
 gt patrol report --summary "<brief summary>" \
   --steps "heartbeat:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
-The --steps flag is REQUIRED. List ALL 26 steps with their actual status.
+The --steps flag is REQUIRED. List ALL 27 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created
