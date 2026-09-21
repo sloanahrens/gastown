@@ -3959,3 +3959,157 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
+
+// notesOriginFixture returns a bare origin and a clone of it, both with main
+// checked out, for exercising the notes-push retry path (gt-2rcx).
+func notesOriginFixture(t *testing.T) (originDir, cloneDir string) {
+	t.Helper()
+	originDir = t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", originDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	seed := initTestRepo(t)
+	runGit(t, seed, "remote", "add", "origin", originDir)
+	runGit(t, seed, "push", "origin", "HEAD:refs/heads/main")
+
+	return originDir, notesTestClone(t, originDir)
+}
+
+// notesTestClone clones origin into a fresh temp dir, configured to commit.
+func notesTestClone(t *testing.T, originDir string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-c", "protocol.file.allow=always", "clone", originDir, dir).CombinedOutput(); err != nil {
+		t.Fatalf("git clone %s: %v\n%s", originDir, err, out)
+	}
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	return dir
+}
+
+// commitNotesTestFile commits a new file in dir and returns the new commit's
+// sha — an object a writer can hang a note on.
+func commitNotesTestFile(t *testing.T, dir, name, content, message string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	runGit(t, dir, "add", name)
+	runGit(t, dir, "commit", "-m", message)
+	g := NewGit(dir)
+	rev, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	return rev
+}
+
+// notesPublishedOnOrigin reads the notes origin currently serves, keyed by
+// annotated object, from a clone sharing nothing with the writer.
+func notesPublishedOnOrigin(t *testing.T, originDir, ref string) map[string]string {
+	t.Helper()
+	dir := notesTestClone(t, originDir)
+	g := NewGit(dir)
+	if err := g.FetchNotes("origin", ref); err != nil {
+		t.Fatalf("FetchNotes: %v", err)
+	}
+	entries, err := g.NotesList(ref)
+	if err != nil {
+		t.Fatalf("NotesList: %v", err)
+	}
+	published := make(map[string]string, len(entries))
+	for _, e := range entries {
+		published[e.Annotated] = e.Content
+	}
+	return published
+}
+
+// TestPushNotes_MergesRemoteNotesOnNonFastForwardRejection covers gt-2rcx: a
+// notes ref is append-only and keyed per commit, so two writers adding notes
+// for different commits never logically conflict — yet git rejects the second
+// push as non-fast-forward. PushNotes must merge the remote ref in and retry
+// once instead of reporting a failure that leaves a verdict unpublished in
+// every other clone (and, at the `gt mq review` callsite, exits 2
+// record_failed).
+func TestPushNotes_MergesRemoteNotesOnNonFastForwardRejection(t *testing.T) {
+	origin, cloneA := notesOriginFixture(t)
+	cloneB := notesTestClone(t, origin)
+	gA, gB := NewGit(cloneA), NewGit(cloneB)
+	const ref = "om"
+
+	// B publishes first; A never fetches, so A's push is the rejected one.
+	// B's commit stays unknown to A, as a foreign writer's note would be.
+	commitB := commitNotesTestFile(t, cloneB, "b.txt", "b\n", "B change")
+	if err := gB.NotesAdd(ref, commitB, `{"mr":"mr-b"}`); err != nil {
+		t.Fatalf("B NotesAdd: %v", err)
+	}
+	if err := gB.PushNotes("origin", ref); err != nil {
+		t.Fatalf("B PushNotes: %v", err)
+	}
+
+	commitA := commitNotesTestFile(t, cloneA, "a.txt", "a\n", "A change")
+	if err := gA.NotesAdd(ref, commitA, `{"mr":"mr-a"}`); err != nil {
+		t.Fatalf("A NotesAdd: %v", err)
+	}
+	if err := gA.PushNotes("origin", ref); err != nil {
+		t.Fatalf("PushNotes should merge the remote notes ref and retry, got: %v", err)
+	}
+
+	published := notesPublishedOnOrigin(t, origin, ref)
+	if got := published[commitA]; got != `{"mr":"mr-a"}` {
+		t.Errorf("note on A's commit = %q, want mr-a's", got)
+	}
+	if got := published[commitB]; got != `{"mr":"mr-b"}` {
+		t.Errorf("note on B's commit = %q, want mr-b's (remote notes must survive the merge)", got)
+	}
+
+	if _, err := gA.Rev(scratchNotesRef(ref)); err == nil {
+		t.Errorf("scratch ref %s outlived the retry", scratchNotesRef(ref))
+	}
+}
+
+// TestPushNotes_ConflictOnSameCommitFailsClosed: when both writers re-keyed
+// the same commit there is no merge that preserves both verdicts, so the push
+// must fail loudly — ErrNotesPushConflict — with both the local and the remote
+// notes ref left exactly as they were, rather than one silently replacing the
+// other.
+func TestPushNotes_ConflictOnSameCommitFailsClosed(t *testing.T) {
+	origin, cloneA := notesOriginFixture(t)
+	cloneB := notesTestClone(t, origin)
+	gA, gB := NewGit(cloneA), NewGit(cloneB)
+	const ref = "om"
+
+	shared, err := gA.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	if err := gB.NotesAdd(ref, shared, `{"mr":"mr-b"}`); err != nil {
+		t.Fatalf("B NotesAdd: %v", err)
+	}
+	if err := gB.PushNotes("origin", ref); err != nil {
+		t.Fatalf("B PushNotes: %v", err)
+	}
+
+	if err := gA.NotesAdd(ref, shared, `{"mr":"mr-a"}`); err != nil {
+		t.Fatalf("A NotesAdd: %v", err)
+	}
+	err = gA.PushNotes("origin", ref)
+	if !errors.Is(err, ErrNotesPushConflict) {
+		t.Fatalf("PushNotes on a same-commit conflict = %v, want ErrNotesPushConflict", err)
+	}
+
+	local, err := gA.NotesShow(ref, shared)
+	if err != nil {
+		t.Fatalf("NotesShow after failed push: %v", err)
+	}
+	if local != `{"mr":"mr-a"}` {
+		t.Errorf("local note after abort = %q, want mr-a's own note restored", local)
+	}
+	if got := notesPublishedOnOrigin(t, origin, ref)[shared]; got != `{"mr":"mr-b"}` {
+		t.Errorf("remote note = %q, want mr-b's untouched", got)
+	}
+	if _, err := gA.Rev(scratchNotesRef(ref)); err == nil {
+		t.Errorf("scratch ref %s outlived the failed retry", scratchNotesRef(ref))
+	}
+}
