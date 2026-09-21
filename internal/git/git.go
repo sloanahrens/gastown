@@ -977,6 +977,18 @@ func (g *Git) FetchBranch(remote, branch string) error {
 	return err
 }
 
+// FetchDefaultBranchWithTimeout refreshes only the remote's default branch,
+// bounded by timeout.
+//
+// Scan loops that compare local work against the default branch need a fresh
+// origin/<default> or they judge today's work by last month's main — but a
+// plain Fetch can block forever on an unreachable remote, which is how one
+// stuck call takes down a whole patrol scan (gt-ftt).
+func (g *Git) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
+	_, err := g.runWithTimeout(timeout, "fetch", remote, g.RemoteDefaultBranch())
+	return err
+}
+
 // FetchBranchShallow fetches a single branch with --depth 1 and creates the
 // remote tracking ref (e.g. origin/<branch>). Use this on shallow single-branch
 // clones to add a branch that wasn't included in the initial clone.
