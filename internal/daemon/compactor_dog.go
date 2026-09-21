@@ -162,7 +162,7 @@ func (d *Daemon) runCompactorDog() {
 	for _, c := range candidates {
 		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — ESCALATING",
 			c.name, c.commits, threshold)
-		d.escalate("compactor_dog", fmt.Sprintf(
+		d.escalateAlert("compactor_dog:"+c.name, "compactor_dog", fmt.Sprintf(
 			"Commit threshold exceeded for %s: %d commits (threshold %d). "+
 				"Compaction is operator-only: run plugins/compactor-dog/run.sh --compact. "+
 				"See plugins/compactor-dog/plugin.md for the escalation policy.",

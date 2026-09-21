@@ -826,9 +826,26 @@ func (r *Router) queryAgentsFromDir(beadsDir string) ([]*agentBead, error) {
 // shouldBeWisp determines if a message should be stored as a wisp.
 // Returns true if:
 // - Message.Wisp is explicitly set
+// - The message is an escalation copy
 // - Subject matches lifecycle message patterns (POLECAT_*, NUDGE, etc.)
 func (r *Router) shouldBeWisp(msg *Message) bool {
 	if msg.Wisp {
+		return true
+	}
+	// Escalation mail is a notification, not a work item.
+	//
+	// The escalation itself is already recorded as an ephemeral escalation bead
+	// (beads.CreateEscalationBead); this mail is the delivery copy, and it
+	// duplicates that record. Persisting it durably made every firing leave a
+	// second, unowned P0/P1 task row behind — the mail's severity sets the bead
+	// priority, so a "high" escalation appeared as a P1 task and an urgent one
+	// as a P0 — which then sat at the top of bd ready forever, because nothing
+	// closed a mail bead and bd ready does not read the subject line to learn
+	// it was an alert (gt-vwry: 55 of 212 open beads in hq were these records).
+	//
+	// Wisps stay readable in the mailbox (queryWispMessages reads the wisps
+	// table) and are reaped on the normal TTL, so delivery is unaffected.
+	if msg.Type == TypeEscalation {
 		return true
 	}
 	// Auto-detect protocol/lifecycle messages by subject prefix

@@ -259,7 +259,13 @@ func (d *Daemon) runMainBranchTests() {
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("main branch test failures:\n%s", strings.Join(failures, "\n"))
 		d.logger.Printf("main_branch_test: escalating %d failure(s)", len(failures))
-		d.escalate("main_branch_test", msg)
+		d.escalateAlert(alertKeyMainBranchTest, "main_branch_test", msg)
+	} else if tested > 0 {
+		// Every rig that was checked passed, so the condition the alert
+		// describes is gone. Guarded on tested > 0: a cycle that ran nothing
+		// (all rigs filtered out by config) re-checked nothing and must not
+		// clear an alert that may still hold.
+		d.clearAlerts("main branch tests green", alertKeyMainBranchTest)
 	}
 
 	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed)", tested, failed)

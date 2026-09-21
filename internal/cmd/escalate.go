@@ -17,6 +17,8 @@ var (
 	escalateStaleJSON   bool
 	escalateDryRun      bool
 	escalateCloseReason string
+	escalateClearReason string
+	escalateClearKeys   []string
 	escalateStdin       bool // Read reason from stdin
 )
 
@@ -42,6 +44,19 @@ WORKFLOW:
   3. Escalation is routed based on settings/escalation.json
   4. Recipient acknowledges with: gt escalate ack <id>
   5. After resolution: gt escalate close <id> --reason "fixed"
+
+RECURRING ALERTS:
+  Every escalation carries an alert key — an explicit --fingerprint, or one
+  derived from --source and the description. Firing the same key again does
+  not mint a second bead: the existing open escalation records the repeat and
+  bumps its occurrence count. This is what keeps a condition that persists for
+  a night from leaving a dozen identical P0/P1 records behind, each topping
+  bd ready with no owner (gt-vwry).
+
+  A producer whose condition clears should close the key rather than leave it
+  for a human: gt escalate clear --fingerprint <key>. Producers that raise
+  alerts on a patrol cadence are expected to do this on the first healthy
+  cycle after the condition goes away.
 
 CONFIGURATION:
   Routing is configured in ~/gt/settings/escalation.json:
@@ -104,6 +119,28 @@ Examples:
 	RunE: runEscalateClose,
 }
 
+var escalateClearCmd = &cobra.Command{
+	Use:   "clear [description]",
+	Short: "Auto-close a keyed escalation whose condition has cleared",
+	Long: `Close open escalations that share an alert key, because the condition
+that raised them no longer holds.
+
+This is the counterpart to the recurrence handling on the main command: a
+producer that raises a keyed alert (a jsonl export spike, a main-branch test
+failure, a state-collapse condition) is expected to re-check its condition on
+the next cycle and clear the same key when the condition is gone. Without it,
+an alert that fired once stays open forever and keeps topping bd ready (gt-vwry).
+
+A key that matches no open escalation is not an error — that is the ordinary
+case on a healthy cycle, so the command exits 0 and reports "nothing to clear".
+
+Examples:
+  gt escalate clear --fingerprint jsonl_git_backup:spike:gastown
+  gt escalate clear --fingerprint main_branch_test:gastown --reason "main is green"
+  gt escalate clear --source main_branch_test "main branch test failures:"`,
+	RunE: runEscalateClear,
+}
+
 var escalateStaleCmd = &cobra.Command{
 	Use:   "stale",
 	Short: "Re-escalate stale unacknowledged escalations",
@@ -144,7 +181,7 @@ func init() {
 	escalateCmd.Flags().StringVarP(&escalateReason, "reason", "r", "", "Detailed reason for escalation")
 	escalateCmd.Flags().StringVar(&escalateSource, "source", "", "Source identifier (e.g., plugin:rebuild-gt, patrol:deacon)")
 	escalateCmd.Flags().StringVar(&escalateRelatedBead, "related", "", "Related bead ID (task, bug, etc.)")
-	escalateCmd.Flags().StringVar(&escalateFingerprint, "fingerprint", "", "Stable duplicate-suppression key for repeated alerts")
+	escalateCmd.Flags().StringVar(&escalateFingerprint, "fingerprint", "", "Stable alert key: a repeat firing records onto the existing open escalation instead of creating another (default: derived from --source and the description)")
 	escalateCmd.Flags().BoolVar(&escalateJSON, "json", false, "Output as JSON")
 	escalateCmd.Flags().BoolVarP(&escalateDryRun, "dry-run", "n", false, "Show what would be done without executing")
 	escalateCmd.Flags().BoolVar(&escalateStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
@@ -157,6 +194,11 @@ func init() {
 	escalateCloseCmd.Flags().StringVar(&escalateCloseReason, "reason", "", "Resolution reason")
 	_ = escalateCloseCmd.MarkFlagRequired("reason")
 
+	// Clear subcommand flags
+	escalateClearCmd.Flags().StringArrayVar(&escalateClearKeys, "fingerprint", nil, "Alert key to clear (repeatable; as passed when the alert was raised)")
+	escalateClearCmd.Flags().StringVar(&escalateSource, "source", "", "Source identifier used to derive the alert key from the description")
+	escalateClearCmd.Flags().StringVar(&escalateClearReason, "reason", "", "Why the condition cleared (default: recorded per-key)")
+
 	// Stale subcommand flags
 	escalateStaleCmd.Flags().BoolVar(&escalateStaleJSON, "json", false, "Output as JSON")
 	escalateStaleCmd.Flags().BoolVarP(&escalateDryRun, "dry-run", "n", false, "Show what would be re-escalated without acting")
@@ -168,6 +210,7 @@ func init() {
 	escalateCmd.AddCommand(escalateListCmd)
 	escalateCmd.AddCommand(escalateAckCmd)
 	escalateCmd.AddCommand(escalateCloseCmd)
+	escalateCmd.AddCommand(escalateClearCmd)
 	escalateCmd.AddCommand(escalateStaleCmd)
 	escalateCmd.AddCommand(escalateShowCmd)
 

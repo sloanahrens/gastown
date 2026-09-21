@@ -129,9 +129,10 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if err := ensureGitRepoInitialized(gitRepo); err != nil {
 		d.logger.Printf("jsonl_git_backup: cannot initialize git repo %s: %v", gitRepo, err)
 		mol.failStep("export", "git repo init failed: "+err.Error())
-		d.escalate("jsonl_git_backup", fmt.Sprintf("cannot initialize offsite backup repo %s: %v", gitRepo, err))
+		d.escalateAlert(alertKeyJSONLInit, "jsonl_git_backup", fmt.Sprintf("cannot initialize offsite backup repo %s: %v", gitRepo, err))
 		return
 	}
+	d.clearAlerts("backup repo initialized", alertKeyJSONLInit)
 
 	// Determine whether to scrub (default true).
 	scrub := true
@@ -163,9 +164,10 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(databases) == 0 {
 		d.logger.Printf("jsonl_git_backup: no databases found (configured or auto-discovered) under %s, skipping", dataDir)
 		mol.failStep("export", "no databases found")
-		d.escalate("jsonl_git_backup", fmt.Sprintf("no databases found under %s — offsite backup has nothing to export", dataDir))
+		d.escalateAlert(alertKeyJSONLNoDBs, "jsonl_git_backup", fmt.Sprintf("no databases found under %s — offsite backup has nothing to export", dataDir))
 		return
 	}
+	d.clearAlerts("databases discovered", alertKeyJSONLNoDBs)
 
 	d.logger.Printf("jsonl_git_backup: exporting %d database(s) to %s (scrub=%v)", len(databases), gitRepo, scrub)
 
@@ -202,7 +204,9 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Post-scrub verification: re-scan output for any remaining pollution.
 	if remaining := d.verifyNoPollution(gitRepo, databases); remaining > 0 {
 		d.logger.Printf("jsonl_git_backup: WARNING: %d suspicious record(s) survived scrub+filter", remaining)
-		d.escalate("jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining))
+		d.escalateAlert(alertKeyJSONLScrub, "jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining))
+	} else {
+		d.clearAlerts("no suspicious records survived scrub", alertKeyJSONLScrub)
 	}
 
 	mol.closeStep("verify")
@@ -213,10 +217,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalate("jsonl_git_backup", report)
+		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report)
 		mol.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
+	d.clearAlerts("no export spike", alertKeyJSONLSpike)
 
 	// Commit and push if anything changed.
 	// Include failed databases in commit message so staleness is visible.
@@ -232,13 +237,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 			if isPostBufferPushError(err.Error()) {
 				msg += "\n\n" + postBufferHint(d.gitPackSizeSummary(gitRepo))
 			}
-			d.escalate("jsonl_git_backup", msg)
+			d.escalateAlert(alertKeyJSONLPush, "jsonl_git_backup", msg)
 			// Reset to avoid flooding escalations every tick.
 			d.jsonlPushFailures = 0
 		}
 	} else {
 		d.jsonlPushFailures = 0
 		mol.closeStep("push")
+		d.clearAlerts("backup push succeeded", alertKeyJSONLPush)
 	}
 
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
@@ -707,22 +713,51 @@ func escalationTitle(source, message string) string {
 	return title
 }
 
-// escalate sends an escalation message to the mayor via gt escalate. message
-// may be multiline (e.g. full go-test output); it is passed as the
-// escalation reason via --stdin rather than embedded in the title, since
-// `gt escalate` forwards the title straight to `bd create --title=...`,
-// which rejects newlines and would otherwise drop the alert silently.
+// Alert keys for the daemon's patrol readers.
+//
+// Each is the stable identity of one recurring condition, not of one firing.
+// `gt escalate` records a repeat of a key onto the bead that already represents
+// it, and clearAlerts closes the key when the condition goes away, so a
+// condition that persists across many patrol cycles leaves exactly one open
+// escalation behind (gt-vwry) instead of one per cycle.
+const (
+	alertKeyMainBranchTest = "main_branch_test:failures"
+	alertKeyJSONLInit      = "jsonl_git_backup:init"
+	alertKeyJSONLNoDBs     = "jsonl_git_backup:no-databases"
+	alertKeyJSONLScrub     = "jsonl_git_backup:scrub-suspicious"
+	alertKeyJSONLSpike     = "jsonl_git_backup:spike"
+	alertKeyJSONLPush      = "jsonl_git_backup:push"
+)
+
+// escalate raises an alert whose key is derived from its own title, for
+// producers whose subject is already carried in the message (and for the
+// escalation sinks other parts of the daemon inject as function values).
+// Producers that know a stable class for their condition call escalateAlert
+// with an explicit key instead.
+func (d *Daemon) escalate(source, message string) {
+	d.escalateAlert(escalationTitle(source, message), source, message)
+}
+
+// escalateAlert sends an escalation message to the mayor via gt escalate under
+// the given alert key. message may be multiline (e.g. full go-test output); it
+// is passed as the escalation reason via --stdin rather than embedded in the
+// title, since `gt escalate` forwards the title straight to
+// `bd create --title=...`, which rejects newlines and would otherwise drop the
+// alert silently.
+//
+// The key travels as --fingerprint so the alert's identity is explicit at the
+// call site rather than inferred from prose that may embed varying detail.
 //
 // Under load (slot-starvation, Dolt contention) gt escalate can take >10 s.
 // We raise the per-attempt timeout to 60 s, retry up to maxEscalationRetries
 // times with exponential backoff, and on final drop log the full message to
 // the feed as a last-resort fallback (gt-tlwv).
-func (d *Daemon) escalate(source, message string) {
+func (d *Daemon) escalateAlert(key, source, message string) {
 	title := escalationTitle(source, message)
 
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
-		cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--stdin", title)
+		cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--fingerprint", key, "--stdin", title)
 		cmd.Stdin = strings.NewReader(message)
 		cmd.Dir = d.config.TownRoot
 		cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
@@ -794,6 +829,42 @@ func (d *Daemon) escalate(source, message string) {
 			time.Sleep(backoff)
 		}
 	}
+}
+
+// clearAlerts auto-closes the escalations for the given keys, because the
+// conditions they describe no longer hold (gt-vwry).
+//
+// Unlike escalateAlert this does not retry: an escalation that fails to send
+// loses an alert nobody has seen yet, while a clear that fails leaves an alert
+// open for one more cycle, and the next cycle clears it again. A patrol reader
+// clears on every healthy pass, so the ordinary case is "nothing to clear" —
+// `gt escalate clear` treats that as success rather than an error.
+//
+// Callers clear the key for the condition they just re-checked, and only that
+// key. A blanket "cycle was fine, close everything" would close alerts whose
+// conditions were never actually re-checked on this pass.
+func (d *Daemon) clearAlerts(reason string, keys ...string) {
+	if len(keys) == 0 {
+		return
+	}
+
+	args := []string{"escalate", "clear", "--reason", reason}
+	for _, key := range keys {
+		args = append(args, "--fingerprint", key)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", args...)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
+	util.SetDetachedProcessGroup(cmd)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		d.logger.Printf("clearAlerts(%s): %v — %s", strings.Join(keys, ","), err, strings.TrimSpace(string(out)))
+		return
+	}
+	d.logger.Printf("clearAlerts(%s): %s", strings.Join(keys, ","), reason)
 }
 
 // spikeThreshold returns the configured spike threshold or the default (20%).
