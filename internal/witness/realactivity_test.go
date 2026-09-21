@@ -164,6 +164,62 @@ func TestRealActivity_AgeAndStaleCandidate(t *testing.T) {
 	}
 }
 
+// TestRealActivity_ConfirmsStoppedWork pins the gt-z7vr gate: only a transcript
+// that has not advanced proves work stopped, and anything less must not be read
+// as a wedge — a restart on that evidence is what interrupted flint's rebase.
+func TestRealActivity_ConfirmsStoppedWork(t *testing.T) {
+	now := time.Now()
+	doneIntent := now.Add(-5 * time.Minute)
+
+	tests := []struct {
+		name string
+		mut  func(*RealActivity)
+		want bool
+	}{
+		{
+			name: "transcript older than the done-intent",
+			mut:  func(a *RealActivity) { a.LastActivity = doneIntent.Add(-time.Minute) },
+			want: true,
+		},
+		{
+			name: "transcript written at the done-intent",
+			mut:  func(a *RealActivity) { a.LastActivity = doneIntent },
+			want: true,
+		},
+		{
+			name: "work done after the done-intent",
+			mut:  func(a *RealActivity) { a.LastActivity = now.Add(-30 * time.Second) },
+			want: false,
+		},
+		{
+			name: "no transcript to date the session",
+			mut: func(a *RealActivity) {
+				a.LastActivity = time.Time{}
+				a.ActivitySource = ActivitySourceNone
+			},
+			want: false,
+		},
+		{
+			name: "agent process is not alive",
+			mut: func(a *RealActivity) {
+				a.AgentAlive = false
+				a.LastActivity = doneIntent.Add(-time.Minute)
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			act := base(now)
+			tc.mut(&act)
+			if got := act.ConfirmsStoppedWork(doneIntent); got != tc.want {
+				t.Errorf("ConfirmsStoppedWork(%v) = %v, want %v", doneIntent, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRealActivity_UnknownActivityIsNeverACandidate: a polecat with no
 // transcript must not be nominated for a restart it cannot be judged for.
 func TestRealActivity_UnknownActivityIsNeverACandidate(t *testing.T) {
