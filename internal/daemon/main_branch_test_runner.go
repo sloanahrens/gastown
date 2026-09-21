@@ -36,6 +36,10 @@ const (
 	// persisted to disk first (gt-1s2g, gt-f57o).
 	maxDiagnosticLines = 200
 
+	// maxLoggedCommandChars bounds how much of the gate command is echoed into
+	// a run's log line (see oneLine).
+	maxLoggedCommandChars = 200
+
 	// mainBranchTestSlotTimeout bounds how long the main_branch_test patrol
 	// waits for the container-gate slot before giving up on a rig's run,
 	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
@@ -52,10 +56,22 @@ const (
 // diagnosticLinePattern matches the lines worth surfacing from a failing
 // test/build run: test failures, panics, and build errors. Plain "ok"
 // lines from passing packages are excluded so a long run with one early
-// failure doesn't bury it under trailing successes (gt-1s2g). Leading
-// whitespace is allowed because a failing subtest's block is reported
-// indented under its parent (gt-f57o).
-var diagnosticLinePattern = regexp.MustCompile(`^\s*(FAIL|--- FAIL|panic:|# |.*\[build failed\])`)
+// failure doesn't bury it under trailing successes (gt-1s2g).
+//
+// The pattern is anchored at column 0, because that is where go test writes
+// every summary line: "FAIL\t<pkg>\t<secs>s" (which also carries a build
+// failure's "[build failed]" suffix), "--- FAIL: TestX (secs)" for a top-level
+// test, "panic:", and "# <pkg>" for a build error. Anything go test reports as
+// *test output* — a test's own log lines, an assertion under a failing test, a
+// test's failure message — is indented past column 0, and an indented match is
+// how text that merely looks like go test output (a fixture echoed by a test
+// in our own suite) got reported as evidence of a failure in a package that
+// does not exist (gt-f57o, second defect).
+//
+// A failing subtest's marker is indented, but it needs no alternative of its
+// own: its parent's top-level marker is printed too, and the parent's block
+// consumption below carries the subtest and its assertion.
+var diagnosticLinePattern = regexp.MustCompile(`^(FAIL|--- FAIL|panic:|# )`)
 
 // failedTestLine is the marker go test prints for each failing test; the
 // assertion block naming what actually broke follows it, indented deeper.
@@ -91,7 +107,7 @@ func extractDiagnosticLines(output string) []string {
 		if !appendLine(line) {
 			break
 		}
-		if !strings.HasPrefix(strings.TrimSpace(line), failedTestLine) {
+		if !strings.HasPrefix(line, failedTestLine) {
 			continue
 		}
 
@@ -100,7 +116,8 @@ func extractDiagnosticLines(output string) []string {
 		// line or a line at the same depth starts something else. A nested
 		// "--- FAIL" for a subtest is itself indented deeper, so it and its
 		// own block are consumed here and never re-appended by the outer
-		// loop.
+		// loop — which is the only way an indented marker reaches the body at
+		// all, since the pattern above only matches at column 0.
 		indent := leadingIndentWidth(line)
 		for j := i + 1; j < len(lines); j++ {
 			next := lines[j]
@@ -121,6 +138,26 @@ func extractDiagnosticLines(output string) []string {
 // failing test's assertion block deeper than its "--- FAIL" line.
 func leadingIndentWidth(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// oneLine flattens s onto a single log line, escaping newlines and bounding
+// the length.
+//
+// This is not cosmetic. The run's log is the text the failure extractor reads,
+// and the log line that announces the command echoes it verbatim: a command
+// carrying newlines (any test that passes go-test-shaped text as the command —
+// internal/daemon's own fixture-driven tests do) would put "--- FAIL: TestX"
+// and "FAIL\t<pkg>\t<secs>s" lines at column 0 of that log, and the extractor
+// would report them as the failure. That is how the mayor was handed
+// 'internal/widget', a package that does not exist, on 2026-09-21 (gt-f57o,
+// second defect). A log entry is one line; nothing echoed into it may add
+// another.
+func oneLine(s string) string {
+	s = strings.NewReplacer("\r\n", `\n`, "\n", `\n`, "\r", `\n`).Replace(s)
+	if runes := []rune(s); len(runes) > maxLoggedCommandChars {
+		s = string(runes[:maxLoggedCommandChars]) + "..."
+	}
+	return s
 }
 
 // writeMainBranchTestLog captures the full output of a failed run to
@@ -632,8 +669,9 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDi
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, workDir, label, command string) error {
 	// The tested head goes in the log line: a verdict that cannot be matched
 	// to a head cannot be checked against the refinery's green run on the
-	// same commit (gt-f57o).
-	d.logger.Printf("main_branch_test: %s: running %s on %s: %s", rigName, label, shortCommit(commit), command)
+	// same commit (gt-f57o). The command goes through oneLine so that echoing
+	// it cannot add lines to the log the extractor reads.
+	d.logger.Printf("main_branch_test: %s: running %s on %s: %s", rigName, label, shortCommit(commit), oneLine(command))
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir

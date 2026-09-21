@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/slot"
 )
@@ -667,6 +668,112 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 			t.Errorf("expected no passing-package lines in body, got:\n%s", body)
 		}
 	}
+}
+
+// fixtureEchoCommand is the command shape internal/daemon's own tests use to
+// exercise the extractor against realistic go test output: the whole fixture
+// as a printf argument. It is also the shape that fabricated a failure on
+// 2026-09-21 — the runner echoes the command it runs, so the fixture's
+// "--- FAIL: ..." and "FAIL\t<pkg>\t<secs>s" lines landed at column 0 of the
+// run's log and the extractor reported them as the failing package (gt-f57o,
+// second defect).
+func fixtureEchoCommand() string {
+	return "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
+}
+
+// TestRunCommandOnWorktree_LogCannotFabricateFailures is the regression test
+// for the second defect on this bead: the run's own log lines must not look
+// like test failures. The mayor was handed 'FAIL
+// github.com/steveyegge/gastown/internal/widget' — a package that does not
+// exist — because the log line announcing the command echoed a fixture with
+// newlines in it, putting go-test-shaped lines at column 0 of the log the
+// extractor reads. Before the command was flattened onto one line, the
+// extractor found four fabricated lines here.
+func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
+	var logged bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logged, "", 0),
+	}
+
+	_ = d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", fixtureEchoCommand())
+
+	if fabricated := extractDiagnosticLines(logged.String()); len(fabricated) != 0 {
+		t.Errorf("the runner's own log lines must not read as test failures, got:\n%s", strings.Join(fabricated, "\n"))
+	}
+}
+
+// TestExtractDiagnosticLines_IgnoresIndentedMarkers is the same defect one
+// layer down: go test indents a failing test's output — its log lines, its
+// failure message — past column 0, so go-test-shaped text there is context,
+// not a verdict. Anchoring the pattern at column 0 is what separates the two;
+// an indented copy may still appear in the body as a block under a real
+// marker (that is how a nested subtest's assertion gets in), but it can never
+// stand as a failure on its own.
+func TestExtractDiagnosticLines_IgnoresIndentedMarkers(t *testing.T) {
+	const fixtureInAMessage = `--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage (0.01s)
+    main_branch_test_runner_test.go:344: expected body to name the failing package, got:
+        --- FAIL: TestWidgetRenders (0.00s)
+        widget_test.go:42: expected 3, got 4
+        FAIL
+        FAIL	github.com/steveyegge/gastown/internal/widget	0.030s
+FAIL
+FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
+`
+	diagnostic := extractDiagnosticLines(fixtureInAMessage)
+	joined := strings.Join(diagnostic, "\n")
+
+	if !strings.Contains(joined, "--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage") {
+		t.Errorf("expected the real failing test marker, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "FAIL\tgithub.com/steveyegge/gastown/internal/daemon") {
+		t.Errorf("expected the real failing package, got:\n%s", joined)
+	}
+
+	for _, line := range diagnostic {
+		if leadingIndentWidth(line) != 0 {
+			continue // block context under a real marker, not a verdict
+		}
+		if strings.Contains(line, "internal/widget") || strings.Contains(line, "TestWidgetRenders") {
+			t.Errorf("a line go test wrote as test output was reported as a failure marker: %q", line)
+		}
+	}
+}
+
+// TestOneLine pins the sanitizer: a log entry is one line, and nothing echoed
+// into it may add another.
+func TestOneLine(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single line unchanged", "GOFLAGS=-p=8 make test", "GOFLAGS=-p=8 make test"},
+		{"newlines escaped", "printf 'a\n--- FAIL: TestX\nFAIL'", `printf 'a\n--- FAIL: TestX\nFAIL'`},
+		{"crlf escaped", "a\r\nb", `a\nb`},
+		{"bare carriage return escaped", "a\rb", `a\nb`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := oneLine(tt.in); got != tt.want {
+				t.Errorf("oneLine(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("length bounded", func(t *testing.T) {
+		got := oneLine(strings.Repeat("x", maxLoggedCommandChars+50))
+		if len(got) != maxLoggedCommandChars+3 {
+			t.Errorf("expected %d chars plus an ellipsis, got %d", maxLoggedCommandChars, len(got))
+		}
+	})
+
+	t.Run("multi-byte runes are not split", func(t *testing.T) {
+		got := oneLine(strings.Repeat("é", maxLoggedCommandChars+50))
+		if !utf8.ValidString(got) {
+			t.Errorf("oneLine produced invalid UTF-8: %q", got)
+		}
+	})
 }
 
 // TestRunCommandOnWorktree_LogLineNamesTheTestedHead is the gt-f57o
