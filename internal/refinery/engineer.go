@@ -616,19 +616,10 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
 
-	// Step 2: Checkout the target branch
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking out target branch %s...\n", target)
-	if err := e.git.Checkout(target); err != nil {
-		return ProcessResult{
-			Success: false,
-			Error:   fmt.Sprintf("failed to checkout target %s: %v", target, err),
-		}
-	}
-
-	// Make sure target is up to date with origin
-	if err := e.git.Pull("origin", target); err != nil {
-		// Pull might fail if nothing to pull, that's ok
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
+	// Step 2: Stage the merge on the target branch.
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Staging the merge on %s...\n", target)
+	if err := e.prepareMergeTarget(target); err != nil {
+		return ProcessResult{Success: false, Error: err.Error()}
 	}
 
 	// Step 2.5: Refuse a submission that changes nothing. Gating a no-op MR
@@ -637,9 +628,9 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return empty
 	}
 
-	// Step 3: Check for merge conflicts (using local branch)
+	// Step 3: Check for merge conflicts against the staged baseline.
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking for conflicts...\n")
-	conflicts, err := e.git.CheckConflicts(mergeRef, target)
+	conflicts, err := e.git.CheckConflictsAtHead(mergeRef)
 	if err != nil {
 		return ProcessResult{
 			Success:  false,
@@ -658,7 +649,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	// Step 3.5: Push submodule commits if the branch changes submodule pointers.
 	// The refinery owns all remote pushes — submodule commits must land before the
 	// parent pointer is merged, otherwise main gets dangling submodule references.
-	subChanges, err := e.git.SubmoduleChanges(target, mergeRef)
+	subChanges, err := e.git.SubmoduleChanges("origin/"+target, mergeRef)
 	if err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check submodule changes: %v\n", err)
 	}
@@ -836,7 +827,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		// session unless GT_REFINERY_MERGE=1 is set (gt-ibt8); the Refinery
 		// owns landing verified MRs, so it names that signal explicitly.
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
-		if err := e.git.PushWithEnv("origin", target, false, []string{git.EnvRefineryMerge}); err != nil {
+		if err := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); err != nil {
 			// Reset the checked-out target branch to undo the local merge commit.
 			// Without this, the next retry could see stale local state from the failed push.
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {

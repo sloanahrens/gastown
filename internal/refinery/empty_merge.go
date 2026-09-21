@@ -58,23 +58,28 @@ type emptyMerge struct {
 
 // checkSubmittedHeadAddsChange refuses mr when merging head into target would
 // leave target's tree as it is.
+//
+// It measures against origin/target rather than the local target ref, which the
+// merge no longer stages on and which a live polecat worktree can leave
+// arbitrarily stale (gt-032w).
 func (e *Engineer) checkSubmittedHeadAddsChange(mr *MRInfo, target, head string) ProcessResult {
 	if e.git == nil {
 		return ProcessResult{Success: false, Error: "git client is missing"}
 	}
-	identical, err := e.git.TreesIdentical(target, head)
+	base := "origin/" + target
+	identical, err := e.git.TreesIdentical(base, head)
 	if err != nil {
-		return ProcessResult{Success: false, Error: fmt.Sprintf("comparing %s with %s: %v", target, shortSHA(head), err)}
+		return ProcessResult{Success: false, Error: fmt.Sprintf("comparing %s with %s: %v", base, shortSHA(head), err)}
 	}
 	if !identical {
 		return ProcessResult{Success: true}
 	}
 	return e.refuseEmptyMerge(mr, emptyMerge{
 		Target:     target,
-		Base:       target,
+		Base:       base,
 		Head:       head,
 		Stage:      "before gates",
-		Comparison: fmt.Sprintf("%s and %s have identical trees", target, shortSHA(head)),
+		Comparison: fmt.Sprintf("%s and %s have identical trees", base, shortSHA(head)),
 	})
 }
 
