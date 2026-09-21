@@ -97,15 +97,20 @@ directory.
 - If integration-target merging is enabled: use MR target when present, fallback `{{ .DefaultBranch }}`
 - If integration-target merging is disabled: always use `{{ .DefaultBranch }}`
 
-**Title-vs-diff is a claim check, not an incompleteness test.**
-When the MR diff does not touch what the source bead's title names, the
-checklist is: what claim does the title make, and does the source contradict
-it? The check is cheap — `git show <pre-fix ref>:<file>` for the mechanism,
-`git diff --stat` for the scope. A disproved claim is a title-accuracy finding
-(amend it, gt-3t2), not automatically a "shipping incomplete" rejection:
-gt-ido's title asserted a half the investigation disproved, the P0 diff
-shipped the other half, and the shape of the diff nearly failed the gate
-before the claim check saved it.
+**A title-vs-diff mismatch is a claim check, not an incompleteness test.**
+When an MR diff does not touch what the source bead's title names, read the
+claim before gating on the diff's shape — `git show <pre-fix ref>:<file>` for
+the mechanism, `git diff --stat` for the scope. Then exactly one of:
+
+- **The title is disproved or outdated** — the work changed scope, or a
+  hypothesis named in the title did not hold. Correct the title as part of the
+  merge, then merge: `bd update <bead> --title "DISPROVEN: <original claim>;
+  <what shipped>"`. Completion criterion: `bd show <bead>` no longer asserts
+  the disproven claim. The polecat owns this before `gt done`; after it, you
+  are the last agent who can fix it (gt-3t2).
+- **The work is genuinely incomplete** — reject as before.
+
+Gating on shape alone nearly rejected a completed P0 (gt-ido).
 
 **Example: Handling a Conflict**
 ```bash

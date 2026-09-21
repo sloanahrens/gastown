@@ -457,13 +457,9 @@ git status              # Must be clean (no uncommitted changes)
 git log --oneline -3    # Verify your commits are present
 ```
 
-**Title check before submit.** A bead's title becomes the merged commit's
-subject. If your work disproved or changed the title's claim, amend it before
-submitting (prefix `DISPROVEN:` or restate to what shipped) — an unread stale
-claim outlives the work and misleads the next three readers (gt-3t2):
-```bash
-bd update <id> --title "DISPROVEN: <original claim>; <what actually shipped>"
-```
+**Title check before submit.** If the work disproved or changed your bead's
+title, amend it before running `{{ cmd }} done` — the submit step of
+`mol-polecat-work` carries the pre-flight and its exit criterion.
 
 Then submit: **`{{ cmd }} done`** ← MANDATORY FINAL STEP
 

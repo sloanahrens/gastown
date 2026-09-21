@@ -264,10 +264,9 @@ When your work is done, follow this checklist — **the final step is REQUIRED**
        → every file listed is one you changed for this issue. A file you never
          touched, or a big negative line count, means your tree is stale:
          rebase your changes (Git Operations) — never reset onto origin/main.
-[ ] 5. Title check: if your work disproved or changed the title's claim, amend
-       it before submitting (prefix DISPROVEN: or restate to what shipped) —
-       the title becomes the merged commit's subject (gt-3t2):
-       bd update <id> --title "DISPROVEN: <original claim>; <what shipped>"
+[ ] 5. Title check: if the work disproved or changed your bead's title, amend
+       it before submitting — the title pre-flight in your formula's submit
+       step (mol-polecat-work) has the command and the exit criterion.
 [ ] 6. Self-clean:        gt done   ← MANDATORY FINAL STEP
 ```
 
