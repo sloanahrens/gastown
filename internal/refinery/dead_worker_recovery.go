@@ -49,6 +49,12 @@ type deadWorkerRecoveryRequest struct {
 // rejection. ID is the finding's stable 12-hex id (om: first 12 hex of
 // sha256(path|title)), matching the id om's --prior-findings classification
 // keys on.
+//
+// The id must be unique per finding. The reviewed head sha is not an id: one
+// rejection's findings are all found on that head, so using it collides the
+// moment a rejection reports two, and om rejects a repeated id outright —
+// fail-closed, so the colliding note blocks every later review of the source
+// issue, not just the attempt that wrote it (gt-2ok0).
 type RejectionFinding struct {
 	ID       string
 	Severity string // "major" | "minor" | "info"

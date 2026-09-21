@@ -67,6 +67,33 @@ not a finding line
 	}
 }
 
+func TestBuildPriorFindings_CollapsesDuplicateIDs(t *testing.T) {
+	// gt-3mp1's notes carried two findings written with the reviewed head sha
+	// as the id. Forwarding that to om makes it reject the payload, and the
+	// gate fails closed, so the duplicate must be collapsed here (gt-2ok0).
+	notes := `Findings from the last rejection:
+- id:34d834b sev:major internal/config/config.go:432 — unchecked error
+- id:def987654321 sev:minor internal/bar.go:7 — missing test
+- id:34d834b sev:major internal/config/config_test.go:898 — unchecked error
+`
+	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{
+		"gt-source": {ID: "gt-source", Notes: notes, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}}
+	bd := beads.NewWithStore(t.TempDir(), store)
+
+	got := BuildPriorFindings(bd, "gt-source", 2)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d findings, want 2 (the repeated id collapsed): %+v", len(got), got)
+	}
+	if got[0].ID != "34d834b" || got[0].Path != "internal/config/config_test.go" || got[0].Line != 898 {
+		t.Errorf("finding[0] = %+v, want the last line naming id 34d834b", got[0])
+	}
+	if got[1].ID != "def987654321" {
+		t.Errorf("finding[1] = %+v, want the unaffected finding, in note order", got[1])
+	}
+}
+
 func TestBuildPriorFindings_NoSourceIssueReturnsNil(t *testing.T) {
 	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{}}
 	bd := beads.NewWithStore(t.TempDir(), store)
