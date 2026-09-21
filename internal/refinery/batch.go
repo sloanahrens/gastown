@@ -127,12 +127,9 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		return nil, nil, nil
 	}
 
-	// Checkout target and ensure it's up to date
-	if checkoutErr := e.git.Checkout(target); checkoutErr != nil {
-		return nil, nil, fmt.Errorf("checkout target %s: %w", target, checkoutErr)
-	}
-	if pullErr := e.git.Pull("origin", target); pullErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: pull origin/%s: %v (continuing)\n", target, pullErr)
+	// Stage the stack on the target branch's current tip.
+	if stageErr := e.prepareMergeTarget(target); stageErr != nil {
+		return nil, nil, stageErr
 	}
 
 	// Remember the base SHA to reset on retry
@@ -160,7 +157,7 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		}
 
 		// Check for conflicts before merging
-		conflictFiles, conflictErr := e.git.CheckConflicts(mergeRef, target)
+		conflictFiles, conflictErr := e.git.CheckConflictsAtHead(mergeRef)
 		if conflictErr != nil || len(conflictFiles) > 0 {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: conflicts detected, removing from batch\n", mr.ID)
 			conflicts = append(conflicts, mr)
@@ -652,7 +649,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	// polecat session unless GT_REFINERY_MERGE=1 is set (gt-ibt8), and the
 	// Refinery may itself run inside one.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Pushing %d merged MRs to origin/%s...\n", len(stacked), target)
-	if pushErr := e.git.PushWithEnv("origin", target, false, []string{git.EnvRefineryMerge}); pushErr != nil {
+	if pushErr := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); pushErr != nil {
 		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
 		}
@@ -819,12 +816,8 @@ func mrIDs(mrs []*MRInfo) []string {
 
 // resetAndRebuildStack resets the target branch and rebuilds the merge stack.
 func (e *Engineer) resetAndRebuildStack(mrs []*MRInfo, target string) error {
-	// Reset target to origin
-	if err := e.git.Checkout(target); err != nil {
-		return fmt.Errorf("checkout %s: %w", target, err)
-	}
-	if err := e.git.ResetHard("origin/" + target); err != nil {
-		return fmt.Errorf("reset %s: %w", target, err)
+	if err := e.prepareMergeTarget(target); err != nil {
+		return err
 	}
 
 	// Rebuild the stack

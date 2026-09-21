@@ -2112,12 +2112,24 @@ func (g *Git) AbortMerge() error {
 //
 // The caller must ensure the working directory is clean before calling this.
 // After return, the working directory is restored to the target branch.
+// A caller whose HEAD already sits on target uses CheckConflictsAtHead instead.
 func (g *Git) CheckConflicts(source, target string) ([]string, error) {
 	// Checkout the target branch
 	if err := g.Checkout(target); err != nil {
 		return nil, fmt.Errorf("checkout target %s: %w", target, err)
 	}
 
+	return g.CheckConflictsAtHead(source)
+}
+
+// CheckConflictsAtHead performs the test merge of source into the commit HEAD
+// already names, so a caller that staged HEAD on the target baseline itself is
+// not made to check the branch out again — the checkout it would repeat is one
+// git refuses while any other worktree holds the branch (gt-032w).
+//
+// The caller must ensure the working directory is clean before calling this.
+// After return, HEAD and the working directory are restored as they were.
+func (g *Git) CheckConflictsAtHead(source string) ([]string, error) {
 	// Attempt test merge with --no-commit --no-ff
 	// We need to capture both stdout and stderr to detect conflicts
 	_, mergeErr := g.runMergeCheck("merge", "--no-commit", "--no-ff", source)
