@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -28,6 +29,23 @@ const (
 	gitPushTimeout                = 120 * time.Second
 	gitCmdTimeout                 = 30 * time.Second
 	maxConsecutivePushFailures    = 3
+
+	// gitLocalPhaseTimeout bounds the local file-staging half of one backup tick
+	// (add, diff --cached, commit) as a whole, not per command. gitCmdTimeout is
+	// a network budget, and a loaded host blows through it while staging the
+	// export tree; the `git add` it killed is what orphaned .git/index.lock and
+	// poisoned every later tick (gt-1aj2). One shared deadline still bounds a
+	// wedged tick to well under the 15-minute interval, where three stacked
+	// per-command budgets would not.
+	gitLocalPhaseTimeout = 5 * time.Minute
+
+	// gitIndexLockGracePeriod is how long .git/index.lock must sit untouched
+	// before the daemon treats it as abandoned rather than held. git records no
+	// owner in the lock, so age is the only signal available; two minutes is far
+	// below the backup interval, so a lock left by a dead tick is always
+	// recognizable, while a lock a live git process just created is not.
+	gitIndexLockGracePeriod = 2 * time.Minute
+
 	defaultSpikeThreshold         = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
@@ -50,6 +68,11 @@ const (
 	// sets this by hand (gt-kxa1).
 	gitPostBufferBytes = "524288000" // 500 MB
 )
+
+// errGitCmdTimeout marks a git command killed because its context deadline
+// expired. The kill signal gives git no chance to release .git/index.lock, so
+// callers of index-mutating commands clear one up on this error (gt-1aj2).
+var errGitCmdTimeout = errors.New("command timed out")
 
 // testPollutionPatterns matches issue IDs or titles that indicate test data leaked
 // into production exports. These records are filtered out before writing JSONL.
@@ -405,14 +428,19 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 // The commit message includes counts for successful exports AND names of failed
 // databases, so partial failures are visible in git history.
 func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, counts map[string]int, failed []string) error {
+	// The three local commands below share one deadline, so a single slow one
+	// can use the whole phase without three of them stacking past a tick.
+	localDeadline := time.Now().Add(gitLocalPhaseTimeout)
+	localBudget := func() time.Duration { return time.Until(localDeadline) }
+
 	// Stage all JSONL files (flat legacy files + subdirectory structure).
 	// Use "." instead of "*/" to correctly handle initially-untracked subdirectories.
-	if err := d.runGitCmd(gitRepo, gitCmdTimeout, "add", "-A", "."); err != nil {
+	if err := d.runGitIndexCmd(gitRepo, localBudget(), "add", "-A", "."); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
 	// Check if there are staged changes.
-	if err := d.runGitCmd(gitRepo, gitCmdTimeout, "diff", "--cached", "--quiet"); err == nil {
+	if err := d.runGitIndexCmd(gitRepo, localBudget(), "diff", "--cached", "--quiet"); err == nil {
 		d.logger.Printf("jsonl_git_backup: no changes to commit")
 		return nil
 	}
@@ -432,7 +460,7 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	}
 
 	// Commit.
-	if err := d.runGitCmd(gitRepo, gitCmdTimeout, "commit", "-m", msg,
+	if err := d.runGitIndexCmd(gitRepo, localBudget(), "commit", "-m", msg,
 		"--author=Gas Town Daemon <daemon@gastown.local>"); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
@@ -681,6 +709,12 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+				return fmt.Errorf("%w after %s: %s", errGitCmdTimeout, timeout, errMsg)
+			}
+			return fmt.Errorf("%w after %s", errGitCmdTimeout, timeout)
+		}
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
 			return fmt.Errorf("%s", errMsg)
@@ -688,6 +722,102 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 		return err
 	}
 	return nil
+}
+
+// runGitIndexCmd runs a git command that reads or writes gitRepo's index,
+// steering around the index lock a previous tick may have left behind. A tick
+// whose `git add` is killed on its deadline cannot release that lock, and
+// without this every later tick fails "index.lock: File exists" until a human
+// removes it (gt-1aj2).
+func (d *Daemon) runGitIndexCmd(gitRepo string, timeout time.Duration, args ...string) error {
+	desc := "git " + strings.Join(args, " ")
+
+	// Two attempts at most: the first may find a lock orphaned by an earlier
+	// tick, the second runs only after this clears that lock.
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
+			d.logger.Printf("jsonl_git_backup: cleared stale %s before %s", gitIndexLockPath(gitRepo), desc)
+		}
+
+		started := time.Now()
+		err = d.runGitCmd(gitRepo, timeout, args...)
+		if err == nil {
+			return nil
+		}
+
+		// A killed command leaves its own lock behind; clear it now so one slow
+		// tick cannot fail the next two and escalate.
+		if errors.Is(err, errGitCmdTimeout) {
+			if d.clearIndexLockModifiedSince(gitRepo, started) {
+				d.logger.Printf("jsonl_git_backup: cleared %s orphaned by timed-out %s", gitIndexLockPath(gitRepo), desc)
+			}
+			return err
+		}
+
+		// The lock may have appeared between the check above and git's attempt
+		// at it. Retry once: the next pass re-reads the lock's age, so a lock
+		// with a live owner is left alone and this error stands.
+		if attempt == 0 && isIndexLockExistsError(err) {
+			continue
+		}
+		return err
+	}
+	return err
+}
+
+// gitIndexLockPath returns the path of gitRepo's index lock. The backup repo is
+// always a plain repository — ensureGitRepoInitialized creates it — so .git is a
+// directory and never the indirection file a worktree or submodule uses.
+func gitIndexLockPath(gitRepo string) string {
+	return filepath.Join(gitRepo, ".git", "index.lock")
+}
+
+// clearStaleIndexLock removes the index lock when it has sat untouched for at
+// least grace, reporting whether it removed one. A younger lock is assumed to
+// have a live owner and is left in place.
+func (d *Daemon) clearStaleIndexLock(gitRepo string, grace time.Duration) bool {
+	lockPath := gitIndexLockPath(gitRepo)
+	info, err := os.Stat(lockPath)
+	if err != nil || time.Since(info.ModTime()) < grace {
+		return false
+	}
+	return d.removeIndexLock(lockPath)
+}
+
+// clearIndexLockModifiedSince removes the index lock when it was written at or
+// after since — the shape of a lock a git process we just killed left behind.
+// The one-second slack absorbs filesystems whose mtime is coarser than Go's.
+func (d *Daemon) clearIndexLockModifiedSince(gitRepo string, since time.Time) bool {
+	lockPath := gitIndexLockPath(gitRepo)
+	info, err := os.Stat(lockPath)
+	if err != nil || info.ModTime().Before(since.Add(-time.Second)) {
+		return false
+	}
+	return d.removeIndexLock(lockPath)
+}
+
+// removeIndexLock deletes lockPath, logging an unremovable lock rather than
+// letting the failure read as "no lock was there".
+func (d *Daemon) removeIndexLock(lockPath string) bool {
+	if err := os.Remove(lockPath); err != nil {
+		d.logger.Printf("jsonl_git_backup: could not remove %s: %v", lockPath, err)
+		return false
+	}
+	return true
+}
+
+// isIndexLockExistsError reports whether git refused to run because the index
+// lock exists.
+func isIndexLockExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "index.lock") {
+		return false
+	}
+	return strings.Contains(msg, "File exists") || strings.Contains(msg, "Another git process")
 }
 
 // maxEscalationTitleLen bounds the escalation title's length. bd 1.0.3+
