@@ -820,10 +820,11 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
 	}
 	// The base's own guards share the bare "Bash" matcher and must survive the
-	// union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command and
-	// container-suite are all self-filtering hooks with no If.
+	// union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command,
+	// container-suite and bd-close-invariant are all self-filtering hooks with
+	// no If.
 	requireUngatedGuardCommand(t, "gastown/polecats", polecats, "tap guard pr-workflow")
-	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite"} {
+	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite", "tap guard bd-close-invariant"} {
 		found := false
 		for _, h := range bashEntry.Hooks {
 			if strings.Contains(h.Command, want) {

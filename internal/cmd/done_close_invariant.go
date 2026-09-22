@@ -118,18 +118,37 @@ func doneCloseTimeInvariantSkipReason(bd *beads.Beads, cwd, townRoot, rigName, i
 	if bd == nil || strings.TrimSpace(issueID) == "" {
 		return ""
 	}
+	g := git.NewGit(cwd)
+	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName)
+	if !ok {
+		return ""
+	}
+	return closeTimeInvariantSkipReason(bd, g, issueID, pendingMRID, branch, target, "")
+}
+
+// closeTimeBranchTarget resolves the branch under test (the cwd's current
+// branch) and the ref to compare its commit count against (the resolved
+// origin/upstream base ref for the rig's default branch).
+//
+// Shared by gt done's self-close path and the bd-close-invariant PreToolUse
+// guard (gt-arno) so the two agree on which branch is being judged and what
+// it's being judged against — a guard that computed the target differently
+// from gt done would refuse closes gt done allows, or vice versa.
+//
+// ok is false when there is nothing meaningful to compare: no branch
+// resolvable from cwd (detached HEAD, not a repo), or the current branch IS
+// the default branch (nothing to compare against itself).
+func closeTimeBranchTarget(g *git.Git, townRoot, rigName string) (branch, target string, ok bool) {
 	defaultBranch := "main"
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
-	g := git.NewGit(cwd)
 	branch, err := g.CurrentBranch()
 	if err != nil {
-		return ""
+		return "", "", false
 	}
 	if branch == defaultBranch {
-		// Not on a feature branch — nothing to compare against itself.
-		return ""
+		return "", "", false
 	}
 	// Compare against the resolved origin/upstream base ref, mirroring the
 	// submit path's ahead-count resolution (done.go:1191-1202): polecat
@@ -140,11 +159,11 @@ func doneCloseTimeInvariantSkipReason(bd *beads.Beads, cwd, townRoot, rigName, i
 	// closes that legitimately have zero polecat commits (gt-6hmz
 	// om-editorial finding 1). Fall back to the local branch only when the
 	// origin ref itself doesn't resolve (e.g. no remote configured).
-	target := defaultBranch
+	target = defaultBranch
 	if originRef := g.CleanBaseRef("origin", defaultBranch, ""); originRef != "" {
 		if exists, err := g.RefExists(originRef); err == nil && exists {
 			target = originRef
 		}
 	}
-	return closeTimeInvariantSkipReason(bd, g, issueID, pendingMRID, branch, target, "")
+	return branch, target, true
 }
