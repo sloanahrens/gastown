@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // gtBinaryOnce guards the single build of the gt binary that the CLI-level
@@ -74,6 +76,12 @@ func buildGTBinary() (string, error) {
 		binaryName += ".exe"
 	}
 	tmpBinary := filepath.Join(os.TempDir(), binaryName)
+
+	// Dolt's go-icu-regex cgo build only reaches this point, so only this
+	// helper needs the include-path diagnosis (gt-mjll).
+	if err := testutil.VerifyCgoIncludePath(); err != nil {
+		return "", err
+	}
 
 	// Must set BuiltProperly=1 via ldflags, otherwise binary refuses to run
 	ldflags := "-X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1"
