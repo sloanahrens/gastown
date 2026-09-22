@@ -999,15 +999,67 @@ func testDatabaseName() string {
 // Investigation: dc-1pq8 (forensic report 2026-05-02).
 const bdSubprocessTimeout = 60 * time.Second
 
+// bdInitSubprocessTimeout is the budget for `bd init`. Init mints a database
+// and installs integrations before it returns, rather than serving one query,
+// so the steady-state 60s left no headroom on a loaded host: an init killed
+// against a contended shared Dolt container was reported as whatever warning
+// bd had emitted first, never as a timeout (gt-824d). Measured against one
+// container: 11s idle, 39s at eight concurrent inits. Five minutes is sized
+// for the gate-load multiple, because a false red gate costs more than
+// waiting out a wedged init.
+const bdInitSubprocessTimeout = 5 * time.Minute
+
+// bdTimeoutEnvVar overrides every subprocess budget, bdInitSubprocessTimeout
+// included, so tests and unusual workloads can shorten one command's budget.
+const bdTimeoutEnvVar = "GT_BD_TIMEOUT_SEC"
+
+// parseBdTimeoutOverride returns the GT_BD_TIMEOUT_SEC override when it parses
+// as a positive whole number of seconds. An unparseable value is no override
+// at all, so a typo cannot silently shrink a budget.
+func parseBdTimeoutOverride() (time.Duration, bool) {
+	v := os.Getenv(bdTimeoutEnvVar)
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
+}
+
 // resolveBdSubprocessTimeout returns the configured timeout, honoring the
 // GT_BD_TIMEOUT_SEC env var override (must parse as a positive integer).
 func resolveBdSubprocessTimeout() time.Duration {
-	if v := os.Getenv("GT_BD_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
+	if d, ok := parseBdTimeoutOverride(); ok {
+		return d
 	}
 	return bdSubprocessTimeout
+}
+
+// subprocessTimeoutFor returns the subprocess budget for one bd command. args
+// is the caller's argv before --allow-stale/--flat injection, so args[0] is
+// the command word. An explicit GT_BD_TIMEOUT_SEC wins over every per-command
+// budget, so tests can shorten a slow command without waiting it out.
+func subprocessTimeoutFor(args []string) time.Duration {
+	if d, ok := parseBdTimeoutOverride(); ok {
+		return d
+	}
+	if len(args) > 0 && args[0] == "init" {
+		return bdInitSubprocessTimeout
+	}
+	return bdSubprocessTimeout
+}
+
+// subprocessFailureError names the cause of a bd failure that the exec error
+// hides. A subprocess killed at its deadline reports "signal: killed", which
+// reads as a crash, and wrapError prefers bd's stderr over it — together those
+// turned a 60s timeout into an unexplained bd warning (gt-824d).
+func subprocessFailureError(ctx context.Context, timeout time.Duration, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
+	}
+	return err
 }
 
 // newBDCmd builds a bd subprocess with the wiring every run path shares: bd on
@@ -1066,7 +1118,8 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry.
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	timeout := subprocessTimeoutFor(args)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	err := newBDCmd(ctx, b.workDir, runEnv, stdinData, fullArgs, &stdout, &stderr).Run()
@@ -1081,7 +1134,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	}
 
 	if err != nil {
-		return nil, b.wrapError(err, stderr.String(), args)
+		return nil, b.wrapError(subprocessFailureError(ctx, timeout, err), stderr.String(), args)
 	}
 
 	// Handle bd exit code 0 bug: when issue not found,
@@ -1115,7 +1168,8 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
 	// Bound subprocess runtime — see bdSubprocessTimeout doc comment.
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	timeout := subprocessTimeoutFor(args)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	err := newBDCmd(ctx, b.workDir, runEnv, nil, fullArgs, &stdout, &stderr).Run()
@@ -1128,7 +1182,7 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 		err = newBDCmd(ctx, b.workDir, runEnv, nil, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
 	}
 	if err != nil {
-		return nil, b.wrapError(err, stderr.String(), args)
+		return nil, b.wrapError(subprocessFailureError(ctx, timeout, err), stderr.String(), args)
 	}
 
 	if stdout.Len() == 0 && stderr.Len() > 0 && bdEmptyOutputIsError(stderr.String()) {
@@ -1170,6 +1224,12 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	}
 
 	if stderr != "" {
+		// bd's last words never explain a deadline kill, so report the cause
+		// beside them. Every other message stays byte-identical, keeping log
+		// and caller expectations stable (gt-824d).
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, err)
+		}
 		return fmt.Errorf("bd %s: %s", strings.Join(args, " "), stderr)
 	}
 	return fmt.Errorf("bd %s: %w", strings.Join(args, " "), err)
