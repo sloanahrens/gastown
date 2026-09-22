@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -69,6 +70,11 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The rig registry getRig consults (internal/cmd/rig_helpers.go).
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"),
+		[]byte(`{"version":1,"rigs":{"gastown":{"git_url":"file:///nonexistent","beads":{"repo":"local","prefix":"gt"}}}}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	rigDir = filepath.Join(town, "gastown")
 	repoDir = filepath.Join(rigDir, "refinery", "rig")
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
@@ -109,14 +115,17 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 
 func revForCmd(t *testing.T, dir, ref string) string {
 	t.Helper()
-	out, err := exec.Command("git", "rev-parse", ref).Output()
+	cmd := exec.Command("git", "rev-parse", ref)
+	cmd.Dir = dir
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("rev-parse %s: %v", ref, err)
 	}
-	return string(out) // trimmed: Output strips the newline
+	return strings.TrimSpace(string(out))
 }
 
 func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
+	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
 	// The base commit is not reachable from origin/main (the tip is its
 	// child), so --landed refuses it.
@@ -137,6 +146,7 @@ func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
 }
 
 func TestMQReviewLanded_ApproveExitsZeroAndResolvesRange(t *testing.T) {
+	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
 	tip := revForCmd(t, repoDir, "HEAD")
 
@@ -171,6 +181,7 @@ func TestMQReviewLanded_ApproveExitsZeroAndResolvesRange(t *testing.T) {
 }
 
 func TestMQReviewLanded_RequestChangesExitsOne(t *testing.T) {
+	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
 	tip := revForCmd(t, repoDir, "HEAD")
 
@@ -185,6 +196,7 @@ func TestMQReviewLanded_RequestChangesExitsOne(t *testing.T) {
 }
 
 func TestMQReviewLanded_PositionalMRID(t *testing.T) {
+	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
 	tip := revForCmd(t, repoDir, "HEAD")
 
