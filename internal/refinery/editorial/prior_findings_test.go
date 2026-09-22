@@ -94,6 +94,33 @@ func TestBuildPriorFindings_CollapsesDuplicateIDs(t *testing.T) {
 	}
 }
 
+func TestBuildPriorFindings_ParsesEmptyTitleAndColonInPath(t *testing.T) {
+	// formatMergeRejectionNote's " — %s" with an empty title loses its
+	// trailing space to strings.TrimSpace before this line reaches the
+	// regex, so the line ends right at the em dash with nothing after it.
+	// A path containing its own colon (e.g. a Windows-style path) must still
+	// resolve to the line number at the LAST ":<digits>", not the first
+	// colon in the line (gt-j6ez).
+	notes := "- id:abc123456789 sev:major internal/foo.go:42 —\n" +
+		`- id:def987654321 sev:minor C:\repo\bar.go:7 — missing test` + "\n"
+	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{
+		"gt-source": {ID: "gt-source", Notes: notes, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}}
+	bd := beads.NewWithStore(t.TempDir(), store)
+
+	got := BuildPriorFindings(bd, "gt-source", 1)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d findings, want 2: %+v", len(got), got)
+	}
+	if got[0].ID != "abc123456789" || got[0].Path != "internal/foo.go" || got[0].Line != 42 || got[0].Title != "" {
+		t.Errorf("finding[0] = %+v, want empty title parsed cleanly", got[0])
+	}
+	if got[1].ID != "def987654321" || got[1].Path != `C:\repo\bar.go` || got[1].Line != 7 || got[1].Title != "missing test" {
+		t.Errorf("finding[1] = %+v, want colon-containing path parsed as a whole", got[1])
+	}
+}
+
 func TestBuildPriorFindings_NoSourceIssueReturnsNil(t *testing.T) {
 	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{}}
 	bd := beads.NewWithStore(t.TempDir(), store)

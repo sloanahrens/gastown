@@ -13,7 +13,17 @@ import (
 // writing these lines and may refine the format. The id identifies the
 // FINDING, not the diff it was found on — see RejectionFinding.ID for what a
 // writer of these lines must not use (gt-2ok0).
-var priorFindingLineRE = regexp.MustCompile(`^-\s*id:(\S+)\s+sev:(\S+)\s+([^:]+):(\d+)\s+—\s+(.*)$`)
+//
+// The path group is greedy ((.+), not [^:]+) so a path containing its own
+// colon (e.g. a Windows-style "C:\..." path) still parses: greedy backtracks
+// to the LAST ":<digits>" in the line, which is always the line number, not
+// the first colon encountered. The trailing title is \s* (not \s+) after the
+// em dash so an empty title still matches — formatMergeRejectionNote's " — "
+// separator loses its trailing space to strings.TrimSpace before this regex
+// ever sees the line, so an empty title leaves nothing after the em dash at
+// all (gt-j6ez: both cases previously failed to match, silently dropping the
+// finding from BuildPriorFindings).
+var priorFindingLineRE = regexp.MustCompile(`^-\s*id:(\S+)\s+sev:(\S+)\s+(.+):(\d+)\s+—\s*(.*)$`)
 
 // BuildPriorFindings collects prior MERGE REJECTION findings for sourceIssue
 // so the reviewer classifies them resolved/unresolved/regressed instead of

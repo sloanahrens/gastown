@@ -126,6 +126,58 @@ func TestReviewBatchCandidates_RequestChanges_ClosesMRAndRecovers(t *testing.T) 
 	if gotReq.MRID != "gt-wisp-bbb" || gotReq.Branch != "feature-b" {
 		t.Errorf("recovery request names the wrong MR: %+v", gotReq)
 	}
+	// gt-j6ez: an editorial rejection must carry an EditorialReceipt (the om
+	// score, at minimum) so gt deacon redispatch can run RedispatchEditorial
+	// instead of falling back to the plain attempt-count Redispatch.
+	if gotReq.Receipt == nil {
+		t.Fatal("recovery request carries no Receipt — RedispatchEditorial's convergence rule can never run")
+	}
+	if gotReq.Receipt.Score != 0.5 {
+		t.Errorf("Receipt.Score = %v, want 0.5 (the stub's verdict score)", gotReq.Receipt.Score)
+	}
+}
+
+// TestReviewBatchCandidates_RequestChanges_FindingsTravelToRecovery pins that
+// a rejection's full per-finding detail (not just the count) reaches the
+// dead-worker recovery request, so the source bead's notes and the
+// RECOVERED_BEAD mail carry the actual findings forward for the next
+// reviewer (om-gate T10, gt-j6ez).
+func TestReviewBatchCandidates_RequestChanges_FindingsTravelToRecovery(t *testing.T) {
+	e, _, candidates := batchRejectFixture(t)
+	e.editorialExec = func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+		verdict := "approve"
+		var findings []map[string]interface{}
+		if mrIDFromArgs(args) == "gt-wisp-bbb" {
+			verdict = "request_changes"
+			findings = []map[string]interface{}{
+				{"id": "abc123456789", "severity": "major", "path": "internal/foo.go", "line": 42, "title": "leaky abstraction"},
+			}
+		}
+		data, _ := json.Marshal(map[string]interface{}{"score": 0.4, "verdict": verdict, "findings": findings})
+		if err := os.WriteFile(verdictPathFromArgs(args), data, 0644); err != nil {
+			return "", 0, err
+		}
+		return "", 0, nil
+	}
+
+	var gotReq *deadWorkerRecoveryRequest
+	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		gotReq = &req
+		return true
+	}
+
+	e.reviewBatchCandidates(context.Background(), candidates, "main")
+
+	if gotReq == nil {
+		t.Fatal("expected dead-worker recovery for the rejected candidate")
+	}
+	if len(gotReq.Findings) != 1 {
+		t.Fatalf("Findings = %+v, want exactly 1", gotReq.Findings)
+	}
+	f := gotReq.Findings[0]
+	if f.ID != "abc123456789" || f.Severity != "major" || f.Path != "internal/foo.go" || f.Line != 42 || f.Title != "leaky abstraction" {
+		t.Errorf("Findings[0] = %+v, unexpected", f)
+	}
 }
 
 // TestReviewBatchCandidates_InfraExit_LeftQueued pins the other half of the

@@ -1570,7 +1570,20 @@ func runDeaconRedispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	result := deacon.Redispatch(townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
+	// A merge rejection that came from an actual om review leaves a
+	// Score:/Unresolved: receipt on the source bead's notes
+	// (refinery.formatMergeRejectionNote, om-gate T10). When present, run
+	// RedispatchEditorial's convergence/max_attempts rule instead of the
+	// deacon inferring it from mail prose by hand (gt-htn2). A build/test
+	// rejection or a manual `gt mq reject` carries no such receipt, so this
+	// falls back to the plain attempt-count Redispatch.
+	var result *deacon.RedispatchResult
+	notes := deacon.GetBeadNotesForRedispatch(townRoot, beadID)
+	if cur, ok := deacon.ParseEditorialReceiptFromNotes(notes); ok {
+		result = deacon.RedispatchEditorial(townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown, cur, notes)
+	} else {
+		result = deacon.Redispatch(townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
+	}
 
 	switch result.Action {
 	case "redispatched":

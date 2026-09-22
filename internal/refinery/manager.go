@@ -1043,6 +1043,12 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 			FailureType:   "editorial",
 			ErrorMsg:      reason,
 			AttemptNumber: mr.RetryCount + 1,
+			// A manual `gt mq reject` carries no om verdict to build a
+			// Receipt from (Score/Unresolved) — only the human-typed reason,
+			// which doubles as the RECOVERED_BEAD mail's Rejection-Summary
+			// line. Receipt stays nil, so `gt deacon redispatch` falls back
+			// to the plain attempt-count Redispatch for this path.
+			Summary: reason,
 		})
 		// This CLI path sends mail (RECOVERED_BEAD to the deacon) via
 		// recoverDeadWorker above; every other mail-sending CLI path waits
