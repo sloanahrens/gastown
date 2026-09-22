@@ -159,6 +159,45 @@ func leadingIndentWidth(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
+// packageSummaryLine matches go test's per-package summary for a package that
+// finished, the trace a run killed mid-suite leaves of how far it got: "ok
+// <pkg> <secs>s" and "FAIL <pkg> <secs>s". Anchored at column 0 for the same
+// reason diagnosticLinePattern is — that is where go test writes it, and an
+// indented copy is test output about a line like this, not the line.
+//
+// "? <pkg> [no test files]" is deliberately not matched. go prints it while
+// walking the package list, before anything runs, so a test-less package
+// scheduled late would otherwise overwrite the last package that actually
+// finished and report a package nothing was run from as the run's progress
+// (gt-59yz).
+var packageSummaryLine = regexp.MustCompile(`^(ok|FAIL)[ \t]+\S+`)
+
+// lastPackageReported returns the last per-package summary line in output, or
+// "" when the run produced none. It is the closest thing a deadline kill
+// leaves to a progress marker: no failure pattern exists to extract, so
+// naming where the transcript stops is what tells the reader the run was
+// still working rather than dead (gt-59yz).
+//
+// scope filters the line's package the way extractDiagnosticLines does: a
+// summary naming a package this worktree does not contain is text that only
+// looks like go test output — a fixture echoed by a test — and reporting it
+// as the run's progress points at a package that cannot have produced it
+// (gt-u4oq). nil scope means the worktree's packages could not be listed.
+func lastPackageReported(output string, scope modulePackages) string {
+	last := ""
+	for _, line := range strings.Split(output, "\n") {
+		if !packageSummaryLine.MatchString(line) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if scope != nil && len(fields) > 1 && !scope.contains(fields[1]) {
+			continue
+		}
+		last = strings.TrimSpace(line)
+	}
+	return last
+}
+
 // packageNamedBy returns the package a column-0 line names, or ok false when it
 // names none. go spells the failure of a package two ways: the test summary
 // "FAIL\t<pkg>\t<secs>s" (a build failure carries a " [build failed]" suffix),
@@ -597,6 +636,13 @@ func (d *Daemon) triggerMainBranchTests() bool {
 	return true
 }
 
+// errMainBranchTestInterrupted marks a run that the daemon itself stopped —
+// its context (d.ctx, or one descending from it) was canceled while a gate
+// command was in flight — as opposed to a run that reached a verdict about
+// main. The patrol loop reports it and counts it as neither pass nor fail
+// (gt-59yz); see analyzeRunFailure for where it is raised.
+var errMainBranchTestInterrupted = errors.New("main_branch_test run interrupted")
+
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates failures.
 func (d *Daemon) runMainBranchTests() {
@@ -646,7 +692,18 @@ func (d *Daemon) runMainBranchTests() {
 		}
 
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
-		if err := d.testRigMainBranch(rigName, rigPath, timeout); err != nil {
+		err := d.testRigMainBranch(rigName, rigPath, timeout)
+		if errors.Is(err, errMainBranchTestInterrupted) {
+			// The daemon stopped this run (its context was canceled while the
+			// gate command was in flight), so nothing was verified and the kill
+			// signal says nothing about main. Counting it either way would
+			// misreport: as a failure it is the same false red as a timeout
+			// reported as a crash, and as a pass it would clear a live alert on
+			// a run that checked nothing (gt-59yz).
+			d.logger.Printf("main_branch_test: %s: interrupted, not a verdict about main: %v", rigName, err)
+			continue
+		}
+		if err != nil {
 			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, err)
 			failures = append(failures, fmt.Sprintf("%s: %v", rigName, err))
 			failed++
@@ -831,13 +888,22 @@ func (d *Daemon) commitTested(ctx context.Context, rigName, worktreePath string)
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
 func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDir string, gates map[string]string) error {
 	var failures []string
+	interrupted := false
 	for name, cmd := range gates {
 		if err := d.runCommandOnWorktree(ctx, rigName, commit, workDir, name, cmd); err != nil {
 			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
+			// The gates' messages are joined as text, which would drop the
+			// sentinel: a canceled run has to stay recognizable as a stopped
+			// run, not become an ordinary failure on the way out (gt-59yz).
+			interrupted = interrupted || errors.Is(err, errMainBranchTestInterrupted)
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("%s", strings.Join(failures, "; "))
+		joined := strings.Join(failures, "; ")
+		if interrupted {
+			return fmt.Errorf("%w: %s", errMainBranchTestInterrupted, joined)
+		}
+		return fmt.Errorf("%s", joined)
 	}
 	return nil
 }
@@ -859,52 +925,173 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup, not SetDetachedProcessGroup: the gate command is a shell
+	// that execs go test, which spawns <pkg>.test binaries that inherit the
+	// output pipes. CommandContext's default Cancel SIGKILLs only the direct
+	// child, so the orphaned test binaries keep the pipes open and Wait — which
+	// blocks on the copy goroutines when WaitDelay is unset — returns long
+	// after the deadline, or never. That is the shape behind the 2026-09-11
+	// runs: a 10m deadline whose kill surfaced 11m21s after the suite started
+	// (gt-59yz). The Cancel hook kills the whole group, and WaitDelay bounds
+	// the drain so a stuck pipe-holder can't hold the slot and the worktree
+	// open past it (gt-pxlg's sibling: internal/daemon/plugin_script.go).
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
 
 	startHost := measureHostLoadFn()
+	start := time.Now()
 	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
 	endHost := measureHostLoadFn()
 	if err == nil {
 		return nil
 	}
 
+	// budget is how much of the run's own clock this command was given: the
+	// context's remaining lifetime when it started, not the configured timeout,
+	// since setup and every gate share one context and can leave this command
+	// with less (gt-59yz).
+	budget := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = max(deadline.Sub(start), 0)
+	}
+
+	bodyText, interrupted := analyzeRunFailure(runFailure{
+		label:   label,
+		output:  string(output),
+		err:     err,
+		ctxErr:  ctx.Err(),
+		budget:  budget,
+		elapsed: elapsed,
+		rigName: rigName,
+		commit:  commit,
+		hosts:   [2]string{startHost.String(), endHost.String()},
+		workDir: workDir,
+	})
+
 	logPath, logErr := writeMainBranchTestLog(d.config.TownRoot, rigName, commit, string(output))
 	if logErr != nil {
 		d.logger.Printf("main_branch_test: %s: warning: could not write diagnostic log: %v", rigName, logErr)
 	}
+	if logPath != "" {
+		bodyText += "\nlog: " + logPath
+	}
+	if interrupted {
+		// Carried out as a distinct error so the patrol cycle can refuse to
+		// count it as a verdict about main (gt-59yz).
+		return fmt.Errorf("%w: %s", errMainBranchTestInterrupted, bodyText)
+	}
+	return errors.New(bodyText)
+}
+
+// runFailure is everything one failed gate/test invocation knows about itself
+// when the body is written: what it printed, why it ended, and the clocks that
+// say whether it ended on a verdict or on the run's own budget.
+type runFailure struct {
+	label   string
+	output  string
+	err     error
+	ctxErr  error
+	budget  time.Duration // the run clock this command was given
+	elapsed time.Duration // start to return, including any post-kill drain
+	rigName string
+	commit  string
+	hosts   [2]string
+	workDir string
+}
+
+// analyzeRunFailure builds the escalation body for a command that did not
+// succeed, naming which of the four ways it ended this was. The distinction is
+// the whole defect gt-59yz reports: exec.CommandContext stops a command that
+// overran its context with SIGKILL, which reaches the caller as the bare
+// "signal: killed" — a string that reads as a crash and names no cause. The
+// context's own error is what separates "ran out of time" from "died", and it
+// is readable only there, before the deferred cancel. gastown's suite runs ~12m
+// against this runner's 10m budget, so the crash wording was escalated every
+// cycle alongside a 100%-green transcript.
+//
+// Only the last case is a verdict about main. A timeout is the runner's own
+// clock, a command that never started is the run's budget spent by earlier
+// gates, and an interrupted command is the daemon stopping — in all three the
+// reader is told what happened instead of being handed a crash report.
+// It returns the body plus whether the run was interrupted, which the caller
+// turns into errMainBranchTestInterrupted so the cycle does not count a
+// stopped run as either a pass or a failure. The body comes back as a string,
+// not the strings.Builder it was assembled in: a Builder must not be copied,
+// and the caller still appends the log path.
+func analyzeRunFailure(f runFailure) (string, bool) {
+	timedOut := f.ctxErr == context.DeadlineExceeded
+	interrupted := f.ctxErr == context.Canceled
+	// os/exec's Start short-circuits on an already-expired context and hands
+	// back ctx.Err() with nothing run and nothing printed, which must not be
+	// reported as a command that was still going when the deadline fired.
+	neverStarted := timedOut && errors.Is(f.err, context.DeadlineExceeded) && f.output == ""
 
 	// The worktree's own packages bound what can be a failure here: a transcript
 	// naming a package this tree does not contain is go-test-shaped text from
 	// somewhere else — a fixture echoed into the output — and naming it as the
 	// failure sends the mayor to a package that does not exist (gt-u4oq).
-	diagnostic := extractDiagnosticLines(string(output), loadModulePackages(workDir))
-	if len(diagnostic) == 0 {
+	scope := loadModulePackages(f.workDir)
+	diagnostic := extractDiagnosticLines(f.output, scope)
+	// Matches before scoping, which is a different question from the scoped
+	// count: lines dropped as another tree's packages still mean the run
+	// reported failures, so they must not license the "transcript is green"
+	// reassurance below (gt-59yz).
+	matchedAnyFailureLine := len(extractDiagnosticLines(f.output, nil)) > 0
+
+	var body strings.Builder
+	switch {
+	case interrupted:
+		fmt.Fprintf(&body, "%s was stopped, not failed: the run's context was canceled while the command was in flight (daemon shutting down or restarting), so %v says nothing about main\n", f.label, f.err)
+	case neverStarted:
+		fmt.Fprintf(&body, "%s did not run: the run's budget was already spent when this command started, so nothing was verified on main (err: %v)\n", f.label, f.err)
+	case timedOut:
+		// The escalation's first line is the verdict the mayor reads, and
+		// "signal: killed" there was the whole false red. The timeout leads
+		// instead, and the signal it caused is named as its own doing.
+		fmt.Fprintf(&body, "%s TIMED OUT after %s of the run's budget — the command was still running when its deadline fired (killed by: %v; this is the runner's timeout, not a crash)\n", f.label, f.budget.Round(time.Second), f.err)
+		fmt.Fprintf(&body, "run budget: patrols.main_branch_test.timeout for this rig, shared by setup and every gate and started after the slot wait; the command returned %s after it started (deadline plus any wait for orphaned children to release the output pipes) — raise it if the suite legitimately needs longer\n", f.elapsed.Round(time.Second))
+		if last := lastPackageReported(f.output, scope); last != "" {
+			// Packages run in parallel, so this names where the run had
+			// reached when the deadline hit, not which package was slow.
+			fmt.Fprintf(&body, "last package reported: %s\n", last)
+		}
+	default:
+		fmt.Fprintf(&body, "%s failed: %v\n", f.label, f.err)
+	}
+	fmt.Fprintf(&body, "rig: %s\n", f.rigName)
+	if f.commit != "" {
+		fmt.Fprintf(&body, "commit: %s\n", f.commit)
+	}
+	// Contention context, so a red that is really this town's documented
+	// full-suite flakiness is distinguishable from a regression without
+	// re-running the package by hand (gt-f57o).
+	fmt.Fprintf(&body, "host at start: %s\n", f.hosts[0])
+	fmt.Fprintf(&body, "host at end: %s\n", f.hosts[1])
+
+	// The tail of a run that was killed rather than concluded, with no failure
+	// pattern in it: its transcript stops wherever the suite had got to, and on
+	// this suite that point is passing, so the tail is all "ok" lines.
+	// Presented as failure evidence it reads as a report that everything
+	// passed, which is how this reached the mayor as a red main every 30m.
+	// Keep it, labeled for what it is.
+	greenTailIsOnlyContext := false
+	if len(diagnostic) == 0 && !neverStarted {
 		// Nothing matched a known failure pattern (e.g. a shell error before
 		// the test binary even ran) — fall back to a short tail so the body
 		// isn't empty.
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		greenTailIsOnlyContext = timedOut && !matchedAnyFailureLine
+		lines := strings.Split(strings.TrimSpace(f.output), "\n")
 		if len(lines) > 20 {
 			lines = lines[len(lines)-20:]
 		}
 		diagnostic = lines
 	}
-
-	var body strings.Builder
-	fmt.Fprintf(&body, "%s failed: %v\n", label, err)
-	fmt.Fprintf(&body, "rig: %s\n", rigName)
-	if commit != "" {
-		fmt.Fprintf(&body, "commit: %s\n", commit)
+	if greenTailIsOnlyContext {
+		body.WriteString("no FAIL/panic/build-error line matched: the killed run's transcript is green, so the tail below is context (how far the run got), not a defect\n")
 	}
-	// Contention context, so a red that is really this town's documented
-	// full-suite flakiness is distinguishable from a regression without
-	// re-running the package by hand (gt-f57o).
-	fmt.Fprintf(&body, "host at start: %s\n", startHost)
-	fmt.Fprintf(&body, "host at end: %s\n", endHost)
 	body.WriteString(strings.Join(diagnostic, "\n"))
-	if logPath != "" {
-		fmt.Fprintf(&body, "\nlog: %s", logPath)
-	}
-	return fmt.Errorf("%s", body.String())
+	return body.String(), interrupted
 }
 
 // contains checks if a string slice contains a value.

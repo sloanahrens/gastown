@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -1079,6 +1080,282 @@ func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
 	}
 	if !strings.Contains(filepath.Base(logPath), "37ab61b2c4d1") {
 		t.Errorf("expected the tested head in the log filename, got %q", filepath.Base(logPath))
+	}
+}
+
+// killedSuiteTranscript is the shape the 2026-09-11 main_branch_test runs left
+// behind: package summaries for the packages that had finished, in the order
+// and with the timings from the 09:01Z log, and no failure of any kind. A run
+// killed at its deadline cannot look like anything else (gt-59yz).
+const killedSuiteTranscript = "ok  \tgithub.com/steveyegge/gastown/internal/daemon\t463.9s\n" +
+	"ok  \tgithub.com/steveyegge/gastown/internal/tmux\t141.5s\n"
+
+// timedOutCommand reports the killed-suite transcript and then keeps running,
+// so only the deadline can end it. The exec replaces the shell with the sleep:
+// the context's kill then reaches the process holding the output pipes, and the
+// run returns at the deadline instead of waiting the sleep out.
+func timedOutCommand() string {
+	return "printf '%s' " + shellQuote(killedSuiteTranscript) + "; exec sleep 30"
+}
+
+// TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout is the gt-59yz
+// acceptance case. The suite outran its budget, exec.CommandContext killed it,
+// and the escalation the mayor reads must say that: before this, the body's
+// first line — the verdict — was "test failed: signal: killed", which is
+// character-for-character what a crash reports, while the transcript under it
+// was green and the run had simply needed longer. The kill stays in the body,
+// named as the deadline's doing, so the underlying error is not lost to the
+// rewording.
+func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
+	stubHostLoad(t, hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8})
+	workDir := t.TempDir()
+	writeTree(t, workDir, map[string]string{
+		"go.mod":                  "module github.com/steveyegge/gastown\n",
+		"internal/daemon/scan.go": "package daemon\n",
+		"internal/tmux/scan.go":   "package tmux\n",
+	})
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", workDir, "test", timedOutCommand())
+	if err == nil {
+		t.Fatal("expected error from a command killed at its deadline")
+	}
+
+	body := err.Error()
+	firstLine, _, _ := strings.Cut(body, "\n")
+	if !strings.HasPrefix(firstLine, "test TIMED OUT after ") {
+		t.Errorf("expected the verdict line to lead with the timeout, got: %q", firstLine)
+	}
+	if strings.Contains(firstLine, "failed:") {
+		t.Errorf("expected no failure wording on a deadline kill, got: %q", firstLine)
+	}
+	for _, want := range []string{
+		"of the run's budget",                          // not presented as a plain failure
+		"still running when its deadline fired",        // that it was alive, not crashed
+		"killed by: signal: killed",                    // the raw cause, preserved
+		"this is the runner's timeout, not a crash",    // and classified
+		"run budget: patrols.main_branch_test.timeout", // so the fix (raise it) is visible
+		"last package reported: ok  \t" + "github.com/steveyegge/gastown/internal/tmux",
+		"the killed run's transcript is green", // the all-green tail, labeled
+		"commit: deadbeef",
+		"host at start: CPU idle 3.5%", // the contention context survives the refactor
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected body to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	// The budget is the clock this command was given, measured at its start.
+	// Asserted as a range rather than an exact string: it is derived from a
+	// real deadline minus however long the run took to reach this command, so
+	// pinning "2s" would fail on a box slow enough to lose half a second
+	// between the context and the first instruction.
+	if got := parseBudgetSeconds(t, body); got < time.Second || got > 2*time.Second {
+		t.Errorf("expected the reported budget to be within [1s, 2s] of the 2s timeout, got %v:\n%s", got, body)
+	}
+}
+
+// parseBudgetSeconds pulls the budget out of a timeout body, so the assertions
+// about it can be tolerant of the sub-second time between the context being
+// created and the command starting.
+func parseBudgetSeconds(t *testing.T, body string) time.Duration {
+	t.Helper()
+	const marker = "TIMED OUT after "
+	_, after, ok := strings.Cut(body, marker)
+	if !ok {
+		t.Fatalf("no %q in body:\n%s", marker, body)
+	}
+	fields := strings.Fields(after)
+	if len(fields) == 0 {
+		t.Fatalf("nothing after %q in body:\n%s", marker, body)
+	}
+	d, err := time.ParseDuration(fields[0])
+	if err != nil {
+		t.Fatalf("budget %q in body is not a duration: %v", fields[0], err)
+	}
+	return d
+}
+
+// TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout guards the other
+// direction of the gt-59yz fix: a command that fails on its own under an
+// unexpired deadline is still a failure. Only the context's own error
+// separates the two, and treating every killed command as a timeout would
+// hide the crashes this runner exists to report.
+func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "exit 3")
+	if err == nil {
+		t.Fatal("expected error from a failing command")
+	}
+	body := err.Error()
+	if strings.Contains(body, "TIMED OUT") {
+		t.Errorf("a command that exited on its own is not a timeout, got:\n%s", body)
+	}
+	if !strings.HasPrefix(body, "test failed: exit status 3") {
+		t.Errorf("expected the exit status to lead the body, got:\n%s", body)
+	}
+}
+
+// TestRunCommandOnWorktree_CancelledIsNotAVerdict is the shutdown case: the
+// daemon cancels d.ctx on the way down, which kills an in-flight gate command
+// exactly as a deadline does. Reporting that as "failed: signal: killed" is the
+// same false red the timeout fix removes, so it is surfaced as an interruption
+// the cycle does not count as either a pass or a failure (gt-59yz).
+func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(500*time.Millisecond, cancel)
+	defer cancel()
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "exec sleep 30")
+	if err == nil {
+		t.Fatal("expected error from a command killed by its canceled context")
+	}
+	if !errors.Is(err, errMainBranchTestInterrupted) {
+		t.Errorf("expected the interruption sentinel so the cycle does not count it, got: %v", err)
+	}
+	body := err.Error()
+	if strings.Contains(body, "failed: signal: killed") {
+		t.Errorf("a canceled run must not read as a crash, got:\n%s", body)
+	}
+	if !strings.Contains(body, "was stopped, not failed") || !strings.Contains(body, "says nothing about main") {
+		t.Errorf("expected the cancellation to be named as the cause, got:\n%s", body)
+	}
+}
+
+// TestRunGatesOnWorktree_InterruptionSurvivesTheJoin is the propagation half:
+// gates report into one joined message string, which would drop the sentinel and
+// turn a stopped run back into an ordinary failure — the cycle would then
+// escalate a red main because the daemon restarted (gt-59yz).
+func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(500*time.Millisecond, cancel)
+	defer cancel()
+
+	err := d.runGatesOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), map[string]string{
+		"build-check": "exec sleep 30",
+	})
+	if err == nil {
+		t.Fatal("expected error from a canceled gate")
+	}
+	if !errors.Is(err, errMainBranchTestInterrupted) {
+		t.Errorf("expected the interruption sentinel to survive the join, got: %v", err)
+	}
+}
+
+// TestRunCommandOnWorktree_ExpiredBudgetNeverRan covers the third way a command
+// ends without a verdict: the run's context was already spent when this command
+// started (earlier gates ate a shared budget), so os/exec's Start hands back
+// ctx.Err() with nothing run and nothing printed. Calling that "still running
+// when its deadline fired" would describe a command that never executed, and
+// the empty output would draw the all-green reassurance on top of it.
+func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	<-ctx.Done()
+
+	marker := filepath.Join(t.TempDir(), "ran")
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "build-check", "touch "+shellQuote(marker))
+	if err == nil {
+		t.Fatal("expected error from a command whose context was already expired")
+	}
+	body := err.Error()
+	if !strings.HasPrefix(body, "build-check did not run:") {
+		t.Errorf("expected the body to say nothing ran, got:\n%s", body)
+	}
+	for _, unwanted := range []string{"still running", "transcript is green", "not a crash"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("a command that never started must not contain %q, got:\n%s", unwanted, body)
+		}
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Errorf("expected the command not to have run, marker exists: %v", statErr)
+	}
+}
+
+// TestAnalyzeRunFailure_GreenReassuranceNeedsNoMatchesAtAll is the gt-u4oq
+// interaction: a transcript whose only FAIL lines name packages this worktree
+// does not contain is dropped by extractDiagnosticLines, and the resulting
+// empty diagnostic must not license the sentence that says the transcript is
+// green. It was not green — the matches were filtered, not absent.
+func TestAnalyzeRunFailure_GreenReassuranceNeedsNoMatchesAtAll(t *testing.T) {
+	workDir := t.TempDir()
+	writeTree(t, workDir, map[string]string{
+		"go.mod":                  "module github.com/steveyegge/gastown\n",
+		"internal/daemon/scan.go": "package daemon\n",
+	})
+
+	output := killedSuiteTranscript + goTestFixtureNestedTranscript
+	body, _ := analyzeRunFailure(runFailure{
+		label:   "test",
+		output:  output,
+		err:     errors.New("signal: killed"),
+		ctxErr:  context.DeadlineExceeded,
+		budget:  time.Minute,
+		rigName: "gastown",
+		workDir: workDir,
+	})
+
+	if strings.Contains(body, "transcript is green") {
+		t.Errorf("filtered-out FAIL lines must not license the green reassurance, got:\n%s", body)
+	}
+}
+
+// TestLastPackageReported covers the progress marker a deadline kill leaves:
+// with no failure to extract, where the transcript stops is the only evidence
+// the run was working rather than dead (gt-59yz).
+func TestLastPackageReported(t *testing.T) {
+	gastown := modulePackages{
+		"github.com/steveyegge/gastown/internal/daemon": {},
+		"github.com/steveyegge/gastown/internal/tmux":   {},
+	}
+
+	tests := []struct {
+		name   string
+		output string
+		scope  modulePackages
+		want   string
+	}{
+		{"no summaries", "go: downloading deps\n", nil, ""},
+		{"last of several", killedSuiteTranscript, nil, "ok  \tgithub.com/steveyegge/gastown/internal/tmux\t141.5s"},
+		// A package with no test files was never run, so it is not progress:
+		// go prints it while walking the list, and it would otherwise overwrite
+		// the last package that actually finished.
+		{"no-test-files package is not progress", killedSuiteTranscript + "?   \tgithub.com/steveyegge/gastown/internal/slot\t[no test files]\n", nil, "ok  \tgithub.com/steveyegge/gastown/internal/tmux\t141.5s"},
+		{"scope drops a package this tree lacks", killedSuiteTranscript + "ok  \tgithub.com/steveyegge/gastown/internal/widget\t9.9s\n", gastown, "ok  \tgithub.com/steveyegge/gastown/internal/tmux\t141.5s"},
+		// an indented copy is a test's own output about a summary, not one
+		{"indented copy is not the run's progress", "    ok  \tgithub.com/steveyegge/gastown/internal/daemon\t1s\n", nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lastPackageReported(tc.output, tc.scope); got != tc.want {
+				t.Errorf("lastPackageReported(%q) = %q, want %q", tc.output, got, tc.want)
+			}
+		})
 	}
 }
 
