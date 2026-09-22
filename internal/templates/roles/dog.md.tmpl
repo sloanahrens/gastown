@@ -78,7 +78,11 @@ idle at the prompt after running this command.
 
 ## Prefix-Based Routing
 
-`bd` commands automatically route to the correct rig based on issue ID prefix:
+`bd` commands route to the correct rig based on issue ID prefix. Resolution from
+the town root always works; from inside a rig it needs bd 8a1eeb9+ (be-v1o).
+On an older bd, an hq-* id from inside a rig reports `not found` whether or not
+the bead exists — read that as a version gap, not as a purged bead.
+
 - `bd show <prefix>-xyz` routes to that rig's beads
 - `bd show hq-abc` routes to town beads
 

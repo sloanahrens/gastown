@@ -114,7 +114,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 30
+version = 31
 
 [vars]
 [vars.wisp_type]
@@ -193,6 +193,15 @@ default = "gt"
 id = "inbox-check"
 title = "Check refinery mail"
 description = """
+> **Verify a hook by its RENDERED TITLE.** A title printed by `gt hook` or
+> `gt mol status` is the liveness proof; for a hooked MAIL use `gt mail show <id>`.
+> A `not found` from `bd show` is not evidence of a purge — `bd show <hq-id>` from
+> inside a rig was unreliable before bd 8a1eeb9 (be-v1o), so a miss there proves
+> nothing. A handoff MAIL on the hook at startup is the DESIGNED state
+> (`gt handoff <bead>` = hook + restart): read it and execute it. Run
+> `gt patrol new` only after a rendered title has proven the hook gone — it
+> replaces the hook rather than repairing it (gt-vahe).
+
 First, clean up CLOSED wisps from previous cycles:
 ```bash
 bd mol wisp gc --closed --force --exclude-type chore
