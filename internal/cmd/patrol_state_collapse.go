@@ -225,8 +225,12 @@ func runPatrolStateCollapse(cmd *cobra.Command, args []string) error {
 	}
 	// Suppressions are printed, not silent: a suppressed branch was examined
 	// and adjudicated, which is a different fact from one that was never seen.
+	// s.MRID is either a rejected attempt's replacement MR (from a
+	// pending_mr + rejection-note pair) or a later issue named directly in
+	// the close reason (gt-xpro) — both read fine as "carries the fix
+	// forward" without claiming a rejection record that may not exist.
 	for _, s := range branchResult.Superseded {
-		fmt.Printf("  ~ %s: branch %s suppressed — recorded as rejected, issue re-closed via %s\n",
+		fmt.Printf("  ~ %s: branch %s suppressed — issue's record names %s as carrying the fix forward\n",
 			s.IssueID, s.Branch, s.MRID)
 	}
 

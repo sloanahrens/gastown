@@ -289,8 +289,8 @@ type BranchStrandFinding struct {
 // suppressed branch is visible rather than silently dropped.
 type SupersededBranch struct {
 	IssueID string `json:"issue"`        // The closed source issue
-	Branch  string `json:"branch"`       // The branch recorded as rejected
-	MRID    string `json:"mr,omitempty"` // MR named by the close reason, i.e. the later submission
+	Branch  string `json:"branch"`       // The branch belonging to the superseded attempt
+	MRID    string `json:"mr,omitempty"` // MR or later issue named by the close reason as carrying the fix forward
 }
 
 // DetectStrandedBranchesResult holds the aggregate result of a stranded-branch scan.
@@ -565,6 +565,33 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			continue
 		}
 
+		// The close reason may record the supersession directly ("Superseded
+		// by <later-issue>: ...") instead of through the pending_mr +
+		// rejection-note pair supersededByRecord reads (gt-xpro): a sub-issue
+		// in a series closed by hand as folded into a later sub-issue, whose
+		// landing commit on the target carries only the later issue's own
+		// token. supersededByRecord requires a rejection note that this shape
+		// never writes, so it falls through to the target grep below and, not
+		// finding this issue's own token there, reports a false strand.
+		//
+		// Honored only when the named issue's fix is verifiably in force —
+		// naming it in a close reason is a claim, not proof — checked with
+		// the same target grep the strand check below runs for this issue,
+		// just keyed on the later one instead.
+		if laterIssue := supersededIssueFromCloseReason(record.CloseReason); laterIssue != "" && laterIssue != meta.Issue {
+			inForce, err := refs.TargetHasCommitReferencing(targetBranch, laterIssue)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("checking supersession %s->%s against origin/%s: %w", meta.Issue, laterIssue, targetBranch, err))
+			} else if inForce {
+				result.Superseded = append(result.Superseded, SupersededBranch{
+					IssueID: meta.Issue,
+					Branch:  branch,
+					MRID:    laterIssue,
+				})
+				continue
+			}
+		}
+
 		landed, err := refs.TargetHasCommitReferencing(targetBranch, meta.Issue)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("checking %s against origin/%s: %w", meta.Issue, targetBranch, err))
@@ -656,6 +683,37 @@ func supersededByRecord(record beadRecord, branch string) bool {
 		return false
 	}
 	return rejectedBranchFromNotes(record.Notes, branch)
+}
+
+// supersededIssueFromCloseReason returns the later issue (or MR) id a close
+// reason names as carrying the fix forward ("Superseded by <id>: ...", case
+// insensitive), or "" if the reason has no such shape.
+//
+// This is a distinct adjudication path from supersededByRecord: that one
+// reads a rejection note keyed off a "pending_mr:" close reason, the shape
+// `gt done` and the refinery write when an attempt is rejected and resubmitted
+// through the merge queue. A polecat closing a sub-issue by hand because a
+// later sub-issue's commit already supersedes it (gt-xpro) writes neither —
+// the supersession is prose in the close reason itself, naming the id that
+// replaces this one.
+func supersededIssueFromCloseReason(closeReason string) string {
+	const marker = "superseded by"
+	lower := strings.ToLower(closeReason)
+	idx := strings.Index(lower, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(closeReason[idx+len(marker):])
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '(' || r == ':' || r == ','
+	})
+	if end == 0 {
+		return ""
+	}
+	if end > 0 {
+		rest = rest[:end]
+	}
+	return strings.TrimRight(rest, ".")
 }
 
 // rejectedBranchFromNotes reports whether the issue's notes carry a

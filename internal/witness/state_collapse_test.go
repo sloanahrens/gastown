@@ -806,6 +806,106 @@ func TestDetectStrandedBranches_SupersededAttemptNotFlagged(t *testing.T) {
 	}
 }
 
+// TestDetectStrandedBranches_CloseReasonSupersessionVerifiedNotFlagged is the
+// gt-xpro regression: the live gt-nj23.7 shape, where a sub-issue in a series
+// is closed by hand naming the later sub-issue that supersedes it directly in
+// the close reason — "Superseded by <id>: ...", no pending_mr prefix and no
+// rejection note. supersededByRecord cannot see this shape (neither half of
+// its check matches), and the later issue's landing commit carries only its
+// own token, so the target grep for THIS issue also comes up empty. Both
+// paths that would normally save a superseded candidate miss it; this is the
+// finding gt-xpro reported as a false positive.
+func TestDetectStrandedBranches_CloseReasonSupersessionVerifiedNotFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/pearl/gt-nj23.7+mu8pdbpp"
+	closeReason := "Superseded by gt-nj23.8 (T8): strict superset (T7 content + daemon.go " +
+		"integration, 168 insertions over T7). T8 rework is in-flight (MR gt-wisp-buy, " +
+		"ready in queue). Do not re-dispatch T7 separately."
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-nj23.7" {
+				return `[{"status":"closed","close_reason":` + jsonString(closeReason) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// gt-nj23.8's squash commit is on the target, carrying only its own
+	// token — gt-nj23.7 itself is not referenced anywhere on target.
+	refs := fakeBranchRefSource([]string{branch}, map[string]bool{"gt-nj23.8": true})
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no finding for a verified close-reason supersession, got %+v", result.Findings)
+	}
+	if len(result.Superseded) != 1 {
+		t.Fatalf("Superseded = %d, want 1: %+v", len(result.Superseded), result.Superseded)
+	}
+	if got := result.Superseded[0]; got.IssueID != "gt-nj23.7" || got.Branch != branch || got.MRID != "gt-nj23.8" {
+		t.Errorf("Superseded[0] = %+v, want gt-nj23.7 / %s / gt-nj23.8", got, branch)
+	}
+	if logStr := strings.Join(mock.calls, "\n"); strings.Contains(logStr, "comments add gt-nj23.7") {
+		t.Errorf("a suppressed candidate must not be commented; log:\n%s", logStr)
+	}
+}
+
+// TestDetectStrandedBranches_CloseReasonSupersessionUnverifiedStillFlagged
+// pins the other half: naming a successor in the close reason is a claim,
+// not proof. If the named issue's fix is not (yet) verifiable on the target,
+// the candidate must still be reported rather than suppressed on the claim
+// alone.
+func TestDetectStrandedBranches_CloseReasonSupersessionUnverifiedStillFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/pearl/gt-nj23.7+mu8pdbpp"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-nj23.7" {
+				return `[{"status":"closed","close_reason":"Superseded by gt-nj23.8: rework in flight"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// Neither gt-nj23.7 nor gt-nj23.8 is referenced on target yet.
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if len(result.Superseded) != 0 {
+		t.Errorf("Superseded = %+v, want none — the successor's fix is not verified in force", result.Superseded)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+}
+
+func TestSupersededIssueFromCloseReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		closeReason string
+		want        string
+	}{
+		{"live gt-nj23.7 shape", "Superseded by gt-nj23.8 (T8): strict superset, 168 insertions over T7.", "gt-nj23.8"},
+		{"case insensitive marker", "superseded by GT-ABC: folded in", "GT-ABC"},
+		{"trailing period only", "Fixed elsewhere. Superseded by gt-abc.", "gt-abc"},
+		{"colon immediately after id", "Superseded by gt-abc: see thread", "gt-abc"},
+		{"comma immediately after id", "Superseded by gt-abc, landed there instead", "gt-abc"},
+		{"no marker", "fixed, closing by hand", ""},
+		{"empty reason", "", ""},
+		{"literal Closed", "Closed", ""},
+		{"pending_mr shape is not this shape", "pending_mr: gt-wisp-a9j", ""},
+		{"marker with nothing after it", "Superseded by", ""},
+		{"marker with only whitespace after it", "Superseded by   ", ""},
+	}
+	for _, c := range cases {
+		if got := supersededIssueFromCloseReason(c.closeReason); got != c.want {
+			t.Errorf("%s: supersededIssueFromCloseReason(%q) = %q, want %q", c.name, c.closeReason, got, c.want)
+		}
+	}
+}
+
 // TestDetectStrandedBranches_RejectionOfAnotherBranchStillFlagged keeps the
 // suppression branch-scoped: a rejection record for a different attempt of
 // the same issue explains nothing about this branch.
