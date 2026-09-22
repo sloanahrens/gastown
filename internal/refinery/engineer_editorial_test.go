@@ -1,7 +1,9 @@
 package refinery
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +11,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // fakeBDAndGt installs bd and gt stand-ins on PATH that log their
@@ -342,6 +346,331 @@ func TestCopyEditorialNotes_CopyFails_RecordsRecordFailedAndEscalates(t *testing
 
 	if _, err := editorial.ReadNote(g, landedCommit); err == nil {
 		t.Fatal("expected no note on the landed commit — the copy failed, so nothing should be there")
+	}
+}
+
+// approveNoteFor writes an approve note covering base..head for mrID, the
+// shape gt mq review leaves behind for a candidate it approved.
+func approveNoteFor(t *testing.T, g *gitpkg.Git, mrID, worker, base, head, patchID string) {
+	t.Helper()
+	if err := editorial.WriteNote(g, editorial.Note{
+		OMVersion:  "1.4.0",
+		Rig:        "test-rig",
+		MR:         mrID,
+		Worker:     worker,
+		BaseSHA:    base,
+		HeadSHA:    head,
+		PatchID:    patchID,
+		Score:      0.9,
+		Verdict:    "approve",
+		Attempt:    1,
+		ReviewedAt: time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteNote for %s: %v", mrID, err)
+	}
+}
+
+// TestDoMergePR_EditorialRequired_NoNote_RefusesMerge closes the first
+// om-gate T6 precondition gap: merge_strategy=pr used to merge through the
+// VCS provider with no approve-note/patch-id check at all, because doMerge
+// dispatches to doMergePR before the block that runs the precondition on the
+// local-merge path. The refusal must be classified (EditorialRefused +
+// EditorialReason) so the caller routes it as a queued gate verdict rather
+// than as a build failure.
+func TestDoMergePR_EditorialRequired_NoNote_RefusesMerge(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	bdLog, gtLog := fakeBDAndGt(t)
+
+	branch := "polecat/test/editorial-pr-missing"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+	e.prProvider = &recordingPRProvider{mergeFunc: func(method string) (string, error) {
+		t.Fatalf("MergePR called with method %q despite a missing editorial note", method)
+		return "", nil
+	}}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	mr := &MRInfo{
+		ID:        "mr-editorial-pr-missing",
+		Branch:    branch,
+		Target:    "main",
+		Worker:    "polecats/max",
+		CommitSHA: head,
+	}
+	result := e.doMergePR(context.Background(), mr)
+
+	if result.Success {
+		t.Fatalf("doMergePR succeeded despite missing editorial note: %+v", result)
+	}
+	if !result.EditorialRefused {
+		t.Fatalf("refusal not classified as editorial: %+v", result)
+	}
+	if result.EditorialReason != editorial.ReasonMissing {
+		t.Fatalf("EditorialReason = %q, want %q", result.EditorialReason, editorial.ReasonMissing)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("origin/main advanced despite refused merge: before=%s after=%s", before, after)
+	}
+
+	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
+		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
+	}
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
+		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+	}
+}
+
+// TestDoMergePR_EditorialRequired_ApproveNote_MergesAndCopiesNote covers the
+// same path's success case: an approve note whose patch-id matches lets the
+// provider merge proceed, and the note ends up readable on the commit the
+// provider actually landed — not merely on the reviewed branch tip, which
+// target's history never shows.
+func TestDoMergePR_EditorialRequired_ApproveNote_MergesAndCopiesNote(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/editorial-pr-approve"
+	createFeatureBranch(t, workDir, branch, "pr-editorial.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+
+	base, err := g.MergeBase("origin/main", head)
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	patchID, err := g.PatchID(base, head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	approveNoteFor(t, g, "mr-editorial-pr-approve", "polecats/max", base, head, patchID)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+	e.prProvider = &recordingPRProvider{mergeFunc: func(method string) (string, error) {
+		if method != "merge" {
+			return "", fmt.Errorf("method = %s, want merge", method)
+		}
+		// The provider owns the landing on this path: merge and push on its
+		// behalf, and report the merge commit it produced.
+		run(t, workDir, "git", "checkout", "main")
+		run(t, workDir, "git", "merge", "--no-ff", "-m", "merge PR", branch)
+		run(t, workDir, "git", "push", "origin", "main")
+		return run(t, workDir, "git", "rev-parse", "main"), nil
+	}}
+
+	mr := &MRInfo{
+		ID:                    "mr-editorial-pr-approve",
+		Branch:                branch,
+		Target:                "main",
+		Worker:                "polecats/max",
+		CommitSHA:             head,
+		EditorialReviewedHead: head,
+	}
+	result := e.doMergePR(context.Background(), mr)
+	if !result.Success {
+		t.Fatalf("doMergePR failed despite matching approve note: %s", result.Error)
+	}
+
+	landed := run(t, workDir, "git", "rev-parse", "origin/main")
+	if landed != result.MergeCommit {
+		t.Fatalf("origin/main = %s, reported merge commit = %s", landed, result.MergeCommit)
+	}
+	got, err := editorial.ReadNote(g, landed)
+	if err != nil {
+		t.Fatalf("note not readable at landed commit %s: %v", landed, err)
+	}
+	if got.MR != mr.ID {
+		t.Fatalf("landed note is for %s, want %s", got.MR, mr.ID)
+	}
+	if got.PatchID != patchID {
+		t.Fatalf("copied note patch-id mismatch: got %s, want %s", got.PatchID, patchID)
+	}
+	if strings.TrimSpace(run(t, workDir, "git", "ls-remote", "origin", "refs/notes/om")) == "" {
+		t.Fatal("expected refs/notes/om to be pushed to origin alongside the PR merge")
+	}
+}
+
+// TestProcessBatch_SingleMR_EditorialRefusal_LeftInQueueQuietly closes the
+// second om-gate T6 precondition gap: a refusal used to come back as a bare
+// ProcessResult{Error: ...}, so processSingleMR reported it as a generic
+// failure — a batch error every cycle — and HandleMRInfoFailure then nudged
+// the polecat and the mayor and started dead-worker recovery for a diff that
+// is simply not approved yet. It must instead stay queued, quietly.
+func TestProcessBatch_SingleMR_EditorialRefusal_LeftInQueueQuietly(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	bdLog, gtLog := fakeBDAndGt(t)
+
+	branch := "polecat/test/editorial-single"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	result := e.ProcessBatch(context.Background(), []*MRInfo{makeMR("mr-editorial-single", branch, "main")}, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("an editorial refusal was raised as a batch error: %v", result.Error)
+	}
+	if len(result.Merged) != 0 {
+		t.Fatalf("expected nothing merged, got %v", mrIDs(result.Merged))
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("origin/main advanced despite refused push: before=%s after=%s", before, after)
+	}
+
+	// The witness still learns about the refusal (the design's escalation),
+	// but the worker and the mayor are not told anything they could act on.
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "test-rig/witness") {
+		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+	}
+	if strings.Contains(gtCalls, "MERGE_FAILED") || strings.Contains(gtCalls, "mayor/") {
+		t.Fatalf("editorial refusal nudged the worker/mayor as a build failure, gt log:\n%s", gtCalls)
+	}
+	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
+		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
+	}
+}
+
+// TestHandleMRInfoFailure_EditorialRefused_NoRecovery is the recovery half of
+// the same gap: dead-worker recovery re-dispatches a worker to redo the
+// branch, which for an unchanged refusal would spawn work on every cycle the
+// refusal stands. A refusal the worker cannot act on must not reach it.
+func TestHandleMRInfoFailure_EditorialRefused_NoRecovery(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	r := &rig.Rig{Name: "test-rig", Path: workDir}
+	e := NewEngineer(r)
+	var buf bytes.Buffer
+	e.output = &buf
+	e.workDir = workDir
+
+	recovered := false
+	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		recovered = true
+		return true
+	}
+
+	mr := &MRInfo{
+		ID:          "gt-mr-editorial",
+		Branch:      "polecat/nux/gt-src1+abc123",
+		Target:      "main",
+		SourceIssue: "gt-src1",
+		Worker:      "polecats/nux",
+	}
+	e.HandleMRInfoFailure(mr, ProcessResult{
+		Success:          false,
+		EditorialRefused: true,
+		EditorialReason:  editorial.ReasonMissing,
+		Error:            "editorial precondition failed for gt-mr-editorial: missing",
+	})
+
+	if recovered {
+		t.Fatal("editorial refusal must not trigger dead-worker recovery")
+	}
+	output := buf.String()
+	if !strings.Contains(output, "editorial precondition refused") {
+		t.Fatalf("expected the refusal to be reported as an editorial one, got:\n%s", output)
+	}
+	if strings.Contains(output, "MERGE_FAILED") {
+		t.Fatalf("editorial refusal must not report MERGE_FAILED, got:\n%s", output)
+	}
+}
+
+// TestBatchPush_EditorialRequired_AllNotesApprove_LandsAndCopiesEachNote
+// covers the multi-MR landing path's success case, which only ever had the
+// refusal path (TestBatchPush_EditorialRequired_OneMissingNote_... below) and
+// a presence-only check in batch_editorial_test.go behind it.
+//
+// buildLandedMRs reads the landed commits off origin/target..HEAD's
+// first-parent chain — oldest first, one MergeNoFF commit per stacked member
+// in merge order — and CopyNotesToLanded copies note i onto landed commit i.
+// A presence-only assertion cannot see a mis-pairing, so this pins the
+// pairing itself: the note on each landed commit must name the member whose
+// branch that commit actually landed, cross-checked against the file that
+// commit's own diff touches.
+func TestBatchPush_EditorialRequired_AllNotesApprove_LandsAndCopiesEachNote(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	fileOf := map[string]string{"mr-batch-a": "a.txt", "mr-batch-b": "b.txt"}
+	wantPatchID := map[string]string{}
+	for _, id := range []string{"mr-batch-a", "mr-batch-b"} {
+		branch := "feature-" + strings.TrimPrefix(id, "mr-batch-")
+		createFeatureBranch(t, workDir, branch, fileOf[id], "hello "+id+"\n")
+
+		head := run(t, workDir, "git", "rev-parse", branch)
+		base, err := g.MergeBase("origin/main", head)
+		if err != nil {
+			t.Fatalf("MergeBase for %s: %v", id, err)
+		}
+		patchID, err := g.PatchID(base, head)
+		if err != nil {
+			t.Fatalf("PatchID for %s: %v", id, err)
+		}
+		wantPatchID[id] = patchID
+		approveNoteFor(t, g, id, "polecats/max", base, head, patchID)
+	}
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	batch := []*MRInfo{
+		makeMR("mr-batch-a", "feature-a", "main"),
+		makeMR("mr-batch-b", "feature-b", "main"),
+	}
+	stacked, conflicts, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("BuildRebaseStack: stacked=%d conflicts=%d err=%v", len(stacked), len(conflicts), err)
+	}
+	if len(stacked) != 2 {
+		t.Fatalf("expected 2 stacked MRs, got %d", len(stacked))
+	}
+	// The reviewed head the precondition reads. These notes were written
+	// against each branch's own range, exactly as gt mq review writes them.
+	for _, mr := range stacked {
+		mr.EditorialReviewedHead = run(t, workDir, "git", "rev-parse", mr.Branch)
+	}
+
+	result := e.verifyAndPush(context.Background(), stacked, "main", nil)
+	if result.Error != nil {
+		t.Fatalf("batch push failed: %v (output:\n%s)", result.Error, e.output)
+	}
+	if len(result.Merged) != 2 {
+		t.Fatalf("expected 2 merged, got %d (output:\n%s)", len(result.Merged), e.output)
+	}
+
+	// origin/main now equals HEAD, so the range buildLandedMRs used is empty;
+	// the landed commits are the last len(stacked) first-parent commits, oldest
+	// first — the same order and set buildLandedMRs saw before the push.
+	landed := strings.Fields(run(t, workDir, "git", "rev-list", "--first-parent", "--max-count=2", "--reverse", "HEAD"))
+	if len(landed) != 2 {
+		t.Fatalf("expected 2 first-parent landed commits, got %d: %v", len(landed), landed)
+	}
+	for i, sha := range landed {
+		id := stacked[i].ID
+		note, err := editorial.ReadNote(g, sha)
+		if err != nil {
+			t.Fatalf("no editorial note on landed commit %d (%s): %v", i, sha, err)
+		}
+		if note.MR != id {
+			t.Fatalf("landed commit %d (%s) carries %s's note, want %s's — note/MR pairing is off", i, sha, note.MR, id)
+		}
+		if note.PatchID != wantPatchID[id] {
+			t.Fatalf("landed commit %d carries %s's note with patch-id %s, want %s", i, id, note.PatchID, wantPatchID[id])
+		}
+		changed := run(t, workDir, "git", "diff", "--name-only", sha+"^", sha)
+		if !strings.Contains(changed, fileOf[id]) {
+			t.Fatalf("landed commit %d (%s) changed %q, expected it to land %s for %s", i, sha, changed, fileOf[id], id)
+		}
 	}
 }
 
