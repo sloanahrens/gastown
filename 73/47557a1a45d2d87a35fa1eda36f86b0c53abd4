@@ -1,0 +1,39 @@
+{
+  "score": 0.6,
+  "verdict": "approve",
+  "summary": "The intent is sound — a clean whole-package deletion should not be refused — and the success path is well tested, but the implementation has two real defects. goBuildWholeModule ignores its worktree parameter and runs `go build ./...` in the process CWD instead of setting cmd.Dir; this is masked in production only because gt done always runs from the worktree (cwd == worktree), and it means the integration test that uses the real function verifies the host internal/cmd module rather than the temp repo, so it passes for the wrong reason. The comment asserting the empty-resolved-packages case is always a whole-package deletion is also false: go list fails for other shapes (syntax errors, build-tag-excluded files, stray non-package files), so a change whose only .go file is excluded by build constraints now proceeds to a 'verified' stamp even though the file is never compiled — a widening of the gt-h9kf refusal beyond the intended deletion case.",
+  "findings": [
+    {
+      "id": "52ebe9555840",
+      "severity": "major",
+      "path": "internal/cmd/done_test_verify.go",
+      "line": 245,
+      "title": "goBuildWholeModule ignores its worktree parameter",
+      "detail": "The function takes `worktree string` and its doc comment says it builds the module 'in the worktree', but the exec.Command never sets cmd.Dir = worktree, so `go build ./...` runs in the process CWD. Every sibling in this file (goListDir line 231, runVerifySuite line 113) sets cmd.Dir. In production gt done this is coincidentally masked because runDefaultTestVerification is only reached with cwd == the worktree (resolveDonePolecatWorktree), but it is still a latent correctness bug, and it invalidates the integration test (below), which runs the real function against a t.TempDir() while the build actually compiles the host repo's internal/cmd."
+    },
+    {
+      "id": "f4555f901b77",
+      "severity": "major",
+      "path": "internal/cmd/done_test_verify.go",
+      "line": 624,
+      "title": "Empty resolved-packages case is not only a deletion; gate now fails open for other shapes",
+      "detail": "The comment claims 'the only diff shape that reaches here is a whole-package deletion', but changedGoPackages drops a directory whenever `go list` errors, which also happens for a changed .go file with a syntax error, a directory whose only .go files are excluded by build constraints, or a stray .go file outside any package. For an all-build-tag-excluded file, `go build ./...` succeeds, so the gate proceeds and stamps test_verified=true for a .go change that was never compiled or tested — a widening of the gt-h9kf refusal the fix claims to preserve. A syntax-error change is still refused, but with the misleading 'deleting every .go file in a package' message. The relaxation should verify the changed .go paths are actually deletions before substituting `go build ./...`."
+    },
+    {
+      "id": "4560aac8dbc6",
+      "severity": "minor",
+      "path": "internal/cmd/done_test_verify.go",
+      "line": 248,
+      "title": "Build failure output is discarded",
+      "detail": "`out, err := ...CombinedOutput()` is followed by `_ = out` and only err is returned, so the broken-importer refusal ('fix the build') gives the polecat no compiler output. Every other refusal path in this function surfaces actual failure text (lint detail, readLogTail of the test run); the whole-module build refusal should include the trimmed build output the same way, otherwise the polecat cannot see what to fix."
+    },
+    {
+      "id": "a72b3571bce3",
+      "severity": "minor",
+      "path": "internal/cmd/verify_integration_test.go",
+      "line": 121,
+      "title": "No test covers the still-refusing deletion; success-path integration test verifies the wrong module",
+      "detail": "The new tests only exercise the build-success path (deletePkgb removes a package nothing imports). There is no test asserting that a whole-package deletion whose importers are broken still refuses via the goBuildWholeModule error branch, which is the half of the fix the comment claims to preserve. Additionally, because goBuildWholeModule ignores its worktree argument (see the first finding), the integration subtest at this line never actually builds the temp repo — it builds the host module, so it does not pin the behavior it names."
+    }
+  ]
+}
