@@ -215,6 +215,148 @@ func TestEnsureWorkspaceTrust_ClaudePathVariants(t *testing.T) {
 	}
 }
 
+// A preset can redirect claude's config dir through its own env (town settings
+// agents.<preset>.env). The spawn path merges that env into the agent command
+// after the caller's, so it wins — trust has to follow it there, or the entry
+// lands in a file the session never reads (gt-3vfs).
+func TestEnsureWorkspaceTrust_PresetEnvConfigDirWins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	presetDir := t.TempDir()
+	workDir := t.TempDir()
+	rc := &config.RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"CLAUDE_CONFIG_DIR": presetDir},
+	}
+
+	if err := EnsureWorkspaceTrust(workDir, "", rc); err != nil {
+		t.Fatalf("EnsureWorkspaceTrust: %v", err)
+	}
+
+	cfg := readTrustConfig(t, filepath.Join(presetDir, ".claude.json"))
+	if !trustAccepted(t, cfg, workDir) {
+		t.Errorf("expected trust entry for %s in the preset's config dir %s", workDir, presetDir)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf("trust was seeded into ~/.claude.json, which this session never reads")
+	}
+}
+
+// The preset env is merged last when the agent command is built, so it also
+// beats a caller-supplied config dir (accounts.json) and the gt process's own
+// CLAUDE_CONFIG_DIR. Seed the winner only — writing into another account's
+// config is the cross-contamination the config dir isolates against (gt-3vfs).
+func TestEnsureWorkspaceTrust_PresetEnvConfigDirBeatsCallerAndProcessEnv(t *testing.T) {
+	presetDir := t.TempDir()
+	callerDir := t.TempDir()
+	processDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", processDir)
+
+	rc := &config.RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"CLAUDE_CONFIG_DIR": presetDir},
+	}
+
+	if err := EnsureWorkspaceTrust(workDir, callerDir, rc); err != nil {
+		t.Fatalf("EnsureWorkspaceTrust: %v", err)
+	}
+
+	if !trustAccepted(t, readTrustConfig(t, filepath.Join(presetDir, ".claude.json")), workDir) {
+		t.Errorf("expected trust entry for %s in %s", workDir, presetDir)
+	}
+	for _, other := range []string{callerDir, processDir} {
+		if _, err := os.Stat(filepath.Join(other, ".claude.json")); !os.IsNotExist(err) {
+			t.Errorf("trust seeded into %s, but the spawned session reads %s", other, presetDir)
+		}
+	}
+}
+
+// Precedence without a preset override: the caller's config dir wins over the
+// gt process environment, which wins over the ~/.claude.json default.
+func TestEnsureWorkspaceTrust_CallerConfigDirBeatsProcessEnv(t *testing.T) {
+	callerDir := t.TempDir()
+	processDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", processDir)
+
+	if err := EnsureWorkspaceTrust(workDir, callerDir, claudeRC()); err != nil {
+		t.Fatalf("EnsureWorkspaceTrust: %v", err)
+	}
+
+	if !trustAccepted(t, readTrustConfig(t, filepath.Join(callerDir, ".claude.json")), workDir) {
+		t.Errorf("expected trust entry for %s in the caller's config dir", workDir)
+	}
+	if _, err := os.Stat(filepath.Join(processDir, ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf("trust seeded into the process environment's config dir")
+	}
+}
+
+// A preset that declares CLAUDE_CONFIG_DIR but cannot resolve it (an unset
+// ${VAR} reference) must fail loudly: the spawn will refuse that reference
+// anyway, and silently falling back to ~/.claude.json would seed trust into a
+// file the session never reads (gt-3vfs).
+func TestEnsureWorkspaceTrust_UnresolvablePresetConfigDirErrors(t *testing.T) {
+	t.Setenv("GT_TRUST_TEST_UNSET", "")
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+	rc := &config.RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"CLAUDE_CONFIG_DIR": "${GT_TRUST_TEST_UNSET}"},
+	}
+
+	if err := EnsureWorkspaceTrust(workDir, configDir, rc); err == nil {
+		t.Fatal("expected an error when the preset's CLAUDE_CONFIG_DIR cannot be resolved")
+	}
+
+	if _, err := os.Stat(filepath.Join(configDir, ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf("trust was seeded into the caller's config dir after the preset's failed to resolve")
+	}
+}
+
+// A wrapper/shim in front of claude is still a Claude harness: the spawn path
+// treats it as one (--settings, claude hooks, claude's own config file), so
+// trust seeding must agree instead of gating on the literal basename "claude"
+// (gt-zbty).
+func TestEnsureWorkspaceTrust_NonClaudeCommandWithClaudeProviderIsSeeded(t *testing.T) {
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+
+	rc := &config.RuntimeConfig{
+		Command:  "/opt/gastown/bin/claude-town",
+		Provider: "claude",
+	}
+	if err := EnsureWorkspaceTrust(workDir, configDir, rc); err != nil {
+		t.Fatalf("EnsureWorkspaceTrust: %v", err)
+	}
+
+	cfg := readTrustConfig(t, filepath.Join(configDir, ".claude.json"))
+	if !trustAccepted(t, cfg, workDir) {
+		t.Errorf("expected trust entry for %s via the wrapped claude command", workDir)
+	}
+}
+
+// A wrapper command with no Claude provider is a genuinely different runtime
+// (e.g. a codex shim): no trust entry, matching config.IsResolvedAgentClaude.
+func TestEnsureWorkspaceTrust_WrappedNonClaudeCommandIsNoop(t *testing.T) {
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+
+	rc := &config.RuntimeConfig{
+		Command:  "/opt/gastown/bin/codex-shim",
+		Provider: "codex",
+	}
+	if err := EnsureWorkspaceTrust(workDir, configDir, rc); err != nil {
+		t.Fatalf("EnsureWorkspaceTrust: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(configDir, ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf(".claude.json should not be created for a wrapped non-claude runtime")
+	}
+}
+
 func TestEnsureWorkspaceTrust_CorruptConfigErrors(t *testing.T) {
 	configDir := t.TempDir()
 	workDir := t.TempDir()

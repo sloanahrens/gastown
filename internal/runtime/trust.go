@@ -22,20 +22,20 @@ import (
 // entry before the session starts is the only reliable suppression; the tmux
 // dialog auto-acceptance in AcceptStartupDialogs remains as a backstop.
 //
-// configDir is the runtime's config dir override (CLAUDE_CONFIG_DIR); when
-// empty, the default ~/.claude.json is used. Non-claude runtimes are a no-op.
+// configDir is the caller's config dir override (CLAUDE_CONFIG_DIR), e.g. from
+// accounts.json. The session may read a different one — see
+// resolveTrustConfigDir. Non-claude runtimes are a no-op.
 func EnsureWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig) error {
 	if workDir == "" || !isClaudeRuntime(rc) {
 		return nil
 	}
 
-	// No explicit override: the spawned session inherits the environment, so a
-	// globally-set CLAUDE_CONFIG_DIR redirects where claude reads its config.
-	if configDir == "" {
-		configDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	dir, err := resolveTrustConfigDir(configDir, rc)
+	if err != nil {
+		return err
 	}
 
-	path, err := claudeConfigJSONPath(configDir)
+	path, err := claudeConfigJSONPath(dir)
 	if err != nil {
 		return err
 	}
@@ -113,15 +113,52 @@ func seedTrust(projects map[string]any, dir string) bool {
 	return true
 }
 
-// isClaudeRuntime reports whether the runtime invokes the claude binary
-// (covers the claude preset, claude-transport presets like groq-compound,
-// and path-resolved commands such as ~/.claude/local/claude).
+// isClaudeRuntime reports whether the runtime invokes the claude binary.
+//
+// A resolved runtime defers to config.IsResolvedAgentClaude, the spawn path's
+// own notion of a Claude harness, so a claude behind a wrapper command is
+// seeded too rather than only a command whose basename is literally "claude"
+// (gt-zbty).
+//
+// An unresolved runtime (nil, or no command) stays a no-op:
+// IsResolvedAgentClaude's nil-means-Claude default decides how to start a
+// session, not which .claude.json to write.
 func isClaudeRuntime(rc *config.RuntimeConfig) bool {
 	if rc == nil || rc.Command == "" {
 		return false
 	}
-	base := strings.TrimSuffix(filepath.Base(rc.Command), ".exe")
-	return base == "claude"
+	return config.IsResolvedAgentClaude(rc)
+}
+
+// resolveTrustConfigDir returns the CLAUDE_CONFIG_DIR path the spawned session
+// will read .claude.json from. The spawn path merges a preset's env into the
+// agent command after the caller's env, so a preset that sets
+// CLAUDE_CONFIG_DIR wins over the caller's config dir (accounts.json) and over
+// the gt process's own environment (gt-3vfs).
+//
+// A preset value that cannot be resolved is an error, not a fall-through: the
+// spawn refuses that reference anyway, and the fallback file is one the session
+// never reads.
+func resolveTrustConfigDir(configDir string, rc *config.RuntimeConfig) (string, error) {
+	if rc != nil {
+		if raw := rc.Env["CLAUDE_CONFIG_DIR"]; strings.TrimSpace(raw) != "" {
+			// Expanded, not trimmed: the path seeded must be the one the
+			// session is handed.
+			dir := config.ExpandEnvRefs(rc.Env)["CLAUDE_CONFIG_DIR"]
+			if strings.TrimSpace(dir) == "" {
+				return "", fmt.Errorf("preset env CLAUDE_CONFIG_DIR=%q resolves to an empty path; "+
+					"set the referenced variable or drop the override", raw)
+			}
+			return dir, nil
+		}
+	}
+	if configDir != "" {
+		return configDir, nil
+	}
+	// No explicit override anywhere: the spawned session inherits the
+	// environment, so a globally-set CLAUDE_CONFIG_DIR redirects where claude
+	// reads its config.
+	return os.Getenv("CLAUDE_CONFIG_DIR"), nil
 }
 
 // claudeConfigJSONPath returns the .claude.json location for the given config
