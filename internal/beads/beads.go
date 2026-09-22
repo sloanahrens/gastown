@@ -1092,27 +1092,37 @@ func (b *Beads) run(args ...string) ([]byte, error) {
 // When stdinData is nil, behaves identically to run. Use this for flags like
 // --body-file=- that read multi-line content from stdin (avoids embedding
 // newlines in --description, which bd 1.0.3+ rejects).
-func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr error) {
-	start := time.Now()
-	// Declare buffers before defer so the closure captures them after cmd.Run.
-	var stdout, stderr bytes.Buffer
-	defer func() {
-		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
-	}()
+func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	// bd v0.59+ requires --flat for --json to produce JSON output on "list" commands.
 	// Without --flat, bd list --json silently returns human-readable tree format,
 	// causing all JSON parsing to fail. Inject --flat before --allow-stale prepend
 	// (which changes args[0] from "list" to "--allow-stale").
 	args = InjectFlatForListJSON(args)
 
-	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
-	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
-	//
 	// Always explicitly set BEADS_DIR to prevent inherited env vars from
 	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
 	// resolve from working directory.
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
+
+	return b.runBdWithRetry(stdinData, runEnv, args)
+}
+
+// runBdOnce executes exactly one bd subprocess and is where every pinned and
+// routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
+// attempt here means the --flat handling and the telemetry record stay per
+// invocation, so a retried command reports each attempt rather than one
+// inflated one.
+func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ []byte, retErr error) {
+	start := time.Now()
+	// Declare buffers before defer so the closure captures them after cmd.Run.
+	var stdout, stderr bytes.Buffer
+	defer func() {
+		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
+	}()
+
+	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
+	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
@@ -1152,44 +1162,14 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 // This is needed for slot operations that reference beads with different prefixes
 // (e.g., setting an hq-* hook bead on a gt-* agent bead).
 // See: sling_helpers.go verifyBeadExists/hookBeadWithRetry for the same pattern.
-func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //nolint:unparam // mirrors run() signature for consistency
-	start := time.Now()
-	var stdout, stderr bytes.Buffer
-	defer func() {
-		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
-	}()
+func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
 	// Same --flat handling as run/runWithStdin: routed call sites are "list ...
 	// --json" queries too, and bd v0.59+ emits tree text for those without
 	// --flat, so omitting the injection here fails json.Unmarshal outright.
 	// Inject before the --allow-stale prepend, which changes args[0].
 	args = InjectFlatForListJSON(args)
 
-	runEnv := b.buildRoutingEnv()
-	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
-
-	// Bound subprocess runtime — see bdSubprocessTimeout doc comment.
-	timeout := subprocessTimeoutFor(args)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	err := newBDCmd(ctx, b.workDir, runEnv, nil, fullArgs, &stdout, &stderr).Run()
-
-	// bd < v0.59 rejects --flat as an unknown flag; retry without it, matching
-	// the pinned paths.
-	if err != nil && bdRejectedFlat(stderr.String()) {
-		stdout.Reset()
-		stderr.Reset()
-		err = newBDCmd(ctx, b.workDir, runEnv, nil, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
-	}
-	if err != nil {
-		return nil, b.wrapError(subprocessFailureError(ctx, timeout, err), stderr.String(), args)
-	}
-
-	if stdout.Len() == 0 && stderr.Len() > 0 && bdEmptyOutputIsError(stderr.String()) {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
-	}
-
-	return stripStdoutWarnings(stdout.Bytes()), nil
+	return b.runBdWithRetry(nil, b.buildRoutingEnv(), args)
 }
 
 // Run executes a bd command and returns stdout.
