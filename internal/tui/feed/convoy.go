@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -70,16 +69,30 @@ func FetchConvoys(townRoot string) (*ConvoyState, error) {
 		// Not a fatal error - just return empty state
 		return state, nil
 	}
-	state.InProgress = enrichConvoysConcurrently(townBeads, openConvoys)
 
 	// Fetch recently closed convoys (landed in last 24h). closedAfter is
 	// applied server-side too — this used to fetch every closed issue in
 	// the town (1800+ rows) just to filter down to a handful of convoys
 	// closed today.
 	cutoff := time.Now().Add(-24 * time.Hour)
-	closedConvoys, err := listConvoys(townBeads, "closed", cutoff.Format(time.RFC3339))
-	if err == nil {
-		for _, convoy := range enrichConvoysConcurrently(townBeads, closedConvoys) {
+	closedConvoys, closedErr := listConvoys(townBeads, "closed", cutoff.Format(time.RFC3339))
+
+	// Enrich open and closed convoys together in one batch: gather every
+	// tracked-issue ID first (one `bd dep list` per convoy, serial, and
+	// usually served from cache — see trackedIssueIDs), then resolve all of
+	// their statuses with a single `bd show` call. This is the "one batched
+	// query, not N concurrent bd dep list calls per convoy" fix for
+	// gt-05vk — a prior fix (gt-3ony) fanned this out across up to 4
+	// goroutines per FetchConvoys call, which is exactly the concurrent bd
+	// child pileup that starved every other bd caller town-wide. bd
+	// contention is disk/fsync-bound, not CPU-bound, so that concurrency
+	// never actually reduced wall-clock time — it just multiplied load.
+	allItems := append(append([]convoyListItem{}, openConvoys...), closedConvoys...)
+	enriched := enrichConvoys(townBeads, allItems)
+
+	state.InProgress = enriched[:len(openConvoys)]
+	if closedErr == nil {
+		for _, convoy := range enriched[len(openConvoys):] {
 			if !convoy.ClosedAt.IsZero() && convoy.ClosedAt.After(cutoff) {
 				state.Landed = append(state.Landed, convoy)
 			}
@@ -142,33 +155,33 @@ func listConvoys(beadsDir, status, closedAfter string) ([]convoyListItem, error)
 	return items, nil
 }
 
-// maxConvoyFetchConcurrency bounds how many bd subprocesses this package
-// spawns at once when fanning out per-convoy or per-rig queries. Dolt (the
-// backing store for bd) is a single shared server and degrades badly under a
-// burst of concurrent queries, so this trades some parallelism for safety
-// rather than firing off one goroutine per convoy/rig unbounded.
-const maxConvoyFetchConcurrency = 4
-
-// enrichConvoysConcurrently enriches convoys in parallel, bounded by
-// maxConvoyFetchConcurrency. Each enrichConvoy call spawns its own bd
-// subprocesses (see getTrackedIssueStatus); running them serially was the
-// dominant cost in FetchConvoys under load (~1s per convoy).
-func enrichConvoysConcurrently(beadsDir string, items []convoyListItem) []Convoy {
+// enrichConvoys resolves tracked-issue counts for every convoy in one batch.
+// It fetches each convoy's tracked-issue IDs serially (one bd child at a
+// time; trackedIssueIDs caches the result so most calls are free — see
+// gt-05vk) and then resolves every distinct tracked issue's status with a
+// single batched `bd show` call, instead of one `bd show` per convoy.
+func enrichConvoys(beadsDir string, items []convoyListItem) []Convoy {
 	result := make([]Convoy, len(items))
+	perConvoyIDs := make([][]string, len(items))
 
-	sem := make(chan struct{}, maxConvoyFetchConcurrency)
-	var wg sync.WaitGroup
+	seen := make(map[string]bool)
+	var allIDs []string
 	for i, item := range items {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, item convoyListItem) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			result[i] = enrichConvoy(beadsDir, item)
-		}(i, item)
+		ids := trackedIssueIDs(beadsDir, item.ID)
+		perConvoyIDs[i] = ids
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				allIDs = append(allIDs, id)
+			}
+		}
 	}
-	wg.Wait()
 
+	status := batchIssueStatus(allIDs)
+
+	for i, item := range items {
+		result[i] = buildConvoy(item, perConvoyIDs[i], status)
+	}
 	return result
 }
 
@@ -191,8 +204,9 @@ func feedConvoyHasLabel(labels []string, target string) bool {
 	return false
 }
 
-// enrichConvoy adds tracked issue counts to a convoy
-func enrichConvoy(beadsDir string, item convoyListItem) Convoy {
+// buildConvoy assembles a Convoy from a listing item, its tracked-issue IDs,
+// and a status map covering those IDs (see enrichConvoys).
+func buildConvoy(item convoyListItem, trackedIDs []string, status map[string]string) Convoy {
 	convoy := Convoy{
 		ID:     item.ID,
 		Title:  item.Title,
@@ -211,11 +225,9 @@ func enrichConvoy(beadsDir string, item convoyListItem) Convoy {
 		convoy.ClosedAt = t
 	}
 
-	// Get tracked issues and their status
-	tracked := getTrackedIssueStatus(beadsDir, item.ID)
-	convoy.Total = len(tracked)
-	for _, t := range tracked {
-		if t.Status == "closed" {
+	convoy.Total = len(trackedIDs)
+	for _, id := range trackedIDs {
+		if status[id] == "closed" {
 			convoy.Completed++
 		}
 	}
@@ -417,10 +429,12 @@ type mqListItem struct {
 	Assignee  string `json:"assignee,omitempty"`
 }
 
-// fetchMQEntries queries all rigs for merge-request beads. Rigs are queried
-// concurrently (bounded by maxConvoyFetchConcurrency) and each rig is a
-// single bd call for both open and in_progress statuses combined — this used
-// to be two serial bd calls per rig (8 calls, ~1-1.6s each, for 4 rigs).
+// fetchMQEntries queries all rigs for merge-request beads, one rig at a time
+// (see gt-05vk: fanning bd calls out across goroutines only piles up
+// concurrent bd children against a single-threaded, disk/fsync-bound Dolt
+// server — it doesn't reduce wall-clock time). Each rig is a single bd call
+// for both open and in_progress statuses combined — this used to be two
+// serial bd calls per rig (8 calls, ~1-1.6s each, for 4 rigs).
 func fetchMQEntries(townRoot string) []MQEntry {
 	// Load rigs config to discover rigs
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
@@ -429,44 +443,17 @@ func fetchMQEntries(townRoot string) []MQEntry {
 		return nil
 	}
 
-	type rigEntries struct {
-		rigName string
-		entries []MQEntry
-	}
-
-	jobs := make([]rigEntries, 0, len(rigsConfig.Rigs))
+	var entries []MQEntry
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		// Check rig directory exists
 		if _, err := os.Stat(rigPath); err != nil {
 			continue
 		}
-		jobs = append(jobs, rigEntries{rigName: rigName})
-	}
-
-	sem := make(chan struct{}, maxConvoyFetchConcurrency)
-	var wg sync.WaitGroup
-	for i := range jobs {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			rigName := jobs[i].rigName
-			rigPath := filepath.Join(townRoot, rigName)
-			items := listMQBeads(rigPath, "open,in_progress")
-			entries := make([]MQEntry, 0, len(items))
-			for _, item := range items {
-				entries = append(entries, mqItemToEntry(item, rigName))
-			}
-			jobs[i].entries = entries
-		}(i)
-	}
-	wg.Wait()
-
-	var entries []MQEntry
-	for _, job := range jobs {
-		entries = append(entries, job.entries...)
+		items := listMQBeads(rigPath, "open,in_progress")
+		for _, item := range items {
+			entries = append(entries, mqItemToEntry(item, rigName))
+		}
 	}
 
 	// Sort: in-progress (merging) first, then open (queued)

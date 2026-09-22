@@ -40,6 +40,17 @@ const (
 	maxEventHistory    = 1000
 )
 
+// Convoy poll interval: a floor of baseConvoyPollInterval between fetches,
+// backing off up to maxConvoyPollInterval when a fetch is slow or errors —
+// both signs Dolt is contended — and resetting once fetches are fast again.
+// See gt-05vk: a fixed, unconditional 10s tick kept refetching at full rate
+// even while the town-wide bd famine made every fetch take far longer than
+// that, piling one slow FetchConvoys call on top of the next.
+const (
+	baseConvoyPollInterval = 10 * time.Second
+	maxConvoyPollInterval  = 2 * time.Minute
+)
+
 // Event represents an activity event
 type Event struct {
 	Time    time.Time
@@ -84,10 +95,11 @@ type Model struct {
 	feedViewport   viewport.Model
 
 	// Data
-	rigs        map[string]*Rig
-	events      []Event
-	convoyState *ConvoyState
-	townRoot    string
+	rigs               map[string]*Rig
+	events             []Event
+	convoyState        *ConvoyState
+	convoyPollInterval time.Duration
+	townRoot           string
 
 	// UI state
 	keys     KeyMap
@@ -113,7 +125,7 @@ type Model struct {
 	closeOnce sync.Once
 
 	// mu protects all fields read by View() from concurrent access:
-	// events, rigs, convoyState, eventChan, townRoot, width, height,
+	// events, rigs, convoyState, convoyPollInterval, eventChan, townRoot, width, height,
 	// focusedPanel, showHelp, help, filter, viewMode, problemAgents,
 	// selectedProblem, selectedBeadID, problemsError, lastProblemsCheck,
 	// and all viewports. Write lock is held during Update/handleKey
@@ -128,19 +140,20 @@ func NewModel(bd *beads.Beads) *Model {
 	h.ShowAll = false
 
 	return &Model{
-		focusedPanel:     PanelTree,
-		treeViewport:     viewport.New(0, 0),
-		convoyViewport:   viewport.New(0, 0),
-		feedViewport:     viewport.New(0, 0),
-		problemsViewport: viewport.New(0, 0),
-		rigs:             make(map[string]*Rig),
-		events:           make([]Event, 0, maxEventHistory),
-		problemAgents:    make([]*ProblemAgent, 0),
-		keys:             DefaultKeyMap(),
-		help:             h,
-		done:             make(chan struct{}),
-		viewMode:         ViewActivity,
-		stuckDetector:    NewStuckDetector(bd),
+		focusedPanel:       PanelTree,
+		treeViewport:       viewport.New(0, 0),
+		convoyViewport:     viewport.New(0, 0),
+		feedViewport:       viewport.New(0, 0),
+		problemsViewport:   viewport.New(0, 0),
+		rigs:               make(map[string]*Rig),
+		events:             make([]Event, 0, maxEventHistory),
+		problemAgents:      make([]*ProblemAgent, 0),
+		keys:               DefaultKeyMap(),
+		help:               h,
+		done:               make(chan struct{}),
+		viewMode:           ViewActivity,
+		stuckDetector:      NewStuckDetector(bd),
+		convoyPollInterval: baseConvoyPollInterval,
 	}
 }
 
@@ -178,9 +191,13 @@ func (m *Model) Init() tea.Cmd {
 // eventMsg is sent when a new event arrives
 type eventMsg Event
 
-// convoyUpdateMsg is sent when convoy data is refreshed
+// convoyUpdateMsg is sent when convoy data is refreshed. elapsed and err
+// (present only when state is non-nil, i.e. a fetch actually ran) drive the
+// poll-interval backoff in Update.
 type convoyUpdateMsg struct {
-	state *ConvoyState
+	state   *ConvoyState
+	elapsed time.Duration
+	err     error
 }
 
 // problemsUpdateMsg is sent when problems data is refreshed
@@ -238,14 +255,19 @@ func (m *Model) fetchConvoys() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		state, _ := FetchConvoys(townRoot)
-		return convoyUpdateMsg{state: state}
+		start := time.Now()
+		state, err := FetchConvoys(townRoot)
+		return convoyUpdateMsg{state: state, elapsed: time.Since(start), err: err}
 	}
 }
 
 // convoyRefreshTick returns a command that schedules the next convoy refresh
+// after m.convoyPollInterval.
 func (m *Model) convoyRefreshTick() tea.Cmd {
-	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+	m.mu.RLock()
+	interval := m.convoyPollInterval
+	m.mu.RUnlock()
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return convoyUpdateMsg{} // Empty state triggers a refresh
 	})
 }
@@ -290,10 +312,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case convoyUpdateMsg:
 		if msg.state != nil {
-			// Fresh data arrived - update state and schedule next tick
+			// Fresh data arrived - update state and schedule next tick.
 			m.mu.Lock()
 			m.convoyState = msg.state
 			m.updateViewContentLocked()
+			// Back off when a fetch was slow or errored — a sign Dolt is
+			// contended — and recover once fetches are fast again, mirroring
+			// the daemon's event-poll backoff (see convoy_manager.go).
+			if msg.err != nil || msg.elapsed > m.convoyPollInterval {
+				m.convoyPollInterval = min(m.convoyPollInterval*2, maxConvoyPollInterval)
+			} else {
+				m.convoyPollInterval = baseConvoyPollInterval
+			}
 			m.mu.Unlock()
 			cmds = append(cmds, m.convoyRefreshTick())
 		} else {
