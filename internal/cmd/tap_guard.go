@@ -100,7 +100,9 @@ var prWorkflowCommandPrefixes = [][]string{
 // compound command (cd x && gh pr create ...) — this guard must inspect
 // each ;/&&/||/| segment independently rather than only the start of the
 // whole line, or a leading unrelated segment lets a real PR-workflow
-// command later on the line slip through (gt-wisp-52y4).
+// command later on the line slip through (gt-wisp-52y4). An unquoted
+// newline separates commands the same way and arrives here as ";" — see
+// spaceOutShellOperators (gt-3j8u).
 var shellCommandSeparators = map[string]bool{
 	"&&": true,
 	"||": true,
@@ -115,8 +117,15 @@ var shellCommandSeparators = map[string]bool{
 // and compares whole tokens rather than raw string prefixes — so e.g.
 // "git checkout -branch" (a different flag) does not falsely match
 // "git checkout -b".
+//
+// Heredoc bodies are data being written or composed, not shell syntax —
+// the rule evaluateDangerousCommand, checkBashCommand and
+// commandInvokesRawTmuxSendKeys all state — so they are stripped before
+// tokenizing. Now that an unquoted newline ends a command (gt-3j8u), a body
+// line that happens to spell "gh pr create" would otherwise be read as a
+// live invocation and block an ordinary file write.
 func matchesPRWorkflowCommand(command string) bool {
-	tokens := shellTokenize(strings.TrimSpace(command))
+	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
 
 	segmentMatches := func(segment []string) bool {
 		for _, prefix := range prWorkflowCommandPrefixes {

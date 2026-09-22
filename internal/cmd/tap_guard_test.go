@@ -148,6 +148,27 @@ func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout(t *testing.T) {
 	}
 }
 
+// TestRunTapGuardPRWorkflow_BlocksNewlineSeparatedCommand pins the gt-3j8u
+// bypass at the guard boundary rather than at the matcher: the reported
+// fail-open was a multi-line Bash call whose blocked shape sat on a later
+// line ("cd /tmp" + newline + "gh pr create ..."), read from the hook
+// payload the harness actually sends. JSON's \n escape decodes to the real
+// newline the tokenizer has to treat as a command separator.
+func TestRunTapGuardPRWorkflow_BlocksNewlineSeparatedCommand(t *testing.T) {
+	t.Setenv("GT_REFINERY", "")
+	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
+	t.Setenv("GT_POLECAT", "topaz")
+
+	hookInput := `{"tool_name":"Bash","tool_input":{"command":"cd /tmp\ngit checkout -b feature/x"}}`
+	var err error
+	withStdin(t, hookInput, func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err == nil {
+		t.Error("expected a blocked shape on a later line of a multi-line command to be blocked, got nil error")
+	}
+}
+
 // The following two tests pin the composition of the refinery exemption
 // (gt-r2xm) with the command self-filter (gt-pjeh): the exemption only
 // fires for the exact feature-branch shape, and the self-filter's fail-shut
