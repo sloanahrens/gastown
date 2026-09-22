@@ -70,6 +70,101 @@ func TestDashboardScript_SlingUsesLongRunTimeout(t *testing.T) {
 	}
 }
 
+// dashJSFuncBody returns the source of the named function from dashboard.js,
+// from its `function <name>(` declaration to the matching closing brace. It
+// fails the test if the anchor is gone, so a rename surfaces as a test
+// failure instead of a silently vacuous assertion.
+func dashJSFuncBody(t *testing.T, content, name string) string {
+	t.Helper()
+	decl := "function " + name + "("
+	start := strings.Index(content, decl)
+	if start == -1 {
+		t.Fatalf("dashboard.js has no %s() — update this test's anchors", decl)
+	}
+	depth := 0
+	for i := start; i < len(content); i++ {
+		switch content[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return content[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces in %s() — update this test's anchors", decl)
+	return ""
+}
+
+// TestDashboardScript_ReadyFailureIsNotAnEmptyQueue guards the client half of
+// gt-w7eg. The server-side companion tests (see api_ready_test.go) make a
+// failed fetch answer 503, but the panel is what the operator actually reads:
+// if the failed-fetch render leaves a number in the count badge or a "No ready
+// work" body on screen, a broken panel is once again indistinguishable from a
+// town with nothing to do — which is precisely what was observed live, count 0
+// over a queue of 100 ready issues.
+//
+// dashboard.js has no JS runtime in this suite (there is no JS engine in
+// go.mod and the rod tests are behind the opt-in `browser` build tag), so this
+// asserts against the render contract of the code that runs, anchored to the
+// extracted function bodies rather than the whole file.
+func TestDashboardScript_ReadyFailureIsNotAnEmptyQueue(t *testing.T) {
+	js, err := os.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("ReadFile(static/dashboard.js) error = %v", err)
+	}
+	content := string(js)
+
+	render := dashJSFuncBody(t, content, "renderReadyError")
+	load := dashJSFuncBody(t, content, "loadReady")
+
+	// The badge must carry a non-numeric marker. '?' is the sentinel; a digit
+	// here would be the bug.
+	if !strings.Contains(render, "count.textContent = '?'") {
+		t.Error("renderReadyError must set the count badge to a non-numeric marker ('?'); " +
+			"any number, 0 included, reads as a real count (gt-w7eg)")
+	}
+	if strings.Contains(render, "count.textContent = '0'") {
+		t.Error("renderReadyError must not fall back to 0 — that is what an empty queue shows")
+	}
+	if !strings.Contains(render, "count.classList.add('count-error')") {
+		t.Error("renderReadyError must mark the badge with the count-error class so it is visually distinct from a count")
+	}
+	// A stale "No ready work" left visible beside the error is the same
+	// confusion with extra steps.
+	if !strings.Contains(render, "empty.style.display = 'none'") {
+		t.Error("renderReadyError must hide the 'No ready work' empty state; leaving it up reports an empty queue on a failed fetch")
+	}
+	if !strings.Contains(render, "table.style.display = 'none'") {
+		t.Error("renderReadyError must hide the (possibly stale) ready table")
+	}
+	// The error text must still reach the body.
+	if !strings.Contains(render, "loading.textContent = text") {
+		t.Error("renderReadyError must render the error text in the panel body")
+	}
+
+	// The failure path must actually route through it.
+	if !strings.Contains(load, "renderReadyError('Failed to load ready work: '") {
+		t.Error("loadReady's catch must render through renderReadyError so the badge cannot keep a numeric value")
+	}
+
+	// And a clean fetch must clear the error state again.
+	if !strings.Contains(load, "clearReadyError()") {
+		t.Error("loadReady's success path must clear the error badge state")
+	}
+
+	// The client must outwait the endpoint's own 12s budget, or it aborts the
+	// request the handler is still working on and never sees the honest 503.
+	if !strings.Contains(load, "fetchPanelJSON('/api/ready', READY_FETCH_TIMEOUT_MS)") {
+		t.Error("loadReady must pass its tiered timeout: the default 8s panel budget is " +
+			"shorter than the endpoint's 12s budget, so the client gives up before the server answers (gt-w7eg)")
+	}
+	if !strings.Contains(content, "var READY_FETCH_TIMEOUT_MS = 15000;") {
+		t.Error("READY_FETCH_TIMEOUT_MS must exceed readyFetchTimeoutDefault (12s) so the server's error arrives first")
+	}
+}
+
 func TestConvoyTemplate_LastActivityColors(t *testing.T) {
 	tmpl, err := LoadTemplates()
 	if err != nil {

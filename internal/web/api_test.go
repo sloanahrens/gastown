@@ -491,7 +491,7 @@ func TestAPIHandler_Crew(t *testing.T) {
 
 func TestAPIHandler_Ready(t *testing.T) {
 	handler := &APIHandler{
-		gtPath:            "false", // fast-failing stub — ready handler gracefully returns empty on error
+		gtPath:            "false", // fast-failing stub — see the assertion below
 		workDir:           t.TempDir(),
 		defaultRunTimeout: 5 * time.Second,
 		maxRunTimeout:     10 * time.Second,
@@ -504,21 +504,27 @@ func TestAPIHandler_Ready(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/ready status = %d, want %d", w.Code, http.StatusOK)
+	// This assertion used to demand 200 and a structurally-valid empty
+	// ReadyResponse, on the reasoning that the handler "gracefully returns
+	// empty on error". That is the defect behind gt-w7eg, not a feature: a
+	// failed fetch serialized to exactly the bytes of an empty queue, so the
+	// Ready Across Rigs panel rendered "0 / No ready work" for a town that
+	// was 100 issues deep. The endpoint must now report failure as failure.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /api/ready with a failing backend status = %d, want %d — "+
+			"a failed fetch must not be serialized as a zero-item success (gt-w7eg)",
+			w.Code, http.StatusServiceUnavailable)
 	}
 
-	var resp ReadyResponse
+	var resp CommandResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
-
-	// Response should have the expected structure (even if empty)
-	if resp.Items == nil {
-		t.Error("Expected Items field to be initialized")
+	if resp.Success {
+		t.Error("Expected Success=false on a failed backend fetch")
 	}
-	if resp.BySource == nil {
-		t.Error("Expected BySource field to be initialized")
+	if resp.Error == "" {
+		t.Error("Expected a non-empty error message the panel can show")
 	}
 }
 

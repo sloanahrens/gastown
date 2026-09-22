@@ -110,6 +110,12 @@ type APIHandler struct {
 	// once and then closed in every tab stops spawning subprocesses instead
 	// of polling forever (gt-c9rl).
 	dashboardClients atomic.Int64
+	// readyFetchTimeout overrides the budget for the `gt ready --json`
+	// subprocess behind /api/ready. Zero (the default for both NewAPIHandler
+	// and struct-literal test handlers) means readyFetchTimeoutDefault.
+	// Tests shrink it so the timeout branch can be forced without sleeping
+	// out the production 12s (gt-w7eg).
+	readyFetchTimeout time.Duration
 	// dashboardPollTickC, when non-nil, replaces the real time.Ticker as the
 	// source of poll ticks: pollDashboardHash processes exactly one tick per
 	// value received on this channel instead of firing on a wall-clock
@@ -153,6 +159,18 @@ const dashboardComputeCacheTTLDefault = 30 * time.Second
 // maxConcurrentCommands limits how many gt subprocesses can run at once.
 // handleOptions alone spawns 7; allow headroom for other concurrent handlers.
 const maxConcurrentCommands = 12
+
+// readyFetchTimeoutDefault bounds the `gt ready --json` subprocess behind
+// /api/ready when readyFetchTimeout is unset.
+//
+// The ready query is the expensive one on the dashboard — it fans out across
+// every rig — and it must outlive the client, not the other way round. At the
+// shared 8s panel budget the browser aborted first, so the panel never saw
+// this handler's answer and the failure arrived as a client-side abort with
+// the badge stuck at its initial 0 (gt-w7eg). dashboard.js therefore gives
+// the ready panel a longer, tiered budget (READY_FETCH_TIMEOUT_MS) than this
+// one, so a slow bd surfaces as an explicit 503 instead of a bare timeout.
+const readyFetchTimeoutDefault = 12 * time.Second
 
 // NewAPIHandler creates a new API handler with the given run timeouts and CSRF token.
 func NewAPIHandler(defaultRunTimeout, maxRunTimeout time.Duration, csrfToken string) *APIHandler {
@@ -2100,8 +2118,13 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
+	budget := h.readyFetchTimeout
+	if budget <= 0 {
+		budget = readyFetchTimeoutDefault
+	}
+
 	// Run gt ready --json to get ready work
-	output, err := h.runGtCommand(ctx, 12*time.Second, []string{"ready", "--json"})
+	output, err := h.runGtCommand(ctx, budget, []string{"ready", "--json"})
 
 	resp := ReadyResponse{
 		Items:    make([]ReadyItem, 0),
@@ -2109,8 +2132,16 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		// A failed or timed-out fetch must NOT go out as a 200 carrying zero
+		// items. On the wire that is byte-identical to a town with nothing to
+		// do, so the panel rendered "0 / No ready work" for a queue that was
+		// 100 issues deep (gt-w7eg) — the failure-equals-success anti-pattern
+		// on the one panel an operator reads to decide whether the town is
+		// starved. 503 makes the failure a failure; loadReady renders it as
+		// an explicit, non-numeric error state. A genuinely empty queue still
+		// answers 200 with total 0, which is the only thing allowed to render
+		// as "No ready work".
+		h.sendError(w, "ready work unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
@@ -2136,8 +2167,9 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.Unmarshal([]byte(output), &readyData); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		// Same reasoning as the fetch error above: unparseable output is not
+		// an empty queue. Swallowing it here was the other half of gt-w7eg.
+		h.sendError(w, "ready work unparseable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
