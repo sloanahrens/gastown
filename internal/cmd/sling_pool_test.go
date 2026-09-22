@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // boolp takes the address of a bool for the polecat_pool knobs that are
@@ -256,7 +257,7 @@ func TestListPolecatSessions(t *testing.T) {
 		},
 		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour)},
 	}
-	got, err := listPolecatSessions(f)
+	got, err := listPolecatSessions(f, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +284,68 @@ func TestListPolecatSessions(t *testing.T) {
 	pool.MinSpawnGap = "5m"
 	if a, r, _ := choosePoolAgent(pool, poolBead{}, "", got, now); a != "deepseek-flash" {
 		t.Errorf("marble 1m ago with a 5m gap: want overflow, got %q (%s)", a, r)
+	}
+}
+
+// TestListPolecatSessionsExcludesDoneWithOpenMR pins gt-2nft: a polecat whose
+// own agent bead reads done with an MR still in the queue does not occupy the
+// seat its session name would otherwise claim. The pool refused a 4th flash
+// spawn at 3/3 with only two live flash sessions because two "done, MR ready"
+// polecats were counted as occupants; this is the fix.
+func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
+	restore := poolPolecatDisposition
+	defer func() { poolPolecatDisposition = restore }()
+
+	poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+		if polecatName == "diamond" {
+			return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}, nil
+		}
+		return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictWorking}, nil
+	}
+
+	f := &fakeLister{
+		sessions: map[string]map[string]string{
+			"gt-granite": {"GT_ROLE": "gastown/polecats/granite", "GT_AGENT": "deepseek-flash"},
+			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
+		},
+	}
+	got, err := listPolecatSessions(f, "/town")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].name != "gt-granite" {
+		t.Fatalf("want only granite counted, got %+v", got)
+	}
+
+	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", OverflowAgent: "deepseek-flash", MaxOverflow: 2}
+	_, over, _ := poolSeatCounts(pool, got)
+	if over != 1 {
+		t.Errorf("overflow occupancy should count only the live working session, got %d", over)
+	}
+}
+
+// TestListPolecatSessionsFailsOpenOnDispositionError keeps a session counted
+// when the polecat's own state cannot be read: an overrun the pool exists to
+// prevent (gt-md4z) is worse than one extra refused sling.
+func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
+	restore := poolPolecatDisposition
+	defer func() { poolPolecatDisposition = restore }()
+
+	poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+		return polecat.WorkstateDisposition{}, errors.New("dolt unreachable")
+	}
+
+	f := &fakeLister{
+		sessions: map[string]map[string]string{
+			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
+		},
+	}
+	got, err := listPolecatSessions(f, "/town")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want the session still counted on lookup failure, got %+v", got)
 	}
 }
 
