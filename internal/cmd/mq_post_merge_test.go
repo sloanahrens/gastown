@@ -53,6 +53,11 @@ type fakeMQPostMergeGit struct {
 	landedFiles     []string
 	diffErr         error
 
+	// resolvedCommit is what Rev returns for an attested commit, modelling git's
+	// abbreviated-SHA expansion (resolveMQPostMergeCommit).
+	resolvedCommit string
+	resolveErr     error
+
 	// Orphan-branch cleanup fixtures (runOrphanMQPostMerge).
 	defaultBranch string
 	targetRef     string
@@ -120,6 +125,23 @@ func (g *fakeMQPostMergeGit) PushRemoteBranchTip(_, _ string) (string, error) {
 }
 
 func (g *fakeMQPostMergeGit) Rev(ref string) (string, error) {
+	if resolved, ok := strings.CutSuffix(ref, "^{commit}"); ok {
+		if strings.HasPrefix(resolved, "refs/") {
+			// Peel a local branch ref (deleteMQPostMergeLocalBranchIfAt): the
+			// answer is that branch's head.
+			return g.localHead, nil
+		}
+		// Expand an abbreviated attestation to a full SHA
+		// (resolveMQPostMergeCommit). Absent a fixture, echo the SHA back so
+		// tests that already pass a full SHA see it unchanged.
+		if g.resolveErr != nil {
+			return "", g.resolveErr
+		}
+		if g.resolvedCommit != "" {
+			return g.resolvedCommit, nil
+		}
+		return resolved, nil
+	}
 	if strings.HasSuffix(ref, "^") {
 		return g.landedParent, g.landedParentErr
 	}
@@ -300,6 +322,107 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationUsesLiveBranchHeadWhenCom
 	}
 	if len(rigGit.mergeBaseSubmits) != 1 || rigGit.mergeBaseSubmits[0] != liveHead {
 		t.Fatalf("attestation bound against %v, want the live branch tip [%s] instead of the stale commit_sha %s", rigGit.mergeBaseSubmits, liveHead, mgr.mr.CommitSHA)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_AttestationAcceptedWhenSubmittedHeadAlreadyLanded
+// covers the case the review flagged as still broken (gt-mlla): the submitted
+// head is already reachable from target, so the merge-base of the two IS the
+// submitted head and the submitted range is empty. That is a redundant
+// attestation — a retry after the branch was already fast-forwarded, or an
+// operator passing the flag out of habit — not a wrong one, and the default
+// proof would have accepted the MR with no flag at all. It must be accepted,
+// and the recorded merge_commit must be the commit that demonstrably landed
+// rather than the unverified attestation.
+func TestRunVerifiedMQPostMerge_AttestationAcceptedWhenSubmittedHeadAlreadyLanded(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const liveHead = "1a2b3c4d1a2b3c4d1a2b3c4d1a2b3c4d1a2b3c4d"
+	rigGit := &fakeMQPostMergeGit{
+		remoteTip: liveHead,
+		// MergeBase(target, submittedHead) == submittedHead: the head is an
+		// ancestor of target, so there is no diverged range to bind against.
+		mergeBase: liveHead,
+	}
+	const redundantAttestation = "9f8e7d6c9f8e7d6c9f8e7d6c9f8e7d6c9f8e7d6c"
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, redundantAttestation)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called: a redundant attestation blocked a merge whose work had landed")
+	}
+	if mgr.postMergeMR.MergeCommit != liveHead {
+		t.Fatalf("MR MergeCommit = %q, want the submitted head %q that is actually on target — not the unverified attestation %q",
+			mgr.postMergeMR.MergeCommit, liveHead, redundantAttestation)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_AttestationPersistsFullSHA pins the minor the
+// review raised alongside the binding (gt-mlla): an abbreviate attestation
+// used to be written onto the MR bead verbatim, so the closed MR carried a
+// merge_commit that could no longer be resolved once the branch was deleted.
+func TestRunVerifiedMQPostMerge_AttestationPersistsFullSHA(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const fullSHA = "2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f2bb0bf7f"
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		landedFiles:    []string{"internal/cmd/mq.go"},
+		resolvedCommit: fullSHA,
+	}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, "2bb0bf7")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if mgr.postMergeMR.MergeCommit != fullSHA {
+		t.Fatalf("MR MergeCommit = %q, want the resolved full SHA %q", mgr.postMergeMR.MergeCommit, fullSHA)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_AttestationWithBranchDeletionEnabled covers the
+// untested interaction the review called out (gt-mlla): the attestation path
+// was only ever exercised with --skip-branch-delete, so nothing pinned that an
+// attested merge still deletes the branch it closed.
+func TestRunVerifiedMQPostMerge_AttestationWithBranchDeletionEnabled(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	rigGit := &fakeMQPostMergeGit{
+		// Branch unmoved, so the CAS delete pins at the MR's recorded head.
+		remoteTip:      mgr.mr.CommitSHA,
+		localHead:      mgr.mr.CommitSHA,
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		landedFiles:    []string{"internal/cmd/mq.go", "internal/cmd/mq_status.go"},
+	}
+	const landedCommit = "3aba5e1f3aba5e1f3aba5e1f3aba5e1f3aba5e1f"
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the merged branch deleted after an attested merge", cleanup)
+	}
+	if !cleanup.LocalDeleted {
+		t.Fatalf("cleanup = %+v, want the local branch deleted too", cleanup)
+	}
+	if len(rigGit.deletedBranches) != 1 || rigGit.deletedBranches[0] != mgr.mr.Branch {
+		t.Fatalf("deleted branches = %v, want [%s]", rigGit.deletedBranches, mgr.mr.Branch)
+	}
+	// The delete pins to the MR's recorded head — which conflict resolution
+	// refreshes to the resolved head — not to the attestation, which names the
+	// commit the refinery pushed to the target.
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != mgr.mr.CommitSHA {
+		t.Fatalf("deleted heads = %v, want the MR's recorded head [%s]", rigGit.deletedHeads, mgr.mr.CommitSHA)
+	}
+	if mgr.postMergeMR.MergeCommit != landedCommit {
+		t.Fatalf("MR MergeCommit = %q, want %q", mgr.postMergeMR.MergeCommit, landedCommit)
 	}
 }
 
@@ -910,5 +1033,135 @@ func TestRunOrphanMQPostMerge_RealRemoteRefusesUnmergedBranch(t *testing.T) {
 	}
 	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote == "" {
 		t.Fatal("remote branch deleted despite unmerged work")
+	}
+}
+
+// gitAllowFail runs git and returns its combined output without failing the
+// test on a non-zero exit. Building a real conflict means asking git to do
+// something it is supposed to refuse.
+func gitAllowFail(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_EDITOR=true", "GIT_MERGE_AUTOEDIT=no")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// TestVerifyMQPostMergeProof_RealConflictResolvedRebase is the git-level
+// demonstration the review asked for (gt-mlla). Every other attestation test
+// fakes the git calls, so nothing proved the premise the flag exists for
+// actually holds in a real repository: that a conflict-resolved rebase leaves
+// the submitted head genuinely unprovable on target while the commit the
+// refinery pushed is provable, and that an unrelated on-target commit still is
+// not.
+//
+// It builds the shape end to end — a branch and a concurrent target change
+// editing the same line, a real conflict, a real resolution, then the queue's
+// squash landing — and drives verifyMQPostMergeProof against it.
+func TestVerifyMQPostMergeProof_RealConflictResolvedRebase(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	originPath := filepath.Join(tmp, "origin.git")
+	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", originPath)
+
+	clone := filepath.Join(tmp, "clone")
+	runOrphanCleanupGit(t, tmp, "clone", originPath, clone)
+	runOrphanCleanupGit(t, clone, "config", "user.email", "polecat@example.com")
+	runOrphanCleanupGit(t, clone, "config", "user.name", "Polecat Test")
+
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nline two\nline three\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "seed main")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", "main")
+
+	const branch = "polecat/marlin/gt-mlla"
+	runOrphanCleanupGit(t, clone, "checkout", "-b", branch)
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\npolecat middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "commit", "-am", "polecat change")
+	submittedHead := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", branch)
+
+	// The target moves underneath with a conflicting edit to the same line, so
+	// replaying the branch is a real conflict rather than a clean rebase.
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nmain middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "commit", "-am", "concurrent target change")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+
+	// Resolve the way the conflict-resolution task instructs: replay onto the
+	// moved target, settle the conflict, push the resolved head. That push is
+	// what leaves the MR bead's commit_sha stale.
+	runOrphanCleanupGit(t, clone, "checkout", branch)
+	if out, err := gitAllowFail(t, clone, "rebase", "main"); err == nil {
+		t.Fatalf("test premise broken: rebasing onto the moved target did not conflict:\n%s", out)
+	}
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nresolved middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "add", "app.txt")
+	if out, err := gitAllowFail(t, clone, "rebase", "--continue"); err != nil {
+		t.Fatalf("rebase --continue: %v\n%s", err, out)
+	}
+	if runOrphanCleanupGit(t, clone, "rev-parse", "HEAD") == submittedHead {
+		t.Fatal("test premise broken: conflict resolution left the submitted head unchanged")
+	}
+	runOrphanCleanupGit(t, clone, "push", "--force", "origin", branch)
+
+	// Land it the way the sequential-rebase queue does: squash onto the moved
+	// target, so the resolved head is never itself an ancestor of main.
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--squash", branch)
+	runOrphanCleanupGit(t, clone, "commit", "-m", "queue: land "+branch)
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	landedCommit := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+
+	g := git.NewGit(clone)
+	mr := &refinery.MergeRequest{
+		ID:           "gt-mr-real-attestation",
+		Branch:       branch,
+		TargetBranch: "main",
+		CommitSHA:    submittedHead,
+	}
+
+	// The premise: the stale submitted head is neither on target nor
+	// content-preserved there, so the default proof cannot hold for it.
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "main", submittedHead); err == nil {
+		t.Fatal("test premise broken: the stale submitted head satisfied the default proof")
+	}
+	if _, err := verifyMQPostMergeProof(g, mr, ""); err == nil {
+		t.Fatal("verifyMQPostMergeProof accepted the stale submitted head with no attestation")
+	}
+
+	// The attested landed commit is the one the refinery actually pushed.
+	recorded, err := verifyMQPostMergeProof(g, mr, landedCommit)
+	if err != nil {
+		t.Fatalf("verifyMQPostMergeProof with the real landed commit: %v", err)
+	}
+	if recorded != landedCommit {
+		t.Fatalf("recorded merge commit = %q, want the landed squash commit %q", recorded, landedCommit)
+	}
+
+	// An abbreviated attestation must persist as the full SHA.
+	recorded, err = verifyMQPostMergeProof(g, mr, landedCommit[:7])
+	if err != nil {
+		t.Fatalf("verifyMQPostMergeProof with an abbreviated attestation: %v", err)
+	}
+	if recorded != landedCommit {
+		t.Fatalf("recorded merge commit = %q, want the abbreviated attestation expanded to %q", recorded, landedCommit)
+	}
+
+	// Negative control: a commit that IS reachable from target — because it is
+	// target's tip — but landed unrelated work must still not attest for this
+	// MR, or the flag would accept anything the repository already contains.
+	writeOrphanCleanupFile(t, clone, "notes.md", "unrelated\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "unrelated target change")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	unrelatedOnTarget := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "main", unrelatedOnTarget); err != nil {
+		t.Fatalf("test premise broken: the unrelated commit is not on target: %v", err)
+	}
+	if _, err := verifyMQPostMergeProof(g, mr, unrelatedOnTarget); err == nil {
+		t.Fatal("verifyMQPostMergeProof accepted an unrelated on-target commit as attestation")
 	}
 }

@@ -32,6 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt mq post-merge` now asks for the conflict attestation itself, and
+  accepts it when the submitted head already landed** (gt-mlla) — the
+  `--landed-commit` flag existed for conflict-resolved merges but only the
+  refinery formula's remembered cycles passed it, and an omitted attestation
+  fails the merge proof outright, so those MRs closed only intermittently. The
+  formula now reads `conflict_task_id` off the MR bead (`gt mq status --json`
+  exposes it), passes the SHA it verified onto the target, and records it on
+  the MR. Two smaller corrections came with it: the proof no longer rejects a
+  redundant attestation when the submitted head is already reachable from
+  target (a retry after a fast-forward) — it is accepted, since the default
+  proof would have passed with no flag at all — and an abbreviated attestation
+  is expanded to its full SHA before being persisted, because an abbreviated
+  `merge_commit` cannot be resolved back to a commit once the branch is gone.
+- **`gt mq post-merge`'s merge proof no longer mutates the MR it is checking**
+  (gt-mlla) — `verifyMQPostMergeProof` assigned `mr.MergeCommit` as a side
+  effect, so verifying was indistinguishable from applying and the check could
+  not be run twice. It now returns the commit to record and the caller assigns
+  it. The attestation path also gained its first git-level test: a real
+  conflict-resolved rebase in a real repository, showing the submitted head
+  fails the default proof, the landed commit satisfies the attestation, and an
+  unrelated commit that merely happens to be on target still does not.
+
 - **`gt mq post-merge` can clean a branch whose MR bead is gone** (gt-qjp2) —
   the command read the branch name from the MR bead, so once that bead was
   closed and purged the only record of the branch went with it: no argument
