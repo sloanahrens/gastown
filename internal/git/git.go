@@ -2714,17 +2714,32 @@ func (g *Git) Parents(commit string) ([]string, error) {
 	return fields[1:], nil
 }
 
-// IsAncestor checks if ancestor is an ancestor of descendant.
+// IsAncestor checks if ancestor is a strict ancestor of descendant — it
+// reaches the same result as `git merge-base --is-ancestor` but with one
+// correction to git's own semantics: merge-base treats "same commit" as an
+// ancestor (exit 0), which callers of a function named IsAncestor do not
+// want, and a descendant-of-descendant is trivially accepted by the bare
+// form too. The strict check: merge-base(ancestor, descendant) must equal
+// ancestor, and the two commits must differ.
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
-	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
+	a, err := g.Rev(ancestor)
 	if err != nil {
-		// Exit code 1 means not an ancestor, not an error
-		if strings.Contains(err.Error(), "exit status 1") {
-			return false, nil
-		}
+		return false, fmt.Errorf("resolve %s: %w", ancestor, err)
+	}
+	d, err := g.Rev(descendant)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", descendant, err)
+	}
+	a = strings.TrimSpace(a)
+	d = strings.TrimSpace(d)
+	if a == d {
+		return false, nil
+	}
+	mb, err := g.MergeBase(a, d)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return strings.TrimSpace(mb) == a, nil
 }
 
 // CommitLandedOnTarget reports whether commit was already pushed to
