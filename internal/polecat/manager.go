@@ -18,8 +18,10 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -3236,6 +3238,13 @@ type StalenessInfo struct {
 	AgentState         string // From agent bead (empty if no bead)
 	IsStale            bool   // Overall assessment: safe to clean up
 	Reason             string // Why it's considered stale (or not)
+
+	// MarkerPaused and PausedReason come from agentpause.PauseGate, not the
+	// agent bead: the bead's agent_state=paused is a display mirror that can
+	// go stale or fail to sync, so cleanup consults the same marker file
+	// every restart scanner does (gt-ahik).
+	MarkerPaused bool
+	PausedReason string
 }
 
 // DetectStalePolecats identifies polecats that are candidates for cleanup.
@@ -3289,6 +3298,15 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 			info.AgentState = fields.AgentState
 		}
 
+		// Pause gate (gt-ahik): the marker file, not the bead mirror, is the
+		// only source of truth for "is this agent paused". A bead write that
+		// failed at pause time must not leave the polecat looking abandoned.
+		if paused, pst, perr := agentpause.PauseGate(m.townRoot, m.rig.Name, constants.RolePolecat, p.Name); paused {
+			info.MarkerPaused = true
+			info.PausedReason = agentpause.Reason(pst)
+			_ = perr // fail-closed already folded into `paused`; nothing else to do here
+		}
+
 		// Determine staleness
 		info.IsStale, info.Reason = assessStaleness(info, threshold)
 		results = append(results, info)
@@ -3332,6 +3350,13 @@ func assessStaleness(info *StalenessInfo, threshold int) (bool, string) {
 
 	// No active session - this polecat is a cleanup candidate
 	// Check for reasons to keep it:
+
+	// Sanctioned pause (gt-ahik): checked via the marker file, ahead of the
+	// bead mirror below — a paused polecat with a dead session looks exactly
+	// like an ordinary stale one to every other check here.
+	if info.MarkerPaused {
+		return false, fmt.Sprintf("paused (%s)", info.PausedReason)
+	}
 
 	// Check for non-observable states that indicate intentional pause
 	// (stuck, awaiting-gate are still stored in beads per gt-zecmc)

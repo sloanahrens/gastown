@@ -350,6 +350,15 @@ add_polecat_in_rig() {
   printf '%s\n' "$status" > "$TEST_STATE/health/$session"
 }
 
+# write_pause_marker drops a pause marker at the exact path run.sh's
+# agent_pause_marker_path reads: <town>/.runtime/agents/<rig>/polecat.<name>.json.
+write_pause_marker() {
+  local rig="$1" name="$2" contents="$3"
+
+  mkdir -p "$GT_TOWN_ROOT/.runtime/agents/$rig"
+  printf '%s\n' "$contents" > "$GT_TOWN_ROOT/.runtime/agents/$rig/polecat.$name.json"
+}
+
 # One run.sh invocation with a stall watchdog. Normal runs finish in ~2s; on
 # this host a freshly spawned script very occasionally wedges in exec before
 # bash ever runs it (environmental, not a run.sh bug — gt-nxc), which would
@@ -543,6 +552,59 @@ test_nuked_polecat_stray_inprogress_wisp_skips_restart() {
   assert_file_empty "$TEST_STATE/kill.log" "nuked polecat stray wisp: no session kill"
   assert_file_empty "$TEST_STATE/mail.log" "nuked polecat stray wisp: no restart mail"
   assert_file_contains "$TEST_STATE/output.log" "agent_state=nuked" "nuked polecat stray wisp: identity gate logged"
+}
+
+test_paused_polecat_stray_inprogress_wisp_skips_restart() {
+  # gt-ahik: an operator-sanctioned pause is indistinguishable from a stuck
+  # agent — the dog must not respawn a frozen polecat with a lingering
+  # in_progress wisp. The marker file (not the bead's agent_state, which is
+  # a display mirror only) is what the dog reads.
+  setup_case
+  add_polecat flint session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/flint"
+  write_pause_marker gastown flint '{"paused":true,"reason":"frozen by operator"}'
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "paused polecat stray wisp: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "paused polecat stray wisp: no restart mail"
+  assert_file_empty "$TEST_STATE/escalate.log" "paused polecat stray wisp: no escalation"
+  assert_file_contains "$TEST_STATE/output.log" "pause marker present" "paused polecat stray wisp: pause gate logged"
+}
+
+test_paused_polecat_marker_present_identity_lookup_fails_skips_restart() {
+  # gt-ahik (om review): the marker file must gate BEFORE the identity
+  # lookup, so a Dolt problem or a failed `gt polecat identity show` can
+  # never let the dog kill a paused agent. Simulates exactly that: a pause
+  # marker exists, but the identity lookup this polecat would otherwise fall
+  # through to fails outright.
+  setup_case
+  add_polecat garnet session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/garnet"
+  write_pause_marker gastown garnet '{"paused":true,"reason":"frozen by operator"}'
+  touch "$TEST_STATE/identity_fail/garnet"
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "paused + identity lookup fails: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "paused + identity lookup fails: no restart mail"
+  assert_file_empty "$TEST_STATE/escalate.log" "paused + identity lookup fails: no escalation"
+  assert_file_not_contains "$TEST_STATE/identity_calls.log" "garnet" "paused + identity lookup fails: identity never called"
+  assert_file_contains "$TEST_STATE/output.log" "pause marker present" "paused + identity lookup fails: pause gate logged"
+}
+
+test_malformed_pause_marker_fails_closed() {
+  # gt-ahik / gt-wisp-6ajo: every reader of the marker fails CLOSED. A
+  # truncated or unparseable marker must be treated as paused, not as
+  # "no marker" — restarting an agent the operator parked is the harm.
+  setup_case
+  add_polecat beryl session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/beryl"
+  write_pause_marker gastown beryl '{"paused": tr'
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "malformed marker: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "malformed marker: no restart mail"
+  assert_file_empty "$TEST_STATE/escalate.log" "malformed marker: no escalation"
+  assert_file_contains "$TEST_STATE/output.log" "pause marker present" "malformed marker: fails closed as paused"
 }
 
 test_identity_lookup_unavailable_falls_back_to_hook_status() {
@@ -756,6 +818,9 @@ test_done_polecat_stray_inprogress_wisp_skips_restart
 test_nuked_polecat_stray_inprogress_wisp_skips_restart
 test_working_polecat_empty_hook_bead_still_restarts
 test_idle_agent_state_inprogress_hook_still_restarts
+test_paused_polecat_stray_inprogress_wisp_skips_restart
+test_paused_polecat_marker_present_identity_lookup_fails_skips_restart
+test_malformed_pause_marker_fails_closed
 test_identity_lookup_unavailable_falls_back_to_hook_status
 test_no_hook_dead_sessions_do_not_mass_death
 test_non_actionable_hook_statuses_do_not_mass_death
