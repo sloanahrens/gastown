@@ -598,10 +598,11 @@ func (d *Daemon) Run() (err error) {
 	// Start convoy manager (event-driven + periodic stranded scan)
 	// Try opening beads stores eagerly; if Dolt isn't ready yet,
 	// pass the opener as a callback for lazy retry on each poll tick.
-	d.beadsStores, err = d.openBeadsStores()
+	startupStores, err := d.openBeadsStores()
 	if err != nil {
 		return err
 	}
+	d.beadsStores = startupStores.Stores
 
 	// Clean sessions left behind on legacy tmux sockets after daemon startup has
 	// passed fatal preflight checks but before any patrol agents can be spawned.
@@ -611,18 +612,19 @@ func (d *Daemon) Run() (err error) {
 		ok, _ := d.isRigOperational(rigName)
 		return !ok
 	}
-	var storeOpener func() map[string]beadsdk.Storage
-	if len(d.beadsStores) == 0 {
-		storeOpener = func() map[string]beadsdk.Storage {
+	var storeOpener func() storeOpenResult
+	if storeOpenerNeeded(startupStores) {
+		storeOpener = func() storeOpenResult {
 			stores, err := d.openBeadsStores()
 			if err != nil {
 				d.logger.Printf("Convoy: beads compatibility check failed: %v", err)
-				return nil
+				return storeOpenResult{}
 			}
 			return stores
 		}
 	}
 	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
+	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlerts)
 	if err := d.convoyManager.Start(); err != nil {
 		d.logger.Printf("Warning: failed to start convoy manager: %v", err)
 	} else {
@@ -2369,11 +2371,17 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 }
 
 // openBeadsStores opens beads stores for the town (hq) and all known rigs.
-// Returns a map keyed by "hq" for town-level and rig names for per-rig stores.
+// It returns the stores that opened — keyed by "hq" for town-level and by rig
+// name for per-rig stores — plus the names that were wanted but would not open.
 // Stores that fail to open are logged and skipped. Successfully opened stores
 // are compatibility-checked before being returned to Convoy polling.
-func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
+//
+// The names that failed are returned rather than only logged: a store missed
+// while Dolt is restarting has to be retried, and the convoy manager cannot
+// retry what it was never told was wanted (gt-i36h).
+func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 	stores := make(map[string]beadsdk.Storage)
+	var missing []string
 
 	// Town-level store (hq)
 	hqBeadsDir := filepath.Join(d.config.TownRoot, ".beads")
@@ -2381,6 +2389,7 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 		stores["hq"] = store
 	} else {
 		d.logger.Printf("Convoy: hq beads store unavailable: %s", util.FirstLine(err.Error()))
+		missing = append(missing, "hq")
 	}
 
 	// Per-rig stores
@@ -2392,6 +2401,7 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 		store, err := beadsdk.OpenFromConfig(d.ctx, beadsDir)
 		if err != nil {
 			d.logger.Printf("Convoy: %s beads store unavailable: %s", rigName, util.FirstLine(err.Error()))
+			missing = append(missing, rigName)
 			continue
 		}
 		stores[rigName] = store
@@ -2399,12 +2409,12 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 
 	if len(stores) == 0 {
 		d.logger.Printf("Convoy: no beads stores available, event polling disabled")
-		return nil, nil
+		return storeOpenResult{Missing: missing}, nil
 	}
 
 	if err := checkBeadsStoreCompatibility(d.ctx, stores, embeddedBeadsVersion()); err != nil {
 		closeBeadsStores(d.logger, stores)
-		return nil, err
+		return storeOpenResult{Missing: missing}, err
 	}
 
 	names := make([]string, 0, len(stores))
@@ -2412,7 +2422,20 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 		names = append(names, name)
 	}
 	d.logger.Printf("Convoy: opened %d beads store(s): %v", len(stores), names)
-	return stores, nil
+	return storeOpenResult{Stores: stores, Missing: missing}, nil
+}
+
+// storeOpenerNeeded reports whether the convoy manager must be handed the
+// store opener to complete the set this startup walk produced.
+//
+// A walk that came up short is not only one that came up empty. Dolt restarting
+// mid-walk drops whichever stores it had not reached — hq is opened first, so a
+// restart landing there loses hq while the rigs that follow open fine — and
+// with no opener that partial map read as complete: every convoy lookup was
+// skipped for the life of the daemon, silently, while the rigs kept polling
+// (gt-i36h).
+func storeOpenerNeeded(res storeOpenResult) bool {
+	return len(res.Stores) == 0 || len(res.Missing) > 0
 }
 
 // getKnownRigs returns list of registered rig names.
