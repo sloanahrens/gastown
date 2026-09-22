@@ -192,6 +192,78 @@ func TestStatus_DiscoversPoolSlots(t *testing.T) {
 	_ = h2.Release()
 }
 
+// TestStatusPoolLocksOnlySkipsDockerProbe pins gt-a8kx's first half: the hot
+// readers that want only the held/owner picture must not shell out to
+// `docker ps`. The stub counts calls and returns a matching container, so a
+// stray probe shows up twice over — as a count, and as a container in the
+// report, which is what a caller reading only Held/Owner would have paid for
+// without ever looking.
+func TestStatusPoolLocksOnlySkipsDockerProbe(t *testing.T) {
+	town := t.TempDir()
+	pool := Pool{Slots: 2}
+
+	// Acquiring legitimately probes docker: it decides whether a suite may
+	// start. Only the reads under test are held to the flock alone.
+	stubNoContainers(t)
+	h := mustAcquirePool(t, town, "gastown/amber", pool)
+
+	var calls int
+	restore := SetContainerListerForTest(func() ([]string, error) {
+		calls++
+		return []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, nil
+	})
+	t.Cleanup(restore)
+
+	rep, err := StatusPoolLocksOnly(town, pool)
+	if err != nil {
+		t.Fatalf("StatusPoolLocksOnly: %v", err)
+	}
+	if !rep.Held || rep.HeldCount != 1 || rep.Owner == nil || rep.Owner.Role != "gastown/amber" {
+		t.Fatalf("locks-only report lost the hold or its owner: %+v owner=%+v", rep, rep.Owner)
+	}
+	if len(rep.UnwrappedContainers) != 0 || len(rep.DebrisContainers) != 0 || rep.DockerUnknown {
+		t.Fatalf("locks-only report carries container fields it never looked for: %+v", rep)
+	}
+
+	// A full report while a slot IS held skips the probe too — that half is
+	// vacuous, because containers up while a slot is held belong to that
+	// holder.
+	held, err := StatusPool(town, pool)
+	if err != nil {
+		t.Fatalf("StatusPool (held): %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("StatusPool probed docker while a slot was held: %d call(s)", calls)
+	}
+	if len(held.UnwrappedContainers) != 0 {
+		t.Fatalf("full report with a slot held listed unwrapped containers: %+v", held.UnwrappedContainers)
+	}
+
+	_ = h.Release()
+	rep, err = StatusPoolLocksOnly(town, pool)
+	if err != nil {
+		t.Fatalf("StatusPoolLocksOnly (released): %v", err)
+	}
+	if rep.Held || rep.HeldCount != 0 {
+		t.Fatalf("released slot still reads held: %+v", rep)
+	}
+	if calls != 0 {
+		t.Fatalf("StatusPoolLocksOnly probed docker %d time(s); it must read the flocks alone", calls)
+	}
+
+	// The full report still probes — that is the half callers ask it for.
+	full, err := StatusPool(town, pool)
+	if err != nil {
+		t.Fatalf("StatusPool: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("StatusPool made %d docker probes, want exactly 1", calls)
+	}
+	if len(full.UnwrappedContainers) != 1 {
+		t.Fatalf("StatusPool UnwrappedContainers = %v, want the one container up with no slot held", full.UnwrappedContainers)
+	}
+}
+
 // TestPool_ReentrantMarkerOnAnySlot: a descendant of a holder of slot N
 // (not just slot 0) takes the reentrant fast path, even when every slot is
 // held.

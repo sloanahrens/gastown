@@ -403,9 +403,10 @@ type Report struct {
 	// determined and must not be treated as "none found".
 	DockerUnknown bool
 
-	// Slots is the per-slot picture when the report came from StatusPool
-	// (Status fills it with the single slot 0). HeldCount/Total summarize
-	// it; Reserved is how many low slots only gate roles may take.
+	// Slots is the per-slot picture when the report came from StatusPool or
+	// StatusPoolLocksOnly (Status fills it with the single slot 0, as does
+	// the locks-only path). HeldCount/Total summarize it; Reserved is how many
+	// low slots only gate roles may take.
 	Slots     []SlotState
 	HeldCount int
 	Total     int
@@ -432,6 +433,9 @@ func (r Report) Busy() bool {
 // lock file — never from the owner file — so it can never report "free"
 // while a live holder exists or "held" once the kernel has released the
 // lock.
+//
+// A caller that reads only Held/Owner should use StatusPoolLocksOnly and
+// spare itself the `docker ps` shell-out (gt-a8kx).
 func Status(townRoot string) (Report, error) {
 	return StatusPool(townRoot, DefaultPool)
 }

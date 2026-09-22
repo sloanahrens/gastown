@@ -77,9 +77,12 @@ var gateSlotReport = func(townRoot string) (slot.Report, error) {
 }
 
 // FetchGate reads the container-gate pool for the dashboard's Gate panel.
-// It is an in-process flock probe plus owner-file read — no bd subprocess —
-// so the panel costs nothing per poll tick, unlike the panels backed by
-// runBdCmd.
+// It spawns no bd subprocess, unlike the panels backed by runBdCmd — but the
+// panel does render the container half (DockerUnknown / Unwrapped), and that
+// half is only knowable from a `docker ps` cross-check, so a report with no
+// slot held costs one bounded (dockerPSTimeout) docker call per poll tick.
+// Callers that need only the held/owner picture want StatusPoolLocksOnly
+// instead (gt-a8kx).
 func (f *LiveConvoyFetcher) FetchGate() (*GateStatus, error) {
 	rep, err := gateSlotReport(f.townRoot)
 	if err != nil {

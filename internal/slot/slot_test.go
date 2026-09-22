@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -449,9 +450,15 @@ func TestAcquire_DoesNotProceedOnWedgedDockerDaemon(t *testing.T) {
 
 	orig := runningGateContainers
 	defer func() { runningGateContainers = orig }()
+	probeErr := errors.New("docker ps did not respond within 5s: context deadline exceeded")
 	runningGateContainers = func() ([]string, error) {
-		return nil, errors.New("docker ps did not respond within 5s: context deadline exceeded")
+		return nil, probeErr
 	}
+
+	origWriter := probeWriter
+	buf := &strings.Builder{}
+	probeWriter = buf
+	t.Cleanup(func() { probeWriter = origWriter })
 
 	timeout := DefaultPollInterval + 500*time.Millisecond
 	start := time.Now()
@@ -463,6 +470,17 @@ func TestAcquire_DoesNotProceedOnWedgedDockerDaemon(t *testing.T) {
 	}
 	if elapsed < timeout {
 		t.Fatalf("Acquire returned after %s, before its %s timeout — it treated the wedged-daemon error as a green light instead of waiting", elapsed, timeout)
+	}
+
+	// gt-a8kx: the error Acquire finally returns names the timeout and nothing
+	// else, and the caller's budget can be an hour (runMQBatchRun), so the
+	// reason for the wait has to be on the record — once, not once per poll.
+	got := buf.String()
+	if n := strings.Count(got, "docker ps check inconclusive"); n != 1 {
+		t.Fatalf("inconclusive-probe diagnostic printed %d time(s), want exactly 1: %q", n, got)
+	}
+	if !strings.Contains(got, probeErr.Error()) {
+		t.Fatalf("diagnostic %q does not carry the underlying probe error %q", got, probeErr)
 	}
 }
 
