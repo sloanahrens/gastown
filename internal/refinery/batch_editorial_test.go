@@ -321,6 +321,95 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 	}
 }
 
+// TestReviewBatchCandidates_RehearsalNeverMovesLiveCloneOffItsOwnBranch covers
+// gt-kmul: the batch used to rehearse each candidate by checking out its
+// gt-mq-review-* branch in e.git's own working directory and "restoring" it
+// with `git checkout <target>` afterwards, which on a clone mid-gate on its own
+// branch moved that clone's HEAD onto the target and left the gate building the
+// wrong tree — gt-dcku's bug on the batch path. Rehearsal now runs in a
+// throwaway worktree, so the live clone's checkout must come back exactly as it
+// went in.
+func TestReviewBatchCandidates_RehearsalNeverMovesLiveCloneOffItsOwnBranch(t *testing.T) {
+	fakeBDForBatch(t)
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	candidateIDs := []string{"mr-a", "mr-b"}
+	for _, id := range candidateIDs {
+		createFeatureBranch(t, workDir, "feature-"+id, id+".txt", "hello "+id+"\n")
+		// editorial.Run's rehearsal reads origin/<branch>, not the local branch.
+		run(t, workDir, "git", "push", "origin", "feature-"+id)
+	}
+	writeEditorialManifest(t, workDir)
+
+	var issues []*beadsdk.Issue
+	for _, id := range candidateIDs {
+		issues = append(issues, batchMRIssue(id, "feature-"+id, "main", "polecats/test"))
+	}
+	store := newBatchReviewStore(issues...)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true, ReviewParallelism: 1}
+	e.beads = beads.NewWithStore(workDir, store)
+	e.editorialExec = func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+		data, _ := json.Marshal(map[string]interface{}{"score": 0.8, "verdict": "approve"})
+		if err := os.WriteFile(verdictPathFromArgs(args), data, 0644); err != nil {
+			return "", 0, err
+		}
+		return "", 0, nil
+	}
+
+	// Simulate the refinery being mid-gate on its own "temp" branch — the
+	// state the old restore line clobbered by checking out "main" instead.
+	if err := g.CreateBranchFrom("temp", "feature-mr-a"); err != nil {
+		t.Fatalf("create temp branch: %v", err)
+	}
+	if err := g.Checkout("temp"); err != nil {
+		t.Fatalf("checkout temp: %v", err)
+	}
+	tempHead, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev temp HEAD: %v", err)
+	}
+
+	candidates := []*MRInfo{
+		makeMR("mr-a", "feature-mr-a", "main"),
+		makeMR("mr-b", "feature-mr-b", "main"),
+	}
+	for _, mr := range candidates {
+		mr.Worker = "polecats/test"
+	}
+
+	approved, _, _ := e.reviewBatchCandidates(context.Background(), candidates, "main")
+
+	if len(approved) != 2 {
+		t.Fatalf("expected 2 approved, got %d: %v (output:\n%s)", len(approved), mrIDs(approved), e.output)
+	}
+
+	branch, cbErr := g.CurrentBranch()
+	if cbErr != nil {
+		t.Fatalf("CurrentBranch: %v", cbErr)
+	}
+	if branch != "temp" {
+		t.Fatalf("live clone is on %q, want %q — the batch rehearsal checked out the live clone's working directory", branch, "temp")
+	}
+	head, revErr := g.Rev("HEAD")
+	if revErr != nil {
+		t.Fatalf("rev HEAD: %v", revErr)
+	}
+	if head != tempHead {
+		t.Fatalf("live clone HEAD = %s, want %s (the branch it was mid-gate on)", head, tempHead)
+	}
+
+	leftovers, lbErr := g.ListBranches("gt-mq-review-*")
+	if lbErr != nil {
+		t.Fatalf("ListBranches: %v", lbErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("rehearsal branch(es) left behind in the live clone: %v", leftovers)
+	}
+}
+
 // reviewBarrier holds the first n callers until all n have arrived, then
 // lets everyone through; later callers pass straight through. It also
 // tracks the peak number of callers between arrive and leave.
