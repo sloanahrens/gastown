@@ -211,10 +211,13 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 
 	// Redirecting HOME moves the Go toolchain's default cache locations
-	// (GOPATH=$HOME/go etc.), which would make any `go` invocation from a
-	// test re-download the module cache. Pin the current effective values
-	// before HOME changes.
-	preserveGoEnv()
+	// (GOPATH=$HOME/go etc.) AND its go env file ($HOME/.../go/env), which
+	// would make any `go` invocation from a test re-download the module cache
+	// and, on a host with a keg-only icu4c, lose the cgo flags. Pin the
+	// current effective values before HOME changes.
+	if err := preserveGoEnv(); err != nil {
+		return nil, err
+	}
 
 	setenvs := map[string]string{
 		"HOME":              h.HomeDir,
@@ -245,6 +248,9 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 		if err := os.Setenv(k, v); err != nil {
 			return nil, fmt.Errorf("setting %s: %w", k, err)
 		}
+	}
+	if err := verifyCgoIncludePath(); err != nil {
+		return nil, err
 	}
 
 	if h.cfg.dolt {
@@ -482,38 +488,163 @@ func writeSandboxGitConfig(home string) error {
 	return nil
 }
 
-// preserveGoEnv pins GOPATH/GOCACHE/GOMODCACHE to their current effective
-// values (asking the go tool) before HOME is redirected, so `go` invocations
-// from tests keep using the real build and module caches. Best-effort: when
-// the go tool is unavailable, nothing is pinned.
-func preserveGoEnv() {
-	vars := []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
+// goEnvCarryVars are the variables preserveGoEnv pins to their current
+// effective values before the harness redirects HOME.
+//
+// The CGO trio is in the list because on a host with a keg-only icu4c they
+// live in the Go env FILE ($GOENV — $HOME/Library/Application Support/go/env
+// on macOS), and the redirect points the go toolchain at a sandbox that has no
+// such file. Any cgo build a test shells out to — buildGT's `go build
+// ./cmd/gt`, say — then compiles Dolt's go-icu-regex dependency without
+// icu4c's include path and dies from inside a generated .cpp with
+//
+//	file.cpp:3:10: fatal error: 'unicode/regex.h' file not found
+//
+// which names neither the harness nor HOME nor the missing flags (gt-mjll).
+// `go env` resolves each name from the process environment first and the env
+// file second, so carrying them is a no-op on a host that already exports them
+// (make test does: the Makefile detects the keg-only prefix and exports both
+// CGO_CPPFLAGS and CGO_LDFLAGS, which is why only the bare `go test` path saw
+// this).
+var goEnvCarryVars = []string{
+	"GOPATH", "GOCACHE", "GOMODCACHE",
+	"CGO_CPPFLAGS", "CGO_CFLAGS", "CGO_LDFLAGS",
+}
+
+// preserveGoEnv pins goEnvCarryVars to their current effective values (asking
+// the go tool) before HOME is redirected, so `go` invocations from tests keep
+// using the real build and module caches and the real cgo flags.
+//
+// Best-effort about exactly one thing: a missing go tool. A test process with
+// no `go` on PATH cannot build anything that would notice. Every other failure
+// is reported, because silently dropping the cgo flags here does not surface
+// as an env problem — it resurfaces much later as a compile error inside a
+// dependency, which is the failure mode this function exists to prevent.
+func preserveGoEnv() error {
 	var missing []string
-	for _, v := range vars {
+	for _, v := range goEnvCarryVars {
 		if os.Getenv(v) == "" {
 			missing = append(missing, v)
 		}
 	}
 	if len(missing) == 0 {
-		return
+		return nil
 	}
 	goBin, err := exec.LookPath("go")
 	if err != nil {
-		return
+		return nil
 	}
-	out, err := exec.Command(goBin, append([]string{"env"}, missing...)...).Output() //nolint:gosec // fixed args
+	// -json, not one-value-per-line: values are space-bearing flag strings and
+	// may legitimately be empty, and a line-splitting reader silently loses
+	// the tail of the list when the last requested variable is empty. That
+	// early return is how CGO_LDFLAGS came to be dropped without a word.
+	args := append([]string{"env", "-json"}, missing...)
+	out, err := exec.Command(goBin, args...).Output() //nolint:gosec // fixed args
 	if err != nil {
-		return
+		return fmt.Errorf("asking the go tool for %s: %w", strings.Join(missing, ", "), err)
 	}
-	values := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	if len(values) != len(missing) {
-		return
+	values := map[string]string{}
+	if err := json.Unmarshal(out, &values); err != nil {
+		return fmt.Errorf("parsing `go env -json %s`: %w", strings.Join(missing, " "), err)
 	}
-	for i, v := range missing {
-		if values[i] != "" {
-			_ = os.Setenv(v, values[i])
+	for _, v := range missing {
+		if values[v] == "" {
+			continue
+		}
+		if err := os.Setenv(v, values[v]); err != nil {
+			return fmt.Errorf("carrying %s into the hermetic environment: %w", v, err)
 		}
 	}
+	return nil
+}
+
+// icu4cHeader is the header Dolt's go-icu-regex dependency includes from C++;
+// the harness probes for it by compiling this translation unit.
+const icu4cHeader = "<unicode/regex.h>"
+
+// verifyCgoIncludePath fails loud when the environment carries cgo include
+// directories but the C compiler cannot resolve icu4c's unicode/regex.h
+// through them.
+//
+// cgo dependencies are compiled by the C toolchain, not by go, so when the
+// include path is wrong the failure lands inside generated C++ and reads like
+// a source bug in go-icu-regex ("'unicode/regex.h' file not found") rather
+// than like a misconfigured environment (gt-mjll). Asking the compiler is the
+// only reliable check: -I directories, the toolchain's built-in search path
+// and the macOS SDK all participate, and only the compiler knows which of
+// them will actually resolve. The probe compiles a one-line translation unit
+// in C rather than C++ because the question is include-path resolution, not
+// C++ dialect support — clang rejects the header outright under -x c++.
+//
+// Skipped when no include directory is configured at all (a host that never
+// supplies one loses nothing to the HOME redirect, and the harness has no
+// diagnosis to offer) and when no C compiler is reachable. Costs one compiler
+// invocation per test binary (~0.2s on a warm cache), which is why it runs
+// once at setup rather than before each build a test shells out to.
+func verifyCgoIncludePath() error {
+	cgoFlags := strings.Fields(os.Getenv("CGO_CPPFLAGS") + " " + os.Getenv("CGO_CFLAGS"))
+	if !hasIncludeDir(cgoFlags) {
+		return nil
+	}
+	cc := os.Getenv("CC")
+	if cc == "" {
+		cc = "cc"
+	}
+	if _, err := exec.LookPath(cc); err != nil {
+		return nil
+	}
+	args := append(append([]string{}, cgoFlags...), "-fsyntax-only", "-x", "c", "-")
+	probe := exec.Command(cc, args...)
+	probe.Stdin = strings.NewReader("#include " + icu4cHeader + "\n")
+	out, err := probe.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	// Only a missing-header diagnosis is this harness's to explain, in clang's
+	// spelling ("file not found") or gcc's ("No such file or directory").
+	// Anything else the compiler says — no C frontend, an unknown flag the
+	// local toolchain spells differently — is not evidence about the include
+	// path, so stay out of the way rather than block the suite on it.
+	msg := string(out)
+	if !strings.Contains(msg, "file not found") && !strings.Contains(msg, "No such file or directory") {
+		return nil
+	}
+	return fmt.Errorf(`cgo include path cannot resolve icu4c's %s, so Dolt's go-icu-regex dependency will not compile:
+  CGO_CPPFLAGS=%s
+  CGO_CFLAGS=%s
+  %s: %s
+The hermetic harness keeps the sandbox HOME but carries these flags explicitly
+(preserveGoEnv), so this is a broken install rather than a lost environment:
+icu4c's headers are not in any -I directory above. On macOS the keg is
+keg-only, so reinstalling or upgrading icu4c moves the prefix without updating
+$GOENV. Repair it, then re-run — or prefer the rig's own gate, whose Makefile
+derives the flags itself:
+  brew install icu4c || brew upgrade icu4c
+  make test    # or export CGO_CPPFLAGS=-I$(brew --prefix icu4c)/include CGO_LDFLAGS=-L$(brew --prefix icu4c)/lib`,
+		icu4cHeader, os.Getenv("CGO_CPPFLAGS"), os.Getenv("CGO_CFLAGS"), cc, firstLine(out))
+}
+
+// hasIncludeDir reports whether cgo flags name at least one include directory,
+// in either the joined (-I/path) or separated (-I /path) spelling. Both match
+// on the prefix, so the bare forms need no special case.
+func hasIncludeDir(cgoFlags []string) bool {
+	for _, f := range cgoFlags {
+		if strings.HasPrefix(f, "-I") || strings.HasPrefix(f, "-isystem") {
+			return true
+		}
+	}
+	return false
+}
+
+// firstLine trims compiler output to its first non-empty line, so a probe
+// failure reads as one actionable sentence instead of a clang banner.
+func firstLine(out []byte) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return "(no output)"
 }
 
 // writeSandboxTown creates a minimal valid town (mayor/town.json marker) at
@@ -569,7 +700,9 @@ func HermeticTest(t testing.TB) string {
 	if err := writeSandboxGitConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	preserveGoEnv()
+	if err := preserveGoEnv(); err != nil {
+		t.Fatal(err)
+	}
 
 	testEnvs := map[string]string{
 		"HOME":                  home,
@@ -587,6 +720,9 @@ func HermeticTest(t testing.TB) string {
 		if err := os.Setenv(k, v); err != nil {
 			t.Fatalf("setting %s: %v", k, err)
 		}
+	}
+	if err := verifyCgoIncludePath(); err != nil {
+		t.Fatal(err)
 	}
 	if os.Getenv("GT_TEST_EXTERNAL_DOLT") != "1" {
 		_ = os.Setenv("GT_DOLT_PORT", poisonDoltPort)
