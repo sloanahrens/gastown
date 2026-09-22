@@ -70,11 +70,12 @@ the range is derived from the commit graph and the note is stamped on the
 landed commit itself. The base is the merge-base of the merge's two parents,
 never ^1: ^1 is the target's tip at merge time, so diffing against it reports
 everything the target gained meanwhile as deletions the branch never made.
-The commit must be reachable from origin/<target> and its landing must be a
-merge of its parents; anything else is refused with exit 2. The rig defaults
-to the caller's and the target to the rig's remote default branch (--rig,
---target). The positional MR id is optional, and only routes the verdict to
-that bead in addition to the note.
+The commit must be on origin/<target>'s first-parent chain — the commits the
+coverage check reads — and its landing must be a merge of its parents;
+anything else is refused with exit 2. The rig defaults to the caller's and the
+target to the rig's remote default branch (--rig, --target). The positional MR
+id is optional, and only routes the verdict to that bead in addition to the
+note.
 
 Exit code: 0 approve, 1 request_changes, 2 infra failure (never an approval).
 
@@ -87,6 +88,12 @@ Examples:
   gt mq review --landed 3107a0d --target main --rig gastown`,
 	Args: cobra.RangeArgs(0, 2),
 	RunE: runMQReview,
+	// A verdict signals through its exit code, and RunE returns a non-nil
+	// SilentExitError for request_changes — so without these cobra would print
+	// "Error: exit 1" and the usage block after a verdict, on every invocation
+	// the refinery patrol and the workers drive.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func init() {
@@ -137,9 +144,19 @@ func runMQReview(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 	if err != nil {
+		// This command silences cobra's error line (a verdict's exit code is
+		// the signal, and an error line after one reads as part of the
+		// verdict), so a real failure prints its one message here. Execute maps
+		// a plain error to exit 1, as before.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
 		return err
 	}
 	printMQReviewResult(result)
+	if result.Exit == 0 {
+		// Approve is not an error: returning a non-nil error here would put
+		// cobra's error line on a successful review.
+		return nil
+	}
 	// SilentExitError, not os.Exit: Execute owns the process exit code, as it
 	// does for the usage errors above.
 	return NewSilentExit(result.Exit)

@@ -51,8 +51,7 @@ type LandedRange struct {
 // time, which for a branch cut from an older target is ahead of the branch's
 // own base: diffing against it reports everything the target gained in the
 // meantime, inverted, as deletions the branch never made — phantom findings
-// for files nobody touched (mayor, 2026-09-22: one such run reported a
-// CRITICAL removal of a guard whose file exists).
+// for files nobody touched (gt-ljn8).
 //
 // The landing must also be a merge of its parents rather than a rewrite of
 // them: a landed merge whose tree differs from the tree git computes for its
@@ -66,15 +65,18 @@ func ResolveLandedRange(g *git.Git, landedArg, target string) (LandedRange, erro
 	}
 	landed = strings.TrimSpace(landed)
 
-	// Only a landed commit has a landed diff. A note on a commit that never
-	// reached the target proofs nothing about it (same rule as rekey-note).
+	// Only a landed commit has a landed diff, and the fact that matters is
+	// first-parent membership rather than ancestry: the coverage check walks
+	// first parents, so a commit inside a merged branch is reachable without
+	// being a commit the check ever reads, and a note stamped on it covers
+	// nothing (gt-ljn8).
 	targetRef := "origin/" + target
-	reachable, err := g.IsAncestor(landed, targetRef)
+	onChain, err := g.FirstParentContains(landed, targetRef)
 	if err != nil {
 		return LandedRange{}, fmt.Errorf("review --landed: cannot tell whether %s landed on %s: %w (fetch the rig clone and retry)", landed, targetRef, err)
 	}
-	if !reachable {
-		return LandedRange{}, fmt.Errorf("review --landed: refusing: %s is not reachable from %s — only a commit that landed has a landed diff to review; fetch and retry, or name the branch it landed on", landed, targetRef)
+	if !onChain {
+		return LandedRange{}, fmt.Errorf("review --landed: refusing: %s is not on %s's first-parent chain — the coverage check walks first-parent history, so only a commit that landed there has a landed diff whose note counts; fetch and retry, or name the branch it landed on", landed, targetRef)
 	}
 
 	parents, err := g.Parents(landed)
@@ -118,13 +120,12 @@ func ResolveLandedRange(g *git.Git, landedArg, target string) (LandedRange, erro
 // requireMergeOfParents refuses a landing whose own tree is not the tree a
 // conflict-free merge of its parents would produce.
 //
-// The test is a tree comparison, not a patch-id comparison. patch-id hashes
-// hunk context as well as changed lines, so an ordinary conflict-free merge —
-// one where the target moved lines inside the branch's hunk context — hashes
-// differently from the branch alone even though both describe the same change.
-// Requiring the two patch-ids to be equal refused those landings and diagnosed
-// them as merges that dropped a side, which was false (om, 2026-09-22). Trees
-// carry no such ambiguity: they are either the same tree or they are not.
+// The comparison is between trees, not patch-ids. patch-id hashes hunk
+// context as well as changed lines, so an ordinary conflict-free merge — one
+// where the target moved lines inside the branch's hunk context — hashes
+// differently from the branch alone even though both describe the same change
+// (gt-ljn8). Trees carry no such ambiguity: they are either the same tree or
+// they are not.
 func requireMergeOfParents(g *git.Git, r LandedRange) error {
 	commitTree, err := g.Rev(r.Commit + "^{tree}")
 	if err != nil {

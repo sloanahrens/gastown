@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,7 +53,23 @@ func saveReviewFlags(t *testing.T) func() {
 // runReviewArgs drives the real gt mq review command tree — rootCmd, cobra's
 // own arg parsing, runMQReview's exit-code paths — and returns its exit code.
 // The gate is faked for the duration of the call so the test never invokes om.
+//
+// Driving rootCmd runs persistentPreRun with it (beads version check, usage
+// logging, heartbeat, the town-branch warning), which is the point: these
+// tests pin what a caller of the installed binary sees. It stays hermetic only
+// because this package's TestMain runs under testutil.HermeticMain, which
+// scrubs GT_*/BD_* and redirects HOME — a test that needs this command tree
+// without that harness must invoke mqReviewCmd detached from rootCmd.
 func runReviewArgs(t *testing.T, rigDir string, gate func(req editorial.ReviewRequest) editorial.ReviewResult, args ...string) (int, *editorial.ReviewRequest) {
+	t.Helper()
+	code, _, captured := runReviewArgsErr(t, rigDir, gate, args...)
+	return code, captured
+}
+
+// runReviewArgsErr is runReviewArgs with the error Execute returned, for a
+// test that must tell "the command succeeded" from "the command returned a
+// error carrying exit code 0".
+func runReviewArgsErr(t *testing.T, rigDir string, gate func(req editorial.ReviewRequest) editorial.ReviewResult, args ...string) (int, error, *editorial.ReviewRequest) {
 	t.Helper()
 	t.Chdir(rigDir)
 
@@ -71,7 +88,8 @@ func runReviewArgs(t *testing.T, rigDir string, gate func(req editorial.ReviewRe
 	os.Args = append([]string{"gt"}, args...)
 	defer func() { os.Args = oldArgs }()
 
-	return CodeOf(t, rootCmd), captured
+	code, err := CodeOfErr(t, rootCmd)
+	return code, err, captured
 }
 
 // CodeOf runs a cobra command and maps its error onto the CLI's exit-code
@@ -79,15 +97,23 @@ func runReviewArgs(t *testing.T, rigDir string, gate func(req editorial.ReviewRe
 // error is exit 1.
 func CodeOf(t *testing.T, cmd *cobra.Command) int {
 	t.Helper()
+	code, _ := CodeOfErr(t, cmd)
+	return code
+}
+
+// CodeOfErr is CodeOf with the command's own error, so a caller can tell an
+// approve (no error at all) from a request_changes (a SilentExitError).
+func CodeOfErr(t *testing.T, cmd *cobra.Command) (int, error) {
+	t.Helper()
 	err := cmd.Execute()
 	if err == nil {
-		return 0
+		return 0, nil
 	}
 	if code, ok := IsSilentExit(err); ok {
-		return code
+		return code, err
 	}
 	t.Errorf("command error: %v", err)
-	return 1
+	return 1, err
 }
 
 // approveGate stands in for a gate run that approves. It answers with a Note
@@ -332,6 +358,63 @@ func TestMQReviewLanded_UsageExitsTwo(t *testing.T) {
 	}
 	if captured != nil {
 		t.Error("the gate ran on a usage error")
+	}
+}
+
+// TestMQReviewLanded_VerdictIsExitCodeOnly pins how a verdict reaches its
+// caller. RunE returns a non-nil SilentExitError for request_changes, and
+// cobra prints any non-nil error plus the usage block unless the command
+// silences both — which would put "Error: exit 1" and a usage dump after every
+// verdict the refinery patrol reads. An approve must return no error at all,
+// so a caller checking it cannot read success as failure.
+func TestMQReviewLanded_VerdictIsExitCodeOnly(t *testing.T) {
+	_, repoDir, rigDir := testRigRoot(t, "main")
+	tip := revForCmd(t, repoDir, "HEAD")
+
+	cases := []struct {
+		name string
+		exit int
+		gate func(editorial.ReviewRequest) editorial.ReviewResult
+	}{
+		{name: "approve", exit: 0, gate: approveGate(t)},
+		{name: "request_changes", exit: 1, gate: func(editorial.ReviewRequest) editorial.ReviewResult {
+			return editorial.ReviewResult{Exit: 1, Note: &editorial.Note{Verdict: "request_changes", Score: 0.38}}
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			restore := captureRootOutput(&buf)
+			defer restore()
+
+			code, err, _ := runReviewArgsErr(t, rigDir, tc.gate, "mq", "review", "--landed", tip)
+			if code != tc.exit {
+				t.Fatalf("exit = %d, want %d", code, tc.exit)
+			}
+			_, isSilent := IsSilentExit(err)
+			switch {
+			case tc.exit == 0 && err != nil:
+				t.Errorf("approve returned error %v; a successful review is not an error", err)
+			case tc.exit != 0 && !isSilent:
+				t.Errorf("error = %v, want a SilentExitError carrying exit %d", err, tc.exit)
+			}
+			if out := buf.String(); strings.Contains(out, "Error:") || strings.Contains(out, "Usage:") {
+				t.Errorf("cobra wrote an error line or the usage block for a verdict:\n%s", out)
+			}
+		})
+	}
+}
+
+// captureRootOutput redirects rootCmd's streams into w and returns the restore
+// func. Cobra prints an error line to ErrOrStderr and the usage block to
+// OutOrStderr, so both must be captured to see all a verdict leaves behind.
+func captureRootOutput(w *bytes.Buffer) func() {
+	rootCmd.SetOut(w)
+	rootCmd.SetErr(w)
+	return func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
 	}
 }
 

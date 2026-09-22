@@ -2753,6 +2753,26 @@ func (g *Git) Parents(commit string) ([]string, error) {
 	return fields[1:], nil
 }
 
+// FirstParentContains reports whether commit is on the first-parent chain of
+// descendant — whether walking descendant's first parents reaches it.
+//
+// It is the membership test the editorial-coverage check's walk makes: that
+// walk follows first parents only, so a commit inside a merged branch is an
+// ancestor of the target without being a commit the check ever reads. A note
+// stamped on such a commit is proof of nothing (gt-ljn8).
+func (g *Git) FirstParentContains(commit, descendant string) (bool, error) {
+	out, err := g.run("rev-list", "--first-parent", descendant)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == commit {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // IsAncestor checks if ancestor is an ancestor of descendant.
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)

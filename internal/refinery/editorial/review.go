@@ -295,7 +295,17 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		// to re-roll from: an unreadable note would be silently replaced.
 		return failureResult(deps, req, Tooling, fmt.Sprintf("read recorded verdict for diff %s: %v", patchID, err), 0)
 	}
-	if prior != nil && !req.Reroll && recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion) {
+	// A landed review answers from a recorded verdict only when the note it
+	// found sits on the landed commit. priorVerdict falls back to a
+	// notes-ref-wide patch-id scan (FindVerdictForDiff), and a match found that
+	// way was written against a rehearsal head the merge queue discarded:
+	// reusing it would report approve while stamping nothing, leaving the
+	// landed commit as uncovered as it was — the gap this mode exists to close
+	// (gt-ljn8). Falling through re-reviews and writes the note.
+	reuseApplies := prior != nil && !req.Reroll &&
+		(!retroReview || prior.Commit == noteCommit) &&
+		recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
+	if reuseApplies {
 		if prior.Note.Verdict == "approve" {
 			// Record the head the note was found on — the reviewed head —
 			// not this invocation's rehearsal commit. No note exists on the
@@ -362,14 +372,15 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 	// Omitted rather than passed empty: a landed review names no MR bead, and
 	// the gate script reads an absent --mr as "do not route this verdict to a
-	// bead" (route_comment in scripts/om-gate.sh), which is what a verdict
-	// about a commit whose MR is gone should do.
+	// bead", which is what a verdict about a commit whose MR is gone should do.
 	if req.MRID != "" {
 		args = append(args, "--mr", req.MRID)
 	}
-	if req.Worker != "" {
-		args = append(args, "--worker", req.Worker)
-	}
+	// --worker is passed whether or not it has a value: every MR-path run
+	// before landed reviews existed sent it, and the deployed gate script
+	// parses its arguments strictly and fails closed, so a shape it has never
+	// seen is a refusal, not a default.
+	args = append(args, "--worker", req.Worker)
 	args = append(args, "--rig", req.Rig, "--out", verdictPath, "--prior-findings", priorPath)
 	// Only appended when the caller asked for an override: the deployed
 	// gate script parses its args with a strict case and fails closed

@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -307,12 +309,43 @@ func TestResolveLandedRange_NotLandedRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("ResolveLandedRange: want a refusal for a commit origin/main cannot contain")
 	}
-	// This must be the reachability refusal, not a later one: an unpushed
+	// This must be the first-parent refusal, not a later one: an unpushed
 	// commit is also a perfectly ordinary commit, so any other refusal would
-	// mean the reachability check did not run.
-	if !strings.Contains(err.Error(), "not reachable from") {
-		t.Errorf("refusal = %q, want the not-reachable refusal", err.Error())
+	// mean the landed check did not run.
+	if !strings.Contains(err.Error(), "first-parent") {
+		t.Errorf("refusal = %q, want the not-on-the-first-parent-chain refusal", err.Error())
 	}
+}
+
+// TestResolveLandedRange_BranchInternalCommitRefused pins why ancestry is not
+// the test. The branch tip is an ancestor of the landed merge, so an ancestor
+// check accepts it, but the editorial-coverage check walks first parents only
+// and would never read a note stamped there — a retro-review would report
+// closed a coverage gap it had not touched (gt-ljn8).
+func TestResolveLandedRange_BranchInternalCommitRefused(t *testing.T) {
+	f := newLandedFixture(t)
+	f.land(t, f.merge)
+	if !mustIsAncestor(t, f.g, f.branchTip, f.merge) {
+		t.Fatal("fixture does not reproduce the case: the branch tip is not an ancestor of the landed merge")
+	}
+	_, err := ResolveLandedRange(f.g, f.branchTip, "main")
+	if err == nil {
+		t.Fatal("ResolveLandedRange accepted a branch-internal commit the coverage check never reads")
+	}
+	if !strings.Contains(err.Error(), "first-parent") {
+		t.Errorf("refusal = %q, want it to say the commit is not on the first-parent chain", err.Error())
+	}
+}
+
+// mustIsAncestor reports whether ancestor is an ancestor of descendant,
+// failing the test if git cannot tell.
+func mustIsAncestor(t *testing.T, g *git.Git, ancestor, descendant string) bool {
+	t.Helper()
+	ok, err := g.IsAncestor(ancestor, descendant)
+	if err != nil {
+		t.Fatalf("IsAncestor(%s, %s): %v", ancestor, descendant, err)
+	}
+	return ok
 }
 
 func TestResolveLandedRange_RootRefused(t *testing.T) {
@@ -484,6 +517,180 @@ func TestRun_LandedReview_StampNoteOnLandedCommit(t *testing.T) {
 	if len(store.issues) != 0 {
 		t.Errorf("store has %d issue(s); a landed review must not write MR beads", len(store.issues))
 	}
+}
+
+// TestRun_LandedReview_ReuseOnlyFromTheLandedCommit pins the shortcut's limit
+// on the landed path. A verdict for the same patch-id may be found anywhere in
+// the notes ref — that is how priorVerdict's scan works, and the case it finds
+// here is the one this mode exists for: the rehearsal head's verdict was never
+// copied onto the landed commit. Reusing it reports approve while stamping
+// nothing, so the landed commit stays uncovered and the coverage check keeps
+// flagging it. The landed path must re-review and write the note instead.
+func TestRun_LandedReview_ReuseOnlyFromTheLandedCommit(t *testing.T) {
+	fakeBDForReview(t)
+	f := newLandedFixture(t)
+	f.land(t, f.merge)
+	landed, err := ResolveLandedRange(f.g, f.merge, "main")
+	if err != nil {
+		t.Fatalf("ResolveLandedRange: %v", err)
+	}
+
+	rigDir := t.TempDir()
+	if err := writeTestManifest(t, rigDir); err != nil {
+		t.Fatal(err)
+	}
+	// The rehearsal head's verdict: the landed diff's patch-id, the deployed
+	// rubric (writeTestManifest records none), an om version this pipeline
+	// accepts — recordedVerdictApplies holds, so only the commit it sits on
+	// keeps the landed path from answering with it.
+	if err := WriteNote(f.g, Note{
+		OMVersion:  "1.4.0",
+		Rig:        "gastown",
+		MR:         "gt-mr-landed",
+		HeadSHA:    f.branchTip,
+		PatchID:    landed.PatchID,
+		Score:      0.81,
+		Verdict:    "approve",
+		ReviewedAt: time.Now().UTC().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed the rehearsal head's note: %v", err)
+	}
+	if _, err := ReadNote(f.g, f.merge); !errors.Is(err, git.ErrNoNote) {
+		t.Fatalf("the landed commit already carries a note (%v); the case under test is that it does not", err)
+	}
+
+	gateRuns := 0
+	deps := Deps{
+		Git:      f.g,
+		Beads:    beads.NewWithStore(f.repoDir, newReviewStore()),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			gateRuns++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.87, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := ReviewRequest{
+		RigDir:  rigDir,
+		RepoDir: f.repoDir,
+		Rig:     "gastown",
+		Target:  "main",
+		Landed:  &landed,
+		Attempt: 1,
+		Config:  config.EditorialConfig{Required: true},
+	}
+
+	result := Run(context.Background(), req, deps)
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Reused {
+		t.Error("Reused = true: the run answered from a verdict recorded on another commit, so the landed commit got no note")
+	}
+	if gateRuns != 1 {
+		t.Errorf("gate ran %d time(s), want 1: a landed review measures the landed diff rather than answering from the rehearsal head's note", gateRuns)
+	}
+	got, err := ReadNote(f.g, f.merge)
+	if err != nil {
+		t.Fatalf("ReadNote on the landed commit after the review: %v", err)
+	}
+	if got.PatchID != landed.PatchID || got.Verdict != "approve" {
+		t.Errorf("note on the landed commit = patch-id %q verdict %q, want %q/approve", got.PatchID, got.Verdict, landed.PatchID)
+	}
+}
+
+// TestRun_GateArgsCarryWorkerOnEitherPath pins the gate script's argument
+// shape across both paths. A landed review added the --mr omission; --worker
+// must not have drifted with it, because every MR-path run before landed
+// reviews existed sent --worker whether or not it had a value, and the
+// deployed script parses its arguments strictly and fails closed.
+func TestRun_GateArgsCarryWorkerOnEitherPath(t *testing.T) {
+	cases := []struct {
+		name         string
+		worker       string
+		landed       bool
+		wantMR       string
+		wantMRAbsent bool
+	}{
+		{name: "MR path with a worker", worker: "marble", wantMR: "gt-mr-1"},
+		{name: "MR path with no worker", worker: "", wantMR: "gt-mr-1"},
+		{name: "landed path has no MR bead", landed: true, wantMRAbsent: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBDForReview(t)
+			var gotArgs []string
+			exec := func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+				gotArgs = append([]string(nil), args...)
+				writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+				return "", 0, nil
+			}
+
+			var req ReviewRequest
+			var store *reviewStore
+			if tc.landed {
+				f := newLandedFixture(t)
+				f.land(t, f.merge)
+				landed, err := ResolveLandedRange(f.g, f.merge, "main")
+				if err != nil {
+					t.Fatalf("ResolveLandedRange: %v", err)
+				}
+				rigDir := t.TempDir()
+				if err := writeTestManifest(t, rigDir); err != nil {
+					t.Fatal(err)
+				}
+				store = newReviewStore() // a landed review has no MR bead
+				req = ReviewRequest{RigDir: rigDir, RepoDir: f.repoDir, Rig: "gastown",
+					Target: "main", Landed: &landed, Attempt: 1, Config: config.EditorialConfig{Required: true}}
+			} else {
+				f := newReviewFixture(t)
+				store = newReviewStore(mrIssue("gt-mr-1", f.request().Branch, "main", "gt-real", "gastown", tc.worker))
+				req = f.request()
+				req.Worker = tc.worker
+			}
+
+			deps := Deps{
+				Git:      git.NewGit(req.RepoDir),
+				Beads:    beads.NewWithStore(req.RepoDir, store),
+				Recorder: plugin.NewRecorder(t.TempDir()),
+				Exec:     exec,
+			}
+			if result := Run(context.Background(), req, deps); result.Exit != 0 {
+				t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+			}
+
+			gotWorker, hasWorker := gateArgValue(gotArgs, "--worker")
+			if !hasWorker {
+				t.Errorf("gate script args omit --worker (args=%v); a strict parser reads that as a shape it has never seen", gotArgs)
+			} else if gotWorker != tc.worker {
+				t.Errorf("--worker = %q, want %q (args=%v)", gotWorker, tc.worker, gotArgs)
+			}
+
+			gotMR, hasMR := gateArgValue(gotArgs, "--mr")
+			switch {
+			case tc.wantMRAbsent && hasMR:
+				t.Errorf("--mr = %q, want it absent on a review with no MR bead (args=%v)", gotMR, gotArgs)
+			case !tc.wantMRAbsent && (!hasMR || gotMR != tc.wantMR):
+				t.Errorf("--mr = %q (present=%v), want %q (args=%v)", gotMR, hasMR, tc.wantMR, gotArgs)
+			}
+		})
+	}
+}
+
+// gateArgValue returns the value following flag in args, and whether the flag
+// is there at all — an absent flag and a flag with an empty value are the two
+// cases a strict parser distinguishes.
+func gateArgValue(args []string, flag string) (string, bool) {
+	for i, a := range args {
+		if a == flag {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true
+		}
+	}
+	return "", false
 }
 
 // writeTestManifest writes a valid harness manifest pointing at a stub om

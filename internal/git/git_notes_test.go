@@ -393,6 +393,62 @@ func TestPatchIDs_EmptyRange(t *testing.T) {
 	}
 }
 
+// TestFirstParentContains pins the membership test apart from ancestry: the
+// head of a merged branch is an ancestor of the merge but is not on the
+// first-parent chain, and the landed-review refusal turns on exactly that
+// difference (gt-ljn8).
+func TestFirstParentContains(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	mainBranch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	runGit(t, dir, "checkout", "-b", "feature", base)
+	featureHead := commitFile(t, dir, "feature.txt", "feature\n", "feat: add feature")
+	runGit(t, dir, "checkout", mainBranch)
+	landing := commitFile(t, dir, "other.txt", "other\n", "other: a landing on the target")
+	runGit(t, dir, "merge", "--no-ff", "feature", "-m", "Merge feature into main")
+	merge, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev merge: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		commit string
+		want   bool
+	}{
+		{"the merge itself", merge, true},
+		{"a commit the target landed before it", landing, true},
+		{"the branch head the merge brought in", featureHead, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := g.FirstParentContains(tc.commit, merge)
+			if err != nil {
+				t.Fatalf("FirstParentContains: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("FirstParentContains(%s, merge) = %v, want %v", tc.commit[:12], got, tc.want)
+			}
+		})
+	}
+
+	// The distinction an ancestry check cannot make: both are ancestors.
+	ancestor, err := g.IsAncestor(featureHead, merge)
+	if err != nil {
+		t.Fatalf("IsAncestor: %v", err)
+	}
+	if !ancestor {
+		t.Fatal("fixture does not reproduce the case: the branch head is not an ancestor of the merge")
+	}
+}
+
 // TestFirstParentPatchIDs_MergeCommitCarriesBranchPatchID pins the property
 // the refinery's landed-commit lookup depends on (gt-9t0p): a landing merge
 // commit's own patch-id, measured against its first parent, is the whole
