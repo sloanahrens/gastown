@@ -20,10 +20,11 @@ nuke your sandbox, and exit. There is no idle state. Done means gone.
 when you run `gt prime` — there are no separate step beads to close. Work through
 the checklist, then run `gt done`.
 
-**Speed principle:** You run the full gate suite AFTER rebasing onto the target
-branch (pre-verify step). This enables the refinery to fast-path merge your MR
-in ~5 seconds instead of re-running gates. If pre-verification is skipped or
-stale, the refinery falls through to normal gate execution.
+**Speed principle:** You run the cheap gates (build, typecheck, lint) AFTER
+rebasing onto the target branch (pre-verify step), and you submit with plain
+`gt done` — never `--pre-verified`. That command re-runs the full gate set
+including the container suite under a slot cap and disables the auto-rebase,
+duplicating work the refinery and `gt done` already do.
 
 **You do NOT:**
 - Push directly to main (Refinery merges from MQ)
