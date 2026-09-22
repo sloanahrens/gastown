@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/style"
@@ -84,24 +85,11 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 			hasRun = true
 		}
 	}
-	var heavy []string
-	for _, arg := range goTestPackageArgs(rest) {
-		norm := normalizeGoPackageArg(arg)
-		if norm == "" {
-			return "polecat 'go test' of the whole repo", []string{arg}
-		}
-		switch {
-		case heavyTestPackages[norm] || heavyTestPackages[topTwoPathSegments(norm)]:
-			heavy = append(heavy, norm)
-		case strings.HasSuffix(arg, "/...") || strings.HasSuffix(arg, "..."):
-			// An ancestor wildcard (./internal/...) runs every heavy package
-			// beneath it; name them so the message says what it caught.
-			for hp := range heavyTestPackages {
-				if strings.HasPrefix(hp, norm+"/") {
-					heavy = append(heavy, hp)
-				}
-			}
-		}
+	pkgArgs := goTestPackageArgs(rest)
+	cwd, _ := os.Getwd()
+	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, cwd)
+	if wholeRepo {
+		return "polecat 'go test' of the whole repo", nil
 	}
 	if len(heavy) > 0 && !hasRun {
 		return "polecat 'go test' of a whole heavy package with no -run filter", heavy
@@ -109,14 +97,69 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 	return "", nil
 }
 
-// topTwoPathSegments reduces "internal/cmd/sub" to "internal/cmd" so a
-// subpackage of a heavy package is judged with its parent.
-func topTwoPathSegments(p string) string {
-	parts := strings.SplitN(p, "/", 3)
-	if len(parts) < 2 {
-		return p
+// polecatHeavyTarget reports the heavy packages a go test package-argument
+// list reaches, or true for the whole-repo wildcard. Arguments naming the
+// cwd are resolved here, through cwdHeavyPackages, by the same rule as any
+// other argument — one function judges every spelling, so no caller can
+// resolve the argument form and miss the cwd form, and a polecat cannot dodge
+// the rule by cd-ing into the package and running "go test ." (gt-1lko).
+func polecatHeavyTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched []string) {
+	var heavy []string
+	for _, p := range normalizedPackageArgs(pkgArgs) {
+		if isWholeRepoPackageArg(p) {
+			return true, nil
+		}
+		if p == cwdPackageArg {
+			heavy = append(heavy, cwdHeavyPackages(cwd)...)
+			continue
+		}
+		heavy = append(heavy, heavyPackagesCoveredBy(p)...)
 	}
-	return parts[0] + "/" + parts[1]
+	return false, dedupeSorted(heavy)
+}
+
+// heavyPackagesCoveredBy returns the heavy packages a normalized package
+// argument reaches, by the same rule the container guard uses
+// (packageArgCovers): the package itself ("internal/cmd"), a subpackage of
+// one ("internal/cmd/sub"), or a directory containing one ("internal", which
+// is what "./internal/..." normalizes to). The list is fixed, so this is
+// every match rather than a sample of them.
+func heavyPackagesCoveredBy(arg string) []string {
+	var heavy []string
+	for hp := range heavyTestPackages {
+		if packageArgCovers(arg, hp) {
+			heavy = append(heavy, hp)
+		}
+	}
+	sort.Strings(heavy)
+	return heavy
+}
+
+// cwdHeavyPackages returns the heavy packages the invocation's cwd reaches —
+// the cwd form of heavyPackagesCoveredBy, so a polecat cannot dodge the rule
+// by cd-ing into the package and running "go test ." (gt-1lko). It walks up
+// to the enclosing go.mod rather than matching the checkout's directory name,
+// so it resolves from the refinery worktree (…/gastown/refinery/rig) as well
+// as from a polecat's.
+func cwdHeavyPackages(cwd string) []string {
+	pkg, ok := cwdPackagePath(cwd)
+	if !ok || pkg == "" {
+		return nil
+	}
+	return heavyPackagesCoveredBy(pkg)
+}
+
+// dedupeSorted returns the distinct packages in sorted order, so the block
+// message names each package once whatever order the arguments came in.
+func dedupeSorted(pkgs []string) []string {
+	sort.Strings(pkgs)
+	out := make([]string, 0, len(pkgs))
+	for i, p := range pkgs {
+		if i == 0 || p != pkgs[i-1] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func printPolecatTestScopeBlock(reason, command string, matched []string) {

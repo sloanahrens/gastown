@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -24,6 +26,9 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test ancestor dir covering container packages", "GT_TEST_DOCKER=1 go test ./internal/...", true},
 		{"go test whole repo wildcard", "GT_TEST_DOCKER=1 go test ./...", true},
 		{"go test bare dots", "GT_TEST_DOCKER=1 go test ...", true},
+		{"go test module-prefixed whole repo wildcard", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
+		{"go test container package with a trailing slash", "GT_TEST_DOCKER=1 go test ./internal/beads/", true},
+		{"go test module-prefixed container package", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/internal/beads/...", true},
 		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/refinery/...", true},
 		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
 		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
@@ -72,7 +77,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 	}
 }
 
-func TestContainerSuitePackagesIntersect(t *testing.T) {
+func TestContainerSuiteTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
@@ -80,9 +85,12 @@ func TestContainerSuitePackagesIntersect(t *testing.T) {
 		wantWhole bool
 		wantCount int
 	}{
+		// cwd "" is outside any module, so the argument form is the only one
+		// these cases exercise; cwd resolution is TestCwdContainerPackages.
 		{"no args", nil, false, 0},
 		{"whole repo dots", []string{"./..."}, true, 0},
 		{"bare ellipsis", []string{"..."}, true, 0},
+		{"module-prefixed whole repo wildcard", []string{"github.com/steveyegge/gastown/..."}, true, 0},
 		{"exact container package", []string{"./internal/beads/..."}, false, 1},
 		{"ancestor covers multiple container packages", []string{"./internal/..."}, false, len(containerSuitePackages)},
 		{"non-container package", []string{"./internal/style/..."}, false, 0},
@@ -92,12 +100,296 @@ func TestContainerSuitePackagesIntersect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wholeRepo, matched := containerSuitePackagesIntersect(tt.pkgArgs)
+			wholeRepo, matched := containerSuiteTarget(tt.pkgArgs, "")
 			if wholeRepo != tt.wantWhole {
 				t.Errorf("wholeRepo = %v, want %v", wholeRepo, tt.wantWhole)
 			}
 			if len(matched) != tt.wantCount {
 				t.Errorf("matched = %v (len %d), want len %d", matched, len(matched), tt.wantCount)
+			}
+		})
+	}
+}
+
+// cwdContainerPackages is the cwd form of the container rule: the cwd's
+// package is judged with packageArgCovers, the same rule an argument gets, so
+// the set a "go test ." from that directory reaches is the set "go test
+// ./<that dir>" reaches.
+func TestCwdContainerPackages(t *testing.T) {
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name   string
+		relDir string
+		want   []string
+	}{
+		{"module root", ".", nil},
+		{"container package", "internal/beads", []string{"internal/beads"}},
+		{"subpackage of a container package", "internal/beads/sub", []string{"internal/beads"}},
+		{"ancestor of every container package", "internal", containerSuitePackages},
+		{"light package", "internal/style", nil},
+		{"light package outside internal", "cmd/gt", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cwdContainerPackages(filepath.Join(root, filepath.FromSlash(tt.relDir)))
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("cwdContainerPackages(%s) = %v, want %v", tt.relDir, got, tt.want)
+			}
+		})
+	}
+}
+
+// worktreeLayouts are the checkout shapes the guards run in, as paths to
+// build under a temp dir. The first is the refinery's, where the module root
+// directory is named "rig" and an outer directory is named "gastown"
+// (docs/reference.md:378) — the layout that defeats a root found by matching
+// the directory name "gastown" (gt-1lko).
+var worktreeLayouts = []string{
+	"gastown/refinery/rig",
+	"gastown/polecats/topaz/gastown",
+	"clone",
+	"rig",
+}
+
+// fakeModule materialises a gastown module tree under path.Join(tmp,
+// worktreeRel) and returns the module root: a real go.mod plus the package
+// directories the guards name, so a cwd resolution under it runs the real
+// walk instead of matching a fabricated path string.
+func fakeModule(t *testing.T, worktreeRel string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), worktreeRel)
+	for _, rel := range []string{
+		"internal", "internal/beads", "internal/beads/sub", "internal/cmd",
+		"internal/cmd/sub", "internal/style", "cmd/gt",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+	}
+	goMod := "module " + gastownModulePath + "\n\ngo 1.26.2\n"
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	return root
+}
+
+// cwdPackagePath is what makes "." / "./" and a bare "go test" blockable: it
+// turns the caller's directory into the package path the argument form would
+// have carried. Every layout is exercised, because a resolution anchored to
+// the checkout's directory name answers correctly in exactly one of them.
+func TestCwdPackagePath(t *testing.T) {
+	for _, layout := range worktreeLayouts {
+		t.Run(layout, func(t *testing.T) {
+			root := fakeModule(t, layout)
+			tests := []struct {
+				name    string
+				relDir  string
+				wantPkg string
+				wantOK  bool
+			}{
+				{"module root", ".", "", true},
+				{"container package", "internal/beads", "internal/beads", true},
+				{"subpackage of a container package", "internal/beads/sub", "internal/beads/sub", true},
+				{"heavy package", "internal/cmd", "internal/cmd", true},
+				{"light package", "internal/style", "internal/style", true},
+				{"light package outside internal", "cmd/gt", "cmd/gt", true},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					pkg, ok := cwdPackagePath(filepath.Join(root, filepath.FromSlash(tt.relDir)))
+					if pkg != tt.wantPkg || ok != tt.wantOK {
+						t.Errorf("cwdPackagePath(%s/%s) = (%q, %v), want (%q, %v)", layout, tt.relDir, pkg, ok, tt.wantPkg, tt.wantOK)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A cwd outside this module has no package path to judge. Failing open there
+// cannot hide a listed package: the lists are module-relative, so a cwd in
+// another module or in no module at all cannot be one. A nested module (the
+// plugins/dolt-snapshots submodule in this repo) ends the walk for the same
+// reason.
+func TestCwdPackagePath_OutsideModule(t *testing.T) {
+	t.Run("no go.mod anywhere", func(t *testing.T) {
+		if pkg, ok := cwdPackagePath(t.TempDir()); ok {
+			t.Errorf("cwdPackagePath(%s) = (%q, true), want ok false outside any module", t.TempDir(), pkg)
+		}
+	})
+
+	t.Run("another module", func(t *testing.T) {
+		root := fakeModule(t, "clone")
+		nested := filepath.Join(root, "plugins", "dolt-snapshots", "internal")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(nested), "go.mod"),
+			[]byte("module "+gastownModulePath+"/plugins/dolt-snapshots\n"), 0o644); err != nil {
+			t.Fatalf("write go.mod: %v", err)
+		}
+		if pkg, ok := cwdPackagePath(nested); ok {
+			t.Errorf("cwdPackagePath(%s) = (%q, true), want ok false: the nearest go.mod declares another module", nested, pkg)
+		}
+	})
+}
+
+// The cwd form of the container rule, end to end through os.Getwd(): the same
+// package reached as "go test ." must be judged exactly as "go test
+// ./internal/beads" is. The polecat cwd is the one attempt 2's guard let
+// through (gt-1lko).
+func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "")
+	tests := []struct {
+		name    string
+		relDir  string
+		command string
+		blocked bool
+	}{
+		{"dot in a container package", "internal/beads", "GT_TEST_DOCKER=1 go test .", true},
+		{"dot-slash in a container package", "internal/beads", "GT_TEST_DOCKER=1 go test ./", true},
+		{"no package arg in a container package", "internal/beads", "GT_TEST_DOCKER=1 go test", true},
+		{"dot in a subpackage of a container package", "internal/beads/sub", "GT_TEST_DOCKER=1 go test .", true},
+		{"dot in an ancestor of a container package", "internal", "GT_TEST_DOCKER=1 go test .", true},
+		{"dot in a container package, slot-wrapped", "internal/beads", "gt slot run --role gastown/refinery -- GT_TEST_DOCKER=1 go test .", false},
+		{"dot in a light package", "internal/style", "GT_TEST_DOCKER=1 go test .", false},
+		{"dot in a light package outside internal", "cmd/gt", "GT_TEST_DOCKER=1 go test .", false},
+		{"dot at the module root", ".", "GT_TEST_DOCKER=1 go test .", false},
+		{"dot in a container package, switch off", "internal/beads", "go test .", false},
+	}
+	for _, layout := range worktreeLayouts {
+		t.Run(layout, func(t *testing.T) {
+			root := fakeModule(t, layout)
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Chdir(filepath.Join(root, filepath.FromSlash(tt.relDir)))
+					reason, _ := evaluateContainerSuiteCommand(tt.command)
+					if got := reason != ""; got != tt.blocked {
+						t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
+							tt.command, tt.relDir, got, reason, tt.blocked)
+					}
+				})
+			}
+		})
+	}
+}
+
+// cwdHeavyPackages is the polecat scope rule's cwd form: the same set a "go
+// test ./<that dir>" names, so cd-ing into the package is not a way around
+// the rule.
+func TestCwdHeavyPackages(t *testing.T) {
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name   string
+		relDir string
+		want   []string
+	}{
+		{"module root", ".", nil},
+		{"heavy package", "internal/cmd", []string{"internal/cmd"}},
+		{"subpackage of a heavy package", "internal/cmd/sub", []string{"internal/cmd"}},
+		{"ancestor of every heavy package", "internal", []string{"internal/cmd", "internal/daemon", "internal/polecat", "internal/refinery"}},
+		{"light package", "internal/style", nil},
+		{"container package that is not heavy", "internal/beads", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cwdHeavyPackages(filepath.Join(root, filepath.FromSlash(tt.relDir)))
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("cwdHeavyPackages(%s) = %v, want %v", tt.relDir, got, tt.want)
+			}
+		})
+	}
+}
+
+// The polecat scope rule's cwd form, end to end: "go test ." and a bare "go
+// test" in a heavy package are the whole-package run the rule exists to stop,
+// and the -run filter is the alternative it points at. The refinery layout is
+// where the guard runs, so it is where the resolution is pinned.
+func TestEvaluatePolecatTestScope_CwdStyle(t *testing.T) {
+	tests := []struct {
+		name    string
+		relDir  string
+		command string
+		blocked bool
+	}{
+		{"dot in a heavy package", "internal/cmd", "go test .", true},
+		{"dot-slash in a heavy package", "internal/cmd", "go test ./", true},
+		{"no package arg in a heavy package", "internal/cmd", "go test", true},
+		{"no package arg with a count flag", "internal/cmd", "go test -count=1", true},
+		{"dot in a subpackage of a heavy package", "internal/cmd/sub", "go test .", true},
+		{"dot in an ancestor of a heavy package", "internal", "go test .", true},
+		{"dot in a heavy package, slot-wrapped", "internal/cmd", "gt slot run --role gastown/flint -- go test .", true},
+		{"dot in a heavy package with -run", "internal/cmd", "go test . -run 'TestOne|TestTwo'", false},
+		{"dot in a light package", "internal/style", "go test .", false},
+		{"dot in a light package outside internal", "cmd/gt", "go test .", false},
+		{"dot at the module root", ".", "go test .", false},
+	}
+	for _, layout := range worktreeLayouts {
+		t.Run(layout, func(t *testing.T) {
+			root := fakeModule(t, layout)
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Chdir(filepath.Join(root, filepath.FromSlash(tt.relDir)))
+					reason, matched := evaluatePolecatTestScope(tt.command)
+					if got := reason != ""; got != tt.blocked {
+						t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q, matched %v), want %v",
+							tt.command, tt.relDir, got, reason, matched, tt.blocked)
+					}
+					if tt.blocked && !containsSubsequence(matched, []string{"internal/cmd"}) {
+						t.Errorf("evaluatePolecatTestScope(%q) blocked but matched %v, want the heavy package named", tt.command, matched)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The cwd the guard actually runs from: the test binary's own directory in
+// this checkout, whatever the checkout directory is called. A resolution that
+// reads the package path out of the enclosing go.mod answers here; one that
+// matches the name "gastown" only answers in a worktree that happens to carry
+// it.
+func TestCwdPackagePath_ActualCheckout(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	pkg, ok := cwdPackagePath(cwd)
+	if !ok {
+		t.Fatalf("cwdPackagePath(%s) did not resolve a package path; the guard would fail open here", cwd)
+	}
+	if pkg != "internal/cmd" {
+		t.Errorf("cwdPackagePath(%s) = %q, want %q", cwd, pkg, "internal/cmd")
+	}
+	if got := strings.Join(cwdContainerPackages(cwd), ","); got != "internal/cmd" {
+		t.Errorf("cwdContainerPackages(%s) = %q, want %q", cwd, got, "internal/cmd")
+	}
+	if got := strings.Join(cwdHeavyPackages(cwd), ","); got != "internal/cmd" {
+		t.Errorf("cwdHeavyPackages(%s) = %q, want %q", cwd, got, "internal/cmd")
+	}
+}
+
+// Both guards must agree on an argument form and its cwd form: the rule that
+// decides one decides the other, or a polecat cd-s into the package and runs
+// the same tests the argument form blocks.
+func TestCwdAndArgumentFormsAgree(t *testing.T) {
+	root := fakeModule(t, "gastown/refinery/rig")
+	for _, relDir := range []string{"internal", "internal/beads", "internal/beads/sub", "internal/cmd", "internal/cmd/sub", "internal/style", "cmd/gt", "."} {
+		t.Run(relDir, func(t *testing.T) {
+			cwd := filepath.Join(root, filepath.FromSlash(relDir))
+			t.Chdir(cwd)
+
+			argForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test ./" + relDir)
+			cwdForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test .")
+			if (argForm != "") != (cwdForm != "") {
+				t.Errorf("container guard: ./%s blocked by argument form = %v (reason %q), by cwd form = %v (reason %q)",
+					relDir, argForm != "", argForm, cwdForm != "", cwdForm)
+			}
+
+			argReason, _ := evaluatePolecatTestScope("go test ./" + relDir)
+			scopeReason, _ := evaluatePolecatTestScope("go test .")
+			if (argReason != "") != (scopeReason != "") {
+				t.Errorf("polecat scope rule: ./%s blocked by argument form = %v, by cwd form = %v", relDir, argReason != "", scopeReason != "")
 			}
 		})
 	}
