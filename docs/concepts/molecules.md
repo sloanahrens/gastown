@@ -96,7 +96,7 @@ through each step in order.
 1. Spawn with work on hook
 2. gt prime               # Shows formula checklist inline
 3. Work through each step
-4. Persist findings: bd update <issue> --notes "..."
+4. Persist findings: bd update <issue> --append-notes "..."
 5. gt done                # Submit, preserve handoff metadata, exit
 ```
 
@@ -126,7 +126,7 @@ a new one for the next cycle.
 
 ## Best Practices
 
-1. **Persist findings early** — `bd update <issue> --notes "..."` before session death
+1. **Persist findings early** — `bd update <issue> --append-notes "..."` before session death
 2. **Run `gt done` when complete** — mandatory for polecats (pushes, submits to MQ/PR path, exits)
 3. **Use `gt patrol report`** — for patrol agents to cycle (replaces squash+new pattern)
 4. **File discovered work** — `bd create` for bugs found, don't fix them yourself

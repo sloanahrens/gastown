@@ -337,7 +337,7 @@ bd ready                           # Issues ready to work (no blockers)
 
 # Updating
 bd update <id> --status=in_progress   # Claim work
-bd update <id> --notes "..."          # Persist findings (survives session death)
+bd update <id> --append-notes "..."   # Persist findings (survives session death)
 bd update <id> --design "..."         # Persist structured analysis
 bd update <id> --add-label <label>    # Add a label
 
@@ -393,7 +393,7 @@ in git, but analysis, findings, and decisions exist ONLY in your context window.
 
 **Persist to the bead as you work:**
 ```bash
-bd update <issue-id> --notes "Findings: <what you discovered>"
+bd update <issue-id> --append-notes "Findings: <what you discovered>"
 bd update <issue-id> --design "<structured findings>"
 ```
 

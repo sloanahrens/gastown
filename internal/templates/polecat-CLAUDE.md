@@ -122,7 +122,7 @@ bd list --status=open                 # List open issues
 
 # Updating
 bd update <id> --status=in_progress   # Claim work
-bd update <id> --notes "..."          # Persist findings (survives session death)
+bd update <id> --append-notes "..."   # Persist findings (survives session death)
 bd update <id> --design "..."         # Persist structured analysis
 bd close <id>                         # Close issue
 bd close <id> --reason="no-changes: <explanation>"  # Close without code changes
@@ -313,7 +313,7 @@ and decisions exist ONLY in your context window. **Persist to the bead as you wo
 
 ```bash
 # After significant analysis or conclusions:
-bd update <issue-id> --notes "Findings: <what you discovered>"
+bd update <issue-id> --append-notes "Findings: <what you discovered>"
 # For detailed reports:
 bd update <issue-id> --design "<structured findings>"
 ```
