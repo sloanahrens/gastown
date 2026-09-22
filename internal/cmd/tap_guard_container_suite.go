@@ -50,24 +50,52 @@ func init() {
 }
 
 // containerSuitePackages lists the repo-relative Go import paths whose tests
-// spin real Dolt/testcontainers containers, derived (2026-09-11, gt-e2rs) by
-// grepping the tree for call sites of testutil.RequireDoltContainer,
-// testutil.WithDolt, and testutil.StartIsolatedDoltContainer — the three
-// entry points into internal/testutil's container-spinning code
-// (internal/testutil/doltserver.go). Keep in sync with actual usage; a
-// package added here that doesn't touch containers only costs an
-// unnecessary 'gt slot run' wrap, but a real container-spinning package
-// missing from this list is invisible to the guard entirely.
+// spin real Dolt/testcontainers containers (or a shell script that launches
+// them), derived (2026-09-11, gt-e2rs; re-verified 2026-09-22, gt-dlzc) by
+// finding every package whose TEST BINARY links internal/testutil — the
+// only path into container-spinning code (testutil.RequireDoltContainer,
+// testutil.WithDolt, testutil.StartIsolatedDoltContainer, all in
+// internal/testutil/doltserver.go) — with
+// `go list -test -f '{{.ImportPath}} {{join .Deps "\n"}}' ./internal/...`
+// and filtering for the module's testutil import path. This catches both
+// call-site packages (internal/daemon, internal/mail, internal/refinery,
+// internal/doltserver, internal/beads, internal/convoy, internal/polecat —
+// test files calling the entry points) and import-only packages (doctor,
+// crew, deacon, ... — the tests import testutil for the hermetic harness,
+// and the harness re-exports the opt-in env GT_TEST_DOCKER, so the linked
+// entry points CAN run when the switch is on even though the package's own
+// test files call no container function). A package whose test binary links
+// testutil is on this list even if no current test would actually start a
+// container: the cost of a false entry is one unnecessary 'gt slot run'
+// wrap (and doctor's tests are the ones that read the Docker daemon's
+// capacity anyway, so even they are not wasted); a container-spinning
+// package MISSING from this list is invisible to the guard entirely.
 var containerSuitePackages = []string{
 	"internal/beads",
 	"internal/cmd",
 	"internal/convoy",
+	"internal/crew",
 	"internal/daemon",
+	"internal/deacon",
+	"internal/deps",
+	"internal/doctor",
+	"internal/dog",
 	"internal/doltserver",
+	"internal/git",
+	"internal/health",
 	"internal/mail",
+	"internal/plugin",
 	"internal/polecat",
+	"internal/protocol",
+	"internal/proxy",
 	"internal/refinery",
+	"internal/refinery/editorial",
+	"internal/rig",
 	"internal/testutil",
+	"internal/tui/convoy",
+	"internal/tui/feed",
+	"internal/web",
+	"internal/witness",
 }
 
 func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {

@@ -125,6 +125,7 @@ func TestCwdContainerPackages(t *testing.T) {
 		{"module root", ".", nil},
 		{"container package", "internal/beads", []string{"internal/beads"}},
 		{"subpackage of a container package", "internal/beads/sub", []string{"internal/beads"}},
+		{"import-only container package (links testutil, no call site)", "internal/doctor", []string{"internal/doctor"}},
 		{"ancestor of every container package", "internal", containerSuitePackages},
 		{"light package", "internal/style", nil},
 		{"light package outside internal", "cmd/gt", nil},
@@ -160,7 +161,7 @@ func fakeModule(t *testing.T, worktreeRel string) string {
 	root := filepath.Join(t.TempDir(), worktreeRel)
 	for _, rel := range []string{
 		"internal", "internal/beads", "internal/beads/sub", "internal/cmd",
-		"internal/cmd/sub", "internal/style", "cmd/gt",
+		"internal/cmd/sub", "internal/style", "cmd/gt", "internal/doctor",
 	} {
 		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", rel, err)
