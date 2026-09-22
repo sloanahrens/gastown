@@ -489,8 +489,14 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 
 	if note.Verdict == "approve" {
-		if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
-			return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
+		if !retroReview {
+			// A submitted branch's push is authorized by its note, which the
+			// refinery finds by reading editorial_reviewed_head off the MR
+			// bead. A landed review has no such bead — and no push to
+			// precondition — so it skips this write.
+			if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
+				return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
+			}
 		}
 		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: resultStderr}
 	}
@@ -777,8 +783,14 @@ func fileFollowups(b *beads.Beads, mrID string, score float64, findings []Findin
 	}
 	if len(ids) > 0 {
 		comment := fmt.Sprintf("om approve carried %d major finding(s); follow-ups filed: %s", len(ids), strings.Join(ids, ", "))
-		if err := b.AddComment(mrID, comment); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("commenting followups on %s: %w", mrID, err)
+		// An empty mrID is a retro review of a landed commit: the follow-up
+		// beads are the record, and there is no MR bead to comment on —
+		// commenting on the landed commit's (nonexistent) MR bead would fail
+		// and poison an otherwise clean approve.
+		if mrID != "" {
+			if err := b.AddComment(mrID, comment); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("commenting followups on %s: %w", mrID, err)
+			}
 		}
 	}
 	return ids, firstErr

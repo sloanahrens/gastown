@@ -23,6 +23,9 @@ var (
 	mqReviewAttempt   int
 	mqReviewTimeout   int
 	mqReviewReroll    bool
+	mqReviewLanded    string
+	mqReviewTarget    string
+	mqReviewRigFlag   string
 )
 
 var mqReviewCmd = &cobra.Command{
@@ -66,7 +69,7 @@ Examples:
   gt mq review gt-mr-abc123 --rehearsed temp-branch
   gt mq review gt-mr-abc123 --timeout 900
   gt mq review gt-mr-abc123 --json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(0, 2),
 	RunE: runMQReview,
 }
 
@@ -77,6 +80,9 @@ func init() {
 	mqReviewCmd.Flags().IntVar(&mqReviewAttempt, "attempt", 1, "Resubmit attempt number recorded on the note")
 	mqReviewCmd.Flags().IntVar(&mqReviewTimeout, "timeout", 0, "Override the rig's .om.json backend timeout for this review, in whole seconds (passed to om, recorded on the om note)")
 	mqReviewCmd.Flags().BoolVar(&mqReviewReroll, "reroll", false, "Re-review a head that already carries a recorded verdict for the same diff and rubric, replacing it (recorded in the note's attempt history)")
+	mqReviewCmd.Flags().StringVar(&mqReviewLanded, "landed", "", "Review a commit that already landed on the target branch instead of a submitted MR: no rehearsal, no MR bead — the verdict is stamped on the landed commit itself (positional MR id optional)")
+	mqReviewCmd.Flags().StringVar(&mqReviewTarget, "target", "", "Branch the commit landed on, for --landed (default: the rig's remote default branch)")
+	mqReviewCmd.Flags().StringVar(&mqReviewRigFlag, "rig", "", "Rig to review in, for --landed (default: the current rig)")
 	mqCmd.AddCommand(mqReviewCmd)
 }
 
