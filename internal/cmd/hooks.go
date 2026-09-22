@@ -21,6 +21,7 @@ Subcommands:
   diff       Show what sync would change
   list       Show all managed settings.json locations
   scan       Scan workspace for existing hooks
+  reconcile  One-time removal of the interim host-hygiene hook
   registry   List hooks from the registry
   install    Install a hook from the registry
 

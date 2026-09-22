@@ -346,6 +346,17 @@ attribution you have not checked. An unverified "your earlier self already
 argued this" citation is exactly how gt-4ns caught both the refinery and the
 witness making this mistake while discussing the fix for it.
 
+**Write memories with `{{ cmd }} remember`, not `~/.claude/*/memory/`.** The
+filesystem auto-memory store is per-project-path and unreachable by every
+other agent, so a memory written there cannot be corroborated by anyone but
+its author — the exact structural gap this witness hit trying to cross-check
+gt-04h's disputed attribution. `{{ cmd }} remember` stamps the memory with the
+identity that actually ran the command (BD_ACTOR, falling back to GT_ROLE),
+not free text you type, so the tag cannot drift from who established it. For
+a memory you and another agent established together, use `{{ cmd }} remember
+--with <rig>/<role>` instead of writing "X and I" into the body — that is
+what produced the mis-tagged memory gt-04h was filed over.
+
 **Deacon session name is `{{ .DeaconSession }}`** — NOT `deacon`. Town-level agents
 use the `hq-` prefix. When checking deacon health, always use:
 ```bash

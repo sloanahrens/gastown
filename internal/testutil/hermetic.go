@@ -656,13 +656,17 @@ func (s *townSnapshot) diff() []string {
 }
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
-// file, e.g. bd's JSONL export at .beads/.~issues.jsonl.<random>. bd (and
-// other town tooling) writes via write-temp-then-rename, so any concurrent
-// bd invocation by any agent during a test window creates and then deletes
-// one of these — indistinguishable from the .lock churn already tolerated
-// below (gt-wdr, the file-entry analog of gt-ro0's event-actor exemption).
+// file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
+// write-temp-then-rename sibling like .events.jsonl.tmp (internal/krc's
+// prune rewrite of the raw events log races the snapshot diff the same way,
+// gt-hotx). Town tooling routinely writes via create-tmp-then-rename, so any
+// concurrent invocation by any agent during a test window creates and then
+// removes one of these — indistinguishable from the .lock churn already
+// tolerated below (gt-wdr, the file-entry analog of gt-ro0's event-actor
+// exemption).
 func isAtomicWriteTemp(name string) bool {
-	return strings.HasPrefix(filepath.Base(name), ".~")
+	base := filepath.Base(name)
+	return strings.HasPrefix(base, ".~") || strings.HasSuffix(base, ".tmp")
 }
 
 // suspiciousAppendedEvents reads .events.jsonl from offset and flags events

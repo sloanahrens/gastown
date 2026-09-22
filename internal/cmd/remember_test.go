@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -240,7 +241,7 @@ func TestParseBdKvListJSON(t *testing.T) {
 		"gt.project.enabled": "true",
 		"gt.project.tags":    `["one"]`,
 		"gt.project.config":  `{"nested":"value"}`,
-		"other":                  "keep string kvs",
+		"other":              "keep string kvs",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("parseBdKvListJSON() returned %d entries, want %d: %#v", len(got), len(want), got)
@@ -264,5 +265,115 @@ func TestParseBdKvListJSONMalformed(t *testing.T) {
 	t.Parallel()
 	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
 		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
+	}
+}
+
+func TestResolveMemoryAuthor(t *testing.T) {
+	tests := []struct {
+		name       string
+		bdActor    string
+		gtRole     string
+		wantAuthor string
+	}{
+		{
+			name:       "BD_ACTOR takes precedence",
+			bdActor:    "gastown/refinery",
+			gtRole:     "gastown/witness",
+			wantAuthor: "gastown/refinery",
+		},
+		{
+			name:       "falls back to GT_ROLE when BD_ACTOR unset",
+			bdActor:    "",
+			gtRole:     "gastown/witness",
+			wantAuthor: "gastown/witness",
+		},
+		{
+			name:       "empty when neither set",
+			bdActor:    "",
+			gtRole:     "",
+			wantAuthor: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BD_ACTOR", tt.bdActor)
+			t.Setenv("GT_ROLE", tt.gtRole)
+			if got := resolveMemoryAuthor(); got != tt.wantAuthor {
+				t.Errorf("resolveMemoryAuthor() = %q, want %q", got, tt.wantAuthor)
+			}
+		})
+	}
+}
+
+func TestAttributionSuffix(t *testing.T) {
+	t.Parallel()
+	if got := attributionSuffix("", nil); got != "" {
+		t.Errorf("attributionSuffix(\"\", nil) = %q, want empty (no fabricated identity)", got)
+	}
+
+	got := attributionSuffix("gastown/refinery", nil)
+	want := "\n\n[recorded by: gastown/refinery @ "
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("attributionSuffix(%q, nil) = %q, want prefix %q", "gastown/refinery", got, want)
+	}
+
+	got = attributionSuffix("gastown/refinery", []string{"gastown/witness", " "})
+	want = "\n\n[recorded by: gastown/refinery + gastown/witness @ "
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("attributionSuffix with --with = %q, want prefix %q", got, want)
+	}
+}
+
+func TestDetectUnattributedJointVoice(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "matches the gt-04h incident phrasing",
+			content: "Note refinery and I ran this independently and converged, which is the only control we managed all night",
+			want:    "refinery",
+		},
+		{
+			name:    "case-insensitive role, still requires capital I",
+			content: "Witness and I disagreed at first.",
+			want:    "witness",
+		},
+		{
+			name:    "no match without a known role name",
+			content: "Sloan and I discussed this over coffee.",
+			want:    "",
+		},
+		{
+			name:    "no match for role name alone",
+			content: "The refinery gates every MR before merging.",
+			want:    "",
+		},
+		{
+			name:    "no false positive on 'and it'",
+			content: "The polecat and it agreed on nothing.",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectUnattributedJointVoice(tt.content); got != tt.want {
+				t.Errorf("detectUnattributedJointVoice(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrElse(t *testing.T) {
+	t.Parallel()
+	if got := orElse("gastown/refinery", "no one"); got != "gastown/refinery" {
+		t.Errorf("orElse() = %q, want %q", got, "gastown/refinery")
+	}
+	if got := orElse("", "no one"); got != "no one" {
+		t.Errorf("orElse() = %q, want %q", got, "no one")
 	}
 }

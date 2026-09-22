@@ -1078,3 +1078,150 @@ EOF`,
 		})
 	}
 }
+
+// TestMatchesGoCleanSharedCache pins the gt-nqcy follow-up: 'go clean' with
+// any of the cache-wiping flags must be blocked — it wipes a cache shared by
+// every agent on the host — while every other 'go clean' shape (no flags,
+// non-shared flags, the flag as prose inside quotes) stays allowed. Ported
+// from the interim host-hygiene hook.
+func TestMatchesGoCleanSharedCache(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Should block — each shared-cache flag individually.
+		{"go clean -cache", "go clean -cache", true},
+		{"go clean -testcache", "go clean -testcache", true},
+		{"go clean -modcache", "go clean -modcache", true},
+		{"go clean -fuzzcache", "go clean -fuzzcache", true},
+		{"combined with other flags", "go clean -x -cache", true},
+		{"flag order reversed", "go clean -cache -x", true},
+		{"multiple shared flags", "go clean -cache -testcache -modcache", true},
+		{"glued to a shell operator", "cd /tmp; go clean -modcache", true},
+
+		// Should allow.
+		{"safe flag on go clean, shared flag on a later unrelated command", "go clean -i; ls -la -cache", false},
+		{"bare go clean", "go clean", false},
+		{"go clean -i", "go clean -i", false},
+		{"go clean -n", "go clean -n", false},
+		{"go clean -x", "go clean -x", false},
+		{"go clean -r", "go clean -r", false},
+		{"go clean of a package", "go clean ./...", false},
+		{"no go clean at all", "echo hello", false},
+		{"flag mentioned in quoted prose", `gt mail send x -s "note" -m "never go clean -modcache"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := matchesGoCleanSharedCache(lowerTokens(tt.command))
+			if blocked := reason != ""; blocked != tt.blocked {
+				t.Errorf("matchesGoCleanSharedCache(%q) blocked=%v, want %v", tt.command, blocked, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestGoCleanSharedCacheReachesGuard checks the full evaluateDangerousCommand
+// path, including recursion into bash -c/eval wrappers, for the shared-cache
+// class — mirroring TestNestedShellCommands for the other matchers.
+func TestGoCleanSharedCacheReachesGuard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"top-level", "go clean -modcache", true},
+		{"bash -c wrapped", `bash -c "go clean -testcache"`, true},
+		{"safe top-level", "go clean -i", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
+			if blocked := reason != ""; blocked != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, blocked, reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestIsIdleGatedSuiteStartCommand pins the gt-nqcy follow-up's detection of
+// unwrapped full-suite starts, ported from the interim host-hygiene hook:
+// 'make test', 'go test ./...', 'make build', and 'go build ./...' are
+// gated; scoped invocations, 'gt slot run'-wrapped ones, and quoted prose
+// are not.
+func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		gated   bool
+	}{
+		// Should gate.
+		{"make test", "make test", true},
+		{"make test with env prefix", "GOFLAGS=-p=8 make test", true},
+		{"make test with -j flag", "make -j4 test", true},
+		{"make build", "make build", true},
+		{"go test whole repo", "go test ./...", true},
+		{"go test whole repo bare dots", "go test ...", true},
+		{"go build whole repo", "go build ./...", true},
+		{"go test after unrelated segment", "echo hi && go test ./...", true},
+		{"go test glued to semicolon", "cd /tmp;go test ./...", true},
+
+		// Should NOT gate.
+		{"scoped go test", "go test ./internal/beads/...", false},
+		{"scoped go build", "go build ./cmd/gt", false},
+		{"make lint", "make lint", false},
+		{"wrapped in gt slot run", "gt slot run -- make test", false},
+		{"wrapped go test in gt slot run", "gt slot run --role gastown/flint -- go test ./...", false},
+		{"go test with flag before target (interim adjacency)", "go test -v ./...", false},
+		{"go build with flag before target (interim adjacency)", "go build -v ./...", false},
+		{"quoted mention", `echo "run make test if idle"`, false},
+		{"no suite command at all", "echo hello", false},
+		{"prose in a heredoc body written to a file", "cat > note.md <<'EOF'\nRun make test before committing.\nEOF", false},
+		{"real command after the heredoc still gates", "cat > note.md <<'EOF'\nordinary content\nEOF\nmake test", true},
+		{"slot-run mention trailing an unwrapped command is not a real wrapper", "make test # not actually gt slot run", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isIdleGatedSuiteStartCommand(tt.command)
+			if got != tt.gated {
+				t.Errorf("isIdleGatedSuiteStartCommand(%q) = %v, want %v", tt.command, got, tt.gated)
+			}
+		})
+	}
+}
+
+// TestEvaluateIdleGate checks the wiring between the pure command matcher
+// and the CPU sample: a gated command is held when the sampled idle
+// percentage is below idleGateThresholdPercent, and allowed through when it
+// is at or above threshold, the sample fails (fail open), or the command
+// isn't gated at all.
+func TestEvaluateIdleGate(t *testing.T) {
+	origCPUIdlePercent := cpuIdlePercent
+	t.Cleanup(func() { cpuIdlePercent = origCPUIdlePercent })
+
+	tests := []struct {
+		name       string
+		command    string
+		sampleIdle int
+		sampleOK   bool
+		wantHeld   bool
+	}{
+		{"held when idle below threshold", "make test", 10, true, true},
+		{"allowed when idle at threshold", "make test", 25, true, false},
+		{"allowed when idle above threshold", "make test", 90, true, false},
+		{"allowed when sample fails (fail open)", "make test", 0, false, false},
+		{"allowed when not a gated command", "make lint", 0, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cpuIdlePercent = func() (int, bool) { return tt.sampleIdle, tt.sampleOK }
+			_, held := evaluateIdleGate(tt.command)
+			if held != tt.wantHeld {
+				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
+			}
+		})
+	}
+}

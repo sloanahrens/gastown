@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 var tapGuardDangerousCmd = &cobra.Command{
@@ -46,13 +47,21 @@ This guard blocks operations that could cause irreversible damage:
     where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
     every rig and every worktree on the host. A path inside a single repo or
     worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed.
+  - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
+    cache SHARED by every agent on the host — see gt-nqcy follow-up).
+
+This guard also HOLDS (rather than permanently blocks) a full-suite start —
+'make test', 'go test ./...', 'make build', 'go build ./...' — when the host
+is already busy (CPU idle below 25 percent, sampled via 'top'), unless the
+command is wrapped in 'gt slot run'. Re-running the exact same command after
+a short wait passes once the host frees up. See gt-nqcy follow-up.
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
-and exits with code 2 to block dangerous operations.
+and exits with code 2 to block or hold an operation.
 
 Exit codes:
   0 - Operation allowed
-  2 - Operation BLOCKED`,
+  2 - Operation BLOCKED or HELD`,
 	RunE: runTapGuardDangerous,
 }
 
@@ -106,7 +115,28 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
+	if idle, held := evaluateIdleGate(command); held {
+		printIdleGateHold(idle, command)
+		return NewSilentExit(2)
+	}
+
 	return nil
+}
+
+// evaluateIdleGate reports whether command is a full-suite start
+// (isIdleGatedSuiteStartCommand) that should be held because the sampled
+// CPU idle percentage is below idleGateThresholdPercent. idle is the
+// sampled percentage (0 when the command isn't gated or the sample
+// failed — a failed sample fails open, never holding the command).
+func evaluateIdleGate(command string) (idle int, held bool) {
+	if !isIdleGatedSuiteStartCommand(command) {
+		return 0, false
+	}
+	idle, ok := cpuIdlePercent()
+	if !ok {
+		return 0, false
+	}
+	return idle, idle < idleGateThresholdPercent
 }
 
 // maxDangerousNestDepth bounds nestedCommands recursion so a pathological
@@ -164,6 +194,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 		return r, alt
 	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
+		return r, alt
+	}
+	if r, alt := matchesGoCleanSharedCache(lowerTokens); r != "" {
 		return r, alt
 	}
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
@@ -1082,6 +1115,176 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 		}
 	}
 	return "", ""
+}
+
+// goCleanSharedCacheFlags are the 'go clean' flags that wipe caches shared
+// by every agent on the host. Ported from the interim host-hygiene hook
+// (~/gt/.claude/hooks/no-root-scan.sh) — see gt-nqcy follow-up.
+var goCleanSharedCacheFlags = map[string]bool{
+	"-cache":     true,
+	"-testcache": true,
+	"-modcache":  true,
+	"-fuzzcache": true,
+}
+
+const goCleanSharedCacheReason = "'go clean' with -cache/-testcache/-modcache/-fuzzcache wipes the Go build cache shared by every agent on this host"
+const goCleanSharedCacheAlternative = "Alternative: use 'go test -count=1' for a cold run, or rebuild a single package; " +
+	"if you believe the cache is corrupt, mail the mayor with the evidence instead of clearing it."
+
+// matchesGoCleanSharedCache blocks 'go clean' invocations carrying any of
+// the shared-cache flags (goCleanSharedCacheFlags), in any order and
+// combined with other clean flags (e.g. 'go clean -x -cache'). tokens must
+// be lowercased, shell-aware tokens (see shellTokenize). inClean resets at
+// every shell operator so a flag on an unrelated LATER command on the same
+// line (e.g. "go clean -i; ls -la -cache") is never mistaken for one of
+// 'go clean's own arguments.
+func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
+	inClean := false
+	for i, f := range tokens {
+		if shellCommandSeparators[f] {
+			inClean = false
+			continue
+		}
+		if f == "clean" && i > 0 && tokens[i-1] == "go" {
+			inClean = true
+			continue
+		}
+		if !inClean {
+			continue
+		}
+		if goCleanSharedCacheFlags[f] {
+			return goCleanSharedCacheReason, goCleanSharedCacheAlternative
+		}
+	}
+	return "", ""
+}
+
+// idleGateThresholdPercent is the minimum CPU idle percentage required
+// before a full-suite start is allowed to proceed; below it the command is
+// HELD (exit 2, retryable) rather than permanently blocked. Ported from the
+// interim host-hygiene hook — see gt-nqcy follow-up.
+const idleGateThresholdPercent = 25
+
+// idleGateAlternative is the HOLD banner's suggested next step.
+const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it will pass once idle >= 25%. " +
+	"Avoid bare 'go test ./...' at full parallelism — use GOFLAGS=-p=8 make test."
+
+// isIdleGatedSuiteStartCommand reports whether command contains an
+// unwrapped full-suite start: 'make test', 'go test ./...', 'make build',
+// or 'go build ./...'. Heredoc bodies are stripped first (stripHeredocBodies)
+// so prose written to a file — "cat > note.md <<'EOF'\nRun make test\nEOF" —
+// is never misread as a live invocation, the same rule evaluateDangerousCommand
+// applies. The remaining text is split into shell segments (on ;/&&/||/|,
+// same as evaluateContainerSuiteCommand) and each is evaluated independently,
+// so a "gt slot run -- make test" wrapper and an unrelated later "make test"
+// on the same compound line are judged separately. Unlike
+// evaluateDangerousCommand, this does NOT recurse into bash -c/eval payloads
+// or command substitutions — the interim hook it replaces didn't either, and
+// no incident has required it; scope stays narrow until one does.
+func isIdleGatedSuiteStartCommand(command string) bool {
+	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
+	var segment []string
+	for _, tok := range tokens {
+		if shellCommandSeparators[tok] {
+			if isIdleGatedSuiteStartSegment(segment) {
+				return true
+			}
+			segment = nil
+			continue
+		}
+		segment = append(segment, tok)
+	}
+	return isIdleGatedSuiteStartSegment(segment)
+}
+
+// idleGateSlotRunPrefix is the token sequence a shell segment must START
+// WITH to count as already running through the townwide container-gate slot
+// ('gt slot run --role <rig>/<name> -- <command>', see internal/slot). The
+// match is anchored to the segment's own command, not a subsequence found
+// anywhere in it — a subsequence match would let a trailing, non-executing
+// mention of the same three words (e.g. inside a later argument) falsely
+// exempt an actually-unwrapped invocation.
+var idleGateSlotRunPrefix = containerSuiteSlotRunTokens
+
+// isIdleGatedSuiteStartSegment judges a single shell segment (tokens
+// between shell operators). tokens is original-case; matching is done on a
+// lowercased copy so "Make Test" and "make test" are treated the same.
+func isIdleGatedSuiteStartSegment(tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	lower := make([]string, len(tokens))
+	for i, t := range tokens {
+		lower[i] = strings.ToLower(t)
+	}
+	if hasPrefix(lower, idleGateSlotRunPrefix) {
+		return false
+	}
+	if findInvocation(lower, "make", "test") >= 0 {
+		return true
+	}
+	if findInvocation(lower, "make", "build") >= 0 {
+		return true
+	}
+	if i := findInvocation(lower, "go", "test"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
+		return true
+	}
+	if i := findInvocation(lower, "go", "build"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
+		return true
+	}
+	return false
+}
+
+// hasPrefix reports whether tokens begins with prefix, element for element.
+func hasPrefix(tokens, prefix []string) bool {
+	if len(tokens) < len(prefix) {
+		return false
+	}
+	for i, p := range prefix {
+		if tokens[i] != p {
+			return false
+		}
+	}
+	return true
+}
+
+// wholeRepoArgFollows reports whether the token at idx names the whole-repo
+// wildcard ("./...", "...", or the module-prefixed spelling). Mirrors the
+// interim hook's exact "go test ./..."/"go build ./..." adjacency: only the
+// token immediately after the subcommand is checked, not a flag further
+// down the line — 'go test -v ./...' is intentionally NOT recognized here,
+// same as the interim regex it replaces.
+func wholeRepoArgFollows(tokens []string, idx int) bool {
+	return idx < len(tokens) && isWholeRepoPackageArg(normalizeGoPackageArg(tokens[idx]))
+}
+
+// cpuIdlePercent returns the current CPU idle percentage. Overridden in
+// tests. Production reads internal/daemon's load-average-based estimate
+// (one instant sysctl/proc read, no subprocess sampling loop) rather than
+// shelling out to `top` for several seconds on every suite-start command —
+// the same host-busy signal already powers the main_branch_test patrol's
+// gate (gt-f57o).
+var cpuIdlePercent = actualCPUIdlePercent
+
+func actualCPUIdlePercent() (idle int, ok bool) {
+	return int(daemon.EstimateCPUIdlePercent()), true
+}
+
+// printIdleGateHold prints the HOLD banner to stderr — distinct from
+// printDangerousBlock's BLOCKED banner since this command is expected to
+// succeed on retry, not to be avoided entirely.
+func printIdleGateHold(idle int, command string) {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(os.Stderr, "║  ⏸  SUITE START HELD (host busy)                                 ║")
+	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintf(os.Stderr, "║  Command:   %-51s ║\n", truncateStr(command, 51))
+	fmt.Fprintf(os.Stderr, "║  CPU idle:  %-51s ║\n", fmt.Sprintf("%d%% (need >= %d%%)", idle, idleGateThresholdPercent))
+	fmt.Fprintln(os.Stderr, "║                                                                  ║")
+	fmt.Fprintln(os.Stderr, "║  Another suite is running on this shared host.                  ║")
+	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(os.Stderr, "  "+idleGateAlternative)
+	fmt.Fprintln(os.Stderr, "")
 }
 
 // inWitnessSession reports whether the hook runs inside a witness session.

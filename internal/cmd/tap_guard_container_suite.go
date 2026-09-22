@@ -260,11 +260,21 @@ var makeValueFlags = map[string]bool{
 var makeOptionalNumberFlags = map[string]bool{"-j": true, "-l": true}
 
 // findTestInvocation returns the index of the first "<tool> test" invocation
-// in tokens (already lowercased) — "go test" or "make test" — or -1. For
-// make, options may sit between the program and the target ("make -j4
-// test", "make -e -w test", "make -C . test") and are stepped over: the
-// target is what decides what runs, not the flags in front of it.
+// in tokens (already lowercased) — "go test" or "make test" — or -1.
 func findTestInvocation(tokens []string, tool string) int {
+	return findInvocation(tokens, tool, "test")
+}
+
+// findInvocation returns the index of the first "<tool> <target>" invocation
+// in tokens (already lowercased) — e.g. "go test", "go build", "make test",
+// "make build" — or -1. For make, options may sit between the program and
+// the target ("make -j4 test", "make -e -w test", "make -C . test") and are
+// stepped over: the target is what decides what runs, not the flags in
+// front of it. For go, the target must immediately follow the tool with no
+// flags between them (mirrors the interim host-hygiene hook's regex, which
+// only recognized the exact "go test ./..."/"go build ./..." adjacency —
+// see idleGateReason in tap_guard_dangerous.go).
+func findInvocation(tokens []string, tool, target string) int {
 	for i := 0; i+1 < len(tokens); i++ {
 		if tokens[i] != tool {
 			continue
@@ -274,7 +284,7 @@ func findTestInvocation(tokens []string, tool string) int {
 			for j < len(tokens) && strings.HasPrefix(tokens[j], "-") {
 				flag := tokens[j]
 				j++
-				if j >= len(tokens) || tokens[j] == "test" {
+				if j >= len(tokens) || tokens[j] == target {
 					continue
 				}
 				if makeValueFlags[flag] || (makeOptionalNumberFlags[flag] && isAllDigits(tokens[j])) {
@@ -282,7 +292,7 @@ func findTestInvocation(tokens []string, tool string) int {
 				}
 			}
 		}
-		if j < len(tokens) && tokens[j] == "test" {
+		if j < len(tokens) && tokens[j] == target {
 			return i
 		}
 	}

@@ -307,7 +307,7 @@ func completionPayloadHasPendingMR(bd *BdCli, workDir, rigName string, payload *
 // handlePolecatDonePendingMR handles a POLECAT_DONE when there's a pending MR.
 // Creates a cleanup wisp, sends MERGE_READY to the Refinery, and nudges it.
 func handlePolecatDonePendingMR(bd *BdCli, workDir, rigName string, payload *PolecatDonePayload, result *HandlerResult) *HandlerResult {
-	wispID, err := createCleanupWisp(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch)
+	wispID, err := createCleanupWisp(bd, workDir, rigName, payload.PolecatName, payload.IssueID, payload.Branch)
 	if err != nil {
 		result.Error = fmt.Errorf("creating cleanup wisp: %w", err)
 		return result
@@ -442,7 +442,7 @@ func HandleMerged(bd *BdCli, workDir, rigName string, msg *mail.Message) *Handle
 		return result
 	}
 
-	wispID, err := findCleanupWisp(bd, workDir, payload.PolecatName)
+	wispID, err := findCleanupWisp(bd, workDir, rigName, payload.PolecatName)
 	if err != nil {
 		result.Error = fmt.Errorf("finding cleanup wisp: %w", err)
 		return result
@@ -543,8 +543,11 @@ func HandleSwarmStart(bd *BdCli, workDir string, msg *mail.Message) *HandlerResu
 	return result
 }
 
-// createCleanupWisp creates a wisp to track polecat cleanup.
-func createCleanupWisp(bd *BdCli, workDir, polecatName, issueID, branch string) (string, error) {
+// createCleanupWisp creates a wisp to track polecat cleanup, tagged with the
+// owning rig via assignee (gt-gsrz: "polecat:<name>" alone collides across
+// rigs that reuse polecat names, and cleanup wisps can land in a database
+// shared across rigs — see CleanupWispAssignee).
+func createCleanupWisp(bd *BdCli, workDir, rigName, polecatName, issueID, branch string) (string, error) {
 	title := fmt.Sprintf("cleanup:%s", polecatName)
 	description := fmt.Sprintf("Verify and cleanup polecat %s", polecatName)
 	if issueID != "" {
@@ -562,6 +565,7 @@ func createCleanupWisp(bd *BdCli, workDir, polecatName, issueID, branch string) 
 		"--title", title,
 		"--description", description,
 		"--labels", labels,
+		"--assignee", CleanupWispAssignee(rigName),
 	)
 	if err != nil {
 		return "", err
@@ -611,13 +615,15 @@ func createSwarmWisp(bd *BdCli, workDir string, payload *SwarmStartPayload) (str
 	return created.ID, nil
 }
 
-// findCleanupWisp finds an existing cleanup wisp for a polecat.
-func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
+// findCleanupWisp finds an existing cleanup wisp for a polecat, scoped to
+// rigName via assignee so a same-named polecat in another rig can't match
+// (gt-gsrz: see CleanupWispAssignee).
+func findCleanupWisp(bd *BdCli, workDir, rigName, polecatName string) (string, error) {
 	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
 	// the issues table and never sees them, regardless of flags. Use "bd
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
-		fmt.Sprintf("ephemeral=true AND label=polecat:%s AND label=state:merge-requested AND status=open", polecatName),
+		fmt.Sprintf("ephemeral=true AND label=polecat:%s AND label=state:merge-requested AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
 		"--json",
 	)
 	if err != nil {
@@ -2159,12 +2165,12 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// Persistence interlock (gt-qnp): check if Mayor ACP session is active before cleanup.
 	townRoot := workDirToTownRoot(workDir)
 	if mayor.IsACPActive(townRoot) {
-		existingWisp := findAnyCleanupWisp(bd, workDir, polecatName)
+		existingWisp := findAnyCleanupWisp(bd, workDir, rigName, polecatName)
 		if existingWisp != "" {
 			zombie.Action = fmt.Sprintf("cleanup-deferred-acp (cleanup_status=%s, existing-wisp=%s)", cleanupStatus, existingWisp)
 			return
 		}
-		wispID, wispErr := createCleanupWisp(bd, workDir, polecatName, hookBead, "")
+		wispID, wispErr := createCleanupWisp(bd, workDir, rigName, polecatName, hookBead, "")
 		if wispErr != nil {
 			zombie.Error = wispErr
 		}
@@ -2182,7 +2188,7 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 
 		// Fast path: if a cleanup wisp already exists from a previous patrol cycle,
 		// the polecat was already restarted and became zombie again. Just restart.
-		existingWisp := findAnyCleanupWisp(bd, workDir, polecatName)
+		existingWisp := findAnyCleanupWisp(bd, workDir, rigName, polecatName)
 		if existingWisp != "" {
 			zombie.Action = fmt.Sprintf("already-tracked (cleanup_status=%s, existing-wisp=%s)", cleanupStatus, existingWisp)
 			break
@@ -2191,7 +2197,7 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 		// No existing wisp — create one as the atomic interlock (gt-7vs1).
 		// Previous code checked then created, allowing two concurrent patrols to
 		// both see "no wisp" and create duplicates. Now we create first, then dedup.
-		wispID, wispErr := createCleanupWisp(bd, workDir, polecatName, hookBead, "")
+		wispID, wispErr := createCleanupWisp(bd, workDir, rigName, polecatName, hookBead, "")
 		if wispErr != nil {
 			zombie.Error = fmt.Errorf("cleanup wisp: %w", wispErr)
 			zombie.Action = fmt.Sprintf("restarted-dirty (cleanup_status=%s, wisp-failed)", cleanupStatus)
@@ -2202,7 +2208,7 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 		// If another patrol also just created a wisp, there will be >1. Use
 		// deterministic winner selection (lowest wisp ID) so exactly one patrol
 		// proceeds with the restart and the other cleans up its duplicate.
-		allWisps := findAllCleanupWisps(bd, workDir, polecatName)
+		allWisps := findAllCleanupWisps(bd, workDir, rigName, polecatName)
 		if len(allWisps) > 1 {
 			sort.Strings(allWisps)
 			if wispID != allWisps[0] {
@@ -2675,7 +2681,7 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 		// rediscovered — by a concurrent patrol scan, or by a later cycle if
 		// the clear failed to persist — and must not produce a second wisp
 		// for work already tracked.
-		wispID, isNew, closedDups, err := ensureCleanupWisp(bd, workDir, payload)
+		wispID, isNew, closedDups, err := ensureCleanupWisp(bd, workDir, rigName, payload)
 		if err != nil {
 			discovery.Error = fmt.Errorf("creating cleanup wisp: %w", err)
 			return
@@ -3439,13 +3445,14 @@ func sessionRecreated(t *tmux.Tmux, sessionName string, detectedAt time.Time) bo
 
 // findAnyCleanupWisp checks if any cleanup wisp already exists for a polecat,
 // regardless of state. Used to prevent duplicate escalation on repeated patrol
-// cycles for the same zombie.
-func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
+// cycles for the same zombie. Scoped to rigName via assignee so a same-named
+// polecat in another rig can't match (gt-gsrz: see CleanupWispAssignee).
+func findAnyCleanupWisp(bd *BdCli, workDir, rigName, polecatName string) string {
 	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
 	// the issues table and never sees them, regardless of flags. Use "bd
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
-		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
 		"--json",
 	)
 	if err != nil {
@@ -3466,12 +3473,14 @@ func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
 // findAllCleanupWisps returns all open cleanup wisp IDs for a polecat.
 // Used for dedup after wisp creation to detect races between concurrent patrol
 // cycles (gt-7vs1). If the query fails, returns nil (caller treats as no race).
-func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
+// Scoped to rigName via assignee so a same-named polecat in another rig can't
+// match (gt-gsrz: see CleanupWispAssignee).
+func findAllCleanupWisps(bd *BdCli, workDir, rigName, polecatName string) []string {
 	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
 	// the issues table and never sees them, regardless of flags. Use "bd
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
-		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
 		"--json",
 	)
 	if err != nil {
@@ -3499,13 +3508,14 @@ func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
 // match to the exact completion being processed — a polecat can legitimately
 // hold open cleanup wisps for OTHER issues at the same time (dispatch reuse),
 // so matching on name alone would misclassify those as duplicates. Used to
-// make completion discovery idempotent (gt-mf5q).
-func findCleanupWispsForCompletion(bd *BdCli, workDir, polecatName, issueID, branch string) []string {
+// make completion discovery idempotent (gt-mf5q). Also scoped to rigName via
+// assignee so a same-named polecat in another rig can't match (gt-gsrz).
+func findCleanupWispsForCompletion(bd *BdCli, workDir, rigName, polecatName, issueID, branch string) []string {
 	// Cleanup wisps are ephemeral (gt-4mnd): "bd list --label" only searches
 	// the issues table and never sees them, regardless of flags. Use "bd
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
-		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open", polecatName),
+		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
 		"--json",
 	)
 	if err != nil || output == "" || output == "[]" || output == "null" {
@@ -3555,18 +3565,18 @@ func parseCleanupWispDescription(description string) (issueID, branch string) {
 // so a post-create recheck deterministically picks one winner (lowest wisp
 // ID) and closes the rest — same create-then-dedup pattern as gt-7vs1's
 // zombie restart path.
-func ensureCleanupWisp(bd *BdCli, workDir string, payload *PolecatDonePayload) (wispID string, isNew bool, closedDups []string, err error) {
-	if existing := findCleanupWispsForCompletion(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch); len(existing) > 0 {
+func ensureCleanupWisp(bd *BdCli, workDir, rigName string, payload *PolecatDonePayload) (wispID string, isNew bool, closedDups []string, err error) {
+	if existing := findCleanupWispsForCompletion(bd, workDir, rigName, payload.PolecatName, payload.IssueID, payload.Branch); len(existing) > 0 {
 		sort.Strings(existing)
 		return existing[0], false, nil, nil
 	}
 
-	newID, err := createCleanupWisp(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch)
+	newID, err := createCleanupWisp(bd, workDir, rigName, payload.PolecatName, payload.IssueID, payload.Branch)
 	if err != nil {
 		return "", false, nil, err
 	}
 
-	if dups := findCleanupWispsForCompletion(bd, workDir, payload.PolecatName, payload.IssueID, payload.Branch); len(dups) > 1 {
+	if dups := findCleanupWispsForCompletion(bd, workDir, rigName, payload.PolecatName, payload.IssueID, payload.Branch); len(dups) > 1 {
 		sort.Strings(dups)
 		winner := dups[0]
 		for _, w := range dups[1:] {
@@ -3589,7 +3599,7 @@ func ensureCleanupWisp(bd *BdCli, workDir string, payload *PolecatDonePayload) (
 // See: gt-6a9d
 func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
-	wispID, wispErr := findCleanupWisp(bd, workDir, polecatName)
+	wispID, wispErr := findCleanupWisp(bd, workDir, rigName, polecatName)
 	if wispErr != nil || wispID != "" {
 		return true
 	}
@@ -3604,7 +3614,7 @@ func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) 
 // value from the agent bead snapshot, avoiding a redundant bd show call. (gt-2gra)
 func hasPendingMRFromSnapshot(bd *BdCli, workDir, rigName, polecatName string, snap *agentBeadSnapshot) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
-	wispID, wispErr := findCleanupWisp(bd, workDir, polecatName)
+	wispID, wispErr := findCleanupWisp(bd, workDir, rigName, polecatName)
 	if wispErr != nil || wispID != "" {
 		return true
 	}

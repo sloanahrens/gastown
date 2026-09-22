@@ -111,6 +111,29 @@ func TestTripwire_ToleratesBdAtomicWriteTemp(t *testing.T) {
 	}
 }
 
+func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	// krc's prune rewrite of the raw events log (gt-hotx): write-temp-then-
+	// rename via <path>.tmp, same class as bd's .~ prefix and .lock churn.
+	writeFile(t, filepath.Join(town, ".events.jsonl.tmp"), "")
+	// A real leak at the town root must still be caught.
+	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.txt") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, ".events.jsonl.tmp") {
+		t.Errorf("atomic-write temp flagged as leak: %v", leaks)
+	}
+}
+
 func TestTripwire_FlagsFixtureActorEvents(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
