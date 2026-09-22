@@ -221,7 +221,7 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	printSlotStatusText(cmd, rep)
-	printSlotHistory(cmd, history)
+	printSlotHistory(cmd, rep, history)
 	return nil
 }
 
@@ -286,8 +286,11 @@ func printSlotStatusText(cmd *cobra.Command, rep slot.Report) {
 const slotHistoryShown = 5
 
 // printSlotHistory renders the ring file: the wait distribution the gate has
-// been imposing, and for each recent acquisition why it waited.
-func printSlotHistory(cmd *cobra.Command, history []slot.HistoryEntry) {
+// been imposing, and for each recent acquisition why it waited and how its hold
+// ended. rep is the same report the held/free picture above was printed from,
+// so an entry with no release on record is read against the live pool instead
+// of claiming a holder the pool does not count (gt-2tqe).
+func printSlotHistory(cmd *cobra.Command, rep slot.Report, history []slot.HistoryEntry) {
 	out := cmd.OutOrStdout()
 	if len(history) == 0 {
 		return
@@ -297,25 +300,43 @@ func printSlotHistory(cmd *cobra.Command, history []slot.HistoryEntry) {
 	fmt.Fprintf(out, "Recent acquisitions (n=%d): p50 %s, p95 %s, max %s\n",
 		summary.N, summary.P50.Round(time.Second), summary.P95.Round(time.Second), summary.Max.Round(time.Second))
 
-	shown := history
+	shown := slot.ResolveHolds(history, rep)
 	if len(shown) > slotHistoryShown {
 		shown = shown[len(shown)-slotHistoryShown:]
 	}
 	for _, e := range shown {
-		outcome := "held open (holder never released)"
-		switch {
-		case e.TimedOut:
-			outcome = "gave up"
-		case e.HeldS != nil:
-			outcome = "held " + time.Duration(*e.HeldS*float64(time.Second)).Round(time.Second).String()
-		}
 		line := fmt.Sprintf("  %s %s slot %d: waited %s, %s",
-			e.TS, e.Role, e.Slot, time.Duration(e.WaitedS*float64(time.Second)).Round(time.Second), outcome)
-		if detail := slotHistoryReason(e); detail != "" {
+			e.TS, e.Role, e.Slot, time.Duration(e.WaitedS*float64(time.Second)).Round(time.Second), slotHoldOutcome(e))
+		if detail := slotHistoryReason(e.HistoryEntry); detail != "" {
 			line += " — " + detail
 		}
 		fmt.Fprintln(out, line)
 	}
+}
+
+// slotHoldOutcome renders how one entry's hold ended. An entry with no release
+// on record is named against the pool — "held open" only while the pool still
+// counts that holder, and "abandoned" naming the slot it no longer holds
+// otherwise — so the line agrees with the held/free picture above it (gt-2tqe).
+func slotHoldOutcome(h slot.ResolvedHold) string {
+	switch {
+	case h.TimedOut:
+		return "gave up"
+	case h.HeldS != nil:
+		return "held " + time.Duration(*h.HeldS*float64(time.Second)).Round(time.Second).String()
+	case h.Resolution == slot.HoldLive:
+		return fmt.Sprintf("held open (pid %d holds slot %d now)", h.PID, h.Slot)
+	case h.Resolution == slot.HoldUnmatched:
+		return fmt.Sprintf("held open (slot %d held, owner metadata unavailable)", h.Slot)
+	}
+	// Everything else open is abandoned: the pool no longer counts its holder,
+	// so the hold ended without a release. Whoever took the slot since is the
+	// evidence that it was re-granted rather than merely dropped.
+	if h.ReclaimedBy != nil {
+		return fmt.Sprintf("abandoned (pid %d never released; slot %d since taken by %s pid %d)",
+			h.PID, h.Slot, h.ReclaimedBy.Role, h.ReclaimedBy.PID)
+	}
+	return fmt.Sprintf("abandoned (pid %d never released; slot %d free)", h.PID, h.Slot)
 }
 
 // slotHistoryReason renders one entry's wait reason with the evidence the
@@ -356,7 +377,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		HeldCount           int                 `json:"held_count"`
 		Total               int                 `json:"total"`
 		Reserved            int                 `json:"reserved_for_gate"`
-		History             []slot.HistoryEntry `json:"history,omitempty"`
+		History             []slot.ResolvedHold `json:"history,omitempty"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
@@ -372,7 +393,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		HeldCount:           rep.HeldCount,
 		Total:               rep.Total,
 		Reserved:            rep.Reserved,
-		History:             history,
+		History:             slot.ResolveHolds(history, rep),
 	})
 }
 

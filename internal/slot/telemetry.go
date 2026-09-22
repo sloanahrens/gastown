@@ -190,10 +190,11 @@ func historyLockPath(townRoot string) string {
 // succeeded: a caller that gave up after an hour is the tail that matters most,
 // and it is the one a grant-only ring would silently drop (gt-dc81).
 //
-// HeldS is a pointer so that a hold still open — a killed holder that never
-// reached Release — is distinguishable from a hold of zero seconds. Slot is the
-// slot the waiter was first in line for, and is the slot a timed-out wait names
-// for the part of the pool it never reached.
+// HeldS is a pointer so that a hold with no release on record — a killed holder
+// that never reached Release — is distinguishable from a hold of zero seconds;
+// whether such an entry is still in progress is what ResolveHolds answers
+// against the live pool. Slot is the slot the waiter was first in line for, and
+// is the slot a timed-out wait names for the part of the pool it never reached.
 type HistoryEntry struct {
 	TS       string     `json:"ts"`
 	Role     string     `json:"role"`
