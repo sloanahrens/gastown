@@ -2,6 +2,8 @@ package editorial
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -48,6 +50,16 @@ func newLandedFixture(t *testing.T) *landedFixture {
 	// Fake origin/main at base: the remote tip a landing is measured against.
 	run("update-ref", "refs/remotes/origin/main", base)
 
+	// A real origin remote (matching newReviewFixture) so the post-approve
+	// note push has somewhere to go.
+	bareDir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare origin: %v\n%s", err, out)
+	}
+	if _, err := g.AddRemote("origin", bareDir); err != nil {
+		t.Fatalf("add remote origin: %v", err)
+	}
+
 	// Branch line: one feature commit off base.
 	write := func(path, content string) {
 		t.Helper()
@@ -75,6 +87,8 @@ func newLandedFixture(t *testing.T) *landedFixture {
 	target := mustRev(t, g, "HEAD")
 	run("merge", branchTip, "-m", "merge feature into target")
 	merge := mustRev(t, g, "HEAD")
+	// The merge has landed: it is now the target's tip.
+	run("update-ref", "refs/remotes/origin/main", merge)
 
 	// Evil merge: same shape, but the merge tree drops the branch's file, so
 	// no parent diff reproduces the landed diff.
@@ -279,10 +293,8 @@ func TestRun_LandedReview_StampNoteOnLandedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadNote on landed commit: %v", err)
 	}
-	if !gotNote.RetroReview || !gotNote.Backfill {
-		// RetroReview must be recorded; Backfill must NOT be — this is a
-		// first-hand verdict, not a re-keyed copy.
-	}
+	// RetroReview must be recorded; Backfill must NOT be — this is a
+	// first-hand verdict, not a re-keyed copy.
 	if !gotNote.RetroReview {
 		t.Error("git note RetroReview = false, want true")
 	}

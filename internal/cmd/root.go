@@ -378,8 +378,11 @@ func checkStaleBinaryWarning() {
 }
 
 // Execute runs the root command and returns an exit code.
-// The caller (main) should call os.Exit with this code.
-func Execute() int {
+// The caller (main) should call os.Exit with this code. It is a var rather
+// than a func so tests can install a fake.
+var Execute = executeCLI
+
+func executeCLI() int {
 	if !isDoneInvocation(os.Args[1:]) {
 		ctx := context.Background()
 		provider, err := telemetry.Init(ctx, "gastown", Version)

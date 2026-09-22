@@ -208,6 +208,12 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	return editorial.Run(context.Background(), req, deps), nil
 }
 
+// runEditorialReview wraps editorial.Run so tests can fake the gate.
+// (Test-only indirection; production always runs the real gate.)
+var runEditorialReview = func(req editorial.ReviewRequest, deps editorial.Deps) editorial.ReviewResult {
+	return editorial.Run(context.Background(), req, deps)
+}
+
 // doMQReviewLanded reviews a commit that already landed (the --landed flag):
 // no rehearsal, no MR bead to resolve. The rig defaults to the caller's
 // (GT_RIG or cwd), the target to the rig's remote default branch, and the
@@ -324,7 +330,7 @@ func doMQReviewLanded(args []string) (editorial.ReviewResult, error) {
 		Exec:     editorial.RunGateScript,
 	}
 
-	return editorial.Run(context.Background(), req, deps), nil
+	return runEditorialReview(req, deps), nil
 }
 
 // reusedSuffix marks output answered from a diff's recorded verdict rather
