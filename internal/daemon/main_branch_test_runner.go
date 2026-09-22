@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,8 +89,25 @@ const failedTestLine = "--- FAIL"
 // ("widget_test.go:42: expected 3, got 4") says why. That block matches no
 // pattern of its own, so a filter that keeps only pattern matches reports
 // failures with no cause (gt-f57o).
-func extractDiagnosticLines(output string) []string {
+//
+// scope is the set of packages the worktree can run (loadModulePackages): a
+// line naming a package outside it did not come from a build of this tree, so
+// reporting it would send the reader to a package that does not exist. nil
+// means the worktree's packages could not be listed, and then every match is
+// reported.
+//
+// Only lines that name a package are filtered. A marker that names none
+// ("--- FAIL: TestX", a panic) is kept whatever its neighbors say: the packages
+// run in parallel, so under -p=8 the package line after a marker can belong to
+// another package's transcript — the 2026-09-21 gate capture has two real
+// internal/daemon dolt failures in exactly that position, and dropping markers
+// on positional evidence would cost real test names (gt-u4oq).
+func extractDiagnosticLines(output string, scope modulePackages) []string {
 	lines := strings.Split(output, "\n")
+	keepLine := func(line string) bool {
+		pkg, ok := packageNamedBy(line)
+		return scope == nil || !ok || scope.contains(pkg)
+	}
 
 	var diagnostic []string
 	appendLine := func(line string) bool { // false once the cap is reached
@@ -101,7 +120,7 @@ func extractDiagnosticLines(output string) []string {
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-		if !diagnosticLinePattern.MatchString(line) {
+		if !diagnosticLinePattern.MatchString(line) || !keepLine(line) {
 			continue
 		}
 		if !appendLine(line) {
@@ -138,6 +157,157 @@ func extractDiagnosticLines(output string) []string {
 // failing test's assertion block deeper than its "--- FAIL" line.
 func leadingIndentWidth(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// packageNamedBy returns the package a column-0 line names, or ok false when it
+// names none. go spells the failure of a package two ways: the test summary
+// "FAIL\t<pkg>\t<secs>s" (a build failure carries a " [build failed]" suffix),
+// and the build-error header "# <pkg> [<pkg>.test]".
+//
+// Indentation disqualifies a line: go prints these at column 0, so an indented
+// copy is output *about* a failure — a fixture echoed by a test — not the
+// failure itself.
+func packageNamedBy(line string) (string, bool) {
+	if leadingIndentWidth(line) != 0 {
+		return "", false
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", false
+	}
+	if fields[0] == "FAIL" || fields[0] == "#" {
+		return fields[1], true
+	}
+	return "", false
+}
+
+// modulePackages is the set of packages go can name in a worktree — what a
+// failure line has to be attributed to for it to be evidence about that
+// worktree. A line attributed to anything else is text that only looks like go
+// test output (gt-u4oq).
+type modulePackages map[string]struct{}
+
+// contains reports whether pkg is a package of the worktree the set was built
+// from.
+func (m modulePackages) contains(pkg string) bool {
+	_, ok := m[pkg]
+	return ok
+}
+
+// loadModulePackages returns the package paths of every module rooted under
+// root — root's own go.mod plus any nested module — or nil when root holds no
+// module or the tree could not be read. nil means "cannot scope" (gt-u4oq).
+//
+// A package go can name is a directory holding a .go file, addressed as its
+// module path plus that directory's path within the module. The listing is
+// coarser than go's own — a directory whose files are all excluded by build
+// tags appears here though "go test ./..." would skip it — which is the safe
+// direction for the caller: the set exists to reject a package that cannot
+// exist, not to insist on one.
+func loadModulePackages(root string) modulePackages {
+	if root == "" {
+		return nil
+	}
+	moduleRoots := map[string]string{} // dir -> module path go.mod declares
+	goDirs := map[string]struct{}{}    // dirs holding a .go file
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && skipPackageDir(d.Name()) {
+				return fs.SkipDir
+			}
+			modulePath, err := modulePathIn(path)
+			if err != nil {
+				return err
+			}
+			if modulePath != "" {
+				moduleRoots[path] = modulePath
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") {
+			goDirs[filepath.Dir(path)] = struct{}{}
+		}
+		return nil
+	})
+	if walkErr != nil || len(moduleRoots) == 0 {
+		return nil
+	}
+
+	packages := modulePackages{}
+	for dir := range goDirs {
+		moduleRoot, modulePath, ok := nearestModuleRoot(moduleRoots, dir)
+		if !ok {
+			continue
+		}
+		rel, err := filepath.Rel(moduleRoot, dir)
+		if err != nil {
+			return nil
+		}
+		if rel == "." {
+			packages[modulePath] = struct{}{}
+			continue
+		}
+		packages[modulePath+"/"+filepath.ToSlash(rel)] = struct{}{}
+	}
+	return packages
+}
+
+// skipPackageDir reports whether a directory is one go leaves out of "./..." or
+// one whose contents are not this tree's packages: go's own exclusions
+// (testdata, and the "." and "_" prefixes), the vendor tree, and the two
+// dependency trees that make a walk expensive without adding a package go would
+// test here.
+func skipPackageDir(name string) bool {
+	switch name {
+	case "vendor", "node_modules", "testdata":
+		return true
+	}
+	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+// nearestModuleRoot returns the module root at or above dir and the path that
+// module declares. The innermost root wins: a directory inside a nested module
+// is addressed by the nested module, not the one that contains it.
+func nearestModuleRoot(moduleRoots map[string]string, dir string) (root, modulePath string, ok bool) {
+	for {
+		if modulePath, found := moduleRoots[dir]; found {
+			return dir, modulePath, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", "", false
+		}
+		dir = parent
+	}
+}
+
+// modulePathIn returns the module path declared by dir/go.mod, "" when dir
+// holds no go.mod. An unreadable go.mod is an error rather than an absent
+// module, so a partially read tree withdraws the scope instead of shifting
+// its packages onto the parent module's path (gt-u4oq).
+func modulePathIn(dir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "go.mod")) //nolint:gosec // G304: path from the worktree walk
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "module ")
+		if !ok {
+			continue
+		}
+		if comment := strings.Index(rest, "//"); comment >= 0 {
+			rest = rest[:comment]
+		}
+		return strings.Trim(strings.TrimSpace(rest), `"`), nil
+	}
+	return "", nil
 }
 
 // oneLine flattens s onto a single log line, escaping newlines and bounding
@@ -703,7 +873,11 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 		d.logger.Printf("main_branch_test: %s: warning: could not write diagnostic log: %v", rigName, logErr)
 	}
 
-	diagnostic := extractDiagnosticLines(string(output))
+	// The worktree's own packages bound what can be a failure here: a transcript
+	// naming a package this tree does not contain is go-test-shaped text from
+	// somewhere else — a fixture echoed into the output — and naming it as the
+	// failure sends the mayor to a package that does not exist (gt-u4oq).
+	diagnostic := extractDiagnosticLines(string(output), loadModulePackages(workDir))
 	if len(diagnostic) == 0 {
 		// Nothing matched a known failure pattern (e.g. a shell error before
 		// the test binary even ran) — fall back to a short tail so the body

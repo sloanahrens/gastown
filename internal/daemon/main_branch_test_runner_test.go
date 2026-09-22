@@ -277,7 +277,7 @@ ok  	github.com/steveyegge/gastown/internal/eee	0.010s
 `
 
 func TestExtractDiagnosticLines(t *testing.T) {
-	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage)
+	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage, nil)
 
 	found := false
 	for _, line := range diagnostic {
@@ -298,7 +298,7 @@ func TestExtractDiagnosticLines_CapsAtMax(t *testing.T) {
 	for i := 0; i < maxDiagnosticLines+10; i++ {
 		sb.WriteString("--- FAIL: TestSomething\n")
 	}
-	diagnostic := extractDiagnosticLines(sb.String())
+	diagnostic := extractDiagnosticLines(sb.String(), nil)
 	if len(diagnostic) != maxDiagnosticLines {
 		t.Errorf("expected %d lines, got %d", maxDiagnosticLines, len(diagnostic))
 	}
@@ -354,7 +354,7 @@ func TestWriteMainBranchTestLog_NamesTheTestedHead(t *testing.T) {
 // assertion line says a test failed but not what broke, and the assertion
 // line matches no failure pattern of its own.
 func TestExtractDiagnosticLines_KeepsAssertionAfterFail(t *testing.T) {
-	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage)
+	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage, nil)
 	joined := strings.Join(diagnostic, "\n")
 
 	if !strings.Contains(joined, "--- FAIL: TestWidgetRenders") {
@@ -376,7 +376,7 @@ func TestExtractDiagnosticLines_KeepsNestedSubtestBlock(t *testing.T) {
 FAIL
 FAIL	github.com/steveyegge/gastown/internal/parent	0.050s
 `
-	joined := strings.Join(extractDiagnosticLines(fixture), "\n")
+	joined := strings.Join(extractDiagnosticLines(fixture, nil), "\n")
 	if !strings.Contains(joined, "parent_test.go:88: got 1, want 2") {
 		t.Errorf("expected the nested subtest assertion, got:\n%s", joined)
 	}
@@ -396,7 +396,7 @@ func TestExtractDiagnosticLines_CapHoldsWithAssertionBlocks(t *testing.T) {
 	for i := 0; i < maxDiagnosticLines; i++ {
 		sb.WriteString("--- FAIL: TestSomething\n    something_test.go:1: boom\n")
 	}
-	diagnostic := extractDiagnosticLines(sb.String())
+	diagnostic := extractDiagnosticLines(sb.String(), nil)
 	if len(diagnostic) > maxDiagnosticLines {
 		t.Errorf("expected at most %d lines, got %d", maxDiagnosticLines, len(diagnostic))
 	}
@@ -681,6 +681,31 @@ func fixtureEchoCommand() string {
 	return "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
 }
 
+// goTestFixtureNestedTranscript is the gt-u4oq shape: a whole synthetic
+// transcript at column 0 — the aaa/bbb/widget packages this suite's own
+// fixtures use — sitting in the same output as a failure that really happened.
+// Nothing about the synthetic half is distinguishable from a real failure by
+// its own text: only the module says internal/widget does not exist.
+const goTestFixtureNestedTranscript = goTestFixtureOneFailingPackage + `--- FAIL: TestScan_ContextCancelled_MidIteration (470.00s)
+    scan_test.go:88: context canceled mid-iteration
+FAIL
+FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
+`
+
+// writeTree writes a map of slash-separated paths (relative to dir) to content.
+func writeTree(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+}
+
 // TestRunCommandOnWorktree_LogCannotFabricateFailures is the regression test
 // for the second defect on this bead: the run's own log lines must not look
 // like test failures. The mayor was handed 'FAIL
@@ -698,8 +723,56 @@ func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
 
 	_ = d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", fixtureEchoCommand())
 
-	if fabricated := extractDiagnosticLines(logged.String()); len(fabricated) != 0 {
+	if fabricated := extractDiagnosticLines(logged.String(), nil); len(fabricated) != 0 {
 		t.Errorf("the runner's own log lines must not read as test failures, got:\n%s", strings.Join(fabricated, "\n"))
+	}
+}
+
+// TestRunCommandOnWorktree_ReportsThePackageThatExists is the gt-u4oq
+// acceptance case: the run's output carries a synthetic transcript naming a
+// package the worktree does not contain beside a failure that happened, and the
+// escalation names only the latter. The full output still reaches the on-disk
+// log — the scope filters the report, not the record.
+func TestRunCommandOnWorktree_ReportsThePackageThatExists(t *testing.T) {
+	workDir := t.TempDir()
+	writeTree(t, workDir, map[string]string{
+		"go.mod":                  "module github.com/steveyegge/gastown\n",
+		"internal/daemon/scan.go": "package daemon\n",
+	})
+	townRoot := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "", 0),
+	}
+
+	cmd := "printf '%s' " + shellQuote(goTestFixtureNestedTranscript) + "; exit 1"
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", cmd)
+	if err == nil {
+		t.Fatal("expected error from failing command")
+	}
+
+	body := err.Error()
+	if !strings.Contains(body, "TestScan_ContextCancelled_MidIteration") {
+		t.Errorf("expected the failure that happened, got:\n%s", body)
+	}
+	if !strings.Contains(body, "FAIL\tgithub.com/steveyegge/gastown/internal/daemon") {
+		t.Errorf("expected the failing package the worktree contains, got:\n%s", body)
+	}
+	if strings.Contains(body, "internal/widget") {
+		t.Errorf("expected no package the worktree does not contain, got:\n%s", body)
+	}
+
+	logPath := filepath.Join(townRoot, "logs", "main_branch_test")
+	entries, globErr := filepath.Glob(filepath.Join(logPath, "*"))
+	if globErr != nil || len(entries) != 1 {
+		t.Fatalf("expected one persisted log under %s, got %v (err %v)", logPath, entries, globErr)
+	}
+	data, readErr := os.ReadFile(entries[0])
+	if readErr != nil {
+		t.Fatalf("could not read %s: %v", entries[0], readErr)
+	}
+	if !strings.Contains(string(data), "internal/widget") {
+		t.Errorf("expected the persisted log to hold the full output including the synthetic transcript")
 	}
 }
 
@@ -720,7 +793,7 @@ func TestExtractDiagnosticLines_IgnoresIndentedMarkers(t *testing.T) {
 FAIL
 FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
 `
-	diagnostic := extractDiagnosticLines(fixtureInAMessage)
+	diagnostic := extractDiagnosticLines(fixtureInAMessage, nil)
 	joined := strings.Join(diagnostic, "\n")
 
 	if !strings.Contains(joined, "--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage") {
@@ -737,6 +810,165 @@ FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
 		if strings.Contains(line, "internal/widget") || strings.Contains(line, "TestWidgetRenders") {
 			t.Errorf("a line go test wrote as test output was reported as a failure marker: %q", line)
 		}
+	}
+}
+
+// TestExtractDiagnosticLines_ScopesAttributionToTheWorktree is the gt-u4oq
+// requirement at the extractor: the package summary a synthetic transcript
+// carries is the only line that says which package failed, so a package the
+// module does not contain takes its summary with it and the failure the
+// worktree really has is what remains.
+func TestExtractDiagnosticLines_ScopesAttributionToTheWorktree(t *testing.T) {
+	scope := modulePackages{"github.com/steveyegge/gastown/internal/daemon": {}}
+	joined := strings.Join(extractDiagnosticLines(goTestFixtureNestedTranscript, scope), "\n")
+
+	if !strings.Contains(joined, "--- FAIL: TestScan_ContextCancelled_MidIteration") {
+		t.Errorf("expected the failing test that really ran, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "scan_test.go:88: context canceled mid-iteration") {
+		t.Errorf("expected its assertion, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "FAIL\tgithub.com/steveyegge/gastown/internal/daemon") {
+		t.Errorf("expected the failing package the worktree has, got:\n%s", joined)
+	}
+	for _, line := range strings.Split(joined, "\n") {
+		if strings.Contains(line, "internal/widget") {
+			t.Errorf("reported a failure in a package the worktree does not contain: %q", line)
+		}
+	}
+}
+
+// TestExtractDiagnosticLines_KeepsMarkersFromInterleavedOutput is the shape the
+// real 2026-09-21 gate capture showed: with the package runs in parallel, the
+// package line after a marker can belong to another package's transcript. Both
+// of internal/daemon's failing dolt tests sat in exactly that position, so a
+// marker is filtered only when the marker itself names a package.
+func TestExtractDiagnosticLines_KeepsMarkersFromInterleavedOutput(t *testing.T) {
+	const interleaved = "ok  \tgithub.com/steveyegge/gastown/internal/crew\t(cached)\n" +
+		"--- FAIL: TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout (60.18s)\n" +
+		"    dolt_remotes_test.go:210: SELECT SLEEP(45s) failed: context deadline exceeded\n" +
+		"--- FAIL: TestPushDatabase_UsesLiveServerConnection (15.00s)\n" +
+		"    dolt_remotes_test.go:228: create database: context deadline exceeded\n" +
+		"FAIL\n" +
+		"FAIL\tgithub.com/steveyegge/gastown/internal/widget\t0.030s\n" +
+		"FAIL\n" +
+		"FAIL\tgithub.com/steveyegge/gastown/internal/daemon\t354.894s\n"
+
+	scope := modulePackages{"github.com/steveyegge/gastown/internal/daemon": {}}
+	joined := strings.Join(extractDiagnosticLines(interleaved, scope), "\n")
+
+	for _, want := range []string{
+		"--- FAIL: TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout",
+		"dolt_remotes_test.go:210: SELECT SLEEP(45s) failed",
+		"--- FAIL: TestPushDatabase_UsesLiveServerConnection",
+		"FAIL\tgithub.com/steveyegge/gastown/internal/daemon",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in the body, got:\n%s", want, joined)
+		}
+	}
+	for _, line := range strings.Split(joined, "\n") {
+		if strings.Contains(line, "internal/widget") {
+			t.Errorf("reported a failure in a package the worktree does not contain: %q", line)
+		}
+	}
+}
+
+// TestExtractDiagnosticLines_KeepsEvidenceItCannotAttribute pins the two ways
+// output survives scoping with no package to check: a line attributed to no
+// package at all, and a worktree that could not be listed (nil scope). Dropping
+// either trades a false attribution for no evidence.
+func TestExtractDiagnosticLines_KeepsEvidenceItCannotAttribute(t *testing.T) {
+	scope := modulePackages{"example.com/other/pkg": {}}
+
+	t.Run("no package line follows a marker", func(t *testing.T) {
+		const orphanedPanic = "panic: runtime error: index out of range [3] with length 3\n"
+		if got := extractDiagnosticLines(orphanedPanic, scope); len(got) != 1 {
+			t.Errorf("expected the panic to survive any scope, got %v", got)
+		}
+	})
+
+	t.Run("a package outside the scope is dropped", func(t *testing.T) {
+		const foreign = "FAIL\tgithub.com/steveyegge/gastown/internal/widget\t0.030s\n"
+		if got := extractDiagnosticLines(foreign, scope); len(got) != 0 {
+			t.Errorf("expected a package the scope does not list to be dropped, got %v", got)
+		}
+	})
+
+	t.Run("an unscopeable worktree reports everything", func(t *testing.T) {
+		joined := strings.Join(extractDiagnosticLines(goTestFixtureOneFailingPackage, nil), "\n")
+		if !strings.Contains(joined, "internal/widget") {
+			t.Errorf("expected the transcript to be reported when no scope was found, got:\n%s", joined)
+		}
+	})
+}
+
+// TestLoadModulePackages pins what counts as a package of a worktree: go's own
+// exclusions from "./...", the vendor and dependency trees, and — the part
+// scoping turns on — a nested module's packages being addressed by the nested
+// module rather than the one containing it.
+func TestLoadModulePackages(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"go.mod":                        "module example.com/m\n",
+		"main.go":                       "package main\n",
+		"internal/real/real.go":         "package real\n",
+		"internal/testonly/x_test.go":   "package testonly\n",
+		"testdata/broken/broken.go":     "package broken\n",
+		".hidden/hidden.go":             "package hidden\n",
+		"_scratch/scratch.go":           "package scratch\n",
+		"vendor/example.com/dep/dep.go": "package dep\n",
+		"node_modules/junk/junk.go":     "package junk\n",
+		"nested/go.mod":                 "module example.com/nested\n",
+		"nested/nested.go":              "package nested\n",
+		"nested/pkg/pkg.go":             "package pkg\n",
+	})
+
+	got := loadModulePackages(root)
+	want := []string{
+		"example.com/m",
+		"example.com/m/internal/real",
+		"example.com/m/internal/testonly",
+		"example.com/nested",
+		"example.com/nested/pkg",
+	}
+	if len(got) != len(want) {
+		t.Errorf("expected %d packages, got %d: %v", len(want), len(got), got)
+	}
+	for _, pkg := range want {
+		if !got.contains(pkg) {
+			t.Errorf("expected %q in the package set, got %v", pkg, got)
+		}
+	}
+
+	t.Run("no module is no scope", func(t *testing.T) {
+		if got := loadModulePackages(t.TempDir()); got != nil {
+			t.Errorf("expected nil for a tree with no go.mod, got %v", got)
+		}
+	})
+}
+
+// TestModulePathIn covers the go.mod spellings the module declaration may take,
+// including the trailing comment go allows and the quoting a path may need.
+func TestModulePathIn(t *testing.T) {
+	tests := []struct{ name, goMod, want string }{
+		{"plain", "module example.com/m\n", "example.com/m"},
+		{"trailing comment", "module example.com/m // primary module\n", "example.com/m"},
+		{"quoted", "module \"example.com/m\"\n", "example.com/m"},
+		{"no module line", "go 1.22\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"go.mod": tt.goMod})
+			got, err := modulePathIn(dir)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("modulePathIn = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
