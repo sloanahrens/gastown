@@ -155,8 +155,13 @@ install: check-up-to-date build
 	fi
 	@# Sync plugins from build repo to town runtime directories.
 	@# Prevents drift when plugin fixes merge but runtime dirs are stale.
-	@$(INSTALL_DIR)/$(BINARY) plugin sync --source $(CURDIR)/plugins 2>/dev/null && \
-		echo "Plugins synced." || true
+	@# Fail-open by design: a stale runtime copy must not fail an install.
+	@# But NOT silent — a failed sync is reported, so the drift is visible
+	@# instead of hidden behind a success line. `plugin sync` resolves the
+	@# town root from the CWD, so it fails outright when this checkout lives
+	@# outside the town root (LocalRepo override).
+	@$(INSTALL_DIR)/$(BINARY) plugin sync --source $(CURDIR)/plugins || \
+		echo "Warning: plugin sync failed — plugins under <town_root>/plugins may be stale (see plugins/README.md)"
 
 # safe-install: Replace binary WITHOUT restarting daemon or killing sessions.
 # Use this for automated rebuilds (e.g., rebuild-gt plugin). Sessions pick up

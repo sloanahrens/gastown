@@ -65,7 +65,7 @@ gt plugin record-run --plugin quality-review --result failure \
 
 gt escalate "quality-review: empty-result anomaly" \
   --severity medium \
-  --reason "Step 1 query returned [] but plugin history shows recent result wisps; the query is broken."
+  --reason "Step 1 query returned [] for window <start>..<end>, but 'gt plugin history quality-review-result' returned <n> runs (latest <wisp-id>); the query is broken."
 ```
 
 ## Step 2: Compute per-worker trends
@@ -111,30 +111,8 @@ Also escalate:
 ```bash
 gt escalate "Quality BREACH: <worker> (avg: <avg>)" \
   --severity medium \
-  --reason "Worker <worker> in rig <rig> has avg quality score <avg> over <count> reviews"
+  --reason "Worker <worker> in rig <rig> has avg quality score <avg> over <count> reviews (threshold 0.45), window <start>..<end>, wisps: <wisp-id>,<wisp-id>"
 ```
-
-## Escalation evidence requirements (REQUIRED)
-
-Every escalation this plugin files carries the evidence needed to falsify it
-without re-running anything. Put in `--reason`:
-
-- **Wisp IDs** you actually read (the result wisps and/or the run wisp), not a summary of them.
-- **Versions you observed**: for the `om` rig, the installed om binary sha and the manifest's
-  `om_binary.sha256`; for any rig, its rubric pin against the rubric sha seen.
-- **Measurement window**: the start and end timestamps scanned.
-
-Rationale: a body that says only "suggests the harness is out of sync" (hq-wisp-0g6094) makes the
-reader re-derive what the reporter already held. Wisp IDs and shas make the claim checkable in one
-step, and separate a non-reproducible transient from a live defect.
-
-**Re-measure before re-filing.** Before filing a `backend_timeout` or `version_mismatch`
-escalation, re-check the CURRENT budget and the CURRENT shas: the installed sha may already match
-the manifest, and a rig's budget may already have been raised (om's review timeout went
-300s -> 900s, om-cwy). A failure at the CURRENT setting is new evidence; the same failure at a
-setting that has since changed is not, and re-filing it unchanged is noise.
-
-Done when the `--reason` names the wisps, the shas, and the window.
 
 ## Step 5: Record run result
 
@@ -155,8 +133,43 @@ gt plugin record-run --plugin quality-review --result failure \
 
 gt escalate "Plugin FAILED: quality-review" \
   --severity medium \
-  --reason "$ERROR"
+  --reason "Failed at <step> over window <start>..<end>, run wisp <wisp-id>: $ERROR"
 ```
+
+## Escalation evidence requirements (REQUIRED)
+
+This plugin files three escalations: `quality-review: empty-result anomaly`
+(Step 1), `Quality BREACH: <worker>` (Step 4), and `Plugin FAILED:
+quality-review` (Step 5). Each one must carry the evidence needed to falsify it
+without re-running anything. Put in `--reason`:
+
+- **Wisp IDs** you actually read — the result wisps and/or the run wisp, as IDs,
+  not a summary of them.
+- **Measurement window** — the concrete start and end timestamps scanned, not
+  "last 24h".
+- **The numbers the verdict rests on** — for a breach: worker, rig, avg score,
+  review count, and the Step 3 threshold it crossed; for the empty-result
+  anomaly: what the Step 1 query returned against what
+  `gt plugin history quality-review-result` returned.
+
+Rationale: a body that says only "suggests the harness is out of sync"
+(hq-wisp-0g6094) makes the reader re-derive what the reporter already held. IDs,
+a window, and the numbers make the claim checkable in one step, and separate a
+non-reproducible transient from a live defect.
+
+**Re-measure before re-filing.** The Step 1 window is a rolling 24 hours and the
+Refinery writes new result wisps continuously, so a verdict computed earlier may
+no longer hold. Before re-filing a breach or an empty-result anomaly for the same
+worker or condition, re-run the Step 1 query over the CURRENT window. A finding
+that reproduces in the current window is new evidence; the same finding quoted
+from a window that has since moved on is not, and re-filing it unchanged is noise.
+
+Done when the `--reason` names the wisps, the window, and the numbers.
+
+Escalations about the pre-merge om gate itself (a `backend_timeout` or
+`version_mismatch` from the refinery's review) are not this plugin's to file.
+Those carry their own evidence requirements — see
+`contrib/gastown/directives/refinery.md`.
 
 ---
 

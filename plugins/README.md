@@ -53,10 +53,20 @@ is the source of truth. Deacon and `gt doctor` patrols run plugins out of
 `git pull` alone does not update.
 
 An edit made directly under `<town_root>/plugins` is a draft, not a change: the
-next `gt plugin sync` overwrites it. Land the edit here first; `make install`
-syncs this directory to the runtime copy, and the `rebuild-gt` plugin runs the
-same sync after every successful rebuild.
+next `gt plugin sync` overwrites it. Land the edit here first.
 
-`gt doctor`'s `patrol-plugin-drift` check compares the two copies and warns when
-they diverge, or when it cannot locate this source directory at all — it never
-silently reports OK in that case.
+Two paths push this directory to the runtime copy, and neither is a guarantee
+that the runtime copy is current:
+
+- `make install` runs `gt plugin sync --source $(CURDIR)/plugins` (Makefile:158).
+  The step is fail-open: a failed sync does not fail the install. It is no
+  longer silent — the failure is reported on stdout rather than discarded.
+- The `rebuild-gt` plugin runs the same sync after every successful rebuild and
+  logs a failure as "non-fatal".
+
+`gt plugin sync` resolves the town root from the CWD, so both paths fail
+outright when this checkout lives outside the town root (a `LocalRepo`
+override). `gt doctor`'s `patrol-plugin-drift` check is what catches the
+resulting divergence: it compares the two copies and warns when they diverge, or
+when it cannot locate this source directory at all — it never silently reports
+OK in that case.
