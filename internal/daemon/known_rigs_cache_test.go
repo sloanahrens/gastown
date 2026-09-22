@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -57,5 +58,45 @@ func TestGetKnownRigs_CachedBetweenInvalidations(t *testing.T) {
 	d.invalidateKnownRigsCache()
 	if got := d.getKnownRigs(); !slices.Equal(got, []string{"gamma"}) {
 		t.Fatalf("post-invalidate call after rewrite: got %v, want [gamma]", got)
+	}
+}
+
+// TestGetKnownRigs_ConcurrentInvalidation is the regression test for gt-f18v.
+// The cache is a heartbeat-tick memo, but a tick's main_branch_test cycle runs
+// on its own goroutine (gt-uvxy) and calls getKnownRigs, so that goroutine's
+// read races the next tick's invalidateKnownRigsCache at the top of the
+// heartbeat. Run under -race (CI does): without the mutex the reader and the
+// invalidator hit both cache fields unsynchronized and the detector reports
+// the race; the value assertions hold either way.
+//
+// One reader against one invalidator per round, racing only each other: a
+// reader spinning against a long invalidation loop races the same fields
+// hundreds of times, which is all the detector needs to not report, and a
+// round where the two never overlap is a round that proves nothing.
+func TestGetKnownRigs_ConcurrentInvalidation(t *testing.T) {
+	townRoot := t.TempDir()
+	writeRigsJSON(t, townRoot, []string{"alpha"})
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+
+	for range 500 {
+		start := make(chan struct{})
+		var round sync.WaitGroup
+		round.Add(2)
+		go func() {
+			defer round.Done()
+			<-start
+			d.invalidateKnownRigsCache()
+		}()
+		go func() {
+			defer round.Done()
+			<-start
+			// rigs.json never changes here, so every read must see alpha
+			// regardless of where the invalidation lands.
+			if got := d.getKnownRigs(); !slices.Equal(got, []string{"alpha"}) {
+				t.Errorf("getKnownRigs() = %v, want [alpha]", got)
+			}
+		}()
+		close(start)
+		round.Wait()
 	}
 }

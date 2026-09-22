@@ -162,7 +162,13 @@ type Daemon struct {
 	// duration of a single heartbeat tick. ~10 call sites per tick otherwise
 	// re-read and re-parse the same file. Invalidated at the start of each
 	// heartbeat so rigs.json changes between ticks are picked up.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
+	//
+	// knownRigsMu guards both fields. The memo is per-tick, but a tick's
+	// main_branch_test cycle runs on its own goroutine (gt-uvxy) and reads the
+	// cache, so the heartbeat's invalidation and that read would otherwise
+	// touch the fields concurrently (gt-f18v). Later background patrols that
+	// call getKnownRigs inherit the guard.
+	knownRigsMu         sync.Mutex
 	knownRigsCache      []string
 	knownRigsCacheValid bool
 
@@ -2412,20 +2418,27 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 // getKnownRigs returns list of registered rig names.
 // Results are memoized per heartbeat tick to coalesce the ~10 per-tick callers
 // into a single mayor/rigs.json read. The cache is invalidated at the start of
-// each heartbeat.
+// each heartbeat. Callable from any goroutine (gt-f18v).
+//
+// The lock is held across the disk read rather than only around the fields:
+// the file is a few hundred bytes, the callers are a handful per tick, and a
+// second caller arriving mid-read wants the value that read produces.
 func (d *Daemon) getKnownRigs() []string {
+	d.knownRigsMu.Lock()
+	defer d.knownRigsMu.Unlock()
 	if d.knownRigsCacheValid {
 		return d.knownRigsCache
 	}
-	rigs := d.readKnownRigsFromDisk()
-	d.knownRigsCache = rigs
+	d.knownRigsCache = d.readKnownRigsFromDisk()
 	d.knownRigsCacheValid = true
-	return rigs
+	return d.knownRigsCache
 }
 
 // invalidateKnownRigsCache clears the per-tick cache so the next
 // getKnownRigs() call re-reads mayor/rigs.json from disk.
 func (d *Daemon) invalidateKnownRigsCache() {
+	d.knownRigsMu.Lock()
+	defer d.knownRigsMu.Unlock()
 	d.knownRigsCache = nil
 	d.knownRigsCacheValid = false
 }
