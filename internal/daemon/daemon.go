@@ -898,6 +898,10 @@ func (d *Daemon) Run() (err error) {
 				// cadence, before the molecule-based health checks run (gt-twil).
 				d.cleanupOrphanedDoltServers()
 				d.runDoctorDog()
+				// Deacon self-probe (gt-jmy3): inject a known event through
+				// the deacon's own mail path each cycle and read back
+				// whether the previous cycle's probe was acked in time.
+				d.runDeaconSelfProbe()
 			}
 
 		case <-compactorDogChan:

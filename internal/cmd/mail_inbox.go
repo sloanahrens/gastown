@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -122,12 +123,28 @@ func loadInboxSnapshot(mailbox inboxLister, unreadOnly bool) ([]*mail.Message, i
 	if allMessages == nil {
 		allMessages = make([]*mail.Message, 0)
 	}
+	allMessages = filterDeaconSelfProbes(allMessages)
 
 	total, unread := countInboxMessages(allMessages)
 	if unreadOnly {
 		return filterUnreadMessages(allMessages), total, unread, nil
 	}
 	return allMessages, total, unread, nil
+}
+
+// filterDeaconSelfProbes drops doctor-dog self-probe mails from the default
+// inbox view. Probes are a supervision signal read back by the
+// deacon-self-probe doctor check, not a message for a human or agent to
+// triage — see daemon.DeaconSelfProbeSubjectPrefix.
+func filterDeaconSelfProbes(messages []*mail.Message) []*mail.Message {
+	filtered := make([]*mail.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg != nil && strings.HasPrefix(msg.Subject, daemon.DeaconSelfProbeSubjectPrefix) {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
 }
 
 func countInboxMessages(messages []*mail.Message) (total, unread int) {
