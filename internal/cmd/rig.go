@@ -28,7 +28,6 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
@@ -2355,58 +2354,16 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getRigOperationalState returns the operational state and source for a rig.
-// It checks the wisp layer first (local/ephemeral), then rig bead labels (global).
-// Returns state ("OPERATIONAL", "PARKED", or "DOCKED") and source ("local", "global - synced", or "default").
+// getRigOperationalState returns the operational state and source for a rig,
+// as the strings GetRigLED and rigStatePriority switch on.
+//
+// The derivation itself lives in internal/rig so the dashboard's Rigs and
+// Merge Queue panels read the same state this list does — a rig that reads
+// as parked here and active on the page meant to warn about it is the whole
+// point of OpState existing.
 func getRigOperationalState(townRoot, rigName string) (state string, source string) {
-	// Check wisp layer first (local/ephemeral overrides)
-	wispConfig := wisp.NewConfig(townRoot, rigName)
-	if status := wispConfig.GetString("status"); status != "" {
-		switch strings.ToLower(status) {
-		case "parked":
-			return "PARKED", "local"
-		case "docked":
-			return "DOCKED", "local"
-		}
-	}
-
-	// Check rig bead labels (global/synced)
-	// Rig identity bead ID: <prefix>-rig-<name>
-	// Look for status:docked or status:parked labels
-	rigPath := filepath.Join(townRoot, rigName)
-	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
-	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
-
-	// Try to find the rig identity bead
-	// Convention: <prefix>-rig-<rigName>
-	// Try to get prefix from rig config.json, fall back to rigs.json registry
-	var prefix string
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
-		prefix = rigCfg.Beads.Prefix
-	} else {
-		// Fall back to registry (mayor/rigs.json) when config.json is missing
-		prefix = config.GetRigPrefix(townRoot, rigName)
-	}
-
-	if prefix != "" {
-		rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
-		if issue, err := bd.Show(rigBeadID); err == nil {
-			for _, label := range issue.Labels {
-				if strings.HasPrefix(label, "status:") {
-					statusValue := strings.TrimPrefix(label, "status:")
-					switch strings.ToLower(statusValue) {
-					case "docked":
-						return "DOCKED", "global - synced"
-					case "parked":
-						return "PARKED", "global - synced"
-					}
-				}
-			}
-		}
-	}
-
-	// Default: operational
-	return "OPERATIONAL", "default"
+	opState, source := rig.GetOpState(townRoot, rigName)
+	return string(opState), source
 }
 
 // ensureHooksBase creates ~/.gt/hooks-base.json from current defaults if it
