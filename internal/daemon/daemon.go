@@ -95,11 +95,23 @@ type Daemon struct {
 	gtPath string
 	bdPath string
 
-	// wispConfigMissingWarned tracks rigs we've already logged a missing-wisp-config
-	// notice for, so isRigOperational logs it at most once per rig per process
-	// lifetime instead of on every patrol-candidate evaluation (gt-k07).
-	// Only accessed from heartbeat loop goroutine - no sync needed.
-	wispConfigMissingWarned map[string]bool
+	// rigOperational memoizes each rig's docked/parked determination for a short
+	// window, so the many per-rig-per-heartbeat call sites share one lookup
+	// instead of each paying a bd subprocess - which, on a CPU-starved host,
+	// costs its entire 60s budget (gt-4nu3).
+	//
+	// Concurrent by design: isRigOperational runs on the heartbeat goroutine
+	// (patrol rig filters), on rigPool workers (witness/refinery auto-start),
+	// and on the convoy manager's goroutine (its isRigParked callback).
+	rigOperational rigOperationalCache
+
+	// rigStatusAlert / rigStatusClear raise and close the escalation for a rig
+	// whose docked/parked status cannot be read - the condition that silently
+	// suppresses auto-start for that rig. New wires them to the daemon's alert
+	// helpers; they stay nil on a zero-value Daemon (unit tests), which logs
+	// the failure but has no town to escalate into (gt-4nu3).
+	rigStatusAlert func(key, source, message string)
+	rigStatusClear func(reason string, keys ...string)
 
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -468,6 +480,14 @@ func New(config *Config) (*Daemon, error) {
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
 	}
+
+	// A rig whose docked/parked status cannot be read is treated as not
+	// operational, which suppresses auto-start for that rig. Escalate it, so
+	// the suppression is something the Mayor sees rather than a warning line in
+	// a log nobody reads while the rig sits dead (gt-4nu3).
+	d.rigStatusAlert = d.escalateAlert
+	d.rigStatusClear = d.clearAlerts
+
 	return d, nil
 }
 
@@ -2517,6 +2537,19 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // Returns true if the rig can have agents auto-started.
 // Returns false (with reason) if the rig is parked, docked, or has auto_restart blocked/disabled.
 //
+// The state is read from two layers. The wisp layer is local and cheap, so it is
+// evaluated here on every call; the identity bead costs a bd subprocess, so that
+// read is memoized for a short window (rigOperationalCacheTTL) - see
+// internal/daemon/rig_status.go for why. This function is evaluated per rig per
+// heartbeat by the patrol rig filters, witness and refinery auto-start, and the
+// convoy manager, and each of those used to repeat the subprocess read, whose
+// 60s budget a CPU-starved host spends in full (gt-4nu3).
+//
+// A failed bead read still fails closed: the rig is reported not operational, so
+// nothing is auto-started for a rig whose state could not be verified. It is
+// logged with the failure's category (timeout vs missing identity bead) and
+// escalated, because that suppression is otherwise invisible.
+//
 // TODO(#2120): This duplicates parked/docked checking logic from
 // cmd.IsRigParkedOrDocked and cmd.hasRigBeadLabel. Consolidating into a
 // shared package (e.g. internal/rig) would eliminate the third implementation
@@ -2530,26 +2563,94 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	// per process (not on every patrol-candidate evaluation) so it stays
 	// available for debugging without drowning the log (gt-k07).
 	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
-		if !d.wispConfigMissingWarned[rigName] {
-			if d.wispConfigMissingWarned == nil {
-				d.wispConfigMissingWarned = make(map[string]bool)
-			}
-			d.wispConfigMissingWarned[rigName] = true
+		if d.rigOperational.markWispConfigWarned(rigName) {
 			d.logger.Printf("no wisp config for %s (rig has never been parked or docked)", rigName)
 		}
 	}
 
-	// Check wisp layer first (local/ephemeral overrides)
-	status := cfg.GetString("status")
-	switch status {
+	// Check wisp layer first (local/ephemeral overrides). Reading it is a stat
+	// plus a small file, so this layer is never memoized: `gt rig park` takes
+	// effect on the next evaluation, not on the next memo expiry.
+	switch cfg.GetString("status") {
 	case "parked":
 		return false, "rig is parked"
 	case "docked":
 		return false, "rig is docked"
 	}
 
-	// Check rig bead labels (global/synced docked status)
-	// This is the persistent docked state set by 'gt rig dock'
+	// Check the rig bead labels (global/synced docked status), the persistent
+	// docked state set by 'gt rig dock'. This is the memoized read.
+	entry, ok := d.rigBeadVerdict(rigName)
+	if !ok {
+		// FAIL-SAFE: When we can't verify docked status (Dolt down, host starved
+		// past the subprocess budget, network issue), assume the rig is NOT
+		// operational. This prevents wasting API credits starting witnesses that
+		// might be docked. Better to delay work than burn credits unnecessarily.
+		return false, "cannot verify rig status (" + entry.failed + ")"
+	}
+	switch entry.verdict {
+	case rigBeadDocked:
+		return false, "rig is docked (global)"
+	case rigBeadParked:
+		return false, "rig is parked (global)"
+	}
+
+	// Check auto_restart config. Also local and cheap, so also not memoized: a
+	// `gt rig config set <rig> auto_restart false` used to quiesce a rig takes
+	// effect now rather than at the next expiry.
+	//
+	// If explicitly blocked (nil), auto-restart is disabled
+	if cfg.IsBlocked("auto_restart") {
+		return false, "auto_restart is blocked"
+	}
+
+	// If explicitly set to false, auto-restart is disabled
+	if autoRestartDisabled(cfg.Get("auto_restart")) {
+		return false, "auto_restart is disabled"
+	}
+
+	return true, ""
+}
+
+// rigBeadVerdict returns the rig's identity-bead verdict, from the memo when one
+// is fresh and from a fresh bd read otherwise. ok is false when the read could
+// not answer, in which case the entry carries the failure category.
+//
+// The window a read opens starts when the read answers, not when it was issued.
+// Measuring from before the read would hand a starved host an entry that is
+// already stale on arrival - a 60s read with a 60s window buys nothing, and
+// every call site in the tick re-pays the budget the memo exists to save.
+func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
+	if entry, ok := d.rigOperational.get(rigName, time.Now()); ok {
+		return entry, entry.failed == ""
+	}
+
+	rigBeadID, verdict, err := d.queryRigBead(rigName)
+	now := time.Now()
+	if err != nil {
+		// The category is in the line on purpose: "assuming not operational"
+		// alone left a starved-host timeout and a missing identity bead looking
+		// identical in daemon.log, and they call for different responses
+		// (gt-4nu3).
+		category := rigStatusFailureCategory(err)
+		d.logger.Printf("Warning: failed to check rig bead %s for docked/parked status: %s — assuming not operational (rig %s): %v",
+			rigBeadID, category, rigName, err)
+		if d.rigOperational.store(rigName, verdict, category, rigOperationalFailureCacheTTL, now).open {
+			d.alertRigStatusUnverified(rigName, category, err)
+		}
+		return rigBeadEntry{failed: category}, false
+	}
+
+	if d.rigOperational.store(rigName, verdict, "", rigOperationalCacheTTL, now).clear {
+		d.clearRigStatusUnverified(rigName)
+	}
+	return rigBeadEntry{verdict: verdict}, true
+}
+
+// queryRigBead reads the rig's identity bead and turns its status labels into a
+// verdict. It logs nothing and reports no escalation - rigBeadVerdict owns both,
+// so this stays a pure query.
+func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 	rigPath := filepath.Join(d.config.TownRoot, rigName)
 
 	// Try to get prefix from rig config.json, fall back to rigs.json registry
@@ -2564,36 +2665,20 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
 	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
 	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
-	if issue, err := bd.Show(rigBeadID); err == nil {
-		for _, label := range issue.Labels {
-			if label == "status:docked" {
-				return false, "rig is docked (global)"
-			}
-			if label == "status:parked" {
-				return false, "rig is parked (global)"
-			}
+	issue, err := bd.Show(rigBeadID)
+	if err != nil {
+		return rigBeadID, rigBeadActive, err
+	}
+
+	for _, label := range issue.Labels {
+		if label == "status:docked" {
+			return rigBeadID, rigBeadDocked, nil
 		}
-	} else {
-		// Log when rig bead lookup fails - this helps debug transient Dolt issues
-		// FAIL-SAFE: When we can't verify docked status (Dolt down, network issue, etc.),
-		// assume the rig is NOT operational. This prevents wasting API credits starting
-		// witnesses that might be docked. Better to delay work than burn credits unnecessarily.
-		d.logger.Printf("Warning: failed to check rig bead %s for docked/parked status: %v (assuming not operational)", rigBeadID, err)
-		return false, "cannot verify rig status (Dolt unavailable)"
+		if label == "status:parked" {
+			return rigBeadID, rigBeadParked, nil
+		}
 	}
-
-	// Check auto_restart config
-	// If explicitly blocked (nil), auto-restart is disabled
-	if cfg.IsBlocked("auto_restart") {
-		return false, "auto_restart is blocked"
-	}
-
-	// If explicitly set to false, auto-restart is disabled
-	if autoRestartDisabled(cfg.Get("auto_restart")) {
-		return false, "auto_restart is disabled"
-	}
-
-	return true, ""
+	return rigBeadID, rigBeadActive, nil
 }
 
 // autoRestartDisabled reports whether a resolved auto_restart value turns

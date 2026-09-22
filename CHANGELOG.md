@@ -137,6 +137,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rig's own event directory. Town-global channels (e.g. `mayor`) are
   unchanged.
 
+- **The daemon reads a rig's identity bead once per heartbeat, not once per
+  caller** (gt-4nu3) — roughly ten call sites per rig per tick (patrol rig
+  filters, witness and refinery auto-start, the convoy manager's `isRigParked`)
+  each ran their own `bd show` of the rig's identity bead. That read is 0.4s on
+  an idle host but spends its full 60s subprocess budget when the host is
+  CPU-starved, so a busy town — exactly when the heartbeat matters — lost a
+  minute per rig per caller. The bead read is now memoized for 60s, measured
+  from when it answers rather than when it was issued (a failed read for a tick,
+  since it fails closed either way); the local wisp layer that `gt rig park`
+  writes stays un-memoized so parking still takes effect immediately. The
+  failure is logged with its category, so a timeout no longer reads like a
+  missing bead, and a rig whose status cannot be verified is escalated instead
+  of only warned about.
+
 ### Changed
 
 - **`gt prime` renders an index of agent memories instead of every value**
