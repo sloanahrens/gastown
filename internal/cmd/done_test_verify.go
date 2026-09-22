@@ -128,9 +128,12 @@ type testVerifyResult struct {
 	ran        bool
 	skipReason string
 
-	success  bool
-	packages []string // the branch's changed packages, recorded for the MR bead (gt-btw1)
-	scope    string   // "full": the gate runs the rig's full hermetic test_command
+	success bool
+	// the branch's changed packages, recorded for the MR bead (gt-btw1);
+	// ["."] stands in when the change is a whole-package deletion verified
+	// by `go build ./...` (gt-ytjh) and there is no named package to record.
+	packages []string
+	scope    string // "full": the gate runs the rig's full hermetic test_command
 	// slotUsed is true only when the gate's run can start a container-backed
 	// suite (gt-wx53): a Go rig whose command does not turn the container
 	// opt-in on runs its whole suite with those tests skipping, so it takes no
@@ -231,6 +234,19 @@ func goListDir(worktree, dir string) (string, error) {
 		return "", fmt.Errorf("go list %s: %w: %s", rel, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// goBuildWholeModule builds the entire module in the worktree. It is the
+// check that distinguishes a whole-package deletion that still compiles
+// (legitimate, and verifiable — the deletion is either consistent or the
+// build breaks, and the build is the authority) from one whose importers
+// are now broken (gt-ytjh). A var so tests can stub it: the real one shells
+// out to `go build`, which no unit test may do.
+var goBuildWholeModule = func(worktree string) error {
+	//nolint:gosec // G204: fixed argument, run in the polecat's own worktree.
+	out, err := exec.Command("go", "build", "./...").CombinedOutput()
+	_ = out
+	return err
 }
 
 // readLogTail returns the last maxBytes of the file at path (or its full
@@ -557,9 +573,12 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 // cannot — the common case, since the container opt-in is off unless the rig
 // asks for it — runs the same hermetic command with those tests skipping and
 // takes no slot at all. Any failure — the run itself failing, timing out, or
-// changed .go files that resolve to no buildable package — returns an error
-// and the caller must not create the MR bead: that is the refusal gt-h9kf
-// asks for.
+// changed .go files that resolve to no buildable package and a whole-module
+// build that confirms the deletion broke the build — returns an error and the
+// caller must not create the MR bead: that is the refusal gt-h9kf asks for.
+// The one exception is a whole-package deletion that still compiles (gt-ytjh):
+// it is verified by `go build ./...` before the slot and then runs the full
+// suite like any other Go change.
 //
 // gt-pnkd: the budgets and the command are now resolved rather than
 // hardcoded, and every resolved value is written to the verify log header
@@ -602,9 +621,25 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			return testVerifyResult{skipReason: fmt.Sprintf("no changed .go files since %s — nothing to verify", shortSHA(verifiedBase))}, nil
 		}
 		if len(resolvedPkgs) == 0 {
-			return testVerifyResult{}, fmt.Errorf("gt done: changed .go files since %s did not resolve to any buildable package (go list found none) — refusing to submit an unverified MR; fix the build, or use --skip-verify with justification if this is genuinely not testable", shortSHA(verifiedBase))
+			// The only diff shape that reaches here is a whole-package
+			// deletion: changedGoFiles is true, but go list no longer
+			// resolves the deleted directory to a package, so nothing is
+			// left to scope. That is not a broken build — a clean deletion
+			// of every .go file in a package is legitimate work, and the
+			// whole module either still compiles (it is verified) or it
+			// doesn't (the refusal below stays). Refusing every deletion of
+			// a Go package was the false refusal gt-ytjh opened. (A
+			// deletion whose importers are broken but which still
+			// resolves to a named package never reaches here: go list
+			// resolves a package regardless of whether its imports
+			// build, so the gate's suite-run refusal covers it.)
+			pkgs = []string{"."}
+			if buildErr := goBuildWholeModule(worktree); buildErr != nil {
+				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable", shortSHA(verifiedBase))
+			}
+		} else {
+			pkgs = resolvedPkgs
 		}
-		pkgs = resolvedPkgs
 	}
 
 	// The full suite may spin Dolt/testcontainers containers (internal/cmd,

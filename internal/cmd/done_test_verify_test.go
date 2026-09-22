@@ -99,6 +99,29 @@ func stubVerifyProgress(t *testing.T, interval time.Duration) {
 	t.Cleanup(func() { testVerifyProgressInterval = prev })
 }
 
+// stubGoBuildWholeModule replaces the whole-module build check that
+// runDefaultTestVerification runs when a Go change resolves to no buildable
+// package (a whole-package deletion) (gt-ytjh).
+func stubGoBuildWholeModule(t *testing.T, err error) {
+	t.Helper()
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(string) error { return err }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+}
+
+// deletePkgb commits the removal of every file in the test repo's pkgb — a
+// whole-package deletion, the diff shape gt-ytjh opened. It lives here (not in
+// verify_integration_test.go) because both the unit and the integration test
+// files need it, and the integration file only compiles with -tags integration.
+func deletePkgb(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, "pkgb")); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
+}
+
 // stubLintVerifyTimeout shrinks the lint gate's budget so a test can drive a
 // real expiry (gt-taoz) rather than sleeping out the 10m default.
 func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
@@ -293,5 +316,34 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 	}
 	if _, statErr := os.Stat(testMarker); statErr == nil {
 		t.Error("tests ran despite the lint never finishing")
+	}
+}
+
+// TestRunDefaultTestVerification_DeletionRecordsWholeModule pins the marker a
+// whole-package deletion leaves on the MR bead (gt-ytjh): when the changed .go
+// files resolve to no buildable package and the whole-module build passes, the
+// gate proceeds and records packages=["."].
+func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
+	t.Parallel()
+	stubNoContainers(t)
+	stubGoBuildWholeModule(t, nil)
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error { return nil })
+
+	dir, _ := initVerifyTestGoRepo(t)
+	deletePkgb(t, dir)
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-marker")
+	if err != nil {
+		t.Fatalf("runDefaultTestVerification: %v", err)
+	}
+	if !result.ran || !result.success {
+		t.Fatalf("result = %+v, want ran=true success=true", result)
+	}
+	if len(result.packages) != 1 || result.packages[0] != "." {
+		t.Errorf("packages = %v, want [.] — the whole-module build stands in for the deleted package", result.packages)
 	}
 }

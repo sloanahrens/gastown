@@ -118,6 +118,24 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 	})
 
+	t.Run("whole-package deletion that still compiles: verified by go build, not a false refusal", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		deletePkgb(t, dir)
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: a clean whole-package deletion must not refuse (gt-ytjh): %v", err)
+		}
+		if !result.ran || !result.success {
+			t.Fatalf("result = %+v, want ran=true success=true", result)
+		}
+		if len(result.packages) != 1 || result.packages[0] != "." {
+			t.Errorf("packages = %v, want [.] (the whole-module build stands in for the deleted package)", result.packages)
+		}
+	})
+
 	t.Run("non-Go rig (no go.mod): runs the full test_command instead of scoping", func(t *testing.T) {
 		dir := t.TempDir()
 		runGitIn(t, dir, "init", "-q", "-b", "main")
