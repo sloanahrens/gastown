@@ -718,6 +718,114 @@ func TestPurgeExcludesLiveAgentReferencedWisps(t *testing.T) {
 	}
 }
 
+// TestAgentReferencesResolvedFromIssuesTable is the regression test for gt-l6y9.
+// Every agent bead is issue_type='task' carrying the gt:agent label, and in every
+// rig database they sit in the issues table; the reaper's reference protection
+// read "SELECT description FROM wisps WHERE issue_type = 'agent'", which matched a
+// row in no database at all, so the protection was never armed in production. The
+// agent beads here carry the shape production stores, not the shape the old query
+// expected.
+func TestAgentReferencesResolvedFromIssuesTable(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"active-mr-target": {id: "active-mr-target", status: "open", issueType: "task", createdAt: old},
+			"hook-bead-target": {id: "hook-bead-target", status: "open", issueType: "task", createdAt: old},
+			"stale-orphan":     {id: "stale-orphan", status: "open", issueType: "task", createdAt: old},
+			"nuked-target":     {id: "nuked-target", status: "open", issueType: "task", createdAt: old},
+			"unreferenced":     {id: "unreferenced", status: "open", issueType: "task", createdAt: old},
+		},
+		issueAgents: []fakeIssueBead{
+			{issueType: "task", labels: []string{"gt:agent"},
+				description: "agent_state: working\nactive_mr: active-mr-target\nhook_bead: hook-bead-target\n"},
+			{issueType: "task", labels: []string{"gt:agent"},
+				description: "agent_state: nuked\nactive_mr: nuked-target\n"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	// The nuked agent's pointers stop holding wisps open; the other two targets
+	// are named by an agent bead the old query could not see.
+	if scan.ReapCandidates != 3 {
+		t.Fatalf("Scan ReapCandidates = %d, want 3 (nuked-target, stale-orphan, unreferenced)", scan.ReapCandidates)
+	}
+
+	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+		t.Fatalf("real Reap: %v", err)
+	}
+	for _, id := range []string{"active-mr-target", "hook-bead-target"} {
+		if got := state.status(id); got != "open" {
+			t.Fatalf("%s status = %q, want open: an agent bead in the issues table still references it", id, got)
+		}
+	}
+	for _, id := range []string{"nuked-target", "stale-orphan", "unreferenced"} {
+		if got := state.status(id); got != "closed" {
+			t.Fatalf("%s status = %q, want closed (no live reference)", id, got)
+		}
+	}
+}
+
+// TestPurgeSparesAgentReferencedWispsFromIssuesTable covers the same wrong-store
+// lookup on the purge sweep, where deleting the target strands the pointer with
+// nothing left to resolve it (gt-gyb6, gt-l6y9). One reference comes from the
+// issues table and one from a migrated agent bead in wisps, so both halves of the
+// lookup are exercised.
+func TestPurgeSparesAgentReferencedWispsFromIssuesTable(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-30 * 24 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"active-mr-target": {id: "active-mr-target", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"hook-bead-target": {id: "hook-bead-target", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"unreferenced":     {id: "unreferenced", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"migrated-agent": {id: "migrated-agent", status: "open", issueType: "task", createdAt: now,
+				labels: []string{"gt:agent"}, description: "agent_state: done\nhook_bead: hook-bead-target\n"},
+		},
+		issueAgents: []fakeIssueBead{
+			{issueType: "task", labels: []string{"gt:agent"},
+				description: "agent_state: done\nactive_mr: active-mr-target\n"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	purgeAge := 7 * 24 * time.Hour
+	scan, err := Scan(db, "testdb", 24*time.Hour, purgeAge, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.PurgeCandidates != 1 {
+		t.Fatalf("Scan PurgeCandidates = %d, want 1 (unreferenced)", scan.PurgeCandidates)
+	}
+
+	purge, err := Purge(db, "testdb", purgeAge, 7*24*time.Hour, false)
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if purge.WispsPurged != scan.PurgeCandidates {
+		t.Fatalf("Purge deleted %d wisps, Scan previewed %d — the preview must gate the sweep", purge.WispsPurged, scan.PurgeCandidates)
+	}
+
+	statuses := state.statuses()
+	for _, id := range []string{"active-mr-target", "hook-bead-target"} {
+		if _, ok := statuses[id]; !ok {
+			t.Fatalf("%s was purged; an agent bead in the issues table still references it", id)
+		}
+	}
+	if _, ok := statuses["unreferenced"]; ok {
+		t.Fatalf("unreferenced survived the purge, want deleted")
+	}
+}
+
 var fakeReaperDriverID uint64
 
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
@@ -748,12 +856,22 @@ type fakeDep struct {
 	depType           string
 }
 
+// fakeIssueBead is a row in the issues table, which is where agent beads live in
+// every rig database (gt-l6y9). Only the fields the agent-bead queries read are
+// modelled.
+type fakeIssueBead struct {
+	issueType   string
+	labels      []string
+	description string
+}
+
 type fakeReaperState struct {
-	mu       sync.Mutex
-	wisps    map[string]*fakeWisp
-	deps     []fakeDep
-	nextConn int
-	ops      map[int][]string
+	mu          sync.Mutex
+	wisps       map[string]*fakeWisp
+	issueAgents []fakeIssueBead
+	deps        []fakeDep
+	nextConn    int
+	ops         map[int][]string
 }
 
 func (s *fakeReaperState) status(id string) string {
@@ -875,9 +993,13 @@ func (s *fakeReaperState) isMoleculeStepCandidateLocked(id string) bool {
 	return false
 }
 
-func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMoleculeSteps bool) []string {
+// staleCandidatesLocked mirrors the reap sweep's eligibility: open wisps past the
+// cutoff, minus the MR-protected ones the SQL joins select and the agent-referenced
+// ones the caller binds as NOT IN args. References come from excluded rather than
+// from this model, so a query that stops producing those IDs shows up here as an
+// unspared wisp (gt-l6y9).
+func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMoleculeSteps bool, excluded map[string]bool) []string {
 	mrProtected := s.mrProtectedLocked()
-	activeMRProtected := s.activeMRProtectedLocked()
 	var ids []string
 	for id, w := range s.wisps {
 		if !isOpenWispStatus(w.status) || w.issueType == "agent" || !w.createdAt.Before(cutoff) {
@@ -889,7 +1011,7 @@ func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMolecul
 		if excludeMoleculeSteps && s.isMoleculeStepCandidateLocked(id) {
 			continue
 		}
-		if mrProtected[id] || activeMRProtected[id] {
+		if mrProtected[id] || excluded[id] {
 			continue
 		}
 		ids = append(ids, id)
@@ -921,34 +1043,43 @@ func (s *fakeReaperState) mrProtectedLocked() map[string]bool {
 	return protected
 }
 
-// activeMRProtectedLocked mirrors activeMRProtectedIDs: wisp IDs referenced
-// as active_mr by a live (non-nuked) agent bead's description.
-func (s *fakeReaperState) activeMRProtectedLocked() map[string]bool {
-	protected := map[string]bool{}
-	for _, w := range s.wisps {
-		if w.issueType != "agent" {
-			continue
-		}
-		if m := agentStateFieldPattern.FindStringSubmatch(w.description); m != nil && m[1] == "nuked" {
-			continue
-		}
-		m := activeMRFieldPattern.FindStringSubmatch(w.description)
-		if m == nil || m[1] == "null" {
-			continue
-		}
-		protected[m[1]] = true
-	}
-	return protected
-}
-
-func (s *fakeReaperState) agentDescriptionsLocked() []string {
+// agentDescriptionsLocked mirrors agentBeadWispQuery: agent beads resident in the
+// wisps table.
+func (s *fakeReaperState) agentDescriptionsLocked(byLabel bool) []string {
 	var descriptions []string
 	for _, w := range s.wisps {
-		if w.issueType == "agent" {
+		if agentBeadMatchesQuery(w.issueType, w.labels, byLabel) {
 			descriptions = append(descriptions, w.description)
 		}
 	}
 	return descriptions
+}
+
+// issueAgentDescriptionsLocked mirrors agentBeadIssueQuery: agent beads in the
+// issues table, the store production actually uses.
+func (s *fakeReaperState) issueAgentDescriptionsLocked(byLabel bool) []string {
+	var descriptions []string
+	for _, b := range s.issueAgents {
+		if agentBeadMatchesQuery(b.issueType, b.labels, byLabel) {
+			descriptions = append(descriptions, b.description)
+		}
+	}
+	return descriptions
+}
+
+// agentBeadMatchesQuery reports whether a row is selected by the agent-bead query
+// that was issued. byLabel is whether that query identifies agent beads by the
+// gt:agent label — production's marker — or by the legacy issue_type='agent'
+// alone, which matches none of production's rows (gt-l6y9).
+func agentBeadMatchesQuery(issueType string, labels []string, byLabel bool) bool {
+	if byLabel {
+		for _, label := range labels {
+			if label == "gt:agent" {
+				return true
+			}
+		}
+	}
+	return issueType == "agent"
 }
 
 func (s *fakeReaperState) hasOpenParentLocked(id string) bool {
@@ -1024,13 +1155,15 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	c.state.record(c.id, "QUERY "+normalized)
 
 	switch {
-	case strings.Contains(normalized, "SELECT description FROM wisps WHERE issue_type = 'agent'"):
-		return fakeDescriptionRows(c.state.agentDescriptionsLocked()), nil
+	case strings.Contains(normalized, "SELECT description FROM wisps WHERE"):
+		return fakeDescriptionRows(c.state.agentDescriptionsLocked(strings.Contains(normalized, "gt:agent"))), nil
+	case strings.Contains(normalized, "SELECT description FROM issues WHERE"):
+		return fakeDescriptionRows(c.state.issueAgentDescriptionsLocked(strings.Contains(normalized, "gt:agent"))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "created_at <"):
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeCountRows(len(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL")))), nil
+		return fakeCountRows(len(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args)))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "pm.issue_type = 'molecule'"):
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
@@ -1062,7 +1195,7 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeIDRows(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"))), nil
+		return fakeIDRows(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args))), nil
 	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "pm.issue_type = 'molecule'"):
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
