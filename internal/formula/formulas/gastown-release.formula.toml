@@ -20,13 +20,18 @@ Or assign to a crew member:
 gt sling gastown/crew/max --formula gastown-release --var version=0.3.0
 ```
 
+The release session must be crew, mayor, or refinery, never a polecat. The
+`push-release` step pushes the default branch, and a polecat session's push
+there is refused by the tap guard and the pre-push hook by design (gt-ibt8):
+polecat work lands through `gt done` -> MR -> Refinery, and that path cannot
+carry a release commit or its tag.
+
 ## Error Handling
 
 - **Crew members (with user present)**: Attempt to resolve issues (merge branches,
   commit/stash work). Ask the user if blocked.
-- **Polecats (autonomous)**: Escalate via `gt escalate` if preflight fails or
-  unrecoverable errors occur. Do not proceed with a release if workspaces have
-  uncommitted work.
+- **Escalate** via `gt escalate` if preflight fails or unrecoverable errors
+  occur. Do not proceed with a release if workspaces have uncommitted work.
 """
 formula = "gastown-release"
 type = "workflow"
@@ -84,7 +89,7 @@ done
    - Exclude from this release
 3. Only proceed when all workspaces are clean on main
 
-**For polecats (autonomous)**:
+**For an unattended session (autonomous)**:
 1. If any workspace has uncommitted work: STOP and escalate
 2. Use: `gt escalate --severity medium "Release blocked: workspace X has uncommitted work"`
 3. Do NOT proceed with release - uncommitted work would be excluded
@@ -109,7 +114,7 @@ If there are uncommitted changes:
 
 ## On failure:
 - **Crew**: Commit or stash your changes, then continue
-- **Polecat**: Escalate if you have uncommitted changes you didn't create
+- **Unattended**: Escalate if you have uncommitted changes you didn't create
 """
 
 [[steps]]
@@ -125,7 +130,7 @@ git pull --rebase
 
 ## On merge conflicts:
 - **Crew**: Resolve conflicts manually. Ask user if unsure about resolution.
-- **Polecat**: Escalate immediately. Do not attempt to resolve release-blocking
+- **Unattended**: Escalate immediately. Do not attempt to resolve release-blocking
   merge conflicts autonomously.
 """
 
@@ -225,7 +230,7 @@ Review the changes shown by the script.
 ## On failure:
 If the script fails (e.g., version already exists, format error):
 - **Crew**: Debug and fix, or ask user
-- **Polecat**: Escalate with error details
+- **Unattended**: Escalate with error details
 """
 
 [[steps]]
@@ -245,7 +250,7 @@ Both should show {{version}}.
 ## On mismatch:
 Do NOT proceed. Either the bump script failed or there's a bug.
 - **Crew**: Investigate and fix manually
-- **Polecat**: Escalate immediately - version mismatch is a release blocker
+- **Unattended**: Escalate immediately - version mismatch is a release blocker
 """
 
 [[steps]]
@@ -283,7 +288,7 @@ Verify: `git tag -l | tail -5`
 ## If tag already exists:
 The version may have been previously (partially) released.
 - **Crew**: Ask user how to proceed (delete tag and retry? use different version?)
-- **Polecat**: Escalate - do not delete existing tags autonomously
+- **Unattended**: Escalate - do not delete existing tags autonomously
 """
 
 [[steps]]
@@ -298,6 +303,12 @@ git push origin main
 git push origin v{{version}}
 ```
 
+Run this from a crew, mayor, or refinery session. A polecat session is refused
+`git push origin main` by both the tap guard and the pre-push hook (gt-ibt8),
+and rightly so - the refusal is not a bug to route around, it is the fix for
+granite's 09-17 push that skipped the MR, the Refinery gates, and the om review.
+The tag push is unaffected either way; tags are not what the guard protects.
+
 This triggers GitHub Actions to build release artifacts.
 
 Monitor: https://github.com/steveyegge/gastown/actions
@@ -305,7 +316,7 @@ Monitor: https://github.com/steveyegge/gastown/actions
 ## On push rejection:
 Someone pushed while we were releasing.
 - **Crew**: Pull, rebase, re-tag, try again. Ask user if conflicts.
-- **Polecat**: Escalate - release coordination conflict requires human decision
+- **Unattended**: Escalate - release coordination conflict requires human decision
 """
 
 [[steps]]
@@ -333,7 +344,7 @@ Should show {{version}}.
 
 ## On build failure:
 - **Crew**: Debug build error, fix, retry
-- **Polecat**: Escalate - release is pushed but local install failed
+- **Unattended**: Escalate - release is pushed but local install failed
 """
 
 [[steps]]

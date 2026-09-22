@@ -17,10 +17,16 @@ This formula orchestrates a complete release cycle:
 bd mol wisp create beads-release --var version=0.37.0
 ```
 
-Or assign to a polecat:
+Or assign to a crew member:
 ```bash
-gt sling beads/polecats/p1 --formula beads-release --var version=0.37.0
+gt sling beads/crew/max --formula beads-release --var version=0.37.0
 ```
+
+A release session must be crew, mayor, or refinery, never a polecat: the
+`push-main` step pushes the default branch, and a polecat session's push there
+is refused by the tap guard and the pre-push hook by design (gt-ibt8). Polecat
+work lands through `gt done` -> MR -> Refinery, and that path cannot carry a
+release commit or its tag.
 """
 formula = "beads-release"
 type = "workflow"
@@ -197,6 +203,11 @@ Push the release commit to origin.
 ```bash
 git push origin main
 ```
+
+Run this from a crew, mayor, or refinery session. A polecat session is refused
+here by both the tap guard and the pre-push hook (gt-ibt8), and rightly so -
+the refusal is not a bug to route around, it is the fix for granite's 09-17
+push that skipped the MR, the Refinery gates, and the om review.
 
 If rejected, someone else pushed. Pull, rebase, try again.
 """
