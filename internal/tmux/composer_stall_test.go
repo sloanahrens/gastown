@@ -246,6 +246,12 @@ func TestAnalyzeComposerStateNoBusy(t *testing.T) {
 // fakeTmuxLogging installs a tmux shim on PATH that records its argv and
 // returns canned stdout keyed by the tmux subcommand. Returns the log path.
 //
+// Each invocation is logged as one line of its arguments joined by "|", so a
+// caller can recover the exact argument vector — joining with a plain space
+// (as "$*" does) would make a single argument containing a space, such as the
+// broken "C-x C-s" form fixed by gt-rbfj, indistinguishable from two separate
+// arguments "C-x" and "C-s".
+//
 // Response value "@now" expands to the current Unix timestamp, which is what a
 // session producing output right now reports for #{window_activity}.
 func fakeTmuxLogging(t *testing.T, responses map[string]string) string {
@@ -261,7 +267,8 @@ func fakeTmuxLogging(t *testing.T, responses map[string]string) string {
 
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
-	b.WriteString(`printf '%s\n' "$*" >> "` + logPath + `"` + "\n")
+	b.WriteString(`for a in "$@"; do printf '%s|' "$a"; done >> "` + logPath + `"` + "\n")
+	b.WriteString(`printf '\n' >> "` + logPath + `"` + "\n")
 	// The subcommand is the first argument naming a tmux command; -L and its
 	// socket value, other flags, and trailing args are all ignored.
 	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
@@ -286,16 +293,21 @@ func fakeTmuxLogging(t *testing.T, responses map[string]string) string {
 }
 
 // SubmitPendingInput must send exactly the keystroke that matches the pending
-// state: ctrl+x ctrl+s for queued messages (the operator's unblock on
-// 2026-09-18) and a bare Enter for text typed into the composer.
+// state, each as its OWN send-keys argument: ctrl+x ctrl+s for queued
+// messages (the operator's unblock on 2026-09-18) and a bare Enter for text
+// typed into the composer. tmux send-keys types a single argument containing
+// a space as literal text rather than sending it as keystrokes — the gt-rbfj
+// bug — so this asserts the argument vector, not a substring of the joined
+// command line: a substring check cannot tell "C-x C-s" as one argument
+// apart from "C-x" and "C-s" as two.
 func TestSubmitPendingInputKeystrokes(t *testing.T) {
 	tests := []struct {
 		name   string
 		queued bool
-		want   string
+		want   []string
 	}{
-		{"queued uses send-now", true, "C-x C-s"},
-		{"typed text uses Enter", false, "Enter"},
+		{"queued uses send-now", true, []string{"C-x", "C-s"}},
+		{"typed text uses Enter", false, []string{"Enter"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -310,19 +322,45 @@ func TestSubmitPendingInputKeystrokes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read tmux log: %v", err)
 			}
-			got := string(logged)
-			if !strings.Contains(got, "send-keys") {
-				t.Fatalf("no send-keys invocation logged: %q", got)
+			lines := strings.Split(strings.TrimRight(string(logged), "\n"), "\n")
+			var args []string
+			for _, line := range lines {
+				fields := strings.Split(strings.TrimSuffix(line, "|"), "|")
+				for i, f := range fields {
+					if f == "send-keys" {
+						args = fields[i:]
+						break
+					}
+				}
+				if args != nil {
+					break
+				}
 			}
-			if !strings.Contains(got, tt.want) {
-				t.Errorf("logged %q, want keystroke %q", got, tt.want)
+			if args == nil {
+				t.Fatalf("no send-keys invocation logged: %q", logged)
 			}
-			other := "Enter"
-			if !tt.queued {
-				other = "C-x C-s"
+
+			// The keys are whatever follows "-t <target>".
+			idx := -1
+			for i, a := range args {
+				if a == "-t" && i+1 < len(args) {
+					idx = i + 2
+					break
+				}
 			}
-			if strings.Contains(got, other) {
-				t.Errorf("logged %q, must not send %q for this state", got, other)
+			if idx < 0 || idx > len(args) {
+				t.Fatalf("send-keys invocation has no target: %q", args)
+			}
+			got := args[idx:]
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("keys = %q, want %q", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("keys = %q, want %q", got, tt.want)
+					break
+				}
 			}
 		})
 	}

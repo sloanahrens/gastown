@@ -319,11 +319,15 @@ func analyzeComposerStateNoBusy(escContent, promptPrefix string) composerProbe {
 //     both 2026-09-18 refinery stalls, and it is a no-op when nothing is queued.
 //   - composer text: Enter, the ordinary submit.
 func (t *Tmux) SubmitPendingInput(target string, queued bool) error {
-	key := "Enter"
+	keys := []string{"Enter"}
 	if queued {
-		key = "C-x C-s"
+		// tmux send-keys takes each key as its own argument; passing "C-x C-s"
+		// as a single argument makes tmux type it as literal text instead of
+		// sending the two keystrokes (gt-rbfj).
+		keys = []string{"C-x", "C-s"}
 	}
-	if _, err := t.run("send-keys", "-t", target, key); err != nil {
+	args := append([]string{"send-keys", "-t", target}, keys...)
+	if _, err := t.run(args...); err != nil {
 		return fmt.Errorf("submitting pending input to %q: %w", target, err)
 	}
 	return nil
