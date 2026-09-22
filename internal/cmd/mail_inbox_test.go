@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/mail"
 )
 
@@ -68,6 +69,29 @@ func TestLoadInboxSnapshotUnreadOnlyFiltersAfterSingleList(t *testing.T) {
 	}
 	if messages[0].ID != "msg-1" || messages[1].ID != "msg-3" {
 		t.Fatalf("filtered messages = [%s %s], want [msg-1 msg-3]", messages[0].ID, messages[1].ID)
+	}
+}
+
+func TestLoadInboxSnapshotExcludesDeaconSelfProbes(t *testing.T) {
+	t.Parallel()
+	box := &fakeInboxLister{
+		messages: []*mail.Message{
+			{ID: "msg-1", Read: false, Subject: "hello"},
+			{ID: "msg-2", Read: false, Subject: daemon.DeaconSelfProbeSubjectPrefix + " nonce-abc"},
+		},
+	}
+
+	messages, total, unread, err := loadInboxSnapshot(box, false)
+	if err != nil {
+		t.Fatalf("loadInboxSnapshot returned error: %v", err)
+	}
+	// Counts reflect what a human/agent actually sees: the probe is a
+	// supervision signal, not part of the inbox.
+	if total != 1 || unread != 1 {
+		t.Fatalf("counts = (%d total, %d unread), want (1, 1)", total, unread)
+	}
+	if len(messages) != 1 || messages[0].ID != "msg-1" {
+		t.Fatalf("messages = %+v, want only msg-1", messages)
 	}
 }
 

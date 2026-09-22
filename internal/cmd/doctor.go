@@ -306,6 +306,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewPatrolNotStuckCheck())
 	d.Register(doctor.NewPatrolPluginsAccessibleCheck())
 	d.Register(doctor.NewPatrolPluginDriftCheck())
+	d.Register(doctor.NewDeaconSelfProbeCheck()) // Verify the deacon patrol acks an injected probe on the doctor-dog cadence (gt-jmy3)
 	d.Register(doctor.NewAgentBeadsCheck())
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())

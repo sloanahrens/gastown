@@ -120,6 +120,18 @@ func (d *Daemon) runDoctorDog() {
 	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
 }
 
+// runDeaconSelfProbe sends one probe mail into the deacon's own inbox on
+// the doctor-dog cadence (glossary "Self-probe"): a known event through
+// the deacon's real mail path, later verified by the deacon-self-probe
+// doctor check (internal/doctor.DeaconSelfProbeCheck). Code-driven, like
+// cleanupOrphanedDoltServers — sending exactly one mechanical probe per
+// cycle needs no agent judgment.
+func (d *Daemon) runDeaconSelfProbe() {
+	if err := SendDeaconSelfProbe(d.config.TownRoot); err != nil {
+		d.logger.Printf("doctor_dog: deacon self-probe send failed (non-fatal): %v", err)
+	}
+}
+
 // cleanupOrphanedDoltServers reaps orphaned test 'dolt sql-server' processes:
 // leftovers from an embedded-dolt test suite killed at its timeout, whose
 // shared/per-test server never got torn down and was reparented to
