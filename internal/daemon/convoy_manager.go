@@ -33,7 +33,76 @@ const (
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
 	convoyGracePeriod = 5 * time.Minute
+
+	// requiredStoreName is the store convoy lookups read through. Convoys are
+	// hq-* prefixed, so a close event from any rig resolves against the
+	// town-level store; without it the event poll can only skip (gt-i36h).
+	requiredStoreName = "hq"
+
+	// requiredStoreAlertKey is the stable identity of "the daemon cannot open
+	// the town store", so repeated firings record onto one escalation bead and
+	// recovery closes it (gt-vwry).
+	requiredStoreAlertKey = "daemon-convoy:required-store-unavailable"
+
+	// storeOpenRetryInitial and storeOpenRetryMax bound the backoff between
+	// attempts to open a store that would not open. A store missed while Dolt
+	// was restarting is the case that matters — it comes back on a later
+	// attempt with a fresh handle (gt-i36h).
+	storeOpenRetryInitial = 5 * time.Second
+	storeOpenRetryMax     = 5 * time.Minute
+
+	// storeRecoveryEscalationAfter is how long the town store may stay
+	// unopenable before the daemon escalates to the mayor. Reopening is silent
+	// otherwise: every convoy check is skipped and the only trace is a log
+	// line, which is how this ran unremarked until an operator read the log
+	// (gt-i36h).
+	storeRecoveryEscalationAfter = 10 * time.Minute
+
+	// missingStoreLogInterval rate-limits the degraded-mode log line. The line
+	// is written from the per-store poll path, so unthrottled it wrote one
+	// entry every few seconds for every rig — 178 of them during gt-i36h,
+	// which is itself why nobody read it.
+	missingStoreLogInterval = 5 * time.Minute
 )
+
+// storeOpenResult is one attempt to open beads stores: the stores that opened,
+// and the names that were wanted but would not open.
+//
+// The missing names are the point. A store that failed to open used to be
+// dropped from the map with no record that it had ever been wanted, so nothing
+// could retry it: the convoy manager saw a non-empty map, read it as complete,
+// and skipped convoy lookups for every event that followed — indefinitely
+// (gt-i36h).
+type storeOpenResult struct {
+	Stores  map[string]beadsdk.Storage
+	Missing []string
+}
+
+// storeRecoveryState is the manager's state for the stores it could not open.
+// The zero value means "no open attempt has confirmed the store set yet", which
+// is what makes a manager holding a partial map from daemon startup retry
+// instead of assuming completeness. Guarded by ConvoyManager.storesMu.
+type storeRecoveryState struct {
+	// confirmed is true once an open attempt returned a non-empty store set
+	// with nothing missing. Until then the opener is called whenever its
+	// backoff allows, which is how the set is completed.
+	confirmed bool
+	// missing is the names the last attempt wanted but could not open.
+	missing []string
+	// attempts counts consecutive attempts that left something outstanding; it
+	// sets the delay before the next one.
+	attempts int
+	// nextAttempt is the earliest time the opener may be called again. Its zero
+	// value means "now", so the first attempt is not delayed.
+	nextAttempt time.Time
+	// since is when the current outstanding streak began.
+	since time.Time
+	// escalated records that the streak has been escalated, so the bound fires
+	// once per streak rather than once per attempt.
+	escalated bool
+	// loggedAt rate-limits the degraded-mode log line.
+	loggedAt time.Time
+}
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
 type strandedConvoyInfo struct {
@@ -78,11 +147,26 @@ type ConvoyManager struct {
 	stores   map[string]beadsdk.Storage
 	storesMu sync.Mutex
 
-	// openStores is called lazily to open beads stores when stores is nil.
-	// This handles the case where Dolt isn't ready at daemon startup.
-	// Once stores are successfully opened, this is not called again.
-	// May be nil to disable lazy opening (stores must be provided upfront).
-	openStores func() map[string]beadsdk.Storage
+	// openStores is called to (re)open beads stores whenever the store set is
+	// not known-complete: at daemon startup when Dolt wasn't ready, and on each
+	// retry while a store an earlier attempt missed is still missing. It
+	// reports the names it wanted but could not open, which is what the retry
+	// loop works from — a store that opens on a later attempt is picked up here
+	// with a fresh handle (gt-i36h). Once the set is complete it is not called
+	// again. May be nil to disable opening (the stores provided upfront are all
+	// there will ever be).
+	openStores func() storeOpenResult
+
+	// storeRecovery tracks stores an open attempt could not open. See
+	// storeRecoveryState; guarded by storesMu.
+	storeRecovery storeRecoveryState
+
+	// escalate raises and clearEscalation closes the escalation for a town
+	// store the daemon cannot reopen. Both are wired by the daemon before
+	// Start() and read from the polling goroutine afterwards; nil disables
+	// alerting, which is the case in tests. See SetAlertHooks.
+	escalate        func(key, source, message string)
+	clearEscalation func(reason string, keys ...string)
 
 	// originBranchesCache caches each rig's origin polecat branch list for the
 	// duration of one stranded scan, so a convoy with many ready issues (or an
@@ -143,10 +227,13 @@ type ConvoyManager struct {
 // stores maps store names ("hq", rig names) to beads stores for event polling.
 // nil stores disables event-driven convoy checks (stranded scan still runs),
 // unless openStores is provided for lazy initialization.
-// openStores is called lazily if stores is nil (e.g., Dolt not ready at startup).
+// openStores completes the store set: it is called when the set is not yet
+// known-complete, which covers Dolt not being ready at daemon startup and any
+// store a previous attempt missed. It must be non-nil whenever stores may be
+// short, or the store that is missing is never retried (gt-i36h).
 // isRigParked reports whether a rig should be skipped during polling (nil = never parked).
 // gtPath is the resolved path to the gt binary for subprocess calls.
-func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), gtPath string, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() map[string]beadsdk.Storage, isRigParked func(string) bool) *ConvoyManager {
+func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), gtPath string, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	if scanInterval <= 0 {
 		scanInterval = defaultStrandedScanInterval
 	}
@@ -204,6 +291,218 @@ func (m *ConvoyManager) Stop() {
 	}
 }
 
+// SetAlertHooks wires the escalation sink used when the town store cannot be
+// reopened. The daemon passes its escalateAlert/clearAlerts so a store the
+// daemon cannot open reaches the mayor instead of only daemon.log (gt-i36h).
+// Call before Start(): the hooks are read from the polling goroutines without
+// a lock, like every other manager callback. Nil (the default) keeps the
+// manager log-only, which is what tests want.
+func (m *ConvoyManager) SetAlertHooks(escalate func(key, source, message string), clear func(reason string, keys ...string)) {
+	m.escalate = escalate
+	m.clearEscalation = clear
+}
+
+// retryMissingStores calls the opener when the store set is not known-complete
+// and its backoff has elapsed, folding whatever opens into the live map. Stores
+// already held are kept and the duplicate handle closed: a retry must not take
+// a handle away from a reader — convoyStatusOf, hasRejectionMarker — that is
+// mid-call holding it, and re-opening healthy stores every retry would churn
+// connections while Dolt is flaky.
+func (m *ConvoyManager) retryMissingStores(now time.Time) {
+	m.storesMu.Lock()
+	opener := m.openStores
+	rec := &m.storeRecovery
+	due := opener != nil && !rec.confirmed && !now.Before(rec.nextAttempt)
+	m.storesMu.Unlock()
+	if !due {
+		return
+	}
+
+	result := opener()
+
+	// The opener holds no lock while it dials Dolt (seconds when the server is
+	// slow), and the escalation below shells out to `gt escalate`, which can
+	// take minutes under load. Both stay outside storesMu, which the feeder
+	// takes on its own path.
+	m.storesMu.Lock()
+	alert := m.mergeStoreOpenResultLocked(result, now)
+	m.storesMu.Unlock()
+
+	m.deliverStoreAlert(alert)
+}
+
+// storeAlert is an escalation to raise or clear once storesMu is released.
+type storeAlert struct {
+	raise bool
+	clear bool
+	msg   string
+}
+
+// mergeStoreOpenResultLocked folds one open attempt into the live store set and
+// updates recovery state. It returns the alert to deliver once the caller has
+// released storesMu.
+func (m *ConvoyManager) mergeStoreOpenResultLocked(result storeOpenResult, now time.Time) storeAlert {
+	rec := &m.storeRecovery
+
+	reopened := 0
+	for name, store := range result.Stores {
+		if store == nil {
+			continue
+		}
+		if _, held := m.stores[name]; held {
+			// Already polling this name: keep that handle and close the
+			// duplicate so the connections it opened are not leaked.
+			if err := store.Close(); err != nil {
+				m.logger("Convoy: error closing duplicate beads store (%s): %v", name, err)
+			}
+			continue
+		}
+		if m.stores == nil {
+			m.stores = make(map[string]beadsdk.Storage, len(result.Stores))
+		}
+		m.stores[name] = store
+		reopened++
+	}
+
+	// An attempt that returns nothing at all — every open refused, or a
+	// compatibility failure that discarded a whole map — is no evidence of
+	// completeness, so only a non-empty set with nothing missing confirms it.
+	complete := len(m.stores) > 0 && len(result.Missing) == 0
+	if complete {
+		if rec.confirmed {
+			return storeAlert{}
+		}
+		alert := storeAlert{}
+		if rec.since.IsZero() {
+			m.logger("Convoy: %d beads store(s) ready", len(m.stores))
+		} else {
+			m.logger("Convoy: beads stores recovered after %s (%d store(s), %d reopened)",
+				now.Sub(rec.since).Round(time.Second), len(m.stores), reopened)
+			alert.clear = true
+		}
+		rec.confirmed = true
+		rec.missing = nil
+		rec.attempts = 0
+		rec.nextAttempt = time.Time{}
+		rec.since = time.Time{}
+		rec.escalated = false
+		rec.loggedAt = time.Time{}
+		return alert
+	}
+
+	rec.confirmed = false
+	// Keep the last known names when this attempt reported none: it learned
+	// nothing, and the names are what the log line and the escalation say.
+	if len(result.Missing) > 0 {
+		rec.missing = result.Missing
+	}
+	if rec.since.IsZero() {
+		rec.since = now
+	}
+	rec.attempts++
+	delay := storeOpenBackoff(rec.attempts)
+	rec.nextAttempt = now.Add(delay)
+
+	what := "beads"
+	if len(rec.missing) > 0 {
+		what = strings.Join(rec.missing, ", ")
+	}
+	m.logger("Convoy: %s store unavailable, retrying in %s (attempt %d)", what, delay, rec.attempts)
+
+	return m.pendingStoreAlertLocked(now)
+}
+
+// pendingStoreAlertLocked reports the escalation to raise for a town store that
+// has stayed unopenable past storeRecoveryEscalationAfter, once per streak. The
+// town store is the one that matters: without it every convoy lookup is
+// skipped, while a missing rig store costs only that rig's events.
+func (m *ConvoyManager) pendingStoreAlertLocked(now time.Time) storeAlert {
+	rec := &m.storeRecovery
+	if m.escalate == nil || rec.escalated || !m.requiredStoreMissingLocked() {
+		return storeAlert{}
+	}
+	if now.Sub(rec.since) < storeRecoveryEscalationAfter {
+		return storeAlert{}
+	}
+	rec.escalated = true
+	// One line, and short: gt escalate truncates the title at
+	// maxEscalationTitleLen, and the loss lands on whatever the sentence ends
+	// with. The launchd warning an operator needs is on the bead (gt-i36h) and
+	// in the daemon log this line points at.
+	return storeAlert{
+		raise: true,
+		msg: fmt.Sprintf(
+			"Convoy close detection is skipped town-wide: the %s store has not opened for %s. Convoy completion runs on the stranded scan alone until it does.",
+			requiredStoreName, now.Sub(rec.since).Round(time.Second)),
+	}
+}
+
+// requiredStoreMissingLocked reports whether the town store is either absent
+// from the map or named as missing by the last attempt.
+func (m *ConvoyManager) requiredStoreMissingLocked() bool {
+	if _, held := m.stores[requiredStoreName]; !held {
+		return true
+	}
+	for _, name := range m.storeRecovery.missing {
+		if name == requiredStoreName {
+			return true
+		}
+	}
+	return false
+}
+
+// deliverStoreAlert raises or clears the town-store escalation. Called with
+// storesMu released: `gt escalate` shells out, and the feeder takes that lock.
+func (m *ConvoyManager) deliverStoreAlert(alert storeAlert) {
+	switch {
+	case alert.raise && m.escalate != nil:
+		m.escalate(requiredStoreAlertKey, "daemon/convoy", alert.msg)
+	case alert.clear && m.clearEscalation != nil:
+		m.clearEscalation("town store reopened", requiredStoreAlertKey)
+	}
+}
+
+// storeOpenBackoff returns the delay before the next open attempt: exponential
+// from storeOpenRetryInitial, capped at storeOpenRetryMax. attempts is 1-based.
+func storeOpenBackoff(attempts int) time.Duration {
+	delay := storeOpenRetryInitial
+	for i := 1; i < attempts; i++ {
+		delay *= 2
+		if delay >= storeOpenRetryMax {
+			return storeOpenRetryMax
+		}
+	}
+	return delay
+}
+
+// logMissingRequiredStore reports that convoy lookups are being skipped, at
+// most once per missingStoreLogInterval. It is written from the per-store poll
+// path, which runs every few seconds for every rig, so unthrottled it was both
+// the only signal that this was happening and too noisy to read.
+func (m *ConvoyManager) logMissingRequiredStore(polled string) {
+	now := time.Now()
+	m.storesMu.Lock()
+	rec := &m.storeRecovery
+	if !rec.loggedAt.IsZero() && now.Sub(rec.loggedAt) < missingStoreLogInterval {
+		m.storesMu.Unlock()
+		return
+	}
+	rec.loggedAt = now
+	detail := ""
+	if len(rec.missing) > 0 {
+		detail = fmt.Sprintf(" (missing: %s)", strings.Join(rec.missing, ", "))
+	}
+	if retryIn := rec.nextAttempt.Sub(now); retryIn > 0 {
+		detail += fmt.Sprintf(", next reopen attempt in %s", retryIn.Round(time.Second))
+	} else if !rec.confirmed {
+		detail += ", reopen attempt in flight"
+	}
+	m.storesMu.Unlock()
+
+	m.logger("Convoy: %s store unavailable, skipping convoy lookups for %s events%s",
+		requiredStoreName, polled, detail)
+}
+
 // runEventPoll polls GetAllEventsSince every 5s and processes close events.
 // If stores aren't available at startup (e.g., Dolt not ready), retries
 // lazily via the openStores callback until stores become available.
@@ -229,24 +528,27 @@ func (m *ConvoyManager) runEventPoll() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			m.storesMu.Lock()
-			// Lazy store initialization: retry if stores not yet available
-			if len(m.stores) == 0 {
-				if m.openStores != nil {
-					m.stores = m.openStores()
-				}
-				if len(m.stores) == 0 {
-					m.storesMu.Unlock()
-					continue // still not ready, try next tick
-				}
-			}
+			// Complete the store set before deciding what to poll. A store an
+			// earlier attempt missed is retried here, with backoff, until it
+			// opens — without this the manager polls the stores it has, skips
+			// convoy lookups through the one it does not, and never asks again
+			// (gt-i36h).
+			m.retryMissingStores(time.Now())
+
 			// Take a snapshot of stores for this tick to avoid holding the
 			// lock across potentially slow network/Dolt calls.
+			m.storesMu.Lock()
 			snapshot := make(map[string]beadsdk.Storage, len(m.stores))
 			for k, v := range m.stores {
 				snapshot[k] = v
 			}
 			m.storesMu.Unlock()
+
+			if len(snapshot) == 0 {
+				// Nothing open yet. The opener is the only work there is, and
+				// retryMissingStores owns its cadence.
+				continue
+			}
 
 			hadError := m.pollStoresSnapshot(snapshot)
 			// Exponential backoff on consecutive errors to avoid hammering
@@ -356,10 +658,13 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		return nil
 	}
 
-	// Use hq store for convoy lookups (convoys are hq-* prefixed)
-	hqStore := stores["hq"]
+	// Convoy lookups read through the hq store (convoys are hq-* prefixed).
+	// Missing it, every close event in this store is uncheckable: skip, but say
+	// so at a rate an operator can read, and leave getting it back to the retry
+	// path (retryMissingStores) rather than logging this forever (gt-i36h).
+	hqStore := stores[requiredStoreName]
 	if hqStore == nil {
-		m.logger("Convoy: hq store unavailable, skipping convoy lookups for %s events", name)
+		m.logMissingRequiredStore(name)
 		return nil
 	}
 

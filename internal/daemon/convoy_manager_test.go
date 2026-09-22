@@ -539,20 +539,22 @@ exit 0
 	}
 }
 
-func TestEventPoll_LazyStoreOpening(t *testing.T) {
+func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
 
-	callCount := 0
-	opener := func() map[string]beadsdk.Storage {
-		callCount++
-		if callCount < 3 {
-			// Simulate Dolt not ready for first 2 attempts
-			return nil
-		}
-		return map[string]beadsdk.Storage{"hq": store}
+	held := &closeTrackingStorage{}
+	reopened := &closeTrackingStorage{}
+	duplicate := &closeTrackingStorage{}
+
+	calls := 0
+	opener := func() storeOpenResult {
+		calls++
+		// The retry re-opens every store it knows about, including ones already
+		// held. Dolt is up now, so hq opens where the startup walk lost it.
+		return storeOpenResult{Stores: map[string]beadsdk.Storage{
+			"gastown": duplicate,
+			"hq":      reopened,
+		}}
 	}
 
 	var logMu sync.Mutex
@@ -563,38 +565,263 @@ func TestEventPoll_LazyStoreOpening(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	// Start with nil stores but with an opener — should NOT exit immediately
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil)
+	// The daemon hands over a map that is missing hq: Dolt restarted between the
+	// walk's first store and its last, and hq is walked first (gt-i36h).
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+		map[string]beadsdk.Storage{"gastown": held}, opener, nil)
 
-	// Before any poll ticks, stores should be nil
-	if m.stores != nil {
-		t.Fatal("stores should be nil before lazy init")
+	m.retryMissingStores(time.Now())
+
+	if m.stores["hq"] != reopened {
+		t.Fatal("hq should have been adopted from the retry")
+	}
+	if m.stores["gastown"] != held {
+		t.Error("a live handle must not be replaced by a retry")
+	}
+	if !duplicate.closed {
+		t.Error("the duplicate handle for a store already held must be closed, not leaked")
+	}
+	if !m.storeRecovery.confirmed {
+		t.Errorf("a non-empty store set with nothing missing should confirm complete; logs: %v", logged)
 	}
 
-	// Simulate poll ticks — first two calls return nil, third succeeds
-	// runEventPoll's ticker calls this logic on each tick
-	for i := 0; i < 5; i++ {
-		if len(m.stores) == 0 {
-			if m.openStores != nil {
-				m.stores = m.openStores()
-			}
-			if len(m.stores) == 0 {
-				continue
-			}
+	// Confirmed is final: a complete set is not reopened however long the
+	// daemon runs.
+	m.retryMissingStores(time.Now().Add(time.Hour))
+	if calls != 1 {
+		t.Errorf("opener called %d times on a complete store set, want 1", calls)
+	}
+}
+
+func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
+	t.Parallel()
+
+	reopened := &closeTrackingStorage{}
+	missing := true
+	calls := 0
+	opener := func() storeOpenResult {
+		calls++
+		if missing {
+			// hq is the store that matters; om is a rig store riding along.
+			return storeOpenResult{Missing: []string{"hq", "om"}}
 		}
-		// If we get here, stores are ready
-		break
+		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": reopened}}
 	}
 
-	if len(m.stores) == 0 {
-		t.Fatal("stores should have been lazily opened by tick 3")
+	type firing struct{ key, source, msg string }
+	var raised []firing
+	var cleared []string
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+	m.SetAlertHooks(
+		func(key, source, msg string) { raised = append(raised, firing{key, source, msg}) },
+		func(reason string, keys ...string) { cleared = append(cleared, keys...) },
+	)
+
+	start := time.Now()
+	m.retryMissingStores(start)
+	if calls != 1 {
+		t.Fatalf("first attempt should run immediately, opener called %d times", calls)
 	}
-	if callCount != 3 {
-		t.Errorf("expected opener called 3 times, got %d", callCount)
+	if len(raised) != 0 {
+		t.Fatal("a fresh outage must not escalate before the bound")
 	}
-	if _, ok := m.stores["hq"]; !ok {
-		t.Error("expected hq store in lazily opened stores")
+
+	// A retry inside the backoff must not happen — that is what keeps a down
+	// Dolt from being hammered (and daemon.log from a line per tick per store).
+	m.retryMissingStores(start.Add(time.Second))
+	if calls != 1 {
+		t.Errorf("retry ran inside its backoff: opener called %d times", calls)
 	}
+
+	// Past the bound, with hq still unopenable, escalate once.
+	pastBound := start.Add(storeRecoveryEscalationAfter + time.Second)
+	m.retryMissingStores(pastBound)
+	if len(raised) != 1 {
+		t.Fatalf("expected one escalation past the bound, got %d", len(raised))
+	}
+	if raised[0].key != requiredStoreAlertKey {
+		t.Errorf("escalation key = %q, want %q", raised[0].key, requiredStoreAlertKey)
+	}
+	if !strings.Contains(raised[0].msg, "hq") {
+		t.Errorf("escalation should name the missing store, got: %s", raised[0].msg)
+	}
+	// gt escalate builds the title as "<source>: <message>" and truncates it, so
+	// a message that overflows loses the end of the sentence to the operator.
+	if title := len(raised[0].source) + len(": ") + len(raised[0].msg); title > maxEscalationTitleLen {
+		t.Errorf("escalation title is %d chars; gt escalate truncates at %d", title, maxEscalationTitleLen)
+	}
+
+	// The streak is already reported: it is not re-raised on every later retry.
+	m.retryMissingStores(pastBound.Add(time.Hour))
+	if len(raised) != 1 {
+		t.Errorf("the same streak raised %d escalations, want 1", len(raised))
+	}
+
+	// hq opens: the condition is over, so the escalation is cleared.
+	missing = false
+	m.retryMissingStores(pastBound.Add(2 * time.Hour))
+	if m.stores["hq"] != reopened {
+		t.Fatal("hq should have been adopted once it opened")
+	}
+	if len(cleared) != 1 || cleared[0] != requiredStoreAlertKey {
+		t.Errorf("recovery should clear %q, got %v", requiredStoreAlertKey, cleared)
+	}
+}
+
+// TestRetryMissingStores_RigStoreMissingDoesNotEscalate pins the escalation
+// scope: a rig store that will not open costs that rig's close events, not the
+// town's convoy lookups, so it is retried and logged but not escalated.
+func TestRetryMissingStores_RigStoreMissingDoesNotEscalate(t *testing.T) {
+	t.Parallel()
+
+	var raised []string
+	store := &closeTrackingStorage{}
+	opener := func() storeOpenResult {
+		return storeOpenResult{
+			Stores:  map[string]beadsdk.Storage{"hq": store},
+			Missing: []string{"om"},
+		}
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+	m.SetAlertHooks(
+		func(key, source, msg string) { raised = append(raised, key) },
+		func(reason string, keys ...string) {},
+	)
+
+	start := time.Now()
+	m.retryMissingStores(start)
+	if m.stores["hq"] != store {
+		t.Fatal("hq should be adopted even though a rig store is missing")
+	}
+	if m.storeRecovery.confirmed {
+		t.Error("a store set missing a rig store is not complete")
+	}
+
+	m.retryMissingStores(start.Add(storeRecoveryEscalationAfter + time.Hour))
+	if len(raised) != 0 {
+		t.Errorf("a missing rig store should not escalate town-wide; got %v", raised)
+	}
+}
+
+func TestStoreOpenBackoff(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, 5 * time.Second},
+		{2, 10 * time.Second},
+		{3, 20 * time.Second},
+		{4, 40 * time.Second},
+		{5, 80 * time.Second},
+		{6, 160 * time.Second},
+		{7, 5 * time.Minute},
+		{8, 5 * time.Minute},
+		{50, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := storeOpenBackoff(tc.attempts); got != tc.want {
+			t.Errorf("storeOpenBackoff(%d) = %v, want %v", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// TestStoreOpenerNeeded pins the daemon half of gt-i36h: the walk that loses hq
+// to a mid-walk Dolt restart is neither empty nor complete, and it must still
+// get the opener. Handing the opener over only when the map came up empty left
+// the partial map (five rigs, no hq) with nothing that could ever retry.
+func TestStoreOpenerNeeded(t *testing.T) {
+	t.Parallel()
+
+	stub := func() beadsdk.Storage { return &closeTrackingStorage{} }
+	cases := []struct {
+		name string
+		res  storeOpenResult
+		want bool
+	}{
+		{"nothing opened", storeOpenResult{Missing: []string{"hq", "gastown"}}, true},
+		{"opened nothing, reported nothing", storeOpenResult{}, true},
+		{"partial: hq lost mid-walk", storeOpenResult{
+			Stores:  map[string]beadsdk.Storage{"gastown": stub(), "om": stub()},
+			Missing: []string{"hq"},
+		}, true},
+		{"partial: a rig store lost", storeOpenResult{
+			Stores:  map[string]beadsdk.Storage{"hq": stub()},
+			Missing: []string{"om"},
+		}, true},
+		{"complete", storeOpenResult{
+			Stores: map[string]beadsdk.Storage{"hq": stub(), "gastown": stub()},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := storeOpenerNeeded(tc.res); got != tc.want {
+				t.Errorf("storeOpenerNeeded = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogMissingRequiredStore_IsRateLimited pins the other half of gt-i36h:
+// the skip line is written from the per-store poll path, so it fired for every
+// rig on every tick — 178 entries in a few minutes — until it was unreadable.
+func TestLogMissingRequiredStore_IsRateLimited(t *testing.T) {
+	t.Parallel()
+
+	var logMu sync.Mutex
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logMu.Lock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+		logMu.Unlock()
+	}
+
+	m := NewConvoyManager(t.TempDir(), logger, "gt", time.Hour,
+		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, nil, nil)
+	m.storeRecovery.missing = []string{"hq"}
+
+	for i := 0; i < 50; i++ {
+		m.logMissingRequiredStore("gastown")
+		m.logMissingRequiredStore("om")
+	}
+	if len(logged) != 1 {
+		t.Fatalf("expected the skip line once inside the interval, got %d: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0], "skipping convoy lookups for gastown events") {
+		t.Errorf("skip line should name the polled store: %s", logged[0])
+	}
+	if !strings.Contains(logged[0], "missing: hq") {
+		t.Errorf("skip line should name what is missing: %s", logged[0])
+	}
+
+	// Once the interval elapses, one more line is allowed through.
+	m.storesMu.Lock()
+	m.storeRecovery.loggedAt = m.storeRecovery.loggedAt.Add(-missingStoreLogInterval - time.Second)
+	m.storesMu.Unlock()
+	m.logMissingRequiredStore("gastown")
+	if len(logged) != 2 {
+		t.Fatalf("expected a line after the interval elapsed, got %d: %v", len(logged), logged)
+	}
+}
+
+// closeTrackingStorage is a Storage stub that records Close, for tests that
+// only care which handles the manager keeps and which it releases. The embedded
+// interface panics on anything else, which is what a test wants if the code
+// under test starts reading from it.
+type closeTrackingStorage struct {
+	beadsdk.Storage
+	closed bool
+	closes int
+}
+
+func (s *closeTrackingStorage) Close() error {
+	s.closed = true
+	s.closes++
+	return nil
 }
 
 func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
@@ -1836,8 +2063,8 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup() // safety net; Stop() should close first
 
-	opener := func() map[string]beadsdk.Storage {
-		return map[string]beadsdk.Storage{"hq": store}
+	opener := func() storeOpenResult {
+		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": store}}
 	}
 
 	var logged []string
@@ -1848,7 +2075,7 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil)
 
 	// Simulate lazy opening (as runEventPoll does when stores are nil)
-	m.stores = m.openStores()
+	m.retryMissingStores(time.Now())
 	if len(m.stores) != 1 {
 		t.Fatalf("expected 1 store from opener, got %d", len(m.stores))
 	}
