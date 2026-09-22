@@ -78,15 +78,25 @@ Only use mail when the message MUST survive the recipient's session death
 ## Agent Memory
 
 **Use `{{cmd}} remember`, not MEMORY.md.** Memories are stored in beads and injected
-at prime time. Do NOT use Claude Code's filesystem auto-memory (`~/.claude/*/memory/`).
+at prime time. Do NOT use Claude Code's filesystem auto-memory (`~/.claude/*/memory/`)
+— it is per-project-path and unreachable by every other agent in the town, so a
+memory written there cannot be cross-checked or even found by anyone but its author.
 
 ```bash
 {{cmd}} remember "insight"                 # Store a memory (auto-key)
 {{cmd}} remember --key my-slug "insight"   # Store with explicit key
+{{cmd}} remember --with gastown/witness "insight we established together"  # Joint memory
 {{cmd}} memories                           # List all memories
 {{cmd}} memories search-term               # Search memories
 {{cmd}} forget my-slug                     # Remove a memory
 ```
+
+`{{cmd}} remember` stamps the memory with the identity that actually ran the
+command (from BD_ACTOR, falling back to GT_ROLE) — not free text you type — so
+the attribution cannot drift from who really established it. If a memory was
+established jointly with another agent, name them with `--with` instead of
+writing "X and I" into the body; otherwise the stored attribution names only
+you even though the content reads as joint (gt-04h).
 
 ### War room
 Active incidents tracked in `mayor/DOLT-WAR-ROOM.md`. Full escalation protocol

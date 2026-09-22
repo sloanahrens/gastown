@@ -281,6 +281,7 @@ filesystem auto-memory. **Do NOT write to `~/.claude/*/memory/`.**
 {{ cmd }} remember "insight"                       # Store (auto-key)
 {{ cmd }} remember --key my-slug "insight"          # Store with explicit key
 {{ cmd }} remember --type feedback "don't do X"     # Store typed memory
+{{ cmd }} remember --with gastown/witness "insight we established together"  # Joint memory
 {{ cmd }} memories                                  # List all
 {{ cmd }} memories search-term                      # Search
 {{ cmd }} forget my-slug                            # Remove
@@ -289,6 +290,13 @@ filesystem auto-memory. **Do NOT write to `~/.claude/*/memory/`.**
 **Why this matters:** `{{ cmd }} remember` stores memories in Dolt, shared across
 all agents in the town, injected at prime time. Claude Code's MEMORY.md files
 are per-project-path, invisible to other agents, and not injected at prime.
+
+**Attribution is machine-set, not free text.** `{{ cmd }} remember` stamps the
+memory with the identity that actually ran the command (BD_ACTOR, falling back
+to GT_ROLE) — you cannot type a different attribution into the content and
+have it stick. For a memory two or more agents established together, name the
+others with `--with` instead of writing "X and I" into the body; otherwise the
+stored tag names only you even though the content reads as joint (gt-04h).
 
 **What to save** (types: `feedback`, `project`, `user`, `reference`, `general`):
 - **feedback**: User corrections or confirmed approaches — saves repeat guidance
