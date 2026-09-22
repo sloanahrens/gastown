@@ -427,39 +427,45 @@ func upgradeFormulas(townRoot string) upgradeResult {
 		return result
 	}
 
-	updated, skipped, reinstalled, err := formula.UpdateFormulas(townRoot)
+	plan, err := formula.UpdateFormulas(townRoot)
 	if err != nil {
 		result.details = append(result.details, fmt.Sprintf("update error: %v", err))
 		fmt.Printf("     %s Could not update formulas: %v\n", style.ErrorPrefix, err)
 		return result
 	}
 
-	result.changed = updated + reinstalled
-	result.skipped = skipped
+	result.changed = plan.Changed()
+	result.skipped = len(plan.SkippedModified())
 
 	if result.changed == 0 && result.skipped == 0 {
-		// Check total count for display
-		report, _ := formula.CheckFormulaHealth(townRoot)
-		count := 0
-		if report != nil {
-			count = report.OK + report.Modified
-		}
-		fmt.Printf("     %s %d formulas %s\n", style.SuccessPrefix, count, style.Dim.Render("up-to-date"))
+		fmt.Printf("     %s %d formulas %s\n", style.SuccessPrefix, plan.UpToDate(), style.Dim.Render("up-to-date"))
 		return result
 	}
 
 	var parts []string
-	if updated > 0 {
-		parts = append(parts, fmt.Sprintf("%d updated", updated))
+	if n := len(plan.Installed()); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d installed", n))
 	}
-	if reinstalled > 0 {
-		parts = append(parts, fmt.Sprintf("%d reinstalled", reinstalled))
+	if n := len(plan.Updated()); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d updated", n))
 	}
-	if skipped > 0 {
-		parts = append(parts, fmt.Sprintf("%d skipped (modified)", skipped))
+	if n := len(plan.Reinstalled()); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d reinstalled", n))
 	}
 
 	fmt.Printf("     %s formulas: %s\n", style.SuccessPrefix, style.Dim.Render(strings.Join(parts, ", ")))
+
+	// Name the hand-edited copies. 'gt upgrade' is the command a rebuild runs,
+	// so a silent skip here is how a formula fix goes missing for weeks (gt-dt7r).
+	if skipped := plan.SkippedModified(); len(skipped) > 0 {
+		result.details = append(result.details, fmt.Sprintf("%d hand-edited, NOT delivered", len(skipped)))
+		fmt.Printf("     %s %d formulas were NOT delivered — hand-edited town copies sync will not overwrite:\n",
+			style.WarningPrefix, len(skipped))
+		for _, name := range skipped {
+			fmt.Printf("       %s\n", name)
+		}
+		fmt.Printf("       Run %s to see them and the fix.\n", style.Dim.Render("gt formula sync --dry-run"))
+	}
 
 	return result
 }

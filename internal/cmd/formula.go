@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"text/template"
@@ -19,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -35,6 +39,10 @@ var (
 	formulaRunFiles   []string
 	formulaRunSet     []string
 	formulaCreateType string
+
+	formulaSyncDryRun bool
+	formulaSyncForce  bool
+	formulaSyncJSON   bool
 )
 
 var formulaCmd = &cobra.Command{
@@ -145,21 +153,24 @@ var formulaSyncCmd = &cobra.Command{
 	Long: `Sync updates the town's on-disk formulas ($GT_ROOT/.beads/formulas/) to
 match the formulas embedded in this gt binary.
 
-Installing or rebuilding gt does NOT update on-disk formulas — the binary
-only carries the new formula content, and nothing copies it out until
-something calls sync. Formula fixes merged to origin/main sit undelivered
-until a sync runs.
+Delivery is two-staged and this is only the second stage: a formula fix merged
+to origin/main reaches the town only after gt is rebuilt (the fix ships inside
+the binary) and this command runs. Sync therefore delivers the formulas of the
+binary that runs it, and reports the commit they came from plus any formula
+files that changed on the build branch since, so a "synced" line is never read
+as "current".
 
-Sync is idempotent and version-aware:
-  - Formulas the user has customized (locally modified) are never overwritten.
-  - Formulas that are outdated, untracked, or missing are updated/reinstalled.
-  - Formulas already matching the embedded version are left alone.
-
-Run this by hand after a rebuild, or rely on the rebuild-gt plugin, which
-runs it automatically after every successful install.
+A town copy that has been hand-edited since the last install is not
+overwritten: sync names it, because the embedded content for that formula is
+now undelivered. Customize through an overlay instead
+(gt formula overlay --help); --force takes the embedded content anyway and
+backs the edited copy up under .beads/formulas/.bak/.
 
 Examples:
-  gt formula sync            # Sync $GT_ROOT/.beads/formulas from the current binary`,
+  gt formula sync                 # Sync $GT_ROOT/.beads/formulas from this binary
+  gt formula sync --dry-run       # Report what a sync would do, write nothing
+  gt formula sync --json          # Machine-readable report
+  gt formula sync --force         # Overwrite hand-edited copies (backed up first)`,
 	Args: cobra.NoArgs,
 	RunE: runFormulaSync,
 }
@@ -199,6 +210,11 @@ func init() {
 	formulaRunCmd.Flags().StringVar(&formulaRunAgent, "agent", "", "Override agent/runtime for all legs (e.g., gemini, codex, claude-haiku)")
 	formulaRunCmd.Flags().StringSliceVar(&formulaRunFiles, "files", nil, "Files to pass to formula legs (available as {{.files}} in templates)")
 	formulaRunCmd.Flags().StringSliceVar(&formulaRunSet, "set", nil, "Set input variables as key=value pairs (available as {{.key}} in templates)")
+
+	// Sync flags
+	formulaSyncCmd.Flags().BoolVar(&formulaSyncDryRun, "dry-run", false, "Report what a sync would do without writing anything")
+	formulaSyncCmd.Flags().BoolVar(&formulaSyncForce, "force", false, "Overwrite hand-edited town copies too, backing them up first")
+	formulaSyncCmd.Flags().BoolVar(&formulaSyncJSON, "json", false, "Output as JSON")
 
 	// Create flags
 	formulaCreateCmd.Flags().StringVar(&formulaCreateType, "type", "task", "Formula type: task, workflow, or patrol")
@@ -342,25 +358,235 @@ func runFormulaSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("syncing formulas: %w", err)
 	}
-	fmt.Println(msg)
+	// The summary carries its own trailing newline; --json must not get one added.
+	fmt.Print(msg)
 	return nil
 }
 
-// formulaSyncMessage runs formula.UpdateFormulas against townRoot and
-// formats a human-readable summary of the result. Split out from
-// runFormulaSync so the summary logic is testable without a real workspace.
+// formulaSyncMessage runs the formula sync against townRoot and formats a
+// human-readable summary. Split out from runFormulaSync so the summary logic is
+// testable without a real workspace.
 func formulaSyncMessage(townRoot string) (string, error) {
-	updated, skipped, reinstalled, err := formula.UpdateFormulas(townRoot)
+	report, err := buildFormulaSyncReport(townRoot)
 	if err != nil {
 		return "", err
 	}
+	if formulaSyncJSON {
+		out, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
+	}
+	return formatFormulaSyncReport(report), nil
+}
 
-	if updated == 0 && skipped == 0 && reinstalled == 0 {
-		return fmt.Sprintf("%s Formulas already up to date.", style.Bold.Render("✓")), nil
+// formulaSyncReport is the whole of what a sync found and did. It exists as a
+// struct so --json and the human summary can never disagree about the outcome.
+type formulaSyncReport struct {
+	DryRun      bool     `json:"dry_run"`
+	Forced      bool     `json:"forced"`
+	Installed   []string `json:"installed"`
+	Updated     []string `json:"updated"`
+	Reinstalled []string `json:"reinstalled"`
+	UpToDate    int      `json:"up_to_date"`
+
+	// Skipped is the load-bearing field: each name here has embedded content the
+	// town never received.
+	Skipped []string `json:"skipped_locally_modified"`
+	// Superseded is the subset of hand-edited copies whose embedded content is
+	// newer than the last install, i.e. a merged fix sitting inert behind a hand
+	// edit. It includes copies --force overwrote, which report under BackedUp.
+	Superseded []string `json:"hand_edited_hiding_newer_content"`
+
+	// BackedUp lists the hand-edited copies --force displaced, and where to.
+	BackedUp map[string]string `json:"backed_up,omitempty"`
+
+	BinaryVersion string   `json:"binary_version"`
+	BinaryCommit  string   `json:"binary_commit"`
+	BuiltAt       string   `json:"built_at,omitempty"`
+	CompareRef    string   `json:"binary_compare_ref,omitempty"`
+	CommitsBehind int      `json:"binary_commits_behind"`
+	DriftFiles    []string `json:"formula_files_changed_on_build_branch,omitempty"`
+	DriftChecked  bool     `json:"formula_drift_checked"`
+	DriftReason   string   `json:"formula_drift_unchecked_reason,omitempty"`
+}
+
+// buildFormulaSyncReport runs the sync (or its dry run) and collects the
+// embedded-content provenance a "synced" line cannot stand without.
+func buildFormulaSyncReport(townRoot string) (*formulaSyncReport, error) {
+	opts := formula.SyncOptions{DryRun: formulaSyncDryRun, Force: formulaSyncForce}
+	plan, err := formula.SyncFormulas(townRoot, opts)
+	if err != nil {
+		return nil, err
 	}
 
-	return fmt.Sprintf("%s Synced formulas: %d updated, %d reinstalled, %d skipped (locally modified)",
-		style.Bold.Render("✓"), updated, reinstalled, skipped), nil
+	report := &formulaSyncReport{
+		DryRun:        formulaSyncDryRun,
+		Forced:        formulaSyncForce,
+		Installed:     emptyIfNil(plan.Installed()),
+		Updated:       emptyIfNil(plan.Updated()),
+		Reinstalled:   emptyIfNil(plan.Reinstalled()),
+		UpToDate:      plan.UpToDate(),
+		Skipped:       emptyIfNil(plan.SkippedModified()),
+		Superseded:    emptyIfNil(plan.Superseded()),
+		BinaryVersion: Version,
+		BinaryCommit:  version.ShortCommit(Commit),
+		BuiltAt:       BuildTime,
+	}
+	if len(plan.ForceOverwritten()) > 0 {
+		report.BackedUp = backedUpPaths(townRoot)
+	}
+
+	fillFormulaDrift(report)
+	return report, nil
+}
+
+// fillFormulaDrift records whether formula fixes merged on the build branch are
+// missing from this binary. A sync cannot deliver those — only a rebuild can —
+// so the report has to say it or "synced" reads as "current" (gt-dt7r).
+func fillFormulaDrift(report *formulaSyncReport) {
+	repoDir, err := version.GetRepoRoot()
+	if err != nil {
+		// No source checkout: drift is unknowable, not absent.
+		report.DriftReason = err.Error()
+		return
+	}
+	drift := version.CheckEmbeddedFormulaDrift(repoDir)
+	report.DriftChecked = drift.Checked
+	report.DriftFiles = drift.Files
+	report.CompareRef = drift.CompareRef
+	report.CommitsBehind = drift.CommitsBehind
+	if !drift.Checked {
+		report.DriftReason = drift.Reason
+	}
+}
+
+// emptyIfNil keeps --json field types stable: a caller parsing this output gets
+// [] for "none" rather than null.
+func emptyIfNil(names []string) []string {
+	if names == nil {
+		return []string{}
+	}
+	return names
+}
+
+// backedUpPaths maps each displaced formula to where its previous copy now
+// lives, so the summary can point at what a --force overwrite moved aside.
+func backedUpPaths(townRoot string) map[string]string {
+	records, err := formula.ReadForceBackupManifest(townRoot)
+	if err != nil || len(records) == 0 {
+		return nil
+	}
+	backedUp := make(map[string]string, len(records))
+	for _, rec := range records {
+		backedUp[rec.Formula] = rec.Path
+	}
+	return backedUp
+}
+
+// formatFormulaSyncReport renders the human summary. Skipped formulas are the
+// reason this is not a one-line command: each one is a fix the town is not running.
+func formatFormulaSyncReport(r *formulaSyncReport) string {
+	var b strings.Builder
+
+	var parts []string
+	if n := len(r.Installed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d installed", n))
+	}
+	if n := len(r.Updated); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d updated", n))
+	}
+	if n := len(r.Reinstalled); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d reinstalled", n))
+	}
+	parts = append(parts, fmt.Sprintf("%d already current", r.UpToDate))
+
+	switch {
+	case r.DryRun:
+		fmt.Fprintf(&b, "%s formulas sync would write: %s\n", style.Dim.Render("[dry-run]"), strings.Join(parts, ", "))
+	case r.Changed() == 0 && len(r.Skipped) == 0:
+		fmt.Fprintf(&b, "%s Formulas already up to date (%s).\n",
+			style.Bold.Render("✓"), style.Dim.Render(fmt.Sprintf("%d formulas, from %s", r.UpToDate, r.binaryProvenance())))
+	default:
+		fmt.Fprintf(&b, "%s Synced formulas: %s\n", style.Bold.Render("✓"), strings.Join(parts, ", "))
+	}
+
+	if len(r.Skipped) > 0 {
+		fmt.Fprintf(&b, "\n%s %d formulas NOT delivered — the town copy has a hand edit, so sync will not overwrite it:\n",
+			style.WarningPrefix, len(r.Skipped))
+		for _, name := range r.Skipped {
+			note := "local edit preserved"
+			if slices.Contains(r.Superseded, name) {
+				note = "blocks NEWER formula content in this binary"
+			}
+			fmt.Fprintf(&b, "      %-36s %s\n", name, style.Warning.Render(note))
+		}
+		fmt.Fprint(&b, "  For each of these the formula the town reads is not the formula this binary\n")
+		fmt.Fprint(&b, "  shipped, so every fix merged into it is silently inert. Recover by moving the\n")
+		fmt.Fprint(&b, "  customization to an overlay, then deleting the town copy:\n")
+		fmt.Fprint(&b, "      gt formula overlay edit <name>   # ~/gt/formula-overlays/<name>.toml\n")
+		fmt.Fprintf(&b, "  Or take the embedded content anyway with 'gt formula sync --force', which backs\n")
+		fmt.Fprintf(&b, "  the edited copies up under %s.\n", style.Dim.Render(".beads/formulas/.bak/"))
+	}
+
+	if len(r.BackedUp) > 0 {
+		fmt.Fprintf(&b, "\n%s %d hand-edited formulas were overwritten; the previous copies are at:\n",
+			style.WarningPrefix, len(r.BackedUp))
+		for _, name := range slices.Sorted(maps.Keys(r.BackedUp)) {
+			fmt.Fprintf(&b, "      %s  %s\n", name, style.Dim.Render(r.BackedUp[name]))
+		}
+	}
+
+	fmt.Fprintf(&b, "\n  Embedded formulas come from this binary: %s.\n", r.binaryProvenance())
+	switch {
+	case !r.DriftChecked:
+		fmt.Fprintf(&b, "  Whether the build branch has newer formula content is UNKNOWN: %s\n",
+			style.Dim.Render(r.DriftReason))
+	case len(r.DriftFiles) > 0:
+		fmt.Fprintf(&b, "%s %s, and %d formula file(s) changed there since this build:\n",
+			style.WarningPrefix, r.behindPhrase(), len(r.DriftFiles))
+		for _, f := range r.DriftFiles {
+			fmt.Fprintf(&b, "      %s\n", f)
+		}
+		fmt.Fprint(&b, "  Those fixes are NOT in this binary, so this sync cannot deliver them.\n")
+		fmt.Fprint(&b, "  Rebuild and install gt, then run 'gt formula sync' again.\n")
+	default:
+		fmt.Fprintf(&b, "  No formula file changed on %s since this build, so nothing is pending.\n",
+			style.Dim.Render(r.CompareRef))
+	}
+
+	return b.String()
+}
+
+// Changed reports the number of formula files this sync wrote (or would write).
+func (r *formulaSyncReport) Changed() int {
+	return len(r.Installed) + len(r.Updated) + len(r.Reinstalled)
+}
+
+// binaryProvenance names the gt build whose embedded formulas were delivered.
+func (r *formulaSyncReport) binaryProvenance() string {
+	commit := r.BinaryCommit
+	if commit == "" {
+		commit = "unknown commit"
+	}
+	s := fmt.Sprintf("gt %s (%s", r.BinaryVersion, commit)
+	if r.BuiltAt != "" {
+		s += ", built " + r.BuiltAt
+	}
+	return s + ")"
+}
+
+// behindPhrase describes the gap to the build branch, on the branch's own terms.
+func (r *formulaSyncReport) behindPhrase() string {
+	ref := r.CompareRef
+	if ref == "" {
+		ref = "the build branch"
+	}
+	if r.CommitsBehind > 0 {
+		return fmt.Sprintf("this binary is %d commits behind %s", r.CommitsBehind, ref)
+	}
+	return fmt.Sprintf("this binary is behind %s", ref)
 }
 
 // dryRunFormula shows what would happen without executing

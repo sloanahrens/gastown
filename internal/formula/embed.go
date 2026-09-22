@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // Formulas live in internal/formula/formulas/ (source of truth).
@@ -305,87 +307,301 @@ func CheckFormulaHealth(beadsPath string) (*HealthReport, error) {
 	return report, nil
 }
 
-// UpdateFormulas updates formulas that are safe to update (outdated, missing, or untracked).
-// Skips user-modified formulas (tracked files that user changed).
-// Returns counts of updated, skipped (modified), and reinstalled (missing).
-func UpdateFormulas(beadsPath string) (updated, skipped, reinstalled int, err error) {
+// SyncAction is what a sync does with one formula's town copy.
+type SyncAction string
+
+const (
+	// SyncUpToDate: the town copy already matches the embedded content.
+	SyncUpToDate SyncAction = "up-to-date"
+	// SyncUpdate: the town copy is unmodified but older than the embedded content.
+	SyncUpdate SyncAction = "update"
+	// SyncReinstall: the town copy was deleted; the embedded content is written back.
+	SyncReinstall SyncAction = "reinstall"
+	// SyncInstall: no town copy ever existed; this is the first write of it.
+	SyncInstall SyncAction = "install"
+	// SyncSkipModified: the town copy was hand-edited, so sync will not overwrite
+	// it and the embedded content goes undelivered until that is resolved.
+	SyncSkipModified SyncAction = "skip-modified"
+	// SyncForceOverwrite: the town copy was hand-edited and opts.Force replaced
+	// it with the embedded content, after backing the edit up.
+	SyncForceOverwrite SyncAction = "force-overwrite"
+)
+
+// SyncEntry is one formula's disposition in a SyncPlan.
+type SyncEntry struct {
+	Name   string
+	Action SyncAction
+	// Superseded is true when the embedded content also moved past what the last
+	// install recorded, so the blocked copy is hiding a newer formula rather than
+	// only preserving a local edit.
+	Superseded bool
+}
+
+// SyncPlan is what a sync did, or would do, to the town's formula copies.
+type SyncPlan struct {
+	Entries []SyncEntry
+}
+
+// names returns the names of every entry with the given action.
+func (p *SyncPlan) names(action SyncAction) []string {
+	var out []string
+	for _, e := range p.Entries {
+		if e.Action == action {
+			out = append(out, e.Name)
+		}
+	}
+	return out
+}
+
+// Updated returns the formulas rewritten because the embedded content moved ahead.
+func (p *SyncPlan) Updated() []string { return p.names(SyncUpdate) }
+
+// Reinstalled returns the formulas rewritten because the town copy was deleted.
+func (p *SyncPlan) Reinstalled() []string { return p.names(SyncReinstall) }
+
+// Installed returns the formulas the town had no copy of at all.
+func (p *SyncPlan) Installed() []string { return p.names(SyncInstall) }
+
+// SkippedModified returns the formulas sync refused to overwrite. Their embedded
+// content is not on disk, so any fix merged into it is undelivered.
+func (p *SyncPlan) SkippedModified() []string { return p.names(SyncSkipModified) }
+
+// Superseded returns the hand-edited formulas whose embedded content also moved
+// past the last install, i.e. copies hiding a newer formula, not just a local edit.
+func (p *SyncPlan) Superseded() []string {
+	var out []string
+	for _, e := range p.Entries {
+		if e.Superseded && (e.Action == SyncSkipModified || e.Action == SyncForceOverwrite) {
+			out = append(out, e.Name)
+		}
+	}
+	return out
+}
+
+// ForceOverwritten returns the hand-edited formulas --force replaced.
+func (p *SyncPlan) ForceOverwritten() []string { return p.names(SyncForceOverwrite) }
+
+// UpToDate returns the count of formulas already matching the embedded content.
+func (p *SyncPlan) UpToDate() int {
+	return len(p.names(SyncUpToDate))
+}
+
+// Changed returns the count of formulas written (installed + updated + reinstalled).
+func (p *SyncPlan) Changed() int {
+	return len(p.Installed()) + len(p.Updated()) + len(p.Reinstalled())
+}
+
+// SyncOptions tunes what a sync is allowed to do.
+type SyncOptions struct {
+	// DryRun classifies every formula without writing anything.
+	DryRun bool
+	// Force overwrites hand-edited copies too, backing each one up first.
+	Force bool
+}
+
+// PlanFormulaSync classifies every embedded formula against the town's copy
+// without writing anything, so a caller can inspect the sync before running it.
+func PlanFormulaSync(beadsPath string) (*SyncPlan, error) {
+	return SyncFormulas(beadsPath, SyncOptions{DryRun: true})
+}
+
+// SyncFormulas updates town formula copies from the embedded set and returns the
+// plan it executed. Copies the user has edited since the last install are left
+// alone unless opts.Force is set; see SyncSkipModified.
+func SyncFormulas(beadsPath string, opts SyncOptions) (*SyncPlan, error) {
 	embedded, err := getEmbeddedFormulas()
 	if err != nil {
-		return 0, 0, 0, err
+		return nil, err
 	}
 
 	formulasDir := filepath.Join(beadsPath, ".beads", "formulas")
-	if err := os.MkdirAll(formulasDir, 0755); err != nil {
-		return 0, 0, 0, fmt.Errorf("creating formulas directory: %w", err)
+	if !opts.DryRun {
+		if err := os.MkdirAll(formulasDir, 0755); err != nil {
+			return nil, fmt.Errorf("creating formulas directory: %w", err)
+		}
 	}
 
 	installed, err := loadInstalledRecord(formulasDir)
 	if err != nil {
-		return 0, 0, 0, err
+		return nil, err
 	}
 
-	for filename, embeddedHash := range embedded {
+	plan := &SyncPlan{}
+	var backups []BackupRecord
+
+	// Sorted iteration: a sync writes files and rewrites .installed.json, so a
+	// stable order keeps the record diffable across runs.
+	for _, filename := range sortedNames(embedded) {
+		embeddedHash := embedded[filename]
 		installedHash, wasInstalled := installed.Formulas[filename]
 		destPath := filepath.Join(formulasDir, filename)
 		currentHash, fileErr := computeFileHash(destPath)
 
-		shouldInstall := false
-		isMissing := false
-		isModified := false
+		// superseded marks the cases where the embedded content also moved past
+		// what the last install recorded, so the copy on disk is hiding a newer
+		// formula rather than only preserving a local edit.
+		superseded := embeddedHash != installedHash
 
-		if os.IsNotExist(fileErr) {
-			// File doesn't exist - install it
-			shouldInstall = true
-			if wasInstalled {
-				isMissing = true
-			}
-		} else if fileErr != nil {
-			// Error reading file, skip
+		var action SyncAction
+		switch {
+		case os.IsNotExist(fileErr) && wasInstalled:
+			action = SyncReinstall
+		case os.IsNotExist(fileErr):
+			action = SyncInstall
+		case fileErr != nil:
+			// Unreadable copy: sync has nothing safe to do with it.
 			continue
-		} else if currentHash == embeddedHash {
-			// Already up to date
-			continue
-		} else if wasInstalled && currentHash == installedHash {
-			// User hasn't modified, safe to update
-			shouldInstall = true
-		} else if wasInstalled {
-			// Tracked file was modified by user - skip
-			isModified = true
-		} else {
-			// Untracked file (e.g., from older gt version) - safe to update
-			shouldInstall = true
+		case currentHash == embeddedHash:
+			action = SyncUpToDate
+		case wasInstalled && currentHash == installedHash:
+			// Unmodified since install, safe to update.
+			action = SyncUpdate
+		case wasInstalled && opts.Force:
+			// Hand-edited since install, overwritten on request.
+			action = SyncForceOverwrite
+		case wasInstalled:
+			// Hand-edited since install: refuse.
+			action = SyncSkipModified
+		default:
+			// Exists but untracked (e.g. from an older gt): safe to update.
+			action = SyncUpdate
 		}
 
-		if isModified {
-			skipped++
+		if action == SyncSkipModified {
+			plan.Entries = append(plan.Entries, SyncEntry{
+				Name:       filename,
+				Action:     action,
+				Superseded: superseded,
+			})
 			continue
 		}
 
-		if shouldInstall {
-			content, err := formulasFS.ReadFile("formulas/" + filename)
+		if action == SyncUpToDate || opts.DryRun {
+			plan.Entries = append(plan.Entries, SyncEntry{Name: filename, Action: action})
+			continue
+		}
+
+		content, err := formulasFS.ReadFile("formulas/" + filename)
+		if err != nil {
+			return plan, fmt.Errorf("reading %s: %w", filename, err)
+		}
+
+		if action == SyncForceOverwrite {
+			backup, err := backupFormulaFile(formulasDir, destPath, filename)
 			if err != nil {
-				return updated, skipped, reinstalled, fmt.Errorf("reading %s: %w", filename, err)
+				return plan, err
 			}
+			backups = append(backups, backup)
+		}
 
-			if err := os.WriteFile(destPath, content, 0644); err != nil {
-				return updated, skipped, reinstalled, fmt.Errorf("writing %s: %w", filename, err)
-			}
+		if err := os.WriteFile(destPath, content, 0644); err != nil {
+			return plan, fmt.Errorf("writing %s: %w", filename, err)
+		}
+		installed.Formulas[filename] = embeddedHash
+		plan.Entries = append(plan.Entries, SyncEntry{Name: filename, Action: action, Superseded: superseded})
+	}
 
-			// Update installed record
-			installed.Formulas[filename] = embeddedHash
+	if opts.DryRun {
+		return plan, nil
+	}
 
-			if isMissing {
-				reinstalled++
-			} else {
-				updated++
-			}
+	if err := saveInstalledRecord(formulasDir, installed); err != nil {
+		return plan, fmt.Errorf("saving installed record: %w", err)
+	}
+	if err := saveBackupManifest(formulasDir, backups); err != nil {
+		return plan, err
+	}
+
+	return plan, nil
+}
+
+// UpdateFormulas syncs with default options: hand-edited copies are preserved.
+func UpdateFormulas(beadsPath string) (*SyncPlan, error) {
+	return SyncFormulas(beadsPath, SyncOptions{})
+}
+
+// BackupRecord names a hand-edited formula copy that --force displaced.
+type BackupRecord struct {
+	Formula string
+	Path    string
+}
+
+// backupDirName is where --force parks displaced copies, alongside the live ones.
+const backupDirName = ".bak"
+
+// backupFormulaFile copies a hand-edited town formula aside before --force
+// overwrites it, so an overwrite is recoverable rather than destructive.
+func backupFormulaFile(formulasDir, destPath, filename string) (BackupRecord, error) {
+	dir := filepath.Join(formulasDir, backupDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return BackupRecord{}, fmt.Errorf("creating backup directory: %w", err)
+	}
+	content, err := os.ReadFile(destPath) //nolint:gosec // G304: path is inside the town formulas dir
+	if err != nil {
+		return BackupRecord{}, fmt.Errorf("reading %s to back it up: %w", filename, err)
+	}
+	backupPath := filepath.Join(dir, filename)
+	if err := os.WriteFile(backupPath, content, 0644); err != nil {
+		return BackupRecord{}, fmt.Errorf("backing up %s: %w", filename, err)
+	}
+	return BackupRecord{Formula: filename, Path: backupPath}, nil
+}
+
+// backupManifestName records what the last displacing --force sync overwrote, so
+// a later reader can find a hand edit that is no longer in the live copy.
+const backupManifestName = "last-force-sync.txt"
+
+// ReadForceBackupManifest returns the copies the last displacing --force sync
+// moved aside. An empty result means no force sync has displaced anything.
+func ReadForceBackupManifest(beadsPath string) ([]BackupRecord, error) {
+	path := filepath.Join(beadsPath, ".beads", "formulas", backupDirName, backupManifestName)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: fixed path under the given root
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup manifest: %w", err)
+	}
+
+	var records []BackupRecord
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		formula, backupPath, ok := strings.Cut(line, "\t")
+		if ok && formula != "" {
+			records = append(records, BackupRecord{Formula: formula, Path: backupPath})
 		}
 	}
+	return records, nil
+}
 
-	// Save updated installed record
-	if err := saveInstalledRecord(formulasDir, installed); err != nil {
-		return updated, skipped, reinstalled, fmt.Errorf("saving installed record: %w", err)
+// saveBackupManifest records the displaced-copy list. A sync that displaced
+// nothing leaves the previous manifest alone: its backups are still on disk, and
+// dropping the pointer would strand them.
+func saveBackupManifest(formulasDir string, backups []BackupRecord) error {
+	if len(backups) == 0 {
+		return nil
 	}
 
-	return updated, skipped, reinstalled, nil
+	dir := filepath.Join(formulasDir, backupDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating backup directory: %w", err)
+	}
+
+	var b strings.Builder
+	for _, rec := range backups {
+		fmt.Fprintf(&b, "%s\t%s\n", rec.Formula, rec.Path)
+	}
+	if err := os.WriteFile(filepath.Join(dir, backupManifestName), []byte(b.String()), 0644); err != nil {
+		return fmt.Errorf("writing backup manifest: %w", err)
+	}
+	return nil
+}
+
+// sortedNames returns the map's keys in lexical order.
+func sortedNames(m map[string]string) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

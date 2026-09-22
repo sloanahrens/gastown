@@ -23,6 +23,9 @@ var (
 	// BuiltProperly is set to "1" by `make build`. If empty, the binary was built
 	// with raw `go build` and is likely unsigned (will be killed on macOS).
 	BuiltProperly = ""
+	// BuildTime is the UTC build timestamp stamped by `make build`; empty on any
+	// other build, so callers must treat it as optional.
+	BuildTime = ""
 )
 
 var versionVerbose bool

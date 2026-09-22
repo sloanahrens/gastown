@@ -47,9 +47,16 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Build details
+	// Build details. A hand-edited copy is reported as its own kind of finding:
+	// it shortens the message instead of lengthening it, and it leaves the
+	// doctor clean only if nobody ever reads it, so say it and say why.
+	//
+	// "modified" is not fixable here — --fix must not overwrite a user's edits
+	// — but it is never benign. While the edited copy stands, the formula
+	// content embedded in this binary reaches nobody (gt-dt7r).
 	var details []string
 	var needsFix bool
+	var modified []string
 
 	for _, f := range report.Formulas {
 		switch f.Status {
@@ -60,7 +67,12 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 			details = append(details, fmt.Sprintf("  %s: missing (will reinstall)", f.Name))
 			needsFix = true
 		case "modified":
-			details = append(details, fmt.Sprintf("  %s: locally modified (skipping)", f.Name))
+			blocked := "preserving a local edit"
+			if f.EmbeddedHash != f.InstalledHash {
+				blocked = "blocking newer content this binary carries"
+			}
+			details = append(details, fmt.Sprintf("  %s: hand-edited (%s, NOT delivered)", f.Name, blocked))
+			modified = append(modified, f.Name)
 		case "new":
 			details = append(details, fmt.Sprintf("  %s: new formula available", f.Name))
 			needsFix = true
@@ -72,7 +84,7 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Determine status
 	status := StatusOK
-	if needsFix {
+	if needsFix || len(modified) > 0 {
 		status = StatusWarning
 	}
 
@@ -91,7 +103,7 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 		parts = append(parts, fmt.Sprintf("%d untracked", report.Untracked))
 	}
 	if report.Modified > 0 {
-		parts = append(parts, fmt.Sprintf("%d modified", report.Modified))
+		parts = append(parts, fmt.Sprintf("%d hand-edited, embedded content undelivered", report.Modified))
 	}
 
 	message := fmt.Sprintf("Formulas: %s", strings.Join(parts, ", "))
@@ -103,28 +115,22 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 		Details: details,
 	}
 
-	if needsFix {
+	switch {
+	case needsFix && len(modified) > 0:
+		result.FixHint = "Run 'gt doctor --fix' for the rest; 'gt formula sync --dry-run' names the hand-edited ones"
+	case needsFix:
 		result.FixHint = "Run 'gt doctor --fix' to update formulas"
+	case len(modified) > 0:
+		result.FixHint = "Move those edits to an overlay and re-run 'gt formula sync' (see 'gt formula sync --dry-run')"
 	}
 
 	return result
 }
 
-// Fix updates outdated and missing formulas.
+// Fix updates outdated and missing formulas. Hand-edited copies are left alone:
+// overwriting them loses a user's edits, so doctor reports them instead and
+// leaves the choice to `gt formula sync --force` or an overlay.
 func (c *FormulaCheck) Fix(ctx *CheckContext) error {
-	updated, skipped, reinstalled, err := formula.UpdateFormulas(ctx.TownRoot)
-	if err != nil {
-		return err
-	}
-
-	// Log what was done (caller will re-run check to show new status)
-	if updated > 0 || reinstalled > 0 || skipped > 0 {
-		// The doctor framework will re-run the check after fix
-		// so we don't need to log here
-		_ = updated
-		_ = reinstalled
-		_ = skipped
-	}
-
-	return nil
+	_, err := formula.UpdateFormulas(ctx.TownRoot)
+	return err
 }

@@ -518,3 +518,49 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 		t.Fatal("design usage examples do not mention --set problem=")
 	}
 }
+
+// TestFormulaSyncMessage_NamesHandEditedFormulas is the regression test for
+// gt-dt7r: a town copy that sync will not overwrite used to be counted and
+// dropped, so a merged formula fix could sit undelivered indefinitely with
+// "synced" as the only signal. The summary must name each one and say the
+// embedded content is not reaching the town.
+func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// A fresh sync installs the embedded set.
+	if _, err := formulaSyncMessage(root); err != nil {
+		t.Fatalf("formulaSyncMessage (initial): %v", err)
+	}
+
+	// Hand-edit one formula the way a human debugging a stuck patrol would.
+	const edited = "mol-refinery-patrol.formula.toml"
+	path := filepath.Join(root, ".beads", "formulas", edited)
+	if err := os.WriteFile(path, []byte("# hand-edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := formulaSyncMessage(root)
+	if err != nil {
+		t.Fatalf("formulaSyncMessage: %v", err)
+	}
+
+	if !strings.Contains(msg, edited) {
+		t.Errorf("summary does not name the hand-edited formula %s:\n%s", edited, msg)
+	}
+	if !strings.Contains(msg, "NOT delivered") {
+		t.Errorf("summary does not say the embedded content is undelivered:\n%s", msg)
+	}
+	if !strings.Contains(msg, "overlay") {
+		t.Errorf("summary does not point at the overlay remedy:\n%s", msg)
+	}
+
+	// The edit must survive: naming it is the point, not overwriting it.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "# hand-edited\n" {
+		t.Error("the hand-edited formula was overwritten")
+	}
+}
