@@ -1603,6 +1603,137 @@ func TestClearAllDoneIntentLabels(t *testing.T) {
 	}
 }
 
+// TestDoneIntentWorthRestarting covers the gt-jv7v gate: a stale done-intent on
+// a dead session only justifies a restart while there is work to resume.
+func TestDoneIntentWorthRestarting(t *testing.T) {
+	t.Parallel()
+	const maxAge = 24 * time.Hour
+
+	tests := []struct {
+		name string
+		snap *agentBeadSnapshot
+		age  time.Duration
+		want bool
+	}{
+		{
+			// The gt-jv7v false positive: the operator re-slung flint's bead
+			// away, leaving hook_bead null and agent_state idle, yet the scan
+			// restarted it off a done-intent label.
+			name: "idle unhooked polecat with a stale done-intent",
+			snap: &agentBeadSnapshot{
+				AgentState: "idle",
+				HookBead:   "",
+				Labels:     []string{"done-intent:COMPLETED:1789120261"},
+			},
+			age:  120 * time.Hour,
+			want: false,
+		},
+		{
+			name: "active polecat with an open hook and a fresh intent",
+			snap: &agentBeadSnapshot{
+				AgentState: "working",
+				HookBead:   "gt-abc123",
+				Labels:     []string{"done-intent:COMPLETED:1789120261"},
+			},
+			age:  5 * time.Minute,
+			want: true,
+		},
+		{
+			// A dead session cannot be idle and resumable at once, but a hook
+			// without an idle state is the shape gt done leaves when it crashes
+			// mid-exit, so an empty agent_state must not veto the restart.
+			name: "hooked polecat with no recorded agent state",
+			snap: &agentBeadSnapshot{HookBead: "gt-abc123"},
+			age:  5 * time.Minute,
+			want: true,
+		},
+		{
+			name: "hooked but idle means nothing to resume either",
+			snap: &agentBeadSnapshot{
+				AgentState: "idle",
+				HookBead:   "gt-abc123",
+			},
+			age:  5 * time.Minute,
+			want: false,
+		},
+		{
+			name: "completion already reached the witness",
+			snap: &agentBeadSnapshot{
+				AgentState: "working",
+				HookBead:   "gt-abc123",
+				Labels: []string{
+					"done-intent:COMPLETED:1789120261",
+					"done-cp:witness-notified:ok:1789576193",
+				},
+			},
+			age:  5 * time.Minute,
+			want: false,
+		},
+		{
+			// 120h old on the bead's flint: past the bound, the attempt it
+			// records is moot even with a hook still attached.
+			name: "intent older than the max age",
+			snap: &agentBeadSnapshot{
+				AgentState: "working",
+				HookBead:   "gt-abc123",
+			},
+			age:  25 * time.Hour,
+			want: false,
+		},
+		{
+			name: "intent exactly at the max age is still resumable",
+			snap: &agentBeadSnapshot{
+				AgentState: "working",
+				HookBead:   "gt-abc123",
+			},
+			age:  maxAge,
+			want: true,
+		},
+		{
+			name: "unreadable agent bead",
+			snap: nil,
+			age:  5 * time.Minute,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := doneIntentWorthRestarting(tt.snap, tt.age, maxAge); got != tt.want {
+				t.Errorf("doneIntentWorthRestarting() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasDoneCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	snap := &agentBeadSnapshot{Labels: []string{
+		"gt:agent",
+		"done-cp:pushed:polecat/furiosa-abc:1738972800",
+		"done-cp:witness-notified:ok:1738972803",
+	}}
+
+	if !hasDoneCheckpoint(snap, "witness-notified") {
+		t.Error("hasDoneCheckpoint(witness-notified) = false, want true")
+	}
+	if !hasDoneCheckpoint(snap, "pushed") {
+		t.Error("hasDoneCheckpoint(pushed) = false, want true")
+	}
+	if hasDoneCheckpoint(snap, "mr-created") {
+		t.Error("hasDoneCheckpoint(mr-created) = true, want false")
+	}
+	// A stage name that is a prefix of another must not match by substring.
+	if hasDoneCheckpoint(snap, "wit") {
+		t.Error("hasDoneCheckpoint(wit) = true, want false (prefix match must end at a colon)")
+	}
+	if hasDoneCheckpoint(nil, "witness-notified") {
+		t.Error("hasDoneCheckpoint(nil) = true, want false")
+	}
+}
+
 type mockBeadUpdater struct {
 	calls []beadUpdateCall
 }

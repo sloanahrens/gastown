@@ -539,6 +539,10 @@ type WitnessThresholds struct {
 	// to be considered still in progress (default "30s").
 	DoneIntentRecentGrace string `json:"done_intent_recent_grace,omitempty"`
 
+	// DoneIntentMaxAge is the age past which a done-intent on a dead session is
+	// residue rather than a crashed exit worth restarting (default "24h").
+	DoneIntentMaxAge string `json:"done_intent_max_age,omitempty"`
+
 	// HeartbeatStartupGrace is how long after session creation the witness waits
 	// before flagging a live polecat with assigned work but no heartbeat file as
 	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
