@@ -80,6 +80,12 @@ type Daemon struct {
 	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
 	deaconLastStarted time.Time
 
+	// deaconCycle tracks the Deacon heartbeat cycle number and how long it has
+	// gone unchanged, so a heartbeat whose timestamp is being refreshed without
+	// any progress is still treated as stalled (gt-t3cw).
+	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
+	deaconCycle deaconCycleTracker
+
 	// syncFailures tracks consecutive git pull failures per workdir.
 	// Used to escalate logging from WARN to ERROR after repeated failures.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -1729,9 +1735,22 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 // - Always read heartbeat first
 // - Grace period only applies if heartbeat is from BEFORE we started Deacon
 // - If heartbeat is from AFTER start but stale, Deacon is stuck
+//
+// Progress, not freshness: the freshness check is a check on the heartbeat
+// file's timestamp age, and the file is rewritten on a timer as well as by the
+// Deacon. Effective age is therefore the larger of the timestamp age and the
+// time since the heartbeat's cycle last changed (gt-t3cw).
 func (d *Daemon) checkDeaconHeartbeat() {
 	// Always read heartbeat first (PATCH-005)
 	hb := deacon.ReadHeartbeat(d.config.TownRoot)
+
+	// A gap in observations that something other than a stall explains — no
+	// heartbeat file to read, or the crash-loop hold below — must drop the
+	// cycle baseline, or the gap itself reads as a stall on the next check
+	// (gt-t3cw).
+	if hb == nil || (d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon")) {
+		d.deaconCycle.reset()
+	}
 
 	// Respect crash-loop guard: if the restart tracker says Deacon is in a
 	// crash loop, do not kill the session — the guard is deliberately holding
@@ -1805,14 +1824,30 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		return
 	}
 
+	obs := d.deaconCycle.observe(hb.Cycle, deacon.HeartbeatStaleThreshold, time.Now())
+
 	age := hb.Age()
 
-	// If heartbeat is fresh (< 5 min), nothing to do
-	if hb.IsFresh() {
+	// Freshness alone is not progress: the heartbeat poller rewrites the
+	// timestamp on a timer whether or not the Deacon does anything. Date the
+	// heartbeat by the later of its timestamp age and the time its cycle has
+	// gone unchanged (gt-t3cw).
+	cycleStalled := obs.Stalled && obs.Age > age
+	if cycleStalled {
+		age = obs.Age
+	}
+
+	// If heartbeat is fresh (< 5 min) and moving, nothing to do
+	if age < deacon.HeartbeatStaleThreshold {
 		return
 	}
 
-	d.logger.Printf("Deacon heartbeat is stale (%s old), checking session...", age.Round(time.Minute))
+	if cycleStalled {
+		d.logger.Printf("Deacon cycle stalled (%s at cycle %d), checking session...",
+			obs.Age.Round(time.Minute), hb.Cycle)
+	} else {
+		d.logger.Printf("Deacon heartbeat is stale (%s old), checking session...", age.Round(time.Minute))
+	}
 
 	// Check if session exists
 	hasSession, err := d.tmux.HasSession(sessionName)
@@ -1827,14 +1862,28 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		return
 	}
 
+	// A stalled cycle needs a second consecutive sample before the daemon acts
+	// on it: one sample only shows that the cycle has not moved, which is also
+	// what a single missed tick looks like. The mayor-zombie check debounces on
+	// the same principle (gt-t3cw).
+	if cycleStalled && hb.IsFresh() && obs.StalledTicks < 2 {
+		d.logger.Printf("Deacon cycle stalled (%s at cycle %d) on its first sample, waiting for confirmation",
+			obs.Age.Round(time.Minute), hb.Cycle)
+		return
+	}
+
 	// Session exists but heartbeat is stale - Deacon may be stuck.
 	// Two-tier response: nudge for stale (5-20 min), kill and restart
 	// only for very stale (>= 20 min). Kill threshold must be > backoff-max
 	// to avoid false positive kills during legitimate await-signal sleep.
-	if hb.IsVeryStale() {
+	if age >= deacon.HeartbeatVeryStaleThreshold {
 		// Stuck-agent-dog: kill and restart
-		d.logger.Printf("STUCK DEACON: heartbeat stale for %s, session %s needs restart", age.Round(time.Minute), sessionName)
-		d.restartStuckDeacon(sessionName, fmt.Sprintf("heartbeat stale for %s", age.Round(time.Minute)))
+		reason := fmt.Sprintf("heartbeat stale for %s", age.Round(time.Minute))
+		if cycleStalled {
+			reason = fmt.Sprintf("cycle stalled for %s at cycle %d", obs.Age.Round(time.Minute), hb.Cycle)
+		}
+		d.logger.Printf("STUCK DEACON: %s, session %s needs restart", reason, sessionName)
+		d.restartStuckDeacon(sessionName, reason)
 	} else {
 		// Stale but not very stale (5-20 min) - nudge to wake up (unless idle).
 		//
@@ -1852,7 +1901,12 @@ func (d *Daemon) checkDeaconHeartbeat() {
 			return
 		}
 
-		d.logger.Printf("Deacon stuck for %s - nudging session", age.Round(time.Minute))
+		if cycleStalled {
+			d.logger.Printf("Deacon stuck for %s (cycle %d stalled) - nudging session",
+				obs.Age.Round(time.Minute), hb.Cycle)
+		} else {
+			d.logger.Printf("Deacon stuck for %s - nudging session", age.Round(time.Minute))
+		}
 		if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"); err != nil {
 			d.logger.Printf("Error nudging stuck Deacon: %v", err)
 		}

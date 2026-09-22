@@ -17,13 +17,15 @@ func TestDeaconStatusJSON_Schema(t *testing.T) {
 		Paused:  false,
 		Session: "gt-deacon",
 		Heartbeat: &HeartbeatStatus{
-			Timestamp:  now,
-			AgeSec:     42.5,
-			Cycle:      12,
-			LastAction: "patrol complete",
-			Fresh:      true,
-			Stale:      false,
-			VeryStale:  false,
+			Timestamp:    now,
+			AgeSec:       42.5,
+			Cycle:        12,
+			LastAction:   "patrol complete",
+			Fresh:        true,
+			Stale:        false,
+			VeryStale:    false,
+			CycleAgeSec:  301.0,
+			CycleStalled: true,
 		},
 	}
 
@@ -50,7 +52,7 @@ func TestDeaconStatusJSON_Schema(t *testing.T) {
 	if !ok {
 		t.Fatal("heartbeat is not an object")
 	}
-	for _, key := range []string{"timestamp", "age_seconds", "cycle", "last_action", "fresh", "stale", "very_stale"} {
+	for _, key := range []string{"timestamp", "age_seconds", "cycle", "last_action", "fresh", "stale", "very_stale", "cycle_age_seconds", "cycle_stalled"} {
 		if _, ok := hb[key]; !ok {
 			t.Errorf("missing heartbeat key %q in JSON output", key)
 		}
@@ -65,6 +67,14 @@ func TestDeaconStatusJSON_Schema(t *testing.T) {
 	}
 	if hb["last_action"] != "patrol complete" {
 		t.Errorf("last_action = %v, want 'patrol complete'", hb["last_action"])
+	}
+	// A fresh timestamp with a stalled cycle: the two are independent, so a
+	// consumer can tell "alive" from "making progress" (gt-t3cw).
+	if hb["cycle_age_seconds"].(float64) != 301.0 {
+		t.Errorf("cycle_age_seconds = %v, want 301", hb["cycle_age_seconds"])
+	}
+	if hb["cycle_stalled"] != true {
+		t.Errorf("cycle_stalled = %v, want true", hb["cycle_stalled"])
 	}
 }
 
