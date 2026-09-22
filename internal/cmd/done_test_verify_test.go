@@ -501,17 +501,18 @@ func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
 	})
 }
 
-// TestRunDefaultTestVerification_NestedModuleChangeIsNotARefusal pins the shape
-// a rig with a module under its tree produces (this rig ships
+// TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule pins
+// the shape a rig with a module under its tree produces (this rig ships
 // plugins/dolt-snapshots): the changed .go file belongs to that module, so this
 // module's `go list` fails on it while the file itself is fine. The gate must
-// neither refuse it — that locks out every change to a nested module — nor
-// claim to verify it, which it cannot.
-func TestRunDefaultTestVerification_NestedModuleChangeIsNotARefusal(t *testing.T) {
+// not refuse it — that locks out every change to a nested module — and it
+// cannot verify it with this module's suite, so it builds that module where it
+// lives.
+func TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule(t *testing.T) {
 	stubNoContainers(t)
-	builds := 0
+	var builds []string
 	prev := goBuildWholeModule
-	goBuildWholeModule = func(string) error { builds++; return nil }
+	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
 	t.Cleanup(func() { goBuildWholeModule = prev })
 	suiteRan := false
 	stubVerifyGate(t,
@@ -539,10 +540,14 @@ func TestRunDefaultTestVerification_NestedModuleChangeIsNotARefusal(t *testing.T
 	if !suiteRan {
 		t.Error("the suite did not run for a nested-module change")
 	}
-	if builds != 0 {
-		t.Errorf("goBuildWholeModule ran %d time(s); this module's build skips a nested module, so a failure there would not be the change's", builds)
+	// The build has to be of the module that owns the file. Building the
+	// worktree here would compile the wrong tree: this module's `./...` skips a
+	// nested module, so its success would say nothing about the change.
+	want := filepath.Join(dir, "plugins", "example-sub")
+	if len(builds) != 1 || builds[0] != want {
+		t.Errorf("goBuildWholeModule called with %v, want exactly [%s]", builds, want)
 	}
-	// The skip has to survive in the artifact: a reader who sees the changed
+	// The switch has to survive in the artifact: a reader who sees the changed
 	// .go file and no line about it cannot tell it was out of reach from it
 	// having been tested.
 	logBytes, readErr := os.ReadFile(result.logPath)
@@ -550,10 +555,50 @@ func TestRunDefaultTestVerification_NestedModuleChangeIsNotARefusal(t *testing.T
 		t.Fatalf("reading verify log: %v", readErr)
 	}
 	logText := string(logBytes)
-	for _, want := range []string{"not scoped:", "plugins/example-sub", "example.test/plugin"} {
+	for _, want := range []string{"not scoped:", "plugins/example-sub", "example.test/plugin", "built that module in its own directory"} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("verify log is missing %q, so the directory the gate could not scope is invisible:\n%s", want, logText)
 		}
+	}
+}
+
+// TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses is the failing
+// half of the nested-module build: `go list` does not typecheck, so a file that
+// resolves inside its own module can still be one this build is the only check
+// of — including when this module requires the nested one and so compiles it as
+// a dependency. The failure has to name the module and keep the compiler's
+// output.
+func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T) {
+	stubNoContainers(t)
+	compilerSaid := `plugins/example-sub/nested.go:5:9: cannot use "x" (untyped string constant) as int value in return statement`
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-build")
+	if err == nil {
+		t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "plugins/example-sub") {
+		t.Errorf("the refusal does not name the nested module: %v", err)
+	}
+	if !strings.Contains(err.Error(), compilerSaid) {
+		t.Errorf("the refusal does not surface the build failure it tells the polecat to fix: %v", err)
+	}
+	if suiteRan {
+		t.Error("the suite ran for a nested module whose build is already broken")
 	}
 }
 

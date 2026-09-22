@@ -170,6 +170,65 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 	})
 
+	// A nested module is not this module's to refuse and not this module's to
+	// build with `./...`, so the gate builds it where it lives. Both halves run
+	// the real go build: with a clean nested module the gate proceeds and says
+	// in the log which directory it could not scope, and with one that does not
+	// compile it refuses — `go list` resolves a package without typechecking
+	// it, so only the build can see that.
+	t.Run("nested-module change: builds that module and proceeds", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/nested-module-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
+		}
+		if !result.ran || !result.success {
+			t.Fatalf("result = %+v, want ran=true success=true", result)
+		}
+		if len(result.packages) != 1 || result.packages[0] != "." {
+			t.Errorf("packages = %v, want [.] — no package of this module can be scoped to the change", result.packages)
+		}
+		logBytes, readErr := os.ReadFile(result.logPath)
+		if readErr != nil {
+			t.Fatalf("reading verify log: %v", readErr)
+		}
+		logText := string(logBytes)
+		for _, want := range []string{"not scoped:", "plugins/example-sub", "example.test/plugin"} {
+			if !strings.Contains(logText, want) {
+				t.Errorf("verify log is missing %q, so the directory the gate could not scope is invisible:\n%s", want, logText)
+			}
+		}
+	})
+
+	t.Run("nested-module change that does not compile: refuses with the compiler output", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+		// A type error, which `go list` inside the nested module still resolves
+		// (it does not typecheck) and this module's `go list` never reaches.
+		if err := os.WriteFile(filepath.Join(dir, "plugins", "example-sub", "nested.go"), []byte("package nestedmod\n\nfunc V() int { return \"not an int\" }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "break the nested module")
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/nested-module-broken-role")
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "plugins/example-sub") {
+			t.Errorf("the refusal does not name the nested module: %v", err)
+		}
+		if !strings.Contains(err.Error(), "cannot use") {
+			t.Errorf("the refusal does not surface the compiler's own output: %v", err)
+		}
+	})
+
 	// The -o branch of the whole-module build is what makes a single-binary
 	// module verifiable at all. With pkgb gone, cmd/ is the module's only
 	// package and its only main, so `go build ./...` names the executable after

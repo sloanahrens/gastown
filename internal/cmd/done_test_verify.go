@@ -209,10 +209,8 @@ type changedGoResolution struct {
 	deletedDirs []string
 	// nestedModules are changed .go directories that belong to a nested
 	// module. They hold .go files this module cannot name, but nothing is
-	// wrong with the files: the gate neither scopes them (they are not
-	// packages of this module, so no build or test run here reaches them)
-	// nor refuses them — the log header names each one and why it is out of
-	// scope.
+	// wrong with the files: they are resolved, built and logged as the other
+	// module's, not refused as this one's broken change.
 	nestedModules []nestedChangedDir
 	// unresolvable are changed .go directories that still hold a .go file but
 	// that `go list` could not resolve — a file that no longer compiles, a
@@ -388,31 +386,33 @@ func goListDir(worktree, dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// goBuildWholeModule builds the module in the worktree, which is the check
-// that distinguishes a whole-package deletion that still compiles (legitimate,
-// and verifiable — the deletion is either consistent or the build breaks, and
-// the build is the authority) from one whose importers are now broken
-// (gt-ytjh). A var so tests can stub it: the real one shells out to `go
-// build`, which no unit test may do.
+// goBuildWholeModule builds the module rooted at dir, which is the check that
+// distinguishes a whole-package deletion that still compiles (legitimate, and
+// verifiable — the deletion is either consistent or the build breaks, and the
+// build is the authority) from one whose importers are now broken (gt-ytjh). A
+// var so tests can stub it: the real one shells out to `go build`, which no
+// unit test may do.
 //
-// worktree is the module to build, and building anything else verifies the
-// wrong tree: gt done takes a worktree argument, and the process's own
-// directory is the host checkout, not the branch under test.
-var goBuildWholeModule = func(worktree string) error {
+// dir is the module to build: the worktree for a change to this module, and a
+// nested module's own directory for a change to that one. Building anything
+// else verifies the wrong tree — gt done takes a worktree argument, and the
+// process's own directory is the host checkout, not the branch under test —
+// and this module's `go build ./...` does not reach a nested module at all.
+var goBuildWholeModule = func(dir string) error {
 	buildArgs := []string{"build", "./..."}
 	// `go build ./...` discards the objects of a package list, and writes an
 	// executable only when that list resolves to exactly one main package —
 	// named after the package's source directory. So a single-binary module
 	// whose last library package this diff deletes either drops that binary
-	// into the worktree about to be handed to the refinery, or, when the name
-	// is the directory it came from, fails the build outright ("build output
+	// into the tree about to be handed to the refinery, or, when the name is
+	// the directory it came from, fails the build outright ("build output
 	// \"cmd\" already exists and is a directory") and refuses a deletion that
 	// compiles. -o sends the executables to a temp dir that is removed again
 	// instead. A module with no main packages has nothing to write and rejects
 	// -o ("go: no main packages to build"), which would be a false refusal for
 	// every library-only rig and test fixture, so the plain form runs there;
 	// with no main package it writes nothing.
-	if moduleHasMainPackage(worktree) {
+	if moduleHasMainPackage(dir) {
 		outDir, err := os.MkdirTemp("", "gt-whole-module-build-")
 		if err != nil {
 			return fmt.Errorf("creating a temp dir for the whole-module build output: %w", err)
@@ -421,9 +421,9 @@ var goBuildWholeModule = func(worktree string) error {
 		buildArgs = []string{"build", "-o", outDir, "./..."}
 	}
 
-	//nolint:gosec // G204: fixed arguments, run in the worktree under test.
+	//nolint:gosec // G204: fixed arguments, run in the module under test.
 	cmd := exec.Command("go", buildArgs...)
-	cmd.Dir = worktree
+	cmd.Dir = dir
 	out, buildErr := cmd.CombinedOutput()
 	if buildErr != nil {
 		// The compiler's own words, not just "fix the build" (gt-7rds):
@@ -778,11 +778,11 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 // changed .go files that are still present but that `go list` will not resolve
 // to a package, or a whole-module build that confirms a package deletion broke
 // the build — returns an error and the caller must not create the MR bead:
-// that is the refusal gt-h9kf asks for. Changed .go files this module cannot
-// name for a reason that is not a broken file are not a refusal and not a
-// check: a whole-package deletion that still compiles (gt-ytjh) is verified by
-// `go build ./...` before the slot and then runs the suite; a nested module's
-// files are out of this module's reach, and the run's log header says so.
+// that is the refusal gt-h9kf asks for. A change this module cannot name for a
+// reason that is not a broken file is not a refusal: a whole-package deletion
+// that still compiles (gt-ytjh) is verified by `go build ./...` before the slot
+// and then runs the suite; a nested module's files are built in that module's
+// own directory, and the run's log header records the switch.
 //
 // gt-pnkd: the budgets and the command are now resolved rather than
 // hardcoded, and every resolved value is written to the verify log header
@@ -867,16 +867,23 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 				pkgs = changed.packages
 			}
 		case len(changed.nestedModules) > 0:
-			// The changed files belong to a nested module, so no package of
-			// this module names them and there is nothing to scope: the
+			// The changed files belong to nested modules, so no package of
+			// this module names them and there is nothing here to scope: the
 			// suite runs over the module root, and the header below records
-			// which directories this module's gate cannot reach. No build
-			// here — this module's build skips a nested module too, so it
-			// could only fail for a reason unrelated to the change, and
-			// saying it verified the nested files would be false.
+			// which directories this module's gate cannot reach. Each of
+			// those modules is built in its own directory — the same
+			// stand-in the deletion path uses, for the same reason. It is
+			// not a formality: `go list` does not typecheck, so a file that
+			// resolves in its own module can still be one this build is the
+			// only check of.
 			pkgs = []string{"."}
 			if len(changed.packages) > 0 {
 				pkgs = changed.packages
+			}
+			for _, n := range changed.nestedModules {
+				if buildErr := goBuildWholeModule(filepath.Join(worktree, n.moduleRoot)); buildErr != nil {
+					return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are in the nested module %s, and building that module failed — fix it before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", n.moduleRoot, buildErr)
+				}
 			}
 		default:
 			pkgs = changed.packages
@@ -948,7 +955,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// for them cannot tell a file that was skipped from one that was never
 	// noticed.
 	for _, n := range changed.nestedModules {
-		fmt.Fprintf(logFile, "not scoped: %s belongs to the nested module %s (%s), which this module neither builds nor tests — nothing in this run compiles or exercises it\n", n.dir, n.moduleRoot, n.importPath)
+		fmt.Fprintf(logFile, "not scoped: %s belongs to the nested module %s (%s); this module's suite does not run it, so the gate built that module in its own directory instead\n", n.dir, n.moduleRoot, n.importPath)
 	}
 	// Whether this gate queues for the town's container-gate slot, and why, is
 	// the first thing a reader of a slow or refused gate needs (gt-wx53: the
