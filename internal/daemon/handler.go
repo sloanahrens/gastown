@@ -598,7 +598,11 @@ func (d *Daemon) dispatchPluginToDog(p *plugin.Plugin, mgr dogManager, sm dogSes
 		}
 		return "", false
 	}
-	if err := sm.Start(idleDog.Name, dog.SessionStartOptions{WorkDesc: workDesc}); err != nil {
+	// p.Agent overrides role_agents.dog for this plugin's session. The scanner
+	// has already cleared a name the session cannot resolve (internal/plugin),
+	// so a non-empty value here is one the session start will accept.
+	sessOpts := dog.SessionStartOptions{WorkDesc: workDesc, AgentOverride: p.Agent}
+	if err := sm.Start(idleDog.Name, sessOpts); err != nil {
 		d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
 		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
 			d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)

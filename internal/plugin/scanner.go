@@ -13,6 +13,11 @@ import (
 type Scanner struct {
 	townRoot string
 	rigNames []string
+
+	// presetExists reports whether a plugin's agent preset resolves in this
+	// town. Nil means agentPresetResolves; tests inject a stub to scan without
+	// town settings.
+	presetExists func(name, townRoot string) bool
 }
 
 // NewScanner creates a new plugin scanner.
@@ -141,6 +146,21 @@ func (s *Scanner) loadPlugin(pluginDir string, location Location, rigName string
 		plugin.HasRunScript = true
 	}
 
+	// Resolve the agent preset here, where a bad name is still cheap: at
+	// dispatch time it fails the dog session start, the work is rolled back,
+	// and the next heartbeat repeats that forever. Falling back to
+	// role_agents.dog keeps a typo a routing mistake instead of an outage.
+	if plugin.Agent != "" {
+		resolves := s.presetExists
+		if resolves == nil {
+			resolves = agentPresetResolves
+		}
+		if !resolves(plugin.Agent, s.townRoot) {
+			fmt.Fprintf(os.Stderr, "Warning: plugin %q: agent %q does not resolve (a town custom agent or a built-in preset); using role_agents.dog\n", plugin.Name, plugin.Agent)
+			plugin.Agent = ""
+		}
+	}
+
 	return plugin, nil
 }
 
@@ -192,6 +212,7 @@ func parsePluginMD(content []byte, pluginDir string, location Location, rigName 
 		Location:     location,
 		Path:         pluginDir,
 		RigName:      rigName,
+		Agent:        fm.Agent,
 		Gate:         fm.Gate,
 		Tracking:     fm.Tracking,
 		Execution:    fm.Execution,

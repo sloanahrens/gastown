@@ -365,6 +365,13 @@ func outputPluginShowText(p *plugin.Plugin) error {
 
 	fmt.Printf("%s %d\n", style.Bold.Render("Version:"), p.Version)
 
+	// Agent routing: which preset this plugin's dog session runs.
+	agentStr := p.Agent
+	if agentStr == "" {
+		agentStr = style.Dim.Render("(unset — role_agents.dog)")
+	}
+	fmt.Printf("%s %s\n", style.Bold.Render("Agent:"), agentStr)
+
 	// Gate
 	fmt.Println()
 	fmt.Printf("%s\n", style.Bold.Render("Gate:"))

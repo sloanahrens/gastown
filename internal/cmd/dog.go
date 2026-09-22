@@ -1190,6 +1190,7 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		Dog:        targetDog.Name,
 		DogCreated: dogCreated,
 		Work:       workDesc,
+		Agent:      p.Agent,
 		DryRun:     dogDispatchDryRun,
 	}
 	if p.RigName != "" {
@@ -1210,6 +1211,9 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  Dog: %s%s\n", targetDog.Name, ifStr(dogCreated, " (would create)", ""))
 		fmt.Printf("  Work: %s\n", workDesc)
+		if p.Agent != "" {
+			fmt.Printf("  Agent: %s\n", p.Agent)
+		}
 		return nil
 	}
 
@@ -1265,6 +1269,10 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 	sessMgr := dog.NewSessionManager(t, townRoot, mgr)
 	sessOpts := dog.SessionStartOptions{
 		WorkDesc: workDesc,
+		// The plugin's agent preset, when it names one; the scanner clears a
+		// preset that does not resolve, so this is either empty (role_agents.dog)
+		// or a name the session start accepts.
+		AgentOverride: p.Agent,
 	}
 	result.SessionStarted = true
 	if _, sessErr := sessMgr.EnsureRunning(targetDog.Name, sessOpts); sessErr != nil {
@@ -1344,6 +1352,7 @@ type dogDispatchResult struct {
 	Dog            string   `json:"dog"`
 	DogCreated     bool     `json:"dog_created,omitempty"`
 	Work           string   `json:"work"`
+	Agent          string   `json:"agent,omitempty"`
 	DryRun         bool     `json:"dry_run,omitempty"`
 	SessionStarted bool     `json:"session_started"`
 	WorkConfirmed  bool     `json:"work_confirmed"`
