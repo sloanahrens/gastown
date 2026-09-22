@@ -75,13 +75,6 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 		[]byte(`{"version":1,"rigs":{"gastown":{"git_url":"file:///nonexistent","beads":{"repo":"local","prefix":"gt"}}}}`+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// The rig-root config.json ResolveMergeQueueConfig reads as its floor
-	// tier, with the editorial gate required so --landed reviews run without
-	// --force.
-	if err := os.WriteFile(filepath.Join(rigDir, "config.json"),
-		[]byte(`{"type":"rig","name":"gastown","git_url":"file:///nonexistent","merge_queue":{"editorial":{"required":true}}}`+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
 	rigDir = filepath.Join(town, "gastown")
 	repoDir = filepath.Join(rigDir, "refinery", "rig")
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
@@ -92,6 +85,13 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	}
 	cwd = filepath.Join(rigDir, "polecats", "shale")
 	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The rig-root config.json ResolveMergeQueueConfig reads as its floor
+	// tier, with the editorial gate required so --landed reviews run without
+	// --force.
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"),
+		[]byte(`{"type":"rig","name":"gastown","git_url":"file:///nonexistent","merge_queue":{"editorial":{"required":true}}}`+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,6 +124,15 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	return cwd, repoDir, rigDir
 }
 
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "<missing: " + err.Error() + ">"
+	}
+	return string(data)
+}
+
 func revForCmd(t *testing.T, dir, ref string) string {
 	t.Helper()
 	cmd := exec.Command("git", "rev-parse", ref)
@@ -138,6 +147,14 @@ func revForCmd(t *testing.T, dir, ref string) string {
 func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
+	oldImpl := doMQReviewLanded
+	doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
+		mqReviewRigFlag = "gastown"
+		res, err := oldImpl(args)
+		t.Logf("wrapper: res=%+v err=%v config.json=%q", res, err, mustRead(t, filepath.Join(rigDir, "config.json")))
+		return res, err
+	}
+	defer func() { doMQReviewLanded = oldImpl }()
 	// The base commit is not reachable from origin/main (the tip is its
 	// child), so --landed refuses it.
 	base := revForCmd(t, repoDir, "HEAD^")

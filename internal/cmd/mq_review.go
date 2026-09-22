@@ -219,7 +219,7 @@ var runEditorialReview = func(req editorial.ReviewRequest, deps editorial.Deps) 
 // (GT_RIG or cwd), the target to the rig's remote default branch, and the
 // review range is derived from the commit graph alone (ResolveLandedRange).
 // The verdict is stamped on the landed commit itself.
-func doMQReviewLanded(args []string) (editorial.ReviewResult, error) {
+var doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return editorial.ReviewResult{}, fmt.Errorf("not in a Gas Town workspace: %w", err)
