@@ -213,16 +213,27 @@ func TestPrintSlotHistory_AbandonedAfterHolderIsKilled(t *testing.T) {
 	}
 	defer func() { _ = holder.Process.Kill() }()
 
-	waitForSlotHeld(t, townRoot, true)
+	// Wait for the ring entry, not merely the held lock: Acquire takes the
+	// flock before it records the grant, so killing on the lock alone can land
+	// inside that window and leave no entry to read. The entry is written while
+	// the flock is held, so its arrival implies the holder is holding.
+	waitForHistoryEntry(t, townRoot)
+
 	if err := holder.Process.Kill(); err != nil { // SIGKILL — no Release, no held_s
 		t.Fatalf("killing batch holder: %v", err)
 	}
 	_ = holder.Wait()
-	waitForSlotHeld(t, townRoot, false)
+	waitForSlotFree(t, townRoot)
 
 	history, err := slot.History(townRoot)
 	if err != nil {
 		t.Fatalf("slot.History: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history holds %d entries, want the one grant: %+v", len(history), history)
+	}
+	if history[0].HeldS != nil {
+		t.Fatalf("the hold was closed by a Release that should never have run: %+v", history[0])
 	}
 	rep, err := slot.StatusPoolLocksOnly(townRoot, containerGatePool(townRoot))
 	if err != nil {
@@ -265,10 +276,32 @@ func TestPrintSlotHistory_AbandonedAfterHolderIsKilled(t *testing.T) {
 	}
 }
 
-// waitForSlotHeld polls the lock picture until the slot is held (want true) or
-// free (want false). The kill releases the flock through the kernel, which the
-// parent sees as soon as its non-blocking probe runs.
-func waitForSlotHeld(t *testing.T, townRoot string, want bool) {
+// waitForHistoryEntry polls the ring file until the holder's grant is on
+// record. Grant is a two-step in the holder — flock first, entry second — and
+// only the second step is what the history renders, so a test that kills the
+// holder must wait for it rather than for the lock.
+func waitForHistoryEntry(t *testing.T, townRoot string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		history, err := slot.History(townRoot)
+		if err != nil {
+			t.Fatalf("slot.History: %v", err)
+		}
+		if len(history) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the batch holder never recorded its grant in the ring file")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForSlotFree polls the lock picture until the pool no longer counts any
+// holder. The kill releases the flock through the kernel, which the parent sees
+// as soon as its non-blocking probe runs.
+func waitForSlotFree(t *testing.T, townRoot string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -276,11 +309,11 @@ func waitForSlotHeld(t *testing.T, townRoot string, want bool) {
 		if err != nil {
 			t.Fatalf("slot.StatusPoolLocksOnly: %v", err)
 		}
-		if (rep.HeldCount > 0) == want {
+		if rep.HeldCount == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("pool held=%v, want %v: %+v", rep.HeldCount > 0, want, rep)
+			t.Fatalf("pool still counts a holder: %+v", rep)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
