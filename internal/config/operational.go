@@ -127,6 +127,9 @@ const (
 	// treats it as stalled (gt-hkhu). It matches the interim threshold the
 	// operators applied by hand during the 2026-09-18 refinery stalls.
 	DefaultWitnessComposerStallFrozenFor = 5 * time.Minute
+	// DefaultWitnessDoneIntentMaxAge is how old a done-intent on a dead session
+	// can be and still count as a crashed exit worth restarting (gt-jv7v).
+	DefaultWitnessDoneIntentMaxAge = 24 * time.Hour
 )
 
 // Container-gate pool defaults (gt-yihz).
@@ -835,6 +838,14 @@ func (wt *WitnessThresholds) DoneIntentRecentGraceD() time.Duration {
 		return ParseDurationOrDefault(wt.DoneIntentRecentGrace, DefaultWitnessDoneIntentRecentGrace)
 	}
 	return DefaultWitnessDoneIntentRecentGrace
+}
+
+// DoneIntentMaxAgeD returns the configured or default done-intent max age.
+func (wt *WitnessThresholds) DoneIntentMaxAgeD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.DoneIntentMaxAge, DefaultWitnessDoneIntentMaxAge)
+	}
+	return DefaultWitnessDoneIntentMaxAge
 }
 
 // HeartbeatStartupGraceD returns the configured or default heartbeat startup grace period.

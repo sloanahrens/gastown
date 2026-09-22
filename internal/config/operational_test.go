@@ -399,6 +399,9 @@ func TestWitnessThresholds_Defaults(t *testing.T) {
 	if got := wit.DoneIntentRecentGraceD(); got != DefaultWitnessDoneIntentRecentGrace {
 		t.Errorf("DoneIntentRecentGrace: got %v, want %v", got, DefaultWitnessDoneIntentRecentGrace)
 	}
+	if got := wit.DoneIntentMaxAgeD(); got != DefaultWitnessDoneIntentMaxAge {
+		t.Errorf("DoneIntentMaxAge: got %v, want %v", got, DefaultWitnessDoneIntentMaxAge)
+	}
 }
 
 func TestWitnessThresholds_Overrides(t *testing.T) {
@@ -412,6 +415,7 @@ func TestWitnessThresholds_Overrides(t *testing.T) {
 			MaxBeadRespawns:        &maxRespawns,
 			DoneIntentStuckTimeout: "90s",
 			DoneIntentRecentGrace:  "15s",
+			DoneIntentMaxAge:       "48h",
 		},
 	}
 
@@ -430,6 +434,9 @@ func TestWitnessThresholds_Overrides(t *testing.T) {
 	}
 	if got := wit.DoneIntentRecentGraceD(); got != 15*time.Second {
 		t.Errorf("DoneIntentRecentGrace: got %v, want 15s", got)
+	}
+	if got := wit.DoneIntentMaxAgeD(); got != 48*time.Hour {
+		t.Errorf("DoneIntentMaxAge: got %v, want 48h", got)
 	}
 }
 

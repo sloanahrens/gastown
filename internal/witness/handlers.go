@@ -2045,6 +2045,15 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			return ZombieResult{}, false
 		}
 
+		// gt-jv7v: the label alone is not a crashed exit. A restart only
+		// resumes work that is still there to resume — see
+		// doneIntentWorthRestarting. Clearing the label keeps the next patrol
+		// cycle from re-deciding it.
+		if !doneIntentWorthRestarting(snap, age, witCfg.DoneIntentMaxAgeD()) {
+			clearAllDoneIntentLabels(beads.New(workDir).ForAgentBead(), agentBeadID, snap)
+			return ZombieResult{}, false
+		}
+
 		// gt-dsgp: Restart instead of nuke — the session died during gt done,
 		// restart it so it can retry the exit sequence or pick up new work.
 		// Clear ALL done-intent labels before restart so the polecat doesn't
@@ -3398,6 +3407,44 @@ func extractDoneIntent(labels []string) *DoneIntent {
 		}
 	}
 	return best
+}
+
+// doneIntentWorthRestarting reports whether a dead session's done-intent is a
+// crashed exit a restart could still recover, rather than residue on an agent
+// bead whose work is gone: an idle or unhooked polecat has nothing to resume,
+// a done-cp:witness-notified checkpoint means the completion already reached
+// the witness, and past maxAge the recorded attempt is moot (gt-jv7v).
+//
+// Restarting needs positive evidence of resumable work: an unreadable agent
+// bead (nil snap) is not evidence, so nothing is restarted on one.
+func doneIntentWorthRestarting(snap *agentBeadSnapshot, age, maxAge time.Duration) bool {
+	if snap == nil {
+		return false
+	}
+	if snap.HookBead == "" || beads.AgentState(snap.AgentState) == AgentStateIdle {
+		return false
+	}
+	if hasDoneCheckpoint(snap, "witness-notified") {
+		return false
+	}
+	return age <= maxAge
+}
+
+// hasDoneCheckpoint reports whether the agent bead carries a done-cp:<stage>
+// label. gt done writes them as done-cp:<stage>:<value>:<unix-ts>; the witness
+// reads the stage only, so matching the prefix avoids importing internal/cmd
+// for the constant (gt-jv7v).
+func hasDoneCheckpoint(snap *agentBeadSnapshot, stage string) bool {
+	if snap == nil {
+		return false
+	}
+	prefix := "done-cp:" + stage + ":"
+	for _, label := range snap.Labels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // beadUpdater is a minimal interface for updating agent bead labels.
