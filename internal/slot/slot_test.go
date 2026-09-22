@@ -734,3 +734,54 @@ func TestAcquire_TimesOutWhileUnwrappedContainersPersist(t *testing.T) {
 		t.Fatalf("Acquire returned after %s, before its %s timeout elapsed", elapsed, timeout)
 	}
 }
+
+// TestAcquire_ProceedsDespiteOrphanContainer is the regression test for
+// gt-ul1k: an hours-old container with no ryuk reaper left nobody to wait for,
+// but Acquire held the flock back anyway, and every wrapped suite town-wide
+// queued behind it until someone removed the container by hand.
+func TestAcquire_ProceedsDespiteOrphanContainer(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return []string{dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "wizardly_goldberg",
+			time.Now().Add(-5*time.Hour), nil)}, nil
+	}
+
+	start := time.Now()
+	h, err := Acquire(townRoot, "waiter", 30*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Acquire failed while only an orphan container was running: %v", err)
+	}
+	defer h.Release()
+	if elapsed > 2*DefaultPollInterval {
+		t.Fatalf("Acquire took %s — expected it to walk past the orphan on the first check", elapsed)
+	}
+}
+
+// TestAcquire_StillWaitsForAYoungContainer is the other side of the verdict:
+// a container young enough to belong to a suite still running must keep
+// holding the gate, or the town would admit two suites into one Docker VM.
+func TestAcquire_StillWaitsForAYoungContainer(t *testing.T) {
+	townRoot := t.TempDir()
+
+	orig := runningGateContainers
+	defer func() { runningGateContainers = orig }()
+	runningGateContainers = func() ([]string, error) {
+		return []string{dockerPSLine("live-id", "dolt/dolt-sql-server:2.2.0", "running-suite",
+			time.Now().Add(-2*time.Minute), nil)}, nil
+	}
+
+	timeout := DefaultPollInterval + 500*time.Millisecond
+	start := time.Now()
+	_, err := Acquire(townRoot, "waiter", timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Acquire succeeded while a young container suite was running")
+	}
+	if elapsed < timeout {
+		t.Fatalf("Acquire returned after %s, before its %s timeout elapsed", elapsed, timeout)
+	}
+}

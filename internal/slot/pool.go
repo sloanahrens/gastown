@@ -257,6 +257,11 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	hasDeadline := timeout > 0
 	deadline := time.Now().Add(timeout)
 
+	// Announced once per container per Acquire call: a town with one orphan
+	// beside a busy suite would otherwise print the same warning on every
+	// poll of the wait.
+	logDebrisOnce := debrisLogger()
+
 	grant := func(i int, unlock func()) *Handle {
 		h := &Handle{townRoot: townRoot, unlock: unlock, Index: i}
 		_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
@@ -291,7 +296,7 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 			if othersHeld(townRoot, pool, i) > 0 {
 				return grant(i, unlock), nil
 			}
-			containers, containerErr := runningGateContainers()
+			containers, containerErr := gateContainers()
 			switch {
 			case containerErr != nil && !isDaemonUnreachable(containerErr):
 				// Inconclusive probe (wedged daemon, permission-denied
@@ -300,9 +305,18 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 			case containerErr != nil:
 				fmt.Fprintf(os.Stderr, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
 				return grant(i, unlock), nil
-			case len(containers) == 0:
-				return grant(i, unlock), nil
 			default:
+				blocking := 0
+				for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
+					if verdict.Blocks() {
+						blocking++
+						continue
+					}
+					logDebrisOnce(verdict)
+				}
+				if blocking == 0 {
+					return grant(i, unlock), nil
+				}
 				// An unwrapped suite has containers up and nobody holds a
 				// slot for them. Not safe to hand out ANY slot; release
 				// and wait rather than trying the next candidate.
@@ -374,11 +388,17 @@ func StatusPool(townRoot string, pool Pool) (Report, error) {
 	rep.Reserved = pool.ReservedForGate
 
 	if rep.HeldCount == 0 {
-		containers, err := runningGateContainers()
+		containers, err := gateContainers()
 		if err != nil {
 			rep.DockerUnknown = true
 		} else {
-			rep.UnwrappedContainers = containers
+			for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
+				if verdict.Blocks() {
+					rep.UnwrappedContainers = append(rep.UnwrappedContainers, verdict.Container.Display())
+				} else {
+					rep.DebrisContainers = append(rep.DebrisContainers, verdict.Container.Display())
+				}
+			}
 		}
 	}
 	return rep, nil

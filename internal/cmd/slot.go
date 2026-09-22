@@ -16,10 +16,13 @@ import (
 )
 
 var (
-	slotRunRole    string
-	slotRunTimeout time.Duration
-	slotRunNice    int
-	slotStatusJSON bool
+	slotRunRole       string
+	slotRunTimeout    time.Duration
+	slotRunNice       int
+	slotStatusJSON    bool
+	slotReapOlderThan time.Duration
+	slotReapDryRun    bool
+	slotReapJSON      bool
 )
 
 var slotCmd = &cobra.Command{
@@ -34,8 +37,11 @@ starve each other even when the host itself shows plenty of idle CPU.
 
 The slot is a kernel-managed advisory lock (flock), not a pid file: the
 kernel releases it automatically when the holding process dies by any means,
-including SIGKILL, so there is nothing to reclaim and no stale-lock cleanup
-required.`,
+including SIGKILL, so the lock itself needs no reclaim path.
+
+The containers a dead suite leaves behind are a separate matter — run
+'gt slot reap' when a container the gate matches looks stale, and read
+'gt slot status' to see which containers it is judging.`,
 }
 
 var slotRunCmd = &cobra.Command{
@@ -61,6 +67,27 @@ var slotStatusCmd = &cobra.Command{
 	RunE:  runSlotStatus,
 }
 
+var slotReapCmd = &cobra.Command{
+	Use:   "reap",
+	Short: "Delete stale gate containers and the owner files dead suites left behind",
+	Long: `Removes the container-gate's debris: containers the gate matches that are older
+than the staleness window with no live testcontainers ryuk reaper for their
+session, and owner metadata files whose slot nobody holds anymore.
+
+A container-backed suite that dies uncleanly leaves its containers running. The
+gate used to read any matching container as a live suite, so a single hours-old
+orphan blocked every wrapped suite town-wide until someone removed it by hand.
+'gt slot run' now walks past debris on its own; this command is the explicit,
+evidence-printing way to actually delete it.
+
+Reaping is the mayor's and the doctor's call, not a polecat's: a polecat's slot
+token is its promise that its own suite cleans up after itself, and reaping
+another holder's containers mid-run would break that suite. Use --dry-run to
+read the verdicts first.`,
+	Args: cobra.NoArgs,
+	RunE: runSlotReap,
+}
+
 func init() {
 	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it passes that holder's role")
 	slotRunCmd.Flags().DurationVar(&slotRunTimeout, "timeout", 60*time.Minute, "Max time to wait for the slot to free up (0 = wait forever)")
@@ -68,8 +95,14 @@ func init() {
 
 	slotStatusCmd.Flags().BoolVar(&slotStatusJSON, "json", false, "Output as JSON")
 
+	slotReapCmd.Flags().DurationVar(&slotReapOlderThan, "older-than", slot.StaleContainerWindow,
+		"Age past which a container with no live reaper counts as debris")
+	slotReapCmd.Flags().BoolVar(&slotReapDryRun, "dry-run", false, "Report what would be removed without removing anything")
+	slotReapCmd.Flags().BoolVar(&slotReapJSON, "json", false, "Output as JSON")
+
 	slotCmd.AddCommand(slotRunCmd)
 	slotCmd.AddCommand(slotStatusCmd)
+	slotCmd.AddCommand(slotReapCmd)
 	rootCmd.AddCommand(slotCmd)
 }
 
@@ -200,8 +233,11 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", c)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "This suite should have been run via 'gt slot run -- <command>'.")
+		printSlotDebris(cmd, rep.DebrisContainers)
 		return nil
 	}
+
+	printSlotDebris(cmd, rep.DebrisContainers)
 
 	if rep.Total > 1 {
 		return nil
@@ -216,6 +252,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Owner               *slot.Owner      `json:"owner,omitempty"`
 		Busy                bool             `json:"busy"`
 		UnwrappedContainers []string         `json:"unwrapped_containers,omitempty"`
+		DebrisContainers    []string         `json:"debris_containers,omitempty"`
 		DockerUnknown       bool             `json:"docker_unknown"`
 		Saturated           bool             `json:"saturated"` // every slot held; busy also covers unwrapped/unknown
 		Slots               []slot.SlotState `json:"slots,omitempty"`
@@ -230,6 +267,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Owner:               rep.Owner,
 		Busy:                rep.Busy(),
 		UnwrappedContainers: rep.UnwrappedContainers,
+		DebrisContainers:    rep.DebrisContainers,
 		DockerUnknown:       rep.DockerUnknown,
 		Saturated:           rep.AllHeld(),
 		Slots:               rep.Slots,
@@ -237,6 +275,119 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		Total:               rep.Total,
 		Reserved:            rep.Reserved,
 	})
+}
+
+// printSlotDebris names the gate containers Acquire walks past. They are shown
+// because a debris reading is the evidence behind a grant: an operator who
+// sees the gate report free while a container is up needs to know which
+// container, how old it is, and what would remove it (gt-ul1k).
+func printSlotDebris(cmd *cobra.Command, debris []string) {
+	if len(debris) == 0 {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Gate debris (%d), ignored by Acquire — 'gt slot reap' removes it:\n", len(debris))
+	for _, c := range debris {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", c)
+	}
+}
+
+func runSlotReap(cmd *cobra.Command, _ []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	report, reapErr := slot.Reap(townRoot, slot.ReapOptions{
+		OlderThan: slotReapOlderThan,
+		DryRun:    slotReapDryRun,
+	})
+	if slotReapJSON {
+		if err := printSlotReapJSON(cmd, report); err != nil {
+			return err
+		}
+		return reapErr
+	}
+	printSlotReapReport(cmd, report)
+
+	// The owner-file half runs before the container half, so a docker failure
+	// still leaves real reaping behind it to report — which is why the report
+	// prints first and the error second.
+	if reapErr != nil {
+		return reapErr
+	}
+	return nil
+}
+
+func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
+	out := cmd.OutOrStdout()
+	verb := "Removed"
+	if report.DryRun {
+		verb = "Would remove (dry run)"
+	}
+
+	if len(report.Debris) == 0 {
+		fmt.Fprintf(out, "No gate debris older than %s.\n", report.OlderThan)
+	} else {
+		fmt.Fprintf(out, "%s %d gate container(s) older than %s with no live reaper:\n", verb, len(report.Debris), report.OlderThan)
+		for _, v := range report.Debris {
+			fmt.Fprintf(out, "  %s — %s; labels: %s\n", v.Container.Display(), v.Reason, v.Container.LabelSummary())
+		}
+	}
+
+	if len(report.OwnerFiles) > 0 {
+		fmt.Fprintf(out, "%s %d stale owner file(s) (their slot is not held):\n", verb, len(report.OwnerFiles))
+		for _, f := range report.OwnerFiles {
+			fmt.Fprintf(out, "  slot %d: pid %d, acquired %s\n", f.Slot, f.PID, f.AcquiredAt.Format(time.RFC3339))
+		}
+	}
+
+	for _, failure := range report.Failed {
+		fmt.Fprintf(cmd.ErrOrStderr(), "failed: %s\n", failure)
+	}
+	if len(report.Kept) > 0 {
+		fmt.Fprintf(out, "Kept %d container(s) that could still be a running suite.\n", len(report.Kept))
+	}
+}
+
+func printSlotReapJSON(cmd *cobra.Command, report slot.ReapReport) error {
+	type removedEntry struct {
+		Container string `json:"container"`
+		Reason    string `json:"reason"`
+		Labels    string `json:"labels"`
+	}
+	type ownerEntry struct {
+		Slot       int    `json:"slot"`
+		PID        int    `json:"pid"`
+		AcquiredAt string `json:"acquired_at,omitempty"`
+		Path       string `json:"path"`
+	}
+	type jsonOut struct {
+		OlderThan  string         `json:"older_than"`
+		DryRun     bool           `json:"dry_run"`
+		Debris     []removedEntry `json:"debris,omitempty"`
+		Removed    []string       `json:"removed,omitempty"`
+		Failed     []string       `json:"failed,omitempty"`
+		Kept       int            `json:"kept"`
+		OwnerFiles []ownerEntry   `json:"owner_files,omitempty"`
+	}
+
+	out := jsonOut{OlderThan: report.OlderThan.String(), DryRun: report.DryRun, Kept: len(report.Kept)}
+	for _, v := range report.Debris {
+		out.Debris = append(out.Debris, removedEntry{v.Container.Display(), v.Reason, v.Container.LabelSummary()})
+	}
+	out.Removed = report.Removed
+	out.Failed = report.Failed
+	for _, f := range report.OwnerFiles {
+		entry := ownerEntry{Slot: f.Slot, PID: f.PID, Path: f.Path}
+		if !f.AcquiredAt.IsZero() {
+			entry.AcquiredAt = f.AcquiredAt.Format(time.RFC3339)
+		}
+		out.OwnerFiles = append(out.OwnerFiles, entry)
+	}
+
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
 
 // envAssignmentRe matches a leading environment assignment token as env(1)

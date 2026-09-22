@@ -53,6 +53,7 @@ Infrastructure checks:
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
+  - slot-debris              Detect stale container-gate containers and owner files (fixable)
   - stalled-polecats         Detect polecats with dead sessions and unpushed work (fixable)
   - orphan-processes         Detect orphaned Claude processes
   - session-name-format      Detect sessions with outdated naming format (fixable)
@@ -223,6 +224,11 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// VM's CPU/memory bound so operators can see why container-backed
 	// suites contend even when host-idle looks fine (gt-bcsq).
 	d.Register(doctor.NewContainerCapacityCheck())
+
+	// Container-gate debris: containers a dead suite left running that the
+	// gate now walks past, and the owner files of slots nobody holds. Its
+	// fix is the same reap 'gt slot reap' runs (gt-ul1k).
+	d.Register(doctor.NewSlotDebrisCheck())
 
 	// Infrastructure prerequisites — these must pass before any check that
 	// shells out to bd/dolt or queries the database. Order matters:
