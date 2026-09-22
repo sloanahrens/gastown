@@ -293,25 +293,56 @@ var activeMRFieldPattern = regexp.MustCompile(`(?m)^active_mr:\s*(\S+)\s*$`)
 var hookBeadFieldPattern = regexp.MustCompile(`(?m)^hook_bead:\s*(\S+)\s*$`)
 var agentStateFieldPattern = regexp.MustCompile(`(?m)^agent_state:\s*(\S+)\s*$`)
 
+// agentBeadWispQuery and agentBeadIssueQuery locate agent beads in the two stores
+// they can occupy. Identity is the 'gt:agent' label: agent beads are created as
+// issue_type='task' (internal/beads/beads_agent.go), so a type of 'agent' matches
+// none of them, and their durable home is the issues table — wisps holds copies
+// the migration in internal/doltserver/wisps_migrate.go made. Reading the type
+// from wisps alone matched zero rows in every rig database, leaving the
+// reference protection below disarmed (gt-l6y9).
+const (
+	agentBeadWispQuery  = `SELECT description FROM wisps WHERE issue_type = 'agent' OR id IN (SELECT issue_id FROM wisp_labels WHERE label = 'gt:agent')`
+	agentBeadIssueQuery = `SELECT description FROM issues WHERE issue_type = 'agent' OR id IN (SELECT issue_id FROM labels WHERE label = 'gt:agent')`
+)
+
 // liveAgentReferencedWispIDs returns the set of wisp IDs a live (non-nuked) agent
 // bead still names as its active_mr or hook_bead. Both are durable pointers into
 // the wisp tables, so a sweep that removes the target leaves the reference
 // dangling and unreconcilable — the polecat then waits on work that cannot be
 // looked up (gt-gyb6, gt-4okk). The protection lapses when the pointer does: on
-// the agent's next MR, on hook release, or on nuke.
+// the agent's next MR, on hook release, or on nuke. Both agent-bead stores are
+// read (agentBeadWispQuery, agentBeadIssueQuery).
 func liveAgentReferencedWispIDs(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, "SELECT description FROM wisps WHERE issue_type = 'agent'")
+	protected := make(map[string]bool)
+
+	if err := collectAgentReferences(ctx, db, agentBeadWispQuery, protected); err != nil {
+		return nil, err
+	}
+
+	// A database whose issues table is absent is tolerated here the way Scan
+	// tolerates it for its mail count: beads may keep that table on a separate
+	// Dolt instance.
+	if err := collectAgentReferences(ctx, db, agentBeadIssueQuery, protected); err != nil && !isTableNotFound(err) {
+		return nil, err
+	}
+	return protected, nil
+}
+
+// collectAgentReferences adds to protected every wisp ID named as active_mr or
+// hook_bead by an agent bead in the rows query returns.
+func collectAgentReferences(ctx context.Context, db *sql.DB, query string, protected map[string]bool) error {
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("query agent beads for references: %w", err)
+		return fmt.Errorf("query agent beads for references: %w", err)
 	}
 	defer rows.Close()
 
-	protected := make(map[string]bool)
 	for rows.Next() {
 		var description string
 		if err := rows.Scan(&description); err != nil {
-			return nil, fmt.Errorf("scan agent bead description: %w", err)
+			return fmt.Errorf("scan agent bead description: %w", err)
 		}
+		// A nuked agent is gone; its pointers stop holding wisps open.
 		if m := agentStateFieldPattern.FindStringSubmatch(description); m != nil && m[1] == "nuked" {
 			continue
 		}
@@ -321,7 +352,10 @@ func liveAgentReferencedWispIDs(ctx context.Context, db *sql.DB) (map[string]boo
 			}
 		}
 	}
-	return protected, rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read agent bead descriptions: %w", err)
+	}
+	return nil
 }
 
 // wispExcludeClause renders a parameterized "AND w.id NOT IN (...)" clause
