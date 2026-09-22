@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -43,6 +44,32 @@ type deadWorkerRecoveryRequest struct {
 	// Summary is a one-line verdict summary for the RECOVERED_BEAD mail's
 	// Rejection-Summary line. Empty for non-editorial rejections.
 	Summary string
+
+	// Receipt carries the om review score and carried-forward unresolved
+	// finding ids behind this rejection, present only when the rejection
+	// came from an actual om review (the batch path's automatic gt mq
+	// review) rather than a manual `gt mq reject` with no measurable
+	// verdict. When set, it travels onto the source bead notes and the
+	// RECOVERED_BEAD mail so `gt deacon redispatch` can recover it and run
+	// deacon.RedispatchEditorial's convergence/max_attempts rule instead of
+	// falling back to the plain attempt-count Redispatch (om-gate T10).
+	Receipt *EditorialReceipt
+}
+
+// EditorialReceipt is the minimal signal from an om editorial verdict that
+// the deacon's redispatch gate needs to decide whether a resubmit is
+// converging — mirrors deacon.ReceiptSummary, kept as its own type here so
+// this package does not import internal/deacon for a two-field struct.
+type EditorialReceipt struct {
+	// Score is the om review score behind this rejection.
+	Score float64
+
+	// Unresolved is the finding ids om reports as still open relative to
+	// this bead's full rejection history — om computes this itself from the
+	// bead's accumulated MERGE REJECTION notes (BuildPriorFindings), so it
+	// already reflects carry-forward across every prior attempt, not just
+	// the immediately preceding one.
+	Unresolved []string
 }
 
 // RejectionFinding is one om editorial finding attached to a merge
@@ -73,6 +100,27 @@ func rejectionFindingIDs(findings []RejectionFinding) []string {
 	return ids
 }
 
+// rejectionFindingsFromNote converts an om verdict's raw findings into the
+// RejectionFinding shape a deadWorkerRecoveryRequest carries forward. The
+// two types track the same fields (om's own verdict finding shape) so this
+// is a straight field-for-field copy.
+func rejectionFindingsFromNote(findings []editorial.Finding) []RejectionFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]RejectionFinding, len(findings))
+	for i, f := range findings {
+		out[i] = RejectionFinding{
+			ID:       f.ID,
+			Severity: f.Severity,
+			Path:     f.Path,
+			Line:     f.Line,
+			Title:    f.Title,
+		}
+	}
+	return out
+}
+
 // rejectedSourceBeads is the narrow beads surface needed for recovery.
 // *beads.Beads satisfies it.
 type rejectedSourceBeads interface {
@@ -98,6 +146,16 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 		req.Branch, req.Target, req.MRID)
 	for _, f := range req.Findings {
 		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s", f.ID, f.Severity, f.Path, f.Line, f.Title)
+	}
+	// Score/Unresolved are the machine-readable receipt `gt deacon
+	// redispatch` greps back out (deacon.ParseEditorialReceiptFromNotes) to
+	// run RedispatchEditorial's convergence rule. Only written when this
+	// rejection actually carries an om verdict.
+	if req.Receipt != nil {
+		note += fmt.Sprintf("\nScore: %.4f", req.Receipt.Score)
+		if len(req.Receipt.Unresolved) > 0 {
+			note += fmt.Sprintf("\nUnresolved: %s", strings.Join(req.Receipt.Unresolved, ","))
+		}
 	}
 	return note
 }
@@ -270,6 +328,12 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	}
 	if req.Summary != "" {
 		fmt.Fprintf(&rejectionLines, "Rejection-Summary: %s\n", req.Summary)
+	}
+	if req.Receipt != nil {
+		fmt.Fprintf(&rejectionLines, "Rejection-Score: %.4f\n", req.Receipt.Score)
+		if len(req.Receipt.Unresolved) > 0 {
+			fmt.Fprintf(&rejectionLines, "Rejection-Unresolved: %s\n", strings.Join(req.Receipt.Unresolved, ","))
+		}
 	}
 
 	msg := &mail.Message{

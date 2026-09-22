@@ -42,6 +42,11 @@ type Note struct {
 	// Verdict is "approve" or "request_changes".
 	Verdict       string `json:"verdict"`
 	FindingsCount int    `json:"findings_count"`
+	// Findings is the full per-finding detail (id/severity/path/line/title)
+	// behind FindingsCount, om's raw verdict output. Omitted when empty so
+	// notes written before this field round-trip unchanged; a reader that
+	// only needs the count keeps using FindingsCount.
+	Findings      []Finding `json:"findings,omitempty"`
 	PriorFindings struct {
 		Resolved   []string `json:"resolved"`
 		Unresolved []string `json:"unresolved"`

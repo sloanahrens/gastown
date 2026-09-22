@@ -519,7 +519,8 @@ var protocolFieldKeys = []string{
 	"Bead:", "Polecat:", "Rig:", "Branch:", "Issue:", "Target:",
 	"MR:", "MR-Bead-ID:", "Failure-Type:", "Error:", "Attempt:",
 	"Attempt-Number:", "Previous Status:", "Respawn Count:",
-	"Rejection-Findings:", "Rejection-Summary:", "ConvoyID:", "SourceIssue:",
+	"Rejection-Findings:", "Rejection-Summary:", "Rejection-Score:", "Rejection-Unresolved:",
+	"ConvoyID:", "SourceIssue:",
 	"Merged-At:", "Failed-At:", "Requested-At:", "Verified:",
 }
 

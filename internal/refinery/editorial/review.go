@@ -154,9 +154,9 @@ func isExecNotFound(err error) bool {
 // prior_findings shapes track om's internal/verdict package (om-gate T12);
 // gt mq review only needs the fields it routes on.
 type verdictJSON struct {
-	Score    float64          `json:"score"`
-	Verdict  string           `json:"verdict"`
-	Findings []verdictFinding `json:"findings"`
+	Score    float64   `json:"score"`
+	Verdict  string    `json:"verdict"`
+	Findings []Finding `json:"findings"`
 
 	PriorFindings *struct {
 		Resolved   []string `json:"resolved"`
@@ -165,7 +165,11 @@ type verdictJSON struct {
 	} `json:"prior_findings,omitempty"`
 }
 
-type verdictFinding struct {
+// Finding is one om verdict finding, exported so it can travel beyond this
+// package onto Note.Findings and, from there, forward into a merge
+// rejection's deadWorkerRecoveryRequest.Findings (om-gate T10) — the same
+// shape the gate script itself emits.
+type Finding struct {
 	ID       string `json:"id,omitempty"`
 	Severity string `json:"severity,omitempty"`
 	Path     string `json:"path,omitempty"`
@@ -360,6 +364,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		Score:         v.Score,
 		Verdict:       v.Verdict,
 		FindingsCount: len(v.Findings),
+		Findings:      v.Findings,
 		Attempt:       req.Attempt,
 		ReviewedAt:    time.Now().UTC(),
 		// Recorded only when the review actually ran with an override, so
@@ -395,7 +400,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	// clean approve where the script merely logged to stderr is not a warning.
 	var resultStderr string
 	if note.Verdict == "approve" {
-		var majors []verdictFinding
+		var majors []Finding
 		for _, f := range v.Findings {
 			if f.Severity == "major" {
 				majors = append(majors, f)
@@ -708,7 +713,7 @@ func setEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
 // verdict (label om-followup) and appends their ids as a comment on the MR
 // bead, so a review that approves-with-caveats still leaves a paper trail —
 // approval never dissolves a finding (DECISION 8).
-func fileFollowups(b *beads.Beads, mrID string, score float64, findings []verdictFinding) ([]string, error) {
+func fileFollowups(b *beads.Beads, mrID string, score float64, findings []Finding) ([]string, error) {
 	var ids []string
 	var firstErr error
 	for _, f := range findings {

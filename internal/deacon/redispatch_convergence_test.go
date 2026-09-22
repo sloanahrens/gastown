@@ -128,3 +128,78 @@ func TestDecideEditorialRedispatch_UnderCap_NotConverging_Stops(t *testing.T) {
 		t.Errorf("reason = %q, want mention of non-convergence", reason)
 	}
 }
+
+// TestParseEditorialReceiptFromNotes covers what `gt deacon redispatch`
+// greps back out of a source bead's notes (refinery.formatMergeRejectionNote
+// wrote it there) to run RedispatchEditorial instead of falling back to the
+// plain attempt-count Redispatch (om-gate T10, gt-j6ez).
+func TestParseEditorialReceiptFromNotes(t *testing.T) {
+	tests := []struct {
+		name           string
+		notes          string
+		wantOK         bool
+		wantScore      float64
+		wantUnresolved []string
+	}{
+		{
+			name:      "no receipt at all — build/test rejection or manual reject",
+			notes:     "MERGE REJECTION (attempt 1): build - go build failed\nBranch: feature-x\nTarget: main\nMR: mr-1",
+			wantOK:    false,
+		},
+		{
+			name: "editorial rejection with score only",
+			notes: "MERGE REJECTION (attempt 1): editorial - EDITORIAL REJECTION (attempt 1): om gate request_changes, score 0.42, 1 finding(s)\n" +
+				"Branch: feature-x\nTarget: main\nMR: mr-1\n" +
+				"- id:abc123456789 sev:major internal/foo.go:42 — leaky abstraction\n" +
+				"Score: 0.4200",
+			wantOK:    true,
+			wantScore: 0.42,
+		},
+		{
+			name: "editorial rejection with score and unresolved ids",
+			notes: "MERGE REJECTION (attempt 2): editorial - ...\nBranch: feature-x\nTarget: main\nMR: mr-1\n" +
+				"Score: 0.5500\nUnresolved: abc123456789,def987654321",
+			wantOK:         true,
+			wantScore:      0.55,
+			wantUnresolved: []string{"abc123456789", "def987654321"},
+		},
+		{
+			name: "multiple accumulated rejections — takes the LAST score",
+			notes: "MERGE REJECTION (attempt 1): editorial - ...\nBranch: feature-x\nTarget: main\nMR: mr-1\n" +
+				"Score: 0.3000\n\n" +
+				"MERGE REJECTION (attempt 2): editorial - ...\nBranch: feature-x\nTarget: main\nMR: mr-1\n" +
+				"Score: 0.5000\nUnresolved: abc123456789",
+			wantOK:         true,
+			wantScore:      0.5,
+			wantUnresolved: []string{"abc123456789"},
+		},
+		{
+			name:   "empty notes",
+			notes:  "",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cur, ok := ParseEditorialReceiptFromNotes(tt.notes)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if cur.Score != tt.wantScore {
+				t.Errorf("Score = %v, want %v", cur.Score, tt.wantScore)
+			}
+			if len(cur.Unresolved) != len(tt.wantUnresolved) {
+				t.Fatalf("Unresolved = %v, want %v", cur.Unresolved, tt.wantUnresolved)
+			}
+			for i, id := range tt.wantUnresolved {
+				if cur.Unresolved[i] != id {
+					t.Errorf("Unresolved[%d] = %q, want %q", i, cur.Unresolved[i], id)
+				}
+			}
+		})
+	}
+}

@@ -693,6 +693,16 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 	if gotReq.MRID != mrIssue.ID {
 		t.Errorf("MRID = %q, want %q", gotReq.MRID, mrIssue.ID)
 	}
+	// gt-j6ez: a manual gt mq reject has no om verdict behind it, so its
+	// recovery request must not fabricate a Receipt (that would make
+	// RedispatchEditorial gate on a nonexistent score) — but the human's
+	// reason should still surface as the mail's Rejection-Summary line.
+	if gotReq.Receipt != nil {
+		t.Errorf("Receipt = %+v, want nil for a manual reject with no om verdict", gotReq.Receipt)
+	}
+	if gotReq.Summary != "editorial gate: request_changes" {
+		t.Errorf("Summary = %q, want the reject reason", gotReq.Summary)
+	}
 }
 
 // TestManager_RejectMR_SupersededSourceBead_NotReopened is the gt-pvwy

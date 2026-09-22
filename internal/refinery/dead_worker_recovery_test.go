@@ -324,6 +324,69 @@ func TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail(t *testing.T) 
 	}
 }
 
+// TestFormatMergeRejectionNote_ReceiptAppendsScoreLine is om-gate T10's
+// wiring fix (gt-j6ez): a rejection carrying an EditorialReceipt writes a
+// machine-parseable Score:/Unresolved: pair onto the bead's notes, which
+// deacon.ParseEditorialReceiptFromNotes greps back out so `gt deacon
+// redispatch` can run RedispatchEditorial instead of Redispatch.
+func TestFormatMergeRejectionNote_ReceiptAppendsScoreLine(t *testing.T) {
+	t.Parallel()
+	req := deadWorkerReq()
+	req.Receipt = &EditorialReceipt{Score: 0.42, Unresolved: []string{"abc123def456", "789012345678"}}
+
+	note := formatMergeRejectionNote(req)
+
+	if !strings.Contains(note, "Score: 0.4200") {
+		t.Errorf("note missing Score line:\n%s", note)
+	}
+	if !strings.Contains(note, "Unresolved: abc123def456,789012345678") {
+		t.Errorf("note missing Unresolved line:\n%s", note)
+	}
+}
+
+// TestFormatMergeRejectionNote_NoReceipt_NoScoreLine guards the non-editorial
+// and manual-reject paths: no Receipt means no Score:/Unresolved: lines.
+func TestFormatMergeRejectionNote_NoReceipt_NoScoreLine(t *testing.T) {
+	t.Parallel()
+	note := formatMergeRejectionNote(deadWorkerReq())
+	if strings.Contains(note, "Score:") || strings.Contains(note, "Unresolved:") {
+		t.Errorf("expected no Score/Unresolved lines when Receipt is nil, got:\n%s", note)
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_ReceiptTravelsToMail extends
+// TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail to the Score/
+// Unresolved receipt: the RECOVERED_BEAD mail body must carry
+// Rejection-Score and Rejection-Unresolved lines whenever the rejection has
+// one, so deacon.ParseEditorialReceiptFromNotes (reading the persisted bead
+// notes) and a human reading the mail see the same data.
+func TestRecoverRejectedMRDeadWorker_ReceiptTravelsToMail(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+
+	req := deadWorkerReq()
+	req.Receipt = &EditorialReceipt{Score: 0.42, Unresolved: []string{"abc123def456"}}
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, req) {
+		t.Fatal("expected recovery")
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 mail, got %d", len(sent))
+	}
+	body := sent[0].Body
+	if !strings.Contains(body, "Rejection-Score: 0.4200") {
+		t.Errorf("mail body missing Rejection-Score line:\n%s", body)
+	}
+	if !strings.Contains(body, "Rejection-Unresolved: abc123def456") {
+		t.Errorf("mail body missing Rejection-Unresolved line:\n%s", body)
+	}
+}
+
 // TestRecoverRejectedMRDeadWorker_NoFindings_NoRejectionLinesInMail guards
 // the non-editorial path: mail body carries no Rejection-Findings/-Summary
 // lines when the rejection has none.

@@ -306,7 +306,7 @@ func TestRun_RequestChangesNoReviewedHeadChange(t *testing.T) {
 		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
 				Score: 0.4, Verdict: "request_changes",
-				Findings: []verdictFinding{{Title: "a", Severity: "minor"}, {Title: "b", Severity: "major"}},
+				Findings: []Finding{{Title: "a", Severity: "minor"}, {Title: "b", Severity: "major"}},
 			})
 			return "", 1, nil
 		},
@@ -845,7 +845,7 @@ func TestRun_ApproveWithMajorFindingsFilesFollowups(t *testing.T) {
 		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
 				Score: 0.75, Verdict: "approve",
-				Findings: []verdictFinding{
+				Findings: []Finding{
 					{Title: "leaky abstraction", Severity: "major", Path: "foo.go", Line: 10},
 					{Title: "nit", Severity: "minor"},
 				},
@@ -894,7 +894,7 @@ func TestRun_ApproveFollowupFilingFailureSurfacedInStderr(t *testing.T) {
 		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
 				Score: 0.75, Verdict: "approve",
-				Findings: []verdictFinding{{Title: "leaky abstraction", Severity: "major"}},
+				Findings: []Finding{{Title: "leaky abstraction", Severity: "major"}},
 			})
 			return "", 0, nil
 		},
@@ -1742,7 +1742,7 @@ func TestRun_RerollReReviewsAndRecordsAttemptHistory(t *testing.T) {
 		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
 				Score: 0.50, Verdict: "request_changes",
-				Findings: []verdictFinding{{Title: "a", Severity: "minor"}, {Title: "b", Severity: "major"}},
+				Findings: []Finding{{Title: "a", Severity: "minor"}, {Title: "b", Severity: "major"}},
 			})
 			return "", 1, nil
 		},

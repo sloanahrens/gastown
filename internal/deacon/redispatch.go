@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,10 +78,18 @@ type ReceiptSummary struct {
 }
 
 // Converging reports whether attempt cur trends toward a mergeable state
-// relative to the prior attempt prev: the review score strictly increased
-// AND no finding id still open in cur was already unresolved in prev. When
-// false, reason names which condition failed, for use directly in
+// relative to the prior attempt prev: no finding id carried forward from an
+// earlier rejection is still open, AND the review score strictly increased.
+// When false, reason names which condition failed, for use directly in
 // escalation logs ("not converging: <reason> — escalating").
+//
+// cur.Unresolved is not this bead's raw finding list for the current
+// attempt — it is om's own carry-forward classification (PriorFindings.
+// Unresolved), computed upstream from the bead's full accumulated rejection
+// history (every MERGE REJECTION note written so far), not just from prev.
+// That is why this function reads prev.Score but never prev.Unresolved: the
+// prev-vs-cur finding comparison the name implies already happened before
+// this call, inside om.
 //
 // An identical finding set across two attempts is the canonical
 // non-convergence case: cur.Unresolved is non-empty (those exact ids), so
@@ -339,6 +349,26 @@ func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown ti
 		return result
 	}
 
+	return redispatchAttempt(townRoot, beadID, sourceRig, maxAttempts, state, beadState, nil)
+}
+
+// redispatchAttempt is the re-dispatch tail shared by Redispatch and
+// RedispatchEditorial once the escalation/cooldown gate has already cleared:
+// resolve the target rig, verify the bead is still open, resolve any
+// model-escalation agent override, sling the bead, and persist state.
+//
+// onDispatched, when non-nil, is called only after a SUCCESSFUL sling — it
+// exists so RedispatchEditorial can record this attempt's receipt as
+// beadState.LastReceipt for the next call's convergence check. Calling it on
+// a FAILED sling too was the bug: a failed sling makes no new attempt with a
+// new outcome, so the next retry would still be judging the same rejection —
+// but with LastReceipt now equal to cur, Converging compares that rejection
+// to itself (cur.Score <= prev.Score, since they're equal) and reads it as
+// non-converging, forcing an immediate false escalation on a transient sling
+// failure (gt-j6ez).
+func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, state *RedispatchState, beadState *BeadRedispatchState, onDispatched func()) *RedispatchResult {
+	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
+
 	// Determine target rig
 	targetRig := sourceRig
 	if targetRig == "" {
@@ -370,12 +400,11 @@ func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown ti
 	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
 
 	// Re-dispatch via gt sling
-	err = slingBead(townRoot, beadID, targetRig, escalationAgent)
-	if err != nil {
+	if err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
 
-		// Record the failed attempt
+		// Record the failed attempt — but not onDispatched; see doc comment.
 		beadState.LastAgent = escalationAgent
 		beadState.RecordAttempt(targetRig)
 		_ = SaveRedispatchState(townRoot, state)
@@ -386,6 +415,9 @@ func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown ti
 	// Record successful dispatch
 	beadState.LastAgent = escalationAgent
 	beadState.RecordAttempt(targetRig)
+	if onDispatched != nil {
+		onDispatched()
+	}
 	result.Action = "redispatched"
 	result.Attempts = beadState.AttemptCount
 	if escalationAgent != "" {
@@ -470,59 +502,14 @@ func RedispatchEditorial(townRoot, beadID, sourceRig string, maxAttempts int, co
 
 	// Converging (or no prior receipt yet) and under the attempt cap:
 	// proceed exactly like the generic Redispatch, then remember this
-	// attempt's receipt so the next call can judge convergence against it.
-	targetRig := sourceRig
-	if targetRig == "" {
-		targetRig = resolveRigFromBead(townRoot, beadID)
-	}
-	if targetRig == "" {
-		result.Action = "error"
-		result.Error = fmt.Errorf("cannot determine target rig for bead %s", beadID)
-		return result
-	}
-	result.TargetRig = targetRig
-
-	beadStatus := getBeadStatusForRedispatch(townRoot, beadID)
-	if beadStatus != "open" {
-		result.Action = "skipped"
-		if beadStatus == "" {
-			result.Message = "could not determine bead status (treating as not open)"
-		} else {
-			result.Message = fmt.Sprintf("bead status is %q (expected open)", beadStatus)
-		}
-		return result
-	}
-
-	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
-
-	if err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
-		result.Action = "error"
-		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
-		beadState.LastAgent = escalationAgent
-		beadState.RecordAttempt(targetRig)
-		receipt := cur
-		beadState.LastReceipt = &receipt
-		_ = SaveRedispatchState(townRoot, state)
-		return result
-	}
-
-	beadState.LastAgent = escalationAgent
-	beadState.RecordAttempt(targetRig)
+	// attempt's receipt — but only once the sling actually succeeds, so a
+	// transient sling failure doesn't make the next retry compare this
+	// rejection's receipt against itself (see redispatchAttempt's doc
+	// comment).
 	receipt := cur
-	beadState.LastReceipt = &receipt
-	result.Action = "redispatched"
-	result.Attempts = beadState.AttemptCount
-	if escalationAgent != "" {
-		result.Message = fmt.Sprintf("re-dispatched to %s with agent %q (attempt %d/%d)", targetRig, escalationAgent, beadState.AttemptCount, maxAttempts)
-	} else {
-		result.Message = fmt.Sprintf("re-dispatched to %s (attempt %d/%d)", targetRig, beadState.AttemptCount, maxAttempts)
-	}
-
-	if saveErr := SaveRedispatchState(townRoot, state); saveErr != nil {
-		result.Message += fmt.Sprintf(" (warning: state save failed: %v)", saveErr)
-	}
-
-	return result
+	return redispatchAttempt(townRoot, beadID, sourceRig, maxAttempts, state, beadState, func() {
+		beadState.LastReceipt = &receipt
+	})
 }
 
 // labelNeedsHuman applies NeedsHumanLabel to a bead so it surfaces for
@@ -616,6 +603,73 @@ func getBeadStatusForRedispatch(townRoot, beadID string) string {
 		return ""
 	}
 	return issues[0].Status
+}
+
+// GetBeadNotesForRedispatch fetches a bead's notes field, for callers (`gt
+// deacon redispatch`) that need to recover the om editorial receipt
+// formatMergeRejectionNote wrote onto it (om-gate T10), so
+// ParseEditorialReceiptFromNotes can hand RedispatchEditorial's
+// convergence rule real data instead of the deacon inferring it from mail
+// prose by hand. Returns "" on any lookup failure (bd unreachable, bead not
+// found) — the caller falls back to the plain Redispatch in that case.
+func GetBeadNotesForRedispatch(townRoot, beadID string) string {
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.ReadOnlyRouting, "show", beadID, "--json")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	var issues []struct {
+		Notes string `json:"notes"`
+	}
+	if err := json.Unmarshal(output, &issues); err != nil || len(issues) == 0 {
+		return ""
+	}
+	return issues[0].Notes
+}
+
+// editorialScoreLineRE and editorialUnresolvedLineRE match the "Score:" and
+// "Unresolved:" lines formatMergeRejectionNote appends to a source bead's
+// notes for an editorial rejection carrying an EditorialReceipt
+// (refinery.deadWorkerRecoveryRequest.Receipt).
+var (
+	editorialScoreLineRE      = regexp.MustCompile(`(?m)^Score:\s*(\S+)\s*$`)
+	editorialUnresolvedLineRE = regexp.MustCompile(`(?m)^Unresolved:\s*(.+?)\s*$`)
+)
+
+// ParseEditorialReceiptFromNotes recovers the om review receipt (score,
+// carried-forward unresolved finding ids) that an editorial merge rejection
+// wrote onto the source bead's notes, so `gt deacon redispatch` can call
+// RedispatchEditorial with real data instead of falling back to the plain
+// attempt-count Redispatch. ok is false when notes carries no Score line —
+// a build/test rejection, a manual `gt mq reject` with no om verdict behind
+// it, or a bead with no rejection history at all.
+//
+// Notes accumulate one MERGE REJECTION block per attempt (append-only), so
+// this takes the LAST Score/Unresolved line in the text — the most recent
+// rejection, which is the one that triggered this redispatch.
+func ParseEditorialReceiptFromNotes(notes string) (cur ReceiptSummary, ok bool) {
+	scoreMatches := editorialScoreLineRE.FindAllStringSubmatch(notes, -1)
+	if len(scoreMatches) == 0 {
+		return ReceiptSummary{}, false
+	}
+	last := scoreMatches[len(scoreMatches)-1]
+	score, err := strconv.ParseFloat(last[1], 64)
+	if err != nil {
+		return ReceiptSummary{}, false
+	}
+	cur.Score = score
+
+	if unresolvedMatches := editorialUnresolvedLineRE.FindAllStringSubmatch(notes, -1); len(unresolvedMatches) > 0 {
+		last := unresolvedMatches[len(unresolvedMatches)-1]
+		for _, id := range strings.Split(last[1], ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				cur.Unresolved = append(cur.Unresolved, id)
+			}
+		}
+	}
+	return cur, true
 }
 
 // LoadModelEscalationConfig loads model escalation rules from a rig project directory.
