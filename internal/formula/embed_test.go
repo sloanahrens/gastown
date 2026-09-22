@@ -307,19 +307,19 @@ func TestUpdateFormulas_UpdatesOutdated(t *testing.T) {
 	}
 
 	// Run update
-	updated, skipped, reinstalled, err := UpdateFormulas(tmpDir)
+	plan, err := UpdateFormulas(tmpDir)
 	if err != nil {
 		t.Fatalf("UpdateFormulas() error: %v", err)
 	}
 
-	if updated != 1 {
-		t.Errorf("updated = %d, want 1", updated)
+	if n := len(plan.Updated()); n != 1 {
+		t.Errorf("updated = %d, want 1", n)
 	}
-	if skipped != 0 {
-		t.Errorf("skipped = %d, want 0", skipped)
+	if n := len(plan.SkippedModified()); n != 0 {
+		t.Errorf("skipped = %d, want 0", n)
 	}
-	if reinstalled != 0 {
-		t.Errorf("reinstalled = %d, want 0", reinstalled)
+	if n := len(plan.Reinstalled()); n != 0 {
+		t.Errorf("reinstalled = %d, want 0", n)
 	}
 
 	// Verify file was updated
@@ -366,13 +366,15 @@ func TestUpdateFormulas_SkipsModified(t *testing.T) {
 	}
 
 	// Run update - should skip the modified formula
-	_, skipped, _, err := UpdateFormulas(tmpDir)
+	plan, err := UpdateFormulas(tmpDir)
 	if err != nil {
 		t.Fatalf("UpdateFormulas() error: %v", err)
 	}
 
-	if skipped != 1 {
-		t.Errorf("skipped = %d, want 1", skipped)
+	if skipped := plan.SkippedModified(); len(skipped) != 1 {
+		t.Fatalf("skipped = %v, want exactly the modified formula", skipped)
+	} else if skipped[0] != targetFormula {
+		t.Errorf("skipped[0] = %q, want %q", skipped[0], targetFormula)
 	}
 
 	// Verify file was NOT changed
@@ -417,13 +419,13 @@ func TestUpdateFormulas_ReinstallsMissing(t *testing.T) {
 	}
 
 	// Run update
-	_, _, reinstalled, err := UpdateFormulas(tmpDir)
+	plan, err := UpdateFormulas(tmpDir)
 	if err != nil {
 		t.Fatalf("UpdateFormulas() error: %v", err)
 	}
 
-	if reinstalled != 1 {
-		t.Errorf("reinstalled = %d, want 1", reinstalled)
+	if n := len(plan.Reinstalled()); n != 1 {
+		t.Errorf("reinstalled = %d, want 1", n)
 	}
 
 	// Verify file was restored
@@ -449,7 +451,7 @@ func TestUpdateFormulas_InstallsNew(t *testing.T) {
 	}
 
 	// Run update - should install all formulas as "new"
-	updated, skipped, reinstalled, err := UpdateFormulas(tmpDir)
+	plan, err := UpdateFormulas(tmpDir)
 	if err != nil {
 		t.Fatalf("UpdateFormulas() error: %v", err)
 	}
@@ -460,12 +462,11 @@ func TestUpdateFormulas_InstallsNew(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	total := updated + reinstalled
-	if total != len(embedded) {
-		t.Errorf("total installed = %d, want %d", total, len(embedded))
+	if n := plan.Changed(); n != len(embedded) {
+		t.Errorf("total installed = %d, want %d", n, len(embedded))
 	}
-	if skipped != 0 {
-		t.Errorf("skipped = %d, want 0", skipped)
+	if n := len(plan.SkippedModified()); n != 0 {
+		t.Errorf("skipped = %d, want 0", n)
 	}
 }
 
@@ -608,20 +609,20 @@ func TestUpdateFormulas_UpdatesUntracked(t *testing.T) {
 	}
 
 	// Run update - should update all untracked formulas
-	updated, skipped, reinstalled, err := UpdateFormulas(tmpDir)
+	plan, err := UpdateFormulas(tmpDir)
 	if err != nil {
 		t.Fatalf("UpdateFormulas() error: %v", err)
 	}
 
 	// All untracked files should be updated (counted as "updated", not "reinstalled")
-	if updated != len(embedded) {
-		t.Errorf("updated = %d, want %d", updated, len(embedded))
+	if n := len(plan.Updated()); n != len(embedded) {
+		t.Errorf("updated = %d, want %d", n, len(embedded))
 	}
-	if skipped != 0 {
-		t.Errorf("skipped = %d, want 0", skipped)
+	if n := len(plan.SkippedModified()); n != 0 {
+		t.Errorf("skipped = %d, want 0", n)
 	}
-	if reinstalled != 0 {
-		t.Errorf("reinstalled = %d, want 0", reinstalled)
+	if n := len(plan.Reinstalled()); n != 0 {
+		t.Errorf("reinstalled = %d, want 0", n)
 	}
 
 	// Verify files now match embedded
@@ -980,5 +981,227 @@ func TestGetEmbeddedFormulaContent(t *testing.T) {
 	_, err = GetEmbeddedFormulaContent("nonexistent-formula")
 	if err == nil {
 		t.Error("expected error for non-existent formula")
+	}
+}
+
+// provisionTownWithHandEdit provisions a town, then replaces one formula's copy
+// with content the install record does not know, i.e. the state a hand edit
+// leaves behind. It returns the town root, the formulas directory, and the
+// edited formula's filename.
+func provisionTownWithHandEdit(t *testing.T, edited []byte) (townRoot, formulasDir, name string) {
+	t.Helper()
+
+	townRoot = t.TempDir()
+	if _, err := ProvisionFormulas(townRoot); err != nil {
+		t.Fatalf("ProvisionFormulas() error: %v", err)
+	}
+
+	embedded, err := getEmbeddedFormulas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name = "mol-polecat-work.formula.toml"
+	if _, ok := embedded[name]; !ok {
+		t.Fatalf("%s is not an embedded formula", name)
+	}
+
+	formulasDir = filepath.Join(townRoot, ".beads", "formulas")
+	if err := os.WriteFile(filepath.Join(formulasDir, name), edited, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot, formulasDir, name
+}
+
+// TestPlanFormulaSync_WritesNothing verifies the dry run classifies without
+// touching the town — the deacon refused to run sync against the live town for
+// want of exactly this (gt-dt7r).
+func TestPlanFormulaSync_WritesNothing(t *testing.T) {
+	townRoot, formulasDir, name := provisionTownWithHandEdit(t,
+		[]byte("# hand-edited by a human\n"))
+
+	// Give the plan real work to report: a second formula the town is missing.
+	deleted := "mol-witness-patrol.formula.toml"
+	if err := os.Remove(filepath.Join(formulasDir, deleted)); err != nil {
+		t.Fatal(err)
+	}
+
+	installedBefore, err := os.ReadFile(filepath.Join(formulasDir, ".installed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := PlanFormulaSync(townRoot)
+	if err != nil {
+		t.Fatalf("PlanFormulaSync() error: %v", err)
+	}
+
+	if got := plan.SkippedModified(); len(got) != 1 || got[0] != name {
+		t.Errorf("SkippedModified() = %v, want [%s]", got, name)
+	}
+	if got := plan.Reinstalled(); len(got) != 1 || got[0] != deleted {
+		t.Errorf("Reinstalled() = %v, want [%s]", got, deleted)
+	}
+	if _, err := os.Stat(filepath.Join(formulasDir, deleted)); !os.IsNotExist(err) {
+		t.Error("dry run reinstalled a deleted formula")
+	}
+
+	// Nothing on disk may have moved.
+	content, err := os.ReadFile(filepath.Join(formulasDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "# hand-edited by a human\n" {
+		t.Error("dry run overwrote the hand-edited formula")
+	}
+	installedAfter, err := os.ReadFile(filepath.Join(formulasDir, ".installed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(installedBefore) != string(installedAfter) {
+		t.Error("dry run rewrote .installed.json")
+	}
+}
+
+// TestSyncFormulas_ForceOverwritesAndBacksUp verifies --force takes the embedded
+// content and leaves the displaced edit recoverable, so --force is a migration
+// rather than a deletion.
+func TestSyncFormulas_ForceOverwritesAndBacksUp(t *testing.T) {
+	edited := "# the human's only copy\n"
+	townRoot, formulasDir, name := provisionTownWithHandEdit(t, []byte(edited))
+
+	plan, err := SyncFormulas(townRoot, SyncOptions{Force: true})
+	if err != nil {
+		t.Fatalf("SyncFormulas(force) error: %v", err)
+	}
+
+	if got := plan.ForceOverwritten(); len(got) != 1 || got[0] != name {
+		t.Errorf("ForceOverwritten() = %v, want [%s]", got, name)
+	}
+	if got := plan.SkippedModified(); len(got) != 0 {
+		t.Errorf("SkippedModified() = %v, want none under --force", got)
+	}
+
+	// The live copy is now the embedded one.
+	embeddedHash, err := getEmbeddedFormulas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(formulasDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if computeHash(content) != embeddedHash[name] {
+		t.Error("--force did not write the embedded content")
+	}
+
+	// The displaced edit survives under .bak/.
+	backup, err := os.ReadFile(filepath.Join(formulasDir, ".bak", name))
+	if err != nil {
+		t.Fatalf("reading backup: %v", err)
+	}
+	if string(backup) != edited {
+		t.Errorf("backup = %q, want the displaced content %q", backup, edited)
+	}
+
+	// And the manifest points at it, so the loss is discoverable afterwards.
+	records, err := ReadForceBackupManifest(townRoot)
+	if err != nil {
+		t.Fatalf("ReadForceBackupManifest() error: %v", err)
+	}
+	if len(records) != 1 || records[0].Formula != name {
+		t.Fatalf("ReadForceBackupManifest() = %v, want one record for %s", records, name)
+	}
+	if records[0].Path != filepath.Join(formulasDir, ".bak", name) {
+		t.Errorf("backup path = %q, want it under .bak/", records[0].Path)
+	}
+}
+
+// TestReadForceBackupManifest_AbsentIsEmpty verifies an untouched town reports no
+// displaced copies rather than an error, so callers can read it unconditionally.
+func TestReadForceBackupManifest_AbsentIsEmpty(t *testing.T) {
+	townRoot := t.TempDir()
+	if _, err := ProvisionFormulas(townRoot); err != nil {
+		t.Fatalf("ProvisionFormulas() error: %v", err)
+	}
+
+	records, err := ReadForceBackupManifest(townRoot)
+	if err != nil {
+		t.Fatalf("ReadForceBackupManifest() error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("ReadForceBackupManifest() = %v, want none", records)
+	}
+}
+
+// TestSyncFormulas_ForceLeavesCleanTownUntouched verifies --force is not a
+// blanket overwrite: a town with nothing hand-edited syncs to the same plan a
+// plain sync produces.
+func TestSyncFormulas_ForceLeavesCleanTownUntouched(t *testing.T) {
+	townRoot := t.TempDir()
+	if _, err := ProvisionFormulas(townRoot); err != nil {
+		t.Fatalf("ProvisionFormulas() error: %v", err)
+	}
+
+	plan, err := SyncFormulas(townRoot, SyncOptions{Force: true})
+	if err != nil {
+		t.Fatalf("SyncFormulas(force) error: %v", err)
+	}
+
+	if plan.Changed() != 0 || len(plan.ForceOverwritten()) != 0 {
+		t.Errorf("clean town under --force: changed=%d force-overwritten=%v, want none",
+			plan.Changed(), plan.ForceOverwritten())
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, ".beads", "formulas", ".bak")); !os.IsNotExist(err) {
+		t.Error("--force created a backup directory for a town with nothing to back up")
+	}
+}
+
+// TestSyncPlan_SupersededMarksBlockedNewerContent verifies the plan separates a
+// copy that is merely preserving a local edit from one that is also hiding
+// newer embedded content — the difference between "your edit is safe" and "a
+// merged fix is going nowhere" (gt-dt7r).
+func TestSyncPlan_SupersededMarksBlockedNewerContent(t *testing.T) {
+	tests := []struct {
+		name            string
+		recordStaleHash bool
+		wantSuperseded  bool
+	}{
+		{"edit of the currently shipped formula", false, false},
+		{"edit of a formula the binary has since moved past", true, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot, formulasDir, name := provisionTownWithHandEdit(t, []byte("# hand-edited\n"))
+
+			if tc.recordStaleHash {
+				// Simulates a copy the last install left behind an older binary:
+				// the embedded content has moved on since.
+				installed, err := loadInstalledRecord(formulasDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				installed.Formulas[name] = "1111111111111111111111111111111111111111111111111111111111111111"
+				if err := saveInstalledRecord(formulasDir, installed); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			plan, err := PlanFormulaSync(townRoot)
+			if err != nil {
+				t.Fatalf("PlanFormulaSync() error: %v", err)
+			}
+
+			got := plan.Superseded()
+			if tc.wantSuperseded {
+				if len(got) != 1 || got[0] != name {
+					t.Errorf("Superseded() = %v, want [%s]", got, name)
+				}
+				return
+			}
+			if len(got) != 0 {
+				t.Errorf("Superseded() = %v, want none: the embedded content has not moved on", got)
+			}
+		})
 	}
 }
