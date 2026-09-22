@@ -381,6 +381,19 @@ func TestMatchesUnboundedScan(t *testing.T) {
 		{"ls plain", "ls /", false},
 		{"du without root arg", "du -sh .", false},
 		{"no scan tool at all", "echo hello", false},
+
+		// A scan's flags and root argument come only from its own segment: a
+		// recursive flag or a root path belonging to a LATER command on the
+		// line must not be read as this command's (gt-n8ir — "grep -c x; jq
+		// -r .a; echo //" was blocked as "grep rooted at //", combining jq's
+		// -r with echo's // to incriminate a grep that is not recursive).
+		{"-r from a later jq, // from a later echo", "grep -c x; jq -r .a; echo //", false},
+		{"same line, order reversed", "jq -r .a; grep -c x; echo //", false},
+		{"ls -R from a later command", "grep -c x; ls -R; echo //", false},
+		{"// after a bounded grep", "grep -rn TODO ./src; echo //", false},
+		{"the scan's own segment still blocks", "find / -name x; echo //", true},
+		{"a later segment's scan still blocks", "echo //; find / -name x", true},
+		{"a later pipeline stage blocks on its own scan", "grep -c x | ls -R /", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -668,6 +681,85 @@ func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
 	command := "x=./src; bfs $x -name regex.h"
 	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — variable resolves to a bounded path", command, reason)
+	}
+}
+
+// TestCommandSubstitutionProgramStaysOpaque pins the second half of gt-n8ir.
+// A quoted jq program using the "//" alternative operator arrived at the
+// guard as a bare "//" token whenever the program sat inside "$(...)" inside
+// a double-quoted word, and matchesUnboundedScan read that token as a root
+// path — blocking a compound command over quoted text it is supposed to
+// leave opaque. The body of a $(...) or `...` substitution is a command in
+// its own right (the shell re-parses it), so its quoting must not close the
+// enclosing word; the whole substitution has to stay inside one token, which
+// is what spaceOutShellOperators now guarantees.
+func TestCommandSubstitutionProgramStaysOpaque(t *testing.T) {
+	t.Parallel()
+
+	const program = `.[0] | "(.s) a=(.a // "-")"`
+	const substitution = `$(jq -r '` + program + `')`
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// The reporter's ddmin shape: any two of its three parts passed, all
+		// three together were blocked.
+		{"reporter's ddmin shape",
+			`grep -c x f; echo "x: ` + substitution + `"; jq -r '"(.b)"'`, false},
+		{"substitution alone with the jq program",
+			`grep -c x f; echo "x: ` + substitution + `"`, false},
+		{"scan tool after the substitution",
+			`echo "x: ` + substitution + `"; grep -c x f; jq -r '"(.b)"'`, false},
+		{"substitution as a grep argument",
+			`grep -rn TODO ./src "` + substitution + `"`, false},
+		{"the patrol shape the sweep used",
+			`bd list --json | jq -r '.assignee // "-"'`, false},
+		// An opaque token must not be allowed to swallow a real scan: a
+		// substitution wrapping one still blocks, through the recursion into
+		// the body's own text.
+		{"a real root inside the substitution still blocks",
+			`echo "x: $(grep -r TODO /)"`, true},
+		{"a real root in a later segment still blocks",
+			`grep -c x f; echo "x: ` + substitution + `"; find / -name y`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := evaluateDangerousCommand(tt.command, 0, "")
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+
+	// The token-level invariant the results above rest on, pinned exactly so
+	// a future change to the quote scanner has to face it: the whole
+	// substitution is one token, the jq program inside it is intact, and no
+	// fragment of the program ("//", "a=(.a", ...) surfaces as a token of
+	// its own.
+	command := `grep -c x f; echo "x: ` + substitution + `"; jq -r '"(.b)"'`
+	want := []string{
+		"grep", "-c", "x", "f", ";",
+		"echo", `x: $(jq -r '.[0] | "(.s) a=(.a // "-")"')`, ";",
+		"jq", "-r", `"(.b)"`,
+	}
+	got := shellTokenize(command)
+	if len(got) != len(want) {
+		t.Fatalf("shellTokenize(%q) = %q, want %q", command, got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("shellTokenize(%q) = %q, want %q", command, got, want)
+		}
+	}
+	for _, tok := range got {
+		if tok == "//" {
+			t.Fatalf("shellTokenize(%q) leaked the jq program's // as a standalone token: %q", command, got)
+		}
 	}
 }
 
