@@ -124,6 +124,35 @@ func deletePkgb(t *testing.T, dir string) {
 	runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
 }
 
+// addNestedModule writes a module inside the test repo — its own go.mod, so the
+// repo's module does not contain it — holding one .go file, and commits it. The
+// package name need not match the directory, so one fixed name serves any depth
+// ("sub", "plugins/dolt-snapshots").
+func addNestedModule(t *testing.T, dir, relDir, modulePath string) {
+	t.Helper()
+	full := filepath.Join(dir, relDir)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(full, "go.mod"), "module "+modulePath+"\n\ngo 1.21\n")
+	writeFile(t, filepath.Join(full, "nested.go"), "package nestedmod\n\nfunc V() int { return 1 }\n")
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "add nested module at "+relDir)
+}
+
+// addMainPackage writes a package main at cmd/ in the test repo and commits it,
+// which is what puts the module into moduleHasMainPackage's true branch and so
+// switches goBuildWholeModule to its -o form.
+func addMainPackage(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "cmd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "cmd", "main.go"), "package main\n\nfunc main() {}\n")
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "add a main package")
+}
+
 // stubLintVerifyTimeout shrinks the lint gate's budget so a test can drive a
 // real expiry (gt-taoz) rather than sleeping out the 10m default.
 func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
@@ -348,6 +377,291 @@ func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
 	if len(result.packages) != 1 || result.packages[0] != "." {
 		t.Errorf("packages = %v, want [.] — the whole-module build stands in for the deleted package", result.packages)
 	}
+}
+
+// TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild forces the
+// still-refusing half of gt-ytjh: a whole-package deletion whose importers no
+// longer build must refuse, and the refusal has to show the build failure it is
+// asking the polecat to fix rather than only telling it to fix the build.
+func TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild(t *testing.T) {
+	stubNoContainers(t)
+	compilerSaid := "no required module provides package example.test/pkgb"
+	stubGoBuildWholeModule(t, errors.New("go build ./...: exit status 1: "+compilerSaid))
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	deletePkgb(t, dir)
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-refusal")
+	if err == nil {
+		t.Fatalf("runDefaultTestVerification: a deletion that breaks the build must refuse, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "unbuildable") {
+		t.Errorf("error does not report the deletion refusal: %v", err)
+	}
+	if !strings.Contains(err.Error(), compilerSaid) {
+		t.Errorf("the refusal does not surface the build failure it tells the polecat to fix: %v", err)
+	}
+	if suiteRan {
+		t.Error("the suite ran for a deletion whose build is already broken")
+	}
+}
+
+// TestRunDefaultTestVerification_UnresolvableGoChangeRefuses pins the refusal
+// for a changed .go file that is still in the worktree but that `go list` will
+// not resolve to a package: it is not a package deletion, and no whole-module
+// build can stand in for it — for a package whose .go files are all excluded by
+// build constraints `go build ./...` SUCCEEDS, having nothing to build. Every
+// case below stubs the build to succeed and the suite to pass, so a gate that
+// reached either would report success: that is what makes the refusal the
+// assertion, rather than merely an error message.
+func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
+	// addExcludedPkg adds a directory whose only .go file is excluded by its
+	// build constraints — the shape whose whole-module build succeeds.
+	addExcludedPkg := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, "pkgexcluded"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pkgexcluded", "x.go"), []byte("//go:build never\n\npackage pkgexcluded\n\nfunc X() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "add a build-constraint-excluded package")
+	}
+
+	// runGate drives the gate with the build stubbed to pass, returning how
+	// many times it was called: a gate that reached the build would go on to
+	// succeed, so the count is what separates a refusal from a pass.
+	runGate := func(t *testing.T, dir string) (testVerifyResult, error, int) {
+		t.Helper()
+		stubNoContainers(t)
+		builds := 0
+		prev := goBuildWholeModule
+		goBuildWholeModule = func(string) error { builds++; return nil }
+		t.Cleanup(func() { goBuildWholeModule = prev })
+		stubVerifyGate(t,
+			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+			func(context.Context, string, string, []string, *os.File) error { return nil })
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unresolvable-role")
+		return result, err, builds
+	}
+
+	t.Run("all-build-excluded .go file: refuses instead of falling through to a build that would pass", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addExcludedPkg(t, dir)
+
+		result, err, builds := runGate(t, dir)
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: a .go file that resolves to no package must refuse, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "pkgexcluded") {
+			t.Errorf("error does not name the unresolvable directory: %v", err)
+		}
+		if !strings.Contains(err.Error(), "not a package deletion") {
+			t.Errorf("error does not say why a whole-module build cannot stand in here: %v", err)
+		}
+		if builds != 0 {
+			t.Errorf("goBuildWholeModule ran %d time(s); the build cannot verify a file it never compiles", builds)
+		}
+	})
+
+	t.Run("resolved package alongside an unresolvable one: still refuses", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		// pkga resolves, so the gate has a package list to scope a suite to —
+		// the mixed case in which an unresolvable file escaped with no check.
+		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nfunc Add(a, b int) int { return a + b + 1 }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+		addExcludedPkg(t, dir)
+
+		result, err, builds := runGate(t, dir)
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: an unresolvable change must refuse even when another changed package resolved, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "pkgexcluded") {
+			t.Errorf("error does not name the unresolvable directory: %v", err)
+		}
+		if builds != 0 {
+			t.Errorf("goBuildWholeModule ran %d time(s), want 0", builds)
+		}
+	})
+}
+
+// TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule pins
+// the shape a rig with a module under its tree produces (this rig ships
+// plugins/dolt-snapshots): the changed .go file belongs to that module, so this
+// module's `go list` fails on it while the file itself is fine. The gate must
+// not refuse it — that locks out every change to a nested module — and it
+// cannot verify it with this module's suite, so it builds that module where it
+// lives.
+func TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule(t *testing.T) {
+	stubNoContainers(t)
+	var builds []string
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module")
+	if err != nil {
+		t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
+	}
+	if !result.ran || !result.success {
+		t.Fatalf("result = %+v, want ran=true success=true", result)
+	}
+	if len(result.packages) != 1 || result.packages[0] != "." {
+		t.Errorf("packages = %v, want [.] — no package of this module can be scoped to the change", result.packages)
+	}
+	if !suiteRan {
+		t.Error("the suite did not run for a nested-module change")
+	}
+	// The build has to be of the module that owns the file. Building the
+	// worktree here would compile the wrong tree: this module's `./...` skips a
+	// nested module, so its success would say nothing about the change.
+	want := filepath.Join(dir, "plugins", "example-sub")
+	if len(builds) != 1 || builds[0] != want {
+		t.Errorf("goBuildWholeModule called with %v, want exactly [%s]", builds, want)
+	}
+	// The switch has to survive in the artifact: a reader who sees the changed
+	// .go file and no line about it cannot tell it was out of reach from it
+	// having been tested.
+	logBytes, readErr := os.ReadFile(result.logPath)
+	if readErr != nil {
+		t.Fatalf("reading verify log: %v", readErr)
+	}
+	logText := string(logBytes)
+	for _, want := range []string{"not scoped:", "plugins/example-sub", "example.test/plugin", "built that module in its own directory"} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("verify log is missing %q, so the directory the gate could not scope is invisible:\n%s", want, logText)
+		}
+	}
+}
+
+// TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses is the failing
+// half of the nested-module build: `go list` does not typecheck, so a file that
+// resolves inside its own module can still be one this build is the only check
+// of — including when this module requires the nested one and so compiles it as
+// a dependency. The failure has to name the module and keep the compiler's
+// output.
+func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T) {
+	stubNoContainers(t)
+	compilerSaid := `plugins/example-sub/nested.go:5:9: cannot use "x" (untyped string constant) as int value in return statement`
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-build")
+	if err == nil {
+		t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "plugins/example-sub") {
+		t.Errorf("the refusal does not name the nested module: %v", err)
+	}
+	if !strings.Contains(err.Error(), compilerSaid) {
+		t.Errorf("the refusal does not surface the build failure it tells the polecat to fix: %v", err)
+	}
+	if suiteRan {
+		t.Error("the suite ran for a nested module whose build is already broken")
+	}
+}
+
+// TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModule:
+// a diff that deletes a package and modifies another still needs the
+// whole-module build. The packages that import the deleted one are not in the
+// changed set — `go list` resolves a package whose imports are broken — so the
+// resolved modified package is not a substitute for the build.
+func TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModule(t *testing.T) {
+	stubNoContainers(t)
+	builds := 0
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(string) error { builds++; return nil }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error { return nil })
+
+	dir, _ := initVerifyTestGoRepo(t)
+	changePkga(t, dir)
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+	deletePkgb(t, dir)
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-diff")
+	if err != nil {
+		t.Fatalf("runDefaultTestVerification: %v", err)
+	}
+	if builds != 1 {
+		t.Errorf("goBuildWholeModule ran %d time(s), want 1 — a resolved package elsewhere in the diff does not cover the deletion", builds)
+	}
+	if len(result.packages) != 1 || !strings.HasSuffix(result.packages[0], "/pkga") {
+		t.Errorf("packages = %v, want just the modified pkga recorded for the MR bead", result.packages)
+	}
+}
+
+// TestModuleHasMainPackage covers the discriminator that decides whether the
+// whole-module build can use -o: only a module with something to link may pass
+// an output directory, and a listing that fails must not be reported as a main
+// package (the build that follows says why in the compiler's own words).
+func TestModuleHasMainPackage(t *testing.T) {
+	t.Run("a module with a main package reports true", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addMainPackage(t, dir)
+		if !moduleHasMainPackage(dir) {
+			t.Error("moduleHasMainPackage = false, want true for a module with cmd/main.go")
+		}
+	})
+
+	t.Run("a library-only module reports false", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		if moduleHasMainPackage(dir) {
+			t.Error("moduleHasMainPackage = true, want false for a module of libraries (go build -o would refuse it)")
+		}
+	})
+
+	t.Run("a directory that is not a Go module reports false", func(t *testing.T) {
+		if moduleHasMainPackage(t.TempDir()) {
+			t.Error("moduleHasMainPackage = true, want false when `go list` fails")
+		}
+	})
 }
 
 // TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan: the gate's log
