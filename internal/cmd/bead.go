@@ -26,7 +26,8 @@ prefix-based routing.
 Subcommands:
   move    Move a bead from one repository to another
   show    Show details of a bead (routes by prefix)
-  read    Alias for show`,
+  read    Alias for show
+  probe   Create an ephemeral bead for a one-off test/routing question`,
 }
 
 var beadMoveCmd = &cobra.Command{
@@ -86,11 +87,66 @@ Examples:
 	},
 }
 
+var beadProbeDescription string
+
+var beadProbeCmd = &cobra.Command{
+	Use:   "probe <title>",
+	Short: "Create an ephemeral bead for a one-off test/routing question",
+	Long: `Creates an ephemeral bead for investigating a one-off question (e.g.
+"does --repo route to the rig I expect?") without leaving behind a bead that
+outlives its purpose.
+
+This is the fix for gt-eje7: two routing-probe beads (om-hoc, be-h2d) were
+left open as type=bug at P2 after the question they existed to answer had
+already been settled. Every field a dispatcher sorts on said "real work";
+only the title said otherwise, and a title is the field most likely to be
+skimmed.
+
+A probe bead created here is structurally non-dispatchable on two
+independent axes, because either alone reproduces the bug:
+  - ephemeral (wisp-type=probe): invisible to 'bd list'/'bd ready' while
+    open, and reaped on a 1h TTL by 'gt compact' if forgotten.
+  - type=chore, priority=4: even if it survives past that TTL and gets
+    promoted to a permanent bead, it reads as low-priority housekeeping,
+    never a dispatchable bug.
+
+Close it (bd close <id>) as soon as the question is answered — in the same
+investigation, not as a follow-up.
+
+Examples:
+  gt bead probe "TEST-ROUTING-PROBE: does --repo route to gastown?"
+  gt bead probe "Does bd query find beads by label?" --description "checking gt-abc"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runBeadProbe,
+}
+
+func runBeadProbe(cmd *cobra.Command, args []string) error {
+	title := args[0]
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working dir: %w", err)
+	}
+
+	bd := beads.New(workDir)
+	issue, err := bd.CreateProbeBead(title, beadProbeDescription)
+	if err != nil {
+		return fmt.Errorf("creating probe bead: %w", err)
+	}
+
+	fmt.Printf("%s Created probe %s\n", style.Bold.Render("✓"), issue.ID)
+	fmt.Printf("  Close it as soon as you have your answer: bd close %s\n", issue.ID)
+
+	return nil
+}
+
 func init() {
 	beadMoveCmd.Flags().BoolVarP(&beadMoveDryRun, "dry-run", "n", false, "Show what would be done")
+	beadProbeCmd.Flags().StringVar(&beadProbeDescription, "description", "", "Optional description (what question this probe answers)")
 	beadCmd.AddCommand(beadMoveCmd)
 	beadCmd.AddCommand(beadShowCmd)
 	beadCmd.AddCommand(beadReadCmd)
+	beadCmd.AddCommand(beadProbeCmd)
 	rootCmd.AddCommand(beadCmd)
 }
 

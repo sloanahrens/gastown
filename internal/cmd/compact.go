@@ -27,6 +27,7 @@ var (
 var defaultTTLs = map[string]time.Duration{
 	"heartbeat":  6 * time.Hour,
 	"ping":       6 * time.Hour,
+	"probe":      1 * time.Hour,
 	"patrol":     24 * time.Hour,
 	"gc_report":  24 * time.Hour,
 	"recovery":   7 * 24 * time.Hour,
@@ -63,6 +64,7 @@ Wisps with comments or keep labels are always promoted.
 
 TTLs by wisp type:
   heartbeat, ping:              6h
+  probe:                        1h
   patrol, gc_report:            24h
   recovery, error, escalation:  7d
   default (untyped):            24h
