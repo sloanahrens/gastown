@@ -581,6 +581,17 @@ func CleanupWispLabels(polecatName, state string) []string {
 	}
 }
 
+// CleanupWispAssignee returns the assignee value that tags a cleanup wisp
+// with its owning rig (gt-gsrz). Cleanup wisps are created and queried from
+// a workDir whose bd routing can land in a database shared across rigs, and
+// polecat names collide across rigs — "polecat:<name>" alone is not a safe
+// discriminator. assignee is a real, queried bd field (unlike "owner", which
+// no code in this repo ever sets on a bead), so it is the field cleanup-wisp
+// creation and lookup both filter on to stay scoped to the rig that owns them.
+func CleanupWispAssignee(rigName string) string {
+	return fmt.Sprintf("%s/witness", rigName)
+}
+
 // SwarmWispLabels generates labels for a swarm tracking wisp.
 func SwarmWispLabels(swarmID string, total, completed int, startTime time.Time) []string {
 	return []string{

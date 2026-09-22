@@ -863,7 +863,7 @@ func TestFindAnyCleanupWisp_NoBdAvailable(t *testing.T) {
 	t.Parallel()
 	// When bd is not available (test environment), findAnyCleanupWisp
 	// should return empty string without panicking
-	result := findAnyCleanupWisp(DefaultBdCli(), "/nonexistent", "testpolecat")
+	result := findAnyCleanupWisp(DefaultBdCli(), "/nonexistent", "gastown", "testpolecat")
 	if result != "" {
 		t.Errorf("findAnyCleanupWisp = %q, want empty when bd unavailable", result)
 	}
@@ -1166,7 +1166,7 @@ func TestFindCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
 
-	_, _ = findCleanupWisp(bd, workDir, "nux")
+	_, _ = findCleanupWisp(bd, workDir, "gastown", "nux")
 
 	got := strings.Join(mock.calls, "\n")
 
@@ -1190,7 +1190,7 @@ func TestFindAnyCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
 
-	_ = findAnyCleanupWisp(bd, workDir, "bravo")
+	_ = findAnyCleanupWisp(bd, workDir, "gastown", "bravo")
 
 	got := strings.Join(mock.calls, "\n")
 
@@ -1212,7 +1212,7 @@ func TestFindAnyCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 func TestFindAllCleanupWisps_NoBdAvailable(t *testing.T) {
 	t.Parallel()
 	// When bd is not available, findAllCleanupWisps should return nil
-	result := findAllCleanupWisps(DefaultBdCli(), "/nonexistent", "testpolecat")
+	result := findAllCleanupWisps(DefaultBdCli(), "/nonexistent", "gastown", "testpolecat")
 	if result != nil {
 		t.Errorf("findAllCleanupWisps = %v, want nil when bd unavailable", result)
 	}
@@ -1231,7 +1231,7 @@ func TestFindAllCleanupWisps_ReturnsAllIDs(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findAllCleanupWisps(bd, workDir, "nux")
+	result := findAllCleanupWisps(bd, workDir, "gastown", "nux")
 
 	if len(result) != 2 {
 		t.Fatalf("findAllCleanupWisps: got %d items, want 2", len(result))
@@ -1264,7 +1264,7 @@ func TestFindAllCleanupWisps_EmptyList(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findAllCleanupWisps(bd, workDir, "nux")
+	result := findAllCleanupWisps(bd, workDir, "gastown", "nux")
 	if result != nil {
 		t.Errorf("findAllCleanupWisps: got %v, want nil for empty list", result)
 	}
@@ -2962,7 +2962,7 @@ func TestFindCleanupWispsForCompletion_MatchesExactIssueAndBranch(t *testing.T) 
 	)
 	workDir := t.TempDir()
 
-	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+	result := findCleanupWispsForCompletion(bd, workDir, "gastown", "nux", "gt-abc", "feature-x")
 
 	if len(result) != 1 || result[0] != "gt-wisp-match" {
 		t.Errorf("findCleanupWispsForCompletion = %v, want [gt-wisp-match]", result)
@@ -2984,7 +2984,7 @@ func TestFindCleanupWispsForCompletion_NoMatches(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+	result := findCleanupWispsForCompletion(bd, workDir, "gastown", "nux", "gt-abc", "feature-x")
 	if result != nil {
 		t.Errorf("findCleanupWispsForCompletion = %v, want nil", result)
 	}
