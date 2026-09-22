@@ -96,6 +96,22 @@ type Note struct {
 	// false, so reviews that touched no criterion round-trip unchanged.
 	RubricRetirement bool `json:"rubric_retirement,omitempty"`
 
+	// RetroReview marks a verdict produced by a review of an already-landed
+	// commit (gt mq review --landed) rather than before its merge. HeadSHA is
+	// then the landed commit the note is stamped on — not a rehearsal head or
+	// a branch tip — so a reader auditing what the gate saw before a merge
+	// can tell this verdict was not part of that. Omitted when false, so
+	// every pre-merge note round-trips unchanged.
+	RetroReview bool `json:"retro_review,omitempty"`
+	// ReviewHead is the branch head a retro-review diffed, when it is not
+	// HeadSHA: for a merge the note must sit on the merge commit for the
+	// coverage check to find it, while the change under review is the head
+	// the merge brought in. Omitted otherwise — including on every review
+	// written before a merge, where the two are the same commit — so a reader
+	// reconstructing the reviewed range from BaseSHA and HeadSHA never has to
+	// guess which of the two it is holding.
+	ReviewHead string `json:"review_head,omitempty"`
+
 	// The fields below are written only by the auditable backfill (gt mq
 	// rekey-note), never by gt mq review: they record that this note was
 	// copied onto a different commit than the one the review wrote it on,
