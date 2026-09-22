@@ -8,8 +8,27 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doctor"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
+
+// stubLiveFirePairRunner overrides liveFirePairRunner for the duration of
+// the test so 'gt hooks sync' tests never spawn a real claude subprocess —
+// this session's own harness proves claude is often in PATH, so tests must
+// not rely on its absence to stay hermetic and fast.
+func stubLiveFirePairRunner(t *testing.T, blocked, allowed doctor.LiveFireVerdict) {
+	t.Helper()
+	orig := liveFirePairRunner
+	liveFirePairRunner = func(claudePath, settingsPath, label string) *doctor.LiveFirePairResult {
+		return &doctor.LiveFirePairResult{
+			Label:        label,
+			SettingsPath: settingsPath,
+			Blocked:      doctor.LiveFireShapeResult{Verdict: blocked, Detail: "stubbed blocked shape"},
+			Allowed:      doctor.LiveFireShapeResult{Verdict: allowed, Detail: "stubbed allowed shape"},
+		}
+	}
+	t.Cleanup(func() { liveFirePairRunner = orig })
+}
 
 func TestSyncTargetCreatesNew(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -488,9 +507,16 @@ func TestRunHooksSyncNonClaudeAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
 	hooksSyncDryRun = false
 	if err := runHooksSync(nil, nil); err != nil {
 		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	// A successful run with a passing canary pair writes the deployment
+	// record doctor hooks-sync reads back (claude-41j.1 D7/D8).
+	if _, err := hooks.ReadSyncReport(townRoot); err != nil {
+		t.Errorf("expected sync-report.json to be written on success: %v", err)
 	}
 
 	// Verify OpenCode plugin was synced to the worktree (not the parent)
@@ -636,6 +662,7 @@ func TestRunHooksSyncNonClaudeAgentNestedPolecatWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
 	hooksSyncDryRun = false
 	if err := runHooksSync(nil, nil); err != nil {
 		t.Fatalf("runHooksSync failed: %v", err)
@@ -649,5 +676,153 @@ func TestRunHooksSyncNonClaudeAgentNestedPolecatWorktree(t *testing.T) {
 	wrongParentPath := filepath.Join(townRoot, "myrig", "polecats", "fury", ".opencode", "plugins", "gastown.js")
 	if _, err := os.Stat(wrongParentPath); !os.IsNotExist(err) {
 		t.Fatalf("opencode plugin should not be created in polecat slot parent %s", wrongParentPath)
+	}
+}
+
+// scaffoldSyncWorkspace creates a minimal town (mayor, deacon, and one rig
+// with a crew worktree) with a base hooks config, and chdirs into it,
+// restoring the original cwd on test cleanup. Returns the town root.
+func scaffoldSyncWorkspace(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	townRoot := filepath.Join(tmpDir, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew", "alice"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(townRoot, "mayor", "town.json"),
+		[]byte(`{"type":"town","version":1,"name":"test"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	return townRoot
+}
+
+// TestRunHooksSyncCanaryFailurePreventsFanOut pins the acceptance criterion
+// that a confirmed canary live-fire failure aborts before any other target
+// is touched (claude-41j.1 D7/D8): the crew target — synced only after the
+// canary in fan-out order — must never be written.
+func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
+	townRoot := scaffoldSyncWorkspace(t)
+	stubLiveFirePairRunner(t, doctor.LiveFireFail, doctor.LiveFirePass)
+
+	hooksSyncDryRun = false
+	err := runHooksSync(nil, nil)
+	if err == nil {
+		t.Fatal("expected hooks sync to abort on a failed canary live-fire pair")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("expected an abort error naming the canary, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(townRoot, "mayor", ".claude", "settings.json")) {
+		t.Errorf("expected the canary settings path in the error, got: %v", err)
+	}
+
+	crewSettings := filepath.Join(townRoot, "myrig", "crew", "alice", ".claude", "settings.json")
+	if _, statErr := os.Stat(crewSettings); !os.IsNotExist(statErr) {
+		t.Error("fan-out target was synced despite a failed canary — fan-out should have stopped")
+	}
+
+	if _, err := hooks.ReadSyncReport(townRoot); !os.IsNotExist(err) {
+		t.Errorf("expected no sync report to be written after an aborted sync, got err=%v", err)
+	}
+}
+
+// TestRunHooksSyncCanaryInconclusiveProceeds verifies that an inconclusive
+// canary result (could not prove either shape) is a warning, not an abort —
+// only a confirmed failure blocks fan-out.
+func TestRunHooksSyncCanaryInconclusiveProceeds(t *testing.T) {
+	townRoot := scaffoldSyncWorkspace(t)
+	stubLiveFirePairRunner(t, doctor.LiveFireInconclusive, doctor.LiveFirePass)
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync should proceed on an inconclusive (not failed) canary pair: %v", err)
+	}
+
+	crewSettings := filepath.Join(townRoot, "myrig", "crew", "alice", ".claude", "settings.json")
+	if _, statErr := os.Stat(crewSettings); statErr != nil {
+		t.Errorf("expected fan-out to proceed past an inconclusive canary: %v", statErr)
+	}
+
+	// An unverified (not Passed) canary still writes a report — it just
+	// won't read back as StatusOK from the hooks-sync doctor check.
+	report, err := hooks.ReadSyncReport(townRoot)
+	if err != nil {
+		t.Fatalf("expected a sync report to be written: %v", err)
+	}
+	if report.Canary.Passed() {
+		t.Error("expected the recorded canary result not to be a full pass")
+	}
+}
+
+// TestRunHooksSyncWritesReportWithEffectiveHookSet verifies the deployment
+// record: on a fully successful run, sync-report.json records the canary's
+// pair result and, per role, the effective hook set as rendered.
+func TestRunHooksSyncWritesReportWithEffectiveHookSet(t *testing.T) {
+	townRoot := scaffoldSyncWorkspace(t)
+	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	report, err := hooks.ReadSyncReport(townRoot)
+	if err != nil {
+		t.Fatalf("ReadSyncReport: %v", err)
+	}
+	if !report.Canary.Passed() {
+		t.Errorf("expected a passed canary, got blocked=%s allowed=%s", report.Canary.Blocked.Verdict, report.Canary.Allowed.Verdict)
+	}
+	if report.Canary.Target != "mayor" {
+		t.Errorf("expected mayor as the deterministic canary, got %q", report.Canary.Target)
+	}
+	if report.Timestamp.IsZero() {
+		t.Error("expected a non-zero timestamp")
+	}
+
+	mayorRole, ok := report.Roles["mayor"]
+	if !ok {
+		t.Fatal("expected the mayor role's effective hook set to be recorded")
+	}
+	if len(mayorRole.Hooks.SessionStart) == 0 {
+		t.Error("expected mayor's recorded hook set to include the base SessionStart entry")
+	}
+
+	crewRole, ok := report.Roles["myrig/crew"]
+	if !ok {
+		t.Fatal("expected the myrig/crew role's effective hook set to be recorded")
+	}
+	if crewRole.Rig != "myrig" {
+		t.Errorf("expected rig %q, got %q", "myrig", crewRole.Rig)
 	}
 }

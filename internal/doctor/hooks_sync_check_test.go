@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -105,6 +106,28 @@ func syncAllClaudeTargets(t *testing.T, townRoot string) {
 	}
 }
 
+// writePassingSyncReport writes a sync-report.json recording a verified
+// canary live-fire pair, the deployment record 'gt hooks sync' writes on a
+// real successful run. Tests that assert StatusOK for an in-sync workspace
+// need this: in-sync files alone are no longer sufficient (claude-41j.1
+// D7/D8) — the hooks-sync check downgrades to StatusSkipped without it.
+func writePassingSyncReport(t *testing.T, townRoot string) {
+	t.Helper()
+	report := &hooks.SyncReport{
+		Timestamp: time.Now().UTC(),
+		Canary: hooks.SyncReportCanary{
+			Target:       "mayor",
+			SettingsPath: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
+			Blocked:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "blocked ok"},
+			Allowed:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "allowed ok"},
+		},
+		Roles: map[string]hooks.SyncReportRole{},
+	}
+	if err := hooks.WriteSyncReport(townRoot, report); err != nil {
+		t.Fatalf("WriteSyncReport: %v", err)
+	}
+}
+
 func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 	townRoot := scaffoldWorkspace(t, nil)
 
@@ -116,6 +139,7 @@ func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 
 	// Sync ALL Claude targets (mayor, deacon, crew worktree)
 	syncAllClaudeTargets(t, townRoot)
+	writePassingSyncReport(t, townRoot)
 
 	check := NewHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
@@ -166,8 +190,18 @@ func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
 	}
 	check = NewHooksSyncCheck()
 	result = check.Run(ctx)
+	// Fix() mechanically repairs the settings file directly — it doesn't run
+	// 'gt hooks sync's canary live-fire pair, so no sync report exists yet.
+	// Files matching is no longer sufficient for StatusOK (claude-41j.1
+	// D7/D8): an auto-fixed file hasn't been live-fire verified either.
+	if result.Status != StatusSkipped {
+		t.Fatalf("expected StatusSkipped after fix (no sync report written by Fix), got %v: %s", result.Status, result.Message)
+	}
+
+	writePassingSyncReport(t, townRoot)
+	result = check.Run(ctx)
 	if result.Status != StatusOK {
-		t.Fatalf("expected StatusOK after fix, got %v: %s", result.Status, result.Message)
+		t.Fatalf("expected StatusOK once a sync report exists, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -195,6 +229,7 @@ func TestHooksSyncCheck_TemplateAgent_InSync(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pluginDir, "gastown.js"), expectedContent, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePassingSyncReport(t, townRoot)
 
 	check := NewHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
@@ -320,6 +355,7 @@ func TestHooksSyncCheck_PolecatNestedWorktree_InSync(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pluginDir, "gastown.js"), expectedContent, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePassingSyncReport(t, townRoot)
 
 	check := NewHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
@@ -378,5 +414,57 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 	}
 	if settings.EditorMode != "vim" {
 		t.Errorf("editorMode not preserved: got %q, want %q", settings.EditorMode, "vim")
+	}
+}
+
+// TestHooksSyncCheck_NoSyncReport_Skipped pins the "Skipped when absent"
+// requirement (claude-41j.1): every target can match what ComputeExpected
+// would generate — proving the bytes are right — without proving the hooks
+// they encode were ever live-fire verified. Without sync-report.json, the
+// check must report StatusSkipped, never StatusOK.
+func TestHooksSyncCheck_NoSyncReport_Skipped(t *testing.T) {
+	townRoot := scaffoldWorkspace(t, nil)
+	syncAllClaudeTargets(t, townRoot)
+	// Deliberately no writePassingSyncReport call.
+
+	check := NewHooksSyncCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status == StatusOK {
+		t.Fatalf("must never report StatusOK without a sync report, got: %s", result.Message)
+	}
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when sync report is absent, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestHooksSyncCheck_SyncReportCanaryFailed_Warning verifies that a present
+// but unverified sync report (the canary's live-fire pair did not pass) is
+// reported as a warning naming the pair result, not a silent pass.
+func TestHooksSyncCheck_SyncReportCanaryFailed_Warning(t *testing.T) {
+	townRoot := scaffoldWorkspace(t, nil)
+	syncAllClaudeTargets(t, townRoot)
+
+	report := &hooks.SyncReport{
+		Timestamp: time.Now().UTC(),
+		Canary: hooks.SyncReportCanary{
+			Target:       "mayor",
+			SettingsPath: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
+			Blocked:      hooks.SyncReportShape{Verdict: hooks.SyncReportFail, Detail: "guard failed open"},
+			Allowed:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "allowed ok"},
+		},
+		Roles: map[string]hooks.SyncReportRole{},
+	}
+	if err := hooks.WriteSyncReport(townRoot, report); err != nil {
+		t.Fatalf("WriteSyncReport: %v", err)
+	}
+
+	check := NewHooksSyncCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Errorf("expected StatusWarning for an unverified canary pair, got %v: %s", result.Status, result.Message)
 	}
 }
