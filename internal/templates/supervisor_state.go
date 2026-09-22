@@ -109,7 +109,7 @@ func (s SupervisorState) StatusLine(lockPID int) string {
 		if lockPID == 0 {
 			return fmt.Sprintf("%s (the job is not loaded)", s.Kind)
 		}
-		return fmt.Sprintf("%s (DETACHED - the job is not loaded; PID %d was started by hand)", s.Kind, lockPID)
+		return fmt.Sprintf("%s (DETACHED - the job is not loaded, so PID %d is not supervised)", s.Kind, lockPID)
 	case lockPID != 0 && s.PID == lockPID:
 		return s.Kind
 	case lockPID != 0 && s.PID == 0:
@@ -122,8 +122,13 @@ func (s SupervisorState) StatusLine(lockPID int) string {
 		return fmt.Sprintf("%s (pid %d%s)", s.Kind, s.PID, s.evidence())
 	case s.Runs == 0:
 		return fmt.Sprintf("%s (loaded, not started yet)", s.Kind)
-	default:
+	case s.LastExit > 0:
 		return fmt.Sprintf("%s (FAILING - loaded, running no daemon%s)", s.Kind, s.evidence())
+	default:
+		// A clean last exit (or one the manager did not report) is not a
+		// failure to name: the evidence says the daemon is down, and whether
+		// the job brings it back is the manager's restart policy.
+		return fmt.Sprintf("%s (loaded, running no daemon%s)", s.Kind, s.evidence())
 	}
 }
 

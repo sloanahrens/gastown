@@ -281,7 +281,13 @@ gt daemon enable-supervisor
 Host-specific environment variables the daemon needs (e.g. `SDKROOT` on
 machines with a custom CLT/SDK setup) can be supplied via
 `settings/daemon.env` — see [Reference](reference.md#daemon-environment-settingsdaemonenv).
-Check `gt daemon status` for a `Supervised: launchd|systemd|none` line.
+
+`gt daemon status` reports what the supervisor is doing, not just that it is
+installed: `Supervised: launchd` means the job is running the daemon holding
+daemon.lock, and `DETACHED` with a spawn count and last exit code means the job
+is not — the daemon is running outside it while launchd respawns and loses the
+lock every `ThrottleInterval`. Stopping a supervised daemon goes through the
+supervisor, so the job is left unloaded and `gt daemon start` loads it again.
 
 ### Choosing Roles
 

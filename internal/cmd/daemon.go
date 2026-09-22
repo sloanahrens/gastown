@@ -47,8 +47,12 @@ var daemonStopCmd = &cobra.Command{
 	Short: "Stop the daemon",
 	Long: `Stop the running Gas Town daemon.
 
-Sends a stop signal to the daemon process and waits for it to exit.
 The daemon must be running or this command returns an error.
+
+When a supervisor (launchd / systemd) is provisioned for this town, the job is
+stopped through it rather than by signaling the process, so the daemon does not
+come back; 'gt daemon start' loads the job again. Without one, the daemon
+process is signaled and waited for.
 
 Examples:
   gt daemon stop`,
@@ -244,7 +248,7 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	sup, supErr := detectDaemonSupervisor(townRoot)
 	switch {
 	case supErr != nil:
-		fmt.Fprintf(os.Stderr, "warning: %v\n", supErr)
+		fmt.Fprintf(os.Stderr, "warning: could not tell whether a supervisor is provisioned for this town: %v\n", supErr)
 	case sup != nil:
 		if st := supervisorStateFor(sup.name); st.Loaded {
 			if runErr := supervisorRun(sup.stop); runErr != nil {
@@ -269,7 +273,7 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	}
 
 	if stoppedUnder != "" {
-		fmt.Printf("%s Daemon stopped (was PID %d) — the %s job is unloaded, so it stays down\n",
+		fmt.Printf("%s Daemon stopped (was PID %d) — the %s job is stopped, so it stays down\n",
 			style.Bold.Render("✓"), pid, stoppedUnder)
 		fmt.Printf("  Start it again with: %s\n", style.Dim.Render("gt daemon start"))
 		return nil
