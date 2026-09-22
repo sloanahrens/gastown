@@ -49,11 +49,24 @@ record it as a clean "no results" success. (Known affected: `compactor-dog`'s
 
 This `plugins/` directory (checked out at `<town_root>/gastown/mayor/rig/plugins`)
 is the source of truth. Deacon and `gt doctor` patrols run plugins out of
-`<town_root>/plugins` (e.g. `~/gt/plugins`) — a separate runtime copy that
-`git pull` and `make install` do **not** update.
+`<town_root>/plugins` (e.g. `~/gt/plugins`) — a separate runtime copy that a
+`git pull` alone does not update.
 
-Keep the runtime copy current with `gt plugin sync` (the `rebuild-gt` plugin
-runs this automatically after every successful rebuild). `gt doctor`'s
-`patrol-plugin-drift` check compares the two copies and warns when they
-diverge, or when it cannot locate this source directory at all — it never
-silently reports OK in that case.
+An edit made directly under `<town_root>/plugins` is a draft, not a change: the
+next `gt plugin sync` overwrites it. Land the edit here first.
+
+Two paths push this directory to the runtime copy, and neither is a guarantee
+that the runtime copy is current:
+
+- `make install` runs `gt plugin sync --source $(CURDIR)/plugins` (Makefile:158).
+  The step is fail-open: a failed sync does not fail the install. It is no
+  longer silent — the failure is reported on stdout rather than discarded.
+- The `rebuild-gt` plugin runs the same sync after every successful rebuild and
+  logs a failure as "non-fatal".
+
+`gt plugin sync` resolves the town root from the CWD, so both paths fail
+outright when this checkout lives outside the town root (a `LocalRepo`
+override). `gt doctor`'s `patrol-plugin-drift` check is what catches the
+resulting divergence: it compares the two copies and warns when they diverge, or
+when it cannot locate this source directory at all — it never silently reports
+OK in that case.
