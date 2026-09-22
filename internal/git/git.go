@@ -161,6 +161,11 @@ func (g *Git) run(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// EmptyPatchID is the patch-id of a tree-empty diff: git patch-id prints
+// nothing for one, so PatchID returns this stable value instead of an error
+// so callers can compare ids uniformly (an empty landing reviews as empty).
+const EmptyPatchID = "0000000000000000000000000000000000000000"
+
 // pushTimeout is the maximum time a git push is allowed to run before being
 // killed. This prevents gt done from hanging indefinitely when the remote
 // (e.g. GitLab) is unreachable or slow.
@@ -1266,6 +1271,10 @@ func (g *Git) FirstParentLog(base, head string) ([]string, error) {
 // tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase
 // that leaves the diff content identical, and changes whenever the content
 // does — used to detect whether a reviewed range still matches its target.
+// A tree-empty diff (a landed commit that changed nothing) yields
+// EmptyPatchID: git patch-id prints nothing for it, and callers compare
+// ids, so the empty diff needs a stable, recognizable value rather than an
+// error.
 func (g *Git) PatchID(base, head string) (string, error) {
 	diff, err := g.run("diff", base+".."+head)
 	if err != nil {
@@ -1277,7 +1286,7 @@ func (g *Git) PatchID(base, head string) (string, error) {
 	}
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
-		return "", fmt.Errorf("git patch-id produced no output for range %s..%s", base, head)
+		return EmptyPatchID, nil
 	}
 	return fields[0], nil
 }

@@ -75,6 +75,13 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 		[]byte(`{"version":1,"rigs":{"gastown":{"git_url":"file:///nonexistent","beads":{"repo":"local","prefix":"gt"}}}}`+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The rig-root config.json ResolveMergeQueueConfig reads as its floor
+	// tier, with the editorial gate required so --landed reviews run without
+	// --force.
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"),
+		[]byte(`{"type":"rig","name":"gastown","git_url":"file:///nonexistent","merge_queue":{"editorial":{"required":true}}}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	rigDir = filepath.Join(town, "gastown")
 	repoDir = filepath.Join(rigDir, "refinery", "rig")
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
