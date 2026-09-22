@@ -1584,8 +1584,35 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// means this session pushed it, and gt-i0z3 made the ref read behind
 		// pushedReason refresh first) — rewriting history then would break the
 		// later non-force push.
+		//
+		// The skip is safe only while the tip is real work: a machine-generated
+		// tip passes through it unseen and is landed as-is, which is how a
+		// checkpoint commit became main's tip (gt-iki6, f0a00f6). That shape
+		// cannot be squashed here — origin already has the commit — so refuse
+		// it and hand the polecat the rewrite instead.
+		tip, tipErr := checkpoint.InspectAutoSaveTip(cwd, baseRef, "HEAD")
+		if tipErr != nil {
+			// An unreadable tip must not fail the gate open on a branch origin
+			// already has: that is the shape being refused, unverified.
+			if pushedReason != "" {
+				return autoSaveTipUninspectableError(branch, pushedReason, tipErr)
+			}
+			style.PrintWarning("could not inspect the branch tip for auto-save commits: %v", tipErr)
+		} else if err := autoSaveTipGate(tip, branch, pushedReason); err != nil {
+			return err
+		}
 		if pushedReason == "" {
+			headBefore, headBeforeErr := g.Rev("HEAD")
 			if squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(sourceIssueForNoMerge, issueID)); squashErr != nil {
+				// A squash that failed after its soft reset leaves the branch
+				// holding no commits at all; refuse before anything pushes it.
+				if headAfter, revErr := g.Rev("HEAD"); headBeforeErr == nil && revErr == nil && headAfter != headBefore {
+					return autoSaveSquashResetError(branch, baseRef, squashErr)
+				}
+				if tip.AutoSave {
+					return autoSaveTipRefusalError(tip, branch,
+						fmt.Sprintf("the squash failed: %v.", squashErr))
+				}
 				style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
 			} else if squashed > 0 {
 				fmt.Printf("%s Squashed %d auto-save/WIP commit(s) into a single descriptive commit\n", style.Bold.Render("✓"), squashed)

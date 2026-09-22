@@ -72,6 +72,24 @@ func addCommit(t *testing.T, dir, filename, content, msg string) {
 	}
 }
 
+// writeRepoFile writes a file into dir.
+func writeRepoFile(t *testing.T, dir, filename, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mustGit runs a git command in dir, failing the test if it exits non-zero.
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
 // getCommitSubjects returns the commit subjects on the branch since main.
 func getCommitSubjects(t *testing.T, dir string) []string {
 	t.Helper()
@@ -402,5 +420,192 @@ func TestHasAutoSaveCommits_DoesNotMutateRepo(t *testing.T) {
 	after := getCommitSubjects(t, dir)
 	if len(before) != len(after) || before[0] != after[0] {
 		t.Errorf("HasAutoSaveCommits mutated history: before=%v after=%v", before, after)
+	}
+}
+
+func TestInspectAutoSaveTip_RealTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	addCommit(t, dir, "b.go", "package b", "fix: finish feature A")
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip.AutoSave {
+		t.Errorf("expected a real tip, got AutoSave with subject %q", tip.Subject)
+	}
+	if tip.Trailing != 0 {
+		t.Errorf("expected 0 trailing auto-save commits, got %d", tip.Trailing)
+	}
+	if tip.Ahead != 2 {
+		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	}
+	if tip.Subject != "fix: finish feature A" {
+		t.Errorf("expected the tip subject, got %q", tip.Subject)
+	}
+}
+
+// The gt-iki6 shape: real work with a checkpoint_dog commit on top of it.
+func TestInspectAutoSaveTip_WIPTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tip.AutoSave {
+		t.Fatalf("expected the tip to be detected as machine-generated, got %q", tip.Subject)
+	}
+	if tip.Trailing != 1 {
+		t.Errorf("expected 1 trailing auto-save commit, got %d", tip.Trailing)
+	}
+	if tip.Ahead != 2 {
+		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	}
+}
+
+func TestInspectAutoSaveTip_AllGenerated(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	addCommit(t, dir, "b.go", "package b", AutoSaveCommitPrefix)
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tip.AutoSave {
+		t.Fatal("expected the tip to be detected as machine-generated")
+	}
+	if tip.Trailing != tip.Ahead || tip.Ahead != 2 {
+		t.Errorf("expected the whole branch to be machine-generated (2 of 2), got %d of %d", tip.Trailing, tip.Ahead)
+	}
+}
+
+// A machine-generated commit buried under real work leaves the tip
+// submittable, so Trailing counts only the run at the tip.
+func TestInspectAutoSaveTip_WIPNotTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	addCommit(t, dir, "b.go", "package b", "fix: finish the feature")
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip.AutoSave {
+		t.Errorf("expected a real tip, got %q", tip.Subject)
+	}
+	if tip.Trailing != 0 {
+		t.Errorf("expected 0 trailing auto-save commits, got %d", tip.Trailing)
+	}
+	if tip.Ahead != 2 {
+		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	}
+}
+
+func TestInspectAutoSaveTip_NoCommits(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip != (AutoSaveTip{}) {
+		t.Errorf("expected the zero value for a branch with no commits, got %+v", tip)
+	}
+}
+
+// An empty tip subject must not read as the commit beneath it: naming the
+// wrong commit makes the refusal's rewrite advice target the wrong HEAD~N.
+func TestInspectAutoSaveTip_EmptyTipSubject(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	writeRepoFile(t, dir, "b.go", "package b")
+	mustGit(t, dir, "add", "b.go")
+	mustGit(t, dir, "commit", "--allow-empty-message", "-m", "")
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip.Ahead != 2 {
+		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	}
+	if tip.Subject != "" {
+		t.Errorf("expected the empty tip subject, got %q", tip.Subject)
+	}
+	if tip.AutoSave {
+		t.Error("expected an empty subject not to read as machine-generated")
+	}
+}
+
+// The commit the run folds into decides whether an amend keeps a real message,
+// so a merge there must be visible to the caller.
+func TestInspectAutoSaveTip_MergeBeneathTheRun(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "side")
+	addCommit(t, dir, "side.go", "package side", "add side work")
+	mustGit(t, dir, "checkout", "main")
+	createBranch(t, dir, "feature")
+	mustGit(t, dir, "merge", "--no-ff", "-m", "Merge branch 'side'", "side")
+	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tip.AutoSave || tip.Trailing != 1 {
+		t.Fatalf("expected a single machine-generated tip, got %+v", tip)
+	}
+	if !tip.BeneathIsMerge {
+		t.Errorf("expected the merge beneath the run to be reported, got %+v", tip)
+	}
+}
+
+func TestInspectAutoSaveTip_RealCommitBeneathTheRun(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+
+	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip.BeneathIsMerge {
+		t.Errorf("expected a non-merge commit beneath the run, got %+v", tip)
+	}
+}
+
+// InspectAutoSaveTip never checks anything out or rewrites history, so callers
+// may run it on a branch they are about to submit.
+func TestInspectAutoSaveTip_DoesNotMutateRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	before := getCommitSubjects(t, dir)
+
+	if _, err := InspectAutoSaveTip(dir, "main", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+
+	after := getCommitSubjects(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("InspectAutoSaveTip mutated history: before=%v after=%v", before, after)
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("InspectAutoSaveTip mutated history: before=%v after=%v", before, after)
+		}
 	}
 }
