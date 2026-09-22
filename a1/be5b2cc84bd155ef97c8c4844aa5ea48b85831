@@ -1,0 +1,39 @@
+{
+  "score": 0.7,
+  "verdict": "approve",
+  "summary": "The change is well-scoped, well-commented, and thoroughly tested: it correctly routes start/stop through launchd/systemd, adds a live 'Supervised:' reading that names the DETACHED/FAILING states (gt-sq9e), and the tests are hermetic (HOME/XDG_DATA_HOME isolation, no host-state leakage). The core design — bootout/stop through the supervisor, bootstrap on start after a bootout — is sound and fail-closed on the start path. The blocking issue is that the stop path is fail-open: when the supervisor job's live state cannot be read, or when the supervisor stop command itself fails, the code falls back to a direct signal and reports 'Daemon stopped' — the exact failure mode the change exists to prevent, because a signal alone leaves the loaded KeepAlive job to respawn the daemon. There are also two minor secondary issues (a stop-after-bootout race that can spuriously error, and stale/overgeneralized operator-facing stop instructions).",
+  "findings": [
+    {
+      "id": "070b7822bf00",
+      "severity": "major",
+      "path": "internal/cmd/daemon.go",
+      "line": 253,
+      "title": "runDaemonStop is fail-open: probe failure or bootout failure falls back to a signal and reports success",
+      "detail": "The stop gate gates on `st.Loaded` from `supervisorStateFor(sup.name)`; a probe failure returns `SupervisorState{Err: ..., Loaded: false}`, so the code silently skips the supervisor stop. Likewise, when `supervisorRun(sup.stop)` fails, `stoppedUnder` stays empty and control falls through to `stopDaemonDirect`, then prints 'Daemon stopped'. But the change's own comment (daemon.go:242-246) states a signal alone does not stop a supervised daemon: the loaded KeepAlive job respawns the process it manages. So both failure paths emit the same success value as the success path while leaving a loaded job that respawns the daemon. TestRunDaemonStop_SupervisorFailureFallsBackToASignal codifies this false success. Contrast the start path, which is fail-closed (`st.Err == nil \u0026\u0026 !st.Loaded` before bootstrap, and otherwise returns an error). Fix: on `st.Err != nil` or a failed bootout, either still attempt the supervisor stop (a supervisor file for this town is already confirmed) and/or return an error / print a prominent warning instead of reporting a stop that will not stay down."
+    },
+    {
+      "id": "4a3d2a1674a2",
+      "severity": "minor",
+      "path": "internal/cmd/daemon.go",
+      "line": 265,
+      "title": "Mop-up path can spuriously error with 'daemon is not running' after a successful bootout",
+      "detail": "After `supervisorRun(sup.stop)` succeeds, launchd has already SIGTERMed the daemon; the `stillRunning` re-check can observe it mid-shutdown, and then `stopDaemonDirect` (`daemon.StopDaemon`) re-checks `IsRunning` internally and returns 'daemon is not running' if the process released the lock in between. `runDaemonStop` then reports an error even though the stop actually succeeded. This is a user-visible race in the common supervised-stop path (the old code had a narrower version of the same re-check gap)."
+    },
+    {
+      "id": "a4bb2d322e8e",
+      "severity": "minor",
+      "path": "internal/cmd/daemon.go",
+      "line": 448,
+      "title": "enable-supervisor still prints manual stop instructions that the new gt daemon stop supersedes",
+      "detail": "runDaemonEnableSupervisor still tells operators to `launchctl unload ~/Library/LaunchAgents/com.gastown.daemon.plist` (or `systemctl --user stop` + `disable`) to stop a supervised daemon. The change now makes `gt daemon stop` the sanctioned path (and uses `launchctl bootout`, since `unload` is the deprecated form). The hint is now stale and should point at `gt daemon stop` (R5 / docs consistency)."
+    },
+    {
+      "id": "3ae46a5bcd6c",
+      "severity": "minor",
+      "path": "docs/INSTALLING.md",
+      "line": 290,
+      "title": "'the job is left unloaded ... gt daemon start loads it again' is launchd-specific",
+      "detail": "For systemd the stop path runs `systemctl --user stop`, which leaves the unit loaded (inactive), and `gt daemon start` (`systemctl --user restart`) works without re-enabling. The sentence overgeneralizes the launchd bootout behaviour and could mislead a Linux operator into thinking the unit has been disabled/unloaded. Scope the sentence to launchd, or describe both managers."
+    }
+  ]
+}
