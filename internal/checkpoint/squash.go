@@ -48,6 +48,82 @@ func HasAutoSaveCommits(workDir, baseRef, headRef string) (bool, error) {
 	return false, nil
 }
 
+// AutoSaveTip describes where a branch's machine-generated commits sit
+// relative to its tip, which decides whether a caller can fold them away
+// without moving the tip off real work (gt-iki6).
+type AutoSaveTip struct {
+	Subject  string // subject line of headRef's tip commit
+	AutoSave bool   // whether Subject is machine-generated (see IsAutoSaveSubject)
+	Trailing int    // consecutive machine-generated commits at the tip; 0 when the tip is real
+	Ahead    int    // commits in merge-base(baseRef, headRef)..headRef
+	// BeneathIsMerge reports that headRef~Trailing — the commit the run would
+	// be folded into — is a merge, so amending it would bury the branch's own
+	// message under the merge's subject. False when the commit could not be read.
+	BeneathIsMerge bool
+}
+
+// InspectAutoSaveTip reports the machine-generated shape of headRef's tip. It
+// is read-only, so it is safe against a ref other than the current branch.
+func InspectAutoSaveTip(workDir, baseRef, headRef string) (AutoSaveTip, error) {
+	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, headRef)
+	if err != nil {
+		return AutoSaveTip{}, fmt.Errorf("finding merge-base: %w", err)
+	}
+
+	// %x1e terminates each record: a bare newline cannot separate them, because
+	// gitOutput trims the trailing one and an empty tip subject (git commit
+	// --allow-empty-message) would then be swallowed, shifting every index by
+	// one and naming the commit below the tip.
+	logOut, err := gitOutput(workDir, "log", "--format=%s%x1e", mergeBase+".."+headRef)
+	if err != nil {
+		return AutoSaveTip{}, fmt.Errorf("listing commits: %w", err)
+	}
+	subjects := parseSubjectRecords(logOut)
+	if len(subjects) == 0 {
+		return AutoSaveTip{}, nil
+	}
+
+	// git log lists newest first, so index 0 is the tip. The run of generated
+	// commits at the tip is single-parent by construction — a merge subject is
+	// never generated — so the index also counts first-parent steps, which is
+	// what HEAD~Trailing means to a caller.
+	tip := AutoSaveTip{
+		Subject:  subjects[0],
+		AutoSave: IsAutoSaveSubject(subjects[0]),
+		Ahead:    len(subjects),
+	}
+	for _, subject := range subjects {
+		if !IsAutoSaveSubject(subject) {
+			break
+		}
+		tip.Trailing++
+	}
+
+	if tip.Trailing < tip.Ahead {
+		if parents, parentsErr := gitOutput(workDir, "log", "-1", "--format=%p", fmt.Sprintf("%s~%d", headRef, tip.Trailing)); parentsErr == nil {
+			tip.BeneathIsMerge = len(strings.Fields(parents)) > 1
+		}
+	}
+	return tip, nil
+}
+
+// parseSubjectRecords splits `git log --format=%s%x1e` output into one subject
+// per commit, newest first.
+func parseSubjectRecords(logOut string) []string {
+	if logOut == "" {
+		return nil
+	}
+	records := strings.Split(logOut, "\x1e")
+	// Whatever follows the final sentinel is not a record.
+	records = records[:len(records)-1]
+
+	subjects := make([]string, 0, len(records))
+	for _, record := range records {
+		subjects = append(subjects, strings.TrimSpace(record))
+	}
+	return subjects
+}
+
 // CountWIPCommits returns the number of WIP checkpoint commits between
 // the merge-base of baseRef and HEAD.
 func CountWIPCommits(workDir, baseRef string) (int, error) {
