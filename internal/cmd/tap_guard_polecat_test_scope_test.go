@@ -26,6 +26,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"subpackage of a heavy package", "go test ./internal/cmd/sub/", true},
 		{"ancestor wildcard covering heavy packages", "go test ./internal/...", true},
 		{"bare ancestor wildcard", "go test internal/...", true},
+		{"module-prefixed whole repo wildcard", "go test github.com/steveyegge/gastown/...", true},
+		{"module-prefixed heavy package", "go test github.com/steveyegge/gastown/internal/cmd/", true},
 		// make test is `go test ./...` by another name; the wrapper and an env
 		// prefix change nothing about the host CPU it burns (gt-v6se).
 		{"make test", "make test", true},
@@ -65,8 +67,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 22 {
-		t.Errorf("blocked %d of %d cases, want exactly 22", blocked, len(tests))
+	if blocked != 24 {
+		t.Errorf("blocked %d of %d cases, want exactly 24", blocked, len(tests))
 	}
 }
 

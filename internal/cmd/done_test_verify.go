@@ -88,7 +88,7 @@ var acquireVerifySlot = func(townRoot, role string, timeout time.Duration) (func
 // Dolt/testcontainers-backed packages (containerSuitePackages, the same list
 // the container-suite guard enforces) or lives under one. Sub-packages are
 // treated as container-backed too, matching the guard's prefix-scope reading
-// (containerSuitePackagesIntersect): erring that way only sends a package to
+// (containerSuiteTarget): erring that way only sends a package to
 // the refinery's gate, erring the other way would run an unwrapped suite.
 func isContainerSuitePackage(importPath string) bool {
 	for _, p := range containerSuitePackages {

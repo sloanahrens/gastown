@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,6 +30,9 @@ This guard blocks, when running as a polecat or refinery:
   - go test <pkg...>   where <pkg...> intersects the testcontainers-backed
                         package list (containerSuitePackages) or is a
                         whole-repo wildcard (./..., ...)
+  - go test .          (or a bare "go test") when the directory it runs in
+                        is one of those packages — the cwd is judged like
+                        any other target, not exempted
   - make test           which unconditionally runs "go test ./..."
 
 ...unless the command is already wrapped in 'gt slot run -- <command>', in
@@ -197,8 +202,8 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 	}
 
 	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
-		pkgArgs := goTestPackageArgs(tokens[i+2:])
-		wholeRepo, pkgs := containerSuitePackagesIntersect(pkgArgs)
+		cwd, _ := os.Getwd()
+		wholeRepo, pkgs := containerSuiteTarget(goTestPackageArgs(tokens[i+2:]), cwd)
 		if wholeRepo {
 			return "bare 'go test' with a whole-repo target touches every testcontainers-backed package", nil
 		}
@@ -332,52 +337,201 @@ func goTestPackageArgs(rest []string) []string {
 	return pkgs
 }
 
-// normalizeGoPackageArg strips the module-path prefix, leading "./", and
-// trailing "/..." / "/" from a go test package argument, so
-// "./internal/beads/...", "internal/beads/...", and
-// "github.com/steveyegge/gastown/internal/beads/..." all normalize to
-// "internal/beads". A bare "./...", "...", or "." normalizes to "".
+// gastownModulePath is this module's path, as go.mod declares it. A go test
+// argument may spell a package with the prefix
+// ("github.com/steveyegge/gastown/internal/beads"); the guards compare
+// package paths, so it comes off.
+const gastownModulePath = "github.com/steveyegge/gastown"
+
+// wholeRepoPackageArg is what a whole-repo wildcard normalizes to: "...",
+// "./...", and their module-prefixed spellings all name every package in the
+// module.
+const wholeRepoPackageArg = "..."
+
+// cwdPackageArg is what an argument naming the invocation's own directory
+// normalizes to. "." and "./" both mean the caller's cwd, and so does a bare
+// "go test" with no package argument; the guards resolve it against the
+// actual cwd (cwdPackagePath) rather than reading it as a wildcard (gt-1lko).
+const cwdPackageArg = "."
+
+// normalizeGoPackageArg reduces a go test package argument to the form the
+// guards match on: the module prefix, a leading "./", and a trailing "/..."
+// or "/" are stripped, so "./internal/beads/...", "internal/beads/",
+// "internal/beads" and "github.com/steveyegge/gastown/internal/beads" all
+// normalize to "internal/beads". The two spellings that name no directory —
+// the whole-repo wildcard and the cwd itself — normalize to
+// wholeRepoPackageArg and cwdPackageArg, which the callers must recognize
+// before matching.
 func normalizeGoPackageArg(arg string) string {
 	p := arg
-	p = strings.TrimPrefix(p, "github.com/steveyegge/gastown/")
+	p = strings.TrimPrefix(p, gastownModulePath+"/")
 	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimSuffix(p, "/...")
 	p = strings.TrimSuffix(p, "/")
-	if p == "..." || p == "." {
-		p = ""
+	switch p {
+	case "", ".":
+		return cwdPackageArg
+	case "...":
+		return wholeRepoPackageArg
 	}
 	return p
 }
 
-// containerSuitePackagesIntersect reports whether pkgArgs (go test package
-// arguments) cover the whole repo, or which entries of containerSuitePackages
-// they overlap with. An arg overlaps a listed package if it names that
-// package exactly, names an ancestor directory of it (e.g. "internal/..."
-// covers "internal/beads"), or names a path inside it. A bare "go test"
-// with no package arguments is NOT treated as whole-repo — go resolves that
-// to only the current directory's package, which this guard cannot verify
-// without also knowing the invocation's cwd; failing to block here is safer
-// than guessing (see tap_guard_dangerous.go's false-positive history).
-func containerSuitePackagesIntersect(pkgArgs []string) (wholeRepo bool, matched []string) {
-	if len(pkgArgs) == 0 {
-		return false, nil
-	}
-	seen := map[string]bool{}
+// isWholeRepoPackageArg reports whether a normalized package argument (see
+// normalizeGoPackageArg) names every package in the module.
+func isWholeRepoPackageArg(norm string) bool {
+	return norm == wholeRepoPackageArg
+}
+
+// packageArgCovers reports whether a normalized package argument reaches pkg:
+// the argument names pkg ("internal/beads"), a directory containing it
+// ("internal", from "internal/..." or "./internal/..."), or a directory
+// inside it ("internal/beads/sub"). Every argument spelling goes through this
+// one rule, so a cwd resolved to a package path (cwdContainerPackages,
+// cwdHeavyPackages) is judged exactly as the same package named as an
+// argument would be — no spelling can dodge a guard the others obey.
+func packageArgCovers(arg, pkg string) bool {
+	return arg == pkg || strings.HasPrefix(pkg, arg+"/") || strings.HasPrefix(arg, pkg+"/")
+}
+
+// normalizedPackageArgs normalizes a go test package-argument list
+// (normalizeGoPackageArg), standing in the cwd argument when the list is
+// empty: a bare "go test" tests the package of the directory it was started
+// in, which is what an explicit "." names.
+func normalizedPackageArgs(pkgArgs []string) []string {
+	args := make([]string, 0, len(pkgArgs)+1)
 	for _, arg := range pkgArgs {
-		p := normalizeGoPackageArg(arg)
-		if p == "" {
+		args = append(args, normalizeGoPackageArg(arg))
+	}
+	if len(args) == 0 {
+		return []string{cwdPackageArg}
+	}
+	return args
+}
+
+// containerSuitePackagesCoveredBy returns the entries of
+// containerSuitePackages that a normalized package argument reaches
+// (packageArgCovers).
+func containerSuitePackagesCoveredBy(arg string) []string {
+	var matched []string
+	for _, pkg := range containerSuitePackages {
+		if packageArgCovers(arg, pkg) {
+			matched = append(matched, pkg)
+		}
+	}
+	return matched
+}
+
+// cwdContainerPackages returns the entries of containerSuitePackages the
+// package at cwd reaches.
+func cwdContainerPackages(cwd string) []string {
+	pkg, ok := cwdPackagePath(cwd)
+	if !ok || pkg == "" {
+		return nil
+	}
+	return containerSuitePackagesCoveredBy(pkg)
+}
+
+// containerSuiteTarget reports the entries of containerSuitePackages a go
+// test package-argument list reaches, or true for the whole-repo wildcard.
+// Arguments naming the cwd are resolved here, through cwdContainerPackages,
+// by the same rule as any other argument — one function judges every
+// spelling, so no caller can resolve the argument form and miss the cwd form
+// (gt-1lko).
+func containerSuiteTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched []string) {
+	seen := map[string]bool{}
+	for _, p := range normalizedPackageArgs(pkgArgs) {
+		if isWholeRepoPackageArg(p) {
 			return true, nil
 		}
-		for _, pkg := range containerSuitePackages {
-			if p == pkg || strings.HasPrefix(pkg, p+"/") || strings.HasPrefix(p, pkg+"/") {
-				if !seen[pkg] {
-					seen[pkg] = true
-					matched = append(matched, pkg)
-				}
+		covered := containerSuitePackagesCoveredBy(p)
+		if p == cwdPackageArg {
+			covered = cwdContainerPackages(cwd)
+		}
+		for _, pkg := range covered {
+			if !seen[pkg] {
+				seen[pkg] = true
+				matched = append(matched, pkg)
 			}
 		}
 	}
 	return false, matched
+}
+
+// isGastownModule reports whether the file at path is a go.mod declaring
+// this module — "module .../gastown" (import-path form) or "module
+// gastown" (local form). Both the guard's module-root walk and the
+// plugin sync (internal/plugin) check the same shape; sync.go keeps its
+// private copy, and this duplicate exists because a guard that imports
+// internal/plugin would link testcontainers (via the chain from
+// internal/plugin) into the gt binary, which it deliberately avoids.
+func isGastownModule(goModPath string) bool {
+	f, err := os.Open(goModPath) //nolint:gosec // G304: path from traversal
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.HasSuffix(line, "/gastown") || line == "module gastown"
+		}
+	}
+	return false
+}
+
+// moduleRootFromCwd walks up from dir to the nearest go.mod and returns its
+// directory when that go.mod declares this module, "" otherwise. It reads
+// the module declaration rather than the checkout's directory name: the
+// refinery runs from /Users/sloan/gt/gastown/refinery/rig and a polecat
+// worktree may be named "rig", so matching the name "gastown" makes the
+// lookup miss in the very layouts the guards run in and lets "go test ."
+// through (gt-1lko). A nearer go.mod that is a different module — e.g. the
+// plugins/dolt-snapshots submodule — ends the walk: nothing under it is a
+// gastown package path, so no listed package can be there to block.
+func moduleRootFromCwd(dir string) string {
+	for {
+		goMod := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goMod); err == nil {
+			if isGastownModule(goMod) {
+				return dir
+			}
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// cwdPackagePath returns the module-relative package path that a "go test ."
+// run from dir names — "internal/beads" — by walking up to the enclosing
+// go.mod (moduleRootFromCwd). ok is false when dir is empty, unreadable, or
+// outside this module, and the path is "" when dir is the module root, whose
+// package is the repo root and appears on neither guard's list. An
+// unresolvable dir leaves nothing to judge, which matches the guard's
+// reading of any other target it cannot place: go cannot run a "." target
+// from a directory it cannot name either.
+func cwdPackagePath(dir string) (pkg string, ok bool) {
+	if dir == "" {
+		return "", false
+	}
+	root := moduleRootFromCwd(dir)
+	if root == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		return "", true
+	}
+	return rel, true
 }
 
 // printContainerSuiteBlock prints the standard block banner to stderr,
