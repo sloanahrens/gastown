@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -106,7 +108,20 @@ func runMQReview(cmd *cobra.Command, args []string) error {
 		})
 		return NewSilentExit(2)
 	}
-	result, err := doMQReview(args[0])
+	var result editorial.ReviewResult
+	var err error
+	if mqReviewLanded != "" {
+		result, err = doMQReviewLanded(args)
+	} else if len(args) == 1 {
+		result, err = doMQReview(args[0])
+	} else {
+		printMQReviewResult(editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: "usage: gt mq review <mr-id> | gt mq review --landed <sha> [mr-id]",
+		})
+		return NewSilentExit(2)
+	}
 	if err != nil {
 		return err
 	}
@@ -186,6 +201,125 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	deps := editorial.Deps{
 		Git:      git.NewGit(gitDir),
 		Beads:    beads.New(r.Path),
+		Recorder: plugin.NewRecorder(townRoot),
+		Exec:     editorial.RunGateScript,
+	}
+
+	return editorial.Run(context.Background(), req, deps), nil
+}
+
+// doMQReviewLanded reviews a commit that already landed (the --landed flag):
+// no rehearsal, no MR bead to resolve. The rig defaults to the caller's
+// (GT_RIG or cwd), the target to the rig's remote default branch, and the
+// review range is derived from the commit graph alone (ResolveLandedRange).
+// The verdict is stamped on the landed commit itself.
+func doMQReviewLanded(args []string) (editorial.ReviewResult, error) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return editorial.ReviewResult{}, fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	rigName := strings.TrimSpace(mqReviewRigFlag)
+	if rigName == "" {
+		rigName, _, err = findCurrentRig(townRoot)
+		if err != nil {
+			return editorial.ReviewResult{}, fmt.Errorf("resolving rig for --landed: %w (pass --rig to name it)", err)
+		}
+	}
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return editorial.ReviewResult{}, err
+	}
+
+	gitDir := filepath.Join(r.Path, "refinery", "rig")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		gitDir = filepath.Join(r.Path, "mayor", "rig")
+	}
+	g := git.NewGit(gitDir)
+
+	target := strings.TrimSpace(mqReviewTarget)
+	if target == "" {
+		target = g.RemoteDefaultBranch()
+	}
+	if target == "" {
+		return editorial.ReviewResult{}, fmt.Errorf("cannot determine the target branch for --landed in %s (pass --target)", rigName)
+	}
+
+	// A refused range — not landed, a root commit, or a merge whose tree is
+	// not the merge of its parents — is a config error, not a verdict: it
+	// reports exit 2, never 1, so a caller cannot read "not reviewable" as
+	// "request_changes".
+	landed, err := editorial.ResolveLandedRange(g, mqReviewLanded, target)
+	if err != nil {
+		return editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: err.Error(),
+		}, nil
+	}
+
+	var editorialCfg config.EditorialConfig
+	if mqCfg := rig.ResolveMergeQueueConfig(townRoot, rigName); mqCfg != nil && mqCfg.Editorial != nil {
+		editorialCfg = *mqCfg.Editorial
+	}
+	editorialCfg = editorialCfg.WithDefaults()
+
+	if !editorialCfg.Required && !mqReviewForce {
+		return editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: fmt.Sprintf("merge_queue.editorial.required is false for rig %s; pass --force to review anyway", rigName),
+		}, nil
+	}
+
+	// The retro review leaves no MR bead for the gate script's --mr flag or
+	// for readers correlating the receipt: it mints a labeled wisp solely as
+	// that handle, and closes it when the review finishes. It is never
+	// queueable — its description carries no "Rig:" field, so the refinery's
+	// rig filter drops it even while open — and wisp GC reaps any that a
+	// crash leaves behind.
+	bd := beads.New(r.Path)
+	mrID := ""
+	if len(args) > 0 {
+		mrID = args[0]
+	}
+	if mrID == "" {
+		wisp, err := bd.Create(beads.CreateOptions{
+			Title:    fmt.Sprintf("retro review of landed %s", shortSHA(landed.Commit)),
+			Labels:   []string{"gt:merge-request", "retro_reviewed"},
+			Priority: 3,
+			Description: fmt.Sprintf("Retro-review handle for landed commit %s on %s (%s).\nNot a merge request: never queueable (no Rig field); closed when the review finishes.",
+				landed.Commit, target, shortSHA(landed.Commit)),
+			Ephemeral: true,
+			Rig:       rigName,
+		})
+		if err != nil {
+			return editorial.ReviewResult{
+				Exit:   2,
+				Class:  editorial.Tooling,
+				Stderr: fmt.Sprintf("mint retro-review wisp: %v", err),
+			}, nil
+		}
+		mrID = wisp.ID
+		defer bd.Close(mrID)
+	}
+
+	req := editorial.ReviewRequest{
+		RigDir:         r.Path,
+		RepoDir:        gitDir,
+		MRID:           mrID,
+		Rig:            rigName,
+		Target:         target,
+		Landed:         &landed,
+		Attempt:        mqReviewAttempt,
+		TimeoutSeconds: mqReviewTimeout,
+		Reroll:         mqReviewReroll,
+		Config:         editorialCfg,
+	}
+
+	deps := editorial.Deps{
+		Git:      g,
+		Beads:    bd,
 		Recorder: plugin.NewRecorder(townRoot),
 		Exec:     editorial.RunGateScript,
 	}
