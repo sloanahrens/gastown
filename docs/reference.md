@@ -631,6 +631,7 @@ gt sling <bead> <rig>                    # Auto-convoy for dashboard visibility
 Agent overrides:
 
 - `gt start --agent <alias>` overrides the Mayor/Deacon runtime for this launch.
+- `gt sling <bead> <rig> --agent <alias>` honours a `polecat_pool` seat or refuses the sling; a seat that is full never spends on the other agent instead.
 - `gt mayor start|attach|restart --agent <alias>` and `gt deacon start|attach|restart --agent <alias>` do the same.
 - `gt start crew <name> --agent <alias>` and `gt crew at <name> --agent <alias>` override the crew worker runtime.
 

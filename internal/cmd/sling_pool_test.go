@@ -168,24 +168,19 @@ func TestChoosePoolAgentRequestedSeatIsAdmittedByItsCap(t *testing.T) {
 	sess := func(agent string, age time.Duration) poolSession {
 		return poolSession{name: agent + "-" + age.String(), agent: agent, created: now.Add(-age)}
 	}
-	localFull := []poolSession{
+	allFull := []poolSession{
 		sess("local-coder-polecat", 30*time.Minute), sess("local-coder-polecat", 20*time.Minute),
-		sess("deepseek-flash", 20*time.Minute),
+		sess("deepseek-flash", 30*time.Minute), sess("deepseek-flash", 20*time.Minute),
 	}
-	allFull := append(append([]poolSession{}, localFull...), sess("deepseek-flash", 30*time.Minute))
 
 	// The seat requested is the seat counted: a capped overflow seat refuses
 	// the very agent the request named.
 	if a, r, refused := choosePoolAgent(capped, poolBead{Type: "bug"}, "deepseek-flash", allFull, now); !refused || a != "deepseek-flash" {
 		t.Errorf("a requested overflow seat at its cap must refuse, got %q refused=%v (%s)", a, refused, r)
 	}
-	// Local full, overflow free: the request is served by the other seat.
-	if a, r, refused := choosePoolAgent(capped, poolBead{Type: "bug"}, "local-coder-polecat", localFull, now); a != "deepseek-flash" || refused {
-		t.Errorf("a requested local seat with no room must overflow, got %q refused=%v (%s)", a, refused, r)
-	}
 	// Every seat full: no seat for the bead, whatever the caller asked for.
-	if a, _, refused := choosePoolAgent(capped, poolBead{Type: "bug"}, "local-coder-polecat", allFull, now); !refused || a != "deepseek-flash" {
-		t.Errorf("a requested local seat in a full town must refuse, got %q refused=%v", a, refused)
+	if a, r, refused := choosePoolAgent(capped, poolBead{Type: "bug"}, "local-coder-polecat", allFull, now); !refused || !strings.Contains(r, "local full (2/2)") {
+		t.Errorf("a requested local seat in a full town must refuse, got %q refused=%v (%s)", a, refused, r)
 	}
 	// A free local seat is the request honoured, and the reason says the agent
 	// was requested rather than routed.
@@ -201,11 +196,53 @@ func TestChoosePoolAgentRequestedSeatIsAdmittedByItsCap(t *testing.T) {
 	if a, _, refused := choosePoolAgent(capped, poolBead{Type: "bug", Labels: []string{routeFlashLabel}}, "local-coder-polecat", nil, now); a != "deepseek-flash" || refused {
 		t.Errorf("route:flash must beat a requested local seat, got %q refused=%v", a, refused)
 	}
-	// A pool with no local seats sends a request for one to the overflow seat
-	// instead of honouring it against max_local 0.
+}
+
+// A request the pool can serve is served, and one it cannot serve is refused:
+// the pool never answers a request for one seat with the other one, because the
+// overflow seat is the paid provider and moving a bead onto it is a spend
+// decision the caller did not make (gt-x40u). `gt sling <bead> <rig> --agent
+// local-coder-polecat` on a taken local seat spawned a flash polecat instead of
+// refusing the sling.
+func TestChoosePoolAgentRequestedSeatIsHonoredOrRefused(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 2}
+	sess := func(agent string, age time.Duration) poolSession {
+		return poolSession{name: agent + "-" + age.String(), agent: agent, created: now.Add(-age)}
+	}
+	// The state the sling above hit: every local seat taken, the overflow seat
+	// free.
+	overflowFree := []poolSession{
+		sess("local-coder-polecat", 30*time.Minute), sess("local-coder-polecat", 20*time.Minute),
+		sess("deepseek-flash", 20*time.Minute),
+	}
+
+	// Local full, overflow free: refused, and the line names the seat that was
+	// asked for, not the one the pool would have picked for itself.
+	a, r, refused := choosePoolAgent(pool, poolBead{Type: "bug"}, "local-coder-polecat", overflowFree, now)
+	if !refused || a != "local-coder-polecat" {
+		t.Errorf("a requested local seat with no room must refuse, got %q refused=%v (%s)", a, refused, r)
+	}
+	if want := "pool: local full (2/2) -> no seat (requested local-coder-polecat)"; r != want {
+		t.Errorf("reason = %q, want %q", r, want)
+	}
+	// A closed local seat cannot serve the request either, and the refusal says
+	// which rule closed it.
 	noLocal := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0, OverflowAgent: "deepseek-flash"}
-	if a, r, refused := choosePoolAgent(noLocal, poolBead{Type: "bug"}, "local-coder-polecat", nil, now); a != "deepseek-flash" || refused || !strings.Contains(r, "no local seats") {
-		t.Errorf("max_local 0 must route a requested local seat to overflow, got %q refused=%v (%s)", a, refused, r)
+	if a, r, refused := choosePoolAgent(noLocal, poolBead{Type: "bug"}, "local-coder-polecat", nil, now); !refused || !strings.Contains(r, "no local seats (max_local 0)") {
+		t.Errorf("max_local 0 must refuse a requested local seat, got %q refused=%v (%s)", a, refused, r)
+	}
+	// Room, but inside the stagger gap: the seat's own pacing rule decides, and
+	// naming it is what tells the caller the seat frees in three minutes.
+	recent := []poolSession{sess("local-coder-polecat", time.Minute)}
+	if a, r, refused := choosePoolAgent(pool, poolBead{Type: "bug"}, "local-coder-polecat", recent, now); !refused || !strings.Contains(r, "stagger 1m0s") {
+		t.Errorf("a requested local seat inside the stagger must refuse, got %q refused=%v (%s)", a, refused, r)
+	}
+	// The rule reads the same way round: a request for the overflow seat with a
+	// local seat free stays on the overflow seat.
+	if a, _, refused := choosePoolAgent(pool, poolBead{Type: "bug"}, "deepseek-flash", nil, now); a != "deepseek-flash" || refused {
+		t.Errorf("a requested overflow seat must not be moved to a free local one, got %q refused=%v", a, refused)
 	}
 }
 
@@ -431,6 +468,44 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	}
 	if a, r, _ := resolvePolecatPoolAgent(townRoot, "", ""); a != "" || !strings.Contains(r, "max_local") {
 		t.Errorf("misconfigured pool: got %q %q", a, r)
+	}
+}
+
+// The sling path, not just the policy: a sling that named the local seat and
+// found it taken comes back as a refusal — the marker the convoy feeder defers
+// on, so the bead is queued rather than paid for on the overflow seat — and
+// leaves no seat claimed behind it (gt-x40u).
+func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
+	townRoot := t.TempDir()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
+		t.Fatal(err)
+	}
+	origLister, origLookup := newPoolSessionLister, poolBeadLookup
+	t.Cleanup(func() { newPoolSessionLister, poolBeadLookup = origLister, origLookup })
+	newPoolSessionLister = func() sessionLister {
+		return &fakeLister{
+			sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}},
+			created:  map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)},
+		}
+	}
+	poolBeadLookup = func(_, beadID string) (poolBead, error) {
+		return poolBead{ID: beadID, Type: "bug"}, nil
+	}
+
+	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "local-coder-polecat")
+	if !errors.Is(err, errPoolBackpressure) {
+		t.Fatalf("a requested local seat with the seat taken must refuse: got %q %q %v", agent, reason, err)
+	}
+	if want := "pool: local full (1/1) -> no seat (requested local-coder-polecat)"; reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
+	}
+	if !strings.HasPrefix(err.Error(), "sling refused: ") {
+		t.Errorf("the refusal must carry the deferral marker: %q", err)
+	}
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+		t.Errorf("a refused request must not claim a seat: %v", claims)
 	}
 }
 

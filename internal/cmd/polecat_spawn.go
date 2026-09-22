@@ -158,12 +158,12 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// hooked bead's shape, its route:* labels and the live polecat sessions
 	// (see sling_pool.go). It is consulted on every spawn path, --agent
 	// included: an agent that names one of the pool's own seats is a request for
-	// that seat and is admitted by that seat's cap, so the agent a convoy
-	// recorded at sling time and the agent the deacon escalates to can no longer
-	// spawn past a full pool (gt-4lbz). An agent the pool does not own leaves it
-	// with no opinion and the request stands. The reason line always names the
-	// agent the pool chose, and a pool whose seats are all at their cap refuses
-	// the sling.
+	// that seat, served by that seat's rules or refused — never swapped for the
+	// other seat (gt-x40u) — so the agent a convoy recorded at sling time and
+	// the agent the deacon escalates to can no longer spawn past a full pool
+	// (gt-4lbz). An agent the pool does not own leaves it with no opinion and the
+	// request stands. The reason line always names the agent the pool chose, and
+	// a pool whose seats are all at their cap refuses the sling.
 	poolAgent, poolReason, poolErr := resolvePolecatPoolAgent(townRoot, opts.HookBead, opts.Agent)
 	if poolErr != nil {
 		return nil, poolErr
