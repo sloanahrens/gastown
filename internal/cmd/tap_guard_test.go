@@ -3,6 +3,7 @@ package cmd
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -200,4 +201,83 @@ func TestRunTapGuardPRWorkflow_RefineryEmptyStdinStillBlocks(t *testing.T) {
 	if err == nil {
 		t.Error("expected refinery role with empty/unparsable stdin to still be blocked (fail closed), got nil error")
 	}
+}
+
+// withUnreadableStdin replaces os.Stdin with a write-only file for the
+// duration of fn, so io.ReadAll fails where withStdin's pipe would merely
+// yield an empty payload. Reading a write-only fd returns EBADF; no payload
+// content can reach the guard at all.
+func withUnreadableStdin(t *testing.T, fn func()) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(t.TempDir(), "stdin"), os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatalf("opening write-only stdin: %v", err)
+	}
+	defer f.Close()
+
+	origStdin := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = origStdin }()
+
+	fn()
+}
+
+// gt-hift: an io.ReadAll error returned nil straight out of the guard,
+// failing it open — the one path that let a real PR command through in
+// agent context, since a read error was indistinguishable from "allow" at
+// the call site. An unreadable stdin is the same "we don't know what
+// command this is" condition gt-wisp-52y4 gives the fail-closed fallback,
+// so it must reach the unconditional context/origin check.
+func TestRunTapGuardPRWorkflow_UnreadableStdinStillBlocks(t *testing.T) {
+	t.Setenv("GT_POLECAT", "topaz")
+
+	var err error
+	withUnreadableStdin(t, func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err == nil {
+		t.Error("expected unreadable stdin in agent context to fail closed (block), got nil error")
+	}
+}
+
+// TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed pins the decision
+// itself for every shape of "no command", nil included — the value
+// runTapGuardPRWorkflow substitutes on a read error. Unknown input must
+// fall through to the context check, and must not widen the refinery
+// exemption into "refinery always passes" (gt-r2xm composed with
+// gt-wisp-52y4).
+func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
+	t.Setenv("GT_POLECAT", "topaz")
+	t.Setenv("GT_REFINERY", "")
+	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
+
+	unknown := []struct {
+		name  string
+		input []byte
+	}{
+		{"nil input (unreadable stdin)", nil},
+		{"empty payload", []byte("")},
+		{"payload with no command", []byte("not json")},
+	}
+	for _, tt := range unknown {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := evaluatePRWorkflowGuard(tt.input); got != prWorkflowBlockAgentContext {
+				t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want prWorkflowBlockAgentContext (unknown input fails closed)", tt.input, got)
+			}
+		})
+	}
+
+	t.Run("refinery role does not exempt unknown input", func(t *testing.T) {
+		t.Setenv("GT_REFINERY", "1")
+		if got := evaluatePRWorkflowGuard(nil); got != prWorkflowBlockAgentContext {
+			t.Errorf("evaluatePRWorkflowGuard(nil) under GT_REFINERY = %v, want prWorkflowBlockAgentContext", got)
+		}
+	})
+
+	t.Run("known unrelated command is still allowed", func(t *testing.T) {
+		hookInput := []byte(`{"tool_name":"Bash","tool_input":{"command":"ls -la"}}`)
+		if got := evaluatePRWorkflowGuard(hookInput); got != prWorkflowAllow {
+			t.Errorf("evaluatePRWorkflowGuard(unrelated command) = %v, want prWorkflowAllow", got)
+		}
+	})
 }

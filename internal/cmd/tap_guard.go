@@ -161,71 +161,116 @@ func matchesPRWorkflowCommand(command string) bool {
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
+	// All three "if"-matched hook patterns (gh pr create*, git checkout -b*,
+	// git switch -c*) invoke this same command with no argument telling us
+	// which one fired, so the actual command must be read back off stdin
+	// (Claude Code hook protocol).
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		// Unreadable stdin is "we don't know what command this is", not
+		// "nothing to block" — the same distinction evaluatePRWorkflowGuard
+		// draws for an empty/unparsable payload (gt-wisp-52y4). Drop the
+		// partial bytes io.ReadAll returns alongside the error (a truncated
+		// command is not a command) and fall through to the unconditional
+		// context/origin check. Returning early here failed the guard open,
+		// letting the very command it exists to block through (gt-hift).
+		input = nil
+	}
+
+	switch evaluatePRWorkflowGuard(input) {
+	case prWorkflowBlockAgentContext:
+		printPRWorkflowAgentContextBlock()
+		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
+	case prWorkflowBlockMaintainerOrigin:
+		printPRWorkflowMaintainerOriginBlock()
+		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
+	}
+	return nil
+}
+
+// prWorkflowGuardDecision is the pr-workflow guard's verdict on one hook
+// payload: allow, or block with one of the two messages below.
+type prWorkflowGuardDecision int
+
+const (
+	prWorkflowAllow prWorkflowGuardDecision = iota
+	prWorkflowBlockAgentContext
+	prWorkflowBlockMaintainerOrigin
+)
+
+// evaluatePRWorkflowGuard decides whether a hook payload may proceed.
+//
+// input is the raw hook JSON, or nil when stdin could not be read — the two
+// cases collapse deliberately: a payload we could not read and a payload
+// holding no command both mean "we don't know what command this is", and
+// self-filtering is only safe when the command is actually known
+// (gt-wisp-52y4). Unknown input therefore skips the refinery exemption and
+// the self-filter below and falls through to the unconditional
+// context/origin check — the guard's only behavior before the self-filter
+// existed — rather than allowing everything.
+func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
+	command := extractCommand(input)
+
 	// The refinery's mandated merge-rehearsal checkout (mol-refinery-patrol
 	// step 1, mol-polecat-conflict-resolve: "git checkout -b temp
 	// origin/<branch>") legitimately needs to create a branch — the same
 	// shape of command isGasTownAgentContext() otherwise blocks for every
 	// role. Exempt only that shape, and only for the refinery role: "gh pr
 	// create" stays blocked for refineries same as everyone else (gt-r2xm).
-	// All three "if"-matched hook patterns (gh pr create*, git checkout
-	// -b*, git switch -c*) invoke this same command with no argument
-	// telling us which one fired, so the actual command must be read back
-	// off stdin (Claude Code hook protocol) to tell them apart. Read once
-	// and share it with the self-filter below.
-	input, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return nil
-	}
-	command := extractCommand(input)
 	if isRefineryRole() && isFeatureBranchCommand(command) && !isPRCreateCommand(command) {
-		return nil
+		return prWorkflowAllow
 	}
+
 	// Self-filter only when a command was actually extracted. Some harness
 	// templates (e.g. Copilot's INPUT=$(cat) wrapper, gt-wisp-52y4) drain
 	// stdin before invoking this guard, so empty/unparsable input here means
-	// "we don't know what command this is", not "nothing to block" — fall
-	// back to the unconditional context/origin check below (the guard's only
-	// behavior before this self-filter existed) instead of failing open.
+	// "we don't know what command this is", not "nothing to block".
 	if command != "" && !matchesPRWorkflowCommand(command) {
-		return nil
+		return prWorkflowAllow
 	}
 
 	// Check if we're in a Gas Town agent context
 	if isGasTownAgentContext() {
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-		fmt.Fprintln(os.Stderr, "║  ❌ PR WORKFLOW BLOCKED                                          ║")
-		fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-		fmt.Fprintln(os.Stderr, "║  Gas Town workers push directly to main. PRs are forbidden.     ║")
-		fmt.Fprintln(os.Stderr, "║                                                                  ║")
-		fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create / git checkout -b / git switch -c    ║")
-		fmt.Fprintln(os.Stderr, "║  Do this:     git add . && git commit && git push origin main   ║")
-		fmt.Fprintln(os.Stderr, "║                                                                  ║")
-		fmt.Fprintln(os.Stderr, "║  Why? PRs add friction that breaks autonomous execution.        ║")
-		fmt.Fprintln(os.Stderr, "║  See: ~/gt/docs/PRIMING.md (GUPP principle)                     ║")
-		fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-		fmt.Fprintln(os.Stderr, "")
-		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
+		return prWorkflowBlockAgentContext
 	}
 
 	// Check if origin is the maintainer's repo (steveyegge/gastown)
 	if isMaintainerOrigin() {
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-		fmt.Fprintln(os.Stderr, "║  ❌ PR BLOCKED - MAINTAINER ORIGIN                               ║")
-		fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-		fmt.Fprintln(os.Stderr, "║  Your origin is steveyegge/gastown - push directly to main.     ║")
-		fmt.Fprintln(os.Stderr, "║  PRs are for external contributors, not maintainers.            ║")
-		fmt.Fprintln(os.Stderr, "║                                                                  ║")
-		fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create                                      ║")
-		fmt.Fprintln(os.Stderr, "║  Do this:     git push origin main                              ║")
-		fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-		fmt.Fprintln(os.Stderr, "")
-		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
+		return prWorkflowBlockMaintainerOrigin
 	}
 
 	// Not in Gas Town context and not maintainer origin - allow PRs
-	return nil
+	return prWorkflowAllow
+}
+
+func printPRWorkflowAgentContextBlock() {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(os.Stderr, "║  ❌ PR WORKFLOW BLOCKED                                          ║")
+	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintln(os.Stderr, "║  Gas Town workers push directly to main. PRs are forbidden.     ║")
+	fmt.Fprintln(os.Stderr, "║                                                                  ║")
+	fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create / git checkout -b / git switch -c    ║")
+	fmt.Fprintln(os.Stderr, "║  Do this:     git add . && git commit && git push origin main   ║")
+	fmt.Fprintln(os.Stderr, "║                                                                  ║")
+	fmt.Fprintln(os.Stderr, "║  Why? PRs add friction that breaks autonomous execution.        ║")
+	fmt.Fprintln(os.Stderr, "║  See: ~/gt/docs/PRIMING.md (GUPP principle)                     ║")
+	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(os.Stderr, "")
+}
+
+func printPRWorkflowMaintainerOriginBlock() {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(os.Stderr, "║  ❌ PR BLOCKED - MAINTAINER ORIGIN                               ║")
+	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintln(os.Stderr, "║  Your origin is steveyegge/gastown - push directly to main.     ║")
+	fmt.Fprintln(os.Stderr, "║  PRs are for external contributors, not maintainers.            ║")
+	fmt.Fprintln(os.Stderr, "║                                                                  ║")
+	fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create                                      ║")
+	fmt.Fprintln(os.Stderr, "║  Do this:     git push origin main                              ║")
+	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(os.Stderr, "")
 }
 
 // isGasTownAgentContext returns true if we're running as a Gas Town managed agent.
