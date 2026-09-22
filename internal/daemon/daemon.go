@@ -127,6 +127,12 @@ type Daemon struct {
 	// safe for concurrent use.
 	consumption     *consumptionEscalator
 	consumptionOnce sync.Once
+	// pendingClock records when each probed session's composer was first seen
+	// holding unsubmitted input, so the probe can tell how long input has been
+	// waiting rather than how long the pane has been silent (gt-afa7).
+	// Lazily created.
+	pendingClock     *tmux.PendingInputClock
+	pendingClockOnce sync.Once
 	// findDogFn overrides dog selection in tests; nil uses the real pack.
 	findDogFn func() *dog.Dog
 

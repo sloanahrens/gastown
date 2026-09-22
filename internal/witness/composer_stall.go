@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -21,10 +22,15 @@ import (
 // queue behind it.
 //
 // This check supplies the missing signal. It is deliberately conservative: the
-// submit action only fires when the pane holds unsubmitted input AND the
-// session has produced no output at all for the whole frozen window, which is
-// what keeps it off a working or idle-await refinery (see
-// tmux.DetectComposerStall for the false positive this avoids).
+// submit action only fires when the pane holds unsubmitted input AND a clock
+// has run out on it — no output at all for the whole frozen window, or the
+// input observed waiting for the same window. The conjunction is what keeps it
+// off a working or idle-await refinery (see tmux.DetectComposerStall for the
+// false positive this avoids).
+//
+// The age clock matters here as much as in the daemon: the patrol is the
+// detector that reports "0 stalls" up the chain. It shares its stamps with the
+// daemon heartbeat, so whichever probes first starts the clock (gt-afa7).
 
 // Actions reported for a detected composer stall. A stall that is still
 // pending after the submit attempt is the case the patrol must escalate —
@@ -61,6 +67,10 @@ type RefineryStallResult struct {
 	State string
 	// Inactivity is how long the session had produced no output.
 	Inactivity time.Duration
+	// PendingFor is how long the composer had been continuously observed
+	// holding unsubmitted input. Zero when the silence window was the clock
+	// that tripped (gt-afa7).
+	PendingFor time.Duration
 	// Action is what the scan did about it (see the ComposerStallAction*
 	// constants).
 	Action string
@@ -120,7 +130,8 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 	}
 
 	frozenFor := config.LoadOperationalConfig(townRoot).GetWitnessConfig().ComposerStallFrozenForD()
-	stall, err := t.DetectComposerStall(sessionName, frozenFor)
+	clock := tmux.NewPendingInputClock(constants.TownRuntimePath(townRoot))
+	stall, err := t.DetectComposerStallTracked(sessionName, frozenFor, clock)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
 		return result
@@ -135,6 +146,7 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 		StallType:  "composer-stall",
 		State:      stall.State.String(),
 		Inactivity: stall.Inactivity,
+		PendingFor: stall.PendingFor,
 	}
 
 	if err := t.SubmitPendingInput(sessionName, stall.Queued); err != nil {
@@ -143,6 +155,8 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 		result.Stalls = append(result.Stalls, item)
 		return result
 	}
+	// The input has been acted on, so the wait it accumulated is over.
+	clock.Reset(sessionName)
 
 	item.Action = composerStallActionFor(stall.Queued)
 	if err := confirmComposerCleared(t, sessionName, frozenFor); err != nil {
