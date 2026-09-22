@@ -52,6 +52,12 @@ type ReviewRequest struct {
 	// Branch onto Target first (the CLI's --rehearsed flag).
 	RehearsedHead string
 
+	// Landed, when set, reviews a commit that already landed (the CLI's
+	// --landed flag) instead of a submitted branch: no rehearsal, no MR
+	// bead, and the note is stamped on the landed commit itself. Mutually
+	// exclusive with RehearsedHead.
+	Landed *LandedRange
+
 	// TimeoutSeconds, when > 0, overrides the rig's .om.json backend
 	// timeout for this one review (the CLI's --timeout flag). It is
 	// appended to the gate-script args as --timeout, which the gate script
@@ -198,14 +204,23 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		return failureResult(deps, req, class, err.Error(), 0)
 	}
 
+	if req.Landed != nil && req.RehearsedHead != "" {
+		return failureResult(deps, req, ConfigError, "--rehearsed and --landed are mutually exclusive: a landed review derives its range from the commit graph", 0)
+	}
+
 	head := req.RehearsedHead
-	if head == "" {
+	mergeBase := ""
+	switch {
+	case req.Landed != nil:
+		head = req.Landed.Head
+		mergeBase = req.Landed.Base
+	case head == "":
 		rehearsed, err := Rehearse(deps.Git, req.Target, req.Branch)
 		if err != nil {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("rehearsal failed: %v", err), 0)
 		}
 		head = rehearsed
-	} else {
+	default:
 		// The CLI's --rehearsed flag accepts a ref NAME (e.g. a temp branch),
 		// not necessarily a sha. Resolve it now: everything downstream
 		// (Note.HeadSHA, setEditorialReviewedHead's editorial_reviewed_head)
@@ -219,13 +234,26 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		head = resolved
 	}
 
-	mergeBase, err := deps.Git.MergeBase("origin/"+req.Target, head)
-	if err != nil {
-		return failureResult(deps, req, Tooling, fmt.Sprintf("merge-base: %v", err), 0)
+	if mergeBase == "" {
+		mergeBase, err = deps.Git.MergeBase("origin/"+req.Target, head)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("merge-base: %v", err), 0)
+		}
 	}
-	patchID, err := deps.Git.PatchID(mergeBase, head)
-	if err != nil {
-		return failureResult(deps, req, Tooling, fmt.Sprintf("patch-id: %v", err), 0)
+	// The diff's identity, and so the key the verdict is recorded under. A
+	// landed review keys it on the landed diff (ResolveLandedRange.PatchID):
+	// that is what the coverage check recomputes from the commit the note sits
+	// on, and the branch's own range hashes differently whenever the target
+	// moved lines inside the branch's hunk context — a note keyed on the range
+	// would answer for nothing.
+	patchID := ""
+	if req.Landed != nil {
+		patchID = req.Landed.PatchID
+	} else {
+		patchID, err = deps.Git.PatchID(mergeBase, head)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("patch-id: %v", err), 0)
+		}
 	}
 
 	// The rubric guard runs before the gate script, not after a verdict: the
@@ -243,11 +271,25 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	// the note answers "was a criterion given up here?" for every review.
 	retiredRubric := len(rubricDeltas) > 0
 
+	// The commit a landed review stamps, and the only one whose note can
+	// answer for it: the landed commit. Every other review stamps the head it
+	// reviewed.
+	noteCommit := head
+	var retroReview bool
+	var reviewHead string
+	if req.Landed != nil {
+		noteCommit = req.Landed.Commit
+		retroReview = true
+		if head != noteCommit {
+			reviewHead = head
+		}
+	}
+
 	// The verdict this review answers for or replaces, read before the
 	// decision to review at all: it answers the diff outright when it still
 	// applies, and is carried into the new note's attempt history when it
 	// does not.
-	prior, err := priorVerdict(deps.Git, head, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
+	prior, err := priorVerdict(deps.Git, noteCommit, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
 	if err != nil {
 		// Not knowing whether this diff was already reviewed is not a state
 		// to re-roll from: an unreadable note would be silently replaced.
@@ -261,8 +303,14 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			// precondition finds the note by reading editorial_reviewed_head
 			// (CheckPrecondition), so pointing it at a commit with no note
 			// would refuse the push on a review that had just approved.
-			if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
-				return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
+			//
+			// A landed review has no MR bead to record it on, and no push to
+			// precondition: the note is already on the landed commit, which
+			// is where the coverage check reads it.
+			if !retroReview {
+				if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
+					return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
+				}
 			}
 			return ReviewResult{Exit: 0, Note: &prior.Note, Reused: true}
 		}
@@ -311,12 +359,18 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	args := []string{
 		"--base", mergeBase,
 		"--head", head,
-		"--mr", req.MRID,
-		"--worker", req.Worker,
-		"--rig", req.Rig,
-		"--out", verdictPath,
-		"--prior-findings", priorPath,
 	}
+	// Omitted rather than passed empty: a landed review names no MR bead, and
+	// the gate script reads an absent --mr as "do not route this verdict to a
+	// bead" (route_comment in scripts/om-gate.sh), which is what a verdict
+	// about a commit whose MR is gone should do.
+	if req.MRID != "" {
+		args = append(args, "--mr", req.MRID)
+	}
+	if req.Worker != "" {
+		args = append(args, "--worker", req.Worker)
+	}
+	args = append(args, "--rig", req.Rig, "--out", verdictPath, "--prior-findings", priorPath)
 	// Only appended when the caller asked for an override: the deployed
 	// gate script parses its args with a strict case and fails closed
 	// (exit 2) on any argument it does not know, so the default path must
@@ -359,7 +413,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		MR:            req.MRID,
 		Worker:        req.Worker,
 		BaseSHA:       mergeBase,
-		HeadSHA:       head,
+		HeadSHA:       noteCommit,
 		PatchID:       patchID,
 		Score:         v.Score,
 		Verdict:       v.Verdict,
@@ -374,6 +428,11 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		// True only when this review carried a retirement through the rubric
 		// guard (see Note.RubricRetirement).
 		RubricRetirement: retiredRubric,
+		// Set only on a landed review, where the note is stamped on the
+		// landed commit and the diff that was scored is the branch's own
+		// head (see Note.RetroReview, Note.ReviewHead).
+		RetroReview: retroReview,
+		ReviewHead:  reviewHead,
 	}
 	if v.PriorFindings != nil {
 		note.PriorFindings.Resolved = v.PriorFindings.Resolved
@@ -441,8 +500,14 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 
 	if note.Verdict == "approve" {
-		if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
-			return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
+		if !retroReview {
+			// A submitted branch's push is authorized by its note, which the
+			// refinery finds by reading editorial_reviewed_head off the MR
+			// bead. A landed review has no such bead — and no push to
+			// precondition — so it skips this write.
+			if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
+				return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
+			}
 		}
 		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: resultStderr}
 	}
@@ -729,8 +794,14 @@ func fileFollowups(b *beads.Beads, mrID string, score float64, findings []Findin
 	}
 	if len(ids) > 0 {
 		comment := fmt.Sprintf("om approve carried %d major finding(s); follow-ups filed: %s", len(ids), strings.Join(ids, ", "))
-		if err := b.AddComment(mrID, comment); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("commenting followups on %s: %w", mrID, err)
+		// An empty mrID is a retro review of a landed commit: the follow-up
+		// beads are the record, and there is no MR bead to comment on —
+		// commenting on the landed commit's (nonexistent) MR bead would fail
+		// and poison an otherwise clean approve.
+		if mrID != "" {
+			if err := b.AddComment(mrID, comment); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("commenting followups on %s: %w", mrID, err)
+			}
 		}
 	}
 	return ids, firstErr

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -23,11 +25,14 @@ var (
 	mqReviewAttempt   int
 	mqReviewTimeout   int
 	mqReviewReroll    bool
+	mqReviewLanded    string
+	mqReviewTarget    string
+	mqReviewRigFlag   string
 )
 
 var mqReviewCmd = &cobra.Command{
-	Use:   "review <mr-id>",
-	Short: "Run the om editorial gate against a merge request",
+	Use:   "review [<mr-id>] | --landed <sha> [<mr-id>]",
+	Short: "Run the om editorial gate against a merge request or a landed commit",
 	Long: `Run the om editorial gate against a merge request — the single invoker of om.
 
 Rehearses the MR onto its target (or reviews an already-rehearsed head with
@@ -59,14 +64,28 @@ for the case where a diff legitimately needs longer than the rig default
 om and recorded on the note, so it is auditable afterwards rather than
 living only in whoever ran the command.
 
+--landed <sha> reviews a commit that is already on the target branch, for the
+verdict that was never recorded before its merge: no rehearsal, no MR bead —
+the range is derived from the commit graph and the note is stamped on the
+landed commit itself. The base is the merge-base of the merge's two parents,
+never ^1: ^1 is the target's tip at merge time, so diffing against it reports
+everything the target gained meanwhile as deletions the branch never made.
+The commit must be reachable from origin/<target> and its landing must be a
+merge of its parents; anything else is refused with exit 2. The rig defaults
+to the caller's and the target to the rig's remote default branch (--rig,
+--target). The positional MR id is optional, and only routes the verdict to
+that bead in addition to the note.
+
 Exit code: 0 approve, 1 request_changes, 2 infra failure (never an approval).
 
 Examples:
   gt mq review gt-mr-abc123
   gt mq review gt-mr-abc123 --rehearsed temp-branch
   gt mq review gt-mr-abc123 --timeout 900
-  gt mq review gt-mr-abc123 --json`,
-	Args: cobra.ExactArgs(1),
+  gt mq review gt-mr-abc123 --json
+  gt mq review --landed 3107a0d
+  gt mq review --landed 3107a0d --target main --rig gastown`,
+	Args: cobra.RangeArgs(0, 2),
 	RunE: runMQReview,
 }
 
@@ -77,6 +96,9 @@ func init() {
 	mqReviewCmd.Flags().IntVar(&mqReviewAttempt, "attempt", 1, "Resubmit attempt number recorded on the note")
 	mqReviewCmd.Flags().IntVar(&mqReviewTimeout, "timeout", 0, "Override the rig's .om.json backend timeout for this review, in whole seconds (passed to om, recorded on the om note)")
 	mqReviewCmd.Flags().BoolVar(&mqReviewReroll, "reroll", false, "Re-review a head that already carries a recorded verdict for the same diff and rubric, replacing it (recorded in the note's attempt history)")
+	mqReviewCmd.Flags().StringVar(&mqReviewLanded, "landed", "", "Review a commit that already landed on the target branch instead of a submitted MR: no rehearsal, no MR bead — the verdict is stamped on the landed commit itself (positional MR id optional)")
+	mqReviewCmd.Flags().StringVar(&mqReviewTarget, "target", "", "Target branch a --landed commit landed on (default: the rig's remote default branch)")
+	mqReviewCmd.Flags().StringVar(&mqReviewRigFlag, "rig", "", "Rig to review a --landed commit in (default: the current rig)")
 	mqCmd.AddCommand(mqReviewCmd)
 }
 
@@ -100,13 +122,27 @@ func runMQReview(cmd *cobra.Command, args []string) error {
 		})
 		return NewSilentExit(2)
 	}
-	result, err := doMQReview(args[0])
+	var result editorial.ReviewResult
+	var err error
+	if mqReviewLanded != "" {
+		result, err = doMQReviewLanded(args)
+	} else if len(args) == 1 {
+		result, err = doMQReview(args[0])
+	} else {
+		printMQReviewResult(editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: "usage: gt mq review <mr-id> | gt mq review --landed <sha> [mr-id]",
+		})
+		return NewSilentExit(2)
+	}
 	if err != nil {
 		return err
 	}
 	printMQReviewResult(result)
-	os.Exit(result.Exit)
-	return nil
+	// SilentExitError, not os.Exit: Execute owns the process exit code, as it
+	// does for the usage errors above.
+	return NewSilentExit(result.Exit)
 }
 
 // doMQReview resolves the MR's rig and config and runs the review, without
@@ -184,7 +220,122 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		Exec:     editorial.RunGateScript,
 	}
 
-	return editorial.Run(context.Background(), req, deps), nil
+	return runEditorialReview(req, deps), nil
+}
+
+// runEditorialReview is the seam the gate runs through, so tests can review
+// without invoking om. Production always runs the real gate.
+var runEditorialReview = func(req editorial.ReviewRequest, deps editorial.Deps) editorial.ReviewResult {
+	return editorial.Run(context.Background(), req, deps)
+}
+
+// doMQReviewLanded reviews a commit that already landed (the --landed flag):
+// no rehearsal, no MR bead to resolve. The rig defaults to the caller's cwd
+// (findCurrentRig, falling back to GT_RIG), the target to the rig's remote
+// default branch, and the review range is derived from the commit graph alone
+// (ResolveLandedRange). The verdict is stamped on the landed commit itself.
+func doMQReviewLanded(args []string) (editorial.ReviewResult, error) {
+	if len(args) > 1 {
+		// Silently ignoring a second id would review the wrong handle.
+		return editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: "usage: gt mq review --landed <sha> [<mr-id>] — at most one MR id",
+		}, nil
+	}
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return editorial.ReviewResult{}, fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	rigName := strings.TrimSpace(mqReviewRigFlag)
+	if rigName == "" {
+		rigName, _, err = findCurrentRig(townRoot)
+		if err != nil {
+			return editorial.ReviewResult{}, fmt.Errorf("resolving rig for --landed: %w (pass --rig to name it)", err)
+		}
+	}
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return editorial.ReviewResult{}, err
+	}
+
+	gitDir := filepath.Join(r.Path, "refinery", "rig")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		gitDir = filepath.Join(r.Path, "mayor", "rig")
+	}
+	g := git.NewGit(gitDir)
+
+	target := strings.TrimSpace(mqReviewTarget)
+	if target == "" {
+		target = g.RemoteDefaultBranch()
+	}
+	if target == "" {
+		return editorial.ReviewResult{}, fmt.Errorf("cannot determine the target branch for --landed in %s (pass --target)", rigName)
+	}
+
+	// Every way of failing to establish the range is a refusal, and a refusal
+	// is a config error: exit 2, never 1. An unresolvable sha, a commit that
+	// never landed, a root commit, a diff with no patch-id, a landing that is
+	// not a merge of its parents — each means this commit has no reviewable
+	// landed diff, and a caller must not read any of them as request_changes
+	// and send an author off to fix code that was never reviewed.
+	landed, err := editorial.ResolveLandedRange(g, mqReviewLanded, target)
+	if err != nil {
+		return editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: err.Error(),
+		}, nil
+	}
+
+	var editorialCfg config.EditorialConfig
+	if mqCfg := rig.ResolveMergeQueueConfig(townRoot, rigName); mqCfg != nil && mqCfg.Editorial != nil {
+		editorialCfg = *mqCfg.Editorial
+	}
+	editorialCfg = editorialCfg.WithDefaults()
+
+	if !editorialCfg.Required && !mqReviewForce {
+		return editorial.ReviewResult{
+			Exit:   2,
+			Class:  editorial.ConfigError,
+			Stderr: fmt.Sprintf("merge_queue.editorial.required is false for rig %s; pass --force to review anyway", rigName),
+		}, nil
+	}
+
+	// No MR bead is minted. The verdict's record is the note on the landed
+	// commit, and the gate script reads an absent --mr as "do not route this
+	// verdict to a bead" — so a second bead would buy nothing and cost
+	// something: a bead labeled gt:merge-request is queue-visible to the
+	// dozens of consumers that key on that label (mq list, backpressure,
+	// capacity, reaper, ...), and one left open by a crash would read as a
+	// phantom merge request until wisp GC ran.
+	mrID := ""
+	if len(args) > 0 {
+		mrID = args[0]
+	}
+
+	req := editorial.ReviewRequest{
+		RigDir:         r.Path,
+		RepoDir:        gitDir,
+		MRID:           mrID,
+		Rig:            rigName,
+		Target:         target,
+		Landed:         &landed,
+		Attempt:        mqReviewAttempt,
+		TimeoutSeconds: mqReviewTimeout,
+		Reroll:         mqReviewReroll,
+		Config:         editorialCfg,
+	}
+
+	deps := editorial.Deps{
+		Git:      g,
+		Beads:    beads.New(r.Path),
+		Recorder: plugin.NewRecorder(townRoot),
+		Exec:     editorial.RunGateScript,
+	}
+
+	return runEditorialReview(req, deps), nil
 }
 
 // reusedSuffix marks output answered from a diff's recorded verdict rather
@@ -199,6 +350,9 @@ func reusedSuffix(result editorial.ReviewResult) string {
 	return " [recorded verdict reused: same diff, om not re-invoked — pass --reroll to re-review]"
 }
 
+// printMQReviewResult renders a review result. Note is never nil on exit 0 or
+// 1 — Run reaches those codes only by writing a note — so the 0/1 branches
+// read it directly.
 func printMQReviewResult(result editorial.ReviewResult) {
 	if mqReviewJSON {
 		enc := json.NewEncoder(os.Stdout)
