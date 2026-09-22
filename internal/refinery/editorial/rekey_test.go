@@ -558,3 +558,101 @@ func TestNote_BackfillFieldsMatchTheHandWrittenSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestRekeyNote_CoversLandedMergeCommitWhenNoteSitsOnRehearsalHead is the
+// gt-fr3r shape, and it is the one the gt-qvxf test above does not reach:
+// process-branch rehearses the merge on `temp` (parents [branch, target]) and
+// `gt mq review` writes the approve note on THAT head, while merge-push
+// re-merges origin/<branch> from a target checkout and lands a different merge
+// commit (parents [target, branch]). The rehearsal head is an ancestor of
+// neither the target nor the landed commit, so its note is unreachable from
+// the branch the coverage walk inspects — the landed commit is uncovered even
+// though the diff it landed was reviewed and approved.
+//
+// This pins the mechanism the wisp's merge-push step now invokes
+// (mol-refinery-patrol: `gt mq rekey-note --landed ... --target ...`): the
+// source note is found by the MR id inside it rather than by any relationship
+// to the branch, and the patch-id rekey verifies is the same one the
+// editorial-coverage doctor recomputes after a landing.
+func TestRekeyNote_CoversLandedMergeCommitWhenNoteSitsOnRehearsalHead(t *testing.T) {
+	f := newRekeyFixture(t)
+	const branch = "polecat/slate/gt-fr3r"
+	const mr = "gt-wisp-1q55"
+
+	f.git(f.repoDir, "checkout", "-q", "-b", branch)
+	head := commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
+
+	// The target moves on while the branch sits in the queue, which is what
+	// makes the rehearsal merge (and so the landed merge) a real merge rather
+	// than a no-op.
+	f.checkout("main")
+	commitFile(t, f.repoDir, "other.txt", "unrelated\n", "advance main")
+	f.publish()
+
+	// process-branch's rehearsal, in this clone: temp starts at the branch and
+	// merges the target in, so its head is a commit no merge queue ever lands.
+	f.git(f.repoDir, "checkout", "-q", "-b", "temp", head)
+	f.git(f.repoDir, "merge", "--no-ff", "--no-edit", "origin/main")
+	rehearsalHead := f.git(f.repoDir, "rev-parse", "HEAD")
+	if rehearsalHead == head {
+		t.Fatal("rehearsal produced no commit; expected a merge of the target into the branch")
+	}
+
+	// The verdict gt mq review writes: keyed to the merge-base of the target
+	// and the head it reviewed.
+	reviewBase := f.git(f.repoDir, "merge-base", "origin/main", rehearsalHead)
+	want := writeMRNote(t, f.g, mr, reviewBase, rehearsalHead, "")
+
+	// merge-push: merge the branch into the target and push.
+	f.checkout("main")
+	landed := f.landOnMain(head, "Merge "+branch+" into main")
+	if landed == head {
+		t.Fatal("expected a merge commit, not a fast-forward")
+	}
+
+	// The defect: the note's home never lands, so nothing on the target
+	// carries this MR's proof.
+	if merged, err := f.g.IsAncestor(rehearsalHead, "origin/main"); err != nil {
+		t.Fatalf("IsAncestor %s: %v", rehearsalHead, err)
+	} else if merged {
+		t.Fatal("the rehearsal head landed on the target; this test no longer reproduces gt-fr3r and rekey-note would have nothing to copy")
+	}
+	if _, err := ReadNote(f.g, landed); !errors.Is(err, git.ErrNoNote) {
+		t.Fatalf("ReadNote on the landed merge commit = %v, want no note before the copy", err)
+	}
+
+	// The landed commit's own diff is the reviewed diff, which is what lets
+	// rekey copy the verdict instead of inventing one.
+	if got := landedPatchID(t, f.g, landed); got != want.PatchID {
+		t.Fatalf("patch-id of the landed commit's own diff = %s, want the reviewed patch-id %s; the copy would be refused", got, want.PatchID)
+	}
+
+	res, err := RekeyNote(f.g, RekeyRequest{
+		MR:     mr,
+		Landed: landed,
+		Target: "main",
+		Reason: "wisp raw-git merge-push: the verdict is keyed to the rehearsal head and the landed commit is a different merge (gt-fr3r)",
+	})
+	if err != nil {
+		t.Fatalf("RekeyNote: %v", err)
+	}
+	if res.SourceCommit != rehearsalHead {
+		t.Fatalf("source commit = %s, want the rehearsal head %s the verdict was written on", res.SourceCommit, rehearsalHead)
+	}
+	if len(res.Written) != 1 || res.Written[0] != landed {
+		t.Fatalf("written = %v, want [%s]", res.Written, landed)
+	}
+
+	// Covered by the same reading the editorial-coverage doctor applies: the
+	// note is on the landed commit and its patch-id matches that commit's diff.
+	covered, err := ReadNote(f.g, landed)
+	if err != nil {
+		t.Fatalf("ReadNote on the landed commit after the copy: %v", err)
+	}
+	if got := landedPatchID(t, f.g, landed); covered.PatchID != got {
+		t.Fatalf("note on the landed commit carries patch-id %s, but the commit's own diff is %s — editorial-coverage would still flag it", covered.PatchID, got)
+	}
+	if noteOnOrigin(t, f, landed) == "" {
+		t.Fatal("the copied note is not on origin; no other clone, including the coverage check, can see the proof")
+	}
+}
