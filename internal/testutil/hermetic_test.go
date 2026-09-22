@@ -88,6 +88,65 @@ func TestTripwire_DetectsNewFilesAndDatabases(t *testing.T) {
 	}
 }
 
+// gt-bd79: onboarding a new rig concurrently with a test run creates both a
+// rig worktree at the town root and a Dolt data directory under
+// .dolt-data/, named after the rig — the same shape the before/after
+// snapshot cannot distinguish from test-leaked state. Once the rig is
+// registered in rigs.json, both entries must be tolerated.
+func TestTripwire_ToleratesConcurrentRigOnboarding(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	// Operator onboards a new rig "hm" while the test is running: rigs.json
+	// gains an entry, and its worktree + Dolt data directory appear.
+	writeFile(t, filepath.Join(town, "mayor", "rigs.json"),
+		`{"version":1,"rigs":{"gastown":{},"hm":{}}}`)
+	if err := os.MkdirAll(filepath.Join(town, "hm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(town, ".dolt-data", "hm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A real leak must still be caught alongside the tolerated rig entries.
+	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected exactly 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.txt") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, "new entry: hm") {
+		t.Errorf("new rig worktree flagged as leak: %v", leaks)
+	}
+	if strings.Contains(joined, ".dolt-data/hm") {
+		t.Errorf("new rig Dolt data dir flagged as leak: %v", leaks)
+	}
+}
+
+// An entry that merely shares a name with something under .dolt-data but is
+// not a registered rig (e.g. an orphan test database) must still be caught —
+// explainedByRig only tolerates names present in the town's current
+// rigs.json.
+func TestTripwire_DoesNotTolerateUnregisteredDoltDataDir(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	if err := os.MkdirAll(filepath.Join(town, ".dolt-data", "testdb_abc123"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak, got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], ".dolt-data/testdb_abc123") {
+		t.Errorf("orphan database not detected: %v", leaks)
+	}
+}
+
 func TestTripwire_ToleratesBdAtomicWriteTemp(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
