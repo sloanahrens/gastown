@@ -196,8 +196,13 @@ func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
 // A held slot whose owner role doesn't match this polecat is some other
 // rig's suite and says nothing about this polecat's state, so it is not
 // treated as busy here.
+//
+// Reads only the flock picture (StatusPoolLocksOnly): this runs at every
+// turn boundary and nothing below looks at the container half, so the full
+// StatusPool's `docker ps` was a subprocess per turn whose output was never
+// read (gt-a8kx).
 func polecatStopVerificationRunning(townRoot, rigName, polecatName string) (bool, string) {
-	rep, err := slot.StatusPool(townRoot, containerGatePool(townRoot))
+	rep, err := slot.StatusPoolLocksOnly(townRoot, containerGatePool(townRoot))
 	if err != nil || !rep.Held {
 		return false, ""
 	}

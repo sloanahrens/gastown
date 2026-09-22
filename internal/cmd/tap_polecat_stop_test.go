@@ -131,9 +131,21 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	t.Run("no slot held", func(t *testing.T) {
 		townRoot := t.TempDir()
 
+		// This runs at every turn boundary and reads only the flock, so it
+		// must not shell out to `docker ps` (gt-a8kx).
+		var calls int
+		restore := slot.SetContainerListerForTest(func() ([]string, error) {
+			calls++
+			return nil, nil
+		})
+		defer restore()
+
 		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
 		if busy {
 			t.Fatalf("busy = true (%s), want false when nothing holds the slot", reason)
+		}
+		if calls != 0 {
+			t.Fatalf("polecatStopVerificationRunning probed docker %d time(s); it reads only the flock", calls)
 		}
 	})
 

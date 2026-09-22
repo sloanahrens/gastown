@@ -3,6 +3,7 @@ package slot
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -231,6 +232,36 @@ func AcquirePoolReal(townRoot, role string, timeout time.Duration, pool Pool) (*
 	return acquirePool(townRoot, role, timeout, pool, true)
 }
 
+// probeWriter is where the gate's `docker ps` diagnostics go — the counterpart
+// to debrisWriter, which carries the verdicts on the containers Acquire walks
+// past. Both an inconclusive probe and an unreachable daemon are reported
+// here, so an operator has one stream to look at when the gate waits for a
+// reason it cannot name. Declared as a var so a test can read the evidence
+// back rather than have it land on its own stderr.
+var probeWriter io.Writer = os.Stderr
+
+// inconclusiveLogger returns a func that reports the first inconclusive
+// `docker ps` probe it is shown, then stays quiet.
+//
+// Acquire polls while it waits, so an unverifiable probe would otherwise
+// re-announce itself every DefaultPollInterval. But silence is worse here than
+// for debris: the error this branch eventually returns is
+// "timed out after %s waiting for container-gate slot", which names no cause,
+// and for runMQBatchRun that timeout is 60 minutes — long enough that a
+// wedged daemon was indistinguishable from a busy town (gt-a8kx). One line
+// carrying the underlying error is the difference between a diagnosable wait
+// and a mystery hang.
+func inconclusiveLogger() func(error) {
+	logged := false
+	return func(err error) {
+		if logged {
+			return
+		}
+		logged = true
+		fmt.Fprintf(probeWriter, "gt slot: docker ps check inconclusive (%v); cannot confirm no container-backed suite is running, waiting for the gate instead of handing out a slot\n", err)
+	}
+}
+
 // acquirePool implements AcquirePool (firstClass false) and AcquirePoolReal
 // (firstClass true).
 func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstClass bool) (*Handle, error) {
@@ -261,6 +292,10 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	// beside a busy suite would otherwise print the same warning on every
 	// poll of the wait.
 	logDebrisOnce := debrisLogger()
+
+	// Likewise once per Acquire call, and for the same reason: the wait can
+	// outlast several polls.
+	logInconclusiveOnce := inconclusiveLogger()
 
 	grant := func(i int, unlock func()) *Handle {
 		h := &Handle{townRoot: townRoot, unlock: unlock, Index: i}
@@ -300,10 +335,14 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 			switch {
 			case containerErr != nil && !isDaemonUnreachable(containerErr):
 				// Inconclusive probe (wedged daemon, permission-denied
-				// socket): not licensed to assume empty. Release and wait.
+				// socket): not licensed to assume empty. Release and wait,
+				// naming the underlying error the first time so the wait is
+				// diagnosable rather than a silent spin to the timeout
+				// (gt-a8kx).
+				logInconclusiveOnce(containerErr)
 				unlock()
 			case containerErr != nil:
-				fmt.Fprintf(os.Stderr, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
+				fmt.Fprintf(probeWriter, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
 				return grant(i, unlock), nil
 			default:
 				blocking := 0
@@ -344,7 +383,60 @@ type SlotState struct {
 // single-slot callers keep their meaning; Report.Slots carries the full
 // picture. The docker cross-check for unwrapped suites runs only when no
 // slot is held at all.
+//
+// That cross-check shells out to `docker ps` (bounded by dockerPSTimeout),
+// which is the price a caller pays only when it is deciding whether a suite
+// may start or reporting what the Docker VM is doing. A caller that reads
+// nothing but the held/owner picture wants StatusPoolLocksOnly instead
+// (gt-a8kx).
 func StatusPool(townRoot string, pool Pool) (Report, error) {
+	rep, err := StatusPoolLocksOnly(townRoot, pool)
+	if err != nil {
+		return Report{}, err
+	}
+	if rep.HeldCount > 0 {
+		// Containers up while a slot is held belong to that holder, not to an
+		// unwrapped suite, so there is nothing here to cross-check.
+		return rep, nil
+	}
+
+	containers, err := gateContainers()
+	if err != nil {
+		rep.DockerUnknown = true
+		return rep, nil
+	}
+	for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
+		if verdict.Blocks() {
+			rep.UnwrappedContainers = append(rep.UnwrappedContainers, verdict.Container.Display())
+		} else {
+			rep.DebrisContainers = append(rep.DebrisContainers, verdict.Container.Display())
+		}
+	}
+	return rep, nil
+}
+
+// StatusPoolLocksOnly is StatusPool without the `docker ps` cross-check: the
+// held/free picture and the owner metadata, read from the flocks and the
+// display-only owner files alone. Both halves are in-process work — non-
+// blocking flock probes plus small file reads, no subprocess — so it is safe
+// on a path that runs on every refresh.
+//
+// UnwrappedContainers, DebrisContainers and DockerUnknown are therefore always
+// zero-valued, so this report is indistinguishable from a full one by its
+// fields alone. Do NOT read it as "no container-backed suite is running":
+// nothing here looked, and treating an unchecked host as free is the exact
+// collision this package exists to prevent (gt-tuiy). It answers "is the slot
+// held, and by whom" — nothing more, and only for callers that read nothing
+// more.
+//
+// gt status's gatherStatus (internal/cmd/status.go) and the polecat Stop
+// hook's polecatStopVerificationRunning (internal/cmd/tap_polecat_stop.go) are
+// the intended callers: both read only Held/Owner-and-slots, yet the full
+// StatusPool made each of them shell out to docker ps whenever no slot was
+// held (gt-a8kx). Callers that do need the container half — `gt slot status`,
+// the web dashboard's Gate panel, the refinery's Busy() check, Acquire itself
+// — keep using StatusPool/Status.
+func StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	pool = pool.normalized()
 	var rep Report
 
@@ -386,21 +478,6 @@ func StatusPool(townRoot string, pool Pool) (Report, error) {
 	}
 	rep.Total = len(rep.Slots)
 	rep.Reserved = pool.ReservedForGate
-
-	if rep.HeldCount == 0 {
-		containers, err := gateContainers()
-		if err != nil {
-			rep.DockerUnknown = true
-		} else {
-			for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
-				if verdict.Blocks() {
-					rep.UnwrappedContainers = append(rep.UnwrappedContainers, verdict.Container.Display())
-				} else {
-					rep.DebrisContainers = append(rep.DebrisContainers, verdict.Container.Display())
-				}
-			}
-		}
-	}
 	return rep, nil
 }
 

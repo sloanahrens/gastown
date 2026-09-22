@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 func captureStderr(t *testing.T, fn func()) string {
@@ -251,6 +252,67 @@ func TestOutputStatusText_ContainerSlot(t *testing.T) {
 	if strings.Contains(buf.String(), "Container suite running:") {
 		t.Fatalf("did not expect container-slot line when Slot is nil, got: %q", buf.String())
 	}
+}
+
+// TestReadGateSlotHolderSkipsDockerProbe pins gt-a8kx at its regression site.
+// readGateSlotHolder feeds the status line from every `gt status` and every
+// --watch tick and carries nothing but the holder, so it must stay a flock
+// read. StatusPoolLocksOnly's own test cannot catch a revert of just this call
+// site, and neither can a check made while a slot is HELD — StatusPool skips
+// its cross-check then too, because a holder's containers are not "unwrapped"
+// ones. Only the idle gate separates the two, and the idle gate is the common
+// case this bug was about.
+func TestReadGateSlotHolderSkipsDockerProbe(t *testing.T) {
+	t.Run("idle gate", func(t *testing.T) {
+		townRoot := t.TempDir()
+
+		// Any probe here is the bug under test. The stub also returns a
+		// matching container, so a revert shows up as a wrong reading as well
+		// as a call count.
+		var calls int
+		restore := slot.SetContainerListerForTest(func() ([]string, error) {
+			calls++
+			return []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, nil
+		})
+		t.Cleanup(restore)
+
+		if got := readGateSlotHolder(townRoot); got != nil {
+			t.Fatalf("readGateSlotHolder = %+v, want nil with no slot held", got)
+		}
+		if calls != 0 {
+			t.Fatalf("readGateSlotHolder probed docker %d time(s) with no slot held; the status line reads the flock alone", calls)
+		}
+	})
+
+	t.Run("held slot", func(t *testing.T) {
+		townRoot := t.TempDir()
+
+		var calls int
+		restore := slot.SetContainerListerForTest(func() ([]string, error) {
+			calls++
+			return nil, nil
+		})
+		t.Cleanup(restore)
+
+		handle, err := slot.Acquire(townRoot, "gastown/refinery", time.Second)
+		if err != nil {
+			t.Fatalf("slot.Acquire: %v", err)
+		}
+		t.Cleanup(func() { _ = handle.Release() })
+
+		calls = 0 // Acquiring legitimately probes; only the read below is under test.
+
+		got := readGateSlotHolder(townRoot)
+		if got == nil {
+			t.Fatal("readGateSlotHolder = nil, want the refinery's hold")
+		}
+		if got.Role != "gastown/refinery" || got.PID != os.Getpid() {
+			t.Fatalf("readGateSlotHolder = %+v, want role gastown/refinery at pid %d", got, os.Getpid())
+		}
+		if calls != 0 {
+			t.Fatalf("readGateSlotHolder probed docker %d time(s) with a slot held", calls)
+		}
+	})
 }
 
 func TestRunStatusWatch_RejectsZeroInterval(t *testing.T) {
