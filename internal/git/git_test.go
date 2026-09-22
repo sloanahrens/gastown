@@ -4383,3 +4383,85 @@ func TestPushNotes_ConflictOnSameCommitFailsClosed(t *testing.T) {
 		t.Errorf("scratch ref %s outlived the failed retry", scratchNotesRef(ref))
 	}
 }
+
+// TestMergedTree covers the two answers MergedTree distinguishes: the tree a
+// conflict-free merge of two revs would have, and an error when the two have
+// no conflict-free merge at all.
+func TestMergedTree(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte(content), 0644); err != nil {
+			t.Fatalf("write shared.txt: %v", err)
+		}
+	}
+
+	write("line-01\nline-02\nline-03\n")
+	gitRun("add", ".")
+	gitRun("commit", "-m", "base")
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev base: %v", err)
+	}
+
+	// Two sides editing different lines of one file: no conflict, so a merge
+	// tree exists and holds both edits.
+	gitRun("checkout", "-b", "left")
+	write("left-01\nline-02\nline-03\n")
+	gitRun("add", ".")
+	gitRun("commit", "-m", "left edit")
+
+	gitRun("checkout", "-b", "right", base)
+	write("line-01\nline-02\nright-03\n")
+	gitRun("add", ".")
+	gitRun("commit", "-m", "right edit")
+
+	merged, err := g.MergedTree("left", "right")
+	if err != nil {
+		t.Fatalf("MergedTree: %v", err)
+	}
+	// Argument order must not matter: it is the same merge either way.
+	reversed, err := g.MergedTree("right", "left")
+	if err != nil {
+		t.Fatalf("MergedTree reversed: %v", err)
+	}
+	if merged != reversed {
+		t.Errorf("MergedTree(left, right) = %s, MergedTree(right, left) = %s; want one tree", merged, reversed)
+	}
+	for _, side := range []string{"left", "right"} {
+		if merged == treeOf(t, g, side) {
+			t.Errorf("MergedTree = %s, the %s side's own tree: it did not merge the other side", merged, side)
+		}
+	}
+	if merged == treeOf(t, g, base) {
+		t.Errorf("MergedTree = %s, the base tree: it dropped both edits", merged)
+	}
+
+	// Both sides now edit the same line differently: no conflict-free merge
+	// tree exists, which is an error rather than a tree.
+	gitRun("checkout", "left")
+	write("left-01\nline-02\nleft-03\n")
+	gitRun("add", ".")
+	gitRun("commit", "-m", "edit the same line")
+	if tree, err := g.MergedTree("left", "right"); err == nil {
+		t.Errorf("MergedTree on a conflicting pair = %q, want an error", tree)
+	}
+}
+
+func treeOf(t *testing.T, g *Git, rev string) string {
+	t.Helper()
+	tree, err := g.Rev(rev + "^{tree}")
+	if err != nil {
+		t.Fatalf("Rev %s^{tree}: %v", rev, err)
+	}
+	return tree
+}
