@@ -21,6 +21,12 @@
 // authoritative — Status() determines whether the slot is actually held by
 // attempting a non-blocking flock, and only reads the owner file to decorate
 // that result.
+//
+// Waiting on that lock used to be invisible, which left the town unable to
+// answer whether the gate was constricting it (gt-dc81). Acquire now measures
+// the wait and puts it on Handle.WaitedFor, emits a slot_wait event per grant
+// and a slot_hold per release, and writes both to a bounded ring file that
+// `gt slot status` reports. See telemetry.go.
 package slot
 
 import (
@@ -322,6 +328,16 @@ type Handle struct {
 	reentrant bool // true: this Handle rides an ancestor's real hold; Release is a no-op.
 	// Index is the pool slot this handle holds (0 for the single-slot case).
 	Index int
+	// WaitedFor is how long this call blocked before winning the slot: the wall
+	// time from its first lock attempt to the grant (gt-dc81). It is 0 for a
+	// slot won on the first attempt, and 0 for a reentrant handle, which holds
+	// nothing of its own — the ancestor's wait is the one on record.
+	WaitedFor time.Duration
+
+	// role is the owner identity, kept for the telemetry Release reports under.
+	role       string
+	acquiredAt time.Time
+	released   bool
 }
 
 // Acquire blocks until the container-gate slot is available (or timeout
@@ -358,15 +374,48 @@ func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
 // display-only), then the advisory lock itself. The kernel would also
 // release the lock on process exit/death even if Release is never called —
 // this just makes a graceful release immediate instead of exit-triggered.
-func (h *Handle) Release() error {
+//
+// The hold is recorded (slot_hold event and the ring file's held_s) without a
+// command exit status; ReleaseWithExit is the variant for a holder that ran a
+// command and knows how it ended.
+func (h *Handle) Release() error { return h.release(nil) }
+
+// ReleaseWithExit releases the slot, recording exitCode as the status of the
+// command the slot was held for (gt-dc81).
+//
+// `gt slot run` needs this on its failure path: it exits with the child's code,
+// and os.Exit skips deferred calls, so a plain deferred Release would never run
+// and the ring file would keep that hold open forever.
+func (h *Handle) ReleaseWithExit(exitCode int) error { return h.release(&exitCode) }
+
+// release is Release and ReleaseWithExit's shared body. exitCode is nil when
+// there is no command status to report.
+func (h *Handle) release(exitCode *int) error {
 	if h.reentrant {
 		// The real holder is an ancestor in this process tree; it owns the
 		// owner file, the flock, and clearing ReentrantEnvVar.
 		return nil
 	}
+	if h.released {
+		// release is called from a defer, and `gt slot run`'s failure path
+		// calls ReleaseWithExit before the deferred Release would have run.
+		// Recording the hold twice would double-count it in the history.
+		return nil
+	}
+	h.released = true
+
+	held := time.Since(h.acquiredAt)
 	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
 	h.unlock()
 	_ = os.Unsetenv(ReentrantEnvVar)
+
+	// Telemetry is best-effort and runs after the lock is gone: a caller
+	// blocked on this slot must not be made to wait on a stats write, and a
+	// grant is worth more than the record of it.
+	if _, err := completeHold(h.townRoot, h.role, h.Index, os.Getpid(), held); err != nil {
+		fmt.Fprintf(probeWriter, "gt slot: recording slot hold in history: %v\n", err)
+	}
+	emitHoldEvent(h.townRoot, h.role, h.Index, held, exitCode)
 	return nil
 }
 

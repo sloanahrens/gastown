@@ -297,8 +297,19 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	// outlast several polls.
 	logInconclusiveOnce := inconclusiveLogger()
 
+	// watch attributes the wait this call is about to spend (gt-dc81).
+	watch := newWaitWatch()
+
 	grant := func(i int, unlock func()) *Handle {
-		h := &Handle{townRoot: townRoot, unlock: unlock, Index: i}
+		info := watch.info(timeout, false)
+		h := &Handle{
+			townRoot:   townRoot,
+			unlock:     unlock,
+			Index:      i,
+			role:       role,
+			acquiredAt: time.Now(),
+			WaitedFor:  info.Waited,
+		}
 		_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
 			Role:       role,
 			PID:        os.Getpid(),
@@ -308,16 +319,31 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 		// Both acquire paths arm the marker for their own descendants; only
 		// the fast path differs between them (see AcquirePoolReal).
 		_ = os.Setenv(ReentrantEnvVar, reentrantEnvValue(townRoot, i, role, os.Getpid()))
+		if err := recordWaitResult(townRoot, role, i, os.Getpid(), info); err != nil {
+			fmt.Fprintf(probeWriter, "gt slot: recording slot acquisition in history: %v\n", err)
+		}
+		emitWaitEvent(townRoot, role, i, info)
 		return h
 	}
 
 	for {
+		passStart := time.Now()
+		// passReason is why this pass could not grant; "" means nothing
+		// blocked it, which only a grant can end.
+		var passReason WaitReason
 		for _, i := range candidates {
 			unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(townRoot, i))
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
+				// Somebody holds this slot. Read their owner file now, while
+				// they are still the blocker: by the time the wait ends they
+				// have released and removed it (gt-dc81).
+				watch.noteHolder(readSlotOwner(townRoot, i))
+				if passReason == "" {
+					passReason = WaitReasonTokenHeld
+				}
 				continue
 			}
 			// We hold slot i. If somebody else holds another slot, any
@@ -340,33 +366,54 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 				// diagnosable rather than a silent spin to the timeout
 				// (gt-a8kx).
 				logInconclusiveOnce(containerErr)
+				watch.noteDockerErr(containerErr)
+				if passReason == "" {
+					passReason = WaitReasonDaemonUnreachable
+				}
 				unlock()
 			case containerErr != nil:
 				fmt.Fprintf(probeWriter, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
 				return grant(i, unlock), nil
 			default:
-				blocking := 0
+				var blocking []string
 				for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
 					if verdict.Blocks() {
-						blocking++
+						blocking = append(blocking, verdict.Container.Display())
 						continue
 					}
 					logDebrisOnce(verdict)
 				}
-				if blocking == 0 {
+				if len(blocking) == 0 {
 					return grant(i, unlock), nil
 				}
 				// An unwrapped suite has containers up and nobody holds a
 				// slot for them. Not safe to hand out ANY slot; release
 				// and wait rather than trying the next candidate.
+				watch.noteContainers(blocking)
+				if passReason == "" {
+					passReason = WaitReasonUnwrappedContainers
+				}
 				unlock()
 			}
 			break
 		}
 		if hasDeadline && time.Now().After(deadline) {
+			// A caller that gave up is recorded like a grant. It is the
+			// strongest evidence of a constricting gate and the case a
+			// grant-only history drops: two `gt slot run` calls timed out at 30s
+			// behind one unwrapped dolt suite on 2026-09-22 and left no trace
+			// anywhere until this did (gt-dc81).
+			info := watch.info(timeout, true)
+			if err := recordWaitResult(townRoot, role, candidates[0], os.Getpid(), info); err != nil {
+				fmt.Fprintf(probeWriter, "gt slot: recording slot timeout in history: %v\n", err)
+			}
+			emitWaitEvent(townRoot, role, candidates[0], info)
 			return nil, fmt.Errorf("timed out after %s waiting for container-gate slot", timeout)
 		}
 		time.Sleep(DefaultPollInterval)
+		// Credited after the sleep so a blocked pass carries the poll interval
+		// it spent waiting, not just the microseconds its probes took.
+		watch.credit(passReason, time.Since(passStart))
 	}
 }
 

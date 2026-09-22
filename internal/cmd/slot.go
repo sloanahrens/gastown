@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -34,10 +35,18 @@ var slotCmd = &cobra.Command{
 a time against the host's Docker VM. The VM has a fixed CPU/memory bound
 (see 'gt doctor'); two container-backed suites running concurrently inside it
 starve each other even when the host itself shows plenty of idle CPU.
+(gt-bcsq is where that bound was measured and the gate agreed on.)
 
 The slot is a kernel-managed advisory lock (flock), not a pid file: the
 kernel releases it automatically when the holding process dies by any means,
 including SIGKILL, so the lock itself needs no reclaim path.
+
+The wait is measured, not silent (gt-dc81): 'gt slot run' prints how long it
+waited, every grant and release writes a slot_wait / slot_hold event to the
+town's events log ('gt feed --plain' renders them), and 'gt slot status'
+reports the recent acquisitions with their wait durations and the reason each
+one waited — so the question "is the gate constricting the town?" can be
+answered from the status output instead of from panes.
 
 The containers a dead suite leaves behind are a separate matter — run
 'gt slot reap' when a container the gate matches looks stale, and read
@@ -52,6 +61,10 @@ runs the given command with the slot held, and releases the slot when the
 command exits — regardless of whether it succeeded, failed, or this gt
 process itself is killed (the kernel releases the underlying flock on
 process death).
+
+The acquire line reports how long this invocation waited and the release is
+recorded with the command's exit status (gt-dc81), so a suite that queues
+behind another is visible in 'gt feed' rather than looking like a hang.
 
 Run this wrapped around any suite that spins Docker/testcontainers, e.g.:
 
@@ -124,7 +137,10 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
 	defer func() { _ = h.Release() }()
-	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot %d/%d acquired (role=%s).\n", h.Index, pool.Slots, role)
+	// The wait is reported even when it was negligible: a queued invocation and
+	// the one it queued behind only read as a pair (gt-dc81).
+	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot acquired (role=%s, waited %s, slot %d/%d).\n",
+		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
 
 	// env(1) semantics: leading VAR=value tokens set the child's environment.
 	// The polecat formula wraps the rig's test_command verbatim
@@ -169,6 +185,12 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	runErr := sub.Run()
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			// os.Exit skips deferred calls, so the hold has to be closed here
+			// rather than by the deferred Release above — otherwise the release
+			// (and its held_s) would never be recorded for a failing suite,
+			// which is exactly the suite an operator is most likely to be
+			// looking up (gt-dc81).
+			_ = h.ReleaseWithExit(exitErr.ExitCode())
 			os.Exit(exitErr.ExitCode())
 		}
 		return fmt.Errorf("running %s: %w", cmdArgs[0], runErr)
@@ -187,10 +209,23 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("checking container-gate slot: %w", err)
 	}
 
-	if slotStatusJSON {
-		return printSlotStatusJSON(cmd, rep)
+	// The ring file, not the live flocks: what the gate has cost lately, which
+	// is the half of the picture the held/free state cannot show (gt-dc81).
+	history, err := slot.History(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading container-gate history: %w", err)
 	}
 
+	if slotStatusJSON {
+		return printSlotStatusJSON(cmd, rep, history)
+	}
+
+	printSlotStatusText(cmd, rep)
+	printSlotHistory(cmd, history)
+	return nil
+}
+
+func printSlotStatusText(cmd *cobra.Command, rep slot.Report) {
 	if rep.Total > 1 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate pool: %d/%d held (%d reserved for the refinery)\n", rep.HeldCount, rep.Total, rep.Reserved)
 		for _, st := range rep.Slots {
@@ -210,7 +245,7 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  slot %d%s: %s\n", st.Index, tag, label)
 		}
 		if rep.HeldCount > 0 {
-			return nil
+			return
 		}
 	} else if rep.Held {
 		if rep.Owner != nil {
@@ -219,12 +254,12 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: held (owner metadata unavailable)")
 		}
-		return nil
+		return
 	}
 
 	if rep.DockerUnknown {
 		fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: unknown — Docker daemon unreachable, cannot verify no suite is running")
-		return nil
+		return
 	}
 
 	if len(rep.UnwrappedContainers) > 0 {
@@ -234,31 +269,94 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "This suite should have been run via 'gt slot run -- <command>'.")
 		printSlotDebris(cmd, rep.DebrisContainers)
-		return nil
+		return
 	}
 
 	printSlotDebris(cmd, rep.DebrisContainers)
 
 	if rep.Total > 1 {
-		return nil
+		return
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: free")
-	return nil
 }
 
-func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
+// slotHistoryShown is how many recent acquisitions the plain status lists.
+// Enough to see a queue forming, few enough that the live picture stays at the
+// top of the output; --json carries the whole ring.
+const slotHistoryShown = 5
+
+// printSlotHistory renders the ring file: the wait distribution the gate has
+// been imposing, and for each recent acquisition why it waited.
+func printSlotHistory(cmd *cobra.Command, history []slot.HistoryEntry) {
+	out := cmd.OutOrStdout()
+	if len(history) == 0 {
+		return
+	}
+
+	summary := slot.SummarizeWaits(history)
+	fmt.Fprintf(out, "Recent acquisitions (n=%d): p50 %s, p95 %s, max %s\n",
+		summary.N, summary.P50.Round(time.Second), summary.P95.Round(time.Second), summary.Max.Round(time.Second))
+
+	shown := history
+	if len(shown) > slotHistoryShown {
+		shown = shown[len(shown)-slotHistoryShown:]
+	}
+	for _, e := range shown {
+		outcome := "held open (holder never released)"
+		switch {
+		case e.TimedOut:
+			outcome = "gave up"
+		case e.HeldS != nil:
+			outcome = "held " + time.Duration(*e.HeldS*float64(time.Second)).Round(time.Second).String()
+		}
+		line := fmt.Sprintf("  %s %s slot %d: waited %s, %s",
+			e.TS, e.Role, e.Slot, time.Duration(e.WaitedS*float64(time.Second)).Round(time.Second), outcome)
+		if detail := slotHistoryReason(e); detail != "" {
+			line += " — " + detail
+		}
+		fmt.Fprintln(out, line)
+	}
+}
+
+// slotHistoryReason renders one entry's wait reason with the evidence the
+// overseer's gt-dc81 amendment requires: the holder for a token wait, the
+// container names for an unwrapped suite, the probe error otherwise.
+func slotHistoryReason(e slot.HistoryEntry) string {
+	switch e.Reason {
+	case slot.WaitReasonTokenHeld:
+		if e.HolderRole != "" {
+			return fmt.Sprintf("token_held by %s (pid %d)", e.HolderRole, e.HolderPID)
+		}
+		return string(slot.WaitReasonTokenHeld)
+	case slot.WaitReasonUnwrappedContainers:
+		if len(e.Containers) > 0 {
+			return "unwrapped_containers: " + strings.Join(e.Containers, ", ")
+		}
+		return string(slot.WaitReasonUnwrappedContainers)
+	case slot.WaitReasonDaemonUnreachable:
+		if e.DockerError != "" {
+			return "daemon_unreachable: " + e.DockerError
+		}
+		return string(slot.WaitReasonDaemonUnreachable)
+	default:
+		return ""
+	}
+}
+
+func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.HistoryEntry) error {
 	type jsonOut struct {
-		Held                bool             `json:"held"`
-		Owner               *slot.Owner      `json:"owner,omitempty"`
-		Busy                bool             `json:"busy"`
-		UnwrappedContainers []string         `json:"unwrapped_containers,omitempty"`
-		DebrisContainers    []string         `json:"debris_containers,omitempty"`
-		DockerUnknown       bool             `json:"docker_unknown"`
-		Saturated           bool             `json:"saturated"` // every slot held; busy also covers unwrapped/unknown
-		Slots               []slot.SlotState `json:"slots,omitempty"`
-		HeldCount           int              `json:"held_count"`
-		Total               int              `json:"total"`
-		Reserved            int              `json:"reserved_for_gate"`
+		Held                bool                `json:"held"`
+		Owner               *slot.Owner         `json:"owner,omitempty"`
+		Busy                bool                `json:"busy"`
+		UnwrappedContainers []string            `json:"unwrapped_containers,omitempty"`
+		DebrisContainers    []string            `json:"debris_containers,omitempty"`
+		DockerUnknown       bool                `json:"docker_unknown"`
+		Saturated           bool                `json:"saturated"` // every slot held; busy also covers unwrapped/unknown
+		Slots               []slot.SlotState    `json:"slots,omitempty"`
+		HeldCount           int                 `json:"held_count"`
+		Total               int                 `json:"total"`
+		Reserved            int                 `json:"reserved_for_gate"`
+		History             []slot.HistoryEntry `json:"history,omitempty"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
@@ -274,6 +372,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report) error {
 		HeldCount:           rep.HeldCount,
 		Total:               rep.Total,
 		Reserved:            rep.Reserved,
+		History:             history,
 	})
 }
 

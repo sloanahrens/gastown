@@ -87,6 +87,12 @@ const (
 	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
 	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
 
+	// Container-gate slot telemetry (gt-dc81): one slot_wait per grant, one
+	// slot_hold per release, so the cost of serializing container-backed suites
+	// townwide is measurable after the fact instead of inferred from panes.
+	TypeSlotWait = "slot_wait"
+	TypeSlotHold = "slot_hold"
+
 	// TypeWorktreePrune records a destructive `git worktree remove` performed
 	// by a bash-executed patrol step (e.g. the dead-dog-worktree cleanup in
 	// mol-deacon-patrol.formula.toml) that has no Go call site of its own to
