@@ -257,7 +257,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// Remote sessions live on the town socket, so use townTmux for their operations.
 	if targetSession != currentSession {
 		// Update tmux session env before respawn (not during dry-run — see below)
-		updateSessionEnvForHandoff(townTmux, targetSession, "")
+		updateSessionEnvForHandoff(townTmux, targetSession)
 		return handoffRemoteSession(townTmux, targetSession, restartCmd)
 	}
 
@@ -289,7 +289,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
-	updateSessionEnvForHandoff(t, currentSession, "")
+	updateSessionEnvForHandoff(t, currentSession)
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
@@ -568,6 +568,10 @@ func runHandoffCycle() error {
 
 	fmt.Fprintf(os.Stderr, "handoff --cycle: cycling session %s\n", currentSession)
 
+	// Refresh the tmux session env, which liveness checks read, so it names the
+	// agent the pane is about to run (gt-di8p).
+	updateSessionEnvForHandoff(t, currentSession)
+
 	// Set remain-on-exit so the pane survives process death during handoff
 	if err := t.SetRemainOnExit(pane, true); err != nil {
 		style.PrintWarning("could not set remain-on-exit: %v", err)
@@ -793,6 +797,62 @@ func buildRestartCommand(sessionName string) (string, error) {
 	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{})
 }
 
+// agentNameForRole returns the worker name a role keys its agent config and
+// system-prompt file on. Polecat, crew and dog system-prompt files are per
+// agent; other roles have none and pass "". Without the dog name a dog's
+// respawn lost --append-system-prompt-file and printed its ~8.5 KB static role
+// text into the prime hook (gt-h7e5).
+func agentNameForRole(role, workerName string) string {
+	if role == constants.RolePolecat || role == constants.RoleCrew || role == constants.RoleDog {
+		return workerName
+	}
+	return ""
+}
+
+// respawnAgentPin returns the agent a respawn of this identity must run, or ""
+// when the caller should resolve it from config instead.
+//
+// A pinned GT_AGENT records the agent the session was spawned with, not what
+// the role should run now. Once role_agents maps the role, live config is the
+// authority — re-pinning the old preset made role_agents.<role> a write-once
+// setting, so the gastown witness kept spawning claude-opus after
+// role_agents.witness was set to claude-opus-cycle, and only an out-of-band
+// restart applied it (gt-di8p).
+//
+// Two pins describe something live config does not, and are kept:
+//   - an explicit --agent override (config.EnvAgentOverride), which nothing
+//     else records — a sling --agent codex or a polecat_pool seat would
+//     otherwise be swapped for the role's preset on the worker's next handoff;
+//   - a crew worker's worker_agents/crew_agents mapping, which outranks
+//     role_agents.crew and belongs to this identity rather than the role.
+func respawnAgentPin(role, agentName, townRoot, rigPath, pinnedAgent string, pinnedByOverride bool) string {
+	if pinnedAgent == "" || pinnedByOverride || role == "" ||
+		!config.HasExplicitRoleAgent(role, townRoot, rigPath) {
+		return pinnedAgent
+	}
+	if role == constants.RoleCrew && agentName != "" {
+		if rc := config.ResolveWorkerAgentConfig(agentName, townRoot, rigPath); rc != nil && rc.ResolvedAgent == pinnedAgent {
+			return pinnedAgent
+		}
+	}
+	return ""
+}
+
+// liveRespawnConfig resolves the config a respawn of this identity runs when no
+// pin stands. A crew worker resolves its own worker_agents/crew_agents mapping
+// first: it outranks role_agents.crew, so resolving the role alone would drop
+// the worker's mapping — including a change to it — where a fresh spawn would
+// honor it. Every other role resolves through the role, which carries the
+// role's --settings and --append-system-prompt-file flags.
+func liveRespawnConfig(role, agentName, townRoot, rigPath string) (*config.RuntimeConfig, error) {
+	if role == constants.RoleCrew && agentName != "" {
+		if rc := config.ResolveWorkerAgentConfig(agentName, townRoot, rigPath); rc != nil {
+			return rc, nil
+		}
+	}
+	return config.ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, "", agentName)
+}
+
 func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
 	// Detect town root from current directory
 	townRoot := detectTownRootFromCwd()
@@ -861,24 +921,32 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	// Fall back to tmux session environment if process env doesn't have it,
 	// since exec env vars may not propagate through all agent runtimes.
 	currentAgent, agentInEnv := os.LookupEnv("GT_AGENT")
+	agentPinFromOverride := os.Getenv(config.EnvAgentOverride) == "1"
 	if !agentInEnv {
 		// GT_AGENT not in process env at all — try tmux session environment
 		// as fallback, since exec env vars may not propagate through all runtimes.
 		t := tmux.NewTmux()
-		if val, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
+		if val, err := t.GetEnvironment(sessionName, config.EnvAgent); err == nil && val != "" {
 			currentAgent = val
+			if marker, err := t.GetEnvironment(sessionName, config.EnvAgentOverride); err == nil && marker == "1" {
+				agentPinFromOverride = true
+			}
 		}
 	}
 	// Polecat, crew and dog system-prompt files are per agent; the identity's
-	// Name is the worker name for those roles and unused for the rest. Without
-	// the dog name a dog's respawn lost --append-system-prompt-file and printed
-	// its ~8.5 KB static role text into the prime hook (gt-h7e5).
-	agentName := ""
-	if simpleRole == constants.RolePolecat || simpleRole == constants.RoleCrew || simpleRole == constants.RoleDog {
-		agentName = identity.Name
+	// Name is the worker name for those roles and unused for the rest.
+	agentName := agentNameForRole(simpleRole, identity.Name)
+
+	// The pin only stands when it still describes what this identity should
+	// run; when it does not, resolve the agent from live config instead.
+	staleAgentPin := currentAgent != "" &&
+		respawnAgentPin(simpleRole, agentName, townRoot, rigPath, currentAgent, agentPinFromOverride) == ""
+	if staleAgentPin {
+		currentAgent = ""
 	}
 
 	var runtimeCmd string
+	var roleRuntimeConfig *config.RuntimeConfig
 	if currentAgent != "" {
 		// Resolve with the override but still through the role-aware path so
 		// the respawn carries --settings and --append-system-prompt-file
@@ -890,16 +958,26 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
-		// runtime command via role-aware config (instead of default-agent lookup).
-		// Still resolved through the *WithOverride path (empty override) so the
+		// runtime command via live config (instead of default-agent lookup).
+		// Resolved through the *WithOverride path with an empty override so the
 		// per-agent roles keep --append-system-prompt-file on a plain handoff.
-		rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, "", agentName)
+		rc, err := liveRespawnConfig(simpleRole, agentName, townRoot, rigPath)
 		if err != nil {
 			return "", fmt.Errorf("resolving agent config: %w", err)
 		}
+		roleRuntimeConfig = rc
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else {
 		runtimeCmd = config.GetRuntimeCommandWithPrompt(rigPath, beacon)
+	}
+
+	// The agent the successor will actually run. When a stale pin was dropped
+	// that is whatever role_agents resolved to; recording it keeps the
+	// successor's session env, liveness lookups and next handoff in agreement
+	// with its runtime instead of with the preset it used to run.
+	resolvedAgent := currentAgent
+	if staleAgentPin && roleRuntimeConfig != nil {
+		resolvedAgent = roleRuntimeConfig.ResolvedAgent
 	}
 
 	// Add --continue flag to resume the most recent session.
@@ -934,9 +1012,10 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 				runtimeConfig = config.ResolveRoleAgentConfig(simpleRole, townRoot, rigPath)
 			}
 		} else if simpleRole != "" {
-			// Same role-aware resolution as above (empty override), so the
-			// exported env carries GT_SYSTEM_PROMPT_FILE when the flag does.
-			rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, "", agentName)
+			// Same resolution as the command above (empty override), so the
+			// exported env carries GT_SYSTEM_PROMPT_FILE when the flag does and
+			// a crew worker's own agent mapping is not lost.
+			rc, err := liveRespawnConfig(simpleRole, agentName, townRoot, rigPath)
 			if err == nil {
 				runtimeConfig = rc
 			} else {
@@ -960,19 +1039,32 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	// when cwd-based detection fails (broken state recovery)
 	envMap["GT_ROOT"] = townRoot
 
-	// Preserve GT_AGENT across handoff so agent override persists
-	if currentAgent != "" {
-		envMap["GT_AGENT"] = currentAgent
+	// Record the agent the successor runs, so agent selection survives the
+	// handoff. After a role_agents re-resolution that is the newly resolved
+	// agent, not the preset this session was spawned with (gt-di8p).
+	if resolvedAgent != "" {
+		envMap[config.EnvAgent] = resolvedAgent
+	}
+	// Hand the override's provenance on with the override itself, so the
+	// successor keeps honoring it on its own next handoff.
+	if agentPinFromOverride && !staleAgentPin {
+		envMap[config.EnvAgentOverride] = "1"
 	}
 
 	// Preserve GT_PROCESS_NAMES across handoff for accurate liveness detection.
 	// Without this, custom agents that shadow built-in presets (e.g., custom
 	// "codex" running "opencode") would revert to GT_AGENT-based lookup after
-	// handoff, causing false liveness failures.
-	if processNames := os.Getenv("GT_PROCESS_NAMES"); processNames != "" {
+	// handoff, causing false liveness failures. A re-resolved agent is not the
+	// one those names describe, so it is recomputed from its own preset.
+	if processNames := os.Getenv("GT_PROCESS_NAMES"); processNames != "" && !staleAgentPin {
 		envMap["GT_PROCESS_NAMES"] = processNames
-	} else if currentAgent != "" {
-		resolved := config.ResolveProcessNames(currentAgent, "")
+	} else if resolvedAgent != "" {
+		var command string
+		var args []string
+		if staleAgentPin && roleRuntimeConfig != nil {
+			command, args = roleRuntimeConfig.Command, roleRuntimeConfig.Args
+		}
+		resolved := config.ResolveProcessNames(resolvedAgent, command, args...)
 		envMap["GT_PROCESS_NAMES"] = strings.Join(resolved, ",")
 	}
 
@@ -1028,17 +1120,54 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 // GT_PROCESS_NAMES from the tmux session env (via tmux show-environment), not
 // from shell exports in the pane. Without this, post-handoff liveness checks
 // would use stale values from the previous agent.
-func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string) {
-	// Resolve current agent using the same priority as buildRestartCommandWithAgent
-	var currentAgent string
-	if agentOverride != "" {
-		currentAgent = agentOverride
-	} else {
-		currentAgent = os.Getenv("GT_AGENT")
-		if currentAgent == "" {
-			if val, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
-				currentAgent = val
-			}
+//
+// Every caller that respawns a pane from buildRestartCommand must call this
+// too, or the session env keeps naming the agent the pane no longer runs.
+func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
+	// Resolve current agent using the same priority as buildRestartCommandWithOpts
+	currentAgent := os.Getenv("GT_AGENT")
+	if currentAgent == "" {
+		if val, err := t.GetEnvironment(sessionName, config.EnvAgent); err == nil && val != "" {
+			currentAgent = val
+		}
+	}
+
+	townRoot := detectTownRootFromCwd()
+	identity, identityErr := session.ParseSessionName(sessionName)
+	role := ""
+	agentName := ""
+	rigPath := ""
+	if identityErr == nil {
+		role = config.ExtractSimpleRole(identity.GTRole())
+		agentName = agentNameForRole(role, identity.Name)
+		if identity.Rig != "" && townRoot != "" {
+			rigPath = filepath.Join(townRoot, identity.Rig)
+		}
+	}
+
+	// Same precedence rule as buildRestartCommandWithOpts: the pin loses to
+	// live config unless it is an explicit override. The session env must name
+	// the agent the pane is about to run, or liveness checks keep matching the
+	// previous agent's process names (gt-di8p). Pin and marker are both read
+	// with the same priority as in buildRestartCommandWithOpts — a session env
+	// that disagrees with the command would report the wrong agent alive.
+	pinnedByOverride := os.Getenv(config.EnvAgentOverride) == "1"
+	if !pinnedByOverride {
+		if marker, err := t.GetEnvironment(sessionName, config.EnvAgentOverride); err == nil && marker == "1" {
+			pinnedByOverride = true
+		}
+	}
+	var roleRuntimeConfig *config.RuntimeConfig
+	agentChanged := false
+	if currentAgent != "" && townRoot != "" && role != "" &&
+		respawnAgentPin(role, agentName, townRoot, rigPath, currentAgent, pinnedByOverride) == "" {
+		rc, err := liveRespawnConfig(role, agentName, townRoot, rigPath)
+		// A mapping that no longer resolves (uninstalled preset, typo) leaves
+		// the pin in place rather than blanking the session env.
+		if err == nil && rc != nil && rc.ResolvedAgent != "" {
+			currentAgent = rc.ResolvedAgent
+			roleRuntimeConfig = rc
+			agentChanged = true
 		}
 	}
 
@@ -1047,25 +1176,28 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string)
 	}
 
 	// Update GT_AGENT in session env
-	_ = t.SetEnvironment(sessionName, "GT_AGENT", currentAgent)
+	_ = t.SetEnvironment(sessionName, config.EnvAgent, currentAgent)
+	// Keep the override marker in step with the agent just written, so the next
+	// handoff reads the same provenance this session had.
+	if pinnedByOverride {
+		_ = t.SetEnvironment(sessionName, config.EnvAgentOverride, "1")
+	} else if agentChanged {
+		_ = t.UnsetEnvironment(sessionName, config.EnvAgentOverride)
+	}
 
 	// Resolve and update GT_PROCESS_NAMES in session env
 	// When switching agents, recompute from config. When preserving, use env value.
 	var processNames string
-	if agentOverride != "" {
+	if agentChanged {
 		// Agent is changing — resolve config to get the command for process name resolution
-		townRoot := detectTownRootFromCwd()
-		if townRoot != "" {
-			identity, err := session.ParseSessionName(sessionName)
-			rigPath := ""
-			if err == nil && identity.Rig != "" {
-				rigPath = filepath.Join(townRoot, identity.Rig)
+		if roleRuntimeConfig == nil && townRoot != "" {
+			if rc, _, err := config.ResolveAgentConfigWithOverride(townRoot, rigPath, currentAgent); err == nil {
+				roleRuntimeConfig = rc
 			}
-			rc, _, err := config.ResolveAgentConfigWithOverride(townRoot, rigPath, currentAgent)
-			if err == nil {
-				resolved := config.ResolveProcessNames(currentAgent, rc.Command, rc.Args...)
-				processNames = strings.Join(resolved, ",")
-			}
+		}
+		if roleRuntimeConfig != nil {
+			resolved := config.ResolveProcessNames(currentAgent, roleRuntimeConfig.Command, roleRuntimeConfig.Args...)
+			processNames = strings.Join(resolved, ",")
 		}
 	}
 	if processNames == "" {

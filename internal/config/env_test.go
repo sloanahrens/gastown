@@ -59,6 +59,33 @@ func TestAgentEnv_Polecat(t *testing.T) {
 	assertEnv(t, env, "CLAUDECODE", "")             // cleared to prevent nested session detection
 }
 
+// A pin's provenance decides how a handoff treats it: only an explicit --agent
+// override outranks role_agents, so only an override spawn writes the marker.
+// A GT_AGENT that came from role resolution must stay indistinguishable from a
+// stale one, or changing role_agents would still be unreachable (gt-di8p).
+func TestAgentEnv_AgentOverrideMarker(t *testing.T) {
+	t.Parallel()
+
+	overridden := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  "/town",
+		Agent:     "codex",
+	})
+	assertEnv(t, overridden, EnvAgent, "codex")
+	assertEnv(t, overridden, EnvAgentOverride, "1")
+
+	resolved := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  "/town",
+	})
+	assertNotSet(t, resolved, EnvAgent)
+	assertNotSet(t, resolved, EnvAgentOverride)
+}
+
 func TestAgentEnv_Crew(t *testing.T) {
 	t.Parallel()
 	env := AgentEnv(AgentEnvConfig{
