@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/style"
@@ -45,10 +47,12 @@ var memoryTypeOrder = []string{"feedback", "user", "project", "reference", "gene
 
 var rememberKey string
 var rememberType string
+var rememberWith []string
 
 func init() {
 	rememberCmd.Flags().StringVar(&rememberKey, "key", "", "Explicit key slug (default: auto-generated from content)")
 	rememberCmd.Flags().StringVar(&rememberType, "type", "", "Memory type: feedback, project, user, reference (default: general)")
+	rememberCmd.Flags().StringSliceVar(&rememberWith, "with", nil, "Co-authors for a jointly-established memory (e.g. --with gastown/witness)")
 	rememberCmd.GroupID = GroupWork
 	rootCmd.AddCommand(rememberCmd)
 }
@@ -70,11 +74,19 @@ Memory types help organize memories and prioritize injection:
   user       Info about the user's role and preferences
   reference  Pointers to external resources
 
+A memory is stamped with the identity that actually ran this command (from
+BD_ACTOR, falling back to GT_ROLE) — not free text you type, so the
+attribution cannot drift from who really established it (gt-04h). For a
+memory two or more agents established together, name the others with --with
+instead of writing "X and I" into the body; the tag will otherwise carry only
+your own identity even though the content reads as joint.
+
 Examples:
   gt remember "Refinery uses worktree, cannot checkout main"
   gt remember --type feedback "Don't mock the database in integration tests"
   gt remember --type user --key senior-go-dev "User has 10 years Go experience"
-  gt remember --key refinery-worktree "Refinery uses worktree, cannot checkout main"`,
+  gt remember --key refinery-worktree "Refinery uses worktree, cannot checkout main"
+  gt remember --with gastown/witness "Converged on the source-read citation requirement"`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRemember,
 }
@@ -113,7 +125,17 @@ func runRemember(cmd *cobra.Command, args []string) error {
 		verb = "Updated"
 	}
 
-	if err := bdKvSet(fullKey, content); err != nil {
+	author := resolveMemoryAuthor()
+	if len(rememberWith) == 0 {
+		if role := detectUnattributedJointVoice(content); role != "" {
+			style.PrintWarning("this reads as joint with %s (%q) but no --with was given — the stored attribution will name only %s. Re-run with --with %s/<name> to record joint authorship.",
+				role, role+" and I", orElse(author, "no one"), role)
+		}
+	}
+
+	stored := content + attributionSuffix(author, rememberWith)
+
+	if err := bdKvSet(fullKey, stored); err != nil {
 		return fmt.Errorf("storing memory: %w", err)
 	}
 
@@ -123,6 +145,73 @@ func runRemember(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s %s memory: %s\n", style.Success.Render("✓"), verb, style.Bold.Render(displayKey))
 	return nil
+}
+
+// resolveMemoryAuthor returns the canonical actor identity for the current
+// process: BD_ACTOR, the same identity gt done and gt dolt already trust,
+// falling back to GT_ROLE. Returns "" for a human at a plain terminal
+// (neither set) so the caller can skip stamping instead of fabricating an
+// identity.
+func resolveMemoryAuthor() string {
+	if actor := strings.TrimSpace(os.Getenv("BD_ACTOR")); actor != "" {
+		return actor
+	}
+	return strings.TrimSpace(os.Getenv("GT_ROLE"))
+}
+
+// attributionSuffix renders a machine-generated attribution line to append to
+// a stored memory's content. Appended at the end, not the start, so it never
+// displaces the first sentence memorySummary uses as the prime-time preview.
+//
+// This is deliberately not free text the caller can compose: it is built from
+// the actor identity the process was invoked with (resolveMemoryAuthor) plus
+// any --with co-authors, so a memory's tag cannot silently drift from who ran
+// the command (gt-04h). Returns "" when author is empty, so an unattributable
+// write is stored as-is rather than stamped with a blank tag.
+func attributionSuffix(author string, coAuthors []string) string {
+	if author == "" {
+		return ""
+	}
+	who := author
+	for _, c := range coAuthors {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		who += " + " + c
+	}
+	return fmt.Sprintf("\n\n[recorded by: %s @ %s]", who, time.Now().UTC().Format("2006-01-02"))
+}
+
+// jointVoiceRoles are the role names whose bare mention immediately before
+// "and I" signals the writer is narrating a joint action without recording
+// the second party via --with. Matches the exact failure gt-04h documents: a
+// memory tagged to one agent whose body reads "refinery and I ran this
+// independently and converged."
+var jointVoiceRoles = []string{"mayor", "deacon", "witness", "refinery", "crew", "polecat"}
+
+var jointVoicePattern = regexp.MustCompile(`(?i)\b(` + strings.Join(jointVoiceRoles, "|") + `)\b\s+and\s+i\b`)
+
+// detectUnattributedJointVoice reports the first role name found written in
+// first-person-joint voice ("<role> and I") in content, or "" if none is
+// found. A cheap, narrow signal deliberately modeled on gt-3t2's rejected
+// title guard: unlike that guard, this one matches a fixed, closed vocabulary
+// of role names rather than trying to infer intent, which is what kept that
+// guard's precision at ~25%.
+func detectUnattributedJointVoice(content string) string {
+	m := jointVoicePattern.FindStringSubmatch(content)
+	if m == nil {
+		return ""
+	}
+	return strings.ToLower(m[1])
+}
+
+// orElse returns s if non-empty, otherwise fallback.
+func orElse(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // parseMemoryKey extracts the type and short key from a full kv key.
