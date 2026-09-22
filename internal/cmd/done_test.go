@@ -2617,6 +2617,34 @@ func TestResolvePreVerifiedClaim(t *testing.T) {
 		}
 	})
 
+	// gt-ypkc: the pre-verification run covers the five *_command gates only,
+	// so a rig with a named merge_queue.gates entry has gates a stamp cannot
+	// claim — and the refinery refuses such a stamp.
+	t.Run("requested with named gates configured", func(t *testing.T) {
+		townRoot := t.TempDir()
+		rigDir := filepath.Join(townRoot, "gastown")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatalf("mkdir rig dir: %v", err)
+		}
+		rigConfig := `{
+  "merge_queue": {
+    "test_command": "make test",
+    "gates": {"boot-check": {"cmd": "make boot-check", "phase": "post-squash"}}
+  }
+}`
+		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+			t.Fatalf("write rig config.json: %v", err)
+		}
+
+		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
+		if honor {
+			t.Error("honor = true, want false: the stamp cannot cover a named gate")
+		}
+		if !strings.Contains(warning, "named merge_queue.gates") {
+			t.Errorf("warning = %q, want it to name the uncovered gates", warning)
+		}
+	})
+
 	t.Run("requested with a configured gate command", func(t *testing.T) {
 		townRoot := t.TempDir()
 		rigDir := filepath.Join(townRoot, "gastown")

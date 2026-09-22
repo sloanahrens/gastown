@@ -1732,9 +1732,8 @@ func GateSetSHA(cfg *MergeQueueConfig) string {
 //
 // This is the single algorithm the pre-verification producer (`gt done`,
 // stamping pre_verified_gates) and consumer (the refinery's fast-path
-// staleness check) must both call: an earlier version had each side hash
-// this binding differently, so the two values could never agree and the
-// fast-path never fired (om-gate T8 review, attempt 2).
+// staleness check) must both call — hashed two ways, the values never agree
+// and the fast-path never fires (om-gate T8).
 func CombineGateSetSHA(cfg *MergeQueueConfig, namedGates map[string]string) string {
 	base := GateSetSHA(cfg)
 	if len(namedGates) == 0 {

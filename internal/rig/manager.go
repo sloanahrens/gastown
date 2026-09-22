@@ -1165,9 +1165,8 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 // gt done calls this to fold the refinery's named gates into the
 // pre_verified_gates stamp via config.CombineGateSetSHA, so the value it
 // stamps is computed the same way the refinery's fast-path recomputes it
-// (om-gate T8 review, attempt 2: the two sides previously hashed different
-// bindings and could never agree). Returns nil if config.json is missing,
-// unreadable, or defines no named gates.
+// (om-gate T8). Returns nil if config.json is missing, unreadable, or
+// defines no named gates.
 func LoadNamedGateCommands(townRoot, rigName string) map[string]string {
 	if townRoot == "" || rigName == "" {
 		return nil

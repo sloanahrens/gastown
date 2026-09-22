@@ -383,11 +383,9 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		for name, gc := range e.config.Gates {
 			namedGates[name] = gc.Cmd
 		}
-		// config.CombineGateSetSHA is the SAME function `gt done` calls
-		// (internal/cmd/done.go) to stamp pre_verified_gates. An earlier
-		// version hashed this binding two different ways here and at the
-		// stamp site, so the values could never agree and the fast-path
-		// never fired (om-gate T8 review, attempt 2).
+		// config.CombineGateSetSHA is the same function `gt done` stamps
+		// pre_verified_gates with (internal/cmd/done.go); the two values must
+		// agree exactly or the fast-path never fires (om-gate T8).
 		return config.CombineGateSetSHA(mq, namedGates)
 	}
 	e.findOrphanDoltServersFn = func() ([]util.DoltOrphanServer, error) {
@@ -1679,16 +1677,26 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 
 // resolveFastPath decides whether the pre-verification fast-path applies to
 // mr: mechanical gates are skipped only when the polecat's verification is
-// both (a) against the target's current HEAD and (b) against the rig's
-// current gate-set (config.GateSetSHA) — a rig that changes its gate
-// commands after a polecat verified must not honor the stale claim
-// (om-gate T8). This governs mechanical gates only: editorialPrecondition
-// always runs regardless of skipGates (T6).
+// (a) against the target's current HEAD, (b) against the rig's current
+// gate-set (config.GateSetSHA) — a rig that changes its gate commands after a
+// polecat verified must not honor the stale claim (om-gate T8) — and (c)
+// against a gate set the stamp can actually cover. This governs mechanical
+// gates only: editorialPrecondition always runs regardless of skipGates (T6).
 func (e *Engineer) resolveFastPath(mr *MRInfo) bool {
 	if !mr.PreVerified || mr.PreVerifiedBase == "" {
 		return false
 	}
 	_, _ = fmt.Fprintf(e.output, "  Pre-verified: yes (base=%s)\n", shortSHA(mr.PreVerifiedBase))
+
+	// (c): the polecat's stamp covers the five *_command gates gt done ran, not
+	// the named merge_queue.gates that doMerge runs. Post-squash gates are the
+	// sharpest case — they validate the merged result, which no polecat-side run
+	// reproduces — but a pre-merge named gate is equally uncovered, so any
+	// named gate disqualifies the fast-path (gt-ypkc).
+	if n := len(e.config.Gates); n > 0 {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification cannot cover this rig's %d named gate(s) — running gates normally\n", n)
+		return false
+	}
 
 	targetHead, err := e.git.Rev("origin/" + mr.Target)
 	if err != nil {

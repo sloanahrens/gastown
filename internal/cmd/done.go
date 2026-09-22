@@ -139,15 +139,21 @@ func updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID string, pu
 // never diverge from the same gate-command binding `gt sling` uses to
 // populate formula vars: a rig with zero configured gate commands has
 // nothing a polecat could have verified, so the claim is downgraded here
-// rather than trusted at face value (gt-k4sy — the stamp was observed true
-// when no gates were bound and absent when they were, because nothing
-// checked the claim against the binding).
+// rather than trusted at face value (gt-k4sy).
 //
 // Returns whether to honor the claim, and a non-empty warning to surface to
 // the polecat when the claim is downgraded.
 func resolvePreVerifiedClaim(requested bool, townRoot, rigName string) (honor bool, warning string) {
 	if !requested {
 		return false, ""
+	}
+	// runPreVerificationGates runs the five *_command gates only, so the stamp
+	// cannot cover a named merge_queue.gates entry — the refinery's
+	// resolveFastPath refuses such a stamp for the same reason. Refusing at the
+	// producer keeps the two sides agreeing on what a stamp means instead of
+	// queueing a claim nothing will honor (gt-ypkc).
+	if gates := rig.LoadNamedGateCommands(townRoot, rigName); len(gates) > 0 {
+		return false, fmt.Sprintf("ignoring --pre-verified: rig defines %d named merge_queue.gates entry(ies), which the pre-verification run does not cover — the refinery will run them", len(gates))
 	}
 	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
 	if !mq.HasAnyGateCommand() {
@@ -173,7 +179,7 @@ type preVerificationStamp struct {
 // left behind the target runs gates at its own (stale) HEAD; without this
 // check the stamp would record pre_verified_base=<target HEAD the branch
 // never rebased onto>, and the refinery's fast-path would then skip gates
-// on a merged tree nothing ever verified (om-gate T8 review finding).
+// on a merged tree nothing ever verified (om-gate T8).
 func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, gateSetSHA string) (preVerificationStamp, bool, string) {
 	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
 	verifiedBase, baseErr := g.Rev(verifiedBaseRef)
@@ -216,12 +222,14 @@ type preVerificationResult struct {
 // preVerificationGateTimeout bounds each individual pre-verification gate
 // command. Without it a hung gate (e.g. a test waiting on a port) blocks gt
 // done indefinitely at a point where the branch may already be pushed but no
-// MR bead exists yet, and orphans the child process if the session dies
-// (om-gate T8 review, attempt 3 minor). The refinery's own GateConfig.Timeout
-// is per-gate and operator-configured; gt done's gate commands (the
-// polecat-side *_command set) carry no such per-gate config, so this is a
-// single generous fixed bound instead.
-const preVerificationGateTimeout = 10 * time.Minute
+// MR bead exists yet. The refinery's own GateConfig.Timeout is per-gate and
+// operator-configured; gt done's gate commands (the polecat-side *_command
+// set) carry no such per-gate config, so this is a single generous fixed
+// bound instead.
+//
+// A var rather than a const so a test can drive the timeout branch without
+// sleeping out ten minutes (gt-ypkc).
+var preVerificationGateTimeout = 10 * time.Minute
 
 // preVerificationGateOutcome is one pre-verification gate command's result:
 // the run error (nil on success) and whether it was the gate's timeout that
@@ -245,7 +253,11 @@ func runPreVerificationGate(ctx context.Context, worktree, script string, logFil
 	cmd.Dir = worktree
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup, not SetDetachedProcessGroup: the group's Cancel hook is
+	// what makes the gate's deadline reach the script's own children — a hung
+	// `make test` otherwise leaves the test binary running after gt done has
+	// gone (gt-ypkc).
+	util.SetProcessGroup(cmd)
 	err := cmd.Run()
 	return preVerificationGateOutcome{err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
 }
@@ -253,10 +265,9 @@ func runPreVerificationGate(ctx context.Context, worktree, script string, logFil
 // runPreVerificationGates performs the verification `gt done --pre-verified`
 // stamps: it runs each of the rig's configured gate commands, in
 // setup/typecheck/lint/build/test order, in worktree, streaming combined
-// output to <worktree>/.gt-preverify.log. It stops at the first failing
-// gate. There is no path that reports success without this function having
-// actually executed every configured command (om-gate T8 — the prior
-// implementation wrote the stamp on the bare flag alone).
+// output to <worktree>/.runtime/gt-preverify.log. It stops at the first
+// failing gate. There is no path that reports success without this function
+// having actually executed every configured command (om-gate T8).
 func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preVerificationResult, error) {
 	type namedGate struct {
 		name string
@@ -278,9 +289,9 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 	}
 
 	// Written under .runtime/ (constants.DirRuntime) so it is a recognized
-	// runtime artifact (git.go's runtimeArtifactRoot): leaving it untracked
-	// at the worktree root broke CleanExcludingRuntime() and tripped gt
-	// done's uncommitted-work checks on re-runs (om-gate T8 review).
+	// runtime artifact (git.go's runtimeArtifactRoot): untracked at the
+	// worktree root it made CleanExcludingRuntime() false, tripping gt done's
+	// uncommitted-work checks on re-runs (om-gate T8).
 	logDir := filepath.Join(worktree, constants.DirRuntime)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return preVerificationResult{}, fmt.Errorf("creating pre-verification log dir %s: %w", logDir, err)
@@ -317,7 +328,7 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 			// A hung gate (e.g. a test waiting on a port) must not wedge gt
 			// done indefinitely at a point where the branch is already
 			// pushed but no MR bead exists yet — degrade to "no stamp"
-			// instead (om-gate T8 review, attempt 3 minor).
+			// instead (om-gate T8).
 			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, preVerificationGateTimeout)
 			return preVerificationResult{success: false, failedGate: ng.name, exitCode: -1, logPath: logPath}, nil
 		}
@@ -2233,12 +2244,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			fullGatesVerified := false
 			if honorPreVerified {
 				mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-				// config.CombineGateSetSHA is the SAME function the refinery's
-				// currentGateSetSHAFn calls (internal/refinery/engineer.go) —
-				// an earlier version stamped with config.GateSetSHA(mq) alone
-				// while the refinery compared against a second, differently
-				// shaped hash, so the two values could never agree and the
-				// fast-path never fired (om-gate T8 review, attempt 2).
+				// config.CombineGateSetSHA is the same function the refinery's
+				// currentGateSetSHAFn calls (internal/refinery/engineer.go); the
+				// two values must agree exactly or the fast-path never fires
+				// (om-gate T8).
 				gateSetSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
 				// gt-azmw: renew the exiting heartbeat across this bounded gate
 				// run (up to five 10m gates), exactly as the default test-verify

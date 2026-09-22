@@ -114,7 +114,10 @@ var runVerifySuite = func(ctx context.Context, worktree, script string, env []st
 	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup, not SetDetachedProcessGroup: only its Cancel hook
+	// reaches the script's own children, which would otherwise outlive both
+	// the gate's budget and this process (gt-ypkc).
+	util.SetProcessGroup(cmd)
 	return cmd.Run()
 }
 
