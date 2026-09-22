@@ -33,6 +33,12 @@ type MRStatusOutput struct {
 	Rig         string `json:"rig,omitempty"`
 	MergeCommit string `json:"merge_commit,omitempty"`
 	CloseReason string `json:"close_reason,omitempty"`
+	// ConflictTaskID is set once this MR has been through conflict resolution.
+	// The refinery patrol formula reads it to decide whether the post-merge
+	// cleanup needs an explicit --landed-commit attestation: a resolved
+	// conflict is the one case where the submitted commit_sha no longer
+	// identifies what landed (gt-mlla).
+	ConflictTaskID string `json:"conflict_task_id,omitempty"`
 
 	// Dependencies
 	DependsOn []DependencyInfo `json:"depends_on,omitempty"`
@@ -95,6 +101,7 @@ func runMqStatus(cmd *cobra.Command, args []string) error {
 		output.Rig = mrFields.Rig
 		output.MergeCommit = mrFields.MergeCommit
 		output.CloseReason = mrFields.CloseReason
+		output.ConflictTaskID = mrFields.ConflictTaskID
 	}
 
 	// Add dependency info from the issue's Dependencies field
@@ -180,6 +187,9 @@ func printMqStatus(issue *beads.Issue, mrFields *beads.MRFields) error {
 		}
 		if mrFields.MergeCommit != "" {
 			fmt.Printf("   Merge Commit: %s\n", mrFields.MergeCommit)
+		}
+		if mrFields.ConflictTaskID != "" {
+			fmt.Printf("   Conflict Task: %s\n", mrFields.ConflictTaskID)
 		}
 		if mrFields.CloseReason != "" {
 			fmt.Printf("   Close Reason: %s\n", mrFields.CloseReason)

@@ -1187,8 +1187,48 @@ deleting the remote polecat branch (respects delete_merged_branches config):
 # If an open PR was detected in Step 1.6 (direct), pass --skip-branch-delete
 # to avoid auto-closing the PR via head_ref_delete.
 # Otherwise, omit the flag.
-gt mq post-merge <rig> <mr-bead-id>            # normal (no open PR)
-gt mq post-merge <rig> <mr-bead-id> --skip-branch-delete  # open PR exists
+SKIP_FLAG=""
+if [ "${SKIP_BRANCH_DELETE:-false}" = "true" ]; then
+  SKIP_FLAG="--skip-branch-delete"
+fi
+
+# Which commit is actually on <merge-target>?
+#   direct: LOCAL_SHA, captured by Step 1.5 after the push was verified
+#   pr:     the merge commit GitHub created for the PR
+LANDED_SHA="${LOCAL_SHA:-}"
+if [ -z "$LANDED_SHA" ] && [ -n "${PR_URL:-}" ]; then
+  LANDED_SHA=$(gh pr view "$PR_URL" --json mergeCommit -q '.mergeCommit.oid')
+fi
+
+# A conflict-resolved MR needs an explicit --landed-commit attestation
+# (gt-mlla). Resolving a conflict rewrites the source branch, so the
+# commit_sha recorded at submission time no longer identifies what landed:
+# the merge proof's file-level binding cannot hold for a branch whose work
+# legitimately changed shape on the way to <merge-target>. The refinery used
+# to pass this flag by hand, which meant it was passed on the cycles someone
+# remembered and omitted on the rest — and an omitted attestation fails the
+# post-merge proof outright, so the MR closes only on the remembered cycles.
+LANDED_FLAG=""
+CONFLICT_TASK=$(gt mq status <mr-bead-id> --json | jq -r '.conflict_task_id // empty')
+if [ -n "$CONFLICT_TASK" ]; then
+  if [ -z "$LANDED_SHA" ]; then
+    echo "STOP: MR <mr-bead-id> went through conflict resolution (task $CONFLICT_TASK), but the SHA pushed to <merge-target> could not be determined. Do not run post-merge blind; resolve the landed SHA first."
+    exit 1
+  fi
+  LANDED_FLAG="--landed-commit $LANDED_SHA"
+  echo "Conflict-resolved MR (task $CONFLICT_TASK) — attesting landed commit $LANDED_SHA"
+fi
+
+gt mq post-merge <rig> <mr-bead-id> $LANDED_FLAG $SKIP_FLAG
+```
+
+When the attestation was used, record it on the MR bead so the closed MR
+carries the SHA that landed rather than an unexplained merge_commit:
+
+```bash
+if [ -n "$LANDED_FLAG" ]; then
+  bd comments add <mr-bead-id> "post-merge: attested --landed-commit $LANDED_SHA (conflict-resolved rebase via $CONFLICT_TASK)"
+fi
 ```
 
 The MR bead ID was in the MERGE_READY message or find via:

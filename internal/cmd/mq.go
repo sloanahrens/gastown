@@ -819,8 +819,16 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	if err := verifyMQPostMergeProof(rigGit, mr, landedCommit); err != nil {
+	mergeCommit, err := verifyMQPostMergeProof(rigGit, mr, landedCommit)
+	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
+	}
+	// Recorded here rather than inside the verifier: the proof itself must stay
+	// a pure read of the repository, and only the caller that actually goes on
+	// to close the MR should mutate the snapshot it hands to PostMergeMR
+	// (gt-mlla).
+	if mergeCommit != "" {
+		mr.MergeCommit = mergeCommit
 	}
 
 	result, err := mgr.PostMergeMR(mr)
@@ -841,39 +849,66 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 // commit even though the work correctly landed. landedCommit is an explicit
 // attestation for that case: the caller (the refinery formula that performed
 // the rebase) names the SHA it actually pushed to target. It still must be
-// reachable from target — a wrong or stale attestation is rejected — but
-// stands in for the submitted commit_sha rather than being compared against
-// it.
-func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, landedCommit string) error {
+// reachable from target — a wrong or stale attestation is rejected — and it
+// must be bound to the MR it claims to satisfy rather than being compared
+// against the submitted commit_sha, whose patch-id a conflict resolution
+// legitimately changes (see verifyLandedCommitMatchesSubmitted).
+//
+// The return value is the commit that should be recorded as the MR's
+// merge_commit, or "" when the proof does not override it. It is returned
+// rather than assigned onto mr so this stays a read-only check: mutating the
+// caller's snapshot as a side effect of verifying it made the proof both
+// harder to test and impossible to call twice (gt-mlla).
+func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, landedCommit string) (string, error) {
 	if mr == nil {
-		return fmt.Errorf("merge proof failed: merge request is missing")
+		return "", fmt.Errorf("merge proof failed: merge request is missing")
 	}
 	target := strings.TrimSpace(mr.TargetBranch)
 	if target == "" {
-		return fmt.Errorf("merge proof failed for MR %s: missing target branch", mr.ID)
+		return "", fmt.Errorf("merge proof failed for MR %s: missing target branch", mr.ID)
 	}
 	if source := strings.TrimSpace(mr.Branch); source != "" && source == target {
-		return fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
+		return "", fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
 	}
 	commit := strings.TrimSpace(mr.CommitSHA)
 	if commit == "" {
-		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
+		return "", fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
 	if landedCommit = strings.TrimSpace(landedCommit); landedCommit != "" {
 		if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, landedCommit); err != nil {
-			return fmt.Errorf("merge proof failed for MR %s: attested landed commit %s not reachable from %s: %w", mr.ID, landedCommit, target, err)
+			return "", fmt.Errorf("merge proof failed for MR %s: attested landed commit %s not reachable from %s: %w", mr.ID, landedCommit, target, err)
 		}
+		// Normalize before anything compares or persists it. The attestation is
+		// typed by hand at the moment a conflict has just been resolved, which is
+		// exactly when an abbreviated SHA is easiest to paste and hardest to
+		// double-check — and an abbreviated MergeCommit on the closed MR bead
+		// cannot be resolved back to a commit once the branch is deleted.
+		resolvedLanded := resolveMQPostMergeCommit(rigGit, landedCommit)
 		submittedCommit := liveMQPostMergeBranchHead(rigGit, mr.Branch, commit)
-		if err := verifyLandedCommitMatchesSubmitted(rigGit, target, submittedCommit, landedCommit); err != nil {
-			return fmt.Errorf("merge proof failed for MR %s: attestation does not match MR: %w", mr.ID, err)
+		recorded, err := verifyLandedCommitMatchesSubmitted(rigGit, target, submittedCommit, resolvedLanded)
+		if err != nil {
+			return "", fmt.Errorf("merge proof failed for MR %s: attestation does not match MR: %w", mr.ID, err)
 		}
-		mr.MergeCommit = landedCommit
-		return nil
+		return recorded, nil
 	}
 	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
-		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
+		return "", fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
 	}
-	return nil
+	return "", nil
+}
+
+// resolveMQPostMergeCommit normalizes an attested landed commit to its full
+// SHA, so an abbreviated attestation (gt mq post-merge --landed-commit 2bb0bf7)
+// is not persisted verbatim as the MR's merge_commit (gt-mlla). Resolution is
+// best-effort: the attestation has already been proven reachable from target by
+// the caller, so a repository that cannot resolve the shorthand is a cosmetic
+// miss, not a reason to reject a merge whose work did land.
+func resolveMQPostMergeCommit(rigGit mqPostMergeGit, commit string) string {
+	resolved, err := rigGit.Rev(commit + "^{commit}")
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return commit
+	}
+	return strings.TrimSpace(resolved)
 }
 
 // liveMQPostMergeBranchHead prefers the source branch's live remote tip over
@@ -919,25 +954,41 @@ func liveMQPostMergeBranchHead(rigGit mqPostMergeGit, branch, commit string) str
 // the forgeries. Requiring the submitted file set to survive into the landed
 // diff still rejects an unrelated on-target commit, whose changed files are
 // essentially never a superset of the submitted branch's.
-func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submittedCommit, landedCommit string) error {
+//
+// It returns the commit to record as the MR's merge_commit. That is normally
+// landedCommit, but when the submitted head is already reachable from target
+// there is no diverged range to bind against and the submitted head is the
+// commit that demonstrably landed — recording the attestation instead would
+// persist a caller-supplied value the binding never checked.
+func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submittedCommit, landedCommit string) (string, error) {
 	submittedBase, err := rigGit.MergeBase(target, submittedCommit)
 	if err != nil {
-		return fmt.Errorf("merge-base of %s and submitted head %s: %w", target, submittedCommit, err)
+		return "", fmt.Errorf("merge-base of %s and submitted head %s: %w", target, submittedCommit, err)
+	}
+	if strings.TrimSpace(submittedBase) == strings.TrimSpace(submittedCommit) {
+		// The submitted head is already an ancestor of target, so the MR's work
+		// landed with its SHA intact: a fast-forward target, or a retry after an
+		// earlier cycle already fast-forwarded it. There is nothing left for the
+		// attestation to disambiguate — the default proof would have accepted
+		// this MR with no flag at all — so the flag is redundant, not wrong.
+		// Rejecting the empty diff here turned a correct merge into a permanent
+		// post-merge failure that no retry could clear (gt-mlla).
+		return submittedCommit, nil
 	}
 	submittedFiles, err := rigGit.DiffNameOnly(submittedBase, submittedCommit)
 	if err != nil {
-		return fmt.Errorf("changed files of submitted head %s: %w", submittedCommit, err)
+		return "", fmt.Errorf("changed files of submitted head %s: %w", submittedCommit, err)
 	}
 	if len(submittedFiles) == 0 {
-		return fmt.Errorf("submitted head %s has no changed files to bind the attestation to", submittedCommit)
+		return "", fmt.Errorf("submitted head %s has no changed files to bind the attestation to", submittedCommit)
 	}
 	landedParent, err := rigGit.Rev(landedCommit + "^")
 	if err != nil {
-		return fmt.Errorf("resolve parent of attested commit %s: %w", landedCommit, err)
+		return "", fmt.Errorf("resolve parent of attested commit %s: %w", landedCommit, err)
 	}
 	landedFiles, err := rigGit.DiffNameOnly(landedParent, landedCommit)
 	if err != nil {
-		return fmt.Errorf("changed files of attested commit %s: %w", landedCommit, err)
+		return "", fmt.Errorf("changed files of attested commit %s: %w", landedCommit, err)
 	}
 	landedSet := make(map[string]bool, len(landedFiles))
 	for _, f := range landedFiles {
@@ -945,10 +996,10 @@ func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submitted
 	}
 	for _, f := range submittedFiles {
 		if !landedSet[f] {
-			return fmt.Errorf("submitted file %q not present among attested commit %s's changed files", f, landedCommit)
+			return "", fmt.Errorf("submitted file %q not present among attested commit %s's changed files", f, landedCommit)
 		}
 	}
-	return nil
+	return landedCommit, nil
 }
 
 func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refinery.MergeRequest, skipBranchDelete bool) (mqPostMergeBranchCleanup, error) {
