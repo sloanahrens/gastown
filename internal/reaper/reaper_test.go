@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -135,37 +136,42 @@ func TestMRProtectedJoin(t *testing.T) {
 	}
 }
 
-func TestActiveMRExcludeClause(t *testing.T) {
-	if clause, args := activeMRExcludeClause(nil); clause != "" || args != nil {
-		t.Errorf("activeMRExcludeClause(nil) = (%q, %v), want (\"\", nil)", clause, args)
+func TestWispExcludeClause(t *testing.T) {
+	if clause, args := wispExcludeClause(nil); clause != "" || args != nil {
+		t.Errorf("wispExcludeClause(nil) = (%q, %v), want (\"\", nil)", clause, args)
 	}
 
-	clause, args := activeMRExcludeClause(map[string]bool{"gt-wisp-miky": true})
+	clause, args := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
 	if !contains(clause, "NOT IN") {
-		t.Errorf("activeMRExcludeClause should render a NOT IN clause, got %q", clause)
+		t.Errorf("wispExcludeClause should render a NOT IN clause, got %q", clause)
 	}
 	if len(args) != 1 || args[0] != "gt-wisp-miky" {
-		t.Errorf("activeMRExcludeClause args = %v, want [gt-wisp-miky]", args)
+		t.Errorf("wispExcludeClause args = %v, want [gt-wisp-miky]", args)
 	}
 }
 
-func TestActiveMRFieldPattern(t *testing.T) {
+func TestAgentReferenceFieldPatterns(t *testing.T) {
 	cases := []struct {
+		name        string
+		pattern     *regexp.Regexp
 		description string
 		want        string
 	}{
-		{"agent_state: working\nactive_mr: gt-wisp-miky\n", "gt-wisp-miky"},
-		{"agent_state: working\nactive_mr: null\n", "null"},
-		{"agent_state: working\nhook_bead: gt-4okk\n", ""},
+		{"active_mr", activeMRFieldPattern, "agent_state: working\nactive_mr: gt-wisp-miky\n", "gt-wisp-miky"},
+		{"active_mr null", activeMRFieldPattern, "agent_state: working\nactive_mr: null\n", "null"},
+		{"hook_bead is not active_mr", activeMRFieldPattern, "agent_state: working\nhook_bead: gt-wisp-miky\n", ""},
+		{"hook_bead", hookBeadFieldPattern, "agent_state: working\nhook_bead: gt-wisp-miky\n", "gt-wisp-miky"},
+		{"hook_bead null", hookBeadFieldPattern, "agent_state: working\nhook_bead: null\n", "null"},
+		{"active_mr is not hook_bead", hookBeadFieldPattern, "agent_state: working\nactive_mr: gt-wisp-miky\n", ""},
 	}
 	for _, c := range cases {
-		m := activeMRFieldPattern.FindStringSubmatch(c.description)
+		m := c.pattern.FindStringSubmatch(c.description)
 		got := ""
 		if m != nil {
 			got = m[1]
 		}
 		if got != c.want {
-			t.Errorf("activeMRFieldPattern on %q = %q, want %q", c.description, got, c.want)
+			t.Errorf("%s pattern on %q = %q, want %q", c.name, c.description, got, c.want)
 		}
 	}
 }
@@ -368,10 +374,12 @@ func TestReapUpdateQueryNoDatabaseNameInjection(t *testing.T) {
 }
 
 // TestPurgeDigestQueryNoDatabaseNameInjection verifies that the purge digest
-// query is a plain string with no Sprintf interpolation at all.
+// query interpolates only the live-reference exclusion clause, never dbName.
 func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
-	// The fixed digestQuery is a string literal — no Sprintf.
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
+	// Mirrors purgeClosedWisps: the exclusion is parameterized, so the literal
+	// query text carries no database name and no bead id.
+	referencedClause, _ := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?" + referencedClause + " GROUP BY wtype"
 
 	if strings.Contains(digestQuery, "gt") {
 		t.Errorf("purge digestQuery should not contain database name, got: %s", digestQuery)
@@ -384,10 +392,12 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 // TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge batch
 // SELECT query uses DefaultBatchSize as the LIMIT, not dbName.
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
-	// This is the fixed query — only DefaultBatchSize in the Sprintf args.
+	// Mirrors purgeClosedWisps — only the parameterized exclusion and
+	// DefaultBatchSize are interpolated.
+	referencedClause, _ := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
-		DefaultBatchSize)
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s LIMIT %d",
+		referencedClause, DefaultBatchSize)
 
 	if strings.Contains(idQuery, "gt") {
 		t.Errorf("purge idQuery contains injected database name: %s", idQuery)
@@ -656,6 +666,58 @@ func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
 	}
 }
 
+// TestPurgeExcludesLiveAgentReferencedWisps is the regression test for gt-gyb6:
+// the purge sweep deleted closed MR wisps that live agent beads still named as
+// active_mr, so the polecat waited on an MR no lookup could resolve. Both rows
+// here are closed and far past purge-age — only the live reference spares them,
+// and it lapses with the agent (the nuked bead's reference does not).
+func TestPurgeExcludesLiveAgentReferencedWisps(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-30 * 24 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"referenced-mr":       {id: "referenced-mr", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"referenced-hook":     {id: "referenced-hook", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"referenced-by-nuked": {id: "referenced-by-nuked", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"unreferenced":        {id: "unreferenced", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"live-agent":          {id: "live-agent", status: "open", issueType: "agent", createdAt: now, description: "agent_state: done\nactive_mr: referenced-mr\nhook_bead: referenced-hook\n"},
+			"nuked-agent":         {id: "nuked-agent", status: "open", issueType: "agent", createdAt: now, description: "agent_state: nuked\nactive_mr: referenced-by-nuked\n"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	purgeAge := 7 * 24 * time.Hour
+	scan, err := Scan(db, "testdb", 24*time.Hour, purgeAge, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.PurgeCandidates != 2 {
+		t.Fatalf("Scan PurgeCandidates = %d, want 2 (referenced-by-nuked and unreferenced)", scan.PurgeCandidates)
+	}
+
+	purge, err := Purge(db, "testdb", purgeAge, 7*24*time.Hour, false)
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if purge.WispsPurged != scan.PurgeCandidates {
+		t.Fatalf("Purge deleted %d wisps, Scan previewed %d — the preview must gate the sweep", purge.WispsPurged, scan.PurgeCandidates)
+	}
+
+	statuses := state.statuses()
+	for _, id := range []string{"referenced-mr", "referenced-hook"} {
+		if _, ok := statuses[id]; !ok {
+			t.Fatalf("%s was purged; a live agent bead still references it", id)
+		}
+	}
+	for _, id := range []string{"referenced-by-nuked", "unreferenced"} {
+		if _, ok := statuses[id]; ok {
+			t.Fatalf("%s survived the purge, want deleted", id)
+		}
+	}
+}
+
 var fakeReaperDriverID uint64
 
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
@@ -674,6 +736,7 @@ type fakeWisp struct {
 	status      string
 	issueType   string
 	createdAt   time.Time
+	closedAt    time.Time
 	description string
 	labels      []string
 }
@@ -707,6 +770,34 @@ func (s *fakeReaperState) statuses() map[string]string {
 		statuses[id] = w.status
 	}
 	return statuses
+}
+
+// purgeCandidatesLocked mirrors the purge sweep's eligibility: closed wisps past
+// the delete cutoff, minus the ones a live agent bead still references.
+func (s *fakeReaperState) purgeCandidatesLocked(cutoff time.Time, excluded map[string]bool) []string {
+	var ids []string
+	for id, w := range s.wisps {
+		if w.status != "closed" || w.closedAt.IsZero() || !w.closedAt.Before(cutoff) || excluded[id] {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// wispTypeCountsLocked groups the same purge candidates by wisp_type, the shape
+// the digest query returns.
+func (s *fakeReaperState) wispTypeCountsLocked(cutoff time.Time, excluded map[string]bool) map[string]int {
+	counts := map[string]int{}
+	for _, id := range s.purgeCandidatesLocked(cutoff, excluded) {
+		wtype := s.wisps[id].issueType
+		if wtype == "" {
+			wtype = "unknown"
+		}
+		counts[wtype]++
+	}
+	return counts
 }
 
 func (s *fakeReaperState) opCounts() map[int]int {
@@ -947,9 +1038,17 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		return fakeCountRows(len(c.state.moleculeStepCandidatesLocked())), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps WHERE status IN"):
 		return fakeCountRows(c.state.openCountLocked()), nil
+	case strings.Contains(normalized, "GROUP BY wtype"):
+		return fakeWispTypeCountRows(c.state.wispTypeCountsLocked(namedTime(args), namedExcludedIDs(args))), nil
+	case strings.Contains(normalized, "SELECT w.id FROM wisps w WHERE w.status = 'closed'"):
+		return fakeIDRows(c.state.purgeCandidatesLocked(namedTime(args), namedExcludedIDs(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w WHERE w.status = 'closed'"):
-		return fakeCountRows(0), nil
+		return fakeCountRows(len(c.state.purgeCandidatesLocked(namedTime(args), namedExcludedIDs(args)))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM issues"):
+		return fakeCountRows(0), nil
+	case strings.Contains(normalized, "issues WHERE status = 'closed'"):
+		// purgeOldMail's count is the only one that qualifies the table with the
+		// database name; the fake models no mail.
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "LEFT JOIN wisp_dependencies wd") && strings.Contains(normalized, "pm.id IS NULL"):
 		// absent-parent molecule count (dry-run)
@@ -987,6 +1086,16 @@ func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []dri
 			id, _ := arg.Value.(string)
 			if w := c.state.wisps[id]; w != nil && isOpenWispStatus(w.status) {
 				w.status = "closed"
+				affected++
+			}
+		}
+		return fakeReaperResult(affected), nil
+	case strings.HasPrefix(normalized, "DELETE FROM `wisps` WHERE id IN"):
+		affected := int64(0)
+		for _, arg := range args {
+			id, _ := arg.Value.(string)
+			if w := c.state.wisps[id]; w != nil {
+				delete(c.state.wisps, id)
 				affected++
 			}
 		}
@@ -1034,6 +1143,19 @@ func fakeDescriptionRows(descriptions []string) *fakeReaperRows {
 	return &fakeReaperRows{cols: []string{"description"}, rows: rows}
 }
 
+func fakeWispTypeCountRows(counts map[string]int) *fakeReaperRows {
+	types := make([]string, 0, len(counts))
+	for wtype := range counts {
+		types = append(types, wtype)
+	}
+	sort.Strings(types)
+	rows := make([][]driver.Value, len(types))
+	for i, wtype := range types {
+		rows[i] = []driver.Value{wtype, int64(counts[wtype])}
+	}
+	return &fakeReaperRows{cols: []string{"wtype", "cnt"}, rows: rows}
+}
+
 func (r *fakeReaperRows) Columns() []string { return r.cols }
 func (r *fakeReaperRows) Close() error      { return nil }
 
@@ -1054,6 +1176,18 @@ func namedTime(args []driver.NamedValue) time.Time {
 		return value
 	}
 	return time.Time{}
+}
+
+// namedExcludedIDs returns the bind args after the age cutoff — the wisp IDs the
+// live-reference exclusion clause carries.
+func namedExcludedIDs(args []driver.NamedValue) map[string]bool {
+	excluded := map[string]bool{}
+	for _, arg := range args[1:] {
+		if id, ok := arg.Value.(string); ok {
+			excluded[id] = true
+		}
+	}
+	return excluded
 }
 
 func isOpenWispStatus(status string) bool {

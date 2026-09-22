@@ -359,6 +359,10 @@ var reaperPurgeCmd = &cobra.Command{
 	Long: `Delete closed wisps past the purge-age threshold and closed mail
 past the mail-age threshold. Irreversible operation.
 
+Wisps a live agent bead still names as active_mr or hook_bead are kept, so the
+reference keeps resolving (gt-gyb6). They are purge candidates again once the
+pointer clears.
+
 When --db is provided, purges a single database. When omitted, auto-discovers
 all databases on the Dolt server and purges each one.
 
