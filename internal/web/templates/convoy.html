@@ -272,7 +272,7 @@
                 </div>
             </div>
 
-            <!-- Local Pool Panel: the pool's local seats, and llama-server's slots -->
+            <!-- Local Pool Panel: the pool's local seats, and the model server behind them -->
             {{if .LocalPool}}
             <div class="panel" id="local-pool-panel">
                 <div class="panel-header">
@@ -280,11 +280,15 @@
                     <button class="collapse-btn" aria-label="Toggle panel">▼</button>
                     <button class="expand-btn">Expand</button>
                 </div>
-                <div class="mq-tile" title="Local polecat seats against max_local, and llama-server slots in use">
+                <div class="mq-tile" title="Local polecat seats against max_local, and the model server they are configured against">
                     <span class="mq-tile-label">local seats</span>
                     <span class="mq-tile-value">{{if .LocalPool.SeatsErr}}{{.LocalPool.SeatsErr}}{{else}}{{.LocalPool.LocalSeats}}/{{.LocalPool.MaxLocal}}{{end}}</span>
-                    <span class="mq-tile-label">slots busy</span>
-                    <span class="mq-tile-value">{{if .LocalPool.SlotsErr}}{{.LocalPool.SlotsErr}}{{else}}{{.LocalPool.SlotsBusy}}/{{.LocalPool.SlotsTotal}}{{end}}</span>
+                    <span class="mq-tile-label">model server</span>
+                    <span class="mq-tile-value">{{if .LocalPool.ServerErr}}{{.LocalPool.ServerErr}}{{else}}up{{end}}</span>
+                    {{if not .LocalPool.ServerErr}}
+                    <span class="mq-tile-label">model</span>
+                    <span class="mq-tile-value">{{if .LocalPool.ServerModel}}{{.LocalPool.ServerModel}}{{else}}unknown{{end}}</span>
+                    {{end}}
                 </div>
                 <div class="panel-body">
                     <div class="mq-tile" title="The polecat_pool new polecats are routed against">
@@ -297,6 +301,18 @@
                         {{if .LocalPool.MinSpawnGap}}
                         <span class="mq-tile-label">min spawn gap</span>
                         <span class="mq-tile-rig">{{.LocalPool.MinSpawnGap}}</span>
+                        {{end}}
+                    </div>
+                    <div class="mq-tile" title="The endpoint the local agent's preset points at, and what answered there">
+                        <span class="mq-tile-label">endpoint</span>
+                        <span class="mq-tile-rig">{{if .LocalPool.ServerEndpoint}}{{.LocalPool.ServerEndpoint}}{{else}}none configured{{end}}</span>
+                        {{if .LocalPool.ServerKind}}
+                        <span class="mq-tile-label">server kind</span>
+                        <span class="mq-tile-rig">{{.LocalPool.ServerKind}}</span>
+                        {{end}}
+                        {{if .LocalPool.ServerInFlightKnown}}
+                        <span class="mq-tile-label">in flight</span>
+                        <span class="mq-tile-rig">{{if .LocalPool.ServerMaxFlight}}{{.LocalPool.ServerInFlight}}/{{.LocalPool.ServerMaxFlight}}{{else}}{{.LocalPool.ServerInFlight}}{{end}}</span>
                         {{end}}
                     </div>
                 </div>
