@@ -131,10 +131,17 @@ type testVerifyResult struct {
 	success  bool
 	packages []string // the branch's changed packages, recorded for the MR bead (gt-btw1)
 	scope    string   // "full": the gate runs the rig's full hermetic test_command
-	// slotUsed is false only when the gate ran without a container-gate slot;
-	// since the full suite may spin containers the gate always takes one
-	// (gt-yihz).
+	// slotUsed is true only when the gate's run can start a container-backed
+	// suite (gt-wx53): a Go rig whose command does not turn the container
+	// opt-in on runs its whole suite with those tests skipping, so it takes no
+	// slot and never queues behind the town's one gate.
 	slotUsed bool
+	// containersOptedOut is true when the gate forced the container opt-in off
+	// for its run, which is what makes slotUsed false on a Go rig. Recorded
+	// (and written to the log header) so a reader can tell a gate that
+	// deliberately skipped the Docker suite apart from one whose rig never had
+	// containers to run.
+	containersOptedOut bool
 	// lintRan / lintCommand / lintElapsed record the rig's lint_command run
 	// (gt-yihz follow-up): lint is part of the default gate whenever the rig
 	// configures it, slot-free, before the tests.
@@ -323,6 +330,88 @@ func isEnvVarName(s string) bool {
 	return true
 }
 
+// containerOptInRequested reports whether any of the given command texts turns
+// the container opt-in (testutil.DockerTestsEnv) on inline — "GT_TEST_DOCKER=1
+// make test", "env GT_TEST_DOCKER=1 go test ...", "export GT_TEST_DOCKER=1;
+// ...". It reuses the container-suite guard's tokenizer (same package), so the
+// gate and the tap guard agree on what "this command wants containers" means.
+func containerOptInRequested(commands ...string) bool {
+	for _, c := range commands {
+		if strings.TrimSpace(c) == "" {
+			continue
+		}
+		if commandEnablesDockerTests(shellTokenize(c)) {
+			return true
+		}
+	}
+	return false
+}
+
+// gateNeedsSlot reports whether the default test-verify gate must hold a
+// container-gate slot for the run it is about to make (gt-wx53).
+//
+// The slot is town-wide and one suite wide, so taking it for a run that cannot
+// start a container makes every `gt done` in the town queue behind the daemon's
+// main-branch patrol and the refinery's batch gate — mica's gt done on gt-jqif
+// waited out the full 20m cap for a gate that never ran a test (gt-pnkd). The
+// gate therefore takes the slot only when its run can actually start a
+// container-backed suite: a non-Go rig (whose test_command is opaque), or a Go
+// rig whose command turns the opt-in on. Everything else runs the rig's whole
+// suite with the opt-in off: the container-backed tests skip, and the
+// refinery's gate (which does hold a slot) runs them once per submission
+// (gt-yihz, operator decision 14:44 2026-09-17).
+//
+// The *ambient* opt-in is deliberately not consulted, even though the
+// container-suite guard reads it that way. The guard can only inspect the
+// command it is shown; this gate builds its child's environment, so the same
+// input would otherwise decide differently depending on who invoked `gt done`
+// (a polecat spawned by a suite inherits GT_TEST_DOCKER=1 and would take the
+// town-wide slot back; the integration harness sets it too, so the same gate
+// would behave two ways in one test binary). Reading the rig's own command
+// keeps the answer a property of the rig's configuration, which is what an
+// operator can reason about — and overriding an inherited opt-in is safe in
+// the only direction that matters: the run cannot start a container it did not
+// take a slot for.
+func gateNeedsSlot(isGoRig bool, commands ...string) bool {
+	if !isGoRig {
+		return true
+	}
+	return containerOptInRequested(commands...)
+}
+
+// verifyGateEnv builds the child environment for the gate's lint and suite
+// runs: this process's environment, then the rig's test_command env prefix
+// (gt-fa3s), then — when the run must not start containers — an explicit
+// opt-out.
+//
+// The opt-out is *appended after filtering every inherited and rig-supplied
+// value of the same name*, because a duplicate entry in a child's environment
+// is resolved differently by different readers (Go's os.Getenv takes the
+// first, a shell's assignment takes the last), and this value is what decides
+// whether a container starts outside the container-gate slot.
+//
+// A rig whose command turns the opt-in on is never opted out here: the rig
+// wins (see gateNeedsSlot), and the gate takes a slot for it.
+func verifyGateEnv(envPrefix []string, optOutContainers bool) []string {
+	env := make([]string, 0, len(os.Environ())+len(envPrefix)+1)
+	keep := func(kv string) bool {
+		return !optOutContainers || !strings.HasPrefix(kv, dockerTestsEnv+"=")
+	}
+	for _, kv := range os.Environ() {
+		if keep(kv) {
+			env = append(env, kv)
+		}
+	}
+	for _, kv := range envPrefix {
+		if keep(kv) {
+			env = append(env, kv)
+		}
+	}
+	if optOutContainers {
+		env = append(env, dockerTestsEnv+"=0")
+	}
+	return env
+}
 
 // resolveTestVerifyBudgets turns the rig's configuration into the two budgets
 // the gate runs under: how long to wait for the slot, and how long the suite
@@ -462,11 +551,15 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 // `go test` over the changed packages, which bypassed the rig's hermetic
 // test environment (BEADS_TEST_MODE, test-env.sh, Makefile CGO flags) and
 // failed every test-only change in a rig whose package is red on main for
-// ambient-env reasons. The run happens inside the container-gate slot
-// (internal/slot) because the full suite may itself hold a Docker-backed
-// suite. Any failure — the run itself failing, timing out, or changed .go
-// files that resolve to no buildable package — returns an error and the
-// caller must not create the MR bead: that is the refusal gt-h9kf asks for.
+// ambient-env reasons. Where the run happens depends on whether it can start
+// containers (gt-wx53, see gateNeedsSlot): a run that can holds a
+// container-gate slot (internal/slot) for its whole duration, and a run that
+// cannot — the common case, since the container opt-in is off unless the rig
+// asks for it — runs the same hermetic command with those tests skipping and
+// takes no slot at all. Any failure — the run itself failing, timing out, or
+// changed .go files that resolve to no buildable package — returns an error
+// and the caller must not create the MR bead: that is the refusal gt-h9kf
+// asks for.
 //
 // gt-pnkd: the budgets and the command are now resolved rather than
 // hardcoded, and every resolved value is written to the verify log header
@@ -515,9 +608,16 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	}
 
 	// The full suite may spin Dolt/testcontainers containers (internal/cmd,
-	// internal/refinery, ...), so the run happens inside the container-gate
-	// slot — the same guarantee a non-Go rig's test_command always had.
-	needsSlot := true
+	// internal/refinery, ...), and a container must never start outside the
+	// container-gate slot. gt-wx53: it must not start *inside* it either when
+	// nothing in this run needs one — a gate that always took the slot made
+	// every `gt done` in the town queue for a town-wide, one-suite-wide
+	// resource, sometimes for longer than the suite it was queueing behind.
+	// So the gate either runs the rig's whole suite with the container opt-in
+	// forced off (container-backed tests skip, no slot needed) or, when the
+	// rig's own command asks for containers, runs it unchanged inside a slot.
+	needsSlot := gateNeedsSlot(isGoRig, mq.TestCommand, mq.TestVerifyCommand)
+	containersOptedOut := !needsSlot
 
 	budgets := resolveTestVerifyBudgets(mq)
 
@@ -559,20 +659,29 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	if len(envPrefix) > 0 {
 		fmt.Fprintf(logFile, "env (inherited from test_command): %s\n", strings.Join(envPrefix, " "))
 	}
+	// Whether this gate queues for the town's container-gate slot, and why, is
+	// the first thing a reader of a slow or refused gate needs (gt-wx53: the
+	// answer used to be an unconditional yes, stated nowhere).
+	if containersOptedOut {
+		fmt.Fprintf(logFile, "containers: opted out (%s=0) — container-backed tests skip here and run once per submission in the refinery's gate, so this gate takes no container-gate slot\n", dockerTestsEnv)
+	} else {
+		fmt.Fprintf(logFile, "containers: enabled — this run may start container-backed suites, so it takes a container-gate slot\n")
+	}
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))
 
-	env := append(os.Environ(), envPrefix...)
+	env := verifyGateEnv(envPrefix, containersOptedOut)
 
 	// Lint first: cheap, slot-free, and a lint failure should not cost a
 	// suite run. The rig's lint_command is the same one the batch gate runs.
 	result := testVerifyResult{
-		scope:       scope,
-		packages:    pkgs,
-		slotUsed:    needsSlot,
-		logPath:     logPath,
-		runBudget:   budgets.runTimeout,
-		slotTimeout: budgets.slotTimeout,
+		scope:              scope,
+		packages:           pkgs,
+		slotUsed:           needsSlot,
+		containersOptedOut: containersOptedOut,
+		logPath:            logPath,
+		runBudget:          budgets.runTimeout,
+		slotTimeout:        budgets.slotTimeout,
 	}
 	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
 		result.lintCommand = lint
@@ -623,7 +732,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		slotWait = waited
 		reportVerifyProgress(logFile, fmt.Sprintf("container-gate slot acquired after %s", slotWait.Round(time.Second)))
 	} else {
-		reportVerifyProgress(logFile, "running without a container-gate slot (no container-backed package in scope)")
+		reportVerifyProgress(logFile, fmt.Sprintf("running without a container-gate slot (containers opted out with %s=0: container-backed tests skip here and run in the refinery's gate)", dockerTestsEnv))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), budgets.runTimeout)
@@ -648,10 +757,14 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 
 	if timedOut {
 		fmt.Fprintf(logFile, "=== test-verify timed out after %s ===\n", humanDuration(budgets.runTimeout))
+		slotNote := "no container-gate slot was taken"
+		if needsSlot {
+			slotNote = fmt.Sprintf("the %s slot wait is not counted against it", slotWait.Round(time.Second))
+		}
 		return testVerifyResult{}, fmt.Errorf(
-			"gt done: default test-verify timed out after %s running %q (run budget from %s; the %s slot wait is not counted against it) — see %s. Raise merge_queue.test_verify_run_timeout for this rig if the suite legitimately needs longer",
+			"gt done: default test-verify timed out after %s running %q (run budget from %s; %s) — see %s. Raise merge_queue.test_verify_run_timeout for this rig if the suite legitimately needs longer",
 			humanDuration(budgets.runTimeout), testCmd, budgets.runSource,
-			slotWait.Round(time.Second), logPath)
+			slotNote, logPath)
 	}
 	if runErr != nil {
 		exitCode := -1
