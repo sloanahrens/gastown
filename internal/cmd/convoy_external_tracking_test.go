@@ -443,6 +443,66 @@ esac
 	}
 }
 
+// TestGetTrackedIssues_IgnoresNonBeadIDEdge pins the repair path for a convoy
+// damaged before the write-time gate existed (gt-gsky): a tracks edge whose
+// target is a convoy *title*.
+//
+// No query resolves such a target, so it came back trackedStatusUnknown and
+// held the convoy open forever — the reported convoy had every real issue
+// closed and still never auto-closed. A well-formed but unreachable cross-rig
+// target is still unknown and still blocks auto-close (gt-bs6).
+func TestGetTrackedIssues_IgnoresNonBeadIDEdge(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	townRoot, townBeads, _ := makeExternalTrackingTownWorkspace(t)
+	chdirExternalTrackingTest(t, townRoot)
+
+	scriptBody := `
+case "$*" in
+  "--allow-stale version")
+    exit 0
+    ;;
+  *sql*dependencies*)
+    echo '[{"depends_on_id":"external:om:om-gate coverage: om"},{"depends_on_id":"hq-real"}]'
+    ;;
+  *show*hq-real*)
+    echo '[{"id":"hq-real","title":"Real issue","status":"closed","issue_type":"task"}]'
+    ;;
+  *)
+    echo "unexpected bd args: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	writeExternalTrackingBdStub(t, scriptBody)
+
+	tracked, err := getTrackedIssues(townBeads, "hq-cv-damaged")
+	if err != nil {
+		t.Fatalf("getTrackedIssues: %v", err)
+	}
+	if len(tracked) != 1 {
+		t.Fatalf("expected the non-bead-ID edge to be dropped, got %d tracked issue(s): %#v", len(tracked), tracked)
+	}
+	if tracked[0].ID != "hq-real" || tracked[0].Status != "closed" {
+		t.Fatalf("tracked[0] = %#v, want hq-real with status closed", tracked[0])
+	}
+
+	// The convoy's only real issue is closed, so it is now closable — which is
+	// what the phantom edge used to prevent.
+	_, err = captureConvoyStdoutErr(t, func() error {
+		ready, err := closeConvoyIfComplete(townBeads, "hq-cv-damaged", "Damaged convoy", tracked, true)
+		if !ready {
+			t.Errorf("convoy not ready to close after the phantom edge was dropped: %#v", tracked)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("closeConvoyIfComplete: %v", err)
+	}
+}
+
 // TestCloseConvoyIfComplete_UnknownBlocksAutoClose verifies (gt-bs6) that an
 // unknown-status tracked bead prevents convoy auto-close. The rig DB being
 // temporarily unreachable must not be mistaken for a completed bead.

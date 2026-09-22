@@ -750,8 +750,14 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 		trackedIssues = args[1:]
 
 		// If first arg looks like an issue ID (has beads prefix), treat all args as issues
-		// and auto-generate a name from the first issue's title
-		if looksLikeIssueID(name) {
+		// and auto-generate a name from the first issue's title.
+		//
+		// looksLikeIssueID only inspects the first token, so it also fires on a
+		// human-readable name that opens with a short lowercase word ("om-gate
+		// coverage: om"). The shape check keeps such a name in the name
+		// position; folding it into the tracked set recorded the convoy's own
+		// title as a phantom issue (gt-gsky).
+		if looksLikeIssueID(name) && isBeadIDToken(name) {
 			trackedIssues = args
 			if details := getIssueDetails(args[0]); details != nil && details.Title != "" {
 				name = details.Title
@@ -763,6 +769,13 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 		if len(trackedIssues) == 0 {
 			return fmt.Errorf("at least one issue ID is required\nUsage: gt convoy create <name> <issue-id> [issue-id...]")
 		}
+	}
+
+	// Refuse before creating anything: an edge to a non-ID target can never be
+	// resolved, so the convoy would report it unknown on every `convoy check`
+	// and never auto-close (gt-gsky).
+	if err := validateTrackingTargets(trackedIssues); err != nil {
+		return fmt.Errorf("convoy create: %w", err)
 	}
 
 	townBeads, err := getTownBeadsDir()
@@ -885,6 +898,12 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 func runConvoyAdd(cmd *cobra.Command, args []string) error {
 	convoyID := args[0]
 	issuesToAdd := args[1:]
+
+	// Same gate as create, and for the same reason: reject non-ID targets
+	// before this command reopens or touches the convoy (gt-gsky).
+	if err := validateTrackingTargets(issuesToAdd); err != nil {
+		return fmt.Errorf("convoy add: %w", err)
+	}
 
 	townBeads, err := getTownBeadsDir()
 	if err != nil {
@@ -2502,6 +2521,24 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fallback show for tracked deps of %s: %w", convoyID, err)
 		}
+	}
+
+	// Drop tracked edges whose target is not a bead ID: no query can resolve
+	// one, so it came back as trackedStatusUnknown and held the convoy open
+	// forever (gt-gsky). The dashboard drops the same edge (gt-44z1).
+	//
+	// A well-formed cross-rig target that is merely unreachable stays unknown
+	// and still blocks auto-close — the gt-bs6 contract.
+	if len(trackedIDs) > 0 {
+		resolvable := make([]string, 0, len(trackedIDs))
+		for _, id := range trackedIDs {
+			if !isBeadIDToken(id) {
+				style.PrintWarning("convoy %s: ignoring tracked edge to %q (not a bead ID)", convoyID, id)
+				continue
+			}
+			resolvable = append(resolvable, id)
+		}
+		trackedIDs = resolvable
 	}
 
 	if len(trackedIDs) == 0 {

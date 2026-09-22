@@ -35,6 +35,85 @@ func TestTrackingDependsOnID_HQStaysLocal(t *testing.T) {
 	}
 }
 
+func TestIsTrackingTargetID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "local bead id", input: "gt-gsky", want: true},
+		{name: "town convoy id", input: "hq-cv-7rzqg", want: true},
+		{name: "sub-issue id", input: "om-95s.1", want: true},
+		{name: "external cross-rig", input: "external:om:om-95s.1", want: true},
+		{name: "external with dotted id", input: "external:ghostty:ghostty-123", want: true},
+
+		// The reported damage (gt-gsky): a convoy *title* recorded where an ID
+		// belongs. It reached the dependency table because the title starts with
+		// a short lowercase word, so ExtractPrefix found the om- rig and the
+		// target was wrapped as an external edge.
+		{name: "convoy title", input: "om-gate coverage: om", want: false},
+		{name: "title in external form", input: "external:om:om-gate coverage: om", want: false},
+		{name: "empty", input: "", want: false},
+		{name: "external without id", input: "external:om", want: false},
+		{name: "external without rig", input: "external::om-95s.1", want: false},
+		{name: "trailing space", input: "om-95s.1 ", want: false},
+		{name: "leading hyphen", input: "-force", want: false},
+		{name: "flag-like", input: "--force", want: false},
+		{name: "colon in id", input: "om:95s", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTrackingTargetID(tc.input); got != tc.want {
+				t.Errorf("isTrackingTargetID(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateTrackingTargets(t *testing.T) {
+	t.Parallel()
+
+	if err := validateTrackingTargets([]string{"gt-gsky", "external:om:om-95s.1", "hq-cv-7rzqg"}); err != nil {
+		t.Fatalf("validateTrackingTargets(valid) = %v, want nil", err)
+	}
+	if err := validateTrackingTargets(nil); err != nil {
+		t.Fatalf("validateTrackingTargets(nil) = %v, want nil", err)
+	}
+
+	err := validateTrackingTargets([]string{"gt-gsky", "om-gate coverage: om"})
+	if err == nil {
+		t.Fatal("validateTrackingTargets accepted a convoy title")
+	}
+	if !strings.Contains(err.Error(), `"om-gate coverage: om"`) {
+		t.Errorf("error should name the offending target, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "gt-gsky") {
+		t.Errorf("error should not name valid targets, got: %v", err)
+	}
+}
+
+// TestAddTrackingRelation_RejectsNonBeadIDTarget pins the invariant that keeps
+// a phantom edge out of the dependency table: the write path refuses a target
+// that is not a bead ID instead of wrapping it into external:<rig>:<id>
+// (gt-gsky). It must refuse before touching the store, so no town workspace is
+// needed for the call to fail — a valid target here would instead try to open
+// one.
+func TestAddTrackingRelation_RejectsNonBeadIDTarget(t *testing.T) {
+	t.Parallel()
+
+	err := addTrackingRelation(t.TempDir(), "hq-cv-test", "om-gate coverage: om")
+	if err == nil {
+		t.Fatal("addTrackingRelation recorded an edge to a non-bead-ID target")
+	}
+	if !strings.Contains(err.Error(), "not a bead ID") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestFallbackTrackingRelationUsesExternalTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
