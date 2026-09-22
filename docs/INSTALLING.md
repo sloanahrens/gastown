@@ -287,7 +287,11 @@ installed: `Supervised: launchd` means the job is running the daemon holding
 daemon.lock, and `DETACHED` with a spawn count and last exit code means the job
 is not — the daemon is running outside it while launchd respawns and loses the
 lock every `ThrottleInterval`. Stopping a supervised daemon goes through the
-supervisor, so the job is left unloaded and `gt daemon start` loads it again.
+supervisor: on launchd the job is left unloaded and `gt daemon start` bootstraps
+it again, while `systemctl --user stop` leaves the systemd unit loaded but
+inactive and `gt daemon start` restarts it. A stop that cannot establish the
+job's state exits non-zero and names the uncertainty rather than reporting a
+stop it could not confirm.
 
 ### Choosing Roles
 

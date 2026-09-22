@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -244,15 +243,24 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	// the lock the moment the signal lands. Stop the job through the
 	// supervisor so the job is left unloaded, then mop up whatever still
 	// holds the lock (gt-sq9e).
+	//
+	// A probe or bootout that fails leaves the job's state unestablished, and
+	// "a signal was sent" is not "the daemon is stopped": that case is carried
+	// out of here as an error, after the mop-up has run, so the operator gets
+	// the uncertainty and the mechanism that was used instead (gt-ojbb).
 	stoppedUnder := ""
+	var unconfirmed error
 	sup, supErr := detectDaemonSupervisor(townRoot)
 	switch {
 	case supErr != nil:
-		fmt.Fprintf(os.Stderr, "warning: could not tell whether a supervisor is provisioned for this town: %v\n", supErr)
+		unconfirmed = fmt.Errorf("could not tell whether a supervisor is provisioned for this town: %w", supErr)
 	case sup != nil:
-		if st := supervisorStateFor(sup.name); st.Loaded {
+		switch st := supervisorStateFor(sup.name); {
+		case st.Err != nil:
+			unconfirmed = fmt.Errorf("could not read the %s job's state: %w", sup.name, st.Err)
+		case st.Loaded:
 			if runErr := supervisorRun(sup.stop); runErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not stop the %s job: %v\n", sup.name, runErr)
+				unconfirmed = fmt.Errorf("could not stop the %s job: %w", sup.name, runErr)
 			} else {
 				stoppedUnder = sup.name
 			}
@@ -262,14 +270,29 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	// Whatever the supervisor left behind — a daemon it does not manage, or a
 	// job that was never loaded — the lock holder has to go before this can
 	// report a stop.
+	outcome := "the daemon is gone from daemon.lock"
 	stillRunning, _, err := daemonIsRunning(townRoot)
-	switch {
-	case err != nil:
+	if err != nil {
 		return fmt.Errorf("checking daemon status after stopping: %w", err)
-	case stillRunning:
+	}
+	if stillRunning {
+		outcome = "the daemon was signaled directly"
 		if err := stopDaemonDirect(townRoot); err != nil {
-			return fmt.Errorf("stopping daemon: %w", err)
+			// The supervisor's SIGTERM can land between that re-check and
+			// StopDaemon's own: the process releases the lock and StopDaemon
+			// finds nothing to stop. The stop this path is after still
+			// happened, so a free lock is the outcome, not an error (gt-ojbb).
+			nowRunning, _, checkErr := daemonIsRunning(townRoot)
+			if checkErr != nil || nowRunning {
+				return fmt.Errorf("stopping daemon: %w", err)
+			}
+			outcome = "the daemon released the lock while the stop was in progress"
 		}
+	}
+
+	if unconfirmed != nil {
+		return fmt.Errorf("%w\n  %s, but only the supervisor can leave a KeepAlive job stopped: it may respawn the daemon. Check with: %s",
+			unconfirmed, outcome, style.Dim.Render("gt daemon status"))
 	}
 
 	if stoppedUnder != "" {
@@ -446,12 +469,7 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 	fmt.Println("  - Auto-restart if it crashes")
 	fmt.Println("  - Start automatically on login/boot")
 	fmt.Println("\nTo stop the supervised daemon:")
-	if runtime.GOOS == "darwin" {
-		fmt.Println("  launchctl unload ~/Library/LaunchAgents/com.gastown.daemon.plist")
-	} else {
-		fmt.Println("  systemctl --user stop gastown-daemon.service")
-		fmt.Println("  systemctl --user disable gastown-daemon.service")
-	}
+	fmt.Println("  gt daemon stop")
 	return nil
 }
 
