@@ -848,13 +848,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Printf("Would unhook %s from previous assignee\n", beadID)
 		} else {
 
-			// Determine requester identity from env vars, fall back to "gt-sling"
-			requester := "gt-sling"
-			if polecat := os.Getenv("GT_POLECAT"); polecat != "" {
-				requester = polecat
-			} else if user := os.Getenv("USER"); user != "" {
-				requester = user
-			}
+			requester := reassignRequester()
 
 			// Extract rig name from assignee (e.g., "gastown/polecats/Toast" -> "gastown")
 			assigneeParts := strings.Split(info.Assignee, "/")
@@ -991,6 +985,9 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		} else {
 			fmt.Printf("Would run: bd update %s --status=hooked --assignee=%s\n", beadID, targetAgent)
 		}
+		if originalAssignee != "" && originalAssignee != targetAgent {
+			fmt.Printf("Would record reassignment on %s: %s -> %s\n", beadID, originalAssignee, targetAgent)
+		}
 		if slingSubject != "" {
 			fmt.Printf("  subject (in nudge): %s\n", slingSubject)
 		}
@@ -1096,6 +1093,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	hookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
+	// The hook write below replaces the assignee. Record the outgoing value
+	// first: assignee keeps only the last writer, so afterwards the previous
+	// polecat's branch is unreachable from the bead (gt-zd7c).
+	recordReassignment(townRoot, beadID, originalAssignee, targetAgent, reassignRequester())
 	if err := hookBeadWithRetryFn(beadID, targetAgent, hookDir); err != nil {
 		rollbackSpawnedPolecat("Hook failed")
 		return err

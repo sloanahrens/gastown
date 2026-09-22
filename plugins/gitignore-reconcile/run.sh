@@ -17,13 +17,13 @@ if [ -z "$RIG_JSON" ]; then
   exit 0
 fi
 
-RIG_PATHS=$(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | .repo_path // empty' 2>/dev/null || true)
-if [ -z "$RIG_PATHS" ]; then
+RIG_ENTRIES=$(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | [(.name // "unknown"), .repo_path] | @tsv' 2>/dev/null || true)
+if [ -z "$RIG_ENTRIES" ]; then
   log "SKIP: no rigs with repo paths"
   exit 0
 fi
 
-RIG_COUNT=$(echo "$RIG_PATHS" | wc -l | tr -d ' ')
+RIG_COUNT=$(echo "$RIG_ENTRIES" | wc -l | tr -d ' ')
 log "Checking $RIG_COUNT rig repo(s) for tracked+ignored files"
 
 # --- Step 2: Process each rig -----------------------------------------------
@@ -31,7 +31,7 @@ log "Checking $RIG_COUNT rig repo(s) for tracked+ignored files"
 TOTAL_UNTRACKED=0
 TOTAL_BEADS=0
 
-while IFS= read -r REPO_PATH; do
+while IFS=$'\t' read -r RIG_NAME REPO_PATH; do
   [ -z "$REPO_PATH" ] && continue
 
   if ! git -C "$REPO_PATH" rev-parse --git-dir >/dev/null 2>&1; then
@@ -60,14 +60,25 @@ while IFS= read -r REPO_PATH; do
     [ -n "$IS_DIRTY" ]       && REASON="dirty working tree"
     [ -n "$HAS_POLECATS" ]   && REASON="${REASON:+$REASON, }active polecat worktrees"
     [ "$CURRENT_BRANCH" != "main" ] && REASON="${REASON:+$REASON, }not on main ($CURRENT_BRANCH)"
-    log "  SKIP: $REASON — creating chore bead"
-    REPO_NAME=$(basename "$REPO_PATH")
-    bd create "gitignore-reconcile: $REPO_NAME has $FILE_COUNT tracked+ignored file(s)" \
-      -t chore \
-      -l "plugin:gitignore-reconcile,category:git-hygiene" \
-      -d "$(printf "Repo: %s\nSkipped: %s\nFiles:\n%s" "$REPO_PATH" "$REASON" "$(echo "$IGNORED_TRACKED" | head -20)")" \
-      --silent 2>/dev/null || true
-    TOTAL_BEADS=$((TOTAL_BEADS + 1))
+
+    EXISTING_ID=$(bd list --status open -l "plugin:gitignore-reconcile" \
+      --desc-contains "Repo: $REPO_PATH" --json 2>/dev/null \
+      | jq -r 'if type == "array" then (.[0].id // empty) else empty end' 2>/dev/null || true)
+
+    if [ -n "$EXISTING_ID" ]; then
+      log "  SKIP: $REASON — updating existing bead $EXISTING_ID"
+      bd comments add "$EXISTING_ID" \
+        "$(printf "Still %s tracked+ignored file(s) as of %s.\nSkipped: %s" "$FILE_COUNT" "$(date -u +%Y-%m-%d)" "$REASON")" \
+        >/dev/null 2>&1 || true
+    else
+      log "  SKIP: $REASON — creating chore bead"
+      bd create "gitignore-reconcile: $RIG_NAME has $FILE_COUNT tracked+ignored file(s)" \
+        -t chore \
+        -l "plugin:gitignore-reconcile,category:git-hygiene" \
+        -d "$(printf "Repo: %s\nSkipped: %s\nFiles:\n%s" "$REPO_PATH" "$REASON" "$(echo "$IGNORED_TRACKED" | head -20)")" \
+        --silent 2>/dev/null || true
+      TOTAL_BEADS=$((TOTAL_BEADS + 1))
+    fi
     continue
   fi
 
@@ -92,7 +103,7 @@ Auto-committed by gitignore-reconcile plugin."
     TOTAL_UNTRACKED=$((TOTAL_UNTRACKED + COUNT))
     git -C "$REPO_PATH" push origin main 2>/dev/null || log "  WARN: push failed (committed locally)"
   fi
-done <<< "$RIG_PATHS"
+done <<< "$RIG_ENTRIES"
 
 # --- Report ------------------------------------------------------------------
 
