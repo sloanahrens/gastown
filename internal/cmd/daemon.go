@@ -47,8 +47,12 @@ var daemonStopCmd = &cobra.Command{
 	Short: "Stop the daemon",
 	Long: `Stop the running Gas Town daemon.
 
-Sends a stop signal to the daemon process and waits for it to exit.
 The daemon must be running or this command returns an error.
+
+When a supervisor (launchd / systemd) is provisioned for this town, the job is
+stopped through it rather than by signaling the process, so the daemon does not
+come back; 'gt daemon start' loads the job again. Without one, the daemon
+process is signaled and waited for.
 
 Examples:
   gt daemon stop`,
@@ -227,7 +231,7 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	running, pid, err := daemon.IsRunning(townRoot)
+	running, pid, err := daemonIsRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
@@ -235,10 +239,45 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("daemon is not running")
 	}
 
-	if err := daemon.StopDaemon(townRoot); err != nil {
-		return fmt.Errorf("stopping daemon: %w", err)
+	// A signal alone does not stop a supervised daemon: the loaded KeepAlive
+	// job respawns the process it manages, and one it does not manage takes
+	// the lock the moment the signal lands. Stop the job through the
+	// supervisor so the job is left unloaded, then mop up whatever still
+	// holds the lock (gt-sq9e).
+	stoppedUnder := ""
+	sup, supErr := detectDaemonSupervisor(townRoot)
+	switch {
+	case supErr != nil:
+		fmt.Fprintf(os.Stderr, "warning: could not tell whether a supervisor is provisioned for this town: %v\n", supErr)
+	case sup != nil:
+		if st := supervisorStateFor(sup.name); st.Loaded {
+			if runErr := supervisorRun(sup.stop); runErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not stop the %s job: %v\n", sup.name, runErr)
+			} else {
+				stoppedUnder = sup.name
+			}
+		}
 	}
 
+	// Whatever the supervisor left behind — a daemon it does not manage, or a
+	// job that was never loaded — the lock holder has to go before this can
+	// report a stop.
+	stillRunning, _, err := daemonIsRunning(townRoot)
+	switch {
+	case err != nil:
+		return fmt.Errorf("checking daemon status after stopping: %w", err)
+	case stillRunning:
+		if err := stopDaemonDirect(townRoot); err != nil {
+			return fmt.Errorf("stopping daemon: %w", err)
+		}
+	}
+
+	if stoppedUnder != "" {
+		fmt.Printf("%s Daemon stopped (was PID %d) — the %s job is stopped, so it stays down\n",
+			style.Bold.Render("✓"), pid, stoppedUnder)
+		fmt.Printf("  Start it again with: %s\n", style.Dim.Render("gt daemon start"))
+		return nil
+	}
 	fmt.Printf("%s Daemon stopped (was PID %d)\n", style.Bold.Render("✓"), pid)
 	return nil
 }
@@ -249,7 +288,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	running, pid, err := daemon.IsRunning(townRoot)
+	running, pid, err := daemonIsRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
@@ -260,7 +299,10 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			style.Bold.Render("running"),
 			pid)
 		fmt.Printf("  Town: %s\n", townRoot)
-		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatus())
+		// Reports on the supervisor's own process, not just its file: a daemon
+		// holding the lock while the provisioned job crash-loops behind it is
+		// the state this line has to name (gt-sq9e).
+		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatusLine(townRoot, pid, supervisorStateFor))
 
 		// Load state for more details
 		state, err := daemon.LoadState(townRoot)
@@ -286,7 +328,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Daemon is %s\n",
 			style.Dim.Render("○"),
 			"not running")
-		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatus())
+		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatusLine(townRoot, 0, supervisorStateFor))
 		fmt.Printf("\nStart with: %s\n", style.Dim.Render("gt daemon start"))
 	}
 
