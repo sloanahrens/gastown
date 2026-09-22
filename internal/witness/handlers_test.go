@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -2477,6 +2478,87 @@ func TestDetectStalledPolecats_NoSession(t *testing.T) {
 	// so polecats are skipped before structured signal checks.
 	if len(result.Stalled) != 0 {
 		t.Errorf("Stalled = %d, want 0 (no tmux sessions in test)", len(result.Stalled))
+	}
+}
+
+// writeFakeTmuxWithBlockingDialog creates a fake `tmux` binary that reports a
+// live session with a claude-like agent process whose pane is showing a
+// blocking selection dialog (matches containsBlockingQuestionDialog). Used
+// to drive DetectStalledPolecats all the way to recoverDialogBlockedPolecat
+// without a real tmux server or agent process.
+func writeFakeTmuxWithBlockingDialog(t *testing.T, dir string) {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *has-session*) exit 0;;\n" +
+		"  *show-environment*) echo 'unknown variable' >&2; exit 1;;\n" +
+		"  *display-message*) echo 'claude';;\n" +
+		"  *capture-pane*) printf 'Proceed?\\n1. Yes\\n2. No\\nEnter to select, Esc to cancel\\n';;\n" +
+		"  *send-keys*|*kill-session*) exit 0;;\n" +
+		"  *) exit 1;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatalf("writing fake tmux: %v", err)
+	}
+}
+
+// writeFakeGTRefusing creates a fake `gt` binary that always fails
+// immediately. recoverDialogBlockedPolecat shells out to the real `gt
+// escalate`; this keeps that call from ever reaching an actual `gt` binary
+// (and, via it, a live town) if one happens to be on the test runner's PATH.
+func writeFakeGTRefusing(t *testing.T, dir string) {
+	t.Helper()
+	script := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "gt"), []byte(script), 0755); err != nil {
+		t.Fatalf("writing fake gt: %v", err)
+	}
+}
+
+// TestDetectStalledPolecats_HonoursPauseMarker pins the pause gate the mayor
+// required for this scanner (gt-ahik, om kgx0): a frozen (SIGSTOPped)
+// polecat still has a live tmux session and process, so it looks exactly
+// like one stuck on a blocking dialog. Without the gate,
+// recoverDialogBlockedPolecat would send Escape and a nudge into a pane the
+// operator is deliberately holding. The control proves the fake tmux setup
+// actually reaches that path when the polecat is NOT paused, so the paused
+// case is a real skip, not an artifact of the test harness.
+func TestDetectStalledPolecats_HonoursPauseMarker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a Unix shell script to mock tmux")
+	}
+
+	binDir := t.TempDir()
+	writeFakeTmuxWithBlockingDialog(t, binDir)
+	writeFakeGTRefusing(t, binDir)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("GT_TOWN_SOCKET", "")
+
+	townRoot := t.TempDir()
+	rigName := "gastown"
+	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
+	for _, name := range []string{"frozen", "control"} {
+		if err := os.MkdirAll(filepath.Join(polecatsDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := agentpause.Pause(townRoot, rigName, "polecat", "frozen", "operator hold", "human", ""); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	result := DetectStalledPolecats(townRoot, rigName)
+
+	if result.Checked != 2 {
+		t.Fatalf("Checked = %d, want 2", result.Checked)
+	}
+	if len(result.Stalled) != 1 {
+		t.Fatalf("Stalled = %d, want exactly 1 (only the unpaused control)", len(result.Stalled))
+	}
+	if got := result.Stalled[0].PolecatName; got != "control" {
+		t.Errorf("Stalled[0].PolecatName = %q, want %q (the paused polecat must not appear at all)", got, "control")
+	}
+	if result.Stalled[0].StallType != "dialog-blocked" {
+		t.Errorf("Stalled[0].StallType = %q, want %q", result.Stalled[0].StallType, "dialog-blocked")
 	}
 }
 

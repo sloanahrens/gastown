@@ -108,7 +108,7 @@ var pauseGatedRoles = map[session.Role]bool{
 	session.RolePolecat: true,
 }
 
-// checkPauseGated refuses a pause target that no scanner honours, rather
+// checkPauseGated refuses a pause target that no scanner honors, rather
 // than writing a marker that silently does nothing. deacon has its own,
 // separate pause command (`gt deacon pause`) predating this one — the
 // "paused" bead state it writes still shows in `gt status` — and this

@@ -753,3 +753,24 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 		t.Errorf("unpaused witness PausedReason = %q, want empty", idle.PausedReason)
 	}
 }
+
+// TestBeadStatePausedStillShows pins the mayor's decision on gt-ahik/om
+// kgx0: `gt deacon pause` is a separate, existing feature that writes
+// agent_state=paused straight to the deacon bead with no agentpause marker
+// file, so agent.Paused (the marker-driven field) never covers it. Both
+// status renderers must keep showing it via the bead-state switch, or a
+// deacon paused that way silently disappears from `gt status`.
+func TestBeadStatePausedStillShows(t *testing.T) {
+	t.Parallel()
+	agent := AgentRuntime{Address: "deacon/", State: "paused"}
+
+	if indicator := buildStatusIndicator(agent); !strings.Contains(indicator, "paused") {
+		t.Errorf("buildStatusIndicator(%+v) = %q, want it to mention paused", agent, indicator)
+	}
+
+	var buf bytes.Buffer
+	renderAgentDetails(&buf, agent, "", nil, t.TempDir())
+	if out := buf.String(); !strings.Contains(out, "[paused]") {
+		t.Errorf("renderAgentDetails output = %q, want it to contain [paused]", out)
+	}
+}

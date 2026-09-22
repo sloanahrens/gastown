@@ -1,11 +1,53 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/session"
 )
+
+// TestCheckPauseGatedOnlyAllowsPolecat pins the whitelist (gt-ahik, om
+// kgx0): gt agent pause must refuse a target no scanner honors instead of
+// silently writing a marker nothing reads. Only the polecat zombie/stall
+// paths and the stuck-agent dog's polecat loop consult the marker.
+func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
+	if err := checkPauseGated(session.RolePolecat); err != nil {
+		t.Errorf("checkPauseGated(polecat) = %v, want nil", err)
+	}
+
+	for _, role := range []session.Role{
+		session.RoleMayor,
+		session.RoleDeacon,
+		session.RoleWitness,
+		session.RoleRefinery,
+		session.RoleCrew,
+	} {
+		t.Run(string(role), func(t *testing.T) {
+			err := checkPauseGated(role)
+			if err == nil {
+				t.Fatalf("checkPauseGated(%s) = nil, want a refusal (no scanner honors this role's marker)", role)
+			}
+			if !strings.Contains(err.Error(), string(role)) {
+				t.Errorf("error %q does not name the refused role %q", err, role)
+			}
+		})
+	}
+}
+
+// TestCheckPauseGatedDeaconHintsAtExistingCommand: deacon has its own,
+// separate pause command that predates this one — the refusal should point
+// there rather than leaving the operator to guess.
+func TestCheckPauseGatedDeaconHintsAtExistingCommand(t *testing.T) {
+	err := checkPauseGated(session.RoleDeacon)
+	if err == nil {
+		t.Fatal("checkPauseGated(deacon) = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "gt deacon pause") {
+		t.Errorf("error %q does not point to `gt deacon pause`", err)
+	}
+}
 
 // agentPauseAddresses are the forms an operator can hand to `gt agent
 // pause`/`resume`: polecat as either the two-segment shorthand or the
