@@ -159,6 +159,24 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	lastMaintenanceRun time.Time
 
+	// compactorDogMu guards the three fields below, and serializes compactor
+	// cycles. Due-ness is evaluated on the loop's tick and on the startup
+	// catch-up goroutine, and a cycle is expensive enough that two in flight at
+	// once must not happen.
+	compactorDogMu sync.Mutex
+
+	// compactorDogRunning is true while a cycle is in flight.
+	compactorDogRunning bool
+
+	// lastCompactorDogRun is the completion time of the last cycle this process
+	// ran, which can be newer than the persisted record when the write failed.
+	// Zero until the first cycle completes.
+	lastCompactorDogRun time.Time
+
+	// compactorDogChecked is true once this process has evaluated due-ness, so
+	// that "not due" is logged after a restart and not every 15 minutes.
+	compactorDogChecked bool
+
 	// mayorZombieCount tracks consecutive patrol cycles where the Mayor tmux
 	// session exists but the agent process is not detected. A count >= 3
 	// triggers a zombie restart, debouncing transient gaps during handoffs.
@@ -750,15 +768,23 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Start compactor dog ticker if configured.
-	// Flattens Dolt commit history to reclaim graph storage (daily).
+	// Monitors Dolt commit counts and escalates over threshold; compaction
+	// itself is operator-only. The ticker is a check cadence — due-ness comes
+	// from a persisted last-run time, because a run interval enforced by an
+	// in-process ticker resets on every restart (gt-ima2).
 	var compactorDogTicker *time.Ticker
 	var compactorDogChan <-chan time.Time
 	if d.isPatrolActive("compactor_dog") {
 		interval := compactorDogInterval(d.patrolConfig)
-		compactorDogTicker = time.NewTicker(interval)
+		compactorDogTicker = time.NewTicker(compactorDogTickInterval)
 		compactorDogChan = compactorDogTicker.C
 		defer compactorDogTicker.Stop()
-		d.logger.Printf("Compactor dog ticker started (interval %v)", interval)
+		d.logger.Printf("Compactor dog ticker started (check every %v, run interval %v)",
+			compactorDogTickInterval, interval)
+		// Catch up at startup rather than waiting for the first tick: due-ness
+		// is a wall-clock question and a restart must not postpone the answer
+		// (gt-ima2).
+		d.triggerCompactorDog()
 	}
 
 	// Start checkpoint dog ticker if configured.
@@ -933,10 +959,11 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-compactorDogChan:
-			// Compactor dog — flattens Dolt commit history on production databases.
-			// Reclaims commit graph storage, then runs gc to reclaim chunks.
+			// Compactor dog — monitors Dolt commit counts across production
+			// databases and escalates over threshold. Fires only when the
+			// persisted last run is a full interval old (gt-ima2).
 			if !d.isShutdownInProgress() {
-				d.runCompactorDog()
+				d.triggerCompactorDog()
 			}
 
 		case <-checkpointDogChan:
