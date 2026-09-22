@@ -2694,6 +2694,21 @@ func (t *Tmux) GetWindowActivity(session string) (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
+// SessionID returns the tmux session id (`#{session_id}`, e.g. "$3").
+//
+// It is the identity that changes when a session is killed and recreated under
+// the same name, and the name is the only thing the town reuses — a worktree's
+// refinery comes back as "gastown/refinery" every time. Callers that persist
+// per-session state across processes use it to tell a live run from a stamp an
+// older session left behind (gt-afa7).
+func (t *Tmux) SessionID(session string) (string, error) {
+	out, err := t.run("display-message", "-t", session, "-p", "#{session_id}")
+	if err != nil {
+		return "", fmt.Errorf("reading session id for %q: %w", session, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // ZombieStatus describes the liveness state of a tmux agent session.
 type ZombieStatus int
 

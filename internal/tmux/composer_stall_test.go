@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -274,22 +276,51 @@ func fakeTmuxLogging(t *testing.T, responses map[string]string) string {
 	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
 	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
 	b.WriteString("\tesac; done\n")
-	b.WriteString(`case "$sub" in` + "\n")
-	for sub, out := range responses {
-		if out == "@now" {
-			b.WriteString("\t" + sub + ") date +%s; exit 0;;\n")
-			continue
-		}
-		b.WriteString("\t" + sub + ") printf '%s' '" + out + "'; exit 0;;\n")
-	}
-	b.WriteString("\t*) exit 0;;\n")
-	b.WriteString("esac\n")
+	// display-message's last argument is its format string; make it part of the
+	// key so one shim can answer #{window_activity} and #{session_id} with
+	// different values. A key with no format still answers every display-message
+	// call, which is what the simpler tests rely on.
+	b.WriteString(`key=$sub` + "\n")
+	b.WriteString(`for a in "$@"; do case "$a" in '#'*) key="$sub:$a";; esac; done` + "\n")
+	writeShimCase(&b, responses, true)
+	writeShimCase(&b, responses, false)
 
 	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return logPath
+}
+
+// writeShimCase emits the case arms for one lookup pass. keyed selects the arms
+// whose key carries a format string (`display-message:#{session_id}`); the other
+// pass emits the bare-subcommand arms. Both passes are separate case statements,
+// so a keyed arm wins and an unkeyed response still answers any format.
+func writeShimCase(b *strings.Builder, responses map[string]string, keyed bool) {
+	if keyed {
+		b.WriteString(`case "$key" in` + "\n")
+	} else {
+		b.WriteString(`case "$sub" in` + "\n")
+	}
+	for key, out := range responses {
+		if strings.Contains(key, ":") != keyed {
+			continue
+		}
+		switch out {
+		case "@now":
+			b.WriteString("\t'" + key + "') date +%s; exit 0;;\n")
+		case "@fail":
+			b.WriteString("\t'" + key + "') exit 1;;\n")
+		default:
+			b.WriteString("\t'" + key + "') printf '%s' '" + out + "'; exit 0;;\n")
+		}
+	}
+	if !keyed {
+		// The bare pass is the last one: anything it does not answer is a
+		// subcommand this test does not care about.
+		b.WriteString("\t*) exit 0;;\n")
+	}
+	b.WriteString("esac\n")
 }
 
 // SubmitPendingInput must send exactly the keystroke that matches the pending
@@ -500,6 +531,350 @@ func TestDetectComposerStallQueuedFooterIsStalledAndQueued(t *testing.T) {
 	}
 	if !stall.Stalled || !stall.Queued {
 		t.Errorf("queued footer on a frozen session: stalled=%v queued=%v, want both true", stall.Stalled, stall.Queued)
+	}
+}
+
+// --- Pending-input age (gt-afa7) ------------------------------------------
+
+// clockStampPath is where PendingInputClock stores a session's stamp, so a test
+// can seed one the way an earlier probe would have.
+func clockStampPath(dir, session string) string {
+	return filepath.Join(dir, composerPendingSubdir, session)
+}
+
+// agedPendingClock returns a clock already holding a pending run for session
+// that began age ago over pane, as the daemon heartbeat or an earlier patrol
+// would have recorded it. The clock's directory is fresh per call.
+//
+// The progress digest is seeded from the same pane the detector is about to
+// read, because that is what an earlier probe over an unchanging pane would
+// have stored. A stamp whose digest did not match would be read as a run that
+// ended, which is a different test.
+func agedPendingClock(t *testing.T, session, pane string, age time.Duration) *PendingInputClock {
+	t.Helper()
+	dir := t.TempDir()
+	clock := NewPendingInputClock(dir)
+	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	now := time.Now()
+	data, err := json.Marshal(pendingStamp{
+		SessionID: testSessionID,
+		First:     now.Add(-age).Unix(),
+		// The previous probe, not this one: the span between the two is what
+		// makes the run continuous.
+		Last:     now.Add(-age / 4).Unix(),
+		Samples:  pendingInputMinSamples,
+		Progress: PaneProgressSignature(pane, DefaultReadyPromptPrefix),
+	})
+	if err != nil {
+		t.Fatalf("marshal stamp: %v", err)
+	}
+	if err := os.WriteFile(clockStampPath(dir, session), data, 0o644); err != nil {
+		t.Fatalf("seed stamp: %v", err)
+	}
+	return clock
+}
+
+// The gt-afa7 signature, and the branch that went unreported on 2026-09-22: the
+// pane is idle, holding queued input behind the send-now footer, and STILL
+// being written to — so the silence clock never runs out and the pre-gt-afa7
+// verdict was "not stalled" for as long as the input sat there. Input that has
+// outlived the threshold is a stall regardless of whether the pane is animating.
+func TestDetectComposerStallPendingInputThatOutlivedTheClockIsStalled(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane": queuedMessagesPane,
+		// The pane produced output this second. This is what defeats the
+		// silence window: the TUI repaints, and every nudge typed into the
+		// composer writes to the pane too.
+		"display-message":               "@now",
+		"display-message:#{session_id}": testSessionID,
+		"has-session":                   "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+	const frozenFor = 5 * time.Minute
+	clock := agedPendingClock(t, "gt-refinery", queuedMessagesPane, 6*time.Minute)
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", frozenFor, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.State != ComposerPending {
+		t.Fatalf("state = %s, want pending", stall.State)
+	}
+	if stall.Inactivity >= frozenFor {
+		t.Fatalf("fixture is not doing its job: inactivity %s is already past the threshold, so the silence clock would have caught this", stall.Inactivity)
+	}
+	if !stall.Stalled {
+		t.Fatalf("input pending for %s with a repainting pane was not reported as stalled (inactivity %s)",
+			stall.PendingFor, stall.Inactivity)
+	}
+	if stall.PendingFor < frozenFor {
+		t.Errorf("PendingFor = %s, want at least %s", stall.PendingFor, frozenFor)
+	}
+	if !strings.Contains(stall.Evidence, "waiting") {
+		t.Errorf("evidence %q does not report the waiting input", stall.Evidence)
+	}
+}
+
+// The first observation of a pending run only starts the clock. Acting on it
+// immediately would submit input that a working agent is about to consume, so
+// the age has to be earned across probes.
+func TestDetectComposerStallFirstPendingObservationOnlyStartsTheClock(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":    pendingTypedPane,
+		"display-message": "@now",
+		"has-session":     "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+	dir := t.TempDir()
+	clock := NewPendingInputClock(dir)
+	const frozenFor = 5 * time.Minute
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", frozenFor, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.State != ComposerPending {
+		t.Fatalf("state = %s, want pending", stall.State)
+	}
+	if stall.Stalled {
+		t.Error("the first observation of pending input was reported as a stall")
+	}
+	if stall.PendingFor != 0 {
+		t.Errorf("PendingFor = %s, want 0 on the first observation", stall.PendingFor)
+	}
+	if _, err := os.Stat(clockStampPath(dir, "gt-refinery")); err != nil {
+		t.Errorf("the clock did not record the observation: %v", err)
+	}
+}
+
+// Once the input is gone the run is over: a later wait must not inherit the old
+// age and report a fresh nudge as a long stall.
+func TestDetectComposerStallClearsTheClockWhenInputIsConsumed(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":    liveIdleCleanPane, // the agent picked the input up
+		"display-message": "@now",
+		"has-session":     "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+	dir := t.TempDir()
+	clock := NewPendingInputClock(dir)
+	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	// A run left over from before the agent drained its queue.
+	stamp, err := json.Marshal(pendingStamp{
+		SessionID: testSessionID,
+		First:     time.Now().Add(-time.Hour).Unix(),
+		Last:      time.Now().Add(-time.Hour + time.Minute).Unix(),
+		Samples:   pendingInputMinSamples + 1,
+		Progress:  PaneProgressSignature(pendingTypedPane, DefaultReadyPromptPrefix),
+	})
+	if err != nil {
+		t.Fatalf("marshal stamp: %v", err)
+	}
+	if err := os.WriteFile(clockStampPath(dir, "gt-refinery"), stamp, 0o644); err != nil {
+		t.Fatalf("seed stamp: %v", err)
+	}
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.Stalled {
+		t.Error("a clean composer with stale clock state was reported as stalled")
+	}
+	if _, err := os.Stat(clockStampPath(dir, "gt-refinery")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the clock kept its stamp after the input was consumed (stat err: %v)", err)
+	}
+}
+
+// A busy pane keeps the silence clock as its only signal. A long `go test` holds
+// queued input for longer than any useful threshold, so an age alone cannot
+// separate that from a stale indicator — acting on one would interrupt real
+// work, which is the gt-cyyg failure this detector exists alongside.
+func TestDetectComposerStallClockDoesNotOverrideBusyPane(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":                  liveBusyPane,
+		"display-message":               "@now", // genuinely working: still producing output
+		"display-message:#{session_id}": testSessionID,
+		"has-session":                   "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+	clock := agedPendingClock(t, "gt-refinery", liveBusyPane, 30*time.Minute)
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.State != ComposerBusy {
+		t.Fatalf("state = %s, want busy", stall.State)
+	}
+	if stall.Stalled {
+		t.Error("a working pane was reported as stalled because its composer had been non-empty for a while")
+	}
+}
+
+// The gt-hkhu guard, at the detector: an age measured on "the queue footer was
+// seen twice" flags a working or idle-await session carrying a legitimately
+// queued nudge. The age clock requires the pane's transcript region to be
+// unchanged for the whole run, so an agent that did anything in the window
+// restarts the clock instead of tripping it.
+func TestDetectComposerStallClockRestartsWhenThePaneShowsProgress(t *testing.T) {
+	const footer = "  Press up to edit queued messages · ctrl+x ctrl+s to send now"
+	const before = "⏺ Waiting on the review."
+	after := before + "\n⏺ Reviewed MR gt-abc: 3 files changed."
+
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":                  idleAwaitPane(after, "❯ ", footer),
+		"display-message":               "@now",
+		"display-message:#{session_id}": testSessionID,
+		"has-session":                   "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+
+	// The run was started over the pane as it stood before the agent worked.
+	clock := agedPendingClock(t, "gt-refinery", idleAwaitPane(before, "❯ ", footer), 30*time.Minute)
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.State != ComposerPending {
+		t.Fatalf("state = %s, want pending (the fixture must hold queued input)", stall.State)
+	}
+	if stall.Stalled {
+		t.Errorf("a pane that gained output during the window was reported as stalled (evidence: %s)", stall.Evidence)
+	}
+	if stall.PendingSamples != 1 {
+		t.Errorf("PendingSamples = %d, want 1 (the run must restart on progress)", stall.PendingSamples)
+	}
+}
+
+// A run whose samples all landed in one moment is not a run. Input seen before
+// a probe and again after it may have been consumed and replaced in between —
+// the defect is precisely that the old design measured "first stamp to now" and
+// called that continuous. The witness re-probes a composer three times 750ms
+// apart after submitting, so a caller really can accumulate samples that fast;
+// only a span across observations makes them evidence (gt-afa7).
+func TestDetectComposerStallBurstOfSamplesIsNotARun(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":                  queuedMessagesPane,
+		"display-message":               "@now",
+		"display-message:#{session_id}": testSessionID,
+		"has-session":                   "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+	const frozenFor = 5 * time.Minute
+
+	// An hour of apparent waiting and enough samples for the minimum — but the
+	// observations were taken a second apart, so the run has covered one
+	// moment of the pane rather than a window of it.
+	dir := t.TempDir()
+	clock := NewPendingInputClock(dir)
+	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	first := time.Now().Add(-time.Hour)
+	stamp, err := json.Marshal(pendingStamp{
+		SessionID: testSessionID,
+		First:     first.Unix(),
+		Last:      first.Add(time.Second).Unix(),
+		Samples:   pendingInputMinSamples,
+		Progress:  PaneProgressSignature(queuedMessagesPane, DefaultReadyPromptPrefix),
+	})
+	if err != nil {
+		t.Fatalf("marshal stamp: %v", err)
+	}
+	if err := os.WriteFile(clockStampPath(dir, "gt-refinery"), stamp, 0o644); err != nil {
+		t.Fatalf("seed stamp: %v", err)
+	}
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", frozenFor, clock)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if stall.Stalled {
+		t.Errorf("a burst of samples was reported as stalled (evidence: %s)", stall.Evidence)
+	}
+	if stall.PendingFor < frozenFor {
+		t.Errorf("PendingFor = %s, want the recorded age even when the run is not yet continuous", stall.PendingFor)
+	}
+}
+
+// The silence-only branch has to say how long the pane was quiet. It is the
+// most common way a stall trips and, before this, the only branch whose evidence
+// carried no timing at all.
+func TestDetectComposerStallSilenceOnlyEvidenceCarriesItsDuration(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":                  pendingTypedPane,
+		"display-message":               "1700000000", // 2023-11-14: silent since
+		"display-message:#{session_id}": testSessionID,
+		"has-session":                   "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, nil)
+	if err != nil {
+		t.Fatalf("DetectComposerStallTracked: %v", err)
+	}
+	if !stall.Stalled {
+		t.Fatalf("a pane silent since 2023 with pending input was not reported as stalled")
+	}
+	if !strings.Contains(stall.Evidence, "no pane output for") {
+		t.Errorf("evidence %q does not carry the silence duration", stall.Evidence)
+	}
+}
+
+// A verdict that could not be reached has to be audible. Returning a
+// zero-valued, nil-error verdict for an unclassifiable pane is how a stalled
+// session reads as a healthy one to every caller.
+func TestDetectComposerStallUnclassifiablePaneIsAnError(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		// No composer line anywhere in the capture, so nothing can be said
+		// about what the input box holds.
+		"capture-pane":    "⏺ Build finished.\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		"display-message": "@now",
+		"has-session":     "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+
+	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, nil)
+	if !errors.Is(err, ErrComposerUnobservable) {
+		t.Fatalf("err = %v, want ErrComposerUnobservable", err)
+	}
+	if stall.Stalled {
+		t.Error("an unclassifiable pane was reported as stalled")
+	}
+	if stall.State != ComposerUnknown {
+		t.Errorf("state = %s, want unknown", stall.State)
+	}
+}
+
+// Callers with nowhere to persist a clock keep the pre-gt-afa7 semantics: the
+// silence window is the only signal, and a repainting pane is not a stall. This
+// pins that DetectComposerStall did not silently gain a time source.
+func TestDetectComposerStallWithoutClockKeepsTheSilenceOnlyVerdict(t *testing.T) {
+	fakeTmuxLogging(t, map[string]string{
+		"capture-pane":    queuedMessagesPane,
+		"display-message": "@now",
+		"has-session":     "",
+	})
+	tm := NewTmuxWithSocket("gt-test-composer-stall")
+
+	stall, err := tm.DetectComposerStall("gt-refinery", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("DetectComposerStall: %v", err)
+	}
+	if stall.State != ComposerPending {
+		t.Fatalf("state = %s, want pending", stall.State)
+	}
+	if stall.PendingFor != 0 {
+		t.Errorf("PendingFor = %s, want 0 without a clock", stall.PendingFor)
+	}
+	if stall.Stalled {
+		t.Error("a clockless probe reported a stall on a pane that is still producing output")
 	}
 }
 

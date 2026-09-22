@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,8 +30,26 @@ import (
 // What separates the two cases is progress. A working agent repaints its pane
 // constantly (measured live 2026-09-18: every actively-working session showed
 // #{window_activity} age 0s, while idle-await sessions went quiet for 19s, 38s
-// and 254s). So a stall verdict here requires BOTH signals: unsubmitted input
-// present AND no pane output at all for the whole threshold window.
+// and 254s). So a stall verdict here requires unsubmitted input AND a clock that
+// has run out on it.
+//
+// The silence window alone is too weak a guard (gt-afa7): #{window_activity}
+// advances on ANY pane write, including each nudge typed into the composer by
+// the patrols trying to wake the session, so the one signal that could answer
+// "how long has this input been waiting?" is reset by the input itself. The
+// second clock is the pending-input age (PendingInputClock), which lives outside
+// the pane. Because an age alone cannot separate a wedged composer from a
+// working agent carrying a queued nudge (gt-hkhu), that clock only counts a run
+// it has EARNED: several observations spanning a minimum window, in the same tmux
+// session, with the pane's transcript region byte-identical throughout
+// (PaneProgressSignature). An agent that did anything at all during the window
+// restarts the clock rather than tripping it.
+
+// ErrComposerUnobservable means the pane was captured but could not be
+// classified: no prompt prefix to reason about, or no composer line in the
+// capture. It is an error rather than a zero-valued verdict because callers
+// read a nil error with Stalled false as a clean bill of health (gt-afa7).
+var ErrComposerUnobservable = errors.New("composer state could not be classified")
 
 // ComposerState classifies what a Claude Code pane's input box holds.
 type ComposerState int
@@ -175,10 +194,26 @@ type ComposerStall struct {
 	// Inactivity is how long since the session last produced pane output.
 	// Zero when the composer is not pending (nothing was measured).
 	Inactivity time.Duration
-	// FrozenFor is the threshold Inactivity was compared against.
+	// PendingFor is how long the composer has been continuously observed
+	// holding unsubmitted input, as reported by the caller's PendingInputClock.
+	// It is non-zero whenever an earlier probe started the run — including when
+	// the silence window is what tripped the verdict, and when both clocks ran
+	// out. It is zero only on the first observation of a run, and when no clock
+	// was supplied (see DetectComposerStallTracked). Use it for logs, not to
+	// tell which clock fired: Evidence names that in prose.
+	PendingFor time.Duration
+	// PendingSamples is how many consecutive observations have seen the
+	// composer pending. A run needs several before its age may be acted on, so
+	// a large PendingFor under a small PendingSamples means the clock was
+	// restarted mid-run by progress (gt-afa7).
+	PendingSamples int
+	// FrozenFor is the threshold Inactivity and PendingFor were compared
+	// against.
 	FrozenFor time.Duration
-	// Stalled is the verdict: input is pending AND the session has produced
-	// no output at all for FrozenFor.
+	// Stalled is the verdict: input is pending AND a clock has run out on it —
+	// no pane output for FrozenFor, or a continuous run of the input itself
+	// observed waiting for FrozenFor. Either one means nothing is coming to
+	// consume it (gt-afa7).
 	Stalled bool
 	// Evidence is a short human-readable justification for the verdict.
 	Evidence string
@@ -187,15 +222,13 @@ type ComposerStall struct {
 // DetectComposerStall reports whether a session is holding unsubmitted input
 // while producing no output at all.
 //
-// frozenFor is the required silence before a pending composer counts as
-// stalled. It is the guard against the known false positive: a working or
-// idle-await agent with a legitimately queued nudge still repaints its pane, so
-// its activity age stays far below any useful threshold. An agent that has been
-// silent for the full window AND has input waiting is not waiting for its turn
-// — that input will never be consumed without intervention.
+// frozenFor is the threshold both clocks are measured against: how long the
+// session must produce no pane output, or how long the input must be observed
+// waiting unattended, before a pending composer counts as stalled.
 //
-// When the composer is not pending, Inactivity is left unmeasured and Stalled
-// is false: this check never reports a bare quiet session as stalled.
+// Only unsubmitted input counts. An agent that is simply idle at the prompt
+// with a clean composer is healthy and is never reported: the check returns
+// early whenever the composer holds nothing.
 //
 // A busy indicator in the pane does NOT suppress the detection if the session
 // has been silent for the full frozen window. A stale busy indicator (from a
@@ -203,7 +236,36 @@ type ComposerStall struct {
 // blind the detector to a real stall (gt-ncon). The activity check is the
 // authoritative signal: if the session has produced no output for frozenFor,
 // the busy indicator is stale and the pending input is stranded.
+//
+// An unclassifiable pane returns ErrComposerUnobservable rather than a
+// zero-valued verdict, so a caller cannot read "I could not tell" as "healthy"
+// (gt-afa7).
+//
+// This form has no pending clock, so a stall requires the silence window.
+// Callers that can persist per-session state use DetectComposerStallTracked.
 func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (ComposerStall, error) {
+	return t.DetectComposerStallTracked(session, frozenFor, nil)
+}
+
+// DetectComposerStallTracked is DetectComposerStall with a PendingInputClock:
+// it reports a stall when input is pending and either the session has been
+// silent for frozenFor or the clock reports the input has been waiting that
+// long. A nil clock leaves only the silence window.
+//
+// The age clock short-circuits a signal that the thing being detected can
+// reset: #{window_activity} advances on any pane write, including every nudge
+// typed into the stalled composer, so a session collecting nudges from an
+// anxious patrol never accumulates enough silence to be noticed (gt-afa7).
+//
+// The age clock is gated on evidence beyond "input was seen twice". It only
+// acts on a run whose samples are consecutive and span a minimum window, are
+// keyed to this tmux session, and kept the pane's transcript region
+// byte-identical throughout (see PendingInputClock and
+// PaneProgressSignature). An agent that did any work during the window — a
+// working or idle-await one carrying a legitimately queued nudge — advances
+// that region and restarts the clock, which is what keeps the gt-hkhu false
+// positive from coming back.
+func (t *Tmux) DetectComposerStallTracked(session string, frozenFor time.Duration, clock *PendingInputClock) (ComposerStall, error) {
 	result := ComposerStall{Session: session, FrozenFor: frozenFor}
 
 	// -e is required: the dim attribute distinguishes typed input from
@@ -215,16 +277,28 @@ func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (Com
 		return result, fmt.Errorf("capturing pane for %q: %w", session, err)
 	}
 
-	probe := analyzeComposerState(content, readyPromptPrefixForSession(t, session))
+	promptPrefix := readyPromptPrefixForSession(t, session)
+	probe := analyzeComposerState(content, promptPrefix)
 	result.State = probe.State
 	result.Queued = probe.Queued
 	result.Evidence = probe.Evidence
+
+	// The pane was read but says nothing we can classify, and an unreadable
+	// composer must not read as a healthy one (gt-afa7).
+	if probe.State == ComposerUnknown {
+		return result, fmt.Errorf("%w for %q: %s", ErrComposerUnobservable, session, probe.Evidence)
+	}
 
 	// If the pane is busy, check the activity to distinguish a genuinely
 	// working agent from a stalled one with a stale busy indicator (gt-ncon).
 	// A stale busy indicator can linger in the pane capture after a turn ends,
 	// and would otherwise blind the detector to a real stall.
 	if probe.State == ComposerBusy {
+		// The age clock is not consulted here: a long-running turn holds
+		// queued input past any useful threshold, so an age alone cannot
+		// separate that from a stale indicator (gt-cyyg). End the run — the
+		// running turn owns whatever is queued.
+		clock.Reset(session)
 		activity, err := t.GetWindowActivity(session)
 		if err != nil {
 			return result, fmt.Errorf("reading activity for %q: %w", session, err)
@@ -238,7 +312,7 @@ func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (Com
 			// gt-ncon signature: a stale busy indicator masking a real stall.
 			// Re-classify the pane without the busy check to see if there's
 			// pending input.
-			reprobe := analyzeComposerStateNoBusy(content, readyPromptPrefixForSession(t, session))
+			reprobe := analyzeComposerStateNoBusy(content, promptPrefix)
 			if reprobe.State == ComposerPending {
 				result.State = ComposerPending
 				result.Queued = reprobe.Queued
@@ -249,18 +323,65 @@ func (t *Tmux) DetectComposerStall(session string, frozenFor time.Duration) (Com
 		return result, nil
 	}
 
-	// If the pane is not pending, there's nothing to detect.
+	// If the pane is not pending, there's nothing to detect. End any pending
+	// run so a later wait starts its own clock.
 	if probe.State != ComposerPending {
+		clock.Reset(session)
 		return result, nil
 	}
+
+	// Input is waiting and no turn is running (the busy check above returned
+	// early), so nothing is coming to consume it. Either clock running out is
+	// the stall.
+	//
+	// The age clock is fed the pane's transcript-region digest and the tmux
+	// session id, so it can tell a run that has been genuinely unattended from
+	// one where the agent kept working — or the session died and a fresh one
+	// took its name (gt-afa7).
+	wait := clock.Observe(session, t.sessionID(session), PaneProgressSignature(content, promptPrefix), time.Now())
+	result.PendingFor = wait.Waiting
+	result.PendingSamples = wait.Samples
 
 	activity, err := t.GetWindowActivity(session)
 	if err != nil {
 		return result, fmt.Errorf("reading activity for %q: %w", session, err)
 	}
 	result.Inactivity = time.Since(activity)
-	result.Stalled = result.Inactivity >= frozenFor
+
+	frozen := frozenFor > 0 && result.Inactivity >= frozenFor
+	waiting := frozenFor > 0 && wait.Continuous && result.PendingFor >= frozenFor
+	result.Stalled = frozen || waiting
+	switch {
+	case frozen && waiting:
+		result.Evidence = fmt.Sprintf("%s (no pane output for %s, input waiting %s)",
+			probe.Evidence, result.Inactivity.Round(time.Second), result.PendingFor.Round(time.Second))
+	case waiting:
+		// The pane is still being written to, so the silence clock cannot run
+		// out — the age is the only evidence there is.
+		result.Evidence = fmt.Sprintf("%s (input waiting %s; pane still repainting, so the silence clock cannot run out)",
+			probe.Evidence, result.PendingFor.Round(time.Second))
+	case frozen:
+		// The pane has gone quiet, so the silence clock is the evidence.
+		result.Evidence = fmt.Sprintf("%s (no pane output for %s)", probe.Evidence, result.Inactivity.Round(time.Second))
+	}
 	return result, nil
+}
+
+// sessionID resolves a session's tmux id, or "" when it cannot be read.
+//
+// An unreadable identity is not an error for the stall check: it only costs the
+// age clock this observation, leaving the silence window, which is the
+// conservative direction — an unidentified run has no age to act on. In
+// practice this cannot silently disable the age clock for long: the read goes
+// through the same display-message call as GetWindowActivity, so a tmux that
+// cannot answer this one has already failed the activity read above and
+// returned an error.
+func (t *Tmux) sessionID(session string) string {
+	id, err := t.SessionID(session)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // analyzeComposerStateNoBusy is like analyzeComposerState but skips the busy

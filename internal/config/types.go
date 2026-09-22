@@ -549,11 +549,20 @@ type WitnessThresholds struct {
 	// The witness exposes the signal; patrol formula decides whether to escalate.
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
 
-	// ComposerStallFrozenFor is how long a session must produce no pane output
-	// while holding unsubmitted composer input before it counts as stalled
-	// (default "5m"). This is the guard that separates a genuinely wedged
-	// agent from a working or idle-await one carrying a queued nudge — see
-	// tmux.DetectComposerStall (gt-hkhu).
+	// ComposerStallFrozenFor is the threshold BOTH composer-stall clocks are
+	// measured against (default "5m"): how long a session must produce no pane
+	// output while holding unsubmitted composer input, or how long that input
+	// must be observed waiting unattended, before the session counts as
+	// stalled. There is deliberately no second knob — an operator tuning stall
+	// detection has one number to reason about.
+	//
+	// It is the guard that separates a genuinely wedged agent from a working or
+	// idle-await one carrying a queued nudge. Note that the input's age alone
+	// is not evidence: a run may only trip it once several samples spanning a
+	// minimum window agree and the pane's transcript region has been unchanged
+	// throughout, so an agent that did any work in the window restarts the
+	// clock instead of tripping it (gt-hkhu, gt-afa7). See
+	// tmux.DetectComposerStallTracked.
 	ComposerStallFrozenFor string `json:"composer_stall_frozen_for,omitempty"`
 }
 

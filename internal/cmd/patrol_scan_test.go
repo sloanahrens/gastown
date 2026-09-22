@@ -305,3 +305,99 @@ func TestBuildActivityOutput(t *testing.T) {
 		t.Errorf("undated session reported an age: %v", *undated.LastActivityAgeSeconds)
 	}
 }
+
+// The human stall line names the clocks that carried evidence, and it must not
+// claim a pending age it does not have. A first observation reports zero, and
+// "input waiting 0s" reads as input that has just arrived — the opposite of what
+// a silence-clock verdict means (gt-afa7).
+func TestPatrolScanHumanRefineryLineReportsOnlyTheClocksItHas(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    witness.DetectRefineryStallResult
+		want      []string
+		notWanted []string
+	}{
+		{
+			name: "silence clock alone names no pending age",
+			result: witness.DetectRefineryStallResult{
+				Checked: 1,
+				Stalls: []witness.RefineryStallResult{{
+					Agent:      "refinery",
+					StallType:  "composer-stall",
+					State:      "pending",
+					Inactivity: 6 * time.Minute,
+					Action:     witness.ComposerStallActionStillPending,
+				}},
+			},
+			want:      []string{"silent 6m0s"},
+			notWanted: []string{"input waiting"},
+		},
+		{
+			name: "age clock names its age and its samples",
+			result: witness.DetectRefineryStallResult{
+				Checked: 1,
+				Stalls: []witness.RefineryStallResult{{
+					Agent:          "refinery",
+					StallType:      "composer-stall",
+					State:          "pending",
+					Inactivity:     time.Second,
+					PendingFor:     6 * time.Minute,
+					PendingSamples: 4,
+					Action:         witness.ComposerStallActionSubmittedQueued,
+				}},
+			},
+			want: []string{"input waiting 6m0s", "4 observation(s)", "silent 1s"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.result
+			printed := captureStdout(t, func() {
+				if err := outputPatrolScanHuman("gastown", nil, nil, &result, nil, nil, nil); err != nil {
+					t.Errorf("outputPatrolScanHuman: %v", err)
+				}
+			})
+			for _, want := range tt.want {
+				if !strings.Contains(printed, want) {
+					t.Errorf("output %q does not mention %q", printed, want)
+				}
+			}
+			for _, unwanted := range tt.notWanted {
+				if strings.Contains(printed, unwanted) {
+					t.Errorf("output %q mentions %q, which this stall has no evidence for", printed, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// The JSON carries the sample count so a reader can tell a run that was
+// restarted mid-flight from one that has been continuously unattended: a large
+// age beside a small count means the clock went back to zero in between.
+func TestPatrolScanRefineryItemSerializesPendingSamples(t *testing.T) {
+	t.Parallel()
+	item := PatrolScanRefineryItem{
+		Session:        "gt-gastown-refinery",
+		Agent:          "refinery",
+		StallType:      "composer-stall",
+		State:          "pending",
+		PendingSeconds: 360,
+		PendingSamples: 4,
+		Action:         witness.ComposerStallActionSubmittedQueued,
+	}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var parsed PatrolScanRefineryItem
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.PendingSamples != 4 {
+		t.Errorf("PendingSamples = %d, want 4", parsed.PendingSamples)
+	}
+	if !strings.Contains(string(data), "pending_samples") {
+		t.Errorf("JSON %s does not carry pending_samples", data)
+	}
+}
