@@ -246,6 +246,19 @@ func TestKillPayload(t *testing.T) {
 	}
 }
 
+func TestWorktreePrunePayload(t *testing.T) {
+	p := WorktreePrunePayload("dog", "rex", "/gt/deacon/dogs/rex/gastown")
+	if p["kind"] != "dog" {
+		t.Errorf("kind = %v, want dog", p["kind"])
+	}
+	if p["owner"] != "rex" {
+		t.Errorf("owner = %v, want rex", p["owner"])
+	}
+	if p["path"] != "/gt/deacon/dogs/rex/gastown" {
+		t.Errorf("path = %v, want /gt/deacon/dogs/rex/gastown", p["path"])
+	}
+}
+
 func TestHaltPayload(t *testing.T) {
 	services := []string{"witness", "refinery", "deacon"}
 	p := HaltPayload(services)
