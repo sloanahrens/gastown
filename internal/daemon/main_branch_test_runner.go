@@ -221,6 +221,13 @@ func measureHostLoad() hostLoad {
 // (gt-f57o, same pattern as slot.SetContainerListerForTest).
 var measureHostLoadFn = measureHostLoad
 
+// EstimateCPUIdlePercent gives callers outside this package the same
+// host-busy signal hostBusyReason uses (gt-f57o): one load-average read, no
+// multi-second sampling.
+func EstimateCPUIdlePercent() float64 {
+	return measureHostLoad().IdlePercent
+}
+
 // computeCPUIdlePercent converts a 1-minute load average into an idle
 // percentage: load 0 is 100% idle, load == cores is 0% idle, and more load
 // than cores clamps to 0. A non-positive core count reports 100 — nothing
