@@ -349,23 +349,123 @@ func TestRunDaemonStop_UnloadedJobSignalsTheDaemon(t *testing.T) {
 	}
 }
 
-// A supervisor that cannot stop the job must not leave the daemon running:
-// the signal still goes out, so a stop is never a no-op.
-func TestRunDaemonStop_SupervisorFailureFallsBackToASignal(t *testing.T) {
+// A supervisor that cannot stop the job leaves the daemon's fate unproven:
+// the signal still goes out, so a stop is never a no-op, but the command must
+// not report the stop it could not confirm (gt-ojbb).
+func TestRunDaemonStop_SupervisorFailureIsNotReportedAsSuccess(t *testing.T) {
 	town := t.TempDir()
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
 	calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("Boot-out failed: 3: No such process"))
 	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
 	chdirTown(t, town)
 
-	if err := runDaemonStop(nil, nil); err != nil {
-		t.Fatalf("runDaemonStop: %v", err)
+	err := runDaemonStop(nil, nil)
+	if err == nil {
+		t.Fatal("runDaemonStop reported success although the launchd job could not be stopped")
 	}
-	if len(calls.argv) == 0 {
-		t.Fatal("did not try the supervisor first")
+	if !strings.Contains(err.Error(), "com.gastown.daemon") && !strings.Contains(err.Error(), "launchd") {
+		t.Errorf("err = %v, want it to name the job that may still be loaded", err)
+	}
+	if got := calls.joined(); got != "launchctl bootout gui/"+strconv.Itoa(os.Getuid())+"/com.gastown.daemon" {
+		t.Fatalf("supervisor command = %q, want the bootout attempt", got)
 	}
 	if !calls.stopped {
 		t.Fatal("did not signal the daemon after the supervisor could not stop the job")
+	}
+}
+
+// A probe that fails says nothing about whether the job is loaded, so the
+// unreadable state is the same uncertainty as a failed bootout — not the
+// "not loaded" reading that turns into a signal and a success report (gt-ojbb).
+func TestRunDaemonStop_ProbeFailureIsNotReportedAsSuccess(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	state := templates.SupervisorState{Err: errors.New("launchctl print: exit status 1")}
+	calls := stubSupervisor(t, "darwin", plist, state, nil)
+	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	chdirTown(t, town)
+
+	err := runDaemonStop(nil, nil)
+	if err == nil {
+		t.Fatal("runDaemonStop reported success although the job's state could not be read")
+	}
+	if !strings.Contains(err.Error(), "launchctl print") {
+		t.Errorf("err = %v, want it to carry the probe failure", err)
+	}
+	if len(calls.argv) != 0 {
+		t.Fatalf("ran=%v, want no supervisor command on a failed probe", calls.argv)
+	}
+	if !calls.stopped {
+		t.Fatal("did not signal the daemon when the job's state was unknown")
+	}
+}
+
+// Detection failing means the town may or may not have a KeepAlive job; the
+// daemon is still signaled, and the unknown is reported rather than assumed
+// away (gt-ojbb).
+func TestRunDaemonStop_DetectionFailureIsNotReportedAsSuccess(t *testing.T) {
+	town := t.TempDir()
+	// Present but silent about its town: detectDaemonSupervisor errors rather
+	// than answering "no supervisor".
+	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	if err := os.WriteFile(plist, []byte("<plist><dict><key>Label</key><string>com.gastown.daemon</string></dict></plist>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	chdirTown(t, town)
+
+	err := runDaemonStop(nil, nil)
+	if err == nil {
+		t.Fatal("runDaemonStop reported success although it could not tell whether a supervisor exists")
+	}
+	if !strings.Contains(err.Error(), "WorkingDirectory") {
+		t.Errorf("err = %v, want it to carry the detection failure", err)
+	}
+	if len(calls.argv) != 0 {
+		t.Fatalf("ran=%v, want no supervisor command when detection failed", calls.argv)
+	}
+	if !calls.stopped {
+		t.Fatal("did not signal the daemon when the supervisor was unknown")
+	}
+}
+
+// A supervisor SIGTERM can land between the re-check and StopDaemon's own: the
+// daemon releases the lock, StopDaemon finds nothing to stop and reports "not
+// running", and the stop that did happen must not surface as a failure (gt-ojbb).
+func TestRunDaemonStop_DaemonReleasingTheLockMidStopIsNotAnError(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	stopDaemonDirect = func(string) error { calls.stopped = true; return errors.New("daemon is not running") }
+	checks := 0
+	daemonIsRunning = func(string) (bool, int, error) {
+		checks++
+		return checks < 3, 4242, nil // holding the lock, then gone
+	}
+	chdirTown(t, town)
+
+	if err := runDaemonStop(nil, nil); err != nil {
+		t.Fatalf("runDaemonStop: %v, want no error for a daemon that stopped under the bootout", err)
+	}
+	if !calls.stopped {
+		t.Fatal("did not attempt the direct stop after the bootout")
+	}
+}
+
+// Still holding the lock after a failed direct stop is a stop that did not
+// happen, and it stays an error (gt-ojbb).
+func TestRunDaemonStop_StillRunningAfterTheDirectStopIsAnError(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	stopDaemonDirect = func(string) error { return errors.New("sending termination signal: operation not permitted") }
+	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	chdirTown(t, town)
+
+	err := runDaemonStop(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("err = %v, want the direct stop failure", err)
 	}
 }
 
