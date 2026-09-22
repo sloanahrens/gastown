@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Operational constants — timeouts needed to perform checks.
@@ -15,9 +16,9 @@ const (
 // Default advisory thresholds — used for recommendations in the report.
 // These are defaults; override via DoctorDogConfig fields.
 const (
-	defaultDoctorDogLatencyAlertMs      = 5000.0
-	defaultDoctorDogOrphanAlertCount    = 20
-	defaultDoctorDogBackupStaleSeconds  = 3600.0
+	defaultDoctorDogLatencyAlertMs     = 5000.0
+	defaultDoctorDogOrphanAlertCount   = 20
+	defaultDoctorDogBackupStaleSeconds = 3600.0
 )
 
 // DoctorDogConfig holds configuration for the doctor_dog patrol.
@@ -117,4 +118,56 @@ func (d *Daemon) runDoctorDog() {
 	}
 
 	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
+}
+
+// cleanupOrphanedDoltServers reaps orphaned test 'dolt sql-server' processes:
+// leftovers from an embedded-dolt test suite killed at its timeout, whose
+// shared/per-test server never got torn down and was reparented to
+// init/launchd. An 18h-old orphan survived beads' own test-side reaper, so
+// the town needs its own guard on the doctor_dog cadence (gt-twil).
+//
+// Code-driven, not molecule-based: unlike the rest of doctor_dog, detection
+// and SIGTERM here don't need agent judgment, and running on a 5-minute
+// ticker (vs. an agent-dispatched molecule) catches the leak before it can
+// survive to contaminate a gate run.
+func (d *Daemon) cleanupOrphanedDoltServers() {
+	orphans, err := util.FindOrphanDoltServers(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("Warning: dolt orphan server scan failed: %v", err)
+		return
+	}
+
+	for _, o := range orphans {
+		if o.Reason != "orphan" {
+			d.logger.Printf("dolt orphan server scan: unexpected dolt sql-server PID %d ppid=%d (%s) — not auto-reaped",
+				o.PID, o.PPID, o.ConfigPath)
+		}
+	}
+
+	if results := util.ReapOrphanDoltServers(orphans); len(results) > 0 {
+		d.logger.Printf("dolt orphan server cleanup: reaped %d process(es)", len(results))
+		for _, r := range results {
+			if r.Error != nil {
+				d.logger.Printf("  WARNING: SIGTERM PID %d (%s) failed: %v", r.Process.PID, r.Process.ConfigPath, r.Error)
+			} else {
+				d.logger.Printf("  Sent SIGTERM to PID %d ppid=%d: %s", r.Process.PID, r.Process.PPID, r.Process.ConfigPath)
+			}
+		}
+	}
+
+	stale, err := util.FindStaleBeadsTestTempDirs()
+	if err != nil {
+		d.logger.Printf("Warning: stale beads test temp dir scan failed: %v", err)
+		return
+	}
+	if len(stale) == 0 {
+		return
+	}
+	removed, err := util.RemoveStaleBeadsTestTempDirs(stale)
+	if len(removed) > 0 {
+		d.logger.Printf("dolt orphan server cleanup: removed %d stale beads-bd-tests-* temp dir(s)", len(removed))
+	}
+	if err != nil {
+		d.logger.Printf("Warning: failed to remove some stale test temp dirs: %v", err)
+	}
 }
