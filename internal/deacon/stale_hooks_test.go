@@ -1,10 +1,16 @@
 package deacon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestAssigneeToSessionName(t *testing.T) {
@@ -248,6 +254,226 @@ func TestDefaultStaleHookConfig(t *testing.T) {
 	}
 	if cfg.DryRun {
 		t.Error("DryRun should default to false")
+	}
+}
+
+// setupHookStoreTown builds a town root whose routes.jsonl names one rig with
+// a store on disk and one rig without, mirroring the live layout where a rig's
+// beads live under <rig>/mayor/rig/.beads. Returns (townRoot, rigBeadsDir).
+func setupHookStoreTown(t *testing.T) (string, string) {
+	t.Helper()
+
+	townRoot := t.TempDir()
+	rigBeadsDir := filepath.Join(townRoot, "testrig", "mayor", "rig", ".beads")
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+
+	for _, dir := range []string{townBeadsDir, rigBeadsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := beads.WriteRoutes(townBeadsDir, []beads.Route{
+		{Prefix: "hq-", Path: "."},
+		{Prefix: "hq-cv-", Path: "."},
+		{Prefix: "gt-", Path: "testrig/mayor/rig"},
+		{Prefix: "gh-", Path: "ghost/mayor/rig"}, // directory never created
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return townRoot, rigBeadsDir
+}
+
+// hookedIssue builds the beads.Issue shape bd list returns for a hooked bead.
+func hookedIssue(id, assignee, updatedAt string) *beads.Issue {
+	return &beads.Issue{
+		ID:        id,
+		Title:     "hooked work",
+		Status:    beads.StatusHooked,
+		Assignee:  assignee,
+		UpdatedAt: updatedAt,
+	}
+}
+
+// stubHookStores replaces the store query and reset hooks for one test,
+// returning a pointer to the stores each reset was aimed at.
+func stubHookStores(t *testing.T, list func(hookStore) ([]*beads.Issue, error)) *[]hookStore {
+	t.Helper()
+
+	originalList, originalUnhook := listStoreHooks, unhookStoreBead
+	t.Cleanup(func() {
+		listStoreHooks, unhookStoreBead = originalList, originalUnhook
+	})
+	listStoreHooks = list
+
+	resetStores := &[]hookStore{}
+	unhookStoreBead = func(store hookStore, _ string) error {
+		*resetStores = append(*resetStores, store)
+		return nil
+	}
+
+	return resetStores
+}
+
+func TestDiscoverHookStores(t *testing.T) {
+	townRoot, rigBeadsDir := setupHookStoreTown(t)
+
+	stores, err := discoverHookStores(townRoot)
+	if err != nil {
+		t.Fatalf("discoverHookStores() error = %v", err)
+	}
+
+	want := []hookStore{
+		{Name: "town", BeadsDir: filepath.Join(townRoot, ".beads")},
+		{Name: "testrig", BeadsDir: rigBeadsDir},
+	}
+	if len(stores) != len(want) {
+		t.Fatalf("discoverHookStores() = %v, want %v", stores, want)
+	}
+	for i, store := range stores {
+		if store != want[i] {
+			t.Errorf("store[%d] = %v, want %v", i, store, want[i])
+		}
+	}
+}
+
+// TestScanStaleHooksSearchesRigStores is the regression for gt-hdph: a bead
+// hooked in a rig store must be found when it is not in the town store, and
+// the unhook must land in the store that holds it.
+func TestScanStaleHooksSearchesRigStores(t *testing.T) {
+	townRoot, rigBeadsDir := setupHookStoreTown(t)
+
+	var listed []string
+	resetStores := stubHookStores(t, func(store hookStore) ([]*beads.Issue, error) {
+		listed = append(listed, store.Name)
+		if store.Name != "testrig" {
+			return nil, nil
+		}
+		return []*beads.Issue{hookedIssue("gt-fr3r", "testrig/polecats/garnet",
+			time.Now().Add(-3*time.Hour).UTC().Format(time.RFC3339))}, nil
+	})
+
+	result, err := ScanStaleHooks(townRoot, &StaleHookConfig{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("ScanStaleHooks() error = %v", err)
+	}
+
+	if got, want := listed, []string{"town", "testrig"}; !slices.Equal(got, want) {
+		t.Errorf("stores queried = %v, want %v", got, want)
+	}
+	if result.TotalHooked != 1 || result.StaleCount != 1 || result.Unhooked != 1 {
+		t.Errorf("TotalHooked/StaleCount/Unhooked = %d/%d/%d, want 1/1/1",
+			result.TotalHooked, result.StaleCount, result.Unhooked)
+	}
+	if len(result.Results) != 1 || result.Results[0].Store != "testrig" {
+		t.Fatalf("Results = %+v, want one result tagged store=testrig", result.Results)
+	}
+	if len(*resetStores) != 1 || (*resetStores)[0].BeadsDir != rigBeadsDir {
+		t.Errorf("reset targeted %v, want the rig store %s", *resetStores, rigBeadsDir)
+	}
+	if len(result.StoresSearched) != 2 {
+		t.Errorf("StoresSearched = %v, want both stores named", result.StoresSearched)
+	}
+}
+
+func TestScanStaleHooksReportsStoresSearched(t *testing.T) {
+	townRoot, rigBeadsDir := setupHookStoreTown(t)
+
+	resetStores := stubHookStores(t, func(hookStore) ([]*beads.Issue, error) { return nil, nil })
+
+	result, err := ScanStaleHooks(townRoot, &StaleHookConfig{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("ScanStaleHooks() error = %v", err)
+	}
+
+	if result.TotalHooked != 0 || len(result.Results) != 0 {
+		t.Errorf("expected no hooked beads, got %d", result.TotalHooked)
+	}
+	if resetStoresRun := *resetStores; len(resetStoresRun) != 0 {
+		t.Errorf("unhooked %v, want nothing", resetStoresRun)
+	}
+	joined := strings.Join(result.StoresSearched, " ")
+	for _, want := range []string{"town", "testrig", rigBeadsDir} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("StoresSearched = %v, want it to name %q", result.StoresSearched, want)
+		}
+	}
+}
+
+func TestScanStaleHooksStoreErrorDoesNotAbortScan(t *testing.T) {
+	townRoot, _ := setupHookStoreTown(t)
+
+	resetStores := stubHookStores(t, func(store hookStore) ([]*beads.Issue, error) {
+		if store.Name == "town" {
+			return nil, errors.New("dolt unreachable")
+		}
+		return []*beads.Issue{hookedIssue("gt-abc", "testrig/polecats/garnet",
+			time.Now().Add(-3*time.Hour).UTC().Format(time.RFC3339))}, nil
+	})
+
+	result, err := ScanStaleHooks(townRoot, &StaleHookConfig{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("ScanStaleHooks() error = %v", err)
+	}
+
+	if result.TotalHooked != 1 || result.Unhooked != 1 {
+		t.Errorf("TotalHooked/Unhooked = %d/%d, want 1/1", result.TotalHooked, result.Unhooked)
+	}
+	if resetStoresRun := *resetStores; len(resetStoresRun) != 1 {
+		t.Errorf("unhooked %v, want the reachable store's bead", resetStoresRun)
+	}
+	if got := result.StoreErrors["town"]; !strings.Contains(got, "dolt unreachable") {
+		t.Errorf("StoreErrors = %v, want the town store's failure recorded", result.StoreErrors)
+	}
+}
+
+func TestScanStaleHooksFailsWhenNoStoreAnswers(t *testing.T) {
+	townRoot, _ := setupHookStoreTown(t)
+
+	resetStores := stubHookStores(t, func(hookStore) ([]*beads.Issue, error) {
+		return nil, errors.New("dolt unreachable")
+	})
+
+	_, err := ScanStaleHooks(townRoot, &StaleHookConfig{MaxAge: time.Hour})
+	if err == nil {
+		t.Fatal("ScanStaleHooks() error = nil, want failure when no store answers")
+	}
+	if resetStoresRun := *resetStores; len(resetStoresRun) != 0 {
+		t.Errorf("unhooked %v behind a failed scan, want nothing", resetStoresRun)
+	}
+}
+
+func TestScanStaleHooksAgeFallbackNeedsParsedTimestamp(t *testing.T) {
+	townRoot, _ := setupHookStoreTown(t)
+
+	stubHookStores(t, func(store hookStore) ([]*beads.Issue, error) {
+		if store.Name != "testrig" {
+			return nil, nil
+		}
+		// No assignee: session liveness can't be checked, so both beads fall
+		// back to age. Only the parseable one is stale — an unreadable
+		// timestamp must not pass for infinitely old (it would unhook live work).
+		return []*beads.Issue{
+			hookedIssue("gt-unreadable", "", "not-a-timestamp"),
+			hookedIssue("gt-aged", "", time.Now().Add(-3*time.Hour).UTC().Format(time.RFC3339)),
+		}, nil
+	})
+
+	result, err := ScanStaleHooks(townRoot, &StaleHookConfig{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("ScanStaleHooks() error = %v", err)
+	}
+
+	if result.TotalHooked != 2 || result.StaleCount != 1 {
+		t.Fatalf("TotalHooked/StaleCount = %d/%d, want 2/1", result.TotalHooked, result.StaleCount)
+	}
+	if result.Results[0].BeadID != "gt-aged" {
+		t.Errorf("stale bead = %s, want gt-aged", result.Results[0].BeadID)
+	}
+	if result.Results[0].Age != "3h0m0s" {
+		t.Errorf("Age = %q, want %q", result.Results[0].Age, "3h0m0s")
 	}
 }
 
