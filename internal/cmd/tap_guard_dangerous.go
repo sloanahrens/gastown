@@ -560,42 +560,105 @@ func shellTokenize(command string) []string {
 // the joined command ("git \" + newline + "  checkout -b x") is invisible to
 // those same matchers (gt-3j8u). Both rules are skipped inside single
 // quotes, where a backslash is literal and a newline is just a character.
+//
+// A $(...) or `...` command substitution opens a quoting SCOPE of its own:
+// the shell re-parses that body as a command in its own right, so a "'" that
+// is literal inside a double-quoted word is a real quote again inside the
+// body. With one flat quote flag the body's own '"' read as closing the
+// outer word, and shlex — which has no notion of scopes either — split the
+// rest of the body into standalone tokens, so a jq program's "//" alternative
+// operator arrived as a bare token and read as a scan root (gt-n8ir). A
+// scope opened from inside a double-quoted word therefore has its '"' and '\'
+// backslashed, which keeps the whole substitution inside the one opaque token
+// the enclosing quotes promise. Detection is not lost by that: quoted-text
+// matchers that need the body get it from the raw text instead
+// (commandSubstitutions).
 func spaceOutShellOperators(command string) string {
 	var b strings.Builder
 	b.Grow(len(command) + 8)
-	var quote rune
+	scopes := []shellQuoteScope{{}}
 	escaped := false
+	emit := func(r rune) {
+		if scopes[len(scopes)-1].escapeForShlex && (r == '"' || r == '\\') {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	openScope := func(subst, tick bool) {
+		top := scopes[len(scopes)-1]
+		scopes = append(scopes, shellQuoteScope{
+			subst:          subst,
+			tick:           tick,
+			depth:          1,
+			escapeForShlex: top.escapeForShlex || top.quote == '"',
+		})
+	}
+	closeScope := func() {
+		scopes = scopes[:len(scopes)-1]
+	}
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
-		if r == '\\' && !escaped && quote != '\'' && i+1 < len(runes) && runes[i+1] == '\n' {
+		sc := scopes[len(scopes)-1]
+		if r == '\\' && !escaped && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '\n' {
 			i++
 			continue
 		}
 		if escaped {
-			b.WriteRune(r)
+			emit(r)
 			escaped = false
 			continue
 		}
-		if quote != 0 {
-			if r == '\\' && quote == '"' {
-				escaped = true
-			} else if r == quote {
-				quote = 0
-			}
-			b.WriteRune(r)
-			continue
+		// "(" and ")" nest inside a substitution body: the ')' that returns
+		// the depth to zero is the one that ends it. Parens inside a quoted
+		// stretch of the body are literal text, not nesting.
+		paren := ""
+		if sc.subst && sc.quote == 0 && (r == '(' || r == ')') {
+			paren = string(r)
 		}
-		switch r {
-		case '\\':
+		switch {
+		case sc.quote == '\'':
+			if r == '\'' {
+				scopes[len(scopes)-1].quote = 0
+			}
+			emit(r)
+		case r == '$' && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '(':
+			b.WriteString("$(")
+			i++
+			openScope(true, false)
+		case r == '`' && sc.quote != '\'':
+			if sc.tick && sc.quote == 0 {
+				emit(r)
+				closeScope()
+			} else {
+				emit(r)
+				openScope(false, true)
+			}
+		case paren == "(":
+			scopes[len(scopes)-1].depth++
+			emit(r)
+		case paren == ")":
+			scopes[len(scopes)-1].depth--
+			emit(r)
+			if scopes[len(scopes)-1].depth == 0 {
+				closeScope()
+			}
+		case sc.quote == '"':
+			if r == '\\' {
+				escaped = true
+			} else if r == '"' {
+				scopes[len(scopes)-1].quote = 0
+			}
+			emit(r)
+		case r == '\\':
 			escaped = true
-			b.WriteRune(r)
-		case '\'', '"':
-			quote = r
-			b.WriteRune(r)
-		case '\n':
+			emit(r)
+		case r == '\'' || r == '"':
+			scopes[len(scopes)-1].quote = r
+			emit(r)
+		case r == '\n':
 			b.WriteString(" ; ")
-		case ';', '&', '|':
+		case r == ';', r == '&', r == '|':
 			if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
 				b.WriteRune(' ')
 				b.WriteRune(r)
@@ -608,10 +671,25 @@ func spaceOutShellOperators(command string) string {
 				b.WriteRune(' ')
 			}
 		default:
-			b.WriteRune(r)
+			emit(r)
 		}
 	}
 	return b.String()
+}
+
+// shellQuoteScope is one quoting scope in spaceOutShellOperators: the
+// top-level command line, or the body of a command substitution, which the
+// shell re-parses as a command with quoting of its own (gt-n8ir).
+type shellQuoteScope struct {
+	quote rune // the quote open in this scope: 0, '\'' or '"'
+	subst bool // opened by "$(" — closed by the ")" matching its own depth
+	depth int  // unmatched "(" seen inside a subst body
+	tick  bool // opened by a backtick — closed by the next backtick
+	// escapeForShlex backslashes every '"' and '\' this scope emits, so that
+	// a substitution opened inside a double-quoted word stays the one opaque
+	// token those quotes promise when shlex — which has no notion of scope
+	// nesting — splits the result (gt-n8ir).
+	escapeForShlex bool
 }
 
 // printDangerousBlock prints the standard block banner to stderr.
@@ -668,6 +746,21 @@ var alwaysRecursiveScanTools = map[string]bool{
 	"find": true, "bfs": true, "fd": true, "du": true, "rg": true, "ag": true,
 }
 
+// commandArgs returns the arguments of the command starting at i — its
+// tokens up to the next shell command separator, the same delimiting the
+// other per-command matchers use (see shellCommandSeparators, gt-wisp-52y4).
+// A scan's flags and its root argument can only come from its own segment:
+// run to the end of the line instead and an unrelated later command supplies
+// them (gt-n8ir).
+func commandArgs(tokens []string, i int) []string {
+	for j := i + 1; j < len(tokens); j++ {
+		if shellCommandSeparators[tokens[j]] {
+			return tokens[i+1 : j]
+		}
+	}
+	return tokens[i+1:]
+}
+
 // matchesUnboundedScan blocks find/bfs/fd/rg/ag/du, "grep -r", and "ls -R"
 // invocations whose root argument is broad enough to scan the whole
 // filesystem (see scanRootDenylist) or the town tree (see
@@ -691,7 +784,7 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 			base = base[idx+1:]
 		}
 
-		rest := fields[i+1:]
+		rest := commandArgs(fields, i)
 		isScan := alwaysRecursiveScanTools[base]
 		if !isScan {
 			switch base {
