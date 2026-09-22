@@ -701,6 +701,15 @@ type HeartbeatStatus struct {
 	Fresh      bool      `json:"fresh"`
 	Stale      bool      `json:"stale"`
 	VeryStale  bool      `json:"very_stale"`
+
+	// CycleAgeSec is how long the cycle above has gone unchanged, dated from
+	// the last observation of it, so it is a lower bound (deacon.CycleAge).
+	CycleAgeSec float64 `json:"cycle_age_seconds"`
+
+	// CycleStalled reports that CycleAgeSec has reached the stale threshold at
+	// which the daemon treats a heartbeat as stalled despite a fresh timestamp
+	// (gt-t3cw).
+	CycleStalled bool `json:"cycle_stalled"`
 }
 
 func runDeaconStatus(cmd *cobra.Command, args []string) error {
@@ -729,14 +738,20 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 	var hbStatus *HeartbeatStatus
 	if townRoot != "" {
 		if hb := deacon.ReadHeartbeat(townRoot); hb != nil {
+			// Recording the observation here is what dates the cycle on the
+			// next call; an age below the stale threshold means the cycle has
+			// not moved since the last status run, not that the cycle is young.
+			cycleAge := deacon.CycleAge(townRoot, hb.Cycle, time.Now())
 			hbStatus = &HeartbeatStatus{
-				Timestamp:  hb.Timestamp,
-				AgeSec:     hb.Age().Seconds(),
-				Cycle:      hb.Cycle,
-				LastAction: hb.LastAction,
-				Fresh:      hb.IsFresh(),
-				Stale:      hb.IsStale(),
-				VeryStale:  hb.IsVeryStale(),
+				Timestamp:    hb.Timestamp,
+				AgeSec:       hb.Age().Seconds(),
+				Cycle:        hb.Cycle,
+				LastAction:   hb.LastAction,
+				Fresh:        hb.IsFresh(),
+				Stale:        hb.IsStale(),
+				VeryStale:    hb.IsVeryStale(),
+				CycleAgeSec:  cycleAge.Seconds(),
+				CycleStalled: cycleAge >= deacon.HeartbeatStaleThreshold,
 			}
 		}
 	}
@@ -802,8 +817,9 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 	if hbStatus != nil {
 		fmt.Println()
 		ageDur := time.Duration(hbStatus.AgeSec * float64(time.Second))
-		fmt.Printf("  Heartbeat: %s ago (cycle %d)\n",
-			ageDur.Round(time.Second), hbStatus.Cycle)
+		cycleAgeDur := time.Duration(hbStatus.CycleAgeSec * float64(time.Second))
+		fmt.Printf("  Heartbeat: %s ago (cycle %d, unchanged %s)\n",
+			ageDur.Round(time.Second), hbStatus.Cycle, cycleAgeDur.Round(time.Second))
 		if hbStatus.LastAction != "" {
 			fmt.Printf("  Last action: %s\n", hbStatus.LastAction)
 		}
@@ -812,6 +828,10 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 			health = "very stale"
 		} else if hbStatus.Stale {
 			health = "stale"
+		} else if hbStatus.CycleStalled {
+			// Timestamp is fresh but the cycle has stopped moving — a heartbeat
+			// that looks alive without any progress behind it (gt-t3cw).
+			health = "stalled (cycle not advancing)"
 		}
 		fmt.Printf("  Health: %s\n", health)
 	} else if townRoot != "" {

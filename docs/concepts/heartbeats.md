@@ -15,7 +15,10 @@ refreshed its session heartbeat while the file store aged past threshold).
 - **Read by:** the stuck-agent-dog plugin (parses the JSON `timestamp`, falling
   back to mtime for malformed legacy files, and cross-checks tmux activity
   before escalating) and the Go daemon (`deacon.ReadHeartbeat`; thresholds 5m
-  stale / 20m very-stale → poke).
+  stale / 20m very-stale → poke). The daemon dates the heartbeat by whichever
+  is older, the `timestamp` or the `cycle`, so a fresh timestamp with a cycle
+  that has stopped advancing still reads as stale (gt-t3cw); `gt deacon status`
+  reports that age as `cycle_age_seconds` / `cycle_stalled`.
 - **Also touches:** the legacy `deacon/.deacon-heartbeat` mtime file for old
   shell scripts.
 
