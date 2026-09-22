@@ -106,8 +106,19 @@ type PatrolScanRefineryItem struct {
 	StallType         string  `json:"stall_type"`
 	State             string  `json:"state"`
 	InactivitySeconds float64 `json:"inactivity_seconds"`
-	Action            string  `json:"action"`
-	Error             string  `json:"error,omitempty"`
+	// PendingSeconds is how long the composer had been continuously observed
+	// holding unsubmitted input. It is non-zero whenever an earlier probe
+	// started the run, including when the silence window is what tripped this
+	// verdict; it is zero only on the first observation, and it does NOT say
+	// which clock fired (gt-afa7).
+	PendingSeconds float64 `json:"pending_seconds"`
+	// PendingSamples is how many consecutive observations have seen the
+	// composer pending. The age only counts once several samples spanning a
+	// minimum window agree, so this is what tells a run that was restarted
+	// mid-flight from one that has been continuously unattended (gt-afa7).
+	PendingSamples int    `json:"pending_samples"`
+	Action         string `json:"action"`
+	Error          string `json:"error,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -430,6 +441,8 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 				StallType:         s.StallType,
 				State:             s.State,
 				InactivitySeconds: s.Inactivity.Seconds(),
+				PendingSeconds:    s.PendingFor.Seconds(),
+				PendingSamples:    s.PendingSamples,
 				Action:            s.Action,
 			}
 			if s.Error != nil {
@@ -579,9 +592,17 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			fmt.Printf("  %s\n", style.Dim.Render("No composer stalls detected"))
 		} else {
 			for _, s := range refineryResult.Stalls {
-				fmt.Printf("  ⚠ %s: %s (composer %s, silent %s) → %s\n",
-					s.Agent, s.StallType, s.State,
-					s.Inactivity.Round(time.Second), s.Action)
+				// Report the age only when there is one. On a first
+				// observation it is zero, and "input waiting 0s" reads as input
+				// that just arrived rather than as the silence window having
+				// tripped — the opposite of what happened (gt-afa7).
+				clocks := fmt.Sprintf("silent %s", s.Inactivity.Round(time.Second))
+				if s.PendingFor > 0 {
+					clocks += fmt.Sprintf(", input waiting %s over %d observation(s)",
+						s.PendingFor.Round(time.Second), s.PendingSamples)
+				}
+				fmt.Printf("  ⚠ %s: %s (composer %s, %s) → %s\n",
+					s.Agent, s.StallType, s.State, clocks, s.Action)
 				if s.Error != nil {
 					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
 				}

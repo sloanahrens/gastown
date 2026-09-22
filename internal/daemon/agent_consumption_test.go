@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -43,11 +45,25 @@ const (
 // the session has produced no pane output since 2023-11-14.
 const frozenActivity = "1700000000"
 
+// testSessionID is the tmux session id the shim reports. Stable across probes,
+// which is what lets a test date a pending run: a real session id changes only
+// when the session is killed and recreated.
+const testSessionID = "$7"
+
 // writeFakeTmuxPane installs a tmux shim on PATH that answers capture-pane from
 // a sequence of panes (repeating the last one) and reports a frozen
 // window_activity. It returns the shim's invocation log so a test can assert
 // which keystrokes were sent.
 func writeFakeTmuxPane(t *testing.T, panes []string) string {
+	t.Helper()
+	return writeFakeTmuxPaneWithActivity(t, panes, frozenActivity)
+}
+
+// writeFakeTmuxPaneWithActivity is writeFakeTmuxPane with the session's
+// window_activity chosen by the caller. "@now" answers with the current Unix
+// timestamp, which is what a pane being repainted right now reports — the
+// condition the silence clock cannot see through (gt-afa7).
+func writeFakeTmuxPaneWithActivity(t *testing.T, panes []string, activity string) string {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -67,7 +83,20 @@ func writeFakeTmuxPane(t *testing.T, panes []string) string {
 	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
 	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
 	b.WriteString("\tesac; done\n")
-	b.WriteString(`if [ "$sub" = "display-message" ]; then printf '%s' '` + frozenActivity + `'; exit 0; fi` + "\n")
+	// The probe reads two tmux variables: window_activity for the silence clock
+	// and session_id for the identity that dates the pending-input clock. They
+	// are answered separately so a pane being repainted right now can still
+	// belong to a session whose id is stable (gt-afa7).
+	b.WriteString(`fmt=''` + "\n")
+	b.WriteString(`for a in "$@"; do case "$a" in '#'*) fmt=$a;; esac; done` + "\n")
+	b.WriteString(`if [ "$sub" = "display-message" ]; then` + "\n")
+	b.WriteString(`  if [ "$fmt" = '#{session_id}' ]; then printf '%s' '` + testSessionID + `'; exit 0; fi` + "\n")
+	if activity == "@now" {
+		b.WriteString(`  date +%s; exit 0;` + "\n")
+	} else {
+		b.WriteString(`  printf '%s' '` + activity + `'; exit 0;` + "\n")
+	}
+	b.WriteString("fi\n")
 	b.WriteString(`if [ "$sub" = "has-session" ]; then exit 0; fi` + "\n")
 	b.WriteString(`if [ "$sub" = "capture-pane" ]; then` + "\n")
 	b.WriteString(`  n=$(cat "` + countPath + `" 2>/dev/null || echo 0)` + "\n")
@@ -321,5 +350,218 @@ func TestConsumptionEscalatorRateLimits(t *testing.T) {
 	// A different session has its own budget.
 	if !e.shouldEscalate("gt-beads-witness", now) {
 		t.Error("a second session was rate-limited by the first session's escalation")
+	}
+}
+
+// --- Pending-input age (gt-afa7) ------------------------------------------
+
+// newConsumptionTestDaemonWithLog is newConsumptionTestDaemon with the daemon's
+// log captured, so a test can assert what a probe that found nothing to act on
+// actually said.
+func newConsumptionTestDaemonWithLog(t *testing.T) (*Daemon, *bytes.Buffer) {
+	t.Helper()
+	d := newConsumptionTestDaemon(t)
+	buf := &bytes.Buffer{}
+	d.logger = log.New(buf, "", 0)
+	return d, buf
+}
+
+// ageComposerPending backdates the daemon's pending-input clock for session, as
+// an earlier heartbeat or a patrol cycle would have. pane is the pane the shim
+// is serving, because the run's progress digest has to be the one the probe
+// will compute over that same pane — a stamp carrying any other digest reads as
+// a run that ended, which is a different test.
+func ageComposerPending(t *testing.T, d *Daemon, session, pane string, age time.Duration) {
+	t.Helper()
+	clock := tmux.NewPendingInputClock(constants.TownRuntimePath(d.config.TownRoot))
+	if clock == nil {
+		t.Fatal("pending clock is disabled for the test town root")
+	}
+	progress := tmux.PaneProgressSignature(pane, tmux.DefaultReadyPromptPrefix)
+	if progress == "" {
+		t.Fatal("the fixture pane has no content above its input box, so no run can be dated on it")
+	}
+
+	// Several observations spanning most of the age, so the run the probe reads
+	// is continuous rather than one that has just restarted.
+	now := time.Now()
+	for i := 0; i < pendingSeededSamples; i++ {
+		at := now.Add(-age + time.Duration(i)*age/pendingSeededSamples)
+		clock.Observe(session, testSessionID, progress, at)
+	}
+}
+
+// pendingSeededSamples matches pendingInputMinSamples in tmux: enough
+// observations for a run to be continuous. Spelled here rather than imported
+// because the daemon must not depend on the clock's internals.
+const pendingSeededSamples = 3
+
+// The regression test for the 2026-09-22 stall. The gastown refinery was idle
+// at the prompt with deacon HEALTH_CHECK nudges queued behind the send-now
+// footer, and the daemon's probe ran three times across 17 minutes without
+// acting: every nudge typed into the composer had refreshed the
+// #{window_activity} clock the verdict depended on. Input that has outlived the
+// threshold is a stall however busy the pane's byte stream looks.
+func TestProbeInputConsumptionSubmitsInputThatOutlivedTheClock(t *testing.T) {
+	withNoConsumptionRecheckDelay(t)
+	logPath := writeFakeTmuxPaneWithActivity(t, []string{daemonWedgedPane, daemonRecoveredPane}, "@now")
+	d := newConsumptionTestDaemon(t)
+	ageComposerPending(t, d, testRefineryAgent().Session, daemonWedgedPane, 6*time.Minute)
+
+	var escalations []string
+	d.probeInputConsumption(testRefineryAgent(), func(source, message string) {
+		escalations = append(escalations, source+": "+message)
+	})
+
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	if !strings.Contains(string(logged), "C-x C-s") {
+		t.Errorf("queued input that outlived the clock was not flushed; tmux log: %q", logged)
+	}
+	if len(escalations) != 0 {
+		t.Errorf("a session that recovered on the flush was escalated: %v", escalations)
+	}
+}
+
+// A probe that finds input waiting but not yet past the threshold must say so.
+// This is the branch that stayed silent through the three heartbeats on
+// 2026-09-22, leaving a 17-minute stall indistinguishable in the log from a
+// healthy session — the "left silent" half of the defect (gt-afa7).
+func TestProbeInputConsumptionReportsInputWaitingBelowTheThreshold(t *testing.T) {
+	withNoConsumptionRecheckDelay(t)
+	logPath := writeFakeTmuxPaneWithActivity(t, []string{daemonWedgedPane}, "@now")
+	d, buf := newConsumptionTestDaemonWithLog(t)
+
+	// The clock records this observation; nothing has aged yet.
+	var escalations []string
+	d.probeInputConsumption(testRefineryAgent(), func(source, message string) {
+		escalations = append(escalations, source)
+	})
+
+	if len(escalations) != 0 {
+		t.Errorf("input below the threshold was escalated: %v", escalations)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	if strings.Contains(string(logged), "send-keys") {
+		t.Errorf("input below the threshold was submitted; tmux log: %q", logged)
+	}
+
+	said := buf.String()
+	if !strings.Contains(said, "holding unsubmitted input") {
+		t.Errorf("the probe said nothing about the input it saw waiting; log: %q", said)
+	}
+	for _, want := range []string{"gt-beads-refinery", "still watching"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("log %q does not mention %q", said, want)
+		}
+	}
+}
+
+// A pane the probe can read but not classify is a detection failure, not a
+// clean bill of health. It must be reported, and it must not be escalated: the
+// daemon cannot act on what it cannot see, and escalating would fire forever on
+// any agent whose TUI the probe cannot parse.
+func TestProbeInputConsumptionReportsUnclassifiablePane(t *testing.T) {
+	withNoConsumptionRecheckDelay(t)
+	logPath := writeFakeTmuxPaneWithActivity(t,
+		[]string{"⏺ Build finished.\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"}, "@now")
+	d, buf := newConsumptionTestDaemonWithLog(t)
+
+	var escalations []string
+	d.probeInputConsumption(testRefineryAgent(), func(source, message string) {
+		escalations = append(escalations, source)
+	})
+
+	if len(escalations) != 0 {
+		t.Errorf("an unclassifiable pane was escalated: %v", escalations)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	if strings.Contains(string(logged), "send-keys") {
+		t.Errorf("an unclassifiable pane received keystrokes; tmux log: %q", logged)
+	}
+	if !strings.Contains(buf.String(), "could not classify") {
+		t.Errorf("the probe silently accepted an unclassifiable pane; log: %q", buf.String())
+	}
+}
+
+// A pane the probe cannot classify stays that way across heartbeats — a modal,
+// or an agent TUI with no prompt prefix. Reporting it every four minutes per
+// agent buries the lines that matter, so it is reported on a cooldown: the
+// first occurrence always logs, repeats do not (gt-afa7).
+func TestProbeInputConsumptionRateLimitsTheUnclassifiableLog(t *testing.T) {
+	withNoConsumptionRecheckDelay(t)
+	writeFakeTmuxPaneWithActivity(t,
+		[]string{"⏺ Build finished.\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"}, "@now")
+	d, buf := newConsumptionTestDaemonWithLog(t)
+
+	for i := 0; i < 3; i++ {
+		d.probeInputConsumption(testRefineryAgent(), nil)
+	}
+
+	if got := strings.Count(buf.String(), "could not classify"); got != 1 {
+		t.Errorf("the unclassifiable pane was reported %d times across three probes, want 1\nlog: %q",
+			got, buf.String())
+	}
+}
+
+// The daemon's stall line has to say how long the pane was quiet. It lost that
+// when the detector's silence-only branch stopped reporting a duration: the line
+// said what was seen but not for how long, which is the number an operator reads
+// to decide whether to restart a refinery by hand (gt-afa7).
+func TestProbeInputConsumptionLogsHowLongThePaneWasSilent(t *testing.T) {
+	withNoConsumptionRecheckDelay(t)
+	// A frozen session holding queued input: the silence clock is what trips.
+	writeFakeTmuxPane(t, []string{daemonWedgedPane, daemonRecoveredPane})
+	d, buf := newConsumptionTestDaemonWithLog(t)
+
+	d.probeInputConsumption(testRefineryAgent(), nil)
+
+	said := buf.String()
+	if !strings.Contains(said, "no pane output for") {
+		t.Errorf("the stall log line carries no silence duration; log: %q", said)
+	}
+	if !strings.Contains(said, "submitting its pending input") {
+		t.Errorf("the stall log line does not say what was done about it; log: %q", said)
+	}
+}
+
+// The two log lines answer different questions — "this session is wedged" and
+// "I could not read this session" — so suppressing one must not suppress the
+// other.
+func TestConsumptionEscalatorRateLimitsTheUnclassifiableLogSeparately(t *testing.T) {
+	t.Parallel()
+	e := &consumptionEscalator{}
+	now := time.Now()
+
+	if !e.shouldLogUnclassifiable("gt-beads-refinery", now) {
+		t.Error("the first unclassifiable observation for a session was suppressed")
+	}
+	if e.shouldLogUnclassifiable("gt-beads-refinery", now.Add(time.Minute)) {
+		t.Error("a repeat within the interval was logged")
+	}
+	if !e.shouldLogUnclassifiable("gt-beads-refinery", now.Add(consumptionEscalationInterval+time.Second)) {
+		t.Error("a repeat after the interval was suppressed")
+	}
+	// A separate session has its own budget.
+	if !e.shouldLogUnclassifiable("gt-beads-witness", now) {
+		t.Error("a second session was rate-limited by the first session's line")
+	}
+
+	// Escalating the same session must not silence its next log line.
+	e2 := &consumptionEscalator{}
+	if !e2.shouldLogUnclassifiable("gt-beads-refinery", now) {
+		t.Fatal("the first unclassifiable observation was suppressed")
+	}
+	e2.shouldEscalate("gt-beads-refinery", now)
+	if e2.shouldLogUnclassifiable("gt-beads-refinery", now.Add(time.Minute)) {
+		t.Error("an escalation suppressed a later unclassifiable line; the budgets must be separate")
 	}
 }

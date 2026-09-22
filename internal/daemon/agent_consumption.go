@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // Input-consumption liveness for witness and refinery sessions (gt-eigw).
@@ -23,10 +25,17 @@ import (
 // every four minutes. A live process that consumes no input is the one failure
 // mode that check cannot see, so it is checked here instead.
 //
-// The probe itself is the already-reviewed one: tmux.DetectComposerStall
-// (gt-hkhu), which requires BOTH unsubmitted input in the pane AND zero pane
-// output for the whole frozen window. That conjunction is what keeps it off a
-// healthy idle-await agent carrying a legitimately queued nudge.
+// The probe itself is the already-reviewed one: tmux.DetectComposerStallTracked
+// (gt-hkhu), which requires unsubmitted input in the pane AND a clock that has
+// run out on it — the silence window, or the pending-input age (gt-afa7). That
+// conjunction is what keeps it off a healthy idle-await agent carrying a
+// legitimately queued nudge: pane shape alone cannot tell the two apart, so the
+// age clock only counts a run that several observations, a stable session id,
+// and an unchanging pane transcript all agree on.
+//
+// Every branch leaves a trace. A probe that ran and declined to act reports
+// what it saw; silence made a 17-minute stall identical to a healthy session in
+// the log (gt-afa7).
 //
 // The action is deliberately conservative, and this is where it differs from
 // the first attempt at gt-eigw, which was blocked for shipping a path that
@@ -60,6 +69,10 @@ const consumptionEscalationInterval = 30 * time.Minute
 type consumptionEscalator struct {
 	mu   sync.Mutex
 	last map[string]time.Time
+	// unclassified rate-limits the "could not classify" log line separately
+	// from the escalation: they answer different questions and suppressing one
+	// must not suppress the other.
+	unclassified map[string]time.Time
 }
 
 // shouldEscalate reports whether this session's wedge should be escalated now,
@@ -78,6 +91,23 @@ func (e *consumptionEscalator) shouldEscalate(session string, now time.Time) boo
 	return true
 }
 
+// shouldLogUnclassifiable reports whether an unclassifiable pane should be
+// logged for this session now, recording the time when it returns true. The
+// first occurrence always logs; repeats are held to the escalation interval.
+func (e *consumptionEscalator) shouldLogUnclassifiable(session string, now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.unclassified == nil {
+		e.unclassified = make(map[string]time.Time)
+	}
+	if last, ok := e.unclassified[session]; ok && now.Sub(last) < consumptionEscalationInterval {
+		return false
+	}
+	e.unclassified[session] = now
+	return true
+}
+
 // consumptionEscalations returns the daemon's escalator, creating it on first
 // use. Lazily built so a Daemon literal constructed in a test needs no setup.
 func (d *Daemon) consumptionEscalations() *consumptionEscalator {
@@ -85,6 +115,19 @@ func (d *Daemon) consumptionEscalations() *consumptionEscalator {
 		d.consumption = &consumptionEscalator{}
 	})
 	return d.consumption
+}
+
+// pendingInputClock returns the daemon's pending-input clock, creating it on
+// first use. A daemon with no town root gets a disabled clock, which leaves the
+// probe on the silence window alone (gt-afa7).
+func (d *Daemon) pendingInputClock() *tmux.PendingInputClock {
+	d.pendingClockOnce.Do(func() {
+		if d.config == nil {
+			return
+		}
+		d.pendingClock = tmux.NewPendingInputClock(constants.TownRuntimePath(d.config.TownRoot))
+	})
+	return d.pendingClock
 }
 
 // runningAgent names a session the daemon found already running, along with
@@ -144,32 +187,57 @@ func (d *Daemon) probeInputConsumption(agent runningAgent, escalate func(source,
 	frozenFor := config.LoadOperationalConfig(d.config.TownRoot).
 		GetWitnessConfig().ComposerStallFrozenForD()
 
-	stall, err := d.tmux.DetectComposerStall(agent.Session, frozenFor)
+	clock := d.pendingInputClock()
+	stall, err := d.tmux.DetectComposerStallTracked(agent.Session, frozenFor, clock)
 	if err != nil {
-		// The pane could not be read. That says nothing about the session —
-		// staying quiet is the only honest outcome.
-		d.logger.Printf("%s consumption probe could not read %s: %v", agent.Role, agent.Session, err)
+		// The pane could not be read, or was read and could not be classified.
+		// Nothing is known about the session but the failure, so do not act:
+		// escalating on "I could not look" would fire forever on any agent whose
+		// TUI the probe cannot parse.
+		//
+		// It is still reported — a pane nobody can classify must not be
+		// indistinguishable from a healthy one — but on a cooldown, because the
+		// condition persists across heartbeats (a modal, an agent with no prompt
+		// prefix) and one line every four minutes per agent buries the lines
+		// that matter (gt-afa7).
+		if d.consumptionEscalations().shouldLogUnclassifiable(agent.Session, time.Now()) {
+			d.logger.Printf("%s consumption probe could not classify %s: %v", agent.Role, agent.Session, err)
+		}
 		return
 	}
 	if !stall.Stalled {
+		// Input is waiting but no clock has run out. Say so, with the age: this
+		// branch used to return silently, leaving the stall of gt-afa7
+		// indistinguishable in the log from a healthy session.
+		if stall.State == tmux.ComposerPending {
+			d.logger.Printf("%s %s is holding unsubmitted input (%s) — waiting %s over %d observation(s), no pane output for %s, threshold %s; still watching",
+				agent.Role, agent.Session, stall.Evidence,
+				stall.PendingFor.Round(time.Second), stall.PendingSamples,
+				stall.Inactivity.Round(time.Second), frozenFor)
+		}
 		return
 	}
 
-	d.logger.Printf("%s %s is alive but consuming no input: %s (no pane output for %s) — submitting its pending input",
-		agent.Role, agent.Session, stall.Evidence, stall.Inactivity.Round(time.Second))
+	// Evidence carries the timing on every branch, including a stall tripped by
+	// silence alone — the branch that used to log no duration at all (gt-afa7).
+	d.logger.Printf("%s %s is alive but consuming no input: %s — submitting its pending input",
+		agent.Role, agent.Session, stall.Evidence)
 
 	if err := d.tmux.SubmitPendingInput(agent.Session, stall.Queued); err != nil {
 		d.logger.Printf("%s consumption probe could not submit pending input to %s: %v", agent.Role, agent.Session, err)
 		return
 	}
+	// The wait is over now that someone has intervened: clear the pending clock
+	// so the re-probe judges the flush on the silence window alone.
+	clock.Reset(agent.Session)
 
 	if consumptionRecheckDelay > 0 {
 		time.Sleep(consumptionRecheckDelay)
 	}
 
-	after, err := d.tmux.DetectComposerStall(agent.Session, frozenFor)
+	after, err := d.tmux.DetectComposerStallTracked(agent.Session, frozenFor, clock)
 	if err != nil {
-		d.logger.Printf("%s consumption probe could not re-read %s after submitting: %v", agent.Role, agent.Session, err)
+		d.logger.Printf("%s consumption probe could not re-classify %s after submitting: %v", agent.Role, agent.Session, err)
 		return
 	}
 	if !after.Stalled {

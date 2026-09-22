@@ -122,10 +122,12 @@ const (
 	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
 	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
-	// DefaultWitnessComposerStallFrozenFor is how long a session must produce
-	// no output while holding unsubmitted composer input before the witness
-	// treats it as stalled (gt-hkhu). It matches the interim threshold the
-	// operators applied by hand during the 2026-09-18 refinery stalls.
+	// DefaultWitnessComposerStallFrozenFor is the threshold both composer-stall
+	// clocks are measured against: how long a session must produce no pane
+	// output while holding unsubmitted composer input, or how long that input
+	// must be observed waiting unattended, before the witness treats it as
+	// stalled. It matches the interim threshold the operators applied by hand
+	// during the 2026-09-18 refinery stalls (gt-hkhu, gt-afa7).
 	DefaultWitnessComposerStallFrozenFor = 5 * time.Minute
 	// DefaultWitnessDoneIntentMaxAge is how old a done-intent on a dead session
 	// can be and still count as a crashed exit worth restarting (gt-jv7v).
@@ -807,8 +809,9 @@ func (wt *WitnessThresholds) StartupActivityGraceD() time.Duration {
 }
 
 // ComposerStallFrozenForD returns the configured or default window a session
-// must produce no output while holding unsubmitted composer input before the
-// witness treats it as stalled (gt-hkhu).
+// must produce no output, or hold unsubmitted composer input unattended, before
+// the witness treats it as stalled. Both stall clocks use this one threshold
+// (gt-hkhu, gt-afa7).
 func (wt *WitnessThresholds) ComposerStallFrozenForD() time.Duration {
 	if wt != nil {
 		return ParseDurationOrDefault(wt.ComposerStallFrozenFor, DefaultWitnessComposerStallFrozenFor)

@@ -1,10 +1,12 @@
 package witness
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -21,10 +23,19 @@ import (
 // queue behind it.
 //
 // This check supplies the missing signal. It is deliberately conservative: the
-// submit action only fires when the pane holds unsubmitted input AND the
-// session has produced no output at all for the whole frozen window, which is
-// what keeps it off a working or idle-await refinery (see
-// tmux.DetectComposerStall for the false positive this avoids).
+// submit action only fires when the pane holds unsubmitted input AND a clock
+// has run out on it — no output at all for the whole frozen window, or the input
+// observed waiting for the same window across a run that has been earned.
+// Nothing here acts on pane shape, because pane shape cannot separate a wedge
+// from an idle-await refinery between cycles (gt-hkhu). What the age clock adds
+// is that only a run whose samples are consecutive, span a minimum window,
+// belong to this tmux session, and kept the pane's transcript region unchanged
+// may trip it — so an agent that did any work in the window restarts the clock
+// instead of being flagged (gt-afa7; see tmux.DetectComposerStallTracked).
+//
+// The age clock matters here as much as in the daemon: the patrol is the
+// detector that reports "0 stalls" up the chain, and its stamps are shared with
+// the daemon heartbeat, so whichever probes first starts the clock.
 
 // Actions reported for a detected composer stall. A stall that is still
 // pending after the submit attempt is the case the patrol must escalate —
@@ -61,6 +72,19 @@ type RefineryStallResult struct {
 	State string
 	// Inactivity is how long the session had produced no output.
 	Inactivity time.Duration
+	// PendingFor is how long the composer had been continuously observed
+	// holding unsubmitted input, as the shared clock reported it. It is
+	// non-zero whenever an earlier probe started the run — including when the
+	// silence window is what tripped this verdict, and when both clocks ran
+	// out. It is zero only on the first observation of a run. Do not read it as
+	// "which clock fired": a run that is not yet continuous also reports a real
+	// age here, and the age alone does not say the run may be acted on (gt-afa7).
+	PendingFor time.Duration
+	// PendingSamples is how many consecutive observations have seen the
+	// composer pending. A run needs several, spanning a minimum window, before
+	// its age counts, so a large PendingFor beside a small PendingSamples means
+	// the clock was restarted mid-run by progress (gt-afa7).
+	PendingSamples int
 	// Action is what the scan did about it (see the ComposerStallAction*
 	// constants).
 	Action string
@@ -120,7 +144,8 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 	}
 
 	frozenFor := config.LoadOperationalConfig(townRoot).GetWitnessConfig().ComposerStallFrozenForD()
-	stall, err := t.DetectComposerStall(sessionName, frozenFor)
+	clock := tmux.NewPendingInputClock(constants.TownRuntimePath(townRoot))
+	stall, err := t.DetectComposerStallTracked(sessionName, frozenFor, clock)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
 		return result
@@ -130,11 +155,13 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 	}
 
 	item := RefineryStallResult{
-		Session:    sessionName,
-		Agent:      "refinery",
-		StallType:  "composer-stall",
-		State:      stall.State.String(),
-		Inactivity: stall.Inactivity,
+		Session:        sessionName,
+		Agent:          "refinery",
+		StallType:      "composer-stall",
+		State:          stall.State.String(),
+		Inactivity:     stall.Inactivity,
+		PendingFor:     stall.PendingFor,
+		PendingSamples: stall.PendingSamples,
 	}
 
 	if err := t.SubmitPendingInput(sessionName, stall.Queued); err != nil {
@@ -143,11 +170,21 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 		result.Stalls = append(result.Stalls, item)
 		return result
 	}
+	// The input has been acted on, so the wait it accumulated is over.
+	clock.Reset(sessionName)
 
 	item.Action = composerStallActionFor(stall.Queued)
 	if err := confirmComposerCleared(t, sessionName, frozenFor); err != nil {
-		item.Action = ComposerStallActionStillPending
-		item.Error = err
+		if errors.Is(err, errComposerUnverifiable) {
+			// The flush could not be verified, but nothing says it failed.
+			// Report that beside the submit, without claiming the composer is
+			// still holding input — that action is what sends the patrol to a
+			// restart.
+			item.Error = err
+		} else {
+			item.Action = ComposerStallActionStillPending
+			item.Error = err
+		}
 	}
 	result.Stalls = append(result.Stalls, item)
 	return result
@@ -162,22 +199,47 @@ func composerStallActionFor(queued bool) string {
 	return ComposerStallActionSubmittedEnter
 }
 
+// errComposerUnverifiable reports that the pane could not be classified after a
+// submit, so the flush could be neither confirmed nor denied. It is distinct
+// from a confirmed strand: see confirmComposerCleared.
+var errComposerUnverifiable = errors.New("composer could not be classified after submit")
+
 // confirmComposerCleared re-probes the pane after a submit and reports an error
 // if the composer still holds input. A successful submit starts a turn, which
 // the probe reports as busy — either non-pending state is a pass.
+//
+// An unclassifiable pane is a third outcome, not a pass and not a failure. It
+// returns errComposerUnverifiable, which callers report without treating the
+// flush as failed. Folding "I could not tell" into the strand verdict would send
+// the patrol to a restart on a pane that was merely mid-repaint — which is very
+// likely what an unclassifiable capture is, three quarters of a second after
+// ctrl+x ctrl+s (gt-afa7).
 func confirmComposerCleared(t *tmux.Tmux, sessionName string, frozenFor time.Duration) error {
 	last := tmux.ComposerUnknown.String()
+	unverifiable := false
 	for i := 0; i < composerStallRecheckAttempts; i++ {
 		time.Sleep(composerStallRecheckDelay)
 		after, err := t.DetectComposerStall(sessionName, frozenFor)
 		if err != nil {
-			last = err.Error()
-			continue
+			if errors.Is(err, tmux.ErrComposerUnobservable) {
+				unverifiable = true
+				last = err.Error()
+				continue
+			}
+			// The pane could not be read at all. That is a failure of the
+			// check, not a verdict about the composer.
+			return err
 		}
 		if after.State != tmux.ComposerPending {
 			return nil
 		}
+		// Positive evidence that the input is still there outranks an earlier
+		// unclassifiable read.
+		unverifiable = false
 		last = after.State.String()
+	}
+	if unverifiable {
+		return fmt.Errorf("%w (last: %s)", errComposerUnverifiable, last)
 	}
 	return fmt.Errorf("composer still holds input after submit (state: %s)", last)
 }

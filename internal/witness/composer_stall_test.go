@@ -1,12 +1,15 @@
 package witness
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // The detection logic itself is unit-tested in internal/tmux (see
@@ -215,5 +218,88 @@ func TestComposerStallActionFor(t *testing.T) {
 	}
 	if got := composerStallActionFor(false); got != ComposerStallActionSubmittedEnter {
 		t.Errorf("typed action = %q, want %q", got, ComposerStallActionSubmittedEnter)
+	}
+}
+
+// The post-submit recheck has three outcomes, and the third one is the reason
+// this exists as its own function: a pane that cannot be classified is neither
+// a pass nor a strand. An unclassifiable capture is very likely what a pane
+// looks like three quarters of a second after ctrl+x ctrl+s, while it repaints
+// into its new turn — reading that as "still holding input" would send the
+// patrol after a restart for a session that had just recovered (gt-afa7).
+func TestConfirmComposerClearedDistinguishesUnverifiableFromStranded(t *testing.T) {
+	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
+	composerStallRecheckDelay = 0
+
+	tests := []struct {
+		name         string
+		pane         string
+		wantStranded bool
+		wantUnverifi bool
+	}{
+		{
+			// The flush worked: the composer is empty again.
+			name: "cleared composer is a pass",
+			pane: "⏺ Waiting on the review.\n" +
+				"────────────────────────────────────────────────────────────────────────────────\n" +
+				"❯ \n" +
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		},
+		{
+			// Positive evidence the input is still sitting there.
+			name:         "input still in the composer is a strand",
+			pane:         stalledRefineryPane,
+			wantStranded: true,
+		},
+		{
+			// No prompt prefix, so the pane says nothing either way.
+			name:         "unclassifiable pane is unverifiable",
+			pane:         "⏺ Build finished.\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+			wantUnverifi: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeTmuxShim(t, map[string]string{
+				"has-session":                             "",
+				"capture-pane":                            tt.pane,
+				"display-message:#{window_activity}":      "1700000000",
+				"display-message:#{pane_current_command}": "claude",
+			})
+
+			err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+
+			if got := errors.Is(err, errComposerUnverifiable); got != tt.wantUnverifi {
+				t.Errorf("unverifiable = %v, want %v (err: %v)", got, tt.wantUnverifi, err)
+			}
+			if got := err != nil && !errors.Is(err, errComposerUnverifiable); got != tt.wantStranded {
+				t.Errorf("stranded = %v, want %v (err: %v)", got, tt.wantStranded, err)
+			}
+		})
+	}
+}
+
+// A capture that fails outright is neither of those: it is a failure of the
+// check, and it must not be reported as an unverifiable composer, because the
+// caller treats that as "submitted, could not confirm" and reports it beside
+// the submit rather than as an error.
+func TestConfirmComposerClearedPropagatesACaptureFailure(t *testing.T) {
+	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
+	composerStallRecheckDelay = 0
+
+	fakeTmuxShim(t, map[string]string{
+		"has-session":                             "",
+		"capture-pane":                            "@fail",
+		"display-message:#{window_activity}":      "1700000000",
+		"display-message:#{pane_current_command}": "claude",
+	})
+
+	err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+	if err == nil {
+		t.Fatal("a pane that could not be captured at all was reported as cleared")
+	}
+	if errors.Is(err, errComposerUnverifiable) {
+		t.Errorf("a capture failure was reported as an unverifiable composer: %v", err)
 	}
 }
