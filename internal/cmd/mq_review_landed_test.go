@@ -80,6 +80,18 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// routes.jsonl lets beads retarget a Create(Rig: "gastown") from the
+	// caller's cwd to the rig's beads dir; without it the alias is unknown
+	// and the wisp mint fails (beads.ResolveRepoAliasBeadsDir).
+	if err := os.MkdirAll(filepath.Join(town, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, ".beads", "routes.jsonl"),
+		[]byte(`{"prefix":"hq-","path":"."}
+{"prefix":"gt-","path":"gastown"}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -276,4 +288,3 @@ func TestMQReviewLanded_UsageExitsTwo(t *testing.T) {
 // helpers under test touch git.Git via doMQReviewLanded.
 var _ = git.NewGit
 var _ = cobra.RangeArgs
-var _ = beads.ErrNotFound
