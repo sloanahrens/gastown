@@ -185,6 +185,17 @@ type unresolvedChangedDir struct {
 	listErr error
 }
 
+// nestedChangedDir is a changed .go directory that belongs to a module nested
+// inside the worktree — a directory below the worktree root with its own
+// go.mod. The worktree's own module contains neither the directory nor a
+// package for it, so its `go list` fails on a file that is perfectly good;
+// moduleRoot and importPath name where the file does resolve.
+type nestedChangedDir struct {
+	dir        string
+	moduleRoot string
+	importPath string
+}
+
 // changedGoResolution is the outcome of resolving a branch's changed .go files
 // against the worktree.
 type changedGoResolution struct {
@@ -196,6 +207,13 @@ type changedGoResolution struct {
 	// deletion talking and not an unbuildable change. The module still has to
 	// build, and only a whole-module build can say so.
 	deletedDirs []string
+	// nestedModules are changed .go directories that belong to a nested
+	// module. They hold .go files this module cannot name, but nothing is
+	// wrong with the files: the gate neither scopes them (they are not
+	// packages of this module, so no build or test run here reaches them)
+	// nor refuses them — the log header names each one and why it is out of
+	// scope.
+	nestedModules []nestedChangedDir
 	// unresolvable are changed .go directories that still hold a .go file but
 	// that `go list` could not resolve — a file that no longer compiles, a
 	// file whose build constraints exclude it, a stray .go file outside any
@@ -210,21 +228,16 @@ type changedGoResolution struct {
 }
 
 // changedGoPackages resolves the branch's changed .go files (relative to
-// verifiedBase) to buildable package import paths via `go list` — gt-h9kf:
-// "computes the changed packages (git diff base...HEAD --name-only -> go
-// list)". A directory that no longer resolves to a package (e.g. its only
-// file was deleted) is dropped rather than treated as an error: go list is
-// the authority on what is still a package, not the diff.
-//
-// Dropping it is only safe when the directory really is gone. `go list` fails
-// for a changed .go file that is still there too, and conflating the two is
-// the defect gt-7rds fixed: the gate read an empty package list as a clean
-// whole-package deletion and substituted a whole-module build, which for an
-// all-build-tag-excluded directory SUCCEEDS (there is nothing to build) — so a
-// .go change that was never compiled or tested was stamped test_verified=true.
-// The two shapes are therefore reported separately: deletedDirs (nothing left
-// to resolve) and unresolvable (something is still there that the tool cannot
-// make a package of).
+// verifiedBase) into what the gate can act on — gt-h9kf: "computes the changed
+// packages (git diff base...HEAD --name-only -> go list)". `go list`, not the
+// diff, is the authority on what is still a package, so a changed directory it
+// will not resolve is classified rather than dropped: deletedDirs when the
+// directory holds no .go file any more, nestedModules when the directory
+// belongs to another module inside the worktree, and unresolvable when a .go
+// file is still there that this module will not make a package of — one that
+// no longer compiles, one its build constraints exclude, a stray .go file
+// outside any package. Only the last is a refusal: nothing here builds or
+// tests a file the module cannot name, so no check can stand in for it.
 func changedGoPackages(g *git.Git, worktree, verifiedBase string) (changedGoResolution, error) {
 	var res changedGoResolution
 
@@ -251,23 +264,93 @@ func changedGoPackages(g *git.Git, worktree, verifiedBase string) (changedGoReso
 	seen := map[string]bool{}
 	for _, d := range ordered {
 		importPath, listErr := goListDir(worktree, d)
-		if listErr != nil {
-			// go list is the authority on what is a package: it says no.
-			// Which of the two reasons it says no for decides whether the
-			// caller may substitute a build for the missing package.
-			if dirHoldsGoFiles(worktree, d) {
-				res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: listErr})
-			} else {
-				res.deletedDirs = append(res.deletedDirs, d)
+		if listErr == nil {
+			if importPath != "" && !seen[importPath] {
+				seen[importPath] = true
+				res.packages = append(res.packages, importPath)
 			}
 			continue
 		}
-		if importPath != "" && !seen[importPath] {
-			seen[importPath] = true
-			res.packages = append(res.packages, importPath)
+		// go list is the authority on what is a package, and it said no.
+		// Which of the three reasons it said no for decides what the caller
+		// may do about it.
+		if !dirHoldsGoFiles(worktree, d) {
+			res.deletedDirs = append(res.deletedDirs, d)
+			continue
 		}
+		// The directory still holds .go files. A nested module is the one
+		// reason that is not a broken change: the file is fine, it just
+		// belongs to a module this one does not contain, so resolve it
+		// there instead of reading this module's refusal as the file's.
+		moduleRoot, moduleErr := nestedModuleRoot(worktree, d)
+		if moduleErr != nil {
+			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: moduleErr})
+			continue
+		}
+		if moduleRoot == "" {
+			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: listErr})
+			continue
+		}
+		nestedPath, nestedErr := goListDirInModule(worktree, moduleRoot, d)
+		if nestedErr != nil {
+			// The module that owns the file will not make a package of it
+			// either, so nothing anywhere here could compile or test it:
+			// still a refusal, in the words of the module that owns it.
+			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: nestedErr})
+			continue
+		}
+		res.nestedModules = append(res.nestedModules, nestedChangedDir{dir: d, moduleRoot: moduleRoot, importPath: nestedPath})
 	}
 	return res, nil
+}
+
+// nestedModuleRoot returns the worktree-relative directory of the module that
+// owns dir, when that module is nested inside the worktree — a directory below
+// the worktree root holding its own go.mod (plugins/dolt-snapshots, say). The
+// worktree's own module does not own any of them, so the walk stops before the
+// root and returns "" for a directory the root module owns; the root module's
+// packages are resolved, not skipped.
+//
+// A walk that cannot read a candidate go.mod reports it rather than guessing at
+// a module boundary: the caller turns that into the gate's refusal.
+func nestedModuleRoot(worktree, dir string) (string, error) {
+	for d := dir; d != "."; d = filepath.Dir(d) {
+		_, err := os.Stat(filepath.Join(worktree, d, "go.mod"))
+		if err == nil {
+			return d, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("looking for a go.mod above %s: %w", dir, err)
+		}
+	}
+	return "", nil
+}
+
+// goListDirInModule resolves dir, a worktree-relative path inside the module at
+// moduleRoot, to a package import path by running `go list` from that module's
+// own root. A module that does not resolve dir to a package — including one it
+// resolves to nothing at all — is an error, quoting the tool.
+func goListDirInModule(worktree, moduleRoot, dir string) (string, error) {
+	pattern := "."
+	if dir != moduleRoot {
+		rel, relErr := filepath.Rel(moduleRoot, dir)
+		if relErr != nil {
+			return "", fmt.Errorf("locating %s within module %s: %w", dir, moduleRoot, relErr)
+		}
+		pattern = "./" + filepath.ToSlash(rel)
+	}
+	//nolint:gosec // G204: the directory comes from the branch's own git diff, run through a read-only `go list` in the polecat's own worktree.
+	cmd := exec.Command("go", "list", pattern)
+	cmd.Dir = filepath.Join(worktree, moduleRoot)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("go list %s in the nested module %s: %w: %s", pattern, moduleRoot, err, strings.TrimSpace(string(out)))
+	}
+	importPath := strings.TrimSpace(string(out))
+	if importPath == "" {
+		return "", fmt.Errorf("go list %s in the nested module %s named no package", pattern, moduleRoot)
+	}
+	return importPath, nil
 }
 
 // dirHoldsGoFiles reports whether dir (relative to worktree) still contains a
@@ -305,26 +388,30 @@ func goListDir(worktree, dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// goBuildWholeModule builds the entire module in the worktree. It is the
-// check that distinguishes a whole-package deletion that still compiles
-// (legitimate, and verifiable — the deletion is either consistent or the
-// build breaks, and the build is the authority) from one whose importers
-// are now broken (gt-ytjh). A var so tests can stub it: the real one shells
-// out to `go build`, which no unit test may do.
+// goBuildWholeModule builds the module in the worktree, which is the check
+// that distinguishes a whole-package deletion that still compiles (legitimate,
+// and verifiable — the deletion is either consistent or the build breaks, and
+// the build is the authority) from one whose importers are now broken
+// (gt-ytjh). A var so tests can stub it: the real one shells out to `go
+// build`, which no unit test may do.
 //
 // worktree is the module to build, and building anything else verifies the
 // wrong tree: gt done takes a worktree argument, and the process's own
-// directory is the host checkout, not the branch under test (gt-7rds).
+// directory is the host checkout, not the branch under test.
 var goBuildWholeModule = func(worktree string) error {
 	buildArgs := []string{"build", "./..."}
-	// `go build ./...` links one binary per main package into the current
-	// directory, and this gate must not leave build output in the polecat's
-	// worktree: it is about to be handed to the refinery. Where there is
-	// something to link, the binaries go to a temp dir that is removed again.
-	// A module with no main packages has nothing to link and rejects -o
-	// outright ("go: no main packages to build"), which would be a false
-	// refusal for every library-only rig and test fixture, so the plain form
-	// runs there; with no main package it writes nothing.
+	// `go build ./...` discards the objects of a package list, and writes an
+	// executable only when that list resolves to exactly one main package —
+	// named after the package's source directory. So a single-binary module
+	// whose last library package this diff deletes either drops that binary
+	// into the worktree about to be handed to the refinery, or, when the name
+	// is the directory it came from, fails the build outright ("build output
+	// \"cmd\" already exists and is a directory") and refuses a deletion that
+	// compiles. -o sends the executables to a temp dir that is removed again
+	// instead. A module with no main packages has nothing to write and rejects
+	// -o ("go: no main packages to build"), which would be a false refusal for
+	// every library-only rig and test fixture, so the plain form runs there;
+	// with no main package it writes nothing.
 	if moduleHasMainPackage(worktree) {
 		outDir, err := os.MkdirTemp("", "gt-whole-module-build-")
 		if err != nil {
@@ -691,9 +778,11 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 // changed .go files that are still present but that `go list` will not resolve
 // to a package, or a whole-module build that confirms a package deletion broke
 // the build — returns an error and the caller must not create the MR bead:
-// that is the refusal gt-h9kf asks for. The one exception is a whole-package
-// deletion that still compiles (gt-ytjh): it is verified by `go build ./...`
-// before the slot and then runs the suite like any other Go change.
+// that is the refusal gt-h9kf asks for. Changed .go files this module cannot
+// name for a reason that is not a broken file are not a refusal and not a
+// check: a whole-package deletion that still compiles (gt-ytjh) is verified by
+// `go build ./...` before the slot and then runs the suite; a nested module's
+// files are out of this module's reach, and the run's log header says so.
 //
 // gt-pnkd: the budgets and the command are now resolved rather than
 // hardcoded, and every resolved value is written to the verify log header
@@ -729,11 +818,15 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// label below is corrected where that substitution happens.
 	scope := "full"
 	var pkgs []string
+	// changed is filled for a Go rig only; its zero value reports "no changed
+	// .go files", which is what a non-Go rig has to say.
+	var changed changedGoResolution
 	if isGoRig {
-		changed, pkgErr := changedGoPackages(g, worktree, verifiedBase)
+		resolved, pkgErr := changedGoPackages(g, worktree, verifiedBase)
 		if pkgErr != nil {
 			return testVerifyResult{}, fmt.Errorf("gt done: could not compute changed packages for the default test-verify gate: %w", pkgErr)
 		}
+		changed = resolved
 		if !changed.changedGoFiles {
 			return testVerifyResult{skipReason: fmt.Sprintf("no changed .go files since %s — nothing to verify", shortSHA(verifiedBase))}, nil
 		}
@@ -741,32 +834,31 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// Changed .go files that are still in the worktree but that
 			// `go list` will not make a package of: a file that no longer
 			// compiles, a file whose build constraints exclude it, a stray
-			// .go file outside any package. These are not deletions, and a
+			// .go file outside any package. They are not deletions, and a
 			// whole-module build cannot stand in for testing them — for the
-			// all-build-tag-excluded shape `go build ./...` SUCCEEDS, which
-			// is how this branch used to stamp test_verified=true on a .go
-			// change that was never compiled or tested (gt-7rds). There is
-			// nothing safe to scope a suite to either, so refuse, and quote
-			// what `go list` said so the polecat can act on it.
+			// all-build-tag-excluded shape `go build ./...` SUCCEEDS, having
+			// nothing to build — so there is nothing safe to scope a suite to
+			// either. Refuse, and quote what `go list` said so the polecat
+			// can act on it.
 			details := make([]string, 0, len(changed.unresolvable))
 			for _, u := range changed.unresolvable {
 				details = append(details, fmt.Sprintf("%s: %v", u.dir, u.listErr))
 			}
 			return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are still present but `go list` resolves no package for %s — that is not a package deletion, so no whole-module build can verify it; fix the file so it compiles and resolves (or use --skip-verify with justification if this is genuinely not testable)", strings.Join(details, "; "))
 		}
-		if len(changed.deletedDirs) > 0 {
+		switch {
+		case len(changed.deletedDirs) > 0:
 			// A whole-package deletion: every changed .go file in these
 			// directories is gone, so go list no longer resolves them to a
 			// package and nothing is left to scope. That is not a broken
 			// build — a clean deletion of every .go file in a package is
 			// legitimate work — but the rest of the module either still
 			// compiles (the deletion is verified) or it doesn't (the
-			// refusal below stays). Refusing every deletion of a Go package
-			// was the false refusal gt-ytjh opened. The build runs whenever
-			// the diff deletes a package, even when other changed packages
-			// did resolve, because the packages that import the deleted one
-			// are not in the changed set: `go list` resolves a package whose
-			// imports are broken, so only the build sees them.
+			// refusal below stays). The build runs whenever the diff deletes
+			// a package, even when other changed packages did resolve,
+			// because the packages that import the deleted one are not in
+			// the changed set: `go list` resolves a package whose imports are
+			// broken, so only the build sees them.
 			pkgs = []string{"."}
 			if buildErr := goBuildWholeModule(worktree); buildErr != nil {
 				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", shortSHA(verifiedBase), buildErr)
@@ -774,7 +866,19 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			if len(changed.packages) > 0 {
 				pkgs = changed.packages
 			}
-		} else {
+		case len(changed.nestedModules) > 0:
+			// The changed files belong to a nested module, so no package of
+			// this module names them and there is nothing to scope: the
+			// suite runs over the module root, and the header below records
+			// which directories this module's gate cannot reach. No build
+			// here — this module's build skips a nested module too, so it
+			// could only fail for a reason unrelated to the change, and
+			// saying it verified the nested files would be false.
+			pkgs = []string{"."}
+			if len(changed.packages) > 0 {
+				pkgs = changed.packages
+			}
+		default:
 			pkgs = changed.packages
 		}
 	}
@@ -838,6 +942,13 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
 	if len(envPrefix) > 0 {
 		fmt.Fprintf(logFile, "env (inherited from test_command): %s\n", strings.Join(envPrefix, " "))
+	}
+	// A directory this gate could not scope has to be visible in the artifact
+	// that outlives the run: a reader who sees the changed files and no line
+	// for them cannot tell a file that was skipped from one that was never
+	// noticed.
+	for _, n := range changed.nestedModules {
+		fmt.Fprintf(logFile, "not scoped: %s belongs to the nested module %s (%s), which this module neither builds nor tests — nothing in this run compiles or exercises it\n", n.dir, n.moduleRoot, n.importPath)
 	}
 	// Whether this gate queues for the town's container-gate slot, and why, is
 	// the first thing a reader of a slow or refused gate needs (gt-wx53: the
