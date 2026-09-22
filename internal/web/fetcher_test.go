@@ -2557,9 +2557,15 @@ func TestMarkParkedRigsStampsRowsAndCounts(t *testing.T) {
 // a five-MR rig costs one lookup, not five.
 func TestMarkParkedRigsProbesEachRigOnce(t *testing.T) {
 	now := time.Now()
-	var probed []string
+	// The probe is fanned out one goroutine per rig (rigOpLabels), so the
+	// count has to survive concurrent recording: a bare append loses a probe
+	// and reports a fan-out bug the production code does not have (gt-phuy).
+	var mu sync.Mutex
+	probed := make(map[string]int)
 	f := &LiveConvoyFetcher{rigOpState: func(rigName string) (rig.OpState, string) {
-		probed = append(probed, rigName)
+		mu.Lock()
+		probed[rigName]++
+		mu.Unlock()
 		return rig.OpStateParked, rig.OpStateSourceLocal
 	}}
 	snapshot := TownMergeQueue{
@@ -2574,11 +2580,9 @@ func TestMarkParkedRigsProbesEachRigOnce(t *testing.T) {
 
 	f.markParkedRigs(snapshot)
 
-	seen := make(map[string]int, len(probed))
-	for _, name := range probed {
-		seen[name]++
-	}
-	if len(probed) != 2 || seen["hm"] != 1 || seen["gastown"] != 1 {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(probed) != 2 || probed["hm"] != 1 || probed["gastown"] != 1 {
 		t.Errorf("probed %v, want each rig exactly once", probed)
 	}
 }
