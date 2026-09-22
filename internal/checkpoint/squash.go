@@ -21,6 +21,33 @@ func IsAutoSaveSubject(subject string) bool {
 	return strings.HasPrefix(subject, WIPCommitPrefix) || strings.HasPrefix(subject, AutoSaveCommitPrefix)
 }
 
+// HasAutoSaveCommits reports whether any commit between the merge-base of
+// baseRef and headRef, and headRef itself, has a machine-generated subject
+// (see IsAutoSaveSubject). It is read-only — it never checks anything out or
+// changes HEAD — so it is safe to call against a ref other than the current
+// branch, e.g. from a merge process staged on a different target (gt-rswr).
+func HasAutoSaveCommits(workDir, baseRef, headRef string) (bool, error) {
+	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, headRef)
+	if err != nil {
+		return false, fmt.Errorf("finding merge-base: %w", err)
+	}
+
+	logOut, err := gitOutput(workDir, "log", "--format=%s", mergeBase+".."+headRef)
+	if err != nil {
+		return false, fmt.Errorf("listing commits: %w", err)
+	}
+	if logOut == "" {
+		return false, nil
+	}
+
+	for _, line := range strings.Split(logOut, "\n") {
+		if IsAutoSaveSubject(line) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // CountWIPCommits returns the number of WIP checkpoint commits between
 // the merge-base of baseRef and HEAD.
 func CountWIPCommits(workDir, baseRef string) (int, error) {

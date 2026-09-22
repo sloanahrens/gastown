@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
@@ -724,24 +725,66 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		}
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", err)
 	}
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Merging with message: %s\n", strings.TrimSpace(mergeMsg))
-	if err := e.git.MergeNoFF(mergeRef, mergeMsg); err != nil {
-		// ZFC: Use git's porcelain output to detect conflicts instead of parsing stderr.
-		// GetConflictingFiles() uses `git diff --diff-filter=U` which is proper.
-		conflicts, conflictErr := e.git.GetConflictingFiles()
-		if conflictErr == nil && len(conflicts) > 0 {
-			_ = e.git.AbortMerge()
-			return ProcessResult{
-				Success:  false,
-				Conflict: true,
-				Error:    "merge conflict during actual merge",
+	// gt-rswr: a branch can still carry a raw checkpoint_dog/gt-pvx commit
+	// into the merge queue — e.g. gt done's own squash step (gt-3wf) skips a
+	// branch that was already pushed to origin in an earlier session.
+	// Merging such a branch with --no-ff would carry that commit, and its
+	// generic "WIP: checkpoint (auto)" subject, straight onto target's
+	// history. Squash instead so target never gains one, whether or not it
+	// ended up as the branch tip.
+	hasAutoSave, asErr := checkpoint.HasAutoSaveCommits(e.git.WorkDir(), "origin/"+target, mergeRef)
+	if asErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check for auto-save commits: %v\n", asErr)
+	}
+
+	if hasAutoSave {
+		if checkpoint.IsAutoSaveSubject(strings.TrimSpace(mergeMsg)) {
+			mergeMsg = fmt.Sprintf("Merge %s into %s", branch, target)
+			if mr.SourceIssue != "" {
+				mergeMsg = fmt.Sprintf("Merge %s into %s (%s)", branch, target, mr.SourceIssue)
 			}
 		}
-		// Non-conflict failure: still need to abort to clean up dirty merge state
-		_ = e.git.AbortMerge()
-		return ProcessResult{
-			Success: false,
-			Error:   fmt.Sprintf("merge failed: %v", err),
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Branch has auto-save/checkpoint commit(s); squashing to keep them off %s: %s\n", target, strings.TrimSpace(mergeMsg))
+		if err := e.git.MergeSquash(mergeRef, mergeMsg); err != nil {
+			// git merge --squash never sets MERGE_HEAD, so --abort isn't available;
+			// reset the worktree back to the target baseline staged above instead.
+			conflicts, conflictErr := e.git.GetConflictingFiles()
+			isConflict := conflictErr == nil && len(conflicts) > 0
+			if resetErr := e.git.ResetHard("HEAD"); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset after squash failure: %v\n", resetErr)
+			}
+			if isConflict {
+				return ProcessResult{
+					Success:  false,
+					Conflict: true,
+					Error:    "merge conflict during actual merge",
+				}
+			}
+			return ProcessResult{
+				Success: false,
+				Error:   fmt.Sprintf("merge failed: %v", err),
+			}
+		}
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Merging with message: %s\n", strings.TrimSpace(mergeMsg))
+		if err := e.git.MergeNoFF(mergeRef, mergeMsg); err != nil {
+			// ZFC: Use git's porcelain output to detect conflicts instead of parsing stderr.
+			// GetConflictingFiles() uses `git diff --diff-filter=U` which is proper.
+			conflicts, conflictErr := e.git.GetConflictingFiles()
+			if conflictErr == nil && len(conflicts) > 0 {
+				_ = e.git.AbortMerge()
+				return ProcessResult{
+					Success:  false,
+					Conflict: true,
+					Error:    "merge conflict during actual merge",
+				}
+			}
+			// Non-conflict failure: still need to abort to clean up dirty merge state
+			_ = e.git.AbortMerge()
+			return ProcessResult{
+				Success: false,
+				Error:   fmt.Sprintf("merge failed: %v", err),
+			}
 		}
 	}
 

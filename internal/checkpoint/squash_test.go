@@ -343,3 +343,64 @@ func TestSquashWIPCommits_NoCommits(t *testing.T) {
 		t.Errorf("expected 0 for no commits, got %d", wipCount)
 	}
 }
+
+func TestHasAutoSaveCommits_None(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", "add feature A")
+
+	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected no auto-save commits")
+	}
+}
+
+func TestHasAutoSaveCommits_WIPTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+
+	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Error("expected an auto-save commit to be detected")
+	}
+}
+
+func TestHasAutoSaveCommits_WIPNotTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	addCommit(t, dir, "b.go", "package b", "fix: finish the feature")
+
+	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Error("expected an auto-save commit buried earlier in the range to be detected")
+	}
+}
+
+// HasAutoSaveCommits does not check anything out; it must leave the working
+// tree exactly where it found it, unlike the squash helpers above.
+func TestHasAutoSaveCommits_DoesNotMutateRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	before := getCommitSubjects(t, dir)
+
+	if _, err := HasAutoSaveCommits(dir, "main", "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	after := getCommitSubjects(t, dir)
+	if len(before) != len(after) || before[0] != after[0] {
+		t.Errorf("HasAutoSaveCommits mutated history: before=%v after=%v", before, after)
+	}
+}
