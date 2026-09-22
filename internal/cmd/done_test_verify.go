@@ -128,12 +128,12 @@ type testVerifyResult struct {
 	ran        bool
 	skipReason string
 
-	success  bool
+	success bool
 	// the branch's changed packages, recorded for the MR bead (gt-btw1);
 	// ["."] stands in when the change is a whole-package deletion verified
 	// by `go build ./...` (gt-ytjh) and there is no named package to record.
 	packages []string
-	scope    string   // "full": the gate runs the rig's full hermetic test_command
+	scope    string // "full": the gate runs the rig's full hermetic test_command
 	// slotUsed is true only when the gate's run can start a container-backed
 	// suite (gt-wx53): a Go rig whose command does not turn the container
 	// opt-in on runs its whole suite with those tests skipping, so it takes no
