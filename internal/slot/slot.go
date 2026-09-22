@@ -170,9 +170,12 @@ func reentrantEnvValue(townRoot string, index int, role string, pid int) string 
 // kind of detector that missed a live suite before.
 var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 
-// runningGateContainers lists "<image> <names>" for every currently running
-// Docker container whose image or name matches gateContainerPatterns. A
-// non-nil error means the check could not be performed (docker daemon
+// runningGateContainers lists the raw `docker ps` lines for every currently
+// running Docker container whose image or name matches gateContainerPatterns.
+// Each line is one of docker's own JSON records (see dockerPSFormat), which
+// gateContainers parses into the age and session the gate classifies on.
+//
+// A non-nil error means the check could not be performed (docker daemon
 // unreachable, wedged, or refused the connection for some other reason) —
 // callers must treat that as "unknown", never as "no containers running",
 // except the specific isDaemonUnreachable case Acquire distinguishes (see
@@ -181,7 +184,7 @@ var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 var runningGateContainers = func() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerPSTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.Image}} {{.Names}}").Output() //nolint:gosec // G204: fixed args, no user input
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", dockerPSFormat).Output() //nolint:gosec // G204: fixed args, no user input
 	if err != nil {
 		var execErr *exec.Error
 		if errors.As(err, &execErr) {
@@ -241,25 +244,45 @@ func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
 	return func() { runningGateContainers = prev }
 }
 
-// matchGateContainers filters raw `docker ps --format {{.Image}} {{.Names}}`
-// output down to the lines matching gateContainerPatterns. Split out from
-// runningGateContainers so the parsing/matching logic is testable without
-// stubbing the docker CLI call itself.
+// matchGateContainers filters raw `docker ps` output down to the lines for
+// gate containers. Split out from runningGateContainers so the matching logic
+// is testable without stubbing the docker CLI call itself.
 func matchGateContainers(psOutput string) []string {
 	var matches []string
 	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		lower := strings.ToLower(line)
+		// Matched on image and name, the two fields the old
+		// "{{.Image}} {{.Names}}" listing carried. Matching the whole JSON
+		// record instead would let a command or a label match, and gt-bcsq's
+		// rule is that this detector stays no narrower than it was — not that
+		// it widens into fields it never looked at.
+		container := parseGateContainer(line)
+		haystack := strings.ToLower(container.Image + " " + container.Name)
 		for _, pat := range gateContainerPatterns {
-			if strings.Contains(lower, pat) {
+			if strings.Contains(haystack, pat) {
 				matches = append(matches, line)
 				break
 			}
 		}
 	}
 	return matches
+}
+
+// gateContainers parses runningGateContainers' lines into the records the gate
+// judges. Kept separate from the lister so the string seam the tests and the
+// other rigs' packages stub stays what it was.
+func gateContainers() ([]GateContainer, error) {
+	lines, err := runningGateContainers()
+	if err != nil {
+		return nil, err
+	}
+	containers := make([]GateContainer, 0, len(lines))
+	for _, line := range lines {
+		containers = append(containers, parseGateContainer(line))
+	}
+	return containers, nil
 }
 
 // LockDir returns the directory holding the container-gate lock and owner
@@ -363,7 +386,17 @@ type Report struct {
 	// Held is false — i.e. a container-backed suite is running without
 	// holding the slot token. Always empty when Held is true (those
 	// containers belong to the holder, not an "unwrapped" suite).
+	//
+	// Debris is not in here: a gate container past the staleness window with
+	// no live reaper is not a suite anyone is waiting on (gt-ul1k), and
+	// counting it as one is what let a single orphan block the town.
 	UnwrappedContainers []string
+
+	// DebrisContainers lists matching `docker ps` entries classified as
+	// debris: old enough that no live suite can be behind them. Reported so
+	// an operator can see what 'gt slot reap' would remove; never a reason to
+	// call the slot busy.
+	DebrisContainers []string
 
 	// DockerUnknown is true when the docker daemon could not be reached to
 	// check for running containers, so UnwrappedContainers could not be

@@ -115,6 +115,42 @@ Check modification time of backup files. Warn if backups are stale
 **Exit criteria:** All inspections complete."""
 
 [[steps]]
+id = "reap-debris"
+title = "Sweep stale container-gate debris"
+needs = ["inspect"]
+description = """
+Remove gate containers that outlived their suite and the owner files dead
+holders left behind. One hours-old orphan container used to block every
+container-backed suite town-wide until an agent removed it by hand (gt-ul1k).
+
+**1. Read the verdicts before removing anything:**
+```bash
+gt slot reap --dry-run
+```
+Each line names a container, its age, its labels, and the evidence the gate
+used. A container is debris only when it is older than the staleness window
+with no testcontainers ryuk reaper alive for its session; anything younger,
+or anything whose age docker did not report, is kept.
+
+**2. If the list is empty, skip to step 4.**
+
+**3. Remove it:**
+```bash
+gt slot reap
+```
+`gt doctor --check slot-debris --fix` runs the same reap. Both reach the host's
+docker directly — the daemon does not, so this step is what keeps the gate
+clear on the patrol cadence.
+
+**4. Record what was reaped for the report:**
+- Container names removed, with ages
+- Stale owner files removed, with slot index and recorded pid
+- Anything kept, and why
+
+**Exit criteria:** `gt slot reap --dry-run` reports no debris, or the step
+records why what remains was kept."""
+
+[[steps]]
 id = "report"
 title = "Report findings and return to kennel"
 needs = ["inspect"]
