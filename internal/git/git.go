@@ -2714,32 +2714,68 @@ func (g *Git) Parents(commit string) ([]string, error) {
 	return fields[1:], nil
 }
 
-// IsAncestor checks if ancestor is a strict ancestor of descendant — it
-// reaches the same result as `git merge-base --is-ancestor` but with one
-// correction to git's own semantics: merge-base treats "same commit" as an
-// ancestor (exit 0), which callers of a function named IsAncestor do not
-// want, and a descendant-of-descendant is trivially accepted by the bare
-// form too. The strict check: merge-base(ancestor, descendant) must equal
-// ancestor, and the two commits must differ.
+// IsAncestor checks if ancestor is an ancestor of descendant.
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
-	a, err := g.Rev(ancestor)
+	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
 	if err != nil {
-		return false, fmt.Errorf("resolve %s: %w", ancestor, err)
-	}
-	d, err := g.Rev(descendant)
-	if err != nil {
-		return false, fmt.Errorf("resolve %s: %w", descendant, err)
-	}
-	a = strings.TrimSpace(a)
-	d = strings.TrimSpace(d)
-	if a == d {
-		return false, nil
-	}
-	mb, err := g.MergeBase(a, d)
-	if err != nil {
+		// Exit code 1 means not an ancestor, not an error
+		if strings.Contains(err.Error(), "exit status 1") {
+			return false, nil
+		}
 		return false, err
 	}
-	return strings.TrimSpace(mb) == a, nil
+	return true, nil
+}
+
+// CommitLandedOnTarget reports whether commit was already pushed to
+// remote/target by an earlier merge: its exact tip, an ancestor of a later
+// commit, or (a rebase-based queue can rewrite a commit's SHA while
+// preserving content) a commit every one of whose own patches is already
+// applied upstream by patch-id (git cherry).
+//
+// This deliberately stops short of counting a "merge-tree no-op" as landed,
+// unlike VerifyPushedCommitReachableFromPushTarget: that signal is equally
+// true of a commit that never contributed anything to target to begin with,
+// which is a different question (an empty or superseded submission, not a
+// landed one — see the refinery's own empty-merge checks, gt-j5cc). Reusing
+// the broader check here would misreport that case as already landed
+// instead of merge-ineligible, so this checks strictly: literal
+// reachability, or every one of commit's own commits individually already
+// present upstream by patch-id — never merely that merging it now would add
+// nothing.
+//
+// A queue that squashes a multi-commit branch into one upstream commit
+// defeats even the cherry check (no single upstream patch-id equals any one
+// of the branch's own commits); that case has no fully-automatic answer here
+// (see gt mq post-merge --landed-commit, which takes an explicit human
+// attestation instead) and this reports it as not landed.
+func (g *Git) CommitLandedOnTarget(remote, target, commit string) bool {
+	commit = strings.TrimSpace(commit)
+	target = strings.TrimSpace(target)
+	if commit == "" || target == "" {
+		return false
+	}
+	targetRef := remote + "/" + target
+
+	if tip, err := g.Rev(targetRef); err == nil && strings.TrimSpace(tip) == commit {
+		return true
+	}
+	if reachable, err := g.IsAncestor(commit, targetRef); err == nil && reachable {
+		return true
+	}
+
+	base, err := g.MergeBase(targetRef, commit)
+	if err != nil || base == commit {
+		// commit is itself the merge-base (or the base couldn't be
+		// resolved): there is no range of commit's own patches for cherry to
+		// check, so there is no landed-content signal here.
+		return false
+	}
+	out, err := g.Cherry(targetRef, commit)
+	if err != nil {
+		return false
+	}
+	return out != "" && CountCherryUnmergedCommits(out) == 0
 }
 
 // CommitLandedOnTarget reports whether commit was already pushed to
