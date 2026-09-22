@@ -1,6 +1,10 @@
 package cmd
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestResolveSpawnBaseBranch guards gt-a8i3: resolveSpawnBaseBranch has no
 // resumeBranch parameter at all, so a resume dispatch can never leak its
@@ -31,6 +35,46 @@ func TestResolveSpawnBaseBranch(t *testing.T) {
 				t.Errorf("resolveSpawnBaseBranch(%q, %q) = %q, want %q", tt.baseBranch, tt.defaultBranch, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPolecatIntegrationEnabledReadsRigRootMergeQueue reproduces the gt-xwt9
+// finding: both SpawnPolecatForSling call sites read integration_branch_
+// polecat_enabled from rig-local settings/config.json only via
+// config.LoadRigSettings, so a rig-root-only false (gt-me9t's floor) was
+// silently ignored and integration sourcing stayed on. Routing through
+// rig.ResolveMergeQueueConfig (as resolveSetupCommand and
+// buildRefineryPatrolVars already do) makes the rig-root value visible with
+// no rig-local settings/config.json present at all.
+func TestPolecatIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"integration_branch_polecat_enabled": false}
+}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := polecatIntegrationEnabled(townRoot, rigName); got != false {
+		t.Errorf("polecatIntegrationEnabled() = %v, want false (rig-root merge_queue floor invisible to spawn)", got)
+	}
+}
+
+// TestPolecatIntegrationEnabledDefaultsTrue guards the nil-safe default: no
+// config at any tier must not disable integration sourcing.
+func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
+	townRoot := t.TempDir()
+	if got := polecatIntegrationEnabled(townRoot, "norig"); got != true {
+		t.Errorf("polecatIntegrationEnabled() = %v, want true (no config at any tier defaults enabled)", got)
 	}
 }
 

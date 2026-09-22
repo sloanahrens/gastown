@@ -770,6 +770,61 @@ func TestGetIntegrationBranchTemplate(t *testing.T) {
 			t.Errorf("got %q, want %q", got, defaultIntegrationBranchTemplate)
 		}
 	})
+
+	// gt-xwt9: getIntegrationBranchTemplate read only rigPath/settings/
+	// config.json via config.LoadRigSettings, so a rig-root-only template
+	// (gt-me9t's floor) was silently ignored. Routing through
+	// rig.ResolveMergeQueueConfig makes the rig-root value visible with no
+	// rig-local settings/config.json present at all.
+	t.Run("rig-root merge_queue floor is visible with no rig-local settings", func(t *testing.T) {
+		townRoot := t.TempDir()
+		rigPath := filepath.Join(townRoot, "testrig")
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"integration_branch_template": "{prefix}/{epic}"}
+}`
+		if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := getIntegrationBranchTemplate(rigPath, "")
+		if got != "{prefix}/{epic}" {
+			t.Errorf("got %q, want %q", got, "{prefix}/{epic}")
+		}
+	})
+}
+
+// TestGetTestCommandReadsRigRootMergeQueue reproduces gt-xwt9: getTestCommand
+// read only rigPath/settings/config.json via config.LoadRigSettings, so a
+// rig-root-only test_command (gt-me9t's floor) was silently ignored by `gt mq
+// integration land`'s pre-land test run. Routing through
+// rig.ResolveMergeQueueConfig makes the rig-root value visible with no
+// rig-local settings/config.json present at all.
+func TestGetTestCommandReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"test_command": "make test"}
+}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getTestCommand(rigPath); got != "make test" {
+		t.Errorf("getTestCommand() = %q, want %q (rig-root merge_queue floor invisible to integration land)", got, "make test")
+	}
 }
 
 func TestIsReadyToLand(t *testing.T) {

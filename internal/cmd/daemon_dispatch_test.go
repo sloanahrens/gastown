@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +214,42 @@ func TestPoolSeatPicture_UncappedOverflowIsAtLeastOneFreeSeat(t *testing.T) {
 	}
 	if seats.Free < 1 {
 		t.Errorf("free = %d, want at least 1 while the overflow seat is uncapped", seats.Free)
+	}
+}
+
+// TestRigMergeQueueDepthReadsRigRootMergeQueue reproduces gt-xwt9:
+// rigMergeQueueDepth read max_ready_for_dispatch from rig-local settings/
+// config.json only via config.LoadRigSettings, so a rig-root-only ceiling
+// (gt-me9t's floor) was silently ignored and the dispatch patrol fell back
+// to the operator default. Routing through rig.ResolveMergeQueueConfig makes
+// the rig-root value visible with no rig-local settings/config.json present.
+func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"max_ready_for_dispatch": 3}
+}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lister := &fakeDispatchMRLister{mrs: readyMRs(5)}
+	origLister := newDispatchMRLister
+	newDispatchMRLister = func(string) dispatchMRLister { return lister }
+	t.Cleanup(func() { newDispatchMRLister = origLister })
+
+	ready, ceiling := rigMergeQueueDepth(rigPath, rigName)
+	if ceiling != 3 {
+		t.Errorf("ceiling = %d, want 3 (rig-root merge_queue floor invisible to dispatch patrol)", ceiling)
+	}
+	if ready != 5 {
+		t.Errorf("ready = %d, want 5", ready)
 	}
 }

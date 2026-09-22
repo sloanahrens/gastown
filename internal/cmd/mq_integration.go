@@ -12,8 +12,8 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -293,15 +293,9 @@ func getIntegrationBranchTemplate(rigPath, cliOverride string) string {
 		return cliOverride
 	}
 
-	// Try to load rig settings
-	settingsPath := filepath.Join(rigPath, "settings", "config.json")
-	settings, err := config.LoadRigSettings(settingsPath)
-	if err != nil {
-		return defaultIntegrationBranchTemplate
-	}
-
-	if settings.MergeQueue != nil && settings.MergeQueue.IntegrationBranchTemplate != "" {
-		return settings.MergeQueue.IntegrationBranchTemplate
+	mq := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), filepath.Base(rigPath))
+	if mq != nil && mq.IntegrationBranchTemplate != "" {
+		return mq.IntegrationBranchTemplate
 	}
 
 	return defaultIntegrationBranchTemplate
@@ -834,15 +828,11 @@ func filterMRsByTarget(mrs []*beads.Issue, targetBranch string) []*beads.Issue {
 
 // getTestCommand returns the test command from rig settings.
 func getTestCommand(rigPath string) string {
-	settingsPath := filepath.Join(rigPath, "settings", "config.json")
-	settings, err := config.LoadRigSettings(settingsPath)
-	if err != nil {
+	mq := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), filepath.Base(rigPath))
+	if mq == nil {
 		return ""
 	}
-	if settings.MergeQueue != nil && settings.MergeQueue.TestCommand != "" {
-		return settings.MergeQueue.TestCommand
-	}
-	return ""
+	return mq.TestCommand
 }
 
 // runTestCommand executes a test command in the given directory.
@@ -968,11 +958,9 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if auto-land is enabled in settings
-	settingsPath := filepath.Join(r.Path, "settings", "config.json")
-	settings, _ := config.LoadRigSettings(settingsPath) // Ignore error, use defaults
 	autoLandEnabled := false
-	if settings != nil && settings.MergeQueue != nil {
-		autoLandEnabled = settings.MergeQueue.IsIntegrationBranchAutoLandEnabled()
+	if mq := rig.ResolveMergeQueueConfig(townRoot, r.Name); mq != nil {
+		autoLandEnabled = mq.IsIntegrationBranchAutoLandEnabled()
 	}
 
 	// Query children of the epic to determine if ready to land

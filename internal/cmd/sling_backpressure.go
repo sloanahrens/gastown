@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -73,11 +74,13 @@ func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) er
 	rigPath := filepath.Join(townRoot, rigName)
 
 	maxReady := 0
-	settings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json"))
-	switch {
-	case err == nil:
-		maxReady = settings.MergeQueue.GetMaxReadyForDispatch()
-	case !errors.Is(err, config.ErrNotFound):
+	// A missing rig-local settings/config.json is not an error: the ceiling
+	// may still be set at the rig-root or repo tier, so the resolver runs
+	// either way. Only a genuinely unreadable rig-local file (parse error,
+	// permissions) disables the guard, matching the old fail-open behavior.
+	if _, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json")); err == nil || errors.Is(err, config.ErrNotFound) {
+		maxReady = rig.ResolveMergeQueueConfig(townRoot, rigName).GetMaxReadyForDispatch()
+	} else {
 		// An unreadable settings file leaves the guard off, like an unset
 		// knob. Say so: silently dispatching through a ceiling the operator
 		// believes is set is the failure this line exists to prevent.

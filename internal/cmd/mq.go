@@ -983,10 +983,9 @@ func deleteMQPostMergeLocalBranchIfAt(rigGit mqPostMergeGit, branch, expectedHea
 }
 
 func mqDeleteMergedBranchesEnabled(rigPath string) bool {
-	settingsPath := filepath.Join(rigPath, "settings", "config.json")
-	settings, err := config.LoadRigSettings(settingsPath)
-	if err != nil || settings.MergeQueue == nil {
+	mq := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), filepath.Base(rigPath))
+	if mq == nil {
 		return true
 	}
-	return settings.MergeQueue.IsDeleteMergedBranchesEnabled()
+	return mq.IsDeleteMergedBranchesEnabled()
 }

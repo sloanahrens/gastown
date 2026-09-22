@@ -91,6 +91,19 @@ func effectivePolecatDirCap(configured int) int {
 	return configured
 }
 
+// polecatIntegrationEnabled reports whether a hooked bead's parent epic
+// integration branch should be auto-sourced for a spawning polecat's
+// worktree, resolved across rig-root -> repo -> rig-local (gt-xwt9), the
+// same precedence every gate-command call site must use. Nil-safe: an
+// unresolvable config defaults to enabled, matching the pre-existing
+// behavior of the two call sites this replaces.
+func polecatIntegrationEnabled(townRoot, rigName string) bool {
+	if mq := rig.ResolveMergeQueueConfig(townRoot, rigName); mq != nil {
+		return mq.IsPolecatIntegrationEnabled()
+	}
+	return true
+}
+
 func reclaimBrokenIdlePolecatForSling(polecatMgr *polecat.Manager) (bool, error) {
 	polecats, err := polecatMgr.List()
 	if err != nil {
@@ -259,12 +272,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		baseBranch := opts.BaseBranch
 		if opts.ResumeBranch == "" {
 			if baseBranch == "" && opts.HookBead != "" {
-				settingsPath := filepath.Join(r.Path, "settings", "config.json")
-				polecatIntegrationEnabled := true
-				if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-					polecatIntegrationEnabled = settings.MergeQueue.IsPolecatIntegrationEnabled()
-				}
-				if polecatIntegrationEnabled {
+				if polecatIntegrationEnabled(townRoot, rigName) {
 					repoGit, repoErr := getRigGit(r.Path)
 					if repoErr == nil {
 						bd := beads.New(r.Path)
@@ -360,12 +368,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			// Auto-detect: check if the hooked bead's parent epic has an integration branch
-			settingsPath := filepath.Join(r.Path, "settings", "config.json")
-			polecatIntegrationEnabled := true
-			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-				polecatIntegrationEnabled = settings.MergeQueue.IsPolecatIntegrationEnabled()
-			}
-			if polecatIntegrationEnabled {
+			if polecatIntegrationEnabled(townRoot, rigName) {
 				repoGit, repoErr := getRigGit(r.Path)
 				if repoErr == nil {
 					bd := beads.New(r.Path)

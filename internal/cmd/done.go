@@ -1954,9 +1954,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// When merge_strategy=pr, create a GitHub PR for human review
 				// instead of just leaving the branch on origin (gas-rfi).
 				var prURL string
-				noMergeSettingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
-				if noMergeSettings, noMergeSettingsErr := config.LoadRigSettings(noMergeSettingsPath); noMergeSettingsErr == nil &&
-					noMergeSettings.MergeQueue != nil && noMergeSettings.MergeQueue.MergeStrategy == "pr" {
+				if noMergeMQ := rig.ResolveMergeQueueConfig(townRoot, rigName); noMergeMQ != nil && noMergeMQ.MergeStrategy == "pr" {
 					issueTitle := sourceIssueForNoMerge.Title
 					prTitle := fmt.Sprintf("%s (%s)", issueTitle, issueID)
 					if issueTitle == "" {

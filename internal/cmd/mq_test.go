@@ -1,11 +1,49 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+// TestMqDeleteMergedBranchesEnabledReadsRigRootMergeQueue reproduces gt-xwt9:
+// mqDeleteMergedBranchesEnabled read only rigPath/settings/config.json via
+// config.LoadRigSettings, so a rig-root-only delete_merged_branches=false
+// (gt-me9t's floor) was silently ignored and post-merge cleanup kept
+// deleting branches. Routing through rig.ResolveMergeQueueConfig makes the
+// rig-root value visible with no rig-local settings/config.json present.
+func TestMqDeleteMergedBranchesEnabledReadsRigRootMergeQueue(t *testing.T) {
+	rigPath := filepath.Join(t.TempDir(), "testrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "testrig",
+  "merge_queue": {"delete_merged_branches": false}
+}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mqDeleteMergedBranchesEnabled(rigPath); got != false {
+		t.Errorf("mqDeleteMergedBranchesEnabled() = %v, want false (rig-root merge_queue floor invisible to post-merge cleanup)", got)
+	}
+}
+
+// TestMqDeleteMergedBranchesEnabledDefaultsTrue guards the nil-safe default:
+// no config at any tier must not disable branch cleanup.
+func TestMqDeleteMergedBranchesEnabledDefaultsTrue(t *testing.T) {
+	rigPath := filepath.Join(t.TempDir(), "norig")
+	if got := mqDeleteMergedBranchesEnabled(rigPath); got != true {
+		t.Errorf("mqDeleteMergedBranchesEnabled() = %v, want true (no config at any tier defaults enabled)", got)
+	}
+}
 
 func TestParseBranchName(t *testing.T) {
 	t.Parallel()

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -553,10 +554,8 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 // for the one reason it exists.
 func rigMergeQueueDepth(rigPath, rigName string) (ready, ceiling int) {
 	ceiling = defaultDispatchReadyMRCeiling
-	if settings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json")); err == nil {
-		if configured := settings.MergeQueue.GetMaxReadyForDispatch(); configured > 0 {
-			ceiling = configured
-		}
+	if configured := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), rigName).GetMaxReadyForDispatch(); configured > 0 {
+		ceiling = configured
 	}
 	ready, err := countReadyMergeRequests(newDispatchMRLister(rigPath), rigName)
 	if err != nil {
