@@ -69,6 +69,11 @@ func (e *Engineer) buildLandedMRs(mrs []*MRInfo, target string) ([]editorial.Lan
 // next cycle can still resolve (see rejectEditorialVerdict), and returns
 // the error — the caller must not push. skipGates never bypasses this:
 // callers invoke it unconditionally before the push slot is acquired.
+//
+// Landing via the VCS provider instead (merge_strategy=pr) has its own
+// entry point, editorialPreconditionPR, because there is no local merge to
+// read the landed commits off. Both funnel into checkEditorialPrecondition,
+// so the two landing paths cannot drift about what the gate checks.
 func (e *Engineer) editorialPrecondition(logPrefix string, mrs []*MRInfo, target string) ([]editorial.Note, []editorial.LandedMR, *editorial.PreconditionError) {
 	if e.config.Editorial == nil || !e.config.Editorial.Required || len(mrs) == 0 {
 		return nil, nil, nil
@@ -76,26 +81,93 @@ func (e *Engineer) editorialPrecondition(logPrefix string, mrs []*MRInfo, target
 
 	landed, err := e.buildLandedMRs(mrs, target)
 	if err != nil {
-		cerr := &editorial.PreconditionError{Class: editorial.Precondition, MR: mrs[0].ID, Reason: editorial.ReasonRangeUnresolvable}
-		_, _ = fmt.Fprintf(e.output, "%s %s: %v\n", logPrefix, cerr.Error(), err)
-		e.recordEditorialFailure(mrs[0], cerr)
-		e.escalateToWitness(editorialEscalationMessage(cerr))
-		return nil, nil, cerr
+		return nil, nil, e.failEditorialRange(logPrefix, mrs[0], err)
 	}
+	return e.checkEditorialPrecondition(logPrefix, mrs, landed)
+}
 
-	notes, cerr := editorial.CheckPrecondition(e.git, *e.config.Editorial, landed)
-	if cerr != nil {
-		_, _ = fmt.Fprintf(e.output, "%s %s\n", logPrefix, cerr.Error())
-		offending := mrByID(mrs, cerr.MR)
-		e.recordEditorialFailure(offending, cerr)
-		e.escalateToWitness(editorialEscalationMessage(cerr))
-		// The exact MR, not mrByID's fallback: closing a neighboring member
-		// because the failing id was not in this push would dequeue work that
-		// passed the precondition.
-		e.rejectEditorialVerdict(mrByExactID(mrs, cerr.MR), cerr)
-		return nil, nil, cerr
+// editorialPreconditionPR is editorialPrecondition for the merge_strategy=pr
+// path, where the landing push is the VCS provider's PR merge API rather
+// than a local merge followed by a push to origin.
+//
+// buildLandedMRs cannot serve this path: it reads each landed commit off
+// HEAD's first-parent chain, and doMerge never merges locally before it
+// dispatches to doMergePR. The descriptor is built from the MR's own range
+// instead — merge-base(origin/target, submitted head)..submitted head, the
+// same range the note's patch-id was computed over — with LandedCommit left
+// empty, since the commit that will carry the note does not exist until the
+// provider merges. The caller fills it in from the provider's result once
+// the merge has succeeded, and copies the note (copyEditorialNotes).
+//
+// Without this, merge_strategy=pr merged through the provider with no
+// approve-note/patch-id check at all: doMerge returns at its Step 4.5 PR
+// dispatch, before the Step 7-8 block that runs the precondition on the
+// local-merge path.
+func (e *Engineer) editorialPreconditionPR(logPrefix string, mr *MRInfo, target string) ([]editorial.Note, []editorial.LandedMR, *editorial.PreconditionError) {
+	if e.config.Editorial == nil || !e.config.Editorial.Required || mr == nil {
+		return nil, nil, nil
 	}
-	return notes, landed, nil
+	head, err := e.submittedBranchHead(mr)
+	if err != nil {
+		return nil, nil, e.failEditorialRange(logPrefix, mr, err)
+	}
+	base, err := e.git.MergeBase("origin/"+target, head)
+	if err != nil {
+		return nil, nil, e.failEditorialRange(logPrefix, mr, fmt.Errorf("merge-base for %s: %w", mr.ID, err))
+	}
+	return e.checkEditorialPrecondition(logPrefix, []*MRInfo{mr}, []editorial.LandedMR{{
+		MRID:         mr.ID,
+		ReviewedHead: mr.EditorialReviewedHead,
+		Base:         base,
+		Head:         head,
+	}})
+}
+
+// failEditorialRange is the ReasonRangeUnresolvable tail shared by both
+// descriptor builders: the MR's range could not be resolved at all, so no
+// note can be shown to apply to it. Logs the underlying git failure,
+// records the failure receipt, escalates to the rig witness, and returns
+// the classified error — the caller must not land the MR.
+func (e *Engineer) failEditorialRange(logPrefix string, mr *MRInfo, err error) *editorial.PreconditionError {
+	cerr := &editorial.PreconditionError{Class: editorial.Precondition, MR: mr.ID, Reason: editorial.ReasonRangeUnresolvable}
+	_, _ = fmt.Fprintf(e.output, "%s %s: %v\n", logPrefix, cerr.Error(), err)
+	e.recordEditorialFailure(mr, cerr)
+	e.escalateToWitness(editorialEscalationMessage(cerr))
+	return cerr
+}
+
+// checkEditorialPrecondition runs the precondition over descriptors the
+// caller has already built and classifies a refusal. On success it returns
+// the notes and the descriptors they were computed from, so the caller can
+// copy each note onto its landed commit once the push has succeeded.
+func (e *Engineer) checkEditorialPrecondition(logPrefix string, mrs []*MRInfo, landed []editorial.LandedMR) ([]editorial.Note, []editorial.LandedMR, *editorial.PreconditionError) {
+	notes, cerr := editorial.CheckPrecondition(e.git, *e.config.Editorial, landed)
+	if cerr == nil {
+		return notes, landed, nil
+	}
+	_, _ = fmt.Fprintf(e.output, "%s %s\n", logPrefix, cerr.Error())
+	offending := mrByID(mrs, cerr.MR)
+	e.recordEditorialFailure(offending, cerr)
+	e.escalateToWitness(editorialEscalationMessage(cerr))
+	// The exact MR, not mrByID's fallback: closing a neighboring member
+	// because the failing id was not in this push would dequeue work that
+	// passed the precondition.
+	e.rejectEditorialVerdict(mrByExactID(mrs, cerr.MR), cerr)
+	return nil, nil, cerr
+}
+
+// editorialRefusalResult classifies an editorial push-precondition refusal
+// in the ProcessResult a caller returns: a gate verdict about this exact
+// diff, not a build/test/conflict failure. Callers route on
+// EditorialRefused/EditorialReason rather than on Error's message text (see
+// the fail-closed table in the design spec).
+func editorialRefusalResult(cerr *editorial.PreconditionError) ProcessResult {
+	return ProcessResult{
+		Success:          false,
+		EditorialRefused: true,
+		EditorialReason:  cerr.Reason,
+		Error:            cerr.Error(),
+	}
 }
 
 // editorialVerdictReasons are the push-precondition failures that ARE a verdict

@@ -588,6 +588,17 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	// EditorialRefused marks a refusal by the om editorial push precondition
+	// (om-gate T6): no approve note exists whose patch-id still matches the
+	// range about to land. Like NeedsApproval it is not a build/test/conflict
+	// failure — the MR stays queued and is retried next cycle — but unlike
+	// NeedsApproval the refusal is a gate verdict about this exact diff, so
+	// callers must neither nudge the worker nor start dead-worker recovery
+	// for it (HandleMRInfoFailure). EditorialReason carries the classified
+	// reason (editorial.PreconditionReason) so callers route on it rather
+	// than on Error's message text.
+	EditorialRefused bool
+	EditorialReason  editorial.PreconditionReason
 }
 
 // doMerge performs the actual git merge operation.
@@ -831,7 +842,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after editorial precondition failure: %v\n", target, resetErr)
 			}
-			return ProcessResult{Success: false, Error: cerr.Error()}
+			return editorialRefusalResult(cerr)
 		}
 
 		// Acquire merge slot before push to serialize writes to the default branch.
@@ -995,7 +1006,18 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
 
-	// Step PR.3: Merge via VCS provider API with a merge commit so the submitted
+	// Step PR.3: Editorial push precondition (om-gate T6). On the local-merge
+	// path this runs immediately before the push; here the landing push IS the
+	// provider's merge, so it runs immediately before MergePR — after the
+	// approval/head checks that can still defer the merge. Refusal leaves the
+	// MR queued (see HandleMRInfoFailure's EditorialRefused branch); the
+	// provider is never called.
+	notes, landed, cerr := e.editorialPreconditionPR("[Engineer]", mr, target)
+	if cerr != nil {
+		return editorialRefusalResult(cerr)
+	}
+
+	// Step PR.4: Merge via VCS provider API with a merge commit so the submitted
 	// head remains in target ancestry for post-merge proof.
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Merging PR #%d via %s API (merge)...\n", pr.Number, provider)
 	mergeCommit, err := e.prProvider.MergePR(pr, "merge")
@@ -1006,7 +1028,7 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 		}
 	}
 
-	// Step PR.4: Sync local target branch after remote merge
+	// Step PR.5: Sync local target branch after remote merge
 	if err := e.git.Checkout(target); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to checkout %s after PR merge: %v\n", target, err)
 	} else if err := e.git.Pull("origin", target); err != nil {
@@ -1023,6 +1045,17 @@ func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 			Success: false,
 			Error:   err.Error(),
 		}
+	}
+
+	// The provider has landed the PR, so the commit that will carry the note is
+	// known: fill it into the descriptor from the precondition and copy the note
+	// onto the commit target's history actually shows. A no-op when the reviewed
+	// head and the landed merge commit coincide. Like the local-merge path this
+	// runs after the push, so a failure here cannot refuse the merge — it
+	// escalates instead (copyEditorialNotes).
+	if len(landed) > 0 {
+		landed[0].LandedCommit = mergeCommit
+		e.copyEditorialNotes("[Engineer]", landed, notes, []*MRInfo{mr})
 	}
 
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Successfully merged PR #%d: %s\n", pr.Number, shortSHA(mergeCommit))
@@ -2068,6 +2101,19 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// No polecat notification needed; the PR just needs a human review on GitHub.
 	if result.NeedsApproval {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: PR awaiting human approval, will retry next poll\n", mr.ID)
+		return
+	}
+
+	// EditorialRefused: the om editorial push precondition (om-gate T6) refused
+	// this MR — no approve note whose patch-id still matches the range about to
+	// land (see editorial_gate.go). A verdict about the diff, not a build/test
+	// failure, so the MR stays queued and the next cycle re-checks it; a
+	// request_changes verdict has already closed the MR (rejectEditorialVerdict).
+	// No polecat or mayor nudge — the worker has nothing to fix — and no
+	// dead-worker recovery, which would otherwise re-dispatch reviewed work
+	// every cycle the same unchanged refusal stands.
+	if result.EditorialRefused {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: editorial precondition refused (%s), will retry next poll\n", mr.ID, result.EditorialReason)
 		return
 	}
 

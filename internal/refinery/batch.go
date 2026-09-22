@@ -475,6 +475,14 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		// PR awaiting human approval — leave in queue for retry on next poll.
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: PR awaiting approval, will retry\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.EditorialRefused {
+		// A gate verdict about this diff, not a build/test failure: left in
+		// queue for the next cycle, and reported rather than raised as a batch
+		// error — one unchanged refusal must not read as a fresh infrastructure
+		// failure on every cycle (HandleMRInfoFailure does the rest, and
+		// deliberately nudges nobody).
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial precondition refused (%s) — left in queue: %s\n", mr.ID, processResult.EditorialReason, processResult.Error)
+		e.HandleMRInfoFailure(mr, processResult)
 	} else {
 		result.Error = fmt.Errorf("merge failed: %s", processResult.Error)
 	}
