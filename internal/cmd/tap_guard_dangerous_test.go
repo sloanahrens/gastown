@@ -591,6 +591,52 @@ func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
 	}
 }
 
+// TestShellTokenizeSplitsUnquotedNewlines pins the gt-3j8u tokenizer rule
+// every command-word matcher depends on: an unquoted newline ends a command
+// exactly like ';', so it must surface as its own separator token — while a
+// newline that is quoted (or a backslash-newline line continuation, which
+// the shell deletes to JOIN the lines) must not.
+func TestShellTokenizeSplitsUnquotedNewlines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"newline becomes a separator token", "cd /tmp\ngh pr create",
+			[]string{"cd", "/tmp", ";", "gh", "pr", "create"}},
+		{"blank line yields an empty segment", "echo one\n\ngit status",
+			[]string{"echo", "one", ";", ";", "git", "status"}},
+		{"newline still separates after a glued operator", "echo hi&&\nrm -rf /tmp/x",
+			[]string{"echo", "hi", "&&", ";", "rm", "-rf", "/tmp/x"}},
+		{"line continuation joins the two lines", "git \\\n  checkout -b feature/x",
+			[]string{"git", "checkout", "-b", "feature/x"}},
+		{"continuation inside double quotes joins too", "echo \"a\\\nb\"",
+			[]string{"echo", "ab"}},
+		{"escaped backslash before a newline still separates", "echo a\\\\\nb",
+			[]string{"echo", `a\`, ";", "b"}},
+		{"newline inside single quotes is literal", "printf 'a\nb'",
+			[]string{"printf", "a\nb"}},
+		{"newline inside double quotes is literal", "echo \"a\nb\"",
+			[]string{"echo", "a\nb"}},
+		{"newline inside a quoted argument is one token", "git commit -m \"fix: use gh pr create\"\nls",
+			[]string{"git", "commit", "-m", "fix: use gh pr create", ";", "ls"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 // TestShellVariableScanRootIsBlocked pins the narrowed gt-mkrj scope: a
 // scan whose root path is routed through a shell variable assigned
 // earlier in the same command line must be blocked exactly like a literal

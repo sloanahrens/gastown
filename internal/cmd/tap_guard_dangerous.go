@@ -542,6 +542,24 @@ func shellTokenize(command string) []string {
 // with a backslash outside quotes, are left untouched so quoted content (a
 // sed script containing '|', a jq filter) stays exactly as opaque as it was
 // before this pass.
+//
+// An unquoted newline is a command separator too — the shell ends the
+// command there exactly as if ';' had been typed — so it gets the same
+// spaced-out ";" treatment. Without it a multi-line invocation tokenized as
+// ONE segment: "cd /tmp" + newline + "gh pr create" read as a single "cd"
+// call, so only the first line was ever compared against the
+// command-prefix matchers and a blocked command on any later line failed
+// open (gt-3j8u; the same hole hid a later line's command from
+// checkBashCommand and the suite gates, which are keyed on
+// shellCommandSeparators too).
+//
+// A backslash-newline is the opposite case — a LINE CONTINUATION, which the
+// shell deletes outright so the two lines become one command — and is
+// removed here, keeping the words on either side glued exactly as the shell
+// would. Left raw, shlex buries the newline inside the following word and
+// the joined command ("git \" + newline + "  checkout -b x") is invisible to
+// those same matchers (gt-3j8u). Both rules are skipped inside single
+// quotes, where a backslash is literal and a newline is just a character.
 func spaceOutShellOperators(command string) string {
 	var b strings.Builder
 	b.Grow(len(command) + 8)
@@ -550,6 +568,10 @@ func spaceOutShellOperators(command string) string {
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
+		if r == '\\' && !escaped && quote != '\'' && i+1 < len(runes) && runes[i+1] == '\n' {
+			i++
+			continue
+		}
 		if escaped {
 			b.WriteRune(r)
 			escaped = false
@@ -571,6 +593,8 @@ func spaceOutShellOperators(command string) string {
 		case '\'', '"':
 			quote = r
 			b.WriteRune(r)
+		case '\n':
+			b.WriteString(" ; ")
 		case ';', '&', '|':
 			if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
 				b.WriteRune(' ')
