@@ -167,10 +167,11 @@ func poolSeatCounts(pool *config.PolecatPool, sessions []poolSession) (local, ov
 // sling instead of spawning past a cap.
 //
 // requested is the agent named on the command line (--agent), including the
-// agent a convoy recorded at sling time. It is admitted only when it names one
-// of the pool's own seats: the bead's route:* label and that seat's cap decide,
-// exactly as they do for a sling that named no agent. An agent the pool does
-// not own leaves it nothing to admit (gt-4lbz).
+// agent a convoy recorded at sling time. A request that names one of the pool's
+// own seats is served by that seat's own rules or refused — never by the other
+// seat, which would spend on the paid provider the caller did not ask for
+// (gt-x40u). An agent the pool does not own leaves it nothing to admit, and the
+// request stands untouched (gt-4lbz).
 //
 // Every reason names the agent it chose or the seat it could not take. The
 // three lines that name no agent — no pool configured, no local_agent, and a
@@ -200,6 +201,12 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	// reads differently from one refused because the town is out of seats.
 	refuse := func(why string) (string, string, bool) {
 		return pool.OverflowAgent, fmt.Sprintf("pool: overflow full (%d/%d) -> no seat (%s)", over, pool.MaxOverflow, why), true
+	}
+	// refuseRequest is refuse() for a seat the caller named. The line names that
+	// seat, so a request the pool could not serve reads as one rather than as the
+	// pool's own choice of seat.
+	refuseRequest := func(why string) (string, string, bool) {
+		return requested, fmt.Sprintf("pool: %s -> no seat (requested %s)", why, requested), true
 	}
 	// localSeat is the one place the seat line is built: it is contractual
 	// output, and it is what tells a reader which seat the polecat took.
@@ -244,6 +251,22 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 		}
 		return pool.OverflowAgent, fmt.Sprintf("pool: overflow -> %s (%s)", overflow, why), false
 	}
+	// requestedLocal is seat() for a request that named the local agent: the same
+	// three rules, but a seat that cannot be taken refuses rather than being
+	// served by the overflow seat. The caller asked for the free seat; the paid
+	// one is the pool's answer to a bead it routed itself, not to a request
+	// (gt-x40u).
+	requestedLocal := func() (string, string, bool) {
+		switch {
+		case pool.MaxLocal <= 0:
+			return refuseRequest(fmt.Sprintf("no local seats (max_local %d)", pool.MaxLocal))
+		case local >= pool.MaxLocal:
+			return refuseRequest(fmt.Sprintf("local full (%d/%d)", local, pool.MaxLocal))
+		case tooSoon:
+			return refuseRequest("stagger " + now.Sub(newest).Round(time.Second).String() + " since last local spawn")
+		}
+		return localSeat("requested " + requested)
+	}
 
 	// 1. Explicit routing wins over everything below, including a spent local
 	//    attempt: an operator who labeled the bead has already decided.
@@ -261,14 +284,14 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	}
 	// 3. The agent the caller asked for. It names a seat, it does not license
 	//    taking one: a request for a seat the pool owns is admitted by that
-	//    seat's own rules, so `--agent=<local>` on a full local pool goes to the
-	//    overflow agent or is refused rather than over-filling the GPU. An agent
-	//    the pool does not own is not the pool's to admit, and the request
-	//    stands untouched (gt-4lbz).
+	//    seat's own rules — so `--agent=<local>` on a full local pool is refused
+	//    rather than over-filling the GPU or paying for the overflow seat the
+	//    caller did not ask for (gt-x40u). An agent the pool does not own is not
+	//    the pool's to admit, and the request stands untouched (gt-4lbz).
 	if requested != "" {
 		switch requested {
 		case pool.LocalAgent:
-			return seat("requested " + requested)
+			return requestedLocal()
 		case pool.OverflowAgent:
 			return overflowFor("requested " + requested)
 		}
