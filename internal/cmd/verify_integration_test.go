@@ -15,6 +15,17 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 )
 
+// deletePkgb commits the removal of every file in the test repo's pkgb — a
+// whole-package deletion, the diff shape gt-ytjh opened.
+func deletePkgb(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, "pkgb")); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
+}
+
 // TestRunDefaultTestVerification guards the core gt-h9kf behavior: gt done's
 // default (non-opt-in) test gate must actually run the rig's hermetic
 // test_command (gt-btw1) and refuse when it fails, succeed when it passes,
@@ -115,6 +126,46 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "TestBroken") && !strings.Contains(err.Error(), "this new test was never actually run") {
 			t.Errorf("error does not surface the failing test output: %v", err)
+		}
+	})
+
+	t.Run("whole-package deletion that still compiles: verified by go build, not a false refusal", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		deletePkgb(t, dir)
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: a clean whole-package deletion must not refuse (gt-ytjh): %v", err)
+		}
+		if !result.ran || !result.success {
+			t.Fatalf("result = %+v, want ran=true success=true", result)
+		}
+		if len(result.packages) != 1 || result.packages[0] != "." {
+			t.Errorf("packages = %v, want [.] (the whole-module build stands in for the deleted package)", result.packages)
+		}
+	})
+
+	t.Run("whole-package deletion that breaks the build: still refuses", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		// pkga imports pkgb, so deleting pkgb makes the rest of the module
+		// unbuildable: the deletion is real breakage, and the refusal stays.
+		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nimport \"example.test/pkgb\"\n\nfunc Add(a, b int) int { return a + b + pkgb.Double(0) }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "pkga imports pkgb")
+		deletePkgb(t, dir)
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-broken-role")
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: expected a refusal when the deletion breaks the build, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "unbuildable") {
+			t.Errorf("error does not name the broken build: %v", err)
 		}
 	})
 
