@@ -863,7 +863,7 @@ func TestFindAnyCleanupWisp_NoBdAvailable(t *testing.T) {
 	t.Parallel()
 	// When bd is not available (test environment), findAnyCleanupWisp
 	// should return empty string without panicking
-	result := findAnyCleanupWisp(DefaultBdCli(), "/nonexistent", "testpolecat")
+	result := findAnyCleanupWisp(DefaultBdCli(), "/nonexistent", "gastown", "testpolecat")
 	if result != "" {
 		t.Errorf("findAnyCleanupWisp = %q, want empty when bd unavailable", result)
 	}
@@ -1166,7 +1166,7 @@ func TestFindCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
 
-	_, _ = findCleanupWisp(bd, workDir, "nux")
+	_, _ = findCleanupWisp(bd, workDir, "gastown", "nux")
 
 	got := strings.Join(mock.calls, "\n")
 
@@ -1190,7 +1190,7 @@ func TestFindAnyCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	bd, mock := fakeBd()
 	workDir := t.TempDir()
 
-	_ = findAnyCleanupWisp(bd, workDir, "bravo")
+	_ = findAnyCleanupWisp(bd, workDir, "gastown", "bravo")
 
 	got := strings.Join(mock.calls, "\n")
 
@@ -1209,10 +1209,143 @@ func TestFindAnyCleanupWisp_UsesBdQueryForEphemeralWisps(t *testing.T) {
 	}
 }
 
+// storedWisp is a fake row in fakeWispStore.
+type storedWisp struct {
+	id       string
+	labels   []string
+	assignee string
+	status   string
+}
+
+// fakeWispStore is a minimal in-memory bd double that actually filters on
+// labels/assignee/status, unlike mockBd's canned responses. It exists to
+// prove the create→query round trip end to end: a cleanup wisp created via
+// createCleanupWisp for one rig is found by that rig's patrol query and NOT
+// found by another rig's query for a same-named polecat (gt-gsrz — polecat
+// names collide across rigs, so assignee is the discriminator).
+type fakeWispStore struct {
+	next  int
+	wisps []storedWisp
+}
+
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func (s *fakeWispStore) bd() *BdCli {
+	return &BdCli{
+		Exec: func(workDir string, args ...string) (string, error) {
+			if len(args) == 0 {
+				return "{}", nil
+			}
+			switch args[0] {
+			case "create":
+				s.next++
+				id := fmt.Sprintf("gt-wisp-%d", s.next)
+				s.wisps = append(s.wisps, storedWisp{
+					id:       id,
+					labels:   strings.Split(flagValue(args, "--labels"), ","),
+					assignee: flagValue(args, "--assignee"),
+					status:   "open",
+				})
+				return fmt.Sprintf(`{"id":%q}`, id), nil
+			case "query":
+				if len(args) < 2 {
+					return "[]", nil
+				}
+				expr := args[1]
+				var wantLabels []string
+				wantAssignee, wantStatus := "", ""
+				for _, clause := range strings.Split(expr, " AND ") {
+					switch {
+					case strings.HasPrefix(clause, "label="):
+						wantLabels = append(wantLabels, strings.TrimPrefix(clause, "label="))
+					case strings.HasPrefix(clause, "assignee="):
+						wantAssignee = strings.TrimPrefix(clause, "assignee=")
+					case strings.HasPrefix(clause, "status="):
+						wantStatus = strings.TrimPrefix(clause, "status=")
+					}
+				}
+				var matched []string
+				for _, w := range s.wisps {
+					if wantStatus != "" && w.status != wantStatus {
+						continue
+					}
+					if wantAssignee != "" && w.assignee != wantAssignee {
+						continue
+					}
+					allLabels := true
+					for _, wl := range wantLabels {
+						found := false
+						for _, l := range w.labels {
+							if l == wl {
+								found = true
+								break
+							}
+						}
+						if !found {
+							allLabels = false
+							break
+						}
+					}
+					if !allLabels {
+						continue
+					}
+					matched = append(matched, fmt.Sprintf(`{"id":%q}`, w.id))
+				}
+				return "[" + strings.Join(matched, ",") + "]", nil
+			default:
+				return "{}", nil
+			}
+		},
+		Run: func(workDir string, args ...string) error { return nil },
+	}
+}
+
+// TestCreateCleanupWisp_FoundByOwningRigNotByOtherRig is the gt-gsrz
+// regression test: a cleanup wisp created for one rig's polecat is found by
+// that rig's patrol query (createCleanupWisp → findAnyCleanupWisp round
+// trip), and a same-named polecat cleanup wisp created for a DIFFERENT rig
+// is not — proving assignee, not polecat name alone, is what scopes the
+// patrol's cleanup-wisp discovery to its own rig.
+func TestCreateCleanupWisp_FoundByOwningRigNotByOtherRig(t *testing.T) {
+	t.Parallel()
+	store := &fakeWispStore{}
+	bd := store.bd()
+	workDir := t.TempDir()
+
+	gtID, err := createCleanupWisp(bd, workDir, "gastown", "jasper", "gt-abc", "feature-x")
+	if err != nil {
+		t.Fatalf("createCleanupWisp(gastown): %v", err)
+	}
+	omID, err := createCleanupWisp(bd, workDir, "om", "jasper", "om-xyz", "other-branch")
+	if err != nil {
+		t.Fatalf("createCleanupWisp(om): %v", err)
+	}
+	if gtID == omID {
+		t.Fatalf("expected distinct wisp IDs, both got %q", gtID)
+	}
+
+	got := findAnyCleanupWisp(bd, workDir, "gastown", "jasper")
+	if got != gtID {
+		t.Errorf("findAnyCleanupWisp(gastown, jasper) = %q, want %q (the gastown wisp) — a same-named om polecat's wisp must not match", got, gtID)
+	}
+
+	got = findAnyCleanupWisp(bd, workDir, "om", "jasper")
+	if got != omID {
+		t.Errorf("findAnyCleanupWisp(om, jasper) = %q, want %q (the om wisp) — a same-named gastown polecat's wisp must not match", got, omID)
+	}
+}
+
 func TestFindAllCleanupWisps_NoBdAvailable(t *testing.T) {
 	t.Parallel()
 	// When bd is not available, findAllCleanupWisps should return nil
-	result := findAllCleanupWisps(DefaultBdCli(), "/nonexistent", "testpolecat")
+	result := findAllCleanupWisps(DefaultBdCli(), "/nonexistent", "gastown", "testpolecat")
 	if result != nil {
 		t.Errorf("findAllCleanupWisps = %v, want nil when bd unavailable", result)
 	}
@@ -1231,7 +1364,7 @@ func TestFindAllCleanupWisps_ReturnsAllIDs(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findAllCleanupWisps(bd, workDir, "nux")
+	result := findAllCleanupWisps(bd, workDir, "gastown", "nux")
 
 	if len(result) != 2 {
 		t.Fatalf("findAllCleanupWisps: got %d items, want 2", len(result))
@@ -1264,7 +1397,7 @@ func TestFindAllCleanupWisps_EmptyList(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findAllCleanupWisps(bd, workDir, "nux")
+	result := findAllCleanupWisps(bd, workDir, "gastown", "nux")
 	if result != nil {
 		t.Errorf("findAllCleanupWisps: got %v, want nil for empty list", result)
 	}
@@ -2962,7 +3095,7 @@ func TestFindCleanupWispsForCompletion_MatchesExactIssueAndBranch(t *testing.T) 
 	)
 	workDir := t.TempDir()
 
-	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+	result := findCleanupWispsForCompletion(bd, workDir, "gastown", "nux", "gt-abc", "feature-x")
 
 	if len(result) != 1 || result[0] != "gt-wisp-match" {
 		t.Errorf("findCleanupWispsForCompletion = %v, want [gt-wisp-match]", result)
@@ -2984,7 +3117,7 @@ func TestFindCleanupWispsForCompletion_NoMatches(t *testing.T) {
 	)
 	workDir := t.TempDir()
 
-	result := findCleanupWispsForCompletion(bd, workDir, "nux", "gt-abc", "feature-x")
+	result := findCleanupWispsForCompletion(bd, workDir, "gastown", "nux", "gt-abc", "feature-x")
 	if result != nil {
 		t.Errorf("findCleanupWispsForCompletion = %v, want nil", result)
 	}
