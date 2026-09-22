@@ -2441,7 +2441,13 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	gitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
-		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
+		// The landed probe is lazy: it runs only for an active_mr that already
+		// looks gone or closed and is still blocking (gt-wprt). This is the
+		// reuse gate the directory allocator (FindIdlePolecat) decides on, so a
+		// pointer left in that state refuses every new spawn once the rig is at
+		// its directory cap.
+		assessment := AssessActiveMRWithLandedEvidence(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
+			func() LandedEvidence { return ProbeWorkLandedOnRef(clonePath, facts.Branch, "origin") })
 		if assessment.Pending {
 			facts.ActiveMRBlocker = assessment.Reason
 		}
