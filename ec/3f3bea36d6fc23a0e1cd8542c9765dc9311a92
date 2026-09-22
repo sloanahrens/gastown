@@ -1,0 +1,47 @@
+{
+  "score": 0.83,
+  "verdict": "approve",
+  "summary": "The change correctly closes the gt-iki6 hole: a pushed polecat branch whose tip is a checkpoint_dog/auto-save commit is now refused with an actionable rewrite command instead of being landed as-is (the f0a00f6 shape). InspectAutoSaveTip is read-only, well-commented, and covered by thorough unit and end-to-end tests; the gate is fail-closed on the pushed-branch path and the fix-command selection (amend vs. explicit message vs. merge-aware) is correct. Remaining issues are minor: the post-squash reset detector in done.go fails open when HEAD cannot be re-read, Ahead can over-count commits reachable through a merge (benign for decisions), and the BeneathIsMerge read failure silently degrades the advice command.",
+  "findings": [
+    {
+      "id": "ad74b2fe4010",
+      "severity": "minor",
+      "path": "internal/cmd/done.go",
+      "line": 1609,
+      "title": "Post-squash reset detector fails open when HEAD cannot be read",
+      "detail": "The guard that detects 'SquashAutoSaveCommits died after its soft reset' is gated on headBeforeErr == nil \u0026\u0026 revErr == nil. If either g.Rev(\"HEAD\") call fails, the check silently emits the same value as 'no reset happened' and falls through to warn-and-submit (or, for a real tip with a buried auto-save commit, submit an empty branch). This is a measurement whose failure path equals its success path. The trigger is unlikely in a healthy repo and the change is strictly safer than before, but a fail-closed fallback (refuse when the reset cannot be verified) would remove the ambiguity."
+    },
+    {
+      "id": "76bd86d73d0b",
+      "severity": "minor",
+      "path": "internal/checkpoint/squash.go",
+      "line": 86,
+      "title": "git log default ordering is not strictly first-parent",
+      "detail": "InspectAutoSaveTip uses `git log merge-base..headRef` with default (commit-date) ordering, so `Ahead` counts commits pulled in through merge side-branches, and the comment's claim that 'the index also counts first-parent steps' is only guaranteed by the generated commits being newest by date. Decisions remain correct in practice (the trailing-run count stops at a non-generated merge, and Trailing \u003e= Ahead cannot be falsely true with a merge present), but a `--first-parent` walk would make the first-parent claim airtight and the Ahead count meaningful."
+    },
+    {
+      "id": "fb80509950eb",
+      "severity": "info",
+      "path": "internal/checkpoint/squash.go",
+      "line": 103,
+      "title": "BeneathIsMerge silently degrades to false on read failure",
+      "detail": "When the `git log -1 --format=%p headRef~Trailing` probe errors, parentsErr is swallowed and BeneathIsMerge stays false, so autoSaveTipFixCommand emits the `--amend --no-edit` form against a merge and buries the branch's own message under the merge subject. The refusal still fires either way (safe direction); only the remediation advice degrades. The field comment documents the false-on-failure behavior, but the error is not surfaced to the polecat."
+    },
+    {
+      "id": "768bec56c9c3",
+      "severity": "info",
+      "path": "internal/cmd/done_autosave_tip.go",
+      "line": 62,
+      "title": "Reset error names baseRef, not the actual merge-base",
+      "detail": "autoSaveSquashResetError says the branch was 'reset it to baseRef' and its changes are 'staged on top of baseRef', but SquashAutoSaveCommits soft-resets to `git merge-base(baseRef, HEAD)`, which differs on a stale branch or fork-backed rig. The 'commit them' guidance is still correct, but the named ref can be wrong."
+    },
+    {
+      "id": "1fbc188327be",
+      "severity": "info",
+      "path": "internal/cmd/done.go",
+      "line": 1605,
+      "title": "Inline reset-detection logic has no direct test",
+      "detail": "The headBefore/headAfter comparison added to runDone (the trickiest new logic in this change) is not exercised by any test; the new tests cover the error helpers and InspectAutoSaveTip/fix-command selection, but not the integration path where a squash fails after reset. Hard to test without fault injection, but the failure mode it guards is the one most worth pinning."
+    }
+  ]
+}
