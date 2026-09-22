@@ -971,35 +971,12 @@ func nudgeWitness(rigName, message string) {
 	}
 }
 
-// nudgeRefinery wakes the refinery after an MR is created. The MQ_SUBMIT event
-// type is what tells the refinery a *new* submission arrived — see
-// nudgeRefineryMergeReady for the case where the MR already existed.
+// nudgeRefinery wakes the refinery after an MR is created.
+// Uses immediate delivery: sends directly to the tmux pane.
+// No cooperative queue — idle agents never call Drain(), so queued
+// nudges would be stuck forever. Direct delivery is safe: if the
+// agent is busy, text buffers in tmux and is processed at next prompt.
 func nudgeRefinery(rigName, message string) {
-	nudgeRefineryWithEvent(rigName, "MQ_SUBMIT", "sling", message)
-}
-
-// nudgeRefineryMergeReady wakes the refinery for an MR that is already in the
-// queue and has just become processable, rather than for a brand-new
-// submission. The distinction is the event type: emitting MQ_SUBMIT here would
-// tell the refinery a new MR arrived when none did (gh#3885 / shouldNudgeRefinery
-// in done.go).
-func nudgeRefineryMergeReady(rigName, mrID string) {
-	nudgeRefineryWithEvent(rigName, "MERGE_READY", "done",
-		fmt.Sprintf("MERGE_READY %s - check inbox for pending work", mrID))
-}
-
-// nudgeRefineryWithEvent delivers a refinery wake as both a durable channel
-// event and a best-effort tmux nudge.
-//
-// The event file is what the refinery's await-event loop polls, so it is the
-// half that survives the refinery being between cycles or at its Claude prompt;
-// the tmux nudge is the only half that reaches a session sitting at that prompt
-// with an empty turn. Neither alone is sufficient (gt-rv8h).
-//
-// Failing to reach the refinery is non-fatal: the MR stays in the queue and the
-// next wake source (witness patrol scan, daemon heartbeat, or the refinery's own
-// await-event timeout) picks it up.
-func nudgeRefineryWithEvent(rigName, eventType, source, message string) {
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
 
 	// Test hook: log nudge for test observability (same pattern as GT_TEST_ATTACHED_MOLECULE_LOG)
@@ -1017,8 +994,8 @@ func nudgeRefineryWithEvent(rigName, eventType, source, message string) {
 	// This is the programmatic bridge between mq submit and the event system.
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "refinery", rigName, eventType, []string{
-			"source=" + source,
+		_, _ = channelevents.EmitToTown(townRoot, "refinery", rigName, "MQ_SUBMIT", []string{
+			"source=sling",
 			"message=" + message,
 		})
 	}

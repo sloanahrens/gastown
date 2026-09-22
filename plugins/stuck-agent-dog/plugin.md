@@ -94,6 +94,10 @@ For each rig, enumerate polecats and check their session status.
 A polecat is a concern if:
 - `gt hook show --json` reports active work with status `hooked` or `in_progress`
 - Its central runtime-aware health is `session-dead` OR `agent-dead`
+- It has no pause marker (`.runtime/agents/<rig>/polecat.<name>.json`,
+  `"paused": true`) — checked first, before the identity lookup. It is the
+  ONLY source of truth for "is this agent paused" (gt-ahik); unreadable
+  counts as paused too.
 - Its agent identity bead (`gt polecat identity show --json`) does not report
   a TERMINAL `agent_state` of `done` or `nuked`. A finished polecat can leave
   behind an unclosed `in_progress` formula-step wisp still carrying its

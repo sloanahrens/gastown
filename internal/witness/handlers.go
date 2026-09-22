@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/config"
@@ -1059,8 +1061,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if sourceHint == "" {
 			sourceHint = fields.HookBead
 		}
-		assessment := polecat.AssessActiveMRWithLandedEvidence(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
-			func() polecat.LandedEvidence { return polecat.ProbeWorkLandedOnRef(clonePath, input.Branch, "origin") })
+		assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
@@ -1301,11 +1302,43 @@ func extractPolecatFromJSON(output string) string {
 //  2. Start a fresh session via `gt session restart`
 //  3. The new session picks up the polecat's existing hook and continues
 func RestartPolecatSession(workDir, rigName, polecatName string) error {
+	// Pause gate (gt-ahik): see pauseGateSkip's doc for why. This is a
+	// second, cheap check behind that choke point — a read of one file, no
+	// Dolt, no config lookup — safe for any future caller that reaches this
+	// function directly. Fails CLOSED, same as pauseGateSkip (gt-wisp-6ajo):
+	// the error branch below skips the restart rather than proceeding on an
+	// unreadable marker.
+	townRoot := workDirToTownRoot(workDir)
+	paused, st, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName)
+	switch {
+	case perr != nil:
+		log.Printf("warning: pause gate check for %s/%s failed (%v); skipping restart (fail closed)",
+			rigName, polecatName, perr)
+		return nil
+	case paused:
+		actor := ""
+		if st != nil {
+			actor = st.PausedBy
+		}
+		log.Printf("info: skip restart of %s/%s: agent is paused (%s, %s)",
+			rigName, polecatName, agentpause.Reason(st), actor)
+		return nil
+	}
+
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
-	if err := util.ExecRun(workDir, "gt", "session", "restart", address, "--force"); err != nil {
+	if err := restartSessionExec(workDir, address); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)
 	}
 	return nil
+}
+
+// restartSessionExec performs the actual session restart. It is a package
+// variable so tests can assert the pause gate's decision without spawning a
+// real `gt session restart`, which a non-hermetic test process could point at
+// the live town (gt-wisp-6ajo). Swap it only from a non-parallel test, and
+// restore it in t.Cleanup.
+var restartSessionExec = func(workDir, address string) error {
+	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
 }
 
 // NukePolecat executes the actual nuke operation for a polecat.
@@ -1663,6 +1696,11 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 		result.Checked++
 
+		// Pause gate (gt-ahik): see pauseGateSkip doc.
+		if pauseGateSkip(townRoot, rigName, polecatName) {
+			continue
+		}
+
 		detectedAt := time.Now()
 
 		sessionAlive, err := t.HasSession(sessionName)
@@ -1730,6 +1768,35 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 	trackConvoyFailures(bd, workDir, result)
 
 	return result
+}
+
+// pauseGateSkip is the choke point every zombie classification and its
+// consequent action (restart, archive/nuke via aa-apw, done-intent label
+// clearing, cleanup wisp creation) sits behind: an operator-sanctioned pause
+// (gt agent pause) is indistinguishable from a stuck agent to the scanner
+// alone — the mayor's SIGSTOP froze flint and the stuck-agent dog respawned
+// it 20 minutes later (gt-ahik). DetectZombiePolecats calls this before any
+// of the above runs, so a paused polecat is never classified as a zombie and
+// none of their side effects run — reported as skipped, not restarted.
+// DetectStalledPolecats calls it too, so a frozen pane never gets blind
+// dialog-recovery keystrokes sent into it.
+//
+// PauseGate fails CLOSED: an unreadable marker is treated as paused, same as
+// an explicit one, and that failure is logged as a warning rather than
+// silently swallowed.
+func pauseGateSkip(townRoot, rigName, polecatName string) bool {
+	paused, pst, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName)
+	if !paused {
+		return false
+	}
+	if perr != nil {
+		log.Printf("warning: pause gate check for %s/%s failed (%v); skipping zombie detection (fail closed)",
+			rigName, polecatName, perr)
+	} else {
+		log.Printf("info: skip zombie detection for %s/%s: agent is paused (%s)",
+			rigName, polecatName, agentpause.Reason(pst))
+	}
+	return true
 }
 
 // observeDoneIntentActivity is the real-activity probe the stuck-in-done gate
@@ -2446,6 +2513,15 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 		polecatName := entry.Name()
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 		result.Checked++
+
+		// Pause gate (gt-ahik): a frozen (SIGSTOPped) polecat still has a
+		// live session and process, so it looks exactly like a stalled one
+		// to every check below — recoverDialogBlockedPolecat would send
+		// blind keystrokes into a pane the operator is deliberately holding.
+		// See pauseGateSkip's doc.
+		if pauseGateSkip(townRoot, rigName, polecatName) {
+			continue
+		}
 
 		// Only check live sessions with alive agents (the opposite of zombie detection)
 		sessionAlive, err := t.HasSession(sessionName)

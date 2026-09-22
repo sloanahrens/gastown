@@ -130,9 +130,50 @@ rig_hook_assignment() {
   printf '%s|%s\n' "$bead" "$status"
 }
 
+# agent_pause_marker_path prints the pause marker path for a polecat, in the
+# exact convention internal/agentpause.FilePath uses on the Go side:
+# <town>/.runtime/agents/<rig>/polecat.<name>.json. One convention, two
+# readers (gt-ahik) — if it ever changes, both must change together.
+agent_pause_marker_path() {
+  local rig="$1" pcat="$2"
+  printf '%s/.runtime/agents/%s/polecat.%s.json\n' "$TOWN_ROOT" "$rig" "$pcat"
+}
+
+# agent_paused reports (via exit status) whether the pause marker says this
+# polecat is paused. The marker file is the ONLY source of truth for "is
+# this agent paused" (gt-ahik) — no bead, no identity lookup, just the file
+# every layer (Go and this script alike) reads. Fails CLOSED: a marker that
+# exists but cannot be read or parsed reads as paused, same as an explicit
+# one — the dog must never kill a session an operator intentionally froze
+# just because the marker was momentarily unreadable.
+agent_paused() {
+  local rig="$1" pcat="$2" marker="" paused=""
+
+  marker=$(agent_pause_marker_path "$rig" "$pcat")
+  [ -e "$marker" ] || return 1
+
+  paused=$(jq -r '.paused' "$marker" 2>/dev/null || true)
+  case "$paused" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 0 ;; # unreadable or malformed — fail closed
+  esac
+}
+
 agent_identity_gate() {
   local rig="$1" pcat="$2" session="$3" dir=""
   local id_json="" agent_state=""
+
+  # Pause marker (gt-ahik): checked first, before the identity lookup, so a
+  # Dolt problem or a failed `gt polecat identity show` can never let the
+  # dog kill a paused agent — the original incident (the dog respawned a
+  # mayor-frozen flint 20 minutes after the freeze) happened because the
+  # only pause signal the dog read was a bead field the pause command wrote
+  # on a best-effort basis. The marker file has no such gap.
+  if agent_paused "$rig" "$pcat"; then
+    log "  SKIP $session: pause marker present (operator hold — not actionable regardless of any lingering in_progress bead)"
+    return 1
+  fi
 
   if ! dir=$(rig_workdir "$rig"); then
     return 0
@@ -149,11 +190,13 @@ agent_identity_gate() {
 
   # Only a TERMINAL agent_state (done/nuked) overrides a lingering
   # hooked/in_progress bead — gt done and the nuke path are the only writers
-  # of these values (done.go:2500), so they are trustworthy regardless of
-  # what an unclosed formula-step wisp still claims (gt-bd68). agent_state
-  # is NOT checked against "idle": only polecat_spawn.go ever writes
-  # "working", so pool-initialized/reused polecats that were slung work as
-  # an existing agent sit at "idle" while genuinely working — treating idle
+  # of done/nuked (done.go:2500), so they are trustworthy regardless of what
+  # an unclosed formula-step wisp still claims (gt-bd68). A sanctioned pause
+  # is handled above, from the marker file, before this lookup even runs: it
+  # is not a bead agent_state value this gate checks.
+  # agent_state is NOT checked against "idle": only polecat_spawn.go ever
+  # writes "working", so pool-initialized/reused polecats that were slung work
+  # as an existing agent sit at "idle" while genuinely working — treating idle
   # as terminal would silently stop restarting that whole class (om review
   # on gt-wisp-vjcc). hook_bead is likewise not checked: per hq-l6mm5
   # (sling_helpers.go:888-896) it is a documented no-op outside fresh spawn,

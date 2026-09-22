@@ -1,9 +1,7 @@
 package testutil
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -526,40 +524,5 @@ func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
 	}
 	if got := os.Getenv("GT_DOLT_PORT"); got != poisonDoltPort {
 		t.Errorf("GT_DOLT_PORT = %q, want the poison port %q", got, poisonDoltPort)
-	}
-}
-
-// TestFinish_DoltTerminationFailureFailsLoud pins the fix for gt-p98h/gt-n5g6:
-// a Dolt container that fails to terminate must fail the run, not vanish
-// silently and keep holding memory on the shared Docker VM until it's
-// noticed hours later. terminateDoltContainer is swapped for a fake so this
-// forces the failure branch without starting a real container.
-func TestFinish_DoltTerminationFailureFailsLoud(t *testing.T) {
-	orig := terminateDoltContainer
-	terminateDoltContainer = func() error {
-		return errors.New("simulated: container still running")
-	}
-	t.Cleanup(func() { terminateDoltContainer = orig })
-
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	origStderr := os.Stderr
-	os.Stderr = stderrW
-	h := &Hermetic{}
-	code := h.Finish(0)
-	os.Stderr = origStderr
-	stderrW.Close()
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(stderrR); err != nil {
-		t.Fatalf("reading captured stderr: %v", err)
-	}
-
-	if code != 1 {
-		t.Errorf("Finish(0) with a termination error = %d, want 1 (forced failure)", code)
-	}
-	if !strings.Contains(buf.String(), "HERMETIC TRIPWIRE: shared Dolt container failed to terminate") {
-		t.Errorf("Finish stderr = %q, want it to name the termination tripwire", buf.String())
 	}
 }

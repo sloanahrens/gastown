@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -145,6 +146,8 @@ type AgentRuntime struct {
 	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
 	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "opus-46", "pi")
 	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
+	Paused            bool   `json:"paused,omitempty"`             // True when the pause marker file says paused (gt-ahik)
+	PausedReason      string `json:"paused_reason,omitempty"`      // Reason from the pause marker (gt agent pause)
 }
 
 // RigStatus represents status of a single rig.
@@ -1011,6 +1014,9 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	// E-stop banner (if active)
 	addEstopToStatus(status.Location)
 
+	// Paused-agent banner (gt-ahik): surface sanctioned pauses with reasons
+	addPausedToStatus(w, status.Location)
+
 	// Overseer info
 	if status.Overseer != nil {
 		overseerDisplay := status.Overseer.Name
@@ -1266,11 +1272,28 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	case "awaiting-gate":
 		// Agent waiting for external trigger (phase gate)
 		stateInfo = style.Dim.Render(" [awaiting-gate]")
-	case "muted", "paused", "degraded":
+	case "paused":
+		// gt deacon pause (a separate, existing feature from gt-ahik's
+		// agentpause marker) writes agent_state=paused straight to the
+		// deacon bead with no marker file, so agent.Paused below never
+		// picks it up. Overridden by that block when a marker also exists.
+		stateInfo = style.Dim.Render(" [paused]")
+	case "muted", "degraded":
 		// Other intentional non-observable states
 		stateInfo = style.Dim.Render(fmt.Sprintf(" [%s]", beadState))
 		// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
 		// These should be derived from tmux, not bead.
+	}
+
+	// Sanctioned pause (gt-ahik): driven by agent.Paused (the marker file,
+	// the only source of truth), not beadState — the bead mirror can lag or
+	// fail to sync, and a marker-only pause must still show here.
+	if agent.Paused {
+		if agent.PausedReason != "" {
+			stateInfo = style.Dim.Render(fmt.Sprintf(" [paused: %s]", agent.PausedReason))
+		} else {
+			stateInfo = style.Dim.Render(" [paused]")
+		}
 	}
 
 	// Build agent bead ID using canonical naming: prefix-rig-role-name
@@ -1518,9 +1541,23 @@ func buildStatusIndicator(agent AgentRuntime) string {
 		indicator += style.Warning.Render(" stuck")
 	case "awaiting-gate":
 		indicator += style.Dim.Render(" gate")
-	case "muted", "paused", "degraded":
+	case "paused":
+		// gt deacon pause writes this straight to the bead with no marker
+		// file — see the identical comment in renderAgentDetails.
+		indicator += style.Dim.Render(" paused")
+	case "muted", "degraded":
 		indicator += style.Dim.Render(" " + beadState)
 		// Ignore observable states: running, idle, dead, done, stopped, ""
+	}
+
+	// Sanctioned pause (gt-ahik): driven by agent.Paused (the marker file),
+	// not beadState — see the identical comment in renderAgentDetails.
+	if agent.Paused {
+		if agent.PausedReason != "" {
+			indicator += style.Dim.Render(" paused: " + truncateWithEllipsis(agent.PausedReason, 24))
+		} else {
+			indicator += style.Dim.Render(" paused")
+		}
 	}
 
 	if agent.NotificationLevel == beads.NotifyMuted {
@@ -1717,12 +1754,46 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
 
+			applyPauseMarker(&agent, townRoot)
+
 			agents[idx] = agent
 		}(i, def)
 	}
 
 	wg.Wait()
 	return agents
+}
+
+// applyPauseMarker checks the pause marker file layer for this agent
+// (gt-ahik) and records the reason on the AgentRuntime so the status
+// line can show [paused (reason)]. File layer only — cheap, no Dolt.
+func applyPauseMarker(agent *AgentRuntime, townRoot string) {
+	rigName, role, name, ok := agentMarkerTriple(agent.Address)
+	if !ok {
+		return
+	}
+	if st := agentpause.PausedByState(townRoot, rigName, role, name); st != nil {
+		agent.Paused = true
+		agent.PausedReason = st.Reason
+	}
+}
+
+// agentMarkerTriple maps an agent status address to the (rig, role, name)
+// used by the pause marker path, and reports whether the address names a
+// marker-backed agent at all.
+//
+// It goes through session.ParseAddress rather than splitting the string, so
+// every address form the rest of the system uses resolves to the same marker
+// the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
+// "rig/witness", "rig/refinery", "rig/crew/name" — and the town-level
+// "mayor/" and "deacon/", whose marker lives at .runtime/agents/<role>.json,
+// so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
+func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
+	id, err := session.ParseAddress(address)
+	if err != nil {
+		return "", "", "", false
+	}
+	return id.Rig, string(id.Role), id.Name, true
 }
 
 // applyMailSummary copies a pre-fetched batch mail summary onto an agent.
@@ -1892,6 +1963,8 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 			if !skipMail {
 				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
+
+			applyPauseMarker(&agent, townRoot)
 
 			agents[idx] = agent
 		}(i, def)

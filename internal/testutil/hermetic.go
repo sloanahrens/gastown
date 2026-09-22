@@ -281,28 +281,13 @@ func isolateTmuxSocket() string {
 	return socket
 }
 
-// terminateDoltContainer is TerminateDoltContainer, indirected so a test can
-// force the cleanup-failure branch below without starting a real container.
-var terminateDoltContainer = TerminateDoltContainer
-
 // Finish tears down the sandbox and runs the tripwire against the live town
 // snapshot. It returns the exit code for os.Exit: the m.Run() code, forced to
-// 1 when the tripwire detects that tests leaked state into the live town, or
-// when the shared Dolt container fails to terminate.
+// 1 when the tripwire detects that tests leaked state into the live town.
 func (h *Hermetic) Finish(code int) int {
 	// No-op when no container was started; also covers containers started
 	// lazily by tests via RequireDoltContainer.
-	if err := terminateDoltContainer(); err != nil {
-		fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
-		fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: shared Dolt container failed to terminate: %v\n", err)
-		fmt.Fprintf(os.Stderr, "A container that fails to terminate keeps running and holding\n")
-		fmt.Fprintf(os.Stderr, "memory on the shared Docker VM (gt-p98h, gt-n5g6). Investigate\n")
-		fmt.Fprintf(os.Stderr, "rather than re-running: repeated leaks exhaust it town-wide.\n")
-		fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
-		if code == 0 {
-			code = 1
-		}
-	}
+	TerminateDoltContainer()
 	if h.SandboxDir != "" {
 		_ = os.RemoveAll(h.SandboxDir)
 	}

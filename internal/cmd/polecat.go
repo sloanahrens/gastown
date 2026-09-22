@@ -678,10 +678,6 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			// dispatch in flight, not a stall.
 			env := polecatInventoryEnv{
 				MRs: mrIndex,
-				// The active_mr policy resolves MR ids through the index it
-				// already has and source issues through the rig's database; the
-				// counts-only capacity path passes neither.
-				ActiveMRSource: polecatActiveMRReader{index: mrIndex, bd: bd},
 				Spawn: polecatSpawnFacts{
 					UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
 					Grace:     spawnWindow,
@@ -1511,17 +1507,11 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		activeMRAssessment := polecat.ActiveMRAssessment{}
 		if fields.ActiveMR != "" {
 			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
-			// hq-kr3hm: a dangling active_mr used to report PENDING_MR forever,
-			// telling an agent to PRESERVE a polecat whose work already landed.
-			// The landed probe is what separates "gone and finished" from
-			// "gone and still at risk" — see AssessActiveMRWithLandedEvidence.
-			activeMRAssessment = polecat.AssessActiveMRWithLandedEvidence(bd, polecat.ActiveMRInput{
+			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{
 				ActiveMR:        fields.ActiveMR,
 				SourceIssueHint: sourceHint,
 				RequireGitSafe:  true,
 				GitSafe:         gitSafe,
-			}, func() polecat.LandedEvidence {
-				return polecat.ProbeWorkLandedOnRef(p.ClonePath, status.Branch, "origin")
 			})
 			if status.Issue == "" && activeMRAssessment.SourceIssue != "" {
 				status.Issue = activeMRAssessment.SourceIssue

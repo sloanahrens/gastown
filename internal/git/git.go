@@ -3310,20 +3310,6 @@ func (g *Git) BranchTargetStatus(localBranch, remote string, targets []string) (
 	return g.branchPreservationStatus(localBranch, remote, targets, false)
 }
 
-// RefPreservedByRef reports whether the work on head is already contained in
-// the given ref, judged the way BranchPreservationStatus judges HEAD against a
-// custody ref: ancestry, then a merge-tree no-op, then per-patch (cherry)
-// preservation. Both refs are taken as given, so this answers questions that
-// are not about a branch's own custody — "is this work already in the
-// integration branch on origin" (polecat.ProbeWorkLandedOnRef).
-//
-// The merge-tree arm is what makes a squash-merged branch count as preserved:
-// its commits are never ancestors of the integration branch, but merging it in
-// changes nothing.
-func (g *Git) RefPreservedByRef(head, ref string) (BranchPreservationStatus, error) {
-	return g.preservationOfRefAgainstRef(head, ref)
-}
-
 func (g *Git) branchPreservationStatus(localBranch, remote string, targets []string, includeExactBranch bool) (BranchPreservationStatus, error) {
 	if remote == "" {
 		remote = "origin"

@@ -2402,7 +2402,7 @@ func (e *Engineer) createConflictResolutionTaskForMR(mr *MRInfo, _ ProcessResult
 	description := conflictTaskDescription(mr, mr.Branch, mr.Target, shortSHA(mainSHA), retryCount)
 
 	// Create the conflict resolution task
-	taskTitle := ConflictTaskTitlePrefix + originalTitle
+	taskTitle := fmt.Sprintf("Resolve merge conflicts: %s", originalTitle)
 	task, err := e.beads.Create(beads.CreateOptions{
 		Title:       taskTitle,
 		Labels:      []string{"gt:task"},
@@ -2629,33 +2629,6 @@ func isConflictTaskForMR(task *beads.Issue, mrID, sourceIssue string) bool {
 		return false
 	}
 	return sourceIssue == "" || metadata["Original issue"] == sourceIssue
-}
-
-// ConflictTaskTitlePrefix is the title prefix createConflictResolutionTaskForMR
-// gives every conflict-resolution task. Both the prefix and the "- Original MR:"
-// metadata line are the conflict-task signature; either alone is too weak to
-// identify one (gt-rv8h).
-const ConflictTaskTitlePrefix = "Resolve merge conflicts: "
-
-// ConflictTaskOriginalMR reports the merge request a conflict-resolution task
-// was created for, or "" when issue is not one of those tasks.
-//
-// This is the reverse of isConflictTaskForMR: given the task bead a
-// conflict-resolution polecat has just finished, it names the MR that task was
-// dispatched for. Closing that task is the MR's blocked->ready transition, so
-// this is how a completion that created no MR of its own finds the MR it
-// released (gt-rv8h) — see internal/cmd/done_conflict_wake.go.
-//
-// Both the title prefix and the metadata line must agree. conflictTaskMetadata
-// records a value for every line it can split on a colon, and conflict-task
-// descriptions carry polecat-molecule attachment metadata whose values contain
-// prose with colons, so the title gate is what keeps a stray "Original MR:" in
-// unrelated prose from being read as a conflict task.
-func ConflictTaskOriginalMR(issue *beads.Issue) string {
-	if issue == nil || !strings.HasPrefix(issue.Title, ConflictTaskTitlePrefix) {
-		return ""
-	}
-	return strings.TrimSpace(conflictTaskMetadata(issue.Description)["Original MR"])
 }
 
 func conflictTaskMetadata(description string) map[string]string {
