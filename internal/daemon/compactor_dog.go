@@ -65,6 +65,140 @@ func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultCompactorDogInterval
 }
 
+// compactorDogTickInterval is how often the patrol loop asks whether
+// compactor_dog is due — a check cadence, not a run cadence. The run interval
+// (compactorDogInterval, 24h by default) is enforced against the last-run time
+// in daemon/patrol_last_run.json, so a restart cannot postpone or starve a run
+// (gt-ima2).
+const compactorDogTickInterval = 15 * time.Minute
+
+// compactorDogNow is the patrol's clock, seamed so a test can walk a
+// multi-restart timeline without sleeping through it.
+var compactorDogNow = time.Now
+
+// compactorDogCycleFn runs one monitoring cycle. Seamed like the package's
+// other *Fn variables: a cycle opens a SQL connection to every production
+// database and pours a dog molecule, so a test of the schedule must not need
+// Dolt. Recording the last-run time stays outside the seam — the record is what
+// the schedule is built on.
+var compactorDogCycleFn = func(d *Daemon) { d.runCompactorDog() }
+
+// compactorDogDecision is one due-ness evaluation.
+type compactorDogDecision struct {
+	// due is whether the patrol should run now.
+	due bool
+	// note explains the decision for the log. Never empty.
+	note string
+	// warn is set when the decision came from a broken last-run record rather
+	// than from a comparison. A broken record runs the patrol *and* says so
+	// (gt-ima2): silent skipping is the failure being fixed, and a run without
+	// a word would hide a corrupt state file behind a patrol that looks merely
+	// on schedule.
+	warn string
+}
+
+// compactorDogDue decides whether the patrol should run, given the last-run
+// state on disk.
+func (d *Daemon) compactorDogDue(now time.Time, interval time.Duration) compactorDogDecision {
+	lastRun, found, err := loadPatrolLastRun(d.config.TownRoot, "compactor_dog")
+	switch {
+	case err != nil:
+		return compactorDogDecision{
+			due:  true,
+			note: "running the check because the last-run state cannot be read",
+			warn: fmt.Sprintf("last-run state unreadable (%v)", err),
+		}
+	case !found:
+		return compactorDogDecision{due: true, note: "no last-run record"}
+	}
+
+	// A cycle this process ran can be newer than the file when the write
+	// failed; take the later of the two so a known completion is not repeated
+	// 15 minutes later.
+	if d.lastCompactorDogRun.After(lastRun) {
+		lastRun = d.lastCompactorDogRun
+	}
+
+	elapsed := now.Sub(lastRun).Round(time.Minute)
+	if elapsed >= interval {
+		return compactorDogDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+	}
+	return compactorDogDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+}
+
+// triggerCompactorDog runs a monitoring cycle when the patrol is due, on its
+// own goroutine.
+//
+// Dispatched rather than run inline because a cycle queries every production
+// database with a 30s timeout each; running that inside the select loop would
+// stall the heartbeat and every tick behind it (gt-uvxy).
+func (d *Daemon) triggerCompactorDog() {
+	if !d.isPatrolActive("compactor_dog") {
+		return
+	}
+
+	d.compactorDogMu.Lock()
+	defer d.compactorDogMu.Unlock()
+
+	if d.compactorDogRunning {
+		d.logger.Printf("compactor_dog: previous cycle still running — skipping this check")
+		return
+	}
+
+	dec := d.compactorDogDue(compactorDogNow(), compactorDogInterval(d.patrolConfig))
+
+	// The first evaluation of each process is logged either way: "the patrol is
+	// alive and not due" is what an operator needs after a restart, and it is
+	// also the only evidence that a 24h gap is a schedule rather than a stall.
+	firstCheck := !d.compactorDogChecked
+	d.compactorDogChecked = true
+
+	if !dec.due {
+		if firstCheck {
+			d.logger.Printf("compactor_dog: not due — %s", dec.note)
+		}
+		return
+	}
+	if dec.warn != "" {
+		d.logger.Printf("compactor_dog: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("compactor_dog: due — %s", dec.note)
+	}
+
+	d.compactorDogRunning = true
+	go func() {
+		defer func() {
+			d.compactorDogMu.Lock()
+			d.compactorDogRunning = false
+			d.compactorDogMu.Unlock()
+		}()
+		compactorDogCycleFn(d)
+		d.recordCompactorDogRun()
+	}()
+}
+
+// recordCompactorDogRun records the completion time of the cycle that just
+// finished, in memory and on disk.
+//
+// The in-memory time is set even when the write fails: an unwritable daemon
+// directory would otherwise leave the file stale, so every 15-minute check
+// would see a due patrol and run a full cycle — and each cycle pours a
+// molecule, making that a bead leak rather than just noise. A restart then
+// reads the missing record as "run the check", which is the safe direction for
+// a monitor.
+func (d *Daemon) recordCompactorDogRun() {
+	at := compactorDogNow()
+
+	d.compactorDogMu.Lock()
+	d.lastCompactorDogRun = at
+	d.compactorDogMu.Unlock()
+
+	if err := savePatrolLastRun(d.config.TownRoot, "compactor_dog", at); err != nil {
+		d.logger.Printf("compactor_dog: WARNING: cannot persist last-run time (%v) — "+
+			"the next daemon start will run the check again", err)
+	}
+}
+
 // compactorDogConfig returns the compactor_dog patrol config block, or nil.
 func compactorDogConfig(config *DaemonPatrolConfig) *CompactorDogConfig {
 	if config == nil || config.Patrols == nil {
