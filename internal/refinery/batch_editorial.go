@@ -91,7 +91,14 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 			head, tempBranch, err := editorial.RehearseBranch(e.git, target, mr.Branch)
 			rehearsedHeads[i], rehearsalErrs[i] = head, err
 			if prevTempBranch != "" {
-				_ = e.git.DeleteBranch(prevTempBranch, true)
+				if delErr := e.git.DeleteBranch(prevTempBranch, true); delErr != nil {
+					// Not fatal to the batch — RehearseBranch already moved HEAD
+					// off prevTempBranch onto the new candidate's temp branch, so
+					// this only leaks a stale gt-mq-review-* ref, not a bad
+					// checkout — but a silently discarded failure here is how
+					// those refs accumulate unnoticed (gt-evk4).
+					_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to delete rehearsal branch %s: %v\n", prevTempBranch, delErr)
+				}
 			}
 			prevTempBranch = ""
 			if err == nil {
@@ -99,8 +106,12 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 			}
 		}
 		if prevTempBranch != "" {
-			_ = e.git.Checkout(target)
-			_ = e.git.DeleteBranch(prevTempBranch, true)
+			if err := e.git.Checkout(target); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to restore checkout to %s after rehearsal: %v\n", target, err)
+			}
+			if delErr := e.git.DeleteBranch(prevTempBranch, true); delErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to delete rehearsal branch %s: %v\n", prevTempBranch, delErr)
+			}
 		}
 	}
 
