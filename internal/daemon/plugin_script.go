@@ -36,6 +36,32 @@ const defaultScriptTimeout = 10 * time.Minute
 // explains an exit code.
 const scriptOutputTail = 16 * 1024
 
+// scriptExitDeferred is the exit code a script plugin whose plugin.md sets
+// [execution] allow_deferred_exit = true uses to say "I did nothing this
+// time; ask me again on the next heartbeat".
+//
+// It exists because the cooldown gate is satisfied by a run RECORD, and a
+// run record is what the runner writes on any exit — so an exit-0 skip spent
+// a full cooldown (1h for rebuild-gt) on a run that accomplished nothing.
+// For a plugin whose work waits on a window that opens and closes on its own
+// (rebuild-gt waits for the town to be quiet, gt-oqbw) that is starvation:
+// every cooldown tick landed inside a busy window, and the work never ran at
+// all. A deferral writes no record, so no gate is satisfied and the next
+// heartbeat retries; the daemon log and the plugin's own last-run log carry
+// the trail instead of a bead per attempt.
+//
+// A deferral is NOT a failure: it hands nothing to a dog, and unlike a
+// failure it is expected to be the common outcome of a run whose window is
+// shut.
+//
+// The opt-in is per plugin, not global: exit 3 has no inherent meaning to a
+// shell script, and a plugin author who doesn't know this contract could
+// exit 3 for an ordinary failure (a tool it shells out to uses that code, a
+// case statement's default arm). Without the opt-in, that failure would be
+// silently read as "nothing to see here, retry later" instead of recorded
+// and dispatched to a dog like every other nonzero exit (gt-oqbw).
+const scriptExitDeferred = 3
+
 // scriptRunner tracks plugins whose run.sh is executing in-process so a
 // heartbeat that fires mid-run neither starts a second copy nor waits on the
 // first. It is the in-flight half of the cooldown gate: the run record that
@@ -79,6 +105,18 @@ type scriptResult struct {
 
 // ok reports whether the script succeeded (exit 0 within its budget).
 func (r scriptResult) ok() bool { return r.err == nil && !r.timedOut && r.exitCode == 0 }
+
+// deferred reports whether the script asked to be retried on the next
+// heartbeat (see scriptExitDeferred). Only a plugin that declares
+// [execution] allow_deferred_exit = true gets that reading of exit 3; for
+// every other script plugin it is an ordinary failure, recorded and
+// dispatched to a dog like any other nonzero exit. A run that never started,
+// timed out or failed some other way is not a deferral either way: those are
+// outcomes to record.
+func (r scriptResult) deferred(p *plugin.Plugin) bool {
+	return p.Execution != nil && p.Execution.AllowDeferredExit &&
+		r.err == nil && !r.timedOut && r.exitCode == scriptExitDeferred
+}
 
 // status is the one-line summary used in run records and mail.
 func (r scriptResult) status() string {
@@ -182,7 +220,15 @@ type scriptRunHooks struct {
 // completeScriptRun records the result and, on failure, hands the plugin to
 // a dog with the output attached. A failed record must not hide the failure:
 // the dog dispatch runs regardless, and the record error is logged.
+//
+// A deferral is the one outcome with no record: the record is what satisfies
+// the cooldown gate, and a run that accomplished nothing must not buy one
+// (see scriptExitDeferred). The log line is the whole of its trail.
 func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
+	if res.deferred(p) {
+		h.logf("Handler: script plugin %s deferred (%s); will retry on the next heartbeat", p.Name, res.status())
+		return
+	}
 	result := plugin.ResultSuccess
 	if !res.ok() {
 		result = plugin.ResultFailure

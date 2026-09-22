@@ -1,7 +1,7 @@
 +++
 name = "rebuild-gt"
-description = "Rebuild stale gt binary from gastown source"
-version = 2
+description = "Bring the installed gt binary in force from main"
+version = 3
 
 [gate]
 type = "cooldown"
@@ -16,16 +16,47 @@ type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"
+allow_deferred_exit = true
 +++
 
 # Rebuild gt Binary
 
-Checks if the gt binary is stale (built from older commit than HEAD) and rebuilds.
+Brings the installed `gt` binary in force from main: the daemon and every
+session it spawns keep executing the binary at their install path, so a stale
+binary leaves merged fixes inert for as long as detection goes unrepaired
+(gt-oqbw). This plugin installs, it does not just report.
 
-**SAFETY**: This plugin MUST only rebuild forward (binary ancestor of HEAD) and
-only from the main branch. Rebuilding to an older or diverged commit caused a
-crash loop where every new session's startup hook failed, the witness respawned
-it, and the loop repeated every 1-2 minutes.
+The daemon runs it in-process as an execution-type script; no dog performs
+these steps.
+
+## Exit codes
+
+The plugin's contract with the daemon. Before changing it, read
+`internal/daemon/plugin_script.go`. Both sides must agree, and each row has a
+test in `run_test.sh` (recorded there per case, not per exit code, since
+several exit-0 and exit-1 cases differ in what they escalate).
+
+| exit | when | recorded | escalates |
+|------|------|----------|-----------|
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | no |
+| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | no |
+| 1 | failed: `make build`/`make safe-install` failed, or the install could not be verified as in force | yes, as failure | yes, under a stable fingerprint |
+
+Exit 3 means deferral only because this plugin's `[execution]` block sets
+`allow_deferred_exit = true`; a script plugin without that opt-in has exit 3
+read as an ordinary failure (`internal/daemon/plugin_script.go`), so a real
+failure elsewhere can never be silently swallowed as "nothing to see here".
+
+A refusal (exit 0, recorded as skipped) is not the same as a failure (exit 1,
+recorded as failure and escalated): waiting cannot fix a failure, but most
+refusals clear on their own (a human commits the dirty checkout, main catches
+up), so they do not escalate on their own — the unconditional drift check
+below is what alarms if a refusal persists long enough to matter.
+
+A run record is what satisfies the cooldown gate, so exit 3 writing none is
+what holds the retry to one heartbeat (3 min) instead of one cooldown (1 h).
+The install waits for a window that opens and closes on its own, and every
+hourly tick landing inside a busy window is what starved it before.
 
 ## Gate Check
 
@@ -59,6 +90,12 @@ gt escalate "rebuild-gt: binary is $N commits behind origin/main and has not bee
   --fingerprint "rebuild-gt:drift" >/dev/null 2>&1 || true
 ```
 
+`commits_behind` missing or `null` (the count could not be determined) while
+`stale` is `true` is not "0 behind" — it means the drift could be 1 commit or
+1000, so it escalates too, under `rebuild-gt:drift-unknown`. Reading an
+unknown count as 0 is what silently retired this alarm the one time it
+mattered (gt-oqbw).
+
 ## Detection
 
 Check binary staleness:
@@ -72,14 +109,23 @@ Parse the JSON output and check these fields:
 - If `"safe_to_rebuild": false` → **DO NOT REBUILD**. Record a skip wisp and exit.
   This means the repo is on a non-main branch or HEAD is not a descendant of the
   binary commit (would be a downgrade).
-- If `"safe_to_rebuild": true` → proceed to build
+- If `"safe_to_rebuild": true` → continue
 
-If `safe_to_rebuild` is false, record a skip wisp:
-```bash
-gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
-  --title "Plugin: rebuild-gt [skipped]" \
-  --description "Skipped: not safe to rebuild (forward=$FORWARD, main=$ON_MAIN)" >/dev/null 2>&1 || true
-```
+At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install
+at the first quiet moment: a merged commit that is not in force is a live
+defect, not a rounding error — gt-ww20 (a batch path that bypassed the
+editorial gate, so 4 MRs landed unreviewed) and gt-rbfj (composer-stall
+recovery typing the literal text `C-x C-s` into the composer) were each merged
+while the town kept running a binary without them. Under the threshold
+(strictly fewer commits behind than it), defer.
+
+An unknown `commits_behind` here is treated as *at* the threshold, not under
+it — proceed with the install rather than defer. Reading "unknown" as "0
+behind" left a stale, safe, quiet binary deferred every heartbeat forever: the
+threshold gate could never be satisfied by a count `gt stale` couldn't
+produce, and nothing else in the run would ever install it (the drift
+escalation above still fires independently, but firing an alarm is not the
+same as fixing the staleness).
 
 ## Pre-flight Checks
 
@@ -111,35 +157,67 @@ git merge --ff-only origin/main --quiet
 record a skip wisp with reason "local main diverged from origin/main" —
 **never** `git reset --hard` to force it.
 
+## Quiet gate
+
+`make build` competes for CPU with a gate suite whose tests are load-sensitive
+(gt-htx3), so the install waits for a town with nothing in flight:
+
+- no gate-class role holding a container-gate slot, no container running
+  outside the gate, and no saturated pool (`gt slot status --json`), and
+- no MR a refinery is mid-merge on
+  (`gt mq list gastown --status=in_progress --json`).
+
+Two readings that are deliberately not deferrals. An MR merely ready in the
+queue consumes nothing, and at this town's merge rate the queue is never
+empty, so requiring an empty queue would leave the install waiting forever.
+A `docker_unknown` status means the cross-check could not tell, and a VM that
+is down runs no suite for a build to compete with.
+
 ## Action
 
-Rebuild from source (the mayor/rig directory is the canonical source):
+Install through `scripts/install-binary.sh` (temp file plus rename, atomic;
+never `cp` over the running binary — a partial one is SIGKILLed on exec by
+macOS, gt-0het), then verify what came into force.
 
-```bash
-cd ~/gt/gastown/mayor/rig && make build && make safe-install
-```
+Verification reads the commit embedded in the `gt` the town will execute,
+resolved through PATH, and requires it to equal the commit built. `gt version`
+only ever prints that commit abbreviated; the expected commit (read fresh from
+the rig's HEAD immediately before the build, not from the earlier staleness
+check — see below) is the full 40-character hash. Comparing those two forms
+directly as strings never matches, so the abbreviated form is resolved to a
+full hash inside the rig checkout first — the one repo it's guaranteed
+unambiguous in — before the two are compared (gt-oqbw).
 
-**IMPORTANT**: Use `make safe-install` (not `make install`) to avoid restarting
-the daemon while sessions are active. safe-install replaces the binary but does
-NOT restart the daemon — sessions will pick up the new binary on their next cycle.
+The expected commit is deliberately not the `repo_commit` field from the
+staleness check earlier in the run: `gt stale --json` does its own
+independent fetch and can report a `repo_commit` that has since moved past
+what the rig checkout's HEAD — and therefore this build — actually contains.
+Reading it fresh from the rig immediately before `make build` ties the
+expectation to the tree that was actually compiled.
+
+An install that does not take — a shadowing `gt` earlier in PATH, an
+`INSTALL_DIR` that is not the one assumed, a replacement that went elsewhere —
+fails the run and escalates (`rebuild-gt:not-in-force`) instead of recording a
+success over it. A commit that cannot be read, or that cannot be resolved to a
+real commit in the rig checkout, fails the run the same way
+(`rebuild-gt:unverified`).
+
+Then sync — `gt formula sync`, then `gt plugin sync`, both non-fatal — and
+restart the daemon last, through `gt daemon restart` (launchctl kickstart -k),
+which terminates the process running this script. `gt daemon stop` followed by
+a start is not the pair to use: stop unloads the launchd job, so a failure in
+between leaves the town with no daemon and no loaded job to bring one back
+(gt-sq9e). A refusal leaves the daemon alone, because there is nothing new for
+it to run.
 
 ## Record Result
 
-On success:
-```bash
-gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
-  --title "Plugin: rebuild-gt [success]" \
-  --description "Rebuilt gt: $OLD → $NEW ($N commits)" >/dev/null 2>&1 || true
-```
+The receipt names the commits brought into force — `in force <old> -> <new>
+(N commits)` plus their subjects — so "was gt-ww20 ever in force, and when" is
+answered by the record instead of reconstructed from merge timestamps.
 
-On failure:
-```bash
-gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-  --title "Plugin: rebuild-gt [failure]" \
-  --description "Build failed: $ERROR" >/dev/null 2>&1 || true
-
-gt escalate --severity=medium \
-  --subject="Plugin FAILED: rebuild-gt" \
-  --body="$ERROR" \
-  --source="plugin:rebuild-gt"
-```
+Failures escalate under a stable fingerprint each (`rebuild-gt:build-failed`,
+`:not-in-force`, `:unverified`, `:restart-failed`), so a persisting state
+alarms once. Refusals do not escalate on their own (see Exit codes above) —
+a persisting refusal is what the drift check's `rebuild-gt:drift` /
+`:drift-unknown` fingerprints are for.

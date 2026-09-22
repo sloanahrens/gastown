@@ -58,6 +58,27 @@ Examples:
 	RunE: runDaemonStop,
 }
 
+var daemonRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the daemon on the binary now on disk",
+	Long: `Restart the Gas Town daemon.
+
+Use this after replacing the gt binary: the daemon is a long-running process,
+so it keeps executing the program it was started from — including the script
+plugins it runs in-process — until it is restarted. A restart that finds no
+daemon running starts one.
+
+When a supervisor (launchd / systemd) is provisioned for this town, the job is
+restarted through it (launchctl kickstart -k), which reloads the program the
+job points at. Do not use 'gt daemon stop' followed by 'gt daemon start' for
+this: stop unloads the job, so the daemon is unsupervised until the start
+lands and stays down if that start fails.
+
+Examples:
+  gt daemon restart`,
+	RunE: runDaemonRestart,
+}
+
 var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show daemon status",
@@ -155,6 +176,7 @@ var (
 func init() {
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonRestartCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonRunCmd)
@@ -182,6 +204,23 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Daemon started under %s (PID %d)\n", style.Bold.Render("✓"), via, pid)
 	} else {
 		fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
+	}
+	return nil
+}
+
+func runDaemonRestart(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	via, pid, err := restartDaemon(townRoot)
+	if err != nil {
+		return err
+	}
+	if via != "" {
+		fmt.Printf("%s Daemon restarted under %s (PID %d)\n", style.Bold.Render("✓"), via, pid)
+	} else {
+		fmt.Printf("%s Daemon restarted (PID %d)\n", style.Bold.Render("✓"), pid)
 	}
 	return nil
 }
@@ -343,7 +382,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 				if binaryModTime.After(state.StartedAt) {
 					fmt.Printf("  %s Binary is newer than process - consider '%s'\n",
 						style.Bold.Render("⚠"),
-						style.Dim.Render("gt daemon stop && gt daemon start"))
+						style.Dim.Render("gt daemon restart"))
 				}
 			}
 		}
@@ -459,7 +498,7 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("a daemon is already running — stop the running daemon first: gt daemon stop")
 	}
 
-	msg, err := templates.ProvisionSupervisor(townRoot)
+	msg, err := templates.ProvisionSupervisor(townRoot, daemon.ShutdownBudget)
 	if err != nil {
 		return fmt.Errorf("configuring supervisor: %w", err)
 	}

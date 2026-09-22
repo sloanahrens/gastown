@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -38,10 +39,15 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 	t.Helper()
 	prevPlist, prevUnit, prevRun, prevState := supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor
 	prevSpawn, prevStop, prevIsRunning, prevGOOS := spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS
+	prevPollInterval := daemonPollInterval
 	t.Cleanup(func() {
 		supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor = prevPlist, prevUnit, prevRun, prevState
 		spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS = prevSpawn, prevStop, prevIsRunning, prevGOOS
+		daemonPollInterval = prevPollInterval
 	})
+	// waitForDaemon polls in real time; shrinking the interval keeps the same
+	// attempt count at a wall-clock cost of ms instead of seconds.
+	daemonPollInterval = time.Millisecond
 
 	calls := &supervisorCalls{}
 	supervisorGOOS = goos
@@ -594,5 +600,218 @@ func TestRunDaemonStatus_NamesAFailingSupervisorWithNoDaemon(t *testing.T) {
 	want := "Supervised: " + kind + " (FAILING - loaded, running no daemon, runs=58, last exit code=1)"
 	if !strings.Contains(out, want) {
 		t.Errorf("status output = %q, want it to contain %q", out, want)
+	}
+}
+
+// stubRestart replaces the seams restartDaemon uses and returns a recorder.
+// pids is the sequence the lock reports, one entry per read with the last
+// repeating: a restart reads the outgoing PID first and then polls for a
+// different one, so the sequence is how these tests express "the same daemon
+// is still on its way out" versus "a new one is up".
+func stubRestart(t *testing.T, goos, file string, pids ...int) *supervisorCalls {
+	t.Helper()
+	prevPlist, prevUnit, prevRun, prevState := supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor
+	prevSpawn, prevStop, prevIsRunning, prevGOOS := spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS
+	prevPollInterval := daemonPollInterval
+	t.Cleanup(func() {
+		supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor = prevPlist, prevUnit, prevRun, prevState
+		spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS = prevSpawn, prevStop, prevIsRunning, prevGOOS
+		daemonPollInterval = prevPollInterval
+	})
+	// waitForDaemon/waitForRestart poll in real time; a test that exhausts
+	// the full attempt budget (e.g. the new daemon never takes the lock)
+	// would otherwise block for waitForRestart's real 60 s. Shrinking the
+	// interval keeps the same number of polls at a wall-clock cost of ms.
+	daemonPollInterval = time.Millisecond
+
+	calls := &supervisorCalls{}
+	supervisorGOOS = goos
+	supervisorPlistPath = func() (string, error) { return file, nil }
+	supervisorUnitPath = func() (string, error) { return file, nil }
+	supervisorRun = func(a []string) error {
+		calls.argv = append(calls.argv, append([]string{}, a...))
+		return nil
+	}
+	supervisorStateFor = func(kind string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: kind, Loaded: true, LastExit: -1}
+	}
+	spawnDaemonDirect = func(string) (int, error) { calls.spawned = true; return 9999, nil }
+	stopDaemonDirect = func(string) error { calls.stopped = true; return nil }
+	reads := 0
+	daemonIsRunning = func(string) (bool, int, error) {
+		pid := pids[min(reads, len(pids)-1)]
+		reads++
+		return pid != 0, pid, nil
+	}
+	return calls
+}
+
+// A restart of a supervised daemon goes through the supervisor's kickstart -k
+// and never through a hand stop: the stop path is launchctl bootout, which
+// unloads the job, so a restart built from it leaves the town unsupervised
+// between the two commands (gt-oqbw).
+func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubRestart(t, "darwin", plist, 1111, 1111, 4242)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if calls.stopped || calls.spawned {
+		t.Errorf("supervised restart used a hand path: stopped=%v spawned=%v", calls.stopped, calls.spawned)
+	}
+	if got := calls.joined(); !strings.HasPrefix(got, "launchctl kickstart -k gui/") || !strings.HasSuffix(got, "/com.gastown.daemon") {
+		t.Errorf("supervisor command = %q, want launchctl kickstart -k gui/<uid>/com.gastown.daemon", got)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	// Reports the NEW pid, not the outgoing one the lock still names.
+	if pid == 1111 {
+		t.Error("restart reported the outgoing daemon's pid")
+	}
+}
+
+// With no supervisor provisioned the daemon is run by hand, so the restart is
+// a hand stop followed by a hand start.
+func TestRestartDaemon_HandRestartWithoutASupervisor(t *testing.T) {
+	town := t.TempDir()
+	calls := stubRestart(t, "darwin", "", 1111, 0)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if !calls.stopped || !calls.spawned {
+		t.Errorf("unsupervised restart = stopped:%v spawned:%v, want both", calls.stopped, calls.spawned)
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("no supervisor is provisioned but %v ran", calls.argv)
+	}
+	if via != "" || pid != 9999 {
+		t.Errorf("restartDaemon = (%q, %d), want (\"\", 9999)", via, pid)
+	}
+}
+
+// The hand path must not spawn a new daemon into the lock before the old one
+// is confirmed gone: stopDaemonDirect sends SIGKILL and returns without
+// waiting to confirm it took, so restartDaemon confirms it itself
+// (waitForDaemonGone) before calling startDaemon. Here the lock keeps
+// reporting the old PID for the whole confirm budget, so the restart must
+// fail loudly instead of racing a spawn against a still-live old daemon.
+func TestRestartDaemon_HandPathRefusesToStartBeforeTheOldDaemonIsGone(t *testing.T) {
+	town := t.TempDir()
+	calls := stubRestart(t, "darwin", "", 1111) // never reports gone
+
+	_, _, err := restartDaemon(town)
+	if err == nil {
+		t.Fatal("restartDaemon reported success although the old daemon's lock was never confirmed released")
+	}
+	if !calls.stopped {
+		t.Error("stopDaemonDirect was never called")
+	}
+	if calls.spawned {
+		t.Error("a new daemon was spawned before the old one was confirmed gone")
+	}
+}
+
+// A restart with no daemon running is a start: the caller asking for "the
+// daemon on the current binary" does not have to check first.
+func TestRestartDaemon_StartsAStoppedDaemon(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	// Two stopped reads: the restart's own check, then start's. The third is
+	// waitForDaemon seeing the daemon the kickstart brought up.
+	calls := stubRestart(t, "darwin", plist, 0, 0, 4242)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if calls.stopped {
+		t.Error("a stopped daemon must not be stopped again")
+	}
+	if !strings.Contains(calls.joined(), "kickstart") || via != "launchd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d) via %q", via, pid, calls.joined())
+	}
+}
+
+// A restart whose new daemon never takes the lock is an error, not a success
+// that reports the outgoing PID: the whole point is that the process now
+// running is the one on the new binary.
+func TestRestartDaemon_ErrorsWhenTheNewDaemonNeverTakesTheLock(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	// The lock keeps naming the old PID for the whole wait: the restarted
+	// daemon never came up (or came up and died immediately).
+	calls := stubRestart(t, "darwin", plist, 1111)
+
+	if _, _, err := restartDaemon(town); err == nil {
+		t.Fatal("restartDaemon reported success although no new daemon took the lock")
+	}
+	if !strings.Contains(calls.joined(), "kickstart") {
+		t.Errorf("the restart was never attempted: %v", calls.argv)
+	}
+}
+
+// A lock reporting running=true with pid 0 is a start still in flight (the
+// PID file has not been written yet), not the new daemon a restart is
+// waiting for — waitForRestart must keep polling past it rather than
+// returning pid 0 as success.
+func TestRestartDaemon_WaitForRestartIgnoresPidZero(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	// oldPID, then a stretch of "running but pid unknown yet", then the real
+	// new daemon.
+	calls := stubRestart(t, "darwin", plist, 1111, 1111, 0, 0, 4242)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	if !strings.Contains(calls.joined(), "kickstart") {
+		t.Errorf("the restart was never attempted: %v", calls.argv)
+	}
+}
+
+// waitForRestart's budget (restartWaitBudget = daemon.ShutdownBudget +
+// daemonStartupMargin) must outlast the outgoing daemon's own bounded
+// shutdown stages (pushDoltRemotesBounded's 20s + the Dolt server's own
+// graceful-stop wait, 30s + OTel's 5s) plus the incoming daemon's startup
+// preflight — the exact gap the original 10s budget (100 attempts) did not
+// cover (gt-oqbw). This simulates a restart that is genuinely slow,
+// not stuck: the lock keeps naming the outgoing PID for slowAttempts of
+// restartWaitAttempts before the new daemon takes it, comfortably inside the
+// budget but well past what the original one allowed. Under the old budget
+// this would time out and be misreported as a failed restart although it was
+// still in progress.
+func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	const oldPID, newPID, slowAttempts = 1111, 4242, 550
+	if slowAttempts >= restartWaitAttempts {
+		t.Fatalf("slowAttempts (%d) must stay below restartWaitAttempts (%d) or this test proves nothing", slowAttempts, restartWaitAttempts)
+	}
+	pids := make([]int, 0, slowAttempts+1)
+	for range slowAttempts {
+		pids = append(pids, oldPID)
+	}
+	pids = append(pids, newPID)
+	calls := stubRestart(t, "darwin", plist, pids...)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v (budget too short for a slow-but-real restart)", err)
+	}
+	if via != "launchd" || pid != newPID {
+		t.Errorf("restartDaemon = (%q, %d), want (launchd, %d)", via, pid, newPID)
+	}
+	if !strings.Contains(calls.joined(), "kickstart") {
+		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }

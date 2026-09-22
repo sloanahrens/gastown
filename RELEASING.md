@@ -44,8 +44,7 @@ git push origin vX.Y.Z
 5. Rebuild locally:
 
 ```bash
-make install        # builds, codesigns, installs to ~/.local/bin
-gt daemon stop && gt daemon start
+make install        # builds, codesigns, installs to ~/.local/bin, restarts the daemon
 ```
 
 ## What Happens After Tag Push

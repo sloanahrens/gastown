@@ -2721,8 +2721,10 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("KRC pruner stopped")
 	}
 
-	// Push Dolt remotes before stopping the server (if patrol is enabled)
-	d.pushDoltRemotes()
+	// Push Dolt remotes before stopping the server (if patrol is enabled).
+	// Bounded: an unreachable remote must not make shutdown open-ended (see
+	// pushDoltRemotesBounded).
+	d.pushDoltRemotesBounded()
 
 	// Stop Dolt server if we're managing it
 	if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {
@@ -2733,9 +2735,10 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		}
 	}
 
-	// Flush and stop OTel providers (5s deadline to avoid blocking shutdown).
+	// Flush and stop OTel providers. Bounded so it cannot block shutdown; part
+	// of ShutdownBudget (see dolt_remotes.go).
 	if d.otelProvider != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), otelShutdownBudget)
 		defer cancel()
 		if err := d.otelProvider.Shutdown(shutCtx); err != nil {
 			d.logger.Printf("Warning: telemetry shutdown: %v", err)

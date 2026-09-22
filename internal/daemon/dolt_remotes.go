@@ -22,7 +22,39 @@ const (
 	// rather than the driver's own readTimeout aborting a large, legitimately
 	// slow DOLT_PUSH mid-flight with a raw i/o timeout.
 	doltRemotesReadTimeout = doltPushTimeout + 30*time.Second
+
+	// shutdownDoltPushBudget bounds how long daemon shutdown waits for
+	// pushDoltRemotesBounded before moving on. pushDoltRemotes pushes
+	// databases one at a time, each with its own doltPushTimeout (60s) per
+	// add/commit/push step, so it has no bound of its own — an unreachable
+	// remote could otherwise make shutdown (and so a restart's "new binary is
+	// in force" wait, see waitForRestart) open-ended (gt-oqbw).
+	shutdownDoltPushBudget = 20 * time.Second
+
+	// otelShutdownBudget bounds Shutdown's OTel flush (daemon.go). Part of
+	// ShutdownBudget below.
+	otelShutdownBudget = 5 * time.Second
 )
+
+// ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): the sum
+// of its three bounded steps in the order they run — pushDoltRemotesBounded,
+// then the Dolt SQL server's own graceful-stop wait (doltServerStopBudget,
+// dolt.go) before it SIGKILLs, then the OTel flush. Everything else in
+// shutdown (stopping the curator, convoy manager, KRC pruner) is in-process
+// and returns immediately; these three are the only steps that wait on
+// something external.
+//
+// This is the actual value a daemon restart must plan around — not an
+// estimate — because both restart paths bound the OLD daemon's lifetime by a
+// mechanism outside shutdown() itself: `gt daemon restart`'s launchd
+// supervisor (internal/cmd/daemon_supervisor.go) sets the job's ExitTimeOut
+// to this same budget, so a SIGTERM'd daemon that hasn't exited by then is
+// SIGKILLed regardless of which step it is on; the hand path's StopDaemon
+// (daemon.go) uses a much shorter ShutdownNotifyDelay (500ms) before it does
+// the same. Either way, ShutdownBudget is the longest the old process can
+// legitimately take, and it is what waitForRestart's poll budget is derived
+// from.
+const ShutdownBudget = shutdownDoltPushBudget + doltServerStopBudget + otelShutdownBudget
 
 // doltRemotesInterval returns the configured push interval, or the default (15m).
 func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
@@ -32,6 +64,36 @@ func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return defaultDoltRemotesInterval
+}
+
+// runBounded runs fn in a goroutine and waits at most budget for it to
+// finish. If it doesn't, runBounded returns anyway — calling onTimeout first
+// — while fn keeps running in the background; it is never canceled, only
+// abandoned. Used where a callee has no context/cancellation support of its
+// own but the caller cannot afford to block on it indefinitely.
+func runBounded(budget time.Duration, fn func(), onTimeout func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		onTimeout()
+	}
+}
+
+// pushDoltRemotesBounded runs pushDoltRemotes with a hard wall-clock ceiling
+// so shutdown can never block on it indefinitely. The push it abandons on
+// timeout keeps running in the background against a Dolt server the caller
+// is about to stop — best case it finishes anyway, worst case it fails and
+// logs, and either is preferable to a shutdown (and thus a restart, see
+// waitForRestart) that never returns.
+func (d *Daemon) pushDoltRemotesBounded() {
+	runBounded(shutdownDoltPushBudget, d.pushDoltRemotes, func() {
+		d.logger.Printf("Warning: dolt_remotes push still running after %s at shutdown; continuing shutdown without waiting for it", shutdownDoltPushBudget)
+	})
 }
 
 // pushDoltRemotes commits and pushes each configured database to its remote.

@@ -143,15 +143,17 @@ install: check-up-to-date build
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 	@$(MAKE) --no-print-directory check-install-path
-	@# Restart daemon so it picks up the new binary.
-	@# A stale daemon is a recurring source of bugs (wrong session prefixes, etc.)
+	@# Restart daemon so it picks up the new binary: a stale daemon is a
+	@# recurring source of bugs (wrong session prefixes, etc.). Through the
+	@# supervisor ('gt daemon restart' = launchctl kickstart -k), never
+	@# stop-then-start: gt daemon stop unloads the launchd job, so the daemon
+	@# is unsupervised until the start lands and stays down if that start
+	@# fails (gt-sq9e).
 	@if $(INSTALL_DIR)/$(BINARY) daemon status >/dev/null 2>&1; then \
 		echo "Restarting daemon to pick up new binary..."; \
-		$(INSTALL_DIR)/$(BINARY) daemon stop >/dev/null 2>&1 || true; \
-		sleep 1; \
-		$(INSTALL_DIR)/$(BINARY) daemon start >/dev/null 2>&1 && \
+		$(INSTALL_DIR)/$(BINARY) daemon restart && \
 			echo "Daemon restarted." || \
-			echo "Warning: daemon restart failed (start manually with: gt daemon start)"; \
+			echo "Warning: daemon restart failed (start manually with: gt daemon restart)"; \
 	fi
 	@# Sync plugins from build repo to town runtime directories.
 	@# Prevents drift when plugin fixes merge but runtime dirs are stale.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -170,6 +171,73 @@ func TestCompleteScriptRun(t *testing.T) {
 	completeScriptRun(p, scriptResult{timedOut: true, exitCode: -1}, hooks)
 	if dispatched != 2 {
 		t.Error("a failed record must not suppress the failure dispatch")
+	}
+}
+
+// A deferral (exit 3) writes no record and touches no dog. The record is what
+// satisfies a cooldown gate, so writing one for a run that accomplished
+// nothing is what starves a plugin whose window opens and closes on its own
+// (gt-oqbw) — and a deferral is not a failure, so there is nothing for a dog
+// to do either.
+func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p", Execution: &plugin.Execution{AllowDeferredExit: true}}
+	recs := 0
+	dispatched := 0
+	var logs []string
+	hooks := scriptRunHooks{
+		record:    func(plugin.PluginRunRecord) error { recs++; return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		logf:      func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "gate busy"}, hooks)
+	if recs != 0 {
+		t.Errorf("a deferral must write no run record (wrote %d)", recs)
+	}
+	if dispatched != 0 {
+		t.Error("a deferral must not hand off to a dog")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "deferred") || !strings.Contains(logs[0], "next heartbeat") {
+		t.Errorf("deferral must be logged as a retry: %v", logs)
+	}
+
+	// The exit code only means deferral on its own: the same code with a
+	// timeout, or with the process never starting, is an ordinary failure.
+	for _, res := range []scriptResult{
+		{exitCode: scriptExitDeferred, timedOut: true},
+		{exitCode: scriptExitDeferred, err: errors.New("no such file")},
+	} {
+		completeScriptRun(p, res, hooks)
+	}
+	if recs != 2 || dispatched != 2 {
+		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d dispatched=%d", recs, dispatched)
+	}
+}
+
+// Exit 3 only means deferral for a plugin whose plugin.md opts in with
+// [execution] allow_deferred_exit = true. Without the opt-in — the default,
+// and every script plugin except rebuild-gt at the time of writing — exit 3
+// is an ordinary failure: recorded and dispatched to a dog like any other
+// nonzero exit. This is what keeps one plugin's private exit-code contract
+// from silently swallowing a real failure in an unrelated plugin that
+// happens to exit 3 (gt-oqbw).
+func TestCompleteScriptRun_DeferralRequiresOptIn(t *testing.T) {
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
+	var recs []plugin.PluginRunRecord
+	dispatched := 0
+	hooks := scriptRunHooks{
+		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		logf:      func(string, ...any) {},
+	}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultFailure || dispatched != 1 {
+		t.Fatalf("exit 3 without opt-in must be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
+	}
+
+	p.Execution = &plugin.Execution{AllowDeferredExit: false}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || dispatched != 2 {
+		t.Fatalf("exit 3 with allow_deferred_exit=false must still be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
 	}
 }
 

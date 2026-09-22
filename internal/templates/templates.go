@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/templates/commands"
@@ -122,6 +123,17 @@ type SupervisorData struct {
 	GTPath   string            // Path to the gt binary
 	TownRoot string            // Path to the Gas Town workspace
 	Env      map[string]string // Extra environment variables from settings/daemon.env
+
+	// ExitTimeOutSeconds is launchd's ExitTimeOut for the daemon job: how long
+	// launchd waits after SIGTERM (sent by `launchctl kickstart -k`, i.e. `gt
+	// daemon restart`) before it SIGKILLs the process. It must be at least as
+	// large as the daemon's own worst-case graceful shutdown (see
+	// daemon.ShutdownBudget) — otherwise launchd force-kills the daemon
+	// mid-shutdown on every restart, which for the Dolt SQL server step in
+	// particular risks corrupting its append-only journal instead of letting
+	// it exit cleanly. 0 omits the key, which leaves launchd's own default
+	// (20s) in effect.
+	ExitTimeOutSeconds int
 }
 
 // New creates a new Templates instance.
@@ -320,7 +332,12 @@ func MissingCommandsFor(workspacePath, agent string) []string {
 // spawned daemon gets the same host-specific env vars a manually-started one
 // inherits from the operator's shell. GT_TOWN_ROOT is always set from
 // townRoot directly and cannot be overridden by the env file.
-func ProvisionSupervisor(townRoot string) (string, error) {
+//
+// exitTimeout becomes the launchd job's ExitTimeOut (see SupervisorData); the
+// caller passes daemon.ShutdownBudget so the two stay derived from the same
+// real value instead of drifting independently. A zero exitTimeout leaves
+// launchd's own default in effect (only meaningful on darwin).
+func ProvisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
 	gtPath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("finding gt executable: %w", err)
@@ -333,9 +350,10 @@ func ProvisionSupervisor(townRoot string) (string, error) {
 	delete(env, "GT_TOWN_ROOT")
 
 	data := SupervisorData{
-		GTPath:   gtPath,
-		TownRoot: townRoot,
-		Env:      env,
+		GTPath:             gtPath,
+		TownRoot:           townRoot,
+		Env:                env,
+		ExitTimeOutSeconds: int(exitTimeout / time.Second),
 	}
 
 	switch runtime.GOOS {
