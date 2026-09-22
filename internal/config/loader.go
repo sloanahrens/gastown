@@ -412,6 +412,9 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.PollInterval != "" {
 			result.PollInterval = local.PollInterval
 		}
+		if local.MaxReadyForDispatch > 0 {
+			result.MaxReadyForDispatch = local.MaxReadyForDispatch
+		}
 		if local.MaxConcurrent > 0 {
 			result.MaxConcurrent = local.MaxConcurrent
 		}
