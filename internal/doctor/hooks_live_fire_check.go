@@ -266,7 +266,7 @@ func evaluateBlockedShape(settingsPath string, branchCreated, blockConfirmed boo
 			Verdict: LiveFireFail,
 			Detail: fmt.Sprintf(
 				"pr-workflow guard did NOT block 'git checkout -b' end-to-end against %s — hook matcher wiring is broken (gt-5ihs class regression); claude exit: %v; stdout: %s; stderr: %s",
-				settingsPath, runErr, truncate(stdout, 400), truncate(stderr, 400),
+				settingsPath, runErr, truncate(stdout), truncate(stderr),
 			),
 		}
 	}
@@ -313,7 +313,7 @@ func evaluateAllowedShape(settingsPath string, markerCreated, blockConfirmed boo
 			Verdict: LiveFireFail,
 			Detail: fmt.Sprintf(
 				"pr-workflow guard blocked 'git status' — a command it must allow — against %s (over-broad matcher, e.g. a dropped 'if' scoping field); claude exit: %v; stdout: %s; stderr: %s",
-				settingsPath, runErr, truncate(stdout, 400), truncate(stderr, 400),
+				settingsPath, runErr, truncate(stdout), truncate(stderr),
 			),
 		}
 	}
@@ -436,12 +436,16 @@ func withoutNestedSessionEnv(environ []string) []string {
 	return filtered
 }
 
-// truncate shortens s to at most maxLen runes, appending an ellipsis marker
-// when truncated.
-func truncate(s string, maxLen int) string {
+// truncateOutputMaxLen bounds captured subprocess output included in a
+// probe failure's detail message.
+const truncateOutputMaxLen = 400
+
+// truncate shortens s to at most truncateOutputMaxLen runes, appending an
+// ellipsis marker when truncated.
+func truncate(s string) string {
 	r := []rune(s)
-	if len(r) <= maxLen {
+	if len(r) <= truncateOutputMaxLen {
 		return s
 	}
-	return string(r[:maxLen]) + "…"
+	return string(r[:truncateOutputMaxLen]) + "…"
 }
