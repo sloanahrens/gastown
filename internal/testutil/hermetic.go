@@ -630,16 +630,18 @@ func snapshotTown(root string) *townSnapshot {
 }
 
 // diff re-snapshots the town and returns a description of every leak: new
-// non-lock, non-atomic-write-temp entries, and appended events not
-// attributable to the town's known actors (concurrent legitimate agents keep
-// writing events while tests run, so growth alone is not a failure).
+// non-lock, non-atomic-write-temp, non-rig-explained entries, and appended
+// events not attributable to the town's known actors (concurrent legitimate
+// agents keep writing events while tests run, so growth alone is not a
+// failure).
 func (s *townSnapshot) diff() []string {
 	var leaks []string
 
 	after := snapshotTown(s.root)
+	rigs := rigNames(s.root)
 	var added []string
 	for name := range after.entries {
-		if !s.entries[name] && !strings.HasSuffix(name, ".lock") && !isAtomicWriteTemp(name) {
+		if !s.entries[name] && !strings.HasSuffix(name, ".lock") && !isAtomicWriteTemp(name) && !explainedByRig(name, rigs) {
 			added = append(added, name)
 		}
 	}
@@ -653,6 +655,21 @@ func (s *townSnapshot) diff() []string {
 	}
 
 	return leaks
+}
+
+// explainedByRig reports whether an added town entry is the rig worktree or
+// Dolt data directory for a rig now registered in mayor/rigs.json —
+// legitimate concurrent operator onboarding (gt-bd79: `gt-lwi`'s
+// before/after snapshot cannot otherwise distinguish a new rig directory
+// like `hm` or `.dolt-data/hm` from test-leaked state in the same window),
+// not test leakage. A rig's worktree and Dolt data both live under the rig's
+// name — at the town root and under .dolt-data/ respectively — so matching
+// the entry's base name against the registered rig set covers both.
+func explainedByRig(name string, rigs map[string]bool) bool {
+	if len(rigs) == 0 {
+		return false
+	}
+	return rigs[filepath.Base(name)]
 }
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
@@ -828,20 +845,30 @@ func knownActorPrefixes(root string) map[string]bool {
 	for _, p := range builtinActorPrefixes {
 		known[p] = true
 	}
+	for name := range rigNames(root) {
+		known[name] = true
+	}
+	return known
+}
+
+// rigNames returns the set of rig names registered in the town's
+// mayor/rigs.json, or an empty set when the file is missing or unparseable.
+func rigNames(root string) map[string]bool {
+	names := map[string]bool{}
 	data, err := os.ReadFile(filepath.Join(root, "mayor", "rigs.json")) //nolint:gosec // path derives from detected town root
 	if err != nil {
-		return known
+		return names
 	}
 	var rigs struct {
 		Rigs map[string]json.RawMessage `json:"rigs"`
 	}
 	if err := json.Unmarshal(data, &rigs); err != nil {
-		return known
+		return names
 	}
 	for name := range rigs.Rigs {
-		known[name] = true
+		names[name] = true
 	}
-	return known
+	return names
 }
 
 // listDir returns the names of dir's direct children, or an empty map when
