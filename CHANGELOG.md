@@ -171,6 +171,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mail reply-to is inferred from the inbox** so reply-reminders clear
   correctly (gt-zzob).
 - **`gt doctor` rig-config-sync accepts prefix-named Dolt databases** (gt-5hd2).
+- **The daemon's per-tick rigs cache is goroutine-safe** (gt-f18v) — the
+  mayor/rigs.json memo was documented as heartbeat-goroutine-only, but the
+  main_branch_test cycle moved onto its own goroutine, so its read of the
+  cache raced the next heartbeat's invalidation. Both are now behind one
+  mutex.
 
 ### Changed
 
