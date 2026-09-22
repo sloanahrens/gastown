@@ -24,7 +24,7 @@ import (
 func TestResolveMRTarget(t *testing.T) {
 	t.Parallel()
 	t.Run("normal target passes through unchanged", func(t *testing.T) {
-		got, err := resolveMRTarget("main", "polecat/jasper/gt-a8i3+xyz", "main")
+		got, err := resolveMRTarget("main", "polecat/jasper/gt-a8i3+xyz", "main", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -37,7 +37,7 @@ func TestResolveMRTarget(t *testing.T) {
 		branch := "polecat/thunder/be-r18+mtvr3qm3"
 		// Reproduces the exact gt-a8i3 failure mode: base_branch formula var
 		// leaked the resume branch, so target resolved to the polecat's own branch.
-		got, err := resolveMRTarget(branch, branch, "main")
+		got, err := resolveMRTarget(branch, branch, "main", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -48,19 +48,43 @@ func TestResolveMRTarget(t *testing.T) {
 
 	t.Run("self-target with no safe fallback errors instead of guessing", func(t *testing.T) {
 		branch := "main"
-		_, err := resolveMRTarget(branch, branch, "main")
+		_, err := resolveMRTarget(branch, branch, "main", false)
 		if err == nil {
 			t.Fatal("expected an error when defaultBranch also equals branch, got nil")
 		}
 	})
 
 	t.Run("integration branch target passes through unchanged", func(t *testing.T) {
-		got, err := resolveMRTarget("integration/epic-1", "polecat/jasper/gt-a8i3+xyz", "main")
+		got, err := resolveMRTarget("integration/epic-1", "polecat/jasper/gt-a8i3+xyz", "main", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if got != "integration/epic-1" {
 			t.Fatalf("resolveMRTarget() = %q, want %q", got, "integration/epic-1")
+		}
+	})
+
+	t.Run("unexplained polecat target is refused", func(t *testing.T) {
+		// gt-w2jc: a target that resolves to a DIFFERENT polecat's branch
+		// (not the submitter's own — that's the self-target case above) is
+		// also almost certainly wrong, e.g. a stray base_branch formula var
+		// pointing at some other polecat's in-flight work.
+		_, err := resolveMRTarget("polecat/thunder/be-r18+mtvr3qm3", "polecat/jasper/gt-a8i3+xyz", "main", false)
+		if err == nil {
+			t.Fatal("expected an error for an unexplained polecat/* target, got nil")
+		}
+	})
+
+	t.Run("explicit polecat target is allowed", func(t *testing.T) {
+		// An operator who deliberately passes --target/--epic at another
+		// polecat's branch (e.g. stacking work) gets to do that; only the
+		// formula_vars/auto-detect paths are refused.
+		got, err := resolveMRTarget("polecat/thunder/be-r18+mtvr3qm3", "polecat/jasper/gt-a8i3+xyz", "main", true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "polecat/thunder/be-r18+mtvr3qm3" {
+			t.Fatalf("resolveMRTarget() = %q, want explicit target to pass through", got)
 		}
 	})
 }

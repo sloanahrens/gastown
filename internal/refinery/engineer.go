@@ -1059,6 +1059,15 @@ func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string, closeOnRej
 	}
 	reject := func(reason string) ProcessResult { return e.rejectMRBeforeMerge(mr, reason, closeOnReject) }
 
+	// gt-w2jc: independent defense-in-depth check, at merge time rather than
+	// only at submit time (done.go/mq_submit.go's resolveMRTarget). Runs
+	// first, ahead of every other check, so any future path that constructs
+	// an MR bead without going through those submit paths still can't merge
+	// a branch into itself.
+	if branch := strings.TrimSpace(mr.Branch); branch != "" && branch == strings.TrimSpace(target) {
+		return reject(fmt.Sprintf("MR target %s equals source branch %s", target, branch))
+	}
+
 	sourceIssue := strings.TrimSpace(mr.SourceIssue)
 	if sourceIssue == "" {
 		if e.isSyntheticMergeMechanicsMR(mr) {
