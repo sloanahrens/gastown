@@ -5,87 +5,102 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-type trackedStatus struct {
-	ID     string
-	Status string
+// trackedIDsCacheTTL bounds how long a convoy's tracked-issue-ID list (from
+// `bd dep list <convoy> -t tracks`) is reused before being re-queried.
+// Convoy membership is set once at dispatch time and essentially never
+// changes afterward, so re-deriving it on every 10s tick for every convoy
+// was pure waste — it was the dominant source of the concurrent `bd dep
+// list` fan-out that saturated Dolt during the gt-05vk town-wide bd famine.
+const trackedIDsCacheTTL = 60 * time.Second
+
+type trackedIDsCacheEntry struct {
+	ids       []string
+	fetchedAt time.Time
 }
 
+var (
+	trackedIDsCacheMu sync.Mutex
+	trackedIDsCache   = make(map[string]trackedIDsCacheEntry)
+)
 
-// getTrackedIssueStatus queries tracked issues and their status.
-func getTrackedIssueStatus(beadsDir, convoyID string) []trackedStatus {
+// trackedIssueIDs returns the issue IDs a convoy tracks, from cache when
+// fresh (no bd call at all). On a cache miss or expiry it spawns exactly one
+// `bd dep list` child. Callers are expected to invoke this serially across
+// convoys (see enrichConvoys) so at most one bd child is in flight at a time.
+func trackedIssueIDs(beadsDir, convoyID string) []string {
 	if !convoyIDPattern.MatchString(convoyID) {
 		return nil
+	}
+
+	trackedIDsCacheMu.Lock()
+	entry, cached := trackedIDsCache[convoyID]
+	trackedIDsCacheMu.Unlock()
+	if cached && time.Since(entry.fetchedAt) < trackedIDsCacheTTL {
+		return entry.ids
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	// Query tracked issues using bd dep list (returns full issue details)
 	cmd := exec.CommandContext(ctx, "bd", "dep", "list", convoyID, "-t", "tracks", "--json")
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = beadsDir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return nil
+		// Transient failure (e.g. Dolt contention) — keep serving the last
+		// known membership rather than dropping the convoy to zero tracked
+		// issues until the next successful refresh.
+		return entry.ids
 	}
 
 	var deps []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
-		return nil
+		return entry.ids
 	}
 
-	// Extract raw issue IDs
-	for i := range deps {
-		deps[i].ID = beads.ExtractIssueID(deps[i].ID)
-	}
-
-	// Refresh status via cross-rig lookup. bd dep list returns status from
-	// the dependency record in HQ beads which is never updated when cross-rig
-	// issues (e.g., gt-* tracked by hq-* convoys) are closed in their rig.
-	freshStatus := refreshTrackedStatus(ctx, deps)
-
-	var tracked []trackedStatus
+	ids := make([]string, 0, len(deps))
 	for _, dep := range deps {
-		status := dep.Status
-		if fresh, ok := freshStatus[dep.ID]; ok {
-			status = fresh
-		}
-		tracked = append(tracked, trackedStatus{ID: dep.ID, Status: status})
+		ids = append(ids, beads.ExtractIssueID(dep.ID))
 	}
 
-	return tracked
+	trackedIDsCacheMu.Lock()
+	trackedIDsCache[convoyID] = trackedIDsCacheEntry{ids: ids, fetchedAt: time.Now()}
+	trackedIDsCacheMu.Unlock()
+
+	return ids
 }
 
-// refreshTrackedStatus does a batch bd show to get current status for tracked issues.
-func refreshTrackedStatus(ctx context.Context, deps []struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-}) map[string]string {
-	if len(deps) == 0 {
+// batchIssueStatus runs a single `bd show <ids...> --json` covering every
+// distinct tracked issue ID across every convoy in one FetchConvoys pass,
+// replacing what used to be one `bd show` call per convoy. bd dep list
+// returns status from the dependency record in HQ beads, which is never
+// updated when cross-rig issues (e.g., gt-* tracked by hq-* convoys) are
+// closed in their rig — this batched bd show is what keeps status current.
+func batchIssueStatus(ids []string) map[string]string {
+	if len(ids) == 0 {
 		return nil
 	}
 
-	args := []string{"show"}
-	for _, d := range deps {
-		args = append(args, d.ID)
-	}
-	args = append(args, "--json")
+	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
+	defer cancel()
 
+	args := append([]string{"show"}, ids...)
+	args = append(args, "--json")
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	util.SetDetachedProcessGroup(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-
 	if err := cmd.Run(); err != nil {
 		return nil
 	}
