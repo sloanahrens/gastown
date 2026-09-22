@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -174,21 +175,52 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	outOfSyncCount := len(c.outOfSync) + len(c.templateOutOfSync)
-	if outOfSyncCount == 0 {
+	if outOfSyncCount > 0 {
 		return &CheckResult{
 			Name:     c.Name(),
-			Status:   StatusOK,
-			Message:  fmt.Sprintf("All %d hook targets in sync", totalTargets),
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("%d target(s) out of sync", outOfSyncCount),
+			Details:  details,
+			FixHint:  "Run 'gt doctor --fix hooks-sync' to regenerate settings files",
+			Category: c.Category(),
+		}
+	}
+
+	// Files matching what ComputeExpected would generate is necessary but
+	// not sufficient: it proves the bytes are right, not that the hooks
+	// they encode actually work end-to-end. sync-report.json is the
+	// deployment record 'gt hooks sync' writes only after its canary
+	// live-fire pair ran against a real settings file (claude-41j.1
+	// D7/D8) — a role count or a role's mail is not that record. Its
+	// absence means "in sync" here proves nothing about whether that was
+	// ever verified, so report Skipped rather than OK.
+	report, reportErr := hooks.ReadSyncReport(ctx.TownRoot)
+	if reportErr != nil {
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusSkipped,
+			Message:  "unknown: no hooks sync report found — run 'gt hooks sync' to record a live-fire-verified deployment",
+			Category: c.Category(),
+		}
+	}
+
+	if !report.Canary.Passed() {
+		return &CheckResult{
+			Name:   c.Name(),
+			Status: StatusWarning,
+			Message: fmt.Sprintf(
+				"%d hook targets match, but the last sync's canary live-fire pair was not a verified pass (blocked=%s, allowed=%s, canary=%s at %s)",
+				totalTargets, report.Canary.Blocked.Verdict, report.Canary.Allowed.Verdict, report.Canary.Target, report.Timestamp.Format(time.RFC3339),
+			),
+			FixHint:  "Run 'gt doctor --live-fire' to investigate, then 'gt hooks sync' again once the pair passes",
 			Category: c.Category(),
 		}
 	}
 
 	return &CheckResult{
 		Name:     c.Name(),
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d target(s) out of sync", outOfSyncCount),
-		Details:  details,
-		FixHint:  "Run 'gt doctor --fix hooks-sync' to regenerate settings files",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("All %d hook targets in sync (last verified sync: %s)", totalTargets, report.Timestamp.Format(time.RFC3339)),
 		Category: c.Category(),
 	}
 }
