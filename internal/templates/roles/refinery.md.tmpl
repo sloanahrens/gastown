@@ -343,7 +343,7 @@ gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" \
 ```bash
 bd show <id>                             # Issue details (e.g., bd show gt-abc)
 bd update <id> --status=open             # Reopen source issue
-bd update <id> --notes "..."             # Persist findings
+bd update <id> --append-notes "..."      # Persist findings
 bd close <id>                            # Close issue
 bd close <id> --reason="..."             # Close with reason
 bd create --title="..." --type=bug --priority=1  # File pre-existing failure

@@ -254,17 +254,21 @@ survive in git, but analysis, findings, and decisions exist only in your context
 window. Persist them to the bead so they survive session death:
 ```bash
 # After completing significant analysis or reaching conclusions:
-bd update {{issue}} --notes "Findings so far: <what you discovered>"
+bd update {{issue}} --append-notes "Findings so far: <what you discovered>"
 # For detailed reports, use --design:
 bd update {{issue}} --design "<structured findings>"
 ```
+Use `--append-notes`, never `--notes`: a resumed bead already carries the
+refinery's MERGE REJECTION block, and the resume path in load-context greps
+notes for it (gt-nxvg).
+
 Do this BEFORE closing molecule steps, not after. If your session dies between
 persisting and closing, the findings survive. If you close first, they're lost.
 
 **For report-only tasks** (audits, reviews, research): your findings ARE the
 deliverable. There are no code changes to commit. You MUST persist all findings
-to the bead via --notes or --design. Without this, your entire work product is
-lost when the session ends.
+to the bead via --append-notes or --design. Without this, your entire work
+product is lost when the session ends.
 
 **Review-only close evidence:** If the bead has `review_only: true`, notes/design
 are durable report content but do NOT satisfy `gt done`. Add a fresh evidence
@@ -307,7 +311,7 @@ Tried: <what you've attempted>"
 
 **Exit criteria (HARD GATE):** Implementation complete AND code committed to git.
 - Code tasks: `git status` shows clean working tree, `git log origin/{{base_branch}}..HEAD` shows at least 1 commit
-- Report tasks: all findings persisted to bead via --notes or --design
+- Report tasks: all findings persisted to bead via --append-notes or --design
 Do NOT proceed to the next step with uncommitted changes."""
 
 [[steps]]

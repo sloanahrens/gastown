@@ -805,13 +805,14 @@ per MR for no reason.
   Attempt-Number: <N>
   BODY
   ```
-- Update the bead with MERGE REJECTION notes, using the exact vocabulary and
-  the same polecat-liveness check and dead-polecat RECOVERED_BEAD redispatch
-  that handle-failures uses for test/build rejections (see that step) — an
-  editorial rejection sent to a polecat that already exited would otherwise
-  sit unread forever:
+- Update the bead with MERGE REJECTION notes (`--append-notes`, so the
+  polecat's implementation notes survive — gt-nxvg), using the exact
+  vocabulary and the same polecat-liveness check and dead-polecat
+  RECOVERED_BEAD redispatch that handle-failures uses for test/build
+  rejections (see that step) — an editorial rejection sent to a polecat that
+  already exited would otherwise sit unread forever:
   ```bash
-  bd update <issue-id> --notes "MERGE REJECTION (attempt <N>): om-editorial - findings on MR bead <mr-bead-id>
+  bd update <issue-id> --append-notes "MERGE REJECTION (attempt <N>): om-editorial - findings on MR bead <mr-bead-id>
   Branch: <branch>
   Target: <target-branch>
   MR: <mr-bead-id>"
@@ -889,11 +890,12 @@ If any check or test FAILED:
      BODY
      ```
    - **Update the bead** with failure details so they survive session death.
-     Use the exact "MERGE REJECTION" vocabulary and include the branch —
-     the polecat resume path (mol-polecat-work) greps notes for this marker
-     and the branch name to make a targeted fix on the surviving branch:
+     Use `--append-notes` (plain `--notes` REPLACES the polecat's own notes —
+     gt-nxvg), the exact "MERGE REJECTION" vocabulary, and the branch — the
+     polecat resume path (mol-polecat-work) greps notes for this marker and
+     the branch name to make a targeted fix on the surviving branch:
      ```bash
-     bd update <issue-id> --notes "MERGE REJECTION (attempt <N>): <failure-type> - <error summary>
+     bd update <issue-id> --append-notes "MERGE REJECTION (attempt <N>): <failure-type> - <error summary>
      Branch: <branch>
      Target: <target-branch>
      MR: <mr-bead-id>"
@@ -967,7 +969,7 @@ If any check or test FAILED:
 
 **FIX_NEEDED CHECKLIST** (all required before skipping to loop-check):
 - [ ] FIX_NEEDED sent to polecat (with failure details)
-- [ ] Bead updated with MERGE REJECTION notes (marker + branch)
+- [ ] Bead updated with MERGE REJECTION notes appended (marker + branch)
 - [ ] Polecat liveness checked; if dead → bead reopened + RECOVERED_BEAD sent to deacon
 - [ ] MR bead closed as rejected, or left open because the gate never ran
       (infra) and the gate problem escalated
