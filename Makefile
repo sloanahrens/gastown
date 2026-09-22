@@ -222,7 +222,14 @@ test: test-makefile
 	# tightened against an idle host is not a hang detector.
 	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
 	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
-	GT_TEST_DOCKER=1 go test -timeout 20m ./...
+	# Defaulted rather than hardcoded, so an *ambient* GT_TEST_DOCKER=0 wins:
+	# gt done's default gate runs this same recipe with the opt-in forced off
+	# and therefore needs no container-gate slot (gt-wx53), while the refinery
+	# gate and the daemon's main-branch patrol pass no value and still get the
+	# container suite. A hardcoded =1 here is invisible to every caller that
+	# tries to turn containers off (a recipe assignment beats the child env),
+	# so the gate stayed welded to the town-wide slot.
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m ./...
 
 test-makefile:
 	bash scripts/check-install-path_test.sh

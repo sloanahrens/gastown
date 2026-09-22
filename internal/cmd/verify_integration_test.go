@@ -186,14 +186,14 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		return dir
 	}
 
-	t.Run("the gate runs the rig's full hermetic test_command under the floor budget and a slot", func(t *testing.T) {
+	t.Run("the gate runs the rig's full hermetic test_command, slot-free, when the rig does not ask for containers", func(t *testing.T) {
 		dir := newRepoWithTwoChangedPackages(t)
 
-		var gotTimeout time.Duration
 		var calls []runCall
+		acquired := false
 		stubVerifyGate(t,
-			func(_ string, _ string, timeout time.Duration) (func(), error) {
-				gotTimeout = timeout
+			func(_ string, _ string, _ time.Duration) (func(), error) {
+				acquired = true
 				return func() {}, nil
 			},
 			func(ctx context.Context, _ string, script string, env []string, _ *os.File) error {
@@ -211,10 +211,10 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		if len(calls) != 1 {
 			t.Fatalf("runner called %d times, want 1", len(calls))
 		}
-
-		if gotTimeout != defaultTestVerifySlotTimeout {
-			t.Errorf("slot timeout = %s, want the %s default", gotTimeout, defaultTestVerifySlotTimeout)
+		if acquired {
+			t.Error("the gate took the town-wide container-gate slot for a container-free command (gt-wx53)")
 		}
+
 		// gt-btw1: the command is the rig's own hermetic test_command, not a
 		// derived go test over the changed packages.
 		if calls[0].script != "GOFLAGS=-p=6 make test" {
@@ -225,6 +225,11 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		// present, so look for the assignment rather than exact equality.
 		if !containsEnv(calls[0].env, "GOFLAGS=-p=6") {
 			t.Errorf("env is missing GOFLAGS=-p=6 from test_command")
+		}
+		// gt-wx53: the run carries an explicit opt-out so the suite's
+		// container-backed tests skip instead of starting outside the slot.
+		if !containsEnv(calls[0].env, dockerTestsEnv+"=0") {
+			t.Errorf("env is missing %s=0, so nothing keeps the container suite from starting outside a slot:\n%v", dockerTestsEnv, calls[0].env)
 		}
 		// The full suite cannot be scaled by a changed-package count, so the
 		// run budget is the floor (gt-btw1).
@@ -238,8 +243,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		if result.slotTimeout != defaultTestVerifySlotTimeout {
 			t.Errorf("result.slotTimeout = %s, want %s", result.slotTimeout, defaultTestVerifySlotTimeout)
 		}
-		if !result.slotUsed {
-			t.Error("slotUsed = false, want true: the full suite may spin containers")
+		if result.slotUsed || !result.containersOptedOut {
+			t.Errorf("slotUsed=%v containersOptedOut=%v, want false/true", result.slotUsed, result.containersOptedOut)
 		}
 		if result.scope != "full" {
 			t.Errorf("scope = %q, want %q", result.scope, "full")
@@ -249,15 +254,70 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		}
 
 		// The resolve-before-you-run header is the artifact gt-pnkd's victims
-		// could not read: it must name both budgets and their provenance.
+		// could not read: it must name both budgets and their provenance, and
+		// (gt-wx53) say whether this gate is queueing for the town's slot.
 		logBytes, readErr := os.ReadFile(result.logPath)
 		if readErr != nil {
 			t.Fatalf("reading verify log: %v", readErr)
 		}
 		logText := string(logBytes)
-		for _, want := range []string{"run budget: 30m", "slot cap: 1h", "full test_command", "env (inherited from test_command): GOFLAGS=-p=6"} {
+		for _, want := range []string{
+			"run budget: 30m", "slot cap: 1h", "full test_command",
+			"env (inherited from test_command): GOFLAGS=-p=6",
+			"containers: opted out (" + dockerTestsEnv + "=0)",
+			"running without a container-gate slot",
+		} {
 			if !strings.Contains(logText, want) {
 				t.Errorf("verify log is missing %q:\n%s", want, logText)
+			}
+		}
+	})
+
+	t.Run("a rig whose command asks for containers runs it inside a slot, unchanged", func(t *testing.T) {
+		dir := newRepoWithTwoChangedPackages(t)
+
+		var calls []runCall
+		var gotTimeout time.Duration
+		stubVerifyGate(t,
+			func(_ string, _ string, timeout time.Duration) (func(), error) {
+				gotTimeout = timeout
+				return func() {}, nil
+			},
+			func(_ context.Context, _ string, script string, env []string, _ *os.File) error {
+				calls = append(calls, runCall{script: script, env: env})
+				return nil
+			})
+
+		// A rig that wants its container suite verified here says so in its own
+		// command; the gate must honour it, and hold a slot while it runs.
+		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./..."}
+		g := git.NewGit(dir)
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/containers-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if gotTimeout != defaultTestVerifySlotTimeout {
+			t.Errorf("slot timeout = %s, want the %s default", gotTimeout, defaultTestVerifySlotTimeout)
+		}
+		if len(calls) != 1 {
+			t.Fatalf("runner called %d times, want 1", len(calls))
+		}
+		if !containsEnv(calls[0].env, dockerTestsEnv+"=1") {
+			t.Errorf("env lost the rig's %s=1 opt-in", dockerTestsEnv)
+		}
+		if containsEnv(calls[0].env, dockerTestsEnv+"=0") {
+			t.Errorf("the gate opted out containers a rig had asked for")
+		}
+		if !result.slotUsed || result.containersOptedOut {
+			t.Errorf("slotUsed=%v containersOptedOut=%v, want true/false", result.slotUsed, result.containersOptedOut)
+		}
+		logBytes, readErr := os.ReadFile(result.logPath)
+		if readErr != nil {
+			t.Fatalf("reading verify log: %v", readErr)
+		}
+		for _, want := range []string{"containers: enabled", "container-gate slot acquired after"} {
+			if !strings.Contains(string(logBytes), want) {
+				t.Errorf("verify log is missing %q:\n%s", want, logBytes)
 			}
 		}
 	})
@@ -300,7 +360,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifySlotTimeout: "5m"}
+		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./...", TestVerifySlotTimeout: "5m"}
 		g := git.NewGit(dir)
 		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/contention-role")
 		if err == nil {
@@ -326,7 +386,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return ctx.Err()
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyRunTimeout: "1ms"}
+		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./...", TestVerifyRunTimeout: "1ms"}
 		g := git.NewGit(dir)
 		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/run-timeout-role")
 		if err == nil {
@@ -337,6 +397,36 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			if !strings.Contains(msg, want) {
 				t.Errorf("error is missing %q: %v", want, err)
 			}
+		}
+	})
+
+	t.Run("a slot-free timing-out suite says no slot was taken", func(t *testing.T) {
+		dir := newRepoWithTwoChangedPackages(t)
+		acquired := false
+		stubVerifyGate(t,
+			func(_ string, _ string, _ time.Duration) (func(), error) {
+				acquired = true
+				return func() {}, nil
+			},
+			func(ctx context.Context, _ string, _ string, _ []string, _ *os.File) error {
+				<-ctx.Done()
+				return ctx.Err()
+			})
+
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyRunTimeout: "1ms"}
+		g := git.NewGit(dir)
+		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/run-timeout-noslot-role")
+		if err == nil {
+			t.Fatal("expected a timeout error")
+		}
+		// The "slot wait is not counted" clause exists to explain a wait that
+		// happened; there is no wait to explain on the slot-free path, and
+		// saying "the 0s slot wait is not counted" would invent one.
+		if acquired {
+			t.Error("the gate took a slot on the slot-free path")
+		}
+		if !strings.Contains(err.Error(), "no container-gate slot was taken") {
+			t.Errorf("error does not say the run took no slot: %v", err)
 		}
 	})
 
@@ -354,7 +444,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 				return nil
 			})
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./..."}
 		g := git.NewGit(dir)
 		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/progress-role")
 		if err != nil {
@@ -445,15 +535,20 @@ func TestChangedGoPackages(t *testing.T) {
 	})
 }
 
-// TestRunDefaultTestVerification_AlwaysSlots covers gt-btw1: the gate runs the
-// rig's full hermetic test_command, which may spin containers, so it always
-// takes a container-gate slot (gt-yihz) — there is no deferral to the
-// refinery.
-func TestRunDefaultTestVerification_AlwaysSlots(t *testing.T) {
+// TestRunDefaultTestVerification_SlotOnlyForContainerRuns covers gt-wx53: gt
+// done runs the rig's full hermetic test_command (gt-btw1), but it takes the
+// town-wide container-gate slot only when that command can actually start a
+// container-backed suite. Everything else — including a change to a
+// container-backed package, since this rig's command does not ask for
+// containers — runs slot-free with the container opt-in forced off, so a
+// polecat's submission no longer queues behind the daemon's main-branch patrol
+// and the refinery's batch gate. There is no deferral to the refinery either
+// way (gt-btw1): the command is the rig's full one, run whole.
+func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
-	t.Run("container-backed package changed: the full suite runs inside a slot", func(t *testing.T) {
+	t.Run("container-backed package changed, rig does not ask for containers: slot-free", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		changePkga(t, dir)
@@ -461,10 +556,14 @@ func TestRunDefaultTestVerification_AlwaysSlots(t *testing.T) {
 		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga and internal/cmd")
 
 		acquired := false
+		var env []string
 		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
-		}, nil)
+		}, func(_ context.Context, _ string, _ string, e []string, _ *os.File) error {
+			env = e
+			return nil
+		})
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
@@ -478,22 +577,35 @@ func TestRunDefaultTestVerification_AlwaysSlots(t *testing.T) {
 		if len(result.packages) != 2 {
 			t.Errorf("packages = %v, want both changed packages recorded for the MR bead", result.packages)
 		}
-		if !result.slotUsed || !acquired {
-			t.Errorf("slotUsed=%v acquired=%v, want true/true: the full suite may spin containers", result.slotUsed, acquired)
+		if result.slotUsed || acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want false/false: the rig's command never asked for containers", result.slotUsed, acquired)
+		}
+		if !result.containersOptedOut {
+			t.Error("containersOptedOut = false, want true: the run must keep the container suite from starting outside a slot")
+		}
+		// The container-backed package in the diff is what makes this case
+		// interesting: the suite still runs whole, and the opt-out is what
+		// keeps its Docker tests from starting with no slot held.
+		if !containsEnv(env, dockerTestsEnv+"=0") {
+			t.Errorf("child env is missing %s=0:\n%v", dockerTestsEnv, env)
 		}
 	})
 
-	t.Run("only container-backed packages changed: the full suite still runs inside a slot", func(t *testing.T) {
+	t.Run("only container-backed packages changed: still slot-free, and the whole suite still runs", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "only internal/cmd")
 
 		acquired := false
+		var scripts []string
 		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
-		}, nil)
+		}, func(_ context.Context, _ string, script string, _ []string, _ *os.File) error {
+			scripts = append(scripts, script)
+			return nil
+		})
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
@@ -504,8 +616,92 @@ func TestRunDefaultTestVerification_AlwaysSlots(t *testing.T) {
 		if !result.ran || !result.success {
 			t.Fatalf("result = %+v, want ran=true success=true (no deferral under gt-btw1)", result)
 		}
+		if len(scripts) != 1 || scripts[0] != "go test ./..." {
+			t.Errorf("scripts = %v, want the rig's whole test_command run once", scripts)
+		}
+		if result.slotUsed || acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want false/false", result.slotUsed, acquired)
+		}
+	})
+
+	t.Run("an inherited container opt-in is filtered out, and the slot with it", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		changePkga(t, dir)
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+
+		// The integration harness itself sets this (the package's TestMain
+		// needs Docker), so this is also the case that would otherwise make the
+		// gate behave two different ways inside one test binary.
+		t.Setenv(dockerTestsEnv, "1")
+
+		acquired := false
+		var env []string
+		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+			acquired = true
+			return func() {}, nil
+		}, func(_ context.Context, _ string, _ string, e []string, _ *os.File) error {
+			env = e
+			return nil
+		})
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/inherited-optin-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if result.slotUsed || acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want false/false: the rig's command never asked for containers", result.slotUsed, acquired)
+		}
+		if !containsEnv(env, dockerTestsEnv+"=0") {
+			t.Errorf("child env is missing %s=0:\n%v", dockerTestsEnv, env)
+		}
+		seen := 0
+		for _, kv := range env {
+			if strings.HasPrefix(kv, dockerTestsEnv+"=") {
+				seen++
+			}
+		}
+		if seen != 1 {
+			t.Errorf("child env carries %s %d times, want exactly once (a duplicate resolves differently per reader)", dockerTestsEnv, seen)
+		}
+	})
+
+	t.Run("a non-Go rig's command is opaque: it keeps the slot", func(t *testing.T) {
+		dir := t.TempDir()
+		runGitIn(t, dir, "init", "-q", "-b", "main")
+		runGitIn(t, dir, "config", "user.email", "test@example.com")
+		runGitIn(t, dir, "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "base")
+		runGitIn(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\nmore\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch readme")
+
+		acquired := false
+		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+			acquired = true
+			return func() {}, nil
+		}, func(_ context.Context, _ string, _ string, _ []string, _ *os.File) error { return nil })
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "make test"}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/non-go-slot-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
 		if !result.slotUsed || !acquired {
-			t.Errorf("slotUsed=%v acquired=%v, want true/true", result.slotUsed, acquired)
+			t.Errorf("slotUsed=%v acquired=%v, want true/true: nothing here can tell us a non-Go command never touches Docker", result.slotUsed, acquired)
+		}
+		if result.containersOptedOut {
+			t.Error("containersOptedOut = true: a non-Go rig is never opted out")
 		}
 	})
 }

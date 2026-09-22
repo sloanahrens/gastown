@@ -83,12 +83,15 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		}
 	})
 
-	t.Run("container-backed package changed: lint still runs, then the full suite runs in a slot", func(t *testing.T) {
+	t.Run("container-backed package changed: lint still runs, then the full suite runs slot-free", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "only internal/cmd")
 
+		// nil runner: the lint and the suite must actually run here, since this
+		// subtest is about what the gate does around them (the slot stub alone
+		// keeps a slot from being taken).
 		acquired := false
 		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
@@ -111,8 +114,14 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		if !result.ran || !result.success {
 			t.Errorf("tests did not run after lint (no deferral under gt-btw1): %+v", result)
 		}
-		if !result.slotUsed || !acquired {
-			t.Errorf("slotUsed=%v acquired=%v, want true/true: the full suite may spin containers", result.slotUsed, acquired)
+		// gt-wx53: a container-backed package in the diff is not by itself a
+		// reason to queue for the town-wide slot — the rig's command has to ask
+		// for containers, and this one does not.
+		if result.slotUsed || acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want false/false", result.slotUsed, acquired)
+		}
+		if !result.containersOptedOut {
+			t.Error("containersOptedOut = false, want true")
 		}
 	})
 
