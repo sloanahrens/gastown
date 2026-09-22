@@ -2486,6 +2486,31 @@ notifyWitness:
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
 	if shouldNudgeRefinery(exitType, mrID) {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
+	} else if !pushFailed {
+		// A conflict-resolution completion releases an MR that already exists,
+		// so shouldNudgeRefinery's COMPLETED+new-MR gate above can never fire for
+		// it and nothing else emits a wake for the blocked->ready transition —
+		// see wakeRefineryForReadyConflict (gt-rv8h).
+		//
+		// Skipped when this run's own push failed: the resolution's new head
+		// would then not be on origin, and waking the refinery would only invite
+		// it to merge a stale head. The MR is left blocked and the existing
+		// push-failure recovery path owns it.
+		wakeBD := sourceBD
+		if wakeBD == nil {
+			wakeBD = beads.New(cwd)
+		}
+		// issueID is branch-derived unless --issue was passed, and a conflict
+		// polecat may still be on the resolved branch (whose name carries the
+		// source issue, not the task). The agent bead's hook_bead is the other
+		// candidate for "the conflict task this completion just finished".
+		wakeCandidates := []string{issueID}
+		if agentBeadID != "" {
+			if _, fields, err := beads.New(cwd).ForAgentBead().GetAgentBead(agentBeadID); err == nil && fields != nil {
+				wakeCandidates = append(wakeCandidates, fields.HookBead)
+			}
+		}
+		wakeRefineryForReadyConflict(wakeBD.Show, rigName, wakeCandidates...)
 	}
 
 	// Write completion metadata to agent bead for audit trail.
