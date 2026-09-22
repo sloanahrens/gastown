@@ -607,9 +607,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// refinery's suite (gt-fa3s).
 	envPrefix, _ := splitCommandEnvPrefix(mq.TestCommand)
 
-	// The gate runs the rig's full hermetic test_command (gt-btw1), so the
-	// scope is "full" on every rig and the changed-package list is recorded
-	// for the MR bead, not used to scope the run.
+	// Default: the gate runs the rig's whole hermetic test_command
+	// (gt-btw1), and the changed-package list is only recorded on the MR
+	// bead. A rig that sets merge_queue.test_verify_command with the
+	// {packages} token opts into running just that list instead, and the
+	// label below is corrected where that substitution happens.
 	scope := "full"
 	var pkgs []string
 	if isGoRig {
@@ -663,6 +665,14 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	testCmd := mq.TestCommand
 	if override := strings.TrimSpace(mq.TestVerifyCommand); override != "" {
 		if isGoRig {
+			// Only a command that actually consumed the package list ran a
+			// scoped suite; an override without the placeholder is simply a
+			// different whole-suite command. The label is the sole record of
+			// which one a polecat verified with, so it has to distinguish
+			// them rather than report "full" for both.
+			if strings.Contains(override, testVerifyPackagesPlaceholder) {
+				scope = "changed"
+			}
 			testCmd = strings.ReplaceAll(override, testVerifyPackagesPlaceholder, strings.Join(pkgs, " "))
 		} else if strings.Contains(override, testVerifyPackagesPlaceholder) {
 			return testVerifyResult{}, fmt.Errorf("gt done: merge_queue.test_verify_command uses %s, but this rig is not a Go module so no changed-package list can be resolved for it — either drop the placeholder or point the gate at the whole suite", testVerifyPackagesPlaceholder)
