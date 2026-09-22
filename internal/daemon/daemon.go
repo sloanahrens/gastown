@@ -781,10 +781,9 @@ func (d *Daemon) Run() (err error) {
 		defer compactorDogTicker.Stop()
 		d.logger.Printf("Compactor dog ticker started (check every %v, run interval %v)",
 			compactorDogTickInterval, interval)
-		// Catch up at startup instead of waiting for the first tick: on a host
-		// that restarts the daemon more often than the run interval, "wait for
-		// a tick" is what starved this patrol (gt-ima2), and the catch-up
-		// answers "was the last run long enough ago" from disk.
+		// Catch up at startup rather than waiting for the first tick: due-ness
+		// is a wall-clock question and a restart must not postpone the answer
+		// (gt-ima2).
 		d.triggerCompactorDog()
 	}
 
