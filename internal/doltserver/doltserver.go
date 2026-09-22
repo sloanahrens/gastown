@@ -3122,6 +3122,17 @@ func readExistingDoltDatabase(beadsDir string) string {
 	return ""
 }
 
+// DatabaseForBeadsDir returns the dolt_database named by beadsDir's
+// metadata.json, or "" when there is no metadata.json or it names none.
+//
+// Address a rig's database over SQL by this value rather than by the rig's
+// name: the two differ on upgraded towns (the gastown rig keeps the "gt"
+// database), and a query aimed at the rig name resolves to a database that
+// does not exist.
+func DatabaseForBeadsDir(beadsDir string) string {
+	return readExistingDoltDatabase(beadsDir)
+}
+
 // collectReferencedDatabases returns a set of database names referenced by
 // any rig's metadata.json dolt_database field. It checks multiple sources
 // to avoid falsely flagging legitimate databases as orphans (gt-q8f6n):
