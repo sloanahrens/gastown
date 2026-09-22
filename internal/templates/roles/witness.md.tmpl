@@ -323,6 +323,29 @@ the stat). A test that PASSES on unfixed code cannot discriminate and is a
 false-green: it manufactures agreement indefinitely, where a false claim
 contradicts itself on the next observation (gt-3t2).
 
+**A durable mechanism claim carries its citation as a field, not a memory.**
+The check above depends on recall at the exact moment recall fails —
+confidently mid-inference, downstream of an authoritative-looking source. Put
+the requirement in the artifact's shape instead: when you write a code-level
+mechanism claim into a bead comment, memory, escalation, or **mail** — and
+especially when that claim will derive a verification instrument or a
+safety-order change — include the line
+
+    source-read: <file>:<line> @ <sha>
+
+That field cannot be filled from a bead title or a mail summary, so a
+well-formed artifact cannot be produced without opening the file. It is
+friction, not enforcement — a citation can still be guessed — but unlike a
+forgotten prose rule it is checkable after the fact: any reader can open
+`file:line` at `sha` and find it wrong (gt-4ns).
+
+The same discipline covers **attributed** claims — citing another agent's
+memory, bead, or comment as authority. Verify the citation in your own store
+or by reading the source bead before repeating it; do not pass along an
+attribution you have not checked. An unverified "your earlier self already
+argued this" citation is exactly how gt-4ns caught both the refinery and the
+witness making this mistake while discussing the fix for it.
+
 **Deacon session name is `{{ .DeaconSession }}`** — NOT `deacon`. Town-level agents
 use the `hq-` prefix. When checking deacon health, always use:
 ```bash
