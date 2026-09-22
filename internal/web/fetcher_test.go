@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -738,10 +739,10 @@ exit 0
 }
 
 // TestGetTrackedIssues_FallsBackToShowForExternalEdges verifies gt-q0is: when
-// `bd dep list --type=tracks` returns empty (as it does for cross-database
-// external:<rig>:<id> tracking edges, see GH #2624, #2832), getTrackedIssues
-// falls back to `bd show` and still resolves the tracked issue instead of
-// silently reporting zero tracked issues.
+// both `bd dep list` forms return empty, getTrackedIssues falls back to
+// `bd show` and still resolves the tracked issue instead of silently
+// reporting zero tracked issues. The show fallback is the last resort for
+// bd builds without the raw-edge form (see rawTrackedDeps).
 func TestGetTrackedIssues_FallsBackToShowForExternalEdges(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based command test")
@@ -754,7 +755,14 @@ case "$1" in
     echo '[]'
     ;;
   show)
-    echo '[{"dependencies":[{"id":"external:gt:gt-dcku","status":"open","dependency_type":"tracks"},{"id":"hq-other","status":"open","dependency_type":"blocks"}]}]'
+    case "$2" in
+      hq-cv-432tu)
+        echo '[{"dependencies":[{"id":"external:gt:gt-dcku","status":"open","dependency_type":"tracks"},{"id":"hq-other","status":"open","dependency_type":"blocks"}]}]'
+        ;;
+      *)
+        echo '[{"id":"gt-dcku","title":"Fix the thing","status":"open","assignee":"gastown/polecats/flint","updated_at":"2026-09-10T22:00:00Z"}]'
+        ;;
+    esac
     ;;
 esac
 `
@@ -765,11 +773,12 @@ esac
 	restore := fetcherRunCmd
 	defer func() { fetcherRunCmd = restore }()
 	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
-		if name == "tmux" {
-			return bytes.NewBufferString(""), nil
+		// Only tmux still runs through this seam — bd calls all exec the fake
+		// script so they can be steered per-argument.
+		if name != "tmux" {
+			t.Fatalf("unexpected command: %s %v", name, args)
 		}
-		// getIssueDetailsBatch: "bd show gt-dcku --json"
-		return bytes.NewBufferString(`[{"id":"gt-dcku","title":"Fix the thing","status":"open","assignee":"gastown/polecats/flint","updated_at":"2026-09-10T22:00:00Z"}]`), nil
+		return bytes.NewBufferString(""), nil
 	}
 
 	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
@@ -789,6 +798,109 @@ esac
 	}
 }
 
+// TestGetTrackedIssues_CrossRigRawEdges verifies gt-44z1: a convoy whose
+// tracked beads all live in another rig must still render real progress.
+//
+// The fixture is the live shape that broke the dashboard: `bd show <convoy>
+// --json` reports "dependencies": null (bd only fills that array for edges
+// whose target resolves in the same database), while `bd dep list <convoy>
+// <convoy> --json` — the raw-edge form bd's own warning points at — returns
+// depends_on_id "external:om:om-59p" records. It also carries two edges that
+// must not become tracked issues: a non-tracks edge, and a malformed
+// external:<rig>:<id> whose "id" is really a title.
+//
+// If resolution ever regresses to the show path, the null fixture makes this
+// test report 0/0 instead of 2/3.
+func TestGetTrackedIssues_CrossRigRawEdges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+case "$1" in
+  dep)
+    echo '[{"issue_id":"hq-cv-7rzqg","depends_on_id":"external:om:om-59p","type":"tracks"},{"issue_id":"hq-cv-7rzqg","depends_on_id":"external:om:om-8mb","type":"tracks"},{"issue_id":"hq-cv-7rzqg","depends_on_id":"external:om:om-v3b","type":"tracks"},{"issue_id":"hq-cv-7rzqg","depends_on_id":"external:om:om-gate coverage: om","type":"tracks"},{"issue_id":"hq-cv-7rzqg","depends_on_id":"hq-something","type":"blocks"}]'
+    ;;
+  show)
+    case "$2" in
+      hq-cv-7rzqg)
+        echo '[{"id":"hq-cv-7rzqg","dependency_count":3,"dependencies":null}]'
+        ;;
+      *)
+        echo '[{"id":"om-59p","title":"om-gate T12","status":"closed","assignee":"om/polecats/onyx","updated_at":"2026-09-11T03:00:00Z"},{"id":"om-8mb","title":"om-gate T13","status":"closed","assignee":"om/polecats/quartz","updated_at":"2026-09-11T03:00:00Z"},{"id":"om-v3b","title":"om-gate T14","status":"open","assignee":"om/polecats/jasper","updated_at":"2026-09-11T03:00:00Z"}]'
+        ;;
+    esac
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "tmux" {
+			t.Fatalf("unexpected command: %s %v", name, args)
+		}
+		return bytes.NewBufferString(""), nil
+	}
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
+
+	tracked, err := f.getTrackedIssues("hq-cv-7rzqg")
+	if err != nil {
+		t.Fatalf("getTrackedIssues returned error: %v", err)
+	}
+
+	gotIDs := make([]string, 0, len(tracked))
+	completed := 0
+	for _, tr := range tracked {
+		gotIDs = append(gotIDs, tr.ID)
+		if tr.Status == "closed" {
+			completed++
+		}
+	}
+	wantIDs := []string{"om-59p", "om-8mb", "om-v3b"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("tracked IDs = %q, want %q (malformed and non-tracks edges must be skipped)", gotIDs, wantIDs)
+	}
+	if got := fmt.Sprintf("%d/%d", completed, len(tracked)); got != "2/3" {
+		t.Fatalf("progress = %s, want 2/3", got)
+	}
+	for _, tr := range tracked {
+		if tr.Status == "unknown" {
+			t.Fatalf("tracked %s resolved to unknown status — cross-rig bd show did not run from the town root", tr.ID)
+		}
+	}
+}
+
+// TestIsResolvableIssueID pins the filter that keeps a malformed edge from
+// blanking out a convoy row (gt-44z1).
+func TestIsResolvableIssueID(t *testing.T) {
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"gt-44z1", true},
+		{"hq-cv-7rzqg", true},
+		{"om-59p", true},
+		{"ap-qtsup.16", true},
+		{"be-wisp-o3q", true},
+		{"om-gate coverage: om", false}, // title used as an ID (live garbage edge)
+		{"external:om", false},          // malformed wrapper, left unstripped
+		{"", false},
+		{"-leading-dash", false},
+		{"has/slash", false},
+	}
+	for _, tt := range tests {
+		if got := isResolvableIssueID(tt.id); got != tt.want {
+			t.Errorf("isResolvableIssueID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
 // TestFetchConvoys_NoAssigneeNeverReportsStuck verifies gt-q0is: a convoy
 // with tracked issues but no assignee (or no tracked issues at all) must
 // never be colored STUCK based on an unrelated polecat's tmux activity. It
@@ -805,10 +917,18 @@ case "$1" in
     echo '[{"id":"hq-cv-1","title":"Convoy","status":"open","issue_type":"convoy","labels":[]}]'
     ;;
   dep)
-    echo '[{"id":"gt-abc"}]'
+    echo '[{"issue_id":"hq-cv-1","depends_on_id":"gt-abc","type":"tracks"}]'
     ;;
   show)
-    echo '[]'
+    case "$2" in
+      hq-cv-1)
+        echo '[{"id":"hq-cv-1","dependency_count":1,"dependencies":null}]'
+        ;;
+      *)
+        # getIssueDetailsBatch: "bd show gt-abc --json" — no assignee.
+        echo '[{"id":"gt-abc","title":"Untouched","status":"open","assignee":"","updated_at":""}]'
+        ;;
+    esac
     ;;
 esac
 `
@@ -819,14 +939,13 @@ esac
 	restore := fetcherRunCmd
 	defer func() { fetcherRunCmd = restore }()
 	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
-		if name == "tmux" {
-			// Simulate a long-idle, totally unrelated polecat session still
-			// running elsewhere in the town — this must NOT leak into this
-			// convoy's status.
-			return bytes.NewBufferString("gt-otherrig-somepolecat|1\n"), nil
+		if name != "tmux" {
+			t.Fatalf("unexpected command: %s %v", name, args)
 		}
-		// getIssueDetailsBatch: "bd show gt-abc --json" — no assignee.
-		return bytes.NewBufferString(`[{"id":"gt-abc","title":"Untouched","status":"open","assignee":"","updated_at":""}]`), nil
+		// Simulate a long-idle, totally unrelated polecat session still
+		// running elsewhere in the town — this must NOT leak into this
+		// convoy's status.
+		return bytes.NewBufferString("gt-otherrig-somepolecat|1\n"), nil
 	}
 
 	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath, registry: session.DefaultRegistry()}

@@ -442,22 +442,24 @@ type depRef struct {
 
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInfo, error) {
-	// Query tracked dependencies using bd dep list
-	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	// Query tracked dependencies using bd's raw-edge form (see rawTrackedDeps).
+	deps, err := f.rawTrackedDeps(convoyID)
 	if err != nil {
-		return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		// The raw-edge form (ID passed twice) is newer than the single-ID form.
+		// Older bd builds reject it — fall back so an upgrade path never takes
+		// the whole convoy panel down.
+		log.Printf("dashboard: convoy %s: raw dep query failed (%v), falling back to bd dep list", convoyID, err)
+		deps, err = f.depListTrackedDeps(convoyID)
+		if err != nil {
+			return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		}
 	}
 
-	var deps []depRef
-	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
-		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
-	}
-
-	// bd dep list --type=tracks joins against the issues table, which
-	// silently drops cross-database dependencies (external:<rig>:<id> edges)
-	// and only warns on stderr (see GH #2624, #2832). Fall back to bd show,
-	// which returns the convoy's raw dependency list without that join, and
-	// filter to "tracks" edges client-side (gt-q0is).
+	// Final fallback: bd show's dependency array. Unlike the dep queries above
+	// this never joins against the issues table, so cross-database edges
+	// survive — but bd only populates the array when the targets resolve
+	// locally, and emits "dependencies": null when every edge is external
+	// (gt-44z1). Kept for bd builds that lack the raw-edge form.
 	if len(deps) == 0 {
 		deps, err = f.bdShowTrackedDeps(convoyID)
 		if err != nil {
@@ -465,10 +467,23 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 		}
 	}
 
-	// Collect resolved issue IDs, unwrapping external:prefix:id format
+	// Collect resolved issue IDs, unwrapping external:prefix:id format.
+	// Unparseable targets are skipped rather than failing the row: a convoy
+	// with one garbage edge (e.g. "external:om:om-gate coverage: om", a title
+	// used as an ID) must still render the rest of its progress (gt-44z1).
 	issueIDs := make([]string, 0, len(deps))
+	seenIDs := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
-		issueIDs = append(issueIDs, beads.ExtractIssueID(dep.ID))
+		id := beads.ExtractIssueID(dep.ID)
+		if !isResolvableIssueID(id) {
+			log.Printf("dashboard: convoy %s: skipping unparseable tracked edge %q", convoyID, dep.ID)
+			continue
+		}
+		if _, dup := seenIDs[id]; dup {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		issueIDs = append(issueIDs, id)
 	}
 
 	// Batch fetch issue details
@@ -505,11 +520,94 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 	return result, nil
 }
 
+// rawTrackedDeps returns a convoy's "tracks" edges via `bd dep list <convoyID>
+// <convoyID> --json` — the same ID passed twice, which is the raw-edge form bd
+// itself points callers to.
+//
+// With a single ID, `bd dep list` joins the dependency records against the
+// local issues table. That join silently drops every cross-database edge
+// (external:<rig>:<id>, how a town-level convoy tracks a bead living in
+// another rig's Dolt database) and only mentions it on stderr, which this
+// fetcher discards — so convoys tracking cross-rig beads rendered 0/0
+// (gt-q0is, gt-44z1; GH #2624, #2832). The batch form returns the raw records
+// with depends_on_id intact, which also carries the target for edges whose
+// target row is not in this database.
+//
+// Returned IDs are unwrapped; the caller validates them. An empty slice means
+// "try the next strategy", never "this convoy tracks nothing".
+func (f *LiveConvoyFetcher) rawTrackedDeps(convoyID string) ([]depRef, error) {
+	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, convoyID, "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var edges []struct {
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &edges); err != nil {
+		return nil, fmt.Errorf("parsing raw deps for %s: %w", convoyID, err)
+	}
+
+	deps := make([]depRef, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Type != "tracks" {
+			continue
+		}
+		deps = append(deps, depRef{ID: beads.ExtractIssueID(edge.DependsOnID)})
+	}
+	return deps, nil
+}
+
+// depListTrackedDeps is the single-ID `bd dep list --type=tracks` query. It is
+// the pre-raw-edge code path, retained only as a compatibility fallback for bd
+// builds that reject the batch form (see rawTrackedDeps): its join drops
+// cross-database edges, so it is never the first choice.
+func (f *LiveConvoyFetcher) depListTrackedDeps(convoyID string) ([]depRef, error) {
+	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var deps []depRef
+	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
+		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
+	}
+	return deps, nil
+}
+
+// isResolvableIssueID reports whether id looks like a bead ID rather than a
+// mangled edge target. Cross-rig edges are stored as external:<rig>:<id>, and
+// a malformed one ("external:om:om-gate coverage: om" — a title where an ID
+// belongs) unwraps to something with spaces that no bd query can resolve.
+// Such an edge is dropped so it cannot blank out an otherwise healthy row.
+func isResolvableIssueID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+			// Allowed, but not as the first character: every bead ID starts
+			// with its alphabetic prefix (gt-, hq-, om-).
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // bdShowTrackedDeps falls back to `bd show <convoyID> --json` and extracts
 // "tracks" dependency edges from the convoy's raw dependency list. Unlike
 // `bd dep list --type=tracks`, this avoids the join against the issues
 // table that silently drops cross-database (external:<rig>:<id>) edges
-// (see GH #2624, #2832).
+// (see GH #2624, #2832). bd emits "dependencies": null when none of the
+// convoy's edges resolve locally, so this is a last resort, not the fix
+// for cross-rig convoys (gt-44z1).
 func (f *LiveConvoyFetcher) bdShowTrackedDeps(convoyID string) ([]depRef, error) {
 	stdout, err := f.runBdCmd(f.townRoot, "show", convoyID, "--json")
 	if err != nil {
@@ -549,6 +647,12 @@ type issueDetail struct {
 }
 
 // getIssueDetailsBatch fetches details for multiple issues.
+//
+// Runs from the town root, not the dashboard's own working directory: bd
+// discovers the beads database relative to cwd, so a server started outside
+// the town cannot resolve any of these IDs (gt-80o, gt-44z1). From the town
+// root, prefix routing in routes.jsonl reaches the rig that owns each bead,
+// including the cross-rig targets a convoy tracks.
 func (f *LiveConvoyFetcher) getIssueDetailsBatch(issueIDs []string) (map[string]*issueDetail, error) {
 	result := make(map[string]*issueDetail)
 	if len(issueIDs) == 0 {
@@ -558,7 +662,7 @@ func (f *LiveConvoyFetcher) getIssueDetailsBatch(issueIDs []string) (map[string]
 	args := append([]string{"show"}, issueIDs...)
 	args = append(args, "--json")
 
-	stdout, err := fetcherRunCmd(f.cmdTimeout, "bd", args...)
+	stdout, err := f.runBdCmd(f.townRoot, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd show failed (issue_count=%d): %w", len(issueIDs), err)
 	}
