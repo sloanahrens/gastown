@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -1301,6 +1303,7 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 	// Print summary
 	if result.TotalHooked == 0 {
 		fmt.Printf("%s No hooked beads found\n", style.Dim.Render("○"))
+		printHookStoresSearched(result)
 		return nil
 	}
 
@@ -1309,6 +1312,7 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 
 	if result.StaleCount == 0 {
 		fmt.Printf("%s No stale hooked beads\n", style.Dim.Render("○"))
+		printHookStoresSearched(result)
 		return nil
 	}
 
@@ -1330,8 +1334,8 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		fmt.Printf("  %s %s: %s (age: %s, assignee: %s)\n",
-			status, r.BeadID, action, r.Age, r.Assignee)
+		fmt.Printf("  %s %s: %s (age: %s, assignee: %s, store: %s)\n",
+			status, r.BeadID, action, r.Age, r.Assignee, r.Store)
 
 		// Surface partial work warnings
 		if r.PartialWork {
@@ -1373,6 +1377,19 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// printHookStoresSearched names every bead store the scan queried, and every
+// store it could not. Without it, "no hooked beads" reads as "nothing is wedged
+// anywhere" even when the scan never looked at the store where the bead lives.
+func printHookStoresSearched(result *deacon.StaleHookScanResult) {
+	if len(result.StoresSearched) > 0 {
+		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("Searched %d store(s): %s",
+			len(result.StoresSearched), strings.Join(result.StoresSearched, ", "))))
+	}
+	for _, name := range slices.Sorted(maps.Keys(result.StoreErrors)) {
+		style.PrintWarning("store %s could not be queried: %s", name, result.StoreErrors[name])
+	}
 }
 
 // runDeaconPause pauses the Deacon to prevent patrol actions.
