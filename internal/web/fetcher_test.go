@@ -950,7 +950,18 @@ esac
 		return bytes.NewBufferString("gt-otherrig-somepolecat|1\n"), nil
 	}
 
-	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath, registry: session.DefaultRegistry()}
+	// The registry has to actually resolve the unrelated session below, or the
+	// pre-fix "any running polecat" fallback skips every tmux line it is handed
+	// (ParseSessionNameWithRegistry errors on an unknown prefix) and returns
+	// nil — which is exactly how this test used to pass against the code it
+	// was written to guard (gt-f1td).
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+	if id, err := session.ParseSessionNameWithRegistry("gt-otherrig-somepolecat", registry); err != nil || id.Role != session.RolePolecat {
+		t.Fatalf("fixture session name must parse as a polecat under the test registry, got %+v (err=%v)", id, err)
+	}
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath, registry: registry}
 
 	rows, err := f.FetchConvoys()
 	if err != nil {
