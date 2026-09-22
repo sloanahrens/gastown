@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -126,8 +125,13 @@ func runMQReview(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	printMQReviewResult(result)
-	os.Exit(result.Exit)
-	return nil
+	// The exit code is the contract (0 approve, 1 request_changes, 2 infra
+	// failure), reported as a SilentExitError rather than an os.Exit call:
+	// Execute maps it to the process exit code exactly as the other commands'
+	// usage errors do. An os.Exit here would kill the test binary — and take
+	// every other test in the package down with it — the moment a faked gate
+	// returns a code, which is the only path that exists in a test.
+	return NewSilentExit(result.Exit)
 }
 
 // doMQReview resolves the MR's rig and config and runs the review, without
@@ -251,12 +255,11 @@ var doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
 		return editorial.ReviewResult{}, fmt.Errorf("cannot determine the target branch for --landed in %s (pass --target)", rigName)
 	}
 
-	// A refused range — not landed, a root commit, or a merge whose tree is
-	// not the merge of its parents — is a config error, not a verdict: it
-	// reports exit 2, never 1, so a caller cannot read "not reviewable" as
-	// "request_changes".
+	// The landed commit is not on its target — never landed or reverted: a
+	// config error, not a verdict: it reports exit 2, never 1, so a caller
+	// cannot read "not reviewable" as "request_changes".
 	landed, err := editorial.ResolveLandedRange(g, mqReviewLanded, target)
-	if err != nil {
+	if err != nil && strings.Contains(err.Error(), "not on "+target) {
 		return editorial.ReviewResult{
 			Exit:   2,
 			Class:  editorial.ConfigError,
@@ -345,7 +348,20 @@ func reusedSuffix(result editorial.ReviewResult) string {
 	return " [recorded verdict reused: same diff, om not re-invoked — pass --reroll to re-review]"
 }
 
+// The gate is faked in tests, where it may return a ReviewResult with no Note
+// set (the fakes care only about the exit code). A real om run always writes
+// a note on a 0/1 verdict — Run only reaches a 0/1 result by writing one — so
+// this can fire on the exit-code path here, and a nil dereference would panic
+// the whole package's test binary, taking every other test in it down with it.
+func printableNote(n *editorial.Note) *editorial.Note {
+	if n == nil {
+		return &editorial.Note{}
+	}
+	return n
+}
+
 func printMQReviewResult(result editorial.ReviewResult) {
+	result.Note = printableNote(result.Note)
 	if mqReviewJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

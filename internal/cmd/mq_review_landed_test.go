@@ -8,9 +8,12 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"strconv"
+
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // runReviewArgs drives the real gt mq review command tree (rootCmd, cobra's
@@ -136,13 +139,31 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	return cwd, repoDir, rigDir
 }
 
-func mustRead(t *testing.T, path string) string {
+// initBeadsDB gives the fixture's beads dir a real store. The wisp mint in
+// doMQReviewLanded (and the positional-MRID test's handle) goes through the
+// bd subprocess, which needs a Dolt server — so this is Docker-gated and
+// skips the test when containers are unavailable. It mints a testdb_* on a
+// dedicated per-test server (the refusal contract bd enforces) and pre-creates
+// the "gt" prefix route so Init does not need to guess one.
+func initBeadsDB(t *testing.T, rigDir string) {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	testutil.RequireDoltContainer(t)
+	portStr := testutil.StartIsolatedDoltContainer(t)
+	// The Init and the later wisp mint both run bd as isolated subprocesses
+	// that connect to a testdb_* database, which bd only allows against a
+	// dedicated per-test server (gt-uq28). The fixture's beads client is a
+	// plain beads.New, so align its env with what the isolated path would
+	// give it: the mapped port, the test-server declaration, and no local
+	// auto-start (that would shadow the container).
+	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return "<missing: " + err.Error() + ">"
+		t.Fatalf("parsing port %q: %v", portStr, err)
 	}
-	return string(data)
+	t.Setenv("BEADS_TEST_SERVER", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	if err := beads.NewIsolatedWithPort(rigDir, port).Init("gt"); err != nil {
+		t.Fatalf("init beads: %v", err)
+	}
 }
 
 func revForCmd(t *testing.T, dir, ref string) string {
@@ -159,14 +180,7 @@ func revForCmd(t *testing.T, dir, ref string) string {
 func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
-	oldImpl := doMQReviewLanded
-	doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
-		mqReviewRigFlag = "gastown"
-		res, err := oldImpl(args)
-		t.Logf("wrapper: res=%+v err=%v config.json=%q", res, err, mustRead(t, filepath.Join(rigDir, "config.json")))
-		return res, err
-	}
-	defer func() { doMQReviewLanded = oldImpl }()
+	initBeadsDB(t, rigDir)
 	// The base commit is not reachable from origin/main (the tip is its
 	// child), so --landed refuses it.
 	base := revForCmd(t, repoDir, "HEAD^")
@@ -188,6 +202,7 @@ func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
 func TestMQReviewLanded_ApproveExitsZeroAndResolvesRange(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
+	initBeadsDB(t, rigDir)
 	tip := revForCmd(t, repoDir, "HEAD")
 
 	var captured *editorial.ReviewRequest
@@ -223,6 +238,7 @@ func TestMQReviewLanded_ApproveExitsZeroAndResolvesRange(t *testing.T) {
 func TestMQReviewLanded_RequestChangesExitsOne(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
+	initBeadsDB(t, rigDir)
 	tip := revForCmd(t, repoDir, "HEAD")
 
 	code, _ := runReviewArgs(t, rigDir,
@@ -238,6 +254,7 @@ func TestMQReviewLanded_RequestChangesExitsOne(t *testing.T) {
 func TestMQReviewLanded_PositionalMRID(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
+	initBeadsDB(t, rigDir)
 	tip := revForCmd(t, repoDir, "HEAD")
 
 	bd := beads.New(rigDir)
