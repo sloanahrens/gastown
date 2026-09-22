@@ -102,6 +102,10 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	run(bare, "init", "--bare", "--initial-branch", defaultBranch)
 	run(repoDir, "remote", "add", "origin", bare)
 	run(repoDir, "push", "-u", "origin", defaultBranch)
+	// A non-root commit between the base and the landed tip: a test may
+	// point --landed at HEAD^ to exercise a refusal, and the root check
+	// must not fire before the not-landed check does.
+	run(repoDir, "commit", "--allow-empty", "-m", "mid")
 	if err := os.WriteFile(filepath.Join(repoDir, "f.txt"), []byte("one\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
