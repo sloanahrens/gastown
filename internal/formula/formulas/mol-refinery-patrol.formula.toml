@@ -998,6 +998,7 @@ send MERGED only after `gt mq post-merge` succeeds.
 **Config: delete_merged_branches = {{delete_merged_branches}}**
 **Config: merge_strategy = {{merge_strategy}}**
 **Config: require_review = {{require_review}}**
+**Config: editorial_required = {{editorial_required}}**
 
 **Step 1: Merge (strategy-dependent)**
 
@@ -1180,10 +1181,13 @@ If merge fails (conflict, branch protection), debug and retry.
 
 ⚠️ **STOP HERE - DO NOT PROCEED UNTIL THE PR IS ACTUALLY MERGED ON GITHUB**
 
-**Step 2: Post-merge cleanup (REQUIRED — single command)**
+**Step 2: Re-key the om verdict, then post-merge cleanup (REQUIRED — single command)**
 
-This single command handles closing the MR bead, closing the source issue, and
-deleting the remote polecat branch (respects delete_merged_branches config):
+On an editorial_required rig the landed commit first gets this MR's om verdict
+re-keyed onto it (gt-fr3r) — the verdict is keyed to the rehearsal head `gt mq
+review` reviewed, which this path never lands. Then the same command handles
+closing the MR bead, closing the source issue, and deleting the remote polecat
+branch (respects delete_merged_branches config):
 
 ```bash
 # If an open PR was detected in Step 1.6 (direct), pass --skip-branch-delete
@@ -1221,6 +1225,41 @@ if [ -n "$CONFLICT_TASK" ]; then
   echo "Conflict-resolved MR (task $CONFLICT_TASK) — attesting landed commit $LANDED_SHA"
 fi
 
+# gt-fr3r: re-key this MR's om verdict onto the commit that landed. The verdict
+# is keyed to the rehearsal head `gt mq review` reviewed — process-branch's
+# `temp` — which never lands; the merge above creates a different merge commit.
+# The Go engineer path copies the note forward itself
+# (editorial.CopyNotesToLanded); this path is raw git, so it asks for the same
+# copy. gt mq rekey-note refuses rather than guesses (the patch-id must match)
+# and stamps rekeyed_from on the note, so the post-hoc copy is on the record.
+#
+# Fires only when the merge above created this commit for THIS branch: when
+# origin/<polecat-branch> was already contained in <merge-target> the merge
+# created nothing, and LANDED_SHA is the previous MR's merge commit — which
+# carries its own note. Re-keying onto it would be a patch-id mismatch.
+if [ "{{editorial_required}}" = "true" ] && [ -n "$LANDED_SHA" ]; then
+  BRANCH_TIP=$(git rev-parse origin/<polecat-branch> 2>/dev/null)
+  LANDED_PARENTS=$(git log -1 --format=%P "$LANDED_SHA" 2>/dev/null)
+  MERGE_LANDED_HERE=false
+  case " $LANDED_PARENTS " in
+    *" $BRANCH_TIP "*) MERGE_LANDED_HERE=true ;;
+  esac
+  if [ -n "$BRANCH_TIP" ] && [ "$MERGE_LANDED_HERE" = "true" ]; then
+    REKEY_REASON="wisp raw-git merge-push: the verdict is keyed to the rehearsal head and the landed commit is a different merge (gt-fr3r)"
+    if ! gt mq rekey-note <mr-bead-id> --landed "$LANDED_SHA" --target <merge-target> --reason "$REKEY_REASON"; then
+      echo "EDITORIAL_RECORD_FAILED: <mr-bead-id> landed as $LANDED_SHA with no om note on it; editorial-coverage reads it as uncovered until the note is re-keyed."
+      gt mail send <rig>/witness -s "HELP: om note missing on landed commit <mr-bead-id>" --stdin <<BODY
+MR: <mr-bead-id>
+Issue: <issue-id>
+Landed: $LANDED_SHA
+Target: <merge-target>
+Problem: gt mq rekey-note refused or failed, so the landed commit carries no om note.
+Retry: gt mq rekey-note <mr-bead-id> --landed $LANDED_SHA --target <merge-target> --reason "$REKEY_REASON"
+BODY
+    fi
+  fi
+fi
+
 gt mq post-merge <rig> <mr-bead-id> $LANDED_FLAG $SKIP_FLAG
 ```
 
@@ -1238,7 +1277,10 @@ The MR bead ID was in the MERGE_READY message or find via:
 bd list --type=merge-request --status=open | grep <polecat-name>
 ```
 
-Verify the command output shows all steps succeeded (✓ for each).
+Verify the command output shows all steps succeeded (✓ for each). On an
+editorial_required rig whose merge created the commit, the re-key must have
+printed `Re-keyed note` or `Note already on every target`; a failure there is
+escalated to the witness, and the repair is another `gt mq rekey-note` run.
 
 **Note**: In PR mode, run post-merge cleanup only after `gh pr merge` succeeds.
 The branch is deleted by `gt mq post-merge` after merge proof passes, not by
