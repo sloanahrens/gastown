@@ -91,6 +91,17 @@ Benefits:
 - Plugin failures don't stall patrol
 - Consistent with Dogs' purpose (infrastructure work)
 
+**Agent per plugin**: `role_agents.dog` answers for every dog session, but the
+two kinds of plugin want different models. A plugin with a `run.sh` is bash the
+dog only launches, and a cheap or local preset runs it fine; a prose plugin
+(github-sheriff, quality-review) needs a model that can read results and judge.
+Set the optional top-level `agent` key to route just that plugin's session.
+Unset means `role_agents.dog`, unchanged.
+
+The scanner resolves the name against the same lookup a session start uses and
+warns, leaving the plugin on `role_agents.dog`, when it resolves to nothing — a
+typo should change where one plugin runs, not take it offline.
+
 ### State Tracking: Wisps on the Ledger
 
 Each plugin run creates a wisp:
@@ -174,6 +185,9 @@ Instructions for the dog worker to execute...
 name = "string"           # Unique plugin identifier
 description = "string"    # Human-readable description
 version = 1               # Schema version (for future evolution)
+
+agent = "claude-sonnet"   # Agent preset for this plugin's dog session.
+                          # Omit for role_agents.dog.
 
 [gate]
 type = "cooldown|cron|condition|event|manual"

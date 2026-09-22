@@ -42,6 +42,10 @@ type Plugin struct {
 	// Execution defines timeout and notification settings.
 	Execution *Execution `json:"execution,omitempty"`
 
+	// Agent names the agent preset that runs this plugin's dog session,
+	// overriding role_agents.dog. Empty means role_agents.dog, unchanged.
+	Agent string `json:"agent,omitempty"`
+
 	// Instructions is the markdown body (after frontmatter).
 	Instructions string `json:"instructions,omitempty"`
 
@@ -152,6 +156,7 @@ type PluginFrontmatter struct {
 	Name        string     `toml:"name"`
 	Description string     `toml:"description"`
 	Version     int        `toml:"version"`
+	Agent       string     `toml:"agent,omitempty"`
 	Gate        *Gate      `toml:"gate,omitempty"`
 	Tracking    *Tracking  `toml:"tracking,omitempty"`
 	Execution   *Execution `toml:"execution,omitempty"`
@@ -179,6 +184,7 @@ type PluginSummary struct {
 	RigName       string        `json:"rig_name,omitempty"`
 	GateType      GateType      `json:"gate_type,omitempty"`
 	ExecutionType ExecutionType `json:"execution_type,omitempty"`
+	Agent         string        `json:"agent,omitempty"`
 	Path          string        `json:"path"`
 }
 
@@ -203,6 +209,7 @@ func (p *Plugin) Summary() PluginSummary {
 		RigName:       p.RigName,
 		GateType:      gateType,
 		ExecutionType: execType,
+		Agent:         p.Agent,
 		Path:          p.Path,
 	}
 }

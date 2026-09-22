@@ -14,6 +14,14 @@ Each plugin is a directory containing:
 - condition: Metric threshold
 - event: Trigger-based (startup, heartbeat)
 
+## Agent routing
+
+Before writing a plugin whose job needs a model smarter than the dog default,
+read `docs/design/plugin-system.md` for the optional top-level
+`agent = "<preset>"` key. It runs that plugin's dog session on the named preset
+instead of `role_agents.dog`; omit it and every plugin keeps sharing the role
+default. `gt plugin show <name>` prints the preset a plugin resolves to.
+
 ## Querying your own run receipts
 
 Plugin run receipts are **ephemeral wisps** (created by `gt plugin record-run`).
