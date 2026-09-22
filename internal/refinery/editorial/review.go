@@ -446,10 +446,6 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	// as "approved with warning", so it must carry only genuine non-fatal
 	// follow-up trouble, not the gate script's routine stderr chatter — a
 	// clean approve where the script merely logged to stderr is not a warning.
-	// A landed review files follow-ups the same way (DECISION 8, approval
-	// never dissolves a finding); whether the bead comment succeeds is
-	// handled with the rest of the MR-bead writes after the note is
-	// recorded, where it can be reported without failing the verdict.
 	var resultStderr string
 	if note.Verdict == "approve" {
 		var majors []Finding
@@ -492,16 +488,9 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("record receipt: %v", err), retries, tmpDir)
 	}
 
-	// editorial_reviewed_head is a push-precondition field: the refinery
-	// reads it off the MR bead to find the note that authorizes the
-	// branch's push. A landed review has no bead and no push, so it skips
-	// the write — the note on the landed commit (with the follow-up ids)
-	// is its durable record, and fileFollowups above already filed the
-	// beads.
-	if note.Verdict == "approve" && !retroReview {
-			if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
-				return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
-			}
+	if note.Verdict == "approve" {
+		if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
+			return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
 		}
 		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: resultStderr}
 	}
