@@ -443,6 +443,15 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 	hookDir := beads.ResolveHookDir(townRoot, beadToHook, hookWorkDir)
+	// The hook write below replaces the base bead's assignee (beadToHook is the
+	// wisp when a formula applies). Record the outgoing value on the base bead
+	// first: assignee keeps only the last writer, so afterwards the previous
+	// polecat's branch is unreachable from the bead (gt-zd7c).
+	requester := params.CallerContext
+	if requester == "" {
+		requester = reassignRequester()
+	}
+	recordReassignment(townRoot, params.BeadID, info.Assignee, targetAgent, requester)
 	if err := hookBeadWithRetryWithTownRootFn(beadToHook, targetAgent, hookDir, townRoot); err != nil {
 		// Clean up all partial sling state, including raw metadata stored before hook.
 		rollbackSpawnedPolecat(beadToHook, "Hook failed")

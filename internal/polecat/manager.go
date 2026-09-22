@@ -2708,9 +2708,27 @@ func (m *Manager) unassignWorkBeads(name string) {
 		return
 	}
 
+	// One origin listing for every bead being released: each per-issue lookup is
+	// its own ls-remote, and an unreachable remote costs the full query timeout
+	// (see ListOriginPolecatBranches).
+	originBranches, originErr := ListOriginPolecatBranches(m.rig.Path)
+
 	for _, issue := range activeWorkBeadsForCleanup(issues) {
 		openStatus := "open"
 		empty := ""
+		// Record the assignment before clearing it. Without this the bead
+		// keeps no trace of the polecat being removed, and the branch that
+		// polecat left on origin is unreachable from the bead — the same
+		// blind spot gt-zd7c fixes on the re-sling path. A failed listing
+		// stays nil so the record says "(unknown)", not "none": the
+		// difference between "go look in git" and "stop looking".
+		var branches []string
+		if originErr == nil {
+			branches = MatchSurvivingBranches(originBranches, issue.ID)
+		}
+		if err := m.beads.RecordReassignment(issue.ID, assignee, "", name, branches); err != nil {
+			style.PrintWarning("could not record assignment of bead %s to %s: %v", issue.ID, name, err)
+		}
 		if err := m.beads.Update(issue.ID, beads.UpdateOptions{
 			Status:   &openStatus,
 			Assignee: &empty,

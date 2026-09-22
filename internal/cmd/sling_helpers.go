@@ -1278,25 +1278,80 @@ func isHookedAgentDead(assignee string) bool {
 // survivingBranchForBead.
 var survivingBranchForBeadFn = survivingBranchForBead
 
+// rigRootForBead resolves the rig directory owning beadID through the prefix
+// routes, or "" when the bead's prefix routes nowhere.
+func rigRootForBead(townRoot, beadID string) string {
+	prefix := beads.ExtractPrefix(beadID)
+	if prefix == "" {
+		return ""
+	}
+	rigName := beads.GetRigNameForPrefix(townRoot, prefix)
+	if rigName == "" {
+		return ""
+	}
+	return filepath.Join(townRoot, rigName)
+}
+
 // survivingBranchForBead returns the most recent polecat branch still on the
 // rig's origin remote that encodes beadID, or "" when there is none. The
 // second return is false whenever the answer is unknown (no rig route, no git
 // repo, unreachable remote), so callers never read an unreachable remote as
 // "no surviving branch".
 func survivingBranchForBead(townRoot, beadID string) (string, bool) {
-	prefix := beads.ExtractPrefix(beadID)
-	if prefix == "" {
+	rigRoot := rigRootForBead(townRoot, beadID)
+	if rigRoot == "" {
 		return "", false
 	}
-	rigName := beads.GetRigNameForPrefix(townRoot, prefix)
-	if rigName == "" {
-		return "", false
-	}
-	branch, err := polecat.SurvivingBranchForIssue(filepath.Join(townRoot, rigName), beadID)
+	branch, err := polecat.SurvivingBranchForIssue(rigRoot, beadID)
 	if err != nil || branch == "" {
 		return "", false
 	}
 	return branch, true
+}
+
+// survivingBranchesForBead lists every polecat branch on the rig's origin
+// remote that encodes beadID, newest first. Unlike survivingBranchForBead it
+// does not distinguish "no branch" from "cannot tell": the reassignment record
+// is written either way, and an unreachable remote must not block a dispatch.
+func survivingBranchesForBead(townRoot, beadID string) []string {
+	rigRoot := rigRootForBead(townRoot, beadID)
+	if rigRoot == "" {
+		return nil
+	}
+	branches, err := polecat.FindSurvivingBranchesForIssue(rigRoot, beadID)
+	if err != nil {
+		return nil
+	}
+	return branches
+}
+
+// recordReassignment appends the durable reassignment record to a bead. Call it
+// before the write that overwrites the old assignee, or the only surviving copy
+// of the old value is the Dolt events table. Best-effort: a beads failure warns
+// and returns, because a missing audit line must not abort a dispatch.
+func recordReassignment(townRoot, beadID, from, to, requester string) {
+	if beadID == "" || from == "" || from == to {
+		return
+	}
+	dir := beads.ResolveHookDir(townRoot, beadID, "")
+	b := beads.New(dir)
+	if err := b.RecordReassignment(beadID, from, to, requester, survivingBranchesForBead(townRoot, beadID)); err != nil {
+		fmt.Printf("  %s Could not record reassignment of %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+		return
+	}
+	fmt.Printf("  %s Recorded reassignment of %s: %s -> %s\n", style.Dim.Render("○"), beadID, from, to)
+}
+
+// reassignRequester names the actor behind a reassignment for the durable
+// record: the slinging polecat when one is doing the sling, else the operator.
+func reassignRequester() string {
+	if p := os.Getenv("GT_POLECAT"); p != "" {
+		return p
+	}
+	if user := os.Getenv("USER"); user != "" {
+		return user
+	}
+	return "gt-sling"
 }
 
 // hookBeadWithRetry hooks a bead to a target agent with exponential backoff retry
