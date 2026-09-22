@@ -142,7 +142,9 @@ func runReady(cmd *cobra.Command, args []string) error {
 				// cannot resolve because routes.jsonl points that prefix elsewhere.
 				filtered = filterReadyIssuesByRoute(townRoot, "town", filtered)
 				// Filter identity beads (agents, roles, rigs) - not actionable work
-				src.Issues = filterIdentityBeads(filtered)
+				filtered = filterIdentityBeads(filtered)
+				// Filter the remaining bookkeeping families - rows nobody can pick up
+				src.Issues = filterNonDispatchableBeads(filtered)
 			}
 			sources = append(sources, src)
 		}()
@@ -175,7 +177,9 @@ func runReady(cmd *cobra.Command, args []string) error {
 				// usable by the stock `gt sling <id> <rig>` command.
 				filtered = filterReadyIssuesByRoute(townRoot, r.Name, filtered)
 				// Filter identity beads (agents, roles, rigs) - not actionable work
-				src.Issues = filterIdentityBeads(filtered)
+				filtered = filterIdentityBeads(filtered)
+				// Filter the remaining bookkeeping families - rows nobody can pick up
+				src.Issues = filterNonDispatchableBeads(filtered)
 			}
 			sources = append(sources, src)
 		}(r)
@@ -544,6 +548,26 @@ func readyIssueRoutesToSource(townRoot, source, issueID string) bool {
 	}
 
 	return beads.GetRigNameForPrefix(townRoot, prefix) == source
+}
+
+// filterNonDispatchableBeads removes the bead families that record town
+// runtime rather than work: mail, escalations, identity, merge requests and
+// slots, queues, and the deacon's event records (gt-b9wq).
+//
+// A ready row is a button, not a status. The dashboard draws a Sling control
+// beside every ID this list emits, so a row that no polecat can take is a
+// button that cannot work. Membership is beads.IsNonDispatchableBead, shared
+// with `gt daemon dispatch-check`, so the board and the nudge it triggers
+// cannot disagree about what work is.
+func filterNonDispatchableBeads(issues []*beads.Issue) []*beads.Issue {
+	filtered := make([]*beads.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if beads.IsNonDispatchableBead(issue) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered
 }
 
 // filterWisps removes wisp issues from the list.

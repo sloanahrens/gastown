@@ -2114,7 +2114,9 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the JSON output from gt ready
+	// Parse the JSON output from gt ready. The type tag is "issue_type" because
+	// that is the field beads.Issue marshals; reading "type" left every
+	// ReadyItem typed as "" (gt-b9wq).
 	var readyData struct {
 		Sources []struct {
 			Name   string `json:"name"`
@@ -2122,7 +2124,7 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 				ID       string `json:"id"`
 				Title    string `json:"title"`
 				Priority int    `json:"priority"`
-				Type     string `json:"type"`
+				Type     string `json:"issue_type"`
 			} `json:"issues"`
 		} `json:"sources"`
 		Summary struct {

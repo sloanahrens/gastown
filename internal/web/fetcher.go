@@ -2513,11 +2513,14 @@ func stripModelSuffix(model string) string {
 // FetchIssues returns open issues (the backlog).
 func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 	// Query both open AND hooked issues for the Work panel
-	// Open = ready to assign, Hooked = in progress
+	// Open = ready to assign, Hooked = in progress.
+	//
+	// The type tag is "issue_type" because that is what bd emits; reading "type"
+	// left every bead typed as "" (gt-b9wq).
 	var allBeads []struct {
 		ID        string   `json:"id"`
 		Title     string   `json:"title"`
-		Type      string   `json:"type"`
+		Type      string   `json:"issue_type"`
 		Priority  int      `json:"priority"`
 		Labels    []string `json:"labels"`
 		CreatedAt string   `json:"created_at"`
@@ -2528,7 +2531,7 @@ func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 		var openBeads []struct {
 			ID        string   `json:"id"`
 			Title     string   `json:"title"`
-			Type      string   `json:"type"`
+			Type      string   `json:"issue_type"`
 			Priority  int      `json:"priority"`
 			Labels    []string `json:"labels"`
 			CreatedAt string   `json:"created_at"`
@@ -2543,7 +2546,7 @@ func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 		var hookedBeads []struct {
 			ID        string   `json:"id"`
 			Title     string   `json:"title"`
-			Type      string   `json:"type"`
+			Type      string   `json:"issue_type"`
 			Priority  int      `json:"priority"`
 			Labels    []string `json:"labels"`
 			CreatedAt string   `json:"created_at"`
@@ -2553,24 +2556,13 @@ func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 		}
 	}
 
-	beads := allBeads
-
 	var rows []IssueRow
-	for _, bead := range beads {
-		// Skip internal types (messages, convoys, queues, merge-requests, wisps)
-		// Check both legacy type field and gt: labels
-		isInternal := false
-		switch bead.Type {
-		case "message", "convoy", "queue", "merge-request", "wisp", "agent":
-			isInternal = true
-		}
-		for _, l := range bead.Labels {
-			switch l {
-			case "gt:message", "gt:convoy", "gt:queue", "gt:merge-request", "gt:wisp", "gt:agent":
-				isInternal = true
-			}
-		}
-		if isInternal {
+	for _, bead := range allBeads {
+		// Skip the bookkeeping families. This panel draws a Sling button on
+		// every row it shows, so a row no polecat can take is a button that
+		// cannot work — the same rule, and the same definition, as the Ready
+		// lists (gt-b9wq).
+		if beads.IsNonDispatchableBead(&beads.Issue{Type: bead.Type, Labels: bead.Labels, Title: bead.Title}) {
 			continue
 		}
 

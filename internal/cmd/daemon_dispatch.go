@@ -469,45 +469,20 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 	return b.Ready()
 }
 
-// nonDispatchableLabels are the bead families that carry a P0-P2 priority but
-// are not work a polecat can take. Measuring them as dispatchable is how a
-// board reads as "dominated by stale backlog": 34 of gastown's 372 ready beads
-// on 2026-09-21 were agent beads, and the one P0 was the refinery's merge slot.
+// patrolSuppressedTitlePrefixes are notification envelopes this patrol does not
+// count as dispatchable work, over and above beads.IsNonDispatchableBead.
 //
-// Each entry has an owner that is not a polecat: an escalation waits on the
-// mayor or the operator, a message waits on its recipient, an agent bead is a
-// polecat's own identity, and a merge request is the refinery's queue.
-//
-// The identity families (agent, role, rig) are also filtered by
-// filterIdentityBeads, which the caller runs first. They are repeated here so
-// this predicate is correct on its own: a filter that silently depends on its
-// caller having run another one is a filter that stops working when it moves.
-var nonDispatchableLabels = []string{
-	"gt:agent",
-	"gt:convoy",
-	"gt:escalation",
-	"gt:formula",
-	"gt:keep",
-	"gt:merge-request",
-	"gt:merge-slot",
-	"gt:message",
-	"gt:queue",
-	"gt:rig",
-	"gt:role",
-	"gt:standing-orders",
-	"gt:wisp",
-}
-
-// nonDispatchableTitlePrefixes covers the families that carry no label of their
-// own. Titles are a weaker signal than labels and are read only as a fallback,
-// so a bead that gains a label can leave this list.
-var nonDispatchableTitlePrefixes = []string{
+// These are notices *about* work, not a kind of work, and they stay out of the
+// shared predicate because the two callers can afford different mistakes here.
+// A missed nudge costs silence until the mayor next reads the board; a hidden
+// row costs the work itself, and the board still shows a "main_branch_test:
+// <diagnosis>" bug — a real one is filed, gt-59yz — and a "STATE_COLLAPSE
+// <rig>" notice asking the mayor to reopen and re-dispatch.
+var patrolSuppressedTitlePrefixes = []string{
 	"STATE_COLLAPSE",
 	"[HIGH]",
 	"[CRITICAL]",
 	"[MEDIUM]",
-	"HANDOFF",
-	"merge-slot",
 	"main_branch_test:",
 }
 
@@ -527,15 +502,12 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 	if strings.EqualFold(strings.TrimSpace(issue.Type), "epic") {
 		return false
 	}
-	for _, label := range issue.Labels {
-		for _, skip := range nonDispatchableLabels {
-			if strings.EqualFold(strings.TrimSpace(label), skip) {
-				return false
-			}
-		}
+	if beads.IsNonDispatchableBead(issue) {
+		return false
 	}
+
 	title := strings.TrimSpace(issue.Title)
-	for _, prefix := range nonDispatchableTitlePrefixes {
+	for _, prefix := range patrolSuppressedTitlePrefixes {
 		if strings.HasPrefix(title, prefix) {
 			return false
 		}
