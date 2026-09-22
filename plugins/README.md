@@ -49,11 +49,14 @@ record it as a clean "no results" success. (Known affected: `compactor-dog`'s
 
 This `plugins/` directory (checked out at `<town_root>/gastown/mayor/rig/plugins`)
 is the source of truth. Deacon and `gt doctor` patrols run plugins out of
-`<town_root>/plugins` (e.g. `~/gt/plugins`) — a separate runtime copy that
-`git pull` and `make install` do **not** update.
+`<town_root>/plugins` (e.g. `~/gt/plugins`) — a separate runtime copy that a
+`git pull` alone does not update.
 
-Keep the runtime copy current with `gt plugin sync` (the `rebuild-gt` plugin
-runs this automatically after every successful rebuild). `gt doctor`'s
-`patrol-plugin-drift` check compares the two copies and warns when they
-diverge, or when it cannot locate this source directory at all — it never
+An edit made directly under `<town_root>/plugins` is a draft, not a change: the
+next `gt plugin sync` overwrites it. Land the edit here first; `make install`
+syncs this directory to the runtime copy, and the `rebuild-gt` plugin runs the
+same sync after every successful rebuild.
+
+`gt doctor`'s `patrol-plugin-drift` check compares the two copies and warns when
+they diverge, or when it cannot locate this source directory at all — it never
 silently reports OK in that case.

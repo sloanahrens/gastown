@@ -114,6 +114,28 @@ gt escalate "Quality BREACH: <worker> (avg: <avg>)" \
   --reason "Worker <worker> in rig <rig> has avg quality score <avg> over <count> reviews"
 ```
 
+## Escalation evidence requirements (REQUIRED)
+
+Every escalation this plugin files carries the evidence needed to falsify it
+without re-running anything. Put in `--reason`:
+
+- **Wisp IDs** you actually read (the result wisps and/or the run wisp), not a summary of them.
+- **Versions you observed**: for the `om` rig, the installed om binary sha and the manifest's
+  `om_binary.sha256`; for any rig, its rubric pin against the rubric sha seen.
+- **Measurement window**: the start and end timestamps scanned.
+
+Rationale: a body that says only "suggests the harness is out of sync" (hq-wisp-0g6094) makes the
+reader re-derive what the reporter already held. Wisp IDs and shas make the claim checkable in one
+step, and separate a non-reproducible transient from a live defect.
+
+**Re-measure before re-filing.** Before filing a `backend_timeout` or `version_mismatch`
+escalation, re-check the CURRENT budget and the CURRENT shas: the installed sha may already match
+the manifest, and a rig's budget may already have been raised (om's review timeout went
+300s -> 900s, om-cwy). A failure at the CURRENT setting is new evidence; the same failure at a
+setting that has since changed is not, and re-filing it unchanged is noise.
+
+Done when the `--reason` names the wisps, the shas, and the window.
+
 ## Step 5: Record run result
 
 Record a summary wisp for this plugin run:
