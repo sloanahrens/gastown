@@ -232,8 +232,8 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_LaterMRsAlreadyLanded(t *test
 	}
 }
 
-// TestResumeLandedMerge_ContentPreservedRebase_NoFalseEscalation covers the
-// case mergeAlreadyLanded's cherry fallback recognizes but findMergeCommitFor
+// TestResumeLandedMerge_ContentPreservedRebase_BackfillsNoteByPatchID covers
+// the case mergeAlreadyLanded's cherry fallback recognizes but findMergeCommitFor
 // cannot resolve: a rebase changed the submitted commit's SHA before it
 // landed, so that original SHA is not literally on target — only its
 // content is, by patch-id. resumeLandedMerge is exercised directly (rather
@@ -241,11 +241,14 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_LaterMRsAlreadyLanded(t *test
 // the live branch to sit exactly at the recorded commit_sha, which a
 // same-session rebase would already have updated) with mergeRef set to that
 // stale, unreachable original SHA — reproducing a bead that still names the
-// pre-rebase head. Resume must still complete without calling RekeyNote
-// against a commit that was never reachable, which would otherwise fail and
-// wrongly report a record_failed escalation for an MR that actually landed
-// cleanly.
-func TestResumeLandedMerge_ContentPreservedRebase_NoFalseEscalation(t *testing.T) {
+// pre-rebase head.
+//
+// The MR was reviewed, so its note exists (on the pre-rebase head). Resume
+// must resolve the commit the content actually landed as, by patch-id, and
+// backfill the note onto that commit — not guess a sha, and not falsely
+// escalate an MR that landed cleanly (the property this test has always
+// guarded, now on the path that has to prove it).
+func TestResumeLandedMerge_ContentPreservedRebase_BackfillsNoteByPatchID(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	bdLog, gtLog := fakeBDAndGt(t)
@@ -253,6 +256,7 @@ func TestResumeLandedMerge_ContentPreservedRebase_NoFalseEscalation(t *testing.T
 	branch := "polecat/test/resume-crash-rebase"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
 	submitted := run(t, workDir, "git", "rev-parse", branch)
+	patchID := writeApproveNote(t, g, "mr-resume-crash-rebase", "polecats/max", submitted)
 
 	// Another MR lands on target first, moving it ahead of feature's base.
 	run(t, workDir, "git", "checkout", "main")
@@ -281,20 +285,206 @@ func TestResumeLandedMerge_ContentPreservedRebase_NoFalseEscalation(t *testing.T
 	if reachable, _ := g.IsAncestor(submitted, "origin/main"); reachable {
 		t.Fatal("test setup: the stale SHA should not be a literal ancestor of target")
 	}
+	if _, err := editorial.ReadNote(g, rebased); err != gitpkg.ErrNoNote {
+		t.Fatalf("test setup: the landed commit should start with no note of its own, got err=%v", err)
+	}
 
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
 	result := e.resumeLandedMerge(&MRInfo{ID: "mr-resume-crash-rebase"}, "main", submitted)
 	if !result.Success {
-		t.Fatalf("resumeLandedMerge failed for a content-preserved rebase landing: %s", result.Error)
+		t.Fatalf("resumeLandedMerge failed for a reviewed content-preserved rebase landing: %s", result.Error)
+	}
+	if result.MergeCommit != rebased {
+		t.Fatalf("expected resume to report the commit the content landed as %s, got %s", rebased, result.MergeCommit)
 	}
 	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
 		t.Fatalf("resumeLandedMerge moved origin/main: before=%s after=%s", before, after)
 	}
 
-	if bd := readLog(t, bdLog); strings.Contains(bd, "record_failed") {
-		t.Fatalf("expected no record_failed escalation for content that genuinely landed, bd log:\n%s", bd)
+	note, err := editorial.ReadNote(g, rebased)
+	if err != nil {
+		t.Fatalf("expected the landed commit to carry the backfilled om note, got: %v", err)
 	}
-	_ = gtLog
+	if note.Verdict != "approve" || note.PatchID != patchID {
+		t.Fatalf("backfilled note = verdict %q patch-id %s, want approve/%s", note.Verdict, note.PatchID, patchID)
+	}
+	if !note.Backfill || note.RekeyedFrom != submitted {
+		t.Fatalf("expected a backfill rekeyed from the reviewed sha %s, got backfill=%v rekeyed_from=%q", submitted, note.Backfill, note.RekeyedFrom)
+	}
+
+	if bd := readLog(t, bdLog); strings.Contains(bd, "record_failed") {
+		t.Fatalf("expected no record_failed escalation for content that genuinely landed and was reviewed, bd log:\n%s", bd)
+	}
+	if gtCalls := readLog(t, gtLog); strings.Contains(gtCalls, "nudge") {
+		t.Fatalf("expected no escalation for a reviewed landing that resumed cleanly, gt log:\n%s", gtCalls)
+	}
+}
+
+// simulateCherryPickedLanding lands branch's commit on main as a cherry-pick
+// — a new sha carrying the same patch, the shape a rebase or cherry-pick
+// queue produces — and pushes. Unlike simulateCrashedMerge it leaves the
+// branch itself untouched, so an MR bead still naming that commit_sha passes
+// doMerge's submittedBranchHead check and the resume path is reached the way
+// a real queue cycle reaches it.
+func simulateCherryPickedLanding(t *testing.T, workDir, branch string) (landedCommit string) {
+	t.Helper()
+	head := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "cherry-pick", head)
+	landedCommit = run(t, workDir, "git", "rev-parse", "HEAD")
+	run(t, workDir, "git", "push", "origin", "main")
+	return landedCommit
+}
+
+// atCommit fails unless branch still resolves to commit — the state a queue
+// cycle leaves a polecat branch it has not merged, and what lets doMerge's
+// submittedBranchHead check pass so the resume path is reached the way a real
+// cycle reaches it.
+func atCommit(t *testing.T, workDir, branch, commit string) {
+	t.Helper()
+	if got := run(t, workDir, "git", "rev-parse", branch); got != commit {
+		t.Fatalf("test setup: branch %s is at %s, expected the recorded commit_sha %s", branch, got, commit)
+	}
+}
+
+// TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoNote_Refuses
+// is gt-9t0p's core case, driven end to end through doMerge: the submitted
+// commit's content is on target under a sha a cherry-pick rewrote, and no om
+// note covers it. The MR is NOT completed — no merge_commit is reported, no
+// bookkeeping runs — and the missing proof is recorded and escalated.
+//
+// Before this fix the rebase/cherry branch of resumeLandedMerge printed a
+// hint and returned success, so the MR closed and its source issue with it,
+// on content nobody had a verdict for: the silent route past
+// merge_queue.editorial.required that gt-wh66's criterion 5 forbids.
+func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoNote_Refuses(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	bdLog, gtLog := fakeBDAndGt(t)
+
+	branch := "polecat/test/resume-renamed-nonote"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+
+	// Another MR lands first, then this one's patch is cherry-picked on top of
+	// it — a new sha carrying the same content, with the branch itself left
+	// where the MR bead says it is.
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "other.txt", "other\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "other: unrelated MR landed first")
+	run(t, workDir, "git", "push", "origin", "main")
+	landed := simulateCherryPickedLanding(t, workDir, branch)
+	atCommit(t, workDir, branch, head)
+
+	if reachable, err := g.IsAncestor(head, "origin/main"); err != nil || reachable {
+		t.Fatalf("test setup: the submitted sha must not be a literal ancestor of target (err=%v)", err)
+	}
+	if !g.CommitLandedOnTarget("origin", "main", head) {
+		t.Fatal("test setup: the cherry-picked content must read as landed")
+	}
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	mr := &MRInfo{
+		ID:        "mr-resume-renamed-nonote",
+		Branch:    branch,
+		Target:    "main",
+		Worker:    "polecats/max",
+		CommitSHA: head,
+	}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+	result := e.doMerge(context.Background(), mr)
+	if result.Success {
+		t.Fatalf("doMerge completed an unproven renamed landing (merge_commit=%s): %s", result.MergeCommit, result.Error)
+	}
+	if !result.EditorialRefused {
+		t.Fatalf("expected an editorial refusal, got %+v", result)
+	}
+	if result.EditorialReason != editorial.ReasonMissing {
+		t.Fatalf("expected reason %q, got %q", editorial.ReasonMissing, result.EditorialReason)
+	}
+	if result.MergeCommit != "" {
+		t.Fatalf("a refused landing must not report a merge commit, got %s", result.MergeCommit)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("doMerge moved origin/main while refusing: before=%s after=%s", before, after)
+	}
+	if _, err := editorial.ReadNote(g, landed); err != gitpkg.ErrNoNote {
+		t.Fatalf("a refusal must not invent a note on the landed commit, got err=%v", err)
+	}
+
+	bd := readLog(t, bdLog)
+	if !strings.Contains(bd, "failure_class:precondition") {
+		t.Fatalf("expected a precondition failure receipt for the unproven landing, bd log:\n%s", bd)
+	}
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "test-rig/witness") || !strings.Contains(gtCalls, "EDITORIAL_RESUME_UNPROVEN") {
+		t.Fatalf("expected the witness to be nudged about the unproven landing, gt log:\n%s", gtCalls)
+	}
+	if !strings.Contains(gtCalls, "rekey-note mr-resume-renamed-nonote --landed "+landed) {
+		t.Fatalf("expected the escalation to name the remedy and the landed sha, gt log:\n%s", gtCalls)
+	}
+}
+
+// TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
+// is the other half of that case: the same renamed landing, but the MR was
+// reviewed, so its approve note exists keyed to the pre-cherry-pick sha.
+// Resume resolves the landed commit by patch-id, backfills the note onto it,
+// and completes — a reviewed MR must not wedge in the queue for a sha that a
+// rebase rewrote (gt-9t0p: keyed by patch-id when the SHA changed).
+func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/resume-renamed-note"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+	patchID := writeApproveNote(t, g, "mr-resume-renamed-note", "polecats/max", head)
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "other.txt", "other\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "other: unrelated MR landed first")
+	run(t, workDir, "git", "push", "origin", "main")
+	landed := simulateCherryPickedLanding(t, workDir, branch)
+	atCommit(t, workDir, branch, head)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	mr := &MRInfo{
+		ID:        "mr-resume-renamed-note",
+		Branch:    branch,
+		Target:    "main",
+		Worker:    "polecats/max",
+		CommitSHA: head,
+	}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+	result := e.doMerge(context.Background(), mr)
+	if !result.Success {
+		t.Fatalf("doMerge refused a reviewed renamed landing: %s", result.Error)
+	}
+	if result.MergeCommit != landed {
+		t.Fatalf("expected the landed commit %s to be reported, got %s", landed, result.MergeCommit)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("doMerge moved origin/main during resume: before=%s after=%s", before, after)
+	}
+
+	note, err := editorial.ReadNote(g, landed)
+	if err != nil {
+		t.Fatalf("expected the landed commit to carry its backfilled note, got: %v", err)
+	}
+	if note.Verdict != "approve" || note.PatchID != patchID || !note.Backfill {
+		t.Fatalf("backfilled note = verdict %q patch-id %s backfill=%v, want approve/%s/true", note.Verdict, note.PatchID, note.Backfill, patchID)
+	}
+	if note.RekeyedFrom != head {
+		t.Fatalf("expected the note to be rekeyed from the reviewed sha %s, got %q", head, note.RekeyedFrom)
+	}
 }
 
 // TestDoMerge_ResumeAfterInterruptedBookkeeping_EditorialNotRequired_NoOp

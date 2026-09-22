@@ -39,6 +39,27 @@ func (e *Engineer) mergeAlreadyLanded(target, mergeRef string) bool {
 // issue, deletes the branch, and nudges the mayor exactly as it would for a
 // merge doMerge just performed itself. No gate, conflict check, or push runs
 // here — the whole point is that a prior pass already did that part.
+//
+// Under merge_queue.editorial.required the two shapes of "already landed"
+// are handled differently, deliberately (gt-9t0p).
+//
+// A literal ancestor — an ordinary merge, the identity a merge commit's
+// second parent carries forward unchanged — is a landing git itself attests
+// to: the commit is on target, so refusing to finish the bookkeeping could
+// not un-land it, it would only strand the MR bead and its source issue.
+// Bookkeeping completes and a note that cannot be attached is recorded and
+// escalated rather than swallowed (failEditorialRecordFailed, gt-wh66
+// acceptance criterion 5).
+//
+// A landing whose sha a rebase or cherry-pick rewrote is attested only by
+// patch-id equality of the content, so that patch-id has to be the proof:
+// the commit carrying it is resolved and its approve note required, the same
+// requirement the push precondition makes of every other landing (T6). When
+// that proof cannot be established the MR is NOT completed — the refusal
+// leaves it queued and escalates with the command that restores the note.
+// Completing it instead would close the MR and its source issue on content
+// nobody reviewed, which is the silent route past editorial.required this
+// branch used to leave open.
 func (e *Engineer) resumeLandedMerge(mr *MRInfo, target, mergeRef string) ProcessResult {
 	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: submitted commit %s already reachable from %s — resuming post-merge bookkeeping instead of re-merging\n",
 		mr.ID, shortSHA(mergeRef), target)
@@ -69,45 +90,165 @@ func (e *Engineer) resumeLandedMerge(mr *MRInfo, target, mergeRef string) Proces
 		if landedCommit != "" {
 			mergeCommit = landedCommit
 		}
-		e.reconcileLandedEditorialNote(mr, target, mergeCommit)
-	} else if e.config.Editorial != nil && e.config.Editorial.Required {
-		// A rebase changed mergeRef's SHA before landing, so there is no
-		// commit here to key an automatic backfill to: RekeyNote requires
-		// its Landed argument to actually be reachable from target, and
-		// mergeRef itself is not (only its content is, by patch-id). Rather
-		// than guess at (or fail loudly on) the wrong SHA, defer to the
-		// operator with the exact command that can name the real one.
-		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s landed via a content-preserving rebase; the specific landed commit could not be identified automatically — if it is missing its om note, back it in with: gt mq rekey-note %s --landed <landed-sha> --reason \"...\"\n", mr.ID, mr.ID)
+		if err := e.ensureLandedEditorialNote(mr, target, mergeCommit); err != nil {
+			e.failEditorialRecordFailed("[Engineer]", []*MRInfo{mr}, fmt.Sprintf("resume could not attach an om note to landed commit %s: %v", shortSHA(mergeCommit), err))
+		}
+	} else {
+		landedCommit, refusal := e.requireRenamedLandingProof(mr, target, mergeRef)
+		if refusal != nil {
+			return *refusal
+		}
+		mergeCommit = landedCommit
 	}
 
 	return ProcessResult{Success: true, MergeCommit: mergeCommit}
 }
 
-// reconcileLandedEditorialNote ensures landedCommit — the commit that
-// actually carried mergeRef's content onto target, as resumeLandedMerge
-// resolved it — carries a matching om approve note, for an MR
-// resumeLandedMerge is completing after the fact. No-op when the rig has not
-// set merge_queue.editorial.required.
+// requireRenamedLandingProof handles the landing whose sha a rebase or
+// cherry-pick rewrote before it reached target: mergeRef itself is not on
+// target, only its content is (by patch-id), so the commit that actually
+// carries that content has to be resolved before anything can be required of
+// it. Returns the commit to report as this MR's merge, or the refusal result
+// that must be returned in its place — non-nil means the landing was NOT
+// accepted and no bookkeeping may run (gt-9t0p).
+//
+// On a rig that has not set merge_queue.editorial.required there is no proof
+// to require, so the MR is resumed as landed reporting the submitted sha,
+// exactly as before this fix. Resolving the landed commit anyway would only
+// change the recorded merge_commit, which is not what this fix is about.
+func (e *Engineer) requireRenamedLandingProof(mr *MRInfo, target, mergeRef string) (string, *ProcessResult) {
+	if e.config.Editorial == nil || !e.config.Editorial.Required {
+		return mergeRef, nil
+	}
+
+	landedCommit, err := e.findLandedCommitByPatchID(target, mergeRef)
+	if err != nil {
+		return "", e.refuseResumedLanding(mr, target, editorial.ReasonRangeUnresolvable,
+			fmt.Sprintf("could not resolve which commit on %s carries the content of %s: %v", target, shortSHA(mergeRef), err), "")
+	}
+	if landedCommit == "" {
+		return "", e.refuseResumedLanding(mr, target, editorial.ReasonRangeUnresolvable,
+			fmt.Sprintf("no first-parent commit on %s carries the content of %s — a landing split across several rewritten commits has no single commit to hang a note on", target, shortSHA(mergeRef)), "")
+	}
+	if err := e.ensureLandedEditorialNote(mr, target, landedCommit); err != nil {
+		return "", e.refuseResumedLanding(mr, target, editorial.ReasonMissing,
+			fmt.Sprintf("the commit that landed this MR (%s on %s) has no matching approve note, and none could be backfilled: %v", shortSHA(landedCommit), target, err), landedCommit)
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: landed commit %s on %s identified by patch-id and covered by an approve note\n", mr.ID, shortSHA(landedCommit), target)
+	return landedCommit, nil
+}
+
+// refuseResumedLanding is the fail-closed tail of the rebase/cherry-pick
+// branch (gt-9t0p): the MR's content is on target but carries no approve
+// note, so the MR is not treated as landed — no merge_commit is reported, the
+// caller's bookkeeping does not run, the MR bead stays open (EditorialRefused
+// routes it back to the queue rather than into dead-worker recovery, which
+// would re-dispatch reviewed work every cycle), and the witness is told what
+// restores the proof.
+//
+// The failed merge is already on target, so no later merge cycle can produce
+// its note: the remedy is a verdict for the diff (gt mq review) plus either an
+// audited backfill of that verdict onto the landed commit (gt mq rekey-note,
+// which itself refuses unless a matching approve note exists) or, where the
+// patch-id proof cannot hold at all (a rebase that resolved conflicts), an
+// operator's attested close (gt mq post-merge --landed-commit). Until then
+// every cycle reports the same refusal, which is the point — a commit nobody
+// reviewed must not close an MR on an editorial.required rig.
+func (e *Engineer) refuseResumedLanding(mr *MRInfo, target string, reason editorial.PreconditionReason, detail, landedCommit string) *ProcessResult {
+	remedy := fmt.Sprintf("re-review the branch (gt mq review %s) so an approve note covers this diff, then back the note in (gt mq rekey-note %s%s --reason \"...\"), or — for a landing whose patch-id proof cannot hold, e.g. a rebase that resolved conflicts — close it by operator attestation (gt mq post-merge %s %s --landed-commit <sha>)",
+		mr.ID, mr.ID, rekeyLandedArg(landedCommit), e.rig.Name, mr.ID)
+	cerr := &editorial.PreconditionError{Class: editorial.Precondition, MR: mr.ID, Reason: reason}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: refusing to complete an already-landed MR — %s\n", mr.ID, detail)
+	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s stays open in the queue and no bookkeeping ran; %s\n", mr.ID, remedy)
+	e.recordEditorialFailure(mr, cerr)
+	e.escalateToWitness(fmt.Sprintf("EDITORIAL_RESUME_UNPROVEN: MR %s reason=%s — %s. The content is already on %s, so no merge can write this MR's note: %s",
+		mr.ID, reason, detail, target, remedy))
+	result := editorialRefusalResult(cerr)
+	return &result
+}
+
+// rekeyLandedArg names the resolved landed commit in a rekey-note remedy, or
+// leaves the sha for the operator to fill in when it could not be resolved
+// (`gt mq rekey-note` refuses a sha that is not on target, so a guessed one
+// would be worse than a placeholder).
+func rekeyLandedArg(landedCommit string) string {
+	if strings.TrimSpace(landedCommit) == "" {
+		return " --landed <landed-sha>"
+	}
+	return " --landed " + landedCommit
+}
+
+// findLandedCommitByPatchID returns the first-parent commit on origin/target
+// that carries mergeRef's content, for a landing mergeRef itself is not
+// reachable from (a rebase or cherry-pick rewrote its sha; see
+// git.CommitLandedOnTarget's cherry fallback). "" means no such commit —
+// the caller must then refuse rather than assume a landing.
+//
+// The key is the same patch-id a reviewed range's note carries:
+// patch-id(merge-base(origin/target, mergeRef)..mergeRef), which is what
+// editorial.CheckPrecondition recomputes at push time and what the note
+// records (see LandedMR.Base/Head). Candidates are that range's first-parent
+// commits on target, newest first, and the first whose own diff has that
+// patch-id is the commit this MR's content landed as — a landing merge commit
+// qualifies through its diff against its first parent, which is the merged
+// branch's cumulative diff. This is what lets the proof be checked keyed by
+// patch-id when the sha changed, instead of by a sha that no longer exists.
+func (e *Engineer) findLandedCommitByPatchID(target, mergeRef string) (string, error) {
+	targetRef := "origin/" + target
+	base, err := e.git.MergeBase(targetRef, mergeRef)
+	if err != nil {
+		return "", fmt.Errorf("merge-base of %s and %s: %w", targetRef, shortSHA(mergeRef), err)
+	}
+	if base == mergeRef {
+		// mergeRef is the merge base itself: there is no range of its own
+		// whose patch-id could be looked for.
+		return "", nil
+	}
+	want, err := e.git.PatchID(base, mergeRef)
+	if err != nil {
+		return "", fmt.Errorf("patch-id of %s..%s: %w", shortSHA(base), shortSHA(mergeRef), err)
+	}
+	pairs, err := e.git.FirstParentPatchIDs(base, targetRef)
+	if err != nil {
+		return "", fmt.Errorf("first-parent patch-ids of %s..%s: %w", base, targetRef, err)
+	}
+	for _, p := range pairs {
+		if p.PatchID == want {
+			return p.Commit, nil
+		}
+	}
+	return "", nil
+}
+
+// ensureLandedEditorialNote ensures landedCommit — the commit that actually
+// carried mergeRef's content onto target, as resumeLandedMerge resolved it —
+// carries a matching om approve note, for an MR resumeLandedMerge is
+// completing after the fact. Returns nil when it does (including when the rig
+// has not set merge_queue.editorial.required, where there is nothing to
+// require), or an error explaining why the proof could not be established.
 //
 // When landedCommit has no matching note, this backfills it from the
 // pre-push approve note this MR must have carried (the same one
 // editorialPrecondition required before the original push) via
 // editorial.RekeyNote, which independently verifies the patch-id still
-// matches before writing anything. When no matching note can be found, or the
-// landed diff's patch-id no longer matches the note that exists, this is
-// treated exactly like a copyEditorialNotes failure: a verdict-without-proof
-// on a commit `git log` already shows, recorded and escalated to the witness
-// rather than left silent (acceptance criterion 5).
-func (e *Engineer) reconcileLandedEditorialNote(mr *MRInfo, target, landedCommit string) {
+// matches before writing anything — the note is located by MR id, so a
+// rewritten sha does not hide it, and a note whose patch-id no longer matches
+// the landed diff is refused rather than copied. When no matching note can be
+// found, or the landed diff's patch-id no longer matches the note that
+// exists, the caller decides: the ancestor branch records and escalates it
+// while still completing (acceptance criterion 5), the rebase branch refuses
+// outright (gt-9t0p).
+func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit string) error {
 	if e.config.Editorial == nil || !e.config.Editorial.Required {
-		return
+		return nil
 	}
 	if strings.TrimSpace(landedCommit) == "" {
-		return
+		return nil
 	}
 
 	if covered, checkErr := e.landedCommitHasApproveNote(landedCommit); checkErr == nil && covered {
-		return
+		return nil
 	}
 
 	result, err := editorial.RekeyNote(e.git, editorial.RekeyRequest{
@@ -117,10 +258,10 @@ func (e *Engineer) reconcileLandedEditorialNote(mr *MRInfo, target, landedCommit
 		Reason: "gt-wh66: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the pre-push approve note onto the commit that already landed",
 	})
 	if err != nil {
-		e.failEditorialRecordFailed("[Engineer]", []*MRInfo{mr}, fmt.Sprintf("resume could not attach an om note to landed commit %s: %v", shortSHA(landedCommit), err))
-		return
+		return err
 	}
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Backfilled om note onto resumed landed commit %s (patch-id %s)\n", shortSHA(landedCommit), result.PatchID)
+	return nil
 }
 
 // findMergeCommitFor returns the two-parent merge commit reachable from
