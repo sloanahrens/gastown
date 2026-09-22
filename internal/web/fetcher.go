@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -221,12 +222,10 @@ type LiveConvoyFetcher struct {
 	mergesAt    time.Time
 	countMerges countMergesFunc
 
-	// Local Pool panel: llama-server's /slots endpoint (empty means
-	// defaultLlamaSlotsURL) and the breaker that holds the poll off while the
+	// Local Pool panel: localServerBreaker holds the poll off while the model
 	// server is down. listPoolAgents overrides the tmux seat read in tests.
-	llamaSlotsURL  string
-	llamaBreaker   fetchCircuitBreaker
-	listPoolAgents poolAgentLister
+	localServerBreaker fetchCircuitBreaker
+	listPoolAgents     poolAgentLister
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -2678,23 +2677,19 @@ func eventSummary(eventType, actor string, payload map[string]interface{}) strin
 	}
 }
 
-// defaultLlamaSlotsURL is llama-server's slot listing. The dashboard and the
-// pool's local agent share one box, so the address is fixed; tests point the
-// fetcher's llamaSlotsURL elsewhere.
-const defaultLlamaSlotsURL = "http://127.0.0.1:8099/slots"
-
-// llamaSlotsTimeout bounds one /slots poll: a page render waits on it, and a
-// wedged server must not hold the page.
-const llamaSlotsTimeout = 2 * time.Second
+// localServerTimeout bounds one poll of the model server: a page render waits
+// on it, and a wedged server must not hold the page.
+const localServerTimeout = 2 * time.Second
 
 // poolAgentLister returns the GT_AGENT of every live polecat session. The
 // production read goes to tmux; tests supply a fake.
 type poolAgentLister func() ([]string, error)
 
-// FetchLocalPool reports the pool's local seats against llama-server's slots.
-// It returns nil when the town has no polecat_pool, which keeps the panel off
-// the page; a failed seat or slot read sets the matching *Err field so the
-// panel says what is unreadable instead of reporting a zero.
+// FetchLocalPool reports the pool's local seats and the state of the model
+// server those seats are configured against. It returns nil when the town has
+// no polecat_pool, which keeps the panel off the page; a failed seat or server
+// read sets the matching *Err field so the panel says what is unreadable
+// instead of reporting a zero.
 func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(f.townRoot))
 	if err != nil {
@@ -2731,63 +2726,131 @@ func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
 		}
 	}
 
-	busy, total, err := f.llamaServerSlots()
-	if err != nil {
-		data.SlotsErr = "llama-server: down"
+	data.ServerEndpoint = localServerEndpoint(ts, pool.LocalAgent)
+	probe, probeErr := f.modelServerStatus(data.ServerEndpoint)
+	if data.ServerEndpoint == "" {
+		// Nothing to probe: a pool whose local agent names no base URL must
+		// not read as a server that is down.
+		data.ServerErr = "no endpoint"
+	} else if probeErr != nil {
+		data.ServerErr = "down"
 	} else {
-		data.SlotsBusy, data.SlotsTotal = busy, total
+		data.ServerModel = probe.model
+		data.ServerKind = probe.kind
+		data.ServerInFlight = probe.inFlight
+		data.ServerMaxFlight = probe.maxInFlight
+		data.ServerInFlightKnown = probe.inFlightKnown
 	}
 	return data, nil
 }
 
-// llamaServerSlots counts llama-server's busy slots and its total. Failures go
-// through the breaker so a down server costs one request per backoff window
-// rather than one per render.
-func (f *LiveConvoyFetcher) llamaServerSlots() (int, int, error) {
-	if !f.llamaBreaker.allow() {
-		return 0, 0, errors.New("backing off after a failed slots poll")
+// localServerEndpoint is the base URL the pool's local agent is configured
+// against: ANTHROPIC_BASE_URL from the alias's env in the town settings. Empty
+// when that alias sets none, which is what keeps the panel from probing an
+// address nobody configured (gt-w0x3).
+func localServerEndpoint(ts *config.TownSettings, alias string) string {
+	if alias == "" || ts.Agents == nil {
+		return ""
+	}
+	agent, ok := ts.Agents[alias]
+	if !ok || agent == nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(agent.Env["ANTHROPIC_BASE_URL"]), "/")
+}
+
+// modelServerProbe is what a model server says about itself when asked.
+type modelServerProbe struct {
+	// model and kind come from GET /v1/models: the id it serves and the owner
+	// it reports. kind is the server's own word, never a name we chose.
+	model string
+	kind  string
+	// inFlight and maxInFlight come from GET /health when the server serves
+	// one; inFlightKnown is false when it does not, so an unreported count
+	// never renders as zero requests.
+	inFlight      int
+	maxInFlight   int
+	inFlightKnown bool
+}
+
+// modelServerStatus probes the endpoint the local pool is configured against.
+// Up is decided by GET /v1/models — every OpenAI-compatible server answers it,
+// and it names the model; /health is read second for the in-flight count and
+// is not required. Failures go through the breaker so a down server costs one
+// request per backoff window rather than one per render.
+func (f *LiveConvoyFetcher) modelServerStatus(baseURL string) (modelServerProbe, error) {
+	var probe modelServerProbe
+	if baseURL == "" {
+		return probe, errors.New("no endpoint configured for the pool's local agent")
+	}
+	if !f.localServerBreaker.allow() {
+		return probe, errors.New("backing off after a failed poll")
 	}
 
-	url := f.llamaSlotsURL
-	if url == "" {
-		url = defaultLlamaSlotsURL
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), llamaSlotsTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), localServerTimeout)
 	defer cancel()
+	client := &http.Client{Timeout: localServerTimeout}
+
+	body, err := getJSON(ctx, client, baseURL+"/v1/models")
+	if err != nil {
+		f.localServerBreaker.recordFailure()
+		return probe, err
+	}
+	var models struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		f.localServerBreaker.recordFailure()
+		return probe, err
+	}
+	f.localServerBreaker.recordSuccess()
+	if len(models.Data) > 0 {
+		probe.model = models.Data[0].ID
+		probe.kind = models.Data[0].OwnedBy
+	}
+
+	// Best effort: a server without /health still reports up and model.
+	if body, err := getJSON(ctx, client, baseURL+"/health"); err == nil {
+		var health struct {
+			Model          string `json:"model"`
+			ActiveRequests *int   `json:"active_requests"`
+			MaxActive      *int   `json:"max_active_requests"`
+		}
+		if json.Unmarshal(body, &health) == nil {
+			if probe.model == "" {
+				probe.model = health.Model
+			}
+			if health.ActiveRequests != nil {
+				probe.inFlight = *health.ActiveRequests
+				probe.inFlightKnown = true
+			}
+			if health.MaxActive != nil {
+				probe.maxInFlight = *health.MaxActive
+			}
+		}
+	}
+	return probe, nil
+}
+
+// getJSON fetches url and returns its body, or an error for anything that is
+// not a 200.
+func getJSON(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
+		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: llamaSlotsTimeout}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, fmt.Errorf("slots: %s", resp.Status)
+		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
-
-	var slots []struct {
-		ID           int  `json:"id"`
-		IsProcessing bool `json:"is_processing"`
-		NCtx         int  `json:"n_ctx"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&slots); err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
-	}
-	f.llamaBreaker.recordSuccess()
-
-	busy := 0
-	for _, s := range slots {
-		if s.IsProcessing {
-			busy++
-		}
-	}
-	return busy, len(slots), nil
+	return io.ReadAll(resp.Body)
 }
 
 // poolAgents returns the GT_AGENT of every live polecat session, or the

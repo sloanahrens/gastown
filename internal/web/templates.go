@@ -15,7 +15,7 @@ import (
 var templateFS embed.FS
 
 // LocalPoolData is the Local Pool panel: the local polecat seats in use
-// against the pool's max_local, and llama-server's slots.
+// against the pool's max_local, and the model server those seats talk to.
 type LocalPoolData struct {
 	MaxLocal      int
 	LocalSeats    int
@@ -23,13 +23,20 @@ type LocalPoolData struct {
 	OverflowAgent string
 	MinSpawnGap   string
 
-	SlotsBusy  int
-	SlotsTotal int
+	// ServerEndpoint is the address probed, taken from the pool's local agent
+	// preset rather than assumed; the Server* fields describe what answered
+	// there. ServerErr empty means the endpoint answered.
+	ServerEndpoint      string
+	ServerModel         string
+	ServerKind          string
+	ServerInFlight      int
+	ServerMaxFlight     int
+	ServerInFlightKnown bool
 
-	// SeatsErr and SlotsErr say why a figure is missing, so a failed read
+	// SeatsErr and ServerErr say why a figure is missing, so a failed read
 	// renders as unreadable rather than as a zero.
-	SeatsErr string
-	SlotsErr string
+	SeatsErr  string
+	ServerErr string
 }
 
 // ConvoyData represents data passed to the convoy template.
