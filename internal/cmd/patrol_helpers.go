@@ -412,7 +412,13 @@ func outputPatrolContext(cfg PatrolConfig) {
 	} else {
 		// Has active patrol - show status
 		fmt.Println("Status: **Patrol Active**")
-		fmt.Printf("Patrol: %s\n\n", strings.TrimSpace(patrolLine))
+		fmt.Printf("Patrol: %s\n", strings.TrimSpace(patrolLine))
+		// The id can name a wisp a previous cycle already burned: spawn burns
+		// the old wisps but this line is whatever the agent still has hooked.
+		// Three refinery sessions read that as a broken hook and replaced a
+		// live one with `gt patrol new` (gt-vahe).
+		fmt.Println(style.Dim.Render("The id can be a wisp a previous cycle already burned. A hook is live when a command renders its title (`gt hook`); `bd show` naming nothing is not evidence of a purge."))
+		fmt.Println()
 	}
 
 	// Show patrol work loop instructions
