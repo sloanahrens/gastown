@@ -944,13 +944,13 @@ func TestRun_ApproveCleanDoesNotLeakGateScriptStderr(t *testing.T) {
 	}
 }
 
-// TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout covers gt-evk4: a
-// merge conflict during RehearseBranch used to abort the merge but leave the
-// repo checked out on the doomed gt-mq-review-* temp branch, with the branch
-// itself never deleted (and the caller had no name to clean it up either,
-// since tempBranch came back empty on error). A conflict must instead leave
-// the repo detached at origin/<target> with no rehearsal branch behind.
-func TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout(t *testing.T) {
+// TestRehearsal_MergeConflictLeavesLiveCloneUntouched: because a rehearsal runs
+// in its own worktree rather than in the clone it is handed, a conflict must
+// leave that clone exactly as it found it — same detached HEAD, no branch
+// created, no worktree registration left behind. The failure modes this
+// replaces are gt-evk4 (clone stranded on a doomed rehearsal branch) and
+// gt-kmul (a mid-gate clone restored onto the target name).
+func TestRehearsal_MergeConflictLeavesLiveCloneUntouched(t *testing.T) {
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -969,18 +969,26 @@ func TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout(t *testing.T) {
 	branchHead := commitFileReview(t, dir, "conflict.txt", "branch version\n", "branch change")
 	setTestRef(t, dir, "refs/remotes/origin/feature", branchHead)
 
-	// Leave the repo detached at base before calling RehearseBranch — it
-	// must not depend on, or disturb, whatever was checked out beforehand.
+	// Leave the repo detached at base before rehearsing — the rehearsal must
+	// not depend on, or disturb, whatever was checked out beforehand.
 	if err := g.CheckoutDetach(base); err != nil {
 		t.Fatalf("re-detach at base: %v", err)
 	}
-
-	_, tempBranch, err := RehearseBranch(g, "main", "feature")
-	if err == nil {
-		t.Fatal("RehearseBranch succeeded, want a merge conflict error")
+	before := branchList(t, g)
+	worktreesBefore, wtErr := g.WorktreeList()
+	if wtErr != nil {
+		t.Fatalf("WorktreeList: %v", wtErr)
 	}
-	if tempBranch != "" {
-		t.Fatalf("tempBranch = %q, want empty on error", tempBranch)
+
+	rehearsal, err := BeginRehearsal(g, "main")
+	if err != nil {
+		t.Fatalf("BeginRehearsal: %v", err)
+	}
+	if _, err := rehearsal.Branch("feature"); err == nil {
+		t.Fatal("Rehearsal.Branch succeeded, want a merge conflict error")
+	}
+	if closeErr := rehearsal.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 
 	current, cbErr := g.CurrentBranch()
@@ -988,23 +996,36 @@ func TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout(t *testing.T) {
 		t.Fatalf("CurrentBranch: %v", cbErr)
 	}
 	if current != "HEAD" {
-		t.Fatalf("CurrentBranch = %q, want %q (detached) — repo left checked out on a rehearsal branch", current, "HEAD")
+		t.Fatalf("CurrentBranch = %q, want %q (detached) — rehearsal moved the live clone's HEAD", current, "HEAD")
 	}
 	head, revErr := g.Rev("HEAD")
 	if revErr != nil {
 		t.Fatalf("rev HEAD: %v", revErr)
 	}
-	if head != mainHead {
-		t.Fatalf("HEAD = %s, want %s (origin/main) after a failed rehearsal", head, mainHead)
+	if head != base {
+		t.Fatalf("HEAD = %s, want %s (base, where the live clone already was) after a failed rehearsal", head, base)
 	}
 
-	branches, lbErr := g.ListBranches("gt-mq-review-*")
-	if lbErr != nil {
-		t.Fatalf("ListBranches: %v", lbErr)
+	if after := branchList(t, g); after != before {
+		t.Fatalf("branches = %q, want %q unchanged — rehearsal created or deleted a branch in the live clone", after, before)
 	}
-	if len(branches) != 0 {
-		t.Fatalf("orphan rehearsal branch(es) left behind: %v", branches)
+	worktreesAfter, wt2Err := g.WorktreeList()
+	if wt2Err != nil {
+		t.Fatalf("WorktreeList: %v", wt2Err)
 	}
+	if len(worktreesAfter) != len(worktreesBefore) {
+		t.Fatalf("worktrees = %v, want %v — a rehearsal worktree was left registered", worktreesAfter, worktreesBefore)
+	}
+}
+
+// branchList returns the live clone's branches as one comparable string.
+func branchList(t *testing.T, g *git.Git) string {
+	t.Helper()
+	branches, err := g.ListBranches("*")
+	if err != nil {
+		t.Fatalf("ListBranches: %v", err)
+	}
+	return strings.Join(branches, "\n")
 }
 
 func setTestRef(t *testing.T, dir, ref, sha string) {

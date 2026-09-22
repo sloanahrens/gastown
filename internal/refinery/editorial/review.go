@@ -520,114 +520,105 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 	return &v, "", nil
 }
 
-// Rehearse fetches origin and merges origin/<branch> onto origin/<target> in
-// a throwaway detached worktree, returning the resulting head sha so the
-// review sees exactly what would land. Callers that already rehearsed (or
-// are re-reviewing a fixed head) pass ReviewRequest.RehearsedHead instead
-// and skip this.
+// Rehearsal is a throwaway detached worktree that review rehearsals run in, so
+// the refinery's live clone is never checked out onto anything: the clone the
+// single-review CLI path hands over (refinery/rig — see doMQReview) may be
+// mid-gate on its own branch, and a rehearsal that touches its HEAD leaves that
+// gate building the wrong tree (gt-dcku, gt-kmul).
 //
-// RepoDir for the single-invocation `gt mq review` CLI path (the only
-// caller that reaches this) is the refinery's live clone (refinery/rig —
-// see doMQReview), not a throwaway checkout, and it may be mid-gate on its
-// own branch (e.g. a batch's "temp") when this runs. The rehearsal MUST NOT
-// touch g's HEAD at all: an earlier version created a temp branch and
-// checked it out in g's own working directory, then tried to "restore" by
-// checking out the TARGET NAME — which silently moved g's HEAD onto a stale
-// local target branch instead of back to whatever it was on before, and
-// left the working directory's build/test tooling running against the
-// wrong tree (gt-dcku). Doing the rehearsal in a separate worktree makes
-// that whole class of bug impossible: g's checkout is never touched, so
-// there is nothing to restore. The batch path never calls this — it uses
-// RehearseBranch directly and performs its own equivalent cleanup across
-// multiple candidates before running any gate scripts.
-func Rehearse(g *git.Git, target, branch string) (string, error) {
-	if err := g.Fetch("origin"); err != nil {
-		return "", fmt.Errorf("fetch origin: %w", err)
-	}
+// One Rehearsal serves a whole batch: Branch resets the worktree to
+// origin/<target> first, so the batch's sequential rehearsals cannot stack on
+// each other, and the batch pays one `git worktree add` per cycle instead of
+// one per candidate.
+type Rehearsal struct {
+	live   *git.Git // the live clone, which owns the worktree registration
+	dir    string   // the throwaway worktree's path
+	wt     *git.Git // a handle rooted at dir
+	target string   // the base every rehearsal merges onto
+}
 
-	worktreeDir, err := os.MkdirTemp("", "gt-mq-rehearse-*")
+// BeginRehearsal creates the throwaway detached worktree a Rehearsal runs in,
+// seeded (detached) at origin/<target>. Close must be called to remove it.
+func BeginRehearsal(g *git.Git, target string) (*Rehearsal, error) {
+	dir, err := os.MkdirTemp("", "gt-mq-rehearse-*")
 	if err != nil {
-		return "", fmt.Errorf("mktemp rehearsal worktree: %w", err)
+		return nil, fmt.Errorf("mktemp rehearsal worktree: %w", err)
 	}
-	defer os.RemoveAll(worktreeDir)
+	if err := g.WorktreeAddDetached(dir, "origin/"+target); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("add rehearsal worktree from origin/%s: %w", target, err)
+	}
+	return &Rehearsal{live: g, dir: dir, wt: git.NewGit(dir), target: target}, nil
+}
 
-	if err := g.WorktreeAddDetached(worktreeDir, "origin/"+target); err != nil {
-		return "", fmt.Errorf("add rehearsal worktree from origin/%s: %w", target, err)
+// Branch merges origin/<branch> onto origin/<target> in the rehearsal worktree
+// and returns the resulting head sha, so the review sees exactly what would
+// land. An error means this branch is not reviewable — in practice, a merge
+// conflict — and its message is what the caller records.
+//
+// The reset to origin/<target> is load-bearing twice: it is what lets one
+// Rehearsal serve several candidates without one stacking on the last, and it
+// is why no failure here needs cleanup of its own — the next call wipes
+// whatever an aborted merge left behind.
+func (r *Rehearsal) Branch(branch string) (string, error) {
+	if err := r.wt.ResetHard("origin/" + r.target); err != nil {
+		return "", fmt.Errorf("reset rehearsal worktree to origin/%s: %w", r.target, err)
 	}
-	defer func() { _ = g.WorktreeRemove(worktreeDir, true) }()
-
-	wg := git.NewGit(worktreeDir)
-	if err := wg.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
-		_ = wg.AbortMerge()
-		return "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
+	// A merge that conflicts and is aborted can leave the index dirty with
+	// conflict entries; untracked files can only come from the merge itself.
+	// Clearing both means the merge below always starts from a pristine
+	// checkout, whatever the previous candidate did.
+	if err := r.wt.CleanForce(); err != nil {
+		return "", fmt.Errorf("clean rehearsal worktree: %w", err)
 	}
-	head, err := wg.Rev("HEAD")
+	if err := r.wt.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
+		_ = r.wt.AbortMerge()
+		return "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, r.target, err)
+	}
+	head, err := r.wt.Rev("HEAD")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve rehearsal head: %w", err)
 	}
 	return head, nil
 }
 
-// RehearseBranch is Rehearse without the origin fetch, returning the temp
-// branch name alongside the head so the caller can delete it once done.
+// Close removes the rehearsal worktree. A failure is returned rather than
+// swallowed: a worktree that fails to remove stays registered in the live clone
+// with its directory still on disk, and discarding that silently is how they
+// accumulate unnoticed (gt-evk4). Nothing downstream depends on the removal
+// having happened.
+func (r *Rehearsal) Close() error {
+	removeErr := r.live.WorktreeRemove(r.dir, true)
+	// WorktreeRemove leaves the directory behind when it held untracked
+	// files, so nothing outlives the registration.
+	if err := os.RemoveAll(r.dir); err != nil && removeErr == nil {
+		return fmt.Errorf("remove rehearsal worktree dir %s: %w", r.dir, err)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("remove rehearsal worktree %s: %w", r.dir, removeErr)
+	}
+	return nil
+}
+
+// Rehearse fetches origin and merges origin/<branch> onto origin/<target> in
+// a throwaway detached worktree, returning the resulting head sha so the
+// review sees exactly what would land. Callers that already rehearsed (or
+// are re-reviewing a fixed head) pass ReviewRequest.RehearsedHead instead
+// and skip this. It is the one-candidate wrapper over BeginRehearsal +
+// Branch + Close, and never touches g's checkout.
 //
-// Exported so batch callers (om-gate T7) can rehearse every candidate
-// sequentially — each rehearsal checks out a temp branch in the shared
-// working directory, so it is not safe to call concurrently — before
-// running Run itself with bounded parallelism via RehearsedHead, which
-// skips this step entirely. A batch fetches origin once up front (a single
-// candidate's rehearsal failing to find a just-pushed branch is no worse
-// than the pre-batch single-MR path re-fetching per review) instead of
-// once per candidate, and deletes each temp branch after using its head so
-// a busy rig does not accumulate one gt-mq-review-* branch per candidate
-// per cycle.
-func RehearseBranch(g *git.Git, target, branch string) (head, tempBranch string, err error) {
-	name := fmt.Sprintf("gt-mq-review-%d", time.Now().UnixNano())
-	if err := g.CreateBranchFrom(name, "origin/"+target); err != nil {
-		return "", "", fmt.Errorf("create rehearsal branch from origin/%s: %w", target, err)
+// The batch path calls BeginRehearsal directly instead: one fetch and one
+// worktree serve every candidate, rather than one of each per candidate.
+func Rehearse(g *git.Git, target, branch string) (string, error) {
+	if err := g.Fetch("origin"); err != nil {
+		return "", fmt.Errorf("fetch origin: %w", err)
 	}
-	if err := g.Checkout(name); err != nil {
-		// Never checked out: nothing to restore, but the branch itself was
-		// created and must not be left behind for the caller to never learn
-		// its name (this return discards it, like every other error return
-		// here).
-		if delErr := g.DeleteBranch(name, true); delErr != nil {
-			return "", "", fmt.Errorf("checkout rehearsal branch: %w (also failed to delete %s: %v)", err, name, delErr)
-		}
-		return "", "", fmt.Errorf("checkout rehearsal branch: %w", err)
-	}
-	if err := g.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
-		_ = g.AbortMerge()
-		// AbortMerge clears the merge state but leaves HEAD checked out on
-		// name — the very branch this function is about to delete. Detach
-		// HEAD back onto origin/target first so RepoDir is never left
-		// pointed at a branch that no longer exists (gt-evk4): an earlier
-		// version returned tempBranch="" here, so the caller had no name to
-		// clean up and RepoDir was stranded on an orphan gt-mq-review-*
-		// branch with an aborted merge.
-		if checkoutErr := g.CheckoutDetach("origin/" + target); checkoutErr != nil {
-			return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w (also failed to restore HEAD onto origin/%s: %v)", branch, target, err, target, checkoutErr)
-		}
-		if delErr := g.DeleteBranch(name, true); delErr != nil {
-			return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w (also failed to delete rehearsal branch %s: %v)", branch, target, err, name, delErr)
-		}
-		return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
-	}
-	tempBranch = name
-	head, err = g.Rev("HEAD")
+	r, err := BeginRehearsal(g, target)
 	if err != nil {
-		// Merge succeeded but resolving HEAD did not: RepoDir is still
-		// checked out on name with a real merge commit, so the same
-		// stranding this function otherwise guards against applies here too.
-		if checkoutErr := g.CheckoutDetach("origin/" + target); checkoutErr != nil {
-			return "", "", fmt.Errorf("resolve rehearsal head: %w (also failed to restore HEAD onto origin/%s: %v)", err, target, checkoutErr)
-		}
-		if delErr := g.DeleteBranch(name, true); delErr != nil {
-			return "", "", fmt.Errorf("resolve rehearsal head: %w (also failed to delete rehearsal branch %s: %v)", err, name, delErr)
-		}
-		return "", "", err
+		return "", err
 	}
-	return head, tempBranch, nil
+	defer func() { _ = r.Close() }()
+	return r.Branch(branch)
 }
 
 // priorVerdict returns the verdict a review of this diff answers for or

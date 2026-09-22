@@ -68,50 +68,38 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		NotesMu: &notesMu,
 	}
 
-	// Rehearse every candidate sequentially first: a rehearsal checks out a
-	// temp branch in the shared working directory, so running it
-	// concurrently across candidates would have them stomp on each other's
-	// checkouts. Everything after (manifest checks, patch-id, the gate
-	// script exec) operates on fixed SHAs or an external process and is
-	// safe to run concurrently, bounded below by ReviewParallelism.
+	// Rehearse every candidate sequentially first, in one throwaway detached
+	// worktree rather than in e.git's own working directory — the live clone
+	// may be mid-gate on its own branch, and touching its HEAD leaves that
+	// gate building the wrong tree (gt-kmul; see editorial.Rehearsal).
+	// Sequential because it is one worktree being reused; everything after
+	// (manifest checks, patch-id, the gate script exec) operates on fixed
+	// SHAs or an external process and is safe to run concurrently, bounded
+	// below by ReviewParallelism.
 	//
-	// Fetch origin once for the whole batch (rather than once per
-	// candidate) and delete each temp branch as soon as its head is in
-	// hand, so a busy rig doesn't pay one fetch and accumulate one
-	// gt-mq-review-* branch per candidate per cycle.
+	// Origin is fetched once per batch and one worktree serves every
+	// candidate, so a busy rig pays one of each per cycle rather than one of
+	// each per candidate.
 	rehearsedHeads := make([]string, len(candidates))
 	rehearsalErrs := make([]error, len(candidates))
 	if fetchErr := e.git.Fetch("origin"); fetchErr != nil {
 		for i := range candidates {
 			rehearsalErrs[i] = fmt.Errorf("fetch origin: %w", fetchErr)
 		}
-	} else {
-		var prevTempBranch string
-		for i, mr := range candidates {
-			head, tempBranch, err := editorial.RehearseBranch(e.git, target, mr.Branch)
-			rehearsedHeads[i], rehearsalErrs[i] = head, err
-			if prevTempBranch != "" {
-				if delErr := e.git.DeleteBranch(prevTempBranch, true); delErr != nil {
-					// Not fatal to the batch — RehearseBranch already moved HEAD
-					// off prevTempBranch onto the new candidate's temp branch, so
-					// this only leaks a stale gt-mq-review-* ref, not a bad
-					// checkout — but a silently discarded failure here is how
-					// those refs accumulate unnoticed (gt-evk4).
-					_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to delete rehearsal branch %s: %v\n", prevTempBranch, delErr)
-				}
-			}
-			prevTempBranch = ""
-			if err == nil {
-				prevTempBranch = tempBranch
-			}
+	} else if rehearsal, beginErr := editorial.BeginRehearsal(e.git, target); beginErr != nil {
+		for i := range candidates {
+			rehearsalErrs[i] = beginErr
 		}
-		if prevTempBranch != "" {
-			if err := e.git.Checkout(target); err != nil {
-				_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to restore checkout to %s after rehearsal: %v\n", target, err)
-			}
-			if delErr := e.git.DeleteBranch(prevTempBranch, true); delErr != nil {
-				_, _ = fmt.Fprintf(e.output, "[Batch] warning: failed to delete rehearsal branch %s: %v\n", prevTempBranch, delErr)
-			}
+	} else {
+		for i, mr := range candidates {
+			rehearsedHeads[i], rehearsalErrs[i] = rehearsal.Branch(mr.Branch)
+		}
+		if closeErr := rehearsal.Close(); closeErr != nil {
+			// Not fatal: every head above is a fixed sha, so the reviews
+			// proceed against exactly what was rehearsed. A silently
+			// discarded failure here is how stray worktrees accumulate
+			// unnoticed (gt-evk4).
+			_, _ = fmt.Fprintf(e.output, "[Batch] warning: %v\n", closeErr)
 		}
 	}
 
