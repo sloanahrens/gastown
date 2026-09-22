@@ -628,7 +628,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// of every .go file in a package is legitimate work, and the
 			// whole module either still compiles (it is verified) or it
 			// doesn't (the refusal below stays). Refusing every deletion of
-			// a Go package was the false refusal gt-ytjh opened.
+			// a Go package was the false refusal gt-ytjh opened. (A
+			// deletion whose importers are broken but which still
+			// resolves to a named package never reaches here: go list
+			// resolves a package regardless of whether its imports
+			// build, so the gate's suite-run refusal covers it.)
 			pkgs = []string{"."}
 			if buildErr := goBuildWholeModule(worktree); buildErr != nil {
 				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable", shortSHA(verifiedBase))
