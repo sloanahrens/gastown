@@ -147,20 +147,23 @@ agent_identity_gate() {
 
   agent_state=$(printf '%s' "$id_json" | jq -r '.agent_state // empty' 2>/dev/null || true)
 
-  # Only a TERMINAL agent_state (done/nuked) overrides a lingering
+  # Only a TERMINAL agent_state (done/nuked/paused) overrides a lingering
   # hooked/in_progress bead — gt done and the nuke path are the only writers
-  # of these values (done.go:2500), so they are trustworthy regardless of
-  # what an unclosed formula-step wisp still claims (gt-bd68). agent_state
-  # is NOT checked against "idle": only polecat_spawn.go ever writes
-  # "working", so pool-initialized/reused polecats that were slung work as
-  # an existing agent sit at "idle" while genuinely working — treating idle
+  # of done/nuked (done.go:2500), and gt agent pause writes "paused"
+  # (gt-ahik), so they are trustworthy regardless of what an unclosed
+  # formula-step wisp still claims (gt-bd68). "paused" is NOT actually
+  # terminal — it is an intentional operator hold that the dog must never
+  # restart, for the same "don't touch, report once" reason as done/nuked.
+  # agent_state is NOT checked against "idle": only polecat_spawn.go ever
+  # writes "working", so pool-initialized/reused polecats that were slung work
+  # as an existing agent sit at "idle" while genuinely working — treating idle
   # as terminal would silently stop restarting that whole class (om review
   # on gt-wisp-vjcc). hook_bead is likewise not checked: per hq-l6mm5
   # (sling_helpers.go:888-896) it is a documented no-op outside fresh spawn,
   # so an empty hook_bead is not evidence the polecat is idle.
   case "$agent_state" in
-    done|nuked)
-      log "  SKIP $session: agent identity reports agent_state=$agent_state (terminal — not actionable regardless of any lingering in_progress bead)"
+    done|nuked|paused)
+      log "  SKIP $session: agent identity reports agent_state=$agent_state (terminal/paused — not actionable regardless of any lingering in_progress bead)"
       return 1
       ;;
   esac

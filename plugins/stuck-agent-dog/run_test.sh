@@ -545,6 +545,22 @@ test_nuked_polecat_stray_inprogress_wisp_skips_restart() {
   assert_file_contains "$TEST_STATE/output.log" "agent_state=nuked" "nuked polecat stray wisp: identity gate logged"
 }
 
+test_paused_polecat_stray_inprogress_wisp_skips_restart() {
+  # gt-ahik: an operator-sanctioned pause (agent_state=paused from
+  # `gt agent pause`) is indistinguishable from a stuck agent — the dog
+  # must not respawn a frozen polecat with a lingering in_progress wisp.
+  setup_case
+  add_polecat flint session-dead
+  printf 'in_progress\n' > "$TEST_STATE/hook_status/flint"
+  printf 'paused|\n' > "$TEST_STATE/identity_state/flint"
+  run_script
+
+  assert_file_empty "$TEST_STATE/kill.log" "paused polecat stray wisp: no session kill"
+  assert_file_empty "$TEST_STATE/mail.log" "paused polecat stray wisp: no restart mail"
+  assert_file_empty "$TEST_STATE/escalate.log" "paused polecat stray wisp: no escalation"
+  assert_file_contains "$TEST_STATE/output.log" "agent_state=paused" "paused polecat stray wisp: identity gate logged"
+}
+
 test_identity_lookup_unavailable_falls_back_to_hook_status() {
   setup_case
   add_polecat alpha agent-dead
@@ -756,6 +772,7 @@ test_done_polecat_stray_inprogress_wisp_skips_restart
 test_nuked_polecat_stray_inprogress_wisp_skips_restart
 test_working_polecat_empty_hook_bead_still_restarts
 test_idle_agent_state_inprogress_hook_still_restarts
+test_paused_polecat_stray_inprogress_wisp_skips_restart
 test_identity_lookup_unavailable_falls_back_to_hook_status
 test_no_hook_dead_sessions_do_not_mass_death
 test_non_actionable_hook_statuses_do_not_mass_death

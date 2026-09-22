@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -145,6 +146,7 @@ type AgentRuntime struct {
 	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
 	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "opus-46", "pi")
 	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
+	PausedReason      string `json:"paused_reason,omitempty"`      // Reason from the pause marker (gt agent pause)
 }
 
 // RigStatus represents status of a single rig.
@@ -1011,6 +1013,9 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	// E-stop banner (if active)
 	addEstopToStatus(status.Location)
 
+	// Paused-agent banner (gt-ahik): surface sanctioned pauses with reasons
+	addPausedToStatus(w, status.Location)
+
 	// Overseer info
 	if status.Overseer != nil {
 		overseerDisplay := status.Overseer.Name
@@ -1266,9 +1271,17 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	case "awaiting-gate":
 		// Agent waiting for external trigger (phase gate)
 		stateInfo = style.Dim.Render(" [awaiting-gate]")
-	case "muted", "paused", "degraded":
+	case "muted", "degraded":
 		// Other intentional non-observable states
 		stateInfo = style.Dim.Render(fmt.Sprintf(" [%s]", beadState))
+	case "paused":
+		// Sanctioned pause (gt-ahik): show the marker-file reason when
+		// present, even if the bead state is stale.
+		if agent.PausedReason != "" {
+			stateInfo = style.Dim.Render(fmt.Sprintf(" [paused: %s]", agent.PausedReason))
+		} else {
+			stateInfo = style.Dim.Render(" [paused]")
+		}
 		// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
 		// These should be derived from tmux, not bead.
 	}
@@ -1518,8 +1531,15 @@ func buildStatusIndicator(agent AgentRuntime) string {
 		indicator += style.Warning.Render(" stuck")
 	case "awaiting-gate":
 		indicator += style.Dim.Render(" gate")
-	case "muted", "paused", "degraded":
+	case "muted", "degraded":
 		indicator += style.Dim.Render(" " + beadState)
+	case "paused":
+		// Sanctioned pause (gt-ahik): surface the marker-file reason.
+		if agent.PausedReason != "" {
+			indicator += style.Dim.Render(" paused: " + truncateWithEllipsis(agent.PausedReason, 24))
+		} else {
+			indicator += style.Dim.Render(" paused")
+		}
 		// Ignore observable states: running, idle, dead, done, stopped, ""
 	}
 
@@ -1717,12 +1737,52 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
 
+			applyPauseMarker(&agent, townRoot)
+
 			agents[idx] = agent
 		}(i, def)
 	}
 
 	wg.Wait()
 	return agents
+}
+
+// applyPauseMarker checks the pause marker file layer for this agent
+// (gt-ahik) and records the reason on the AgentRuntime so the status
+// line can show [paused (reason)]. File layer only — cheap, no Dolt.
+func applyPauseMarker(agent *AgentRuntime, townRoot string) {
+	rigName, role, name := agentMarkerTriple(agent.Address)
+	if rigName == "" {
+		return
+	}
+	if st := agentpause.PausedByState(townRoot, rigName, role, name); st != nil {
+		agent.PausedReason = st.Reason
+	}
+}
+
+// agentMarkerTriple maps an agent address to the (rig, role, name) used
+// by the pause marker path. Addresses: "mayor/" and "deacon/" are
+// town-level (no marker — they use deacon-style state instead),
+// "rig/name" is a polecat, "rig/witness", "rig/refinery", "rig/crew/name".
+func agentMarkerTriple(address string) (rig, role, name string) {
+	parts := strings.Split(strings.TrimSuffix(address, "/"), "/")
+	if len(parts) == 1 {
+		return "", "", ""
+	}
+	rig = parts[0]
+	switch parts[1] {
+	case constants.RoleCrew:
+		if len(parts) >= 3 {
+			name = parts[2]
+		}
+		role = constants.RoleCrew
+	case constants.RoleWitness, constants.RoleRefinery:
+		role = parts[1]
+	default:
+		role = constants.RolePolecat
+		name = parts[1]
+	}
+	return rig, role, name
 }
 
 // applyMailSummary copies a pre-fetched batch mail summary onto an agent.
@@ -1892,6 +1952,8 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 			if !skipMail {
 				applyMailSummary(&agent, mailSummaries[agent.Address])
 			}
+
+			applyPauseMarker(&agent, townRoot)
 
 			agents[idx] = agent
 		}(i, def)

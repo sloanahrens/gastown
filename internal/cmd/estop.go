@@ -6,11 +6,13 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -431,4 +433,31 @@ func addEstopToStatus(townRoot string) {
 	if len(entries) > 0 {
 		fmt.Println()
 	}
+}
+
+// addPausedToStatus prints a banner for every agent currently paused via
+// `gt agent pause` (gt-ahik). File layer only — cheap, no Dolt: one walk
+// of .runtime/agents, and the marker path names the agent.
+//
+// Writes to w (the status writer) rather than stdout so the banner is
+// capturable in tests — an unnamed "PAUSED" line was the original defect.
+func addPausedToStatus(w io.Writer, townRoot string) {
+	paused := agentpause.ListPaused(townRoot)
+	for _, st := range paused {
+		age := time.Since(st.PausedAt).Round(time.Second)
+		who := firstOr(st.Address, "unknown agent")
+		fmt.Fprintf(w, "%s  PAUSED %s (by %s, %s ago: %s)\n",
+			style.Warning.Render("⏸"), style.Bold.Render(who),
+			firstOr(st.PausedBy, "?"), age, agentpause.Reason(st))
+	}
+	if len(paused) > 0 {
+		fmt.Fprintln(w)
+	}
+}
+
+func firstOr(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }

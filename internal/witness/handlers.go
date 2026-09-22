@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/config"
@@ -1300,6 +1302,29 @@ func extractPolecatFromJSON(output string) string {
 //  2. Start a fresh session via `gt session restart`
 //  3. The new session picks up the polecat's existing hook and continues
 func RestartPolecatSession(workDir, rigName, polecatName string) error {
+	// Pause gate (gt-ahik): an operator-sanctioned pause (gt agent pause)
+	// is indistinguishable from a stuck agent to the scanner alone — the
+	// mayor's SIGSTOP froze flint and the stuck-agent dog respawned it 20
+	// minutes later. This is the single choke point for every Go restart
+	// path (zombie dead-session, stale-working, done-intent-dead, and the
+	// restart seam), so the gate here covers them all.
+	//
+	// File layer only (nil beads client): this path is the restart hot
+	// loop, so it must not take a Dolt read to decide. That is sufficient
+	// in practice because `gt agent pause` always writes the marker file
+	// before it touches the bead, and the marker file is the layer that
+	// survives Dolt being unavailable — exactly when a spurious restart
+	// would hurt most. The bead-layer fallback in PauseGate covers callers
+	// that already hold a client.
+	townRoot := workDirToTownRoot(workDir)
+	if paused, st, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName, nil); perr != nil {
+		log.Printf("warning: pause gate check for %s/%s failed: %v", rigName, polecatName, perr)
+	} else if paused {
+		log.Printf("info: skip restart of %s/%s: agent is paused (%s, %s)",
+			rigName, polecatName, agentpause.Reason(st), st.PausedBy)
+		return nil
+	}
+
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 	if err := util.ExecRun(workDir, "gt", "session", "restart", address, "--force"); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)

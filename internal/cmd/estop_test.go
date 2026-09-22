@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/estop"
 )
 
@@ -84,5 +85,35 @@ func TestRunEstopStatusReportsPerRigEstop(t *testing.T) {
 	}
 	if _, err := os.Stat(estop.FilePath(townRoot)); !os.IsNotExist(err) {
 		t.Fatalf("status should not create town-wide ESTOP sentinel, stat err = %v", err)
+	}
+}
+
+// TestAddPausedToStatusBannerNamesAgent (gt-ahik): the PAUSED banner must
+// name which agent is parked and why. The original implementation printed a
+// bare "PAUSED" line with the reason but no agent, so a town with two paused
+// agents produced two indistinguishable lines.
+func TestAddPausedToStatusBannerNamesAgent(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	var buf strings.Builder
+	addPausedToStatus(&buf, townRoot)
+
+	if got := buf.String(); got != "" {
+		t.Errorf("no paused agents: banner = %q, want empty", got)
+	}
+
+	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan then cache wipe", "mayor"); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	buf.Reset()
+	addPausedToStatus(&buf, townRoot)
+	got := buf.String()
+
+	for _, want := range []string{"gastown/flint", "mayor", "filesystem scan then cache wipe", "PAUSED"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("banner %q missing %q", got, want)
+		}
 	}
 }
