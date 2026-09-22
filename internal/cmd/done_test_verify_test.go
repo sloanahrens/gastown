@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
 )
@@ -346,4 +348,79 @@ func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
 	if len(result.packages) != 1 || result.packages[0] != "." {
 		t.Errorf("packages = %v, want [.] — the whole-module build stands in for the deleted package", result.packages)
 	}
+}
+
+// TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan: the gate's log
+// header is the only record of whether a polecat verified the whole suite or
+// just its changed packages, and an operator reading "scope=full" on a run
+// that tested two packages cannot tell a scoped gate from a full one. The
+// label was hardcoded to "full" even when merge_queue.test_verify_command
+// replaced the suite with a {packages} variant, so it reported the opposite
+// of what happened — the same class of defect as a check whose failure path
+// emits its success value.
+func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
+	readScope := func(t *testing.T, worktree string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(worktree, constants.DirRuntime, "gt-done-verify.log"))
+		if err != nil {
+			t.Fatalf("read verify log: %v", err)
+		}
+		m := regexp.MustCompile(`scope=([a-z]+)`).FindStringSubmatch(string(data))
+		if m == nil {
+			t.Fatalf("verify log has no scope= label:\n%s", data)
+		}
+		return m[1]
+	}
+
+	// The gate skips when nothing changed, so give it a real diff to scope.
+	touchBothPackages := func(t *testing.T, dir string) {
+		t.Helper()
+		for _, rel := range []string{"pkga/a.go", "pkgb/b.go"} {
+			path := filepath.Join(dir, rel)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(data, []byte("\n// touched\n")...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch both packages")
+	}
+
+	t.Run("full suite is labelled full", func(t *testing.T) {
+		stubNoContainers(t)
+		stubVerifyGate(t,
+			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+			func(context.Context, string, string, []string, *os.File) error { return nil })
+		dir, _ := initVerifyTestGoRepo(t)
+		touchBothPackages(t, dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		if _, err := runDefaultTestVerification(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-full"); err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if got := readScope(t, dir); got != "full" {
+			t.Errorf("scope = %q, want %q", got, "full")
+		}
+	})
+
+	t.Run("a scoped test_verify_command is labelled changed", func(t *testing.T) {
+		stubNoContainers(t)
+		stubVerifyGate(t,
+			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+			func(context.Context, string, string, []string, *os.File) error { return nil })
+		dir, _ := initVerifyTestGoRepo(t)
+		touchBothPackages(t, dir)
+		mq := &config.MergeQueueConfig{
+			TestCommand:       "go test ./...",
+			TestVerifyCommand: "go test {packages}",
+		}
+		if _, err := runDefaultTestVerification(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-changed"); err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if got := readScope(t, dir); got != "changed" {
+			t.Errorf("scope = %q, want %q — the log must say what actually ran", got, "changed")
+		}
+	})
 }

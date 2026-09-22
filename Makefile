@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-changed test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -230,6 +230,20 @@ test: test-makefile
 	# tries to turn containers off (a recipe assignment beats the child env),
 	# so the gate stayed welded to the town-wide slot.
 	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m ./...
+
+# test-changed runs the same hermetic suite as `test` over a caller-supplied
+# package list, for `gt done`'s pre-verify gate (merge_queue.test_verify_command
+# with the {packages} token). The refinery's gate still runs `test` over the
+# whole module, so nothing reaches main without a full run; this exists so four
+# polecats do not each run the entire suite beside that gate. Measured
+# 2026-09-22: one suite alone is 244s, four concurrently are 683s each — the
+# contention, not the suite, is what made gates slow.
+#
+# PKGS defaults to the whole module so a bare `make test-changed` is never
+# narrower than `make test` by accident.
+PKGS ?= ./...
+test-changed: test-makefile
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m $(PKGS)
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
