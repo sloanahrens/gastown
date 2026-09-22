@@ -2378,19 +2378,17 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// When a polecat re-submits after fixing a gate failure, the old MR
 			// (same branch, different SHA) is stale. Close it so the refinery
 			// doesn't process the old submission.
-			if issueID != "" {
-				if oldMRs, findErr := bd.FindOpenMRsForIssue(issueID); findErr == nil {
-					for _, old := range oldMRs {
-						if old.ID == mrID {
-							continue // skip the one we just created
-						}
-						reason := fmt.Sprintf("superseded by %s", mrID)
-						if closeErr := bd.CloseWithReason(reason, old.ID); closeErr != nil {
-							style.PrintWarning("could not supersede old MR %s: %v", old.ID, closeErr)
-							continue
-						}
-						fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
-					}
+			//
+			// gt-c5uv: the old MR was usually submitted by a *different* polecat
+			// (deacon redispatch with resume_branch after a rejection), and its
+			// agent bead's active_mr still names it. Clearing that pointer here is
+			// what keeps the superseded worker out of a permanent
+			// idle-pr-open/reusable=false state — nothing downstream does it. See
+			// supersedeOpenMRsForIssue.
+			for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrID, townRoot, rigName) {
+				fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), sup.ID)
+				if sup.AgentCleared {
+					fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
 				}
 			}
 
