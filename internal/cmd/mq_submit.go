@@ -301,23 +301,17 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 		// Supersede older open MRs for the same source issue.
 		// When a new polecat reattempts an issue, the old MR (different branch)
-		// is orphaned. Close it so the queue and GitHub PRs stay clean.
-		if issueID != "" {
-			if oldMRs, err := bd.FindOpenMRsForIssue(issueID); err == nil {
-				for _, old := range oldMRs {
-					if old.ID == mrIssue.ID {
-						continue // skip the one we just created
-					}
-					reason := fmt.Sprintf("superseded by %s", mrIssue.ID)
-					if err := bd.CloseWithReason(reason, old.ID); err != nil {
-						style.PrintWarning("could not supersede old MR %s: %v", old.ID, err)
-						continue
-					}
-					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
-
-					// Leave superseded remote branches intact. Branch deletion belongs to
-					// verified post-merge cleanup, not submit-time queue maintenance.
-				}
+		// is orphaned. Close it so the queue and GitHub PRs stay clean, and
+		// clear the superseded worker's agent-bead active_mr pointer so it does
+		// not stay stuck against the closed MR (gt-c5uv; see
+		// supersedeOpenMRsForIssue).
+		//
+		// Leave superseded remote branches intact. Branch deletion belongs to
+		// verified post-merge cleanup, not submit-time queue maintenance.
+		for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrIssue.ID, townRoot, rigName) {
+			fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), sup.ID)
+			if sup.AgentCleared {
+				fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
 			}
 		}
 	}
