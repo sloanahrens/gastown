@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 var tapGuardContainerSuiteCmd = &cobra.Command{
@@ -589,6 +590,77 @@ func printContainerSuiteBlock(reason, originalCommand string, matched []string) 
 	fmt.Fprintln(os.Stderr, "║  This spins Dolt/testcontainers containers on the shared Docker ║")
 	fmt.Fprintln(os.Stderr, "║  VM. Running it bare can collide with another rig's suite.      ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintf(os.Stderr, "  Run it wrapped instead: gt slot run --role <rig>/<you> -- %s\n", originalCommand)
+	fmt.Fprintf(os.Stderr, "  Run it wrapped instead: %s\n", containerSuiteWrap(originalCommand))
 	fmt.Fprintln(os.Stderr, "")
+}
+
+// containerSuiteWrap renders the remediation command for a blocked suite: the
+// same command run through the container-gate slot. The line is printed for an
+// operator to copy and paste, so it has to be exactly what a shell will
+// execute — the printed form and the command are the same promise (gt-otvb).
+// Three shapes used to break that:
+//
+//   - A leading VAR=value token is an assignment, not a program. 'gt slot run'
+//     has understood one since gt-18nx, but the 'env' form is what the polecat
+//     formula prints (mol-polecat-work.formula.toml) and what a gt older than
+//     that fix accepts, so it is spelled out rather than relied on.
+//   - A compound command cannot simply be prefixed with the wrapper: the wrap
+//     would bind to the FIRST segment only, and the shell would run the rest
+//     bare — the unwrapped suite this guard exists to prevent. "ls && GOFLAGS=
+//     -p=6 make test" printed as one wrap ran 'ls' under the slot and 'make
+//     test' outside it, and "export GT_TEST_DOCKER=1; go test ..." also asked
+//     exec to run the shell builtin 'export'. Such a line goes to one shell
+//     under the slot instead: sh -c '<command>' re-parses it whole, and
+//     config.ShellQuote single-quotes it, so it reaches sh as one argument
+//     with nothing inside expanded, split, or globbed that the original shell
+//     would not have. Every shellCommandSeparator is a character ShellQuote
+//     quotes for, so the quoting always fires on this path. sh is the same
+//     interpreter the gate's own configured test command goes through
+//     (mq_integration.go), not an extra dialect invented here.
+//   - The '<rig>/<you>' placeholder is not runnable — '<' reads as a
+//     redirection. The caller's own GT_ROLE is already the "rig/role" form the
+//     --role flag documents, so it is printed when present and the placeholder
+//     is kept only as the fallback for a hook that inherited no role.
+func containerSuiteWrap(command string) string {
+	command = strings.TrimSpace(command)
+	role := containerSuiteWrapRole()
+	if isCompoundShellCommand(command) {
+		return fmt.Sprintf("gt slot run --role %s -- sh -c %s", role, config.ShellQuote(command))
+	}
+	// splitEnvPrefix is the same rule runSlotRun applies to its own argv
+	// (gt-18nx), so the guard's advice and the runner's reading of it cannot
+	// drift: whatever it peels is exactly what 'env' has to carry.
+	if envAssigns, _ := splitEnvPrefix(shellTokenize(command)); len(envAssigns) > 0 {
+		return fmt.Sprintf("gt slot run --role %s -- env %s", role, command)
+	}
+	return fmt.Sprintf("gt slot run --role %s -- %s", role, command)
+}
+
+// containerSuiteWrapRole is the holder name printed in the remediation's
+// --role flag: GT_ROLE when it names a rig-scoped holder ("gastown/refinery",
+// "gastown/polecats/zircon"), which is the form `gt slot run --role` documents
+// and makes the printed line runnable verbatim. Without one the formula's
+// placeholder is printed and the operator fills it in.
+func containerSuiteWrapRole() string {
+	role := strings.TrimSpace(os.Getenv("GT_ROLE"))
+	if role == "" || !strings.Contains(role, "/") {
+		return "<rig>/<you>"
+	}
+	// A role carrying whitespace or a quote would not survive the line as a
+	// single word; refuse it rather than print a command that misreads.
+	if strings.ContainsAny(role, " \t\n\"'`$") {
+		return "<rig>/<you>"
+	}
+	return role
+}
+
+// isCompoundShellCommand reports whether command chains more than one command
+// on a line, so the wrapper must be handed a shell rather than prefixed to it.
+func isCompoundShellCommand(command string) bool {
+	for _, tok := range shellTokenize(command) {
+		if shellCommandSeparators[tok] {
+			return true
+		}
+	}
+	return false
 }
