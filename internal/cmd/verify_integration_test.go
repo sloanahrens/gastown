@@ -136,6 +136,40 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 	})
 
+	// gt-7rds (MINOR: the still-refusing half of gt-ytjh). The success path
+	// above deletes a package nothing imports; this one deletes a package the
+	// module root imports. The changed .go files resolve to nothing — the root
+	// package that needs the deleted one is not itself in the diff — so the
+	// whole-module build is the only thing that can see the breakage, and the
+	// gate must still refuse. It runs the real goBuildWholeModule, so it also
+	// pins that the build happens in the worktree under test: the host module
+	// builds, and a build of it could not produce this refusal.
+	t.Run("whole-package deletion with broken importers: refuses with the compiler output", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, "root.go"), []byte("package main\n\nimport _ \"example.test/pkgb\"\n\nfunc main() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "root imports pkgb")
+		// Fold the importer into the base so the deletion is the whole diff.
+		base := strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD"))
+		runGitIn(t, dir, "update-ref", "refs/remotes/origin/main", base)
+		deletePkgb(t, dir)
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-broken-role")
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: a deletion its importer still needs must refuse, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "unbuildable") {
+			t.Errorf("error does not report the deletion refusal: %v", err)
+		}
+		if !strings.Contains(err.Error(), "example.test/pkgb") {
+			t.Errorf("error does not surface the compiler's own output: %v", err)
+		}
+	})
+
 	t.Run("non-Go rig (no go.mod): runs the full test_command instead of scoping", func(t *testing.T) {
 		dir := t.TempDir()
 		runGitIn(t, dir, "init", "-q", "-b", "main")
@@ -495,15 +529,15 @@ func TestChangedGoPackages(t *testing.T) {
 		runGitIn(t, dir, "commit", "-q", "-m", "docs only")
 
 		g := git.NewGit(dir)
-		pkgs, changed, err := changedGoPackages(g, dir, base)
+		got, err := changedGoPackages(g, dir, base)
 		if err != nil {
 			t.Fatalf("changedGoPackages: %v", err)
 		}
-		if changed {
+		if got.changedGoFiles {
 			t.Error("changedGoFiles = true, want false for a docs-only change")
 		}
-		if len(pkgs) != 0 {
-			t.Errorf("pkgs = %v, want empty", pkgs)
+		if len(got.packages) != 0 {
+			t.Errorf("packages = %v, want empty", got.packages)
 		}
 	})
 
@@ -516,15 +550,18 @@ func TestChangedGoPackages(t *testing.T) {
 		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
 
 		g := git.NewGit(dir)
-		pkgs, changed, err := changedGoPackages(g, dir, base)
+		got, err := changedGoPackages(g, dir, base)
 		if err != nil {
 			t.Fatalf("changedGoPackages: %v", err)
 		}
-		if !changed {
+		if !got.changedGoFiles {
 			t.Fatal("changedGoFiles = false, want true")
 		}
-		if len(pkgs) != 1 || !strings.HasSuffix(pkgs[0], "/pkga") {
-			t.Errorf("pkgs = %v, want exactly one entry ending in /pkga", pkgs)
+		if len(got.packages) != 1 || !strings.HasSuffix(got.packages[0], "/pkga") {
+			t.Errorf("packages = %v, want exactly one entry ending in /pkga", got.packages)
+		}
+		if len(got.deletedDirs) != 0 || len(got.unresolvable) != 0 {
+			t.Errorf("deletedDirs = %v, unresolvable = %v, want both empty for a modification to an existing package", got.deletedDirs, got.unresolvable)
 		}
 	})
 
@@ -540,15 +577,58 @@ func TestChangedGoPackages(t *testing.T) {
 		runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
 
 		g := git.NewGit(dir)
-		pkgs, changed, err := changedGoPackages(g, dir, base)
+		got, err := changedGoPackages(g, dir, base)
 		if err != nil {
 			t.Fatalf("changedGoPackages: %v", err)
 		}
-		if !changed {
+		if !got.changedGoFiles {
 			t.Fatal("changedGoFiles = false, want true (deletion still touches .go paths)")
 		}
-		if len(pkgs) != 0 {
-			t.Errorf("pkgs = %v, want empty — pkgb no longer exists as a package", pkgs)
+		if len(got.packages) != 0 {
+			t.Errorf("packages = %v, want empty — pkgb no longer exists as a package", got.packages)
+		}
+		if len(got.deletedDirs) != 1 || got.deletedDirs[0] != "pkgb" {
+			t.Errorf("deletedDirs = %v, want exactly [pkgb] — the directory is gone, so an empty package list is the deletion talking", got.deletedDirs)
+		}
+		if len(got.unresolvable) != 0 {
+			t.Errorf("unresolvable = %v, want empty — nothing is left in pkgb to fail to resolve", got.unresolvable)
+		}
+	})
+
+	// gt-7rds: a .go file that is still in the worktree but that go list will
+	// not resolve is NOT a deletion, and must not be reported as one. This is
+	// the shape the gate used to read as a clean package deletion and wave
+	// through on a whole-module build that had nothing to build.
+	t.Run("a .go file excluded by build constraints is unresolvable, not deleted", func(t *testing.T) {
+		dir, base := initVerifyTestGoRepo(t)
+		if err := os.MkdirAll(filepath.Join(dir, "pkgexcluded"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pkgexcluded", "x.go"), []byte("//go:build never\n\npackage pkgexcluded\n\nfunc X() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "add a build-constraint-excluded package")
+
+		g := git.NewGit(dir)
+		got, err := changedGoPackages(g, dir, base)
+		if err != nil {
+			t.Fatalf("changedGoPackages: %v", err)
+		}
+		if !got.changedGoFiles {
+			t.Fatal("changedGoFiles = false, want true")
+		}
+		if len(got.packages) != 0 {
+			t.Errorf("packages = %v, want empty — go list cannot resolve the directory", got.packages)
+		}
+		if len(got.deletedDirs) != 0 {
+			t.Errorf("deletedDirs = %v, want empty — x.go is still in the worktree", got.deletedDirs)
+		}
+		if len(got.unresolvable) != 1 || got.unresolvable[0].dir != "pkgexcluded" {
+			t.Fatalf("unresolvable = %v, want exactly one entry for pkgexcluded", got.unresolvable)
+		}
+		if got.unresolvable[0].listErr == nil || !strings.Contains(got.unresolvable[0].listErr.Error(), "build constraints exclude") {
+			t.Errorf("listErr = %v, want the go list failure naming the excluded build constraints", got.unresolvable[0].listErr)
 		}
 	})
 }

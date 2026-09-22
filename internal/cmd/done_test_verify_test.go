@@ -350,6 +350,132 @@ func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
 	}
 }
 
+// TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild forces the
+// still-refusing half of gt-ytjh: a whole-package deletion whose importers no
+// longer build must refuse, and the refusal has to show the build failure it is
+// asking the polecat to fix — it used to say "fix the build" with the compiler
+// output discarded (gt-7rds MINOR).
+func TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild(t *testing.T) {
+	stubNoContainers(t)
+	compilerSaid := "no required module provides package example.test/pkgb"
+	stubGoBuildWholeModule(t, errors.New("go build ./...: exit status 1: "+compilerSaid))
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	deletePkgb(t, dir)
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-refusal")
+	if err == nil {
+		t.Fatalf("runDefaultTestVerification: a deletion that breaks the build must refuse, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "unbuildable") {
+		t.Errorf("error does not report the deletion refusal: %v", err)
+	}
+	if !strings.Contains(err.Error(), compilerSaid) {
+		t.Errorf("the refusal does not surface the build failure it tells the polecat to fix: %v", err)
+	}
+	if suiteRan {
+		t.Error("the suite ran for a deletion whose build is already broken")
+	}
+}
+
+// TestRunDefaultTestVerification_UnresolvableGoChangeRefuses forces the failing
+// branch of the refusal gt-7rds added to the empty-package-list case: a changed
+// .go file that is still in the worktree but that `go list` will not resolve is
+// not a package deletion, and the gate must refuse it rather than substitute a
+// whole-module build. The substitution is what failed open — for a package
+// whose .go files are all excluded by build constraints `go build ./...`
+// SUCCEEDS (there is nothing to build), so the branch used to stamp
+// test_verified=true on a .go change that was never compiled or tested. Both
+// cases stub the build to succeed and the suite to pass, so a gate that
+// reached either would report success: that is what makes the refusal the
+// assertion, rather than merely an error message.
+func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
+	// addExcludedPkg adds a directory whose only .go file is excluded by its
+	// build constraints — the shape whose whole-module build succeeds.
+	addExcludedPkg := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, "pkgexcluded"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pkgexcluded", "x.go"), []byte("//go:build never\n\npackage pkgexcluded\n\nfunc X() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "add a build-constraint-excluded package")
+	}
+
+	// runGate drives the gate with the build stubbed to pass, returning how
+	// many times it was called: a gate that reached the build would go on to
+	// succeed, so the count is what separates a refusal from a pass.
+	runGate := func(t *testing.T, dir string) (testVerifyResult, error, int) {
+		t.Helper()
+		stubNoContainers(t)
+		builds := 0
+		prev := goBuildWholeModule
+		goBuildWholeModule = func(string) error { builds++; return nil }
+		t.Cleanup(func() { goBuildWholeModule = prev })
+		stubVerifyGate(t,
+			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+			func(context.Context, string, string, []string, *os.File) error { return nil })
+
+		g := git.NewGit(dir)
+		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unresolvable-role")
+		return result, err, builds
+	}
+
+	t.Run("all-build-excluded .go file: refuses instead of falling through to a build that would pass", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addExcludedPkg(t, dir)
+
+		result, err, builds := runGate(t, dir)
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: a .go file that resolves to no package must refuse, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "pkgexcluded") {
+			t.Errorf("error does not name the unresolvable directory: %v", err)
+		}
+		if !strings.Contains(err.Error(), "not a package deletion") {
+			t.Errorf("error does not say why a whole-module build cannot stand in here: %v", err)
+		}
+		if builds != 0 {
+			t.Errorf("goBuildWholeModule ran %d time(s); the build cannot verify a file it never compiles", builds)
+		}
+	})
+
+	t.Run("resolved package alongside an unresolvable one: still refuses", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		// pkga resolves, so the gate has a package list to scope a suite to —
+		// the mixed case in which an unresolvable file escaped with no check.
+		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nfunc Add(a, b int) int { return a + b + 1 }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitIn(t, dir, "add", ".")
+		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+		addExcludedPkg(t, dir)
+
+		result, err, builds := runGate(t, dir)
+		if err == nil {
+			t.Fatalf("runDefaultTestVerification: an unresolvable change must refuse even when another changed package resolved, got result=%+v", result)
+		}
+		if !strings.Contains(err.Error(), "pkgexcluded") {
+			t.Errorf("error does not name the unresolvable directory: %v", err)
+		}
+		if builds != 0 {
+			t.Errorf("goBuildWholeModule ran %d time(s), want 0", builds)
+		}
+	})
+}
+
 // TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan: the gate's log
 // header is the only record of whether a polecat verified the whole suite or
 // just its changed packages, and an operator reading "scope=full" on a run
