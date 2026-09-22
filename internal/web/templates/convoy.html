@@ -635,7 +635,7 @@
             <div class="panel" id="merge-queue-panel">
                 <div class="panel-header">
                     <h2>🔀 Merge Queue</h2>
-                    <span class="count">{{if .TownMergeQueue.Loaded}}{{.TownMergeQueue.ReadyCount}} ready{{else}}…{{end}}</span>
+                    <span class="count">{{if .TownMergeQueue.Loaded}}{{.TownMergeQueue.ReadyCount}} ready{{if .TownMergeQueue.ParkedCount}} · {{.TownMergeQueue.ParkedCount}} in parked rigs{{end}}{{else}}…{{end}}</span>
                     <div class="mq-tabs">
                         <button class="mq-tab active" data-tab="town">Town MRs ({{len .TownMergeQueue.Rows}})</button>
                         <button class="mq-tab" data-tab="prs">GitHub PRs ({{len .MergeQueue}})</button>
@@ -674,7 +674,7 @@
                             </thead>
                             <tbody>
                                 {{range .TownMergeQueue.Rows}}
-                                <tr class="mr-row {{.ColorClass}}">
+                                <tr class="mr-row {{.ColorClass}}{{if .RigOpState}} rig-inactive{{end}}">
                                     <td><span class="issue-id">{{.ID}}</span></td>
                                     <td>
                                         {{if eq .Priority 0}}<span class="badge badge-red">P0</span>
@@ -683,10 +683,10 @@
                                         {{else if eq .Priority 3}}<span class="badge badge-yellow">P3</span>
                                         {{else}}<span class="badge badge-muted">P{{.Priority}}</span>{{end}}
                                     </td>
-                                    <td>{{.Rig}}</td>
+                                    <td>{{.Rig}}{{if .RigOpState}} <span class="badge badge-muted rig-state-badge" title="Rig is {{.RigOpState}} — no refinery will pick this MR up, so its status is not a stall">{{.RigOpState}}</span>{{end}}</td>
                                     <td class="mr-branch">{{.Branch}}</td>
                                     <td>
-                                        {{if eq .Status "ready"}}<span class="badge badge-green">ready</span>
+                                        {{if eq .Status "ready"}}<span class="badge badge-green"{{if .RigOpState}} title="READY, but the rig is {{.RigOpState}}: nothing will process it"{{end}}>ready</span>
                                         {{else if eq .Status "blocked"}}<span class="badge badge-muted">blocked</span>
                                         {{else}}<span class="badge badge-blue">{{.Status}}</span>{{end}}
                                     </td>
@@ -857,8 +857,8 @@
                         </thead>
                         <tbody>
                             {{range .Rigs}}
-                            <tr>
-                                <td><span class="rig-name">{{.Name}}</span></td>
+                            <tr{{if .OpState}} class="rig-inactive"{{end}}>
+                                <td><span class="rig-name">{{.Name}}</span>{{if .OpState}} <span class="badge badge-muted rig-state-badge" title="Rig is {{.OpState}}: no work is dispatched to it, so nothing here moves">{{.OpState}}</span>{{end}}</td>
                                 <td>{{.PolecatCount}}</td>
                                 <td>{{.CrewCount}}</td>
                                 <td class="agent-icons">

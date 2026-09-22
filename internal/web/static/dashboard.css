@@ -1225,6 +1225,29 @@
             color: var(--blue);
         }
 
+        /* A rig that accepts no work — parked or docked. Muted rather than
+           recolored: the row still carries real counts and statuses, and the
+           state badge beside them is the signal. */
+        tr.rig-inactive td {
+            color: var(--text-muted);
+        }
+
+        tr.rig-inactive .rig-name {
+            color: var(--text-secondary);
+        }
+
+        /* Out-specifies the mq-* tint a parked MR row also carries: a
+           five-day-old READY has to stop reading as green. */
+        tr.mr-row.rig-inactive {
+            background: rgba(61, 71, 82, 0.18);
+        }
+
+        .rig-state-badge {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
         .rig-url {
             color: var(--text-muted);
             font-size: 0.75rem;

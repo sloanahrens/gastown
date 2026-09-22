@@ -16,7 +16,9 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 func TestCalculateWorkStatus(t *testing.T) {
@@ -2174,5 +2176,259 @@ func TestSessionActivityForAssigneeReadsWindowActivity(t *testing.T) {
 	got := f.getSessionActivityForAssignee("gastown/polecats/agate")
 	if got == nil || got.Unix() != now {
 		t.Fatalf("activity = %v, want %d from window_activity", got, now)
+	}
+}
+
+// ============================================
+// PARKED RIGS ON THE PANELS (gt-94xz)
+// ============================================
+
+// stubOpState is the probe seam: the named rigs are parked, everything else
+// accepts work. Panel tests use it so a parked row renders without a town.
+func stubOpState(parked ...string) rigOpStateFunc {
+	isParked := make(map[string]bool, len(parked))
+	for _, name := range parked {
+		isParked[name] = true
+	}
+	return func(rigName string) (rig.OpState, string) {
+		if isParked[rigName] {
+			return rig.OpStateParked, rig.OpStateSourceLocal
+		}
+		return rig.OpStateOperational, rig.OpStateSourceDefault
+	}
+}
+
+// nobodyTmux points the fetcher at a tmux socket no server owns, so the
+// live-polecat count reads zero without touching the machine's tmux.
+func nobodyTmux(f *LiveConvoyFetcher) *LiveConvoyFetcher {
+	f.tmuxSocket = "gt-94xz-test-no-server"
+	f.tmuxCmdTimeout = 2 * time.Second
+	return f
+}
+
+// TestFetchRigsMarksParkedRigs is the Rigs panel's half of the acceptance
+// criterion: a parked rig must not render as an ordinary row, because its
+// witness and refinery icons survive the park.
+func TestFetchRigsMarksParkedRigs(t *testing.T) {
+	f := nobodyTmux(&LiveConvoyFetcher{
+		townRoot:   townRootWithRigs(t, "gastown", "hm"),
+		rigOpState: stubOpState("hm"),
+	})
+
+	rows, err := f.FetchRigs()
+	if err != nil {
+		t.Fatalf("FetchRigs: %v", err)
+	}
+
+	byName := make(map[string]RigRow, len(rows))
+	for _, row := range rows {
+		byName[row.Name] = row
+	}
+	if got := byName["hm"].OpState; got != "parked" {
+		t.Errorf("hm OpState = %q, want %q", got, "parked")
+	}
+	if got := byName["gastown"].OpState; got != "" {
+		t.Errorf("gastown OpState = %q, want empty for a rig that accepts work", got)
+	}
+}
+
+// TestFetchRigsReadsParkedStateFromTheTownWisp exercises the wiring with no
+// seam: the state a real `gt rig park` writes must reach the row. The wisp
+// layer is a local file, so this stays hermetic — the rig that is not parked
+// falls through to its identity bead, which in a temp town has no database
+// and answers "operational" rather than inventing a marker.
+func TestFetchRigsReadsParkedStateFromTheTownWisp(t *testing.T) {
+	townRoot := townRootWithRigs(t, "gastown", "hm")
+	if err := wisp.NewConfig(townRoot, "hm").Set(rig.RigStatusKey, rig.RigStatusParked); err != nil {
+		t.Fatalf("write wisp config: %v", err)
+	}
+
+	f := nobodyTmux(&LiveConvoyFetcher{townRoot: townRoot})
+
+	rows, err := f.FetchRigs()
+	if err != nil {
+		t.Fatalf("FetchRigs: %v", err)
+	}
+
+	for _, row := range rows {
+		want := ""
+		if row.Name == "hm" {
+			want = "parked"
+		}
+		if row.OpState != want {
+			t.Errorf("%s OpState = %q, want %q", row.Name, row.OpState, want)
+		}
+	}
+}
+
+// TestMarkParkedRigsStampsRowsAndCounts covers the Merge Queue panel: every
+// row in a parked rig is tagged, and the header's parked count is the number
+// of those rows — not the number of parked rigs, since the point is how much
+// queued work nobody will process.
+func TestMarkParkedRigsStampsRowsAndCounts(t *testing.T) {
+	now := time.Now()
+	f := &LiveConvoyFetcher{rigOpState: stubOpState("hm")}
+	snapshot := TownMergeQueue{
+		Loaded: true,
+		Rows: []TownMergeQueueRow{
+			{ID: "hm-wisp-t7f", Rig: "hm", Status: "ready", ColorClass: "mq-green", createdAt: now},
+			{ID: "hm-wisp-48l", Rig: "hm", Status: "ready", ColorClass: "mq-green", createdAt: now},
+			{ID: "gt-wisp-a", Rig: "gastown", Status: "ready", ColorClass: "mq-green", createdAt: now},
+		},
+	}
+
+	got := f.markParkedRigs(snapshot)
+
+	for _, row := range got.Rows {
+		want := ""
+		if row.Rig == "hm" {
+			want = "parked"
+		}
+		if row.RigOpState != want {
+			t.Errorf("%s RigOpState = %q, want %q", row.ID, row.RigOpState, want)
+		}
+	}
+	if got.ParkedCount != 2 {
+		t.Errorf("ParkedCount = %d, want 2", got.ParkedCount)
+	}
+	if got.ReadyCount != snapshot.ReadyCount {
+		t.Errorf("ReadyCount = %d, want it untouched at %d", got.ReadyCount, snapshot.ReadyCount)
+	}
+}
+
+// TestMarkParkedRigsProbesEachRigOnce keeps the probe off the per-row budget:
+// a five-MR rig costs one lookup, not five.
+func TestMarkParkedRigsProbesEachRigOnce(t *testing.T) {
+	now := time.Now()
+	var probed []string
+	f := &LiveConvoyFetcher{rigOpState: func(rigName string) (rig.OpState, string) {
+		probed = append(probed, rigName)
+		return rig.OpStateParked, rig.OpStateSourceLocal
+	}}
+	snapshot := TownMergeQueue{
+		Loaded: true,
+		Rows: []TownMergeQueueRow{
+			{ID: "hm-wisp-a", Rig: "hm", createdAt: now},
+			{ID: "hm-wisp-b", Rig: "hm", createdAt: now},
+			{ID: "hm-wisp-c", Rig: "hm", createdAt: now},
+			{ID: "gt-wisp-a", Rig: "gastown", createdAt: now},
+		},
+	}
+
+	f.markParkedRigs(snapshot)
+
+	seen := make(map[string]int, len(probed))
+	for _, name := range probed {
+		seen[name]++
+	}
+	if len(probed) != 2 || seen["hm"] != 1 || seen["gastown"] != 1 {
+		t.Errorf("probed %v, want each rig exactly once", probed)
+	}
+}
+
+// TestMarkParkedRigsDoesNotMutateTheCachedSnapshot guards the aliasing bug
+// that would make the marker sticky: the rows handed back alias the cached
+// snapshot's backing array, so stamping in place would park a rig in the
+// cache and leave it marked after `gt rig unpark`.
+func TestMarkParkedRigsDoesNotMutateTheCachedSnapshot(t *testing.T) {
+	now := time.Now()
+	f := &LiveConvoyFetcher{rigOpState: stubOpState("hm")}
+	snapshot := TownMergeQueue{
+		Loaded: true,
+		Rows:   []TownMergeQueueRow{{ID: "hm-wisp-a", Rig: "hm", createdAt: now}},
+	}
+
+	if got := f.markParkedRigs(snapshot); got.Rows[0].RigOpState != "parked" {
+		t.Fatalf("stamped row = %+v, want the marker applied", got.Rows[0])
+	}
+	if snapshot.Rows[0].RigOpState != "" {
+		t.Error("the snapshot passed in was mutated; the cached copy now carries a stale marker")
+	}
+
+	// The same snapshot, with the rig unparked, must come back unmarked.
+	f.rigOpState = stubOpState()
+	if got := f.markParkedRigs(snapshot); got.Rows[0].RigOpState != "" || got.ParkedCount != 0 {
+		t.Errorf("after unpark = %+v, want no marker", got.Rows[0])
+	}
+}
+
+// TestFetchTownMergeQueueStampsParkedRowsFromAFreshSnapshot is the acceptance
+// criterion for the Merge Queue panel: the marker must be on a render that
+// serves an already-cached snapshot, not only on one that happens to trigger
+// the three-minute re-derivation.
+func TestFetchTownMergeQueueStampsParkedRowsFromAFreshSnapshot(t *testing.T) {
+	now := time.Now()
+	f := &LiveConvoyFetcher{rigOpState: stubOpState("hm")}
+
+	f.mqMu.Lock()
+	f.mqSnapshot = TownMergeQueue{
+		Loaded: true,
+		Rows:   []TownMergeQueueRow{{ID: "hm-wisp-t7f", Rig: "hm", Status: "ready", ColorClass: "mq-green", createdAt: now}},
+	}
+	f.mqFetchedAt = time.Now() // fresh: no refresh will be started
+	f.mqMu.Unlock()
+
+	got := f.FetchTownMergeQueue()
+	if len(got.Rows) != 1 {
+		t.Fatalf("rows = %d, want the cached snapshot served as-is", len(got.Rows))
+	}
+	if got.Rows[0].RigOpState != "parked" {
+		t.Errorf("RigOpState = %q, want %q on a fresh snapshot", got.Rows[0].RigOpState, "parked")
+	}
+	if got.ParkedCount != 1 {
+		t.Errorf("ParkedCount = %d, want 1", got.ParkedCount)
+	}
+}
+
+// TestRigOpLabelsGivesUpAtTheDeadline keeps a wedged Dolt from holding a
+// render: probes that never answer are reported unmarked, which is what the
+// panels did before they knew about parked rigs.
+func TestRigOpLabelsGivesUpAtTheDeadline(t *testing.T) {
+	restore := rigOpProbeTimeout
+	rigOpProbeTimeout = 20 * time.Millisecond
+	defer func() { rigOpProbeTimeout = restore }()
+
+	release := make(chan struct{})
+	defer close(release)
+	f := &LiveConvoyFetcher{rigOpState: func(string) (rig.OpState, string) {
+		<-release
+		return rig.OpStateParked, rig.OpStateSourceLocal
+	}}
+
+	done := make(chan map[string]string, 1)
+	go func() { done <- f.rigOpLabels([]string{"hm", "gastown"}) }()
+
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Errorf("labels = %v, want none when no probe answered", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rigOpLabels never returned; the probe is unbounded")
+	}
+}
+
+// TestRigOpLabelsKeepsAnswersThatBeatTheDeadline pins the property the
+// deadline must not break: the wisp read `gt rig park` depends on is a local
+// file, so it answers long before any bd-backed probe could, and a slow rig
+// must not cost a parked one its marker.
+func TestRigOpLabelsKeepsAnswersThatBeatTheDeadline(t *testing.T) {
+	restore := rigOpProbeTimeout
+	rigOpProbeTimeout = 250 * time.Millisecond
+	defer func() { rigOpProbeTimeout = restore }()
+
+	release := make(chan struct{})
+	defer close(release)
+	f := &LiveConvoyFetcher{rigOpState: func(rigName string) (rig.OpState, string) {
+		if rigName == "slow" {
+			<-release
+			return rig.OpStateOperational, rig.OpStateSourceDefault
+		}
+		return rig.OpStateParked, rig.OpStateSourceLocal
+	}}
+
+	got := f.rigOpLabels([]string{"hm", "slow"})
+	if got["hm"] != "parked" {
+		t.Errorf("labels = %v, want hm parked", got)
 	}
 }

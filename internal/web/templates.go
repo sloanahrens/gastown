@@ -64,6 +64,12 @@ type RigRow struct {
 	CrewCount    int
 	HasWitness   bool
 	HasRefinery  bool
+
+	// OpState is "parked", "docked", or "" when the rig accepts work. A
+	// parked rig still shows the witness and refinery icons from its last
+	// session state, so without this marker the row reads as an active rig
+	// while every dispatch path skips it.
+	OpState string
 }
 
 // DogRow represents a Deacon helper worker.
@@ -250,6 +256,13 @@ type TownMergeQueueRow struct {
 	Assignee   string
 	ColorClass string // "mq-green" ready, "mq-red" blocked
 
+	// RigOpState is "parked", "docked", or "" when the MR's rig accepts work.
+	// Status is derived per MR, so a READY wisp in a parked rig is a true
+	// statement about the MR and a false promise about the town: no refinery
+	// will ever pick it up. Rows carrying this are marked so a five-day-old
+	// READY is not read as a refinery stall.
+	RigOpState string
+
 	createdAt time.Time // sort key; the Age string has already lost the ordering
 }
 
@@ -270,6 +283,10 @@ type TownMergeQueue struct {
 	ReadyCount    int // the "N ready" header
 	Merges6h      []RigMergeCount
 	Merges6hTotal int
+	// ParkedCount is how many listed MRs sit in a parked or docked rig. The
+	// header names them so the ready count is not read as work the refinery
+	// could take right now.
+	ParkedCount int
 }
 
 // ConvoyRow represents a single convoy in the dashboard.

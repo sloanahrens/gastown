@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -199,6 +200,11 @@ type LiveConvoyFetcher struct {
 
 	// listMRs derives one rig's merge queue; nil means listRigMergeRequests.
 	listMRs mrListerFunc
+
+	// rigOpState derives one rig's operational state; nil means
+	// rig.GetOpState. Seam for the Rigs and Merge Queue panels' parked
+	// markers.
+	rigOpState rigOpStateFunc
 
 	// polecatIndex is the `gt polecat list --all --json` snapshot the Polecats
 	// panel joins onto its tmux sessions for the AGENT and MR columns. The list
@@ -893,9 +899,80 @@ const (
 	mergesCountTimeout = 10 * time.Second
 )
 
+// rigOpProbeTimeout bounds one render's whole operational-state probe (see
+// rigOpLabels). internal/beads caps a single bd subprocess at 60s, which is
+// longer than a render may take. A var so the deadline test does not have to
+// sit out the real one.
+var rigOpProbeTimeout = 5 * time.Second
+
 // mrListerFunc derives one rig's merge-request wisps. It is the seam tests
 // replace so the derivation runs without spawning bd.
 type mrListerFunc func(beadsDir string, opts beads.ListOptions) ([]*beads.Issue, error)
+
+// rigOpStateFunc derives one rig's operational state. The seam tests replace
+// so the panels can render a parked rig without a town.
+type rigOpStateFunc func(rigName string) (rig.OpState, string)
+
+// rigOpLabels returns the parked/docked marker for each named rig, and no
+// entry for a rig that accepts work.
+//
+// A parked rig used to be invisible to the dashboard, which is how a
+// five-day-old READY MR in a parked rig sat at the top of the queue reading
+// as a refinery stall. The state is probed at render time rather than baked
+// into the three-minute merge-queue snapshot: a marker older than the panel
+// it decorates is the same lie in a different font.
+//
+// The probe is cheap exactly where it matters. `gt rig park` writes the rig's
+// wisp config, a local file read that spawns nothing, so a parked rig is
+// marked however loaded the town is. Only a rig whose wisp says nothing
+// reaches for its identity bead — one `bd show`, measured at ~50ms warm —
+// which is the persistent fallback that keeps a rig parked after wisp
+// cleanup (#2079).
+//
+// The fan-out is bounded all the same, because a wedged Dolt would otherwise
+// hold a render for beads' 60s subprocess cap and undo the merge queue's
+// careful off-render derivation. Rigs whose probe misses the deadline go
+// unmarked — the panel's behavior before it knew about parked rigs — and the
+// next render tries again. Fast probes have already landed by then: a parked
+// rig answers in the time it takes to read one small file.
+func (f *LiveConvoyFetcher) rigOpLabels(rigNames []string) map[string]string {
+	probe := f.rigOpState
+	if probe == nil {
+		probe = func(rigName string) (rig.OpState, string) {
+			return rig.GetOpState(f.townRoot, rigName)
+		}
+	}
+
+	type probeResult struct {
+		rig   string
+		state rig.OpState
+	}
+	// Buffered to one result per rig so a probe that outlives the deadline
+	// still has somewhere to send, and no goroutine leaks blocked on a
+	// channel nobody is left to read.
+	resCh := make(chan probeResult, len(rigNames))
+	for _, name := range rigNames {
+		go func(name string) {
+			state, _ := probe(name)
+			resCh <- probeResult{rig: name, state: state}
+		}(name)
+	}
+
+	labels := make(map[string]string, len(rigNames))
+	timeout := time.NewTimer(rigOpProbeTimeout)
+	defer timeout.Stop()
+	for range rigNames {
+		select {
+		case res := <-resCh:
+			if label := res.state.Label(); label != "" {
+				labels[res.rig] = label
+			}
+		case <-timeout.C:
+			return labels
+		}
+	}
+	return labels
+}
 
 // listRigMergeRequests is the production lister: the `gt mq list` derivation,
 // which searches both the issues and the wisps table and hydrates each MR so
@@ -927,6 +1004,46 @@ func (f *LiveConvoyFetcher) FetchTownMergeQueue() TownMergeQueue {
 	// every render.
 	if stale && f.mqBreaker.allow() {
 		go f.refreshTownMergeQueue()
+	}
+	return f.markParkedRigs(snapshot)
+}
+
+// markParkedRigs stamps each MR row with the operational state of the rig
+// that owns it, and counts them for the panel header.
+//
+// The stamp is applied here, on the render path, and deliberately not in
+// townMergeQueueSnapshot: that snapshot is served for up to
+// townMergeQueueTTL, and a parked marker three minutes behind the rig it
+// describes is the staleness this marker exists to expose.
+func (f *LiveConvoyFetcher) markParkedRigs(snapshot TownMergeQueue) TownMergeQueue {
+	if len(snapshot.Rows) == 0 {
+		return snapshot
+	}
+
+	// Copy before stamping: snapshot.Rows aliases the cached mqSnapshot's
+	// backing array, and writing labels into it would pin them there — a rig
+	// unparked later would keep its marker until the next derivation.
+	rows := make([]TownMergeQueueRow, len(snapshot.Rows))
+	copy(rows, snapshot.Rows)
+	snapshot.Rows = rows
+
+	// Every MR is labeled by its rig, so probe each rig once.
+	rigNames := make([]string, 0, len(rows))
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if !seen[row.Rig] {
+			seen[row.Rig] = true
+			rigNames = append(rigNames, row.Rig)
+		}
+	}
+	opLabels := f.rigOpLabels(rigNames)
+
+	snapshot.ParkedCount = 0
+	for i := range rows {
+		rows[i].RigOpState = opLabels[rows[i].Rig]
+		if rows[i].RigOpState != "" {
+			snapshot.ParkedCount++
+		}
 	}
 	return snapshot
 }
@@ -1771,12 +1888,22 @@ func (f *LiveConvoyFetcher) FetchRigs() ([]RigRow, error) {
 
 	livePolecatCounts := f.countLivePolecatsByRig()
 
+	// A parked rig keeps its witness and refinery icons from the last session
+	// state, so the counts alone cannot tell "paused" from "running" — and
+	// the dashboard exists to catch the difference.
+	rigNames := make([]string, 0, len(rigsConfig.Rigs))
+	for name := range rigsConfig.Rigs {
+		rigNames = append(rigNames, name)
+	}
+	opLabels := f.rigOpLabels(rigNames)
+
 	var rows []RigRow
 	for name, entry := range rigsConfig.Rigs {
 		row := RigRow{
 			Name:         name,
 			GitURL:       entry.GitURL,
 			PolecatCount: livePolecatCounts[name],
+			OpState:      opLabels[name],
 		}
 
 		rigPath := filepath.Join(f.townRoot, name)

@@ -468,3 +468,58 @@ func panelSection(t *testing.T, output, from, to string) string {
 	}
 	return section[:end]
 }
+
+// TestConvoyTemplate_MarksParkedRigsAndTheirMRs is the panel half of gt-94xz:
+// a parked rig has to be visible on the Rigs row and on every MR row it owns,
+// so a stale READY is not read as a refinery stall.
+func TestConvoyTemplate_MarksParkedRigsAndTheirMRs(t *testing.T) {
+	tmpl, err := LoadTemplates()
+	if err != nil {
+		t.Fatalf("LoadTemplates() error = %v", err)
+	}
+
+	data := ConvoyData{
+		Rigs: []RigRow{
+			{Name: "gastown", HasWitness: true, HasRefinery: true},
+			{Name: "hm", OpState: "parked"},
+		},
+		TownMergeQueue: TownMergeQueue{
+			Loaded:      true,
+			ReadyCount:  2,
+			ParkedCount: 1,
+			Rows: []TownMergeQueueRow{
+				{ID: "hm-wisp-t7f", Rig: "hm", Status: "ready", ColorClass: "mq-green", RigOpState: "parked", Age: "5d"},
+				{ID: "gt-wisp-a", Rig: "gastown", Status: "ready", ColorClass: "mq-green", Age: "2m"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	output := buf.String()
+
+	// The Rigs panel row for the parked rig carries the marker...
+	if !strings.Contains(output, `class="rig-inactive"`) {
+		t.Error("parked rig row should carry the rig-inactive class")
+	}
+	// ...and the rig that accepts work does not.
+	if strings.Count(output, "rig-state-badge") != 2 {
+		t.Errorf("rig-state-badge appears %d times, want 2 (the parked rig row and its MR row)",
+			strings.Count(output, "rig-state-badge"))
+	}
+	// The MR row is tagged and greyed, while its status keeps saying ready —
+	// which is exactly the pairing that was missing.
+	if !strings.Contains(output, "mr-row mq-green rig-inactive") {
+		t.Error("MR row in a parked rig should carry the rig-inactive class alongside its status colour")
+	}
+	if !strings.Contains(output, "hm-wisp-t7f") || !strings.Contains(output, "5d") {
+		t.Error("parked MR row should still render its id and age")
+	}
+	// The header has to name the parked work, or the ready count reads as
+	// work the refinery could take right now.
+	if !strings.Contains(output, "1 in parked rigs") {
+		t.Error("merge queue header should report how many MRs sit in parked rigs")
+	}
+}
