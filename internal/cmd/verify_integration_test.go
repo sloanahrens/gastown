@@ -15,17 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-// deletePkgb commits the removal of every file in the test repo's pkgb — a
-// whole-package deletion, the diff shape gt-ytjh opened.
-func deletePkgb(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.RemoveAll(filepath.Join(dir, "pkgb")); err != nil {
-		t.Fatal(err)
-	}
-	runGitIn(t, dir, "add", ".")
-	runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
-}
-
 // TestRunDefaultTestVerification guards the core gt-h9kf behavior: gt done's
 // default (non-opt-in) test gate must actually run the rig's hermetic
 // test_command (gt-btw1) and refuse when it fails, succeed when it passes,

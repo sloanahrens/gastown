@@ -109,6 +109,19 @@ func stubGoBuildWholeModule(t *testing.T, err error) {
 	t.Cleanup(func() { goBuildWholeModule = prev })
 }
 
+// deletePkgb commits the removal of every file in the test repo's pkgb — a
+// whole-package deletion, the diff shape gt-ytjh opened. It lives here (not in
+// verify_integration_test.go) because both the unit and the integration test
+// files need it, and the integration file only compiles with -tags integration.
+func deletePkgb(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, "pkgb")); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
+}
+
 // stubLintVerifyTimeout shrinks the lint gate's budget so a test can drive a
 // real expiry (gt-taoz) rather than sleeping out the 10m default.
 func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
