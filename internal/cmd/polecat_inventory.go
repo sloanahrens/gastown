@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -71,6 +72,57 @@ type polecatInventoryEnv struct {
 	// over-admitting; the actual reuse gate (Manager.ReuseDecisionForPolecat)
 	// does probe.
 	WorktreePath string
+	// ActiveMRSource resolves the ids the active_mr policy looks up (the MR
+	// itself and its source issue). Nil — the zero value, and what the capacity
+	// path passes — leaves the policy reading the same fail-closed
+	// "status=unverified" it read before there was a source at all, so
+	// admission still pays no beads call per polecat.
+	ActiveMRSource polecat.IssueReader
+}
+
+// polecatActiveMRReader resolves the active_mr policy's two lookups from the
+// two places that actually hold them: the rig-wide merge-request index for MR
+// ids, the rig's beads database for everything else (a source issue).
+//
+// MRs are ephemeral wisps — a per-polecat `bd show` finds them unreliably,
+// which is why the index exists — while a source issue is an ordinary bead only
+// the database has. An index that never loaded answers nothing rather than
+// "gone": "the queue does not have it" is a claim only a queue that was read
+// can make, and the policy fails closed on an error.
+type polecatActiveMRReader struct {
+	index polecatMRIndex
+	bd    polecat.IssueReader
+}
+
+func (r polecatActiveMRReader) Show(issueID string) (*beads.Issue, error) {
+	if mr := r.index.byID[issueID]; mr != nil {
+		return mr, nil
+	}
+	if !r.index.loaded {
+		return nil, errPolecatMRIndexUnreadable
+	}
+	if r.bd != nil {
+		return r.bd.Show(issueID)
+	}
+	return nil, beads.ErrNotFound
+}
+
+// errPolecatMRIndexUnreadable reports a merge-request index that was never
+// read. It is deliberately not beads.ErrNotFound: the active_mr policy treats
+// "not found" as "the MR wisp is gone", and a queue nobody managed to read
+// cannot say that.
+var errPolecatMRIndexUnreadable = errors.New("rig merge-request index was not read")
+
+// landedProbe supplies the active_mr policy's git evidence for a gone-or-closed
+// MR: the polecat's work already contained in the integration branch on origin.
+// A run with no worktree to measure (the counts-only capacity projection)
+// returns nil, which the policy reads as "no evidence" without spawning git.
+func (e polecatInventoryEnv) landedProbe(branch string) polecat.LandedEvidenceProbe {
+	if strings.TrimSpace(e.WorktreePath) == "" {
+		return nil
+	}
+	worktree := e.WorktreePath
+	return func() polecat.LandedEvidence { return polecat.ProbeWorkLandedOnRef(worktree, branch, "origin") }
 }
 
 // polecatSpawnFacts dates the agent bead's most recent write. SpawnGrace
@@ -255,15 +307,27 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		}
 	}
 	if item.ActiveMR != "" {
-		// Still blocking whenever active_mr is set (fail-closed, unchanged), but
-		// the status is now the joined MR's real state when the rig-wide index
-		// answered. "unknown" is what an absent index leaves behind — capacity
-		// and a failed MR lookup.
+		// The decision is the shared active_mr policy, so what the list shows
+		// agrees with the reuse gate (Manager.ReuseDecisionForPolecat) and with
+		// `gt polecat check-recovery`; the index's status label stays in the
+		// blocker string because it is the vocabulary `gt mq list` uses.
+		//
+		// gt-wprt: a pointer whose wisp is gone used to block unconditionally,
+		// which read as idle-pr-open forever and refused every spawn once the
+		// rig hit its directory cap. The landed probe is the evidence that
+		// clears it; capacity passes no source and no worktree, so it keeps
+		// failing closed exactly as before.
 		mrStatus := item.MRStatus
 		if mrStatus == "" {
 			mrStatus = "unknown"
 		}
-		facts.ActiveMRBlocker = "active_mr=" + item.ActiveMR + " status=" + mrStatus
+		assessment := polecat.AssessActiveMRWithLandedEvidence(env.ActiveMRSource, polecat.ActiveMRInput{
+			ActiveMR:        item.ActiveMR,
+			SourceIssueHint: agentSourceIssueHint(item.Issue, fields),
+		}, env.landedProbe(item.Branch))
+		if assessment.Pending {
+			facts.ActiveMRBlocker = "active_mr=" + item.ActiveMR + " status=" + mrStatus
+		}
 	}
 
 	facts.State = item.State

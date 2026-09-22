@@ -1059,7 +1059,8 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if sourceHint == "" {
 			sourceHint = fields.HookBead
 		}
-		assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
+		assessment := polecat.AssessActiveMRWithLandedEvidence(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
+			func() polecat.LandedEvidence { return polecat.ProbeWorkLandedOnRef(clonePath, input.Branch, "origin") })
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
