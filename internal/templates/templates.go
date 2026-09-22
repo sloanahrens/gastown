@@ -416,20 +416,15 @@ func SystemdUnitPath() (string, error) {
 // daemon on this host, by checking for the presence of the launchd plist
 // (macOS) or systemd user unit (Linux). Returns "launchd", "systemd", or
 // "none". Never errors — a path resolution failure is treated as "none".
+// This is the file-presence reading; SupervisorStatusLine is the one that
+// says what the job is doing (gt-sq9e).
 func SupervisorStatus() string {
-	switch runtime.GOOS {
-	case "darwin":
-		if path, err := LaunchdPlistPath(); err == nil {
-			if _, statErr := os.Stat(path); statErr == nil {
-				return "launchd"
-			}
-		}
-	case "linux":
-		if path, err := SystemdUnitPath(); err == nil {
-			if _, statErr := os.Stat(path); statErr == nil {
-				return "systemd"
-			}
-		}
+	path, kind := SupervisorFilePath()
+	if path == "" || kind == "" {
+		return "none"
+	}
+	if _, err := os.Stat(path); err == nil {
+		return kind
 	}
 	return "none"
 }

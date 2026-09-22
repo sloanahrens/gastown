@@ -4,38 +4,77 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// stubDaemonStart replaces the seams startDaemon uses — supervisor detection
-// (GOOS + file paths), running the supervisor command, the direct spawn and
-// the running check — and returns recorders for what was called.
-func stubDaemonStart(t *testing.T, goos, file string, runErr error) (ran *[]string, spawned *bool) {
+// supervisorCalls records what a stubbed supervisor path did.
+type supervisorCalls struct {
+	argv    [][]string // every argv handed to the supervisor, in order
+	spawned bool       // the direct spawn ran
+	stopped bool       // the direct stop ran
+}
+
+// last returns the most recent supervisor argv; nil when none ran.
+func (c *supervisorCalls) last() []string {
+	if len(c.argv) == 0 {
+		return nil
+	}
+	return c.argv[len(c.argv)-1]
+}
+
+// joined returns the most recent supervisor argv as a command line.
+func (c *supervisorCalls) joined() string { return strings.Join(c.last(), " ") }
+
+// stubSupervisor replaces the seams the daemon's supervisor paths use —
+// supervisor detection (GOOS + file paths), running the supervisor command,
+// reading the job's live state, the direct spawn, the direct stop and the
+// running check — and returns a recorder for what was called. state is the
+// live read of the job; its Kind is filled in from what detection found.
+func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorState, runErr error) *supervisorCalls {
 	t.Helper()
-	prevPlist, prevUnit, prevRun, prevSpawn, prevIsRunning, prevGOOS := supervisorPlistPath, supervisorUnitPath, supervisorRun, spawnDaemonDirect, daemonIsRunning, supervisorGOOS
+	prevPlist, prevUnit, prevRun, prevState := supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor
+	prevSpawn, prevStop, prevIsRunning, prevGOOS := spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS
 	t.Cleanup(func() {
-		supervisorPlistPath, supervisorUnitPath, supervisorRun, spawnDaemonDirect, daemonIsRunning, supervisorGOOS = prevPlist, prevUnit, prevRun, prevSpawn, prevIsRunning, prevGOOS
+		supervisorPlistPath, supervisorUnitPath, supervisorRun, supervisorStateFor = prevPlist, prevUnit, prevRun, prevState
+		spawnDaemonDirect, stopDaemonDirect, daemonIsRunning, supervisorGOOS = prevSpawn, prevStop, prevIsRunning, prevGOOS
 	})
+
+	calls := &supervisorCalls{}
 	supervisorGOOS = goos
 	supervisorPlistPath = func() (string, error) { return file, nil }
 	supervisorUnitPath = func() (string, error) { return file, nil }
-	var argv []string
-	ran = &argv
-	spawnedFlag := false
-	spawned = &spawnedFlag
-	supervisorRun = func(a []string) error { argv = append([]string{}, a...); return runErr }
-	spawnDaemonDirect = func(townRoot string) (int, error) { spawnedFlag = true; return 1234, nil }
-	// Not running before the start, running after it.
-	calls := 0
+	supervisorRun = func(a []string) error {
+		calls.argv = append(calls.argv, append([]string{}, a...))
+		return runErr
+	}
+	supervisorStateFor = func(kind string) templates.SupervisorState {
+		s := state
+		s.Kind = kind
+		return s
+	}
+	spawnDaemonDirect = func(townRoot string) (int, error) { calls.spawned = true; return 1234, nil }
+	stopDaemonDirect = func(townRoot string) error { calls.stopped = true; return nil }
+	// Not running before a start, running after it.
+	checks := 0
 	daemonIsRunning = func(townRoot string) (bool, int, error) {
-		calls++
-		if calls == 1 {
+		checks++
+		if checks == 1 {
 			return false, 0, nil
 		}
 		return true, 4242, nil
 	}
-	return ran, spawned
+	return calls
+}
+
+// loadedJob is the live read of a supervisor whose job is loaded and whose
+// process is not the daemon under test: start goes through it, and a stop
+// leaves the job unloaded.
+func loadedJob() templates.SupervisorState {
+	return templates.SupervisorState{Loaded: true, LastExit: -1}
 }
 
 // writeSupervisorFile writes a plist/unit naming town as WorkingDirectory,
@@ -63,35 +102,59 @@ func writeSupervisorFile(t *testing.T, name, town string) string {
 func TestStartDaemon_UsesLaunchdWhenProvisioned(t *testing.T) {
 	town := t.TempDir()
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	ran, spawned := stubDaemonStart(t, "darwin", plist, nil)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 
 	via, pid, err := startDaemon(town)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if *spawned {
+	if calls.spawned {
 		t.Fatal("spawned a direct daemon child although launchd is provisioned")
 	}
 	if via != "launchd" || pid != 4242 {
 		t.Fatalf("startDaemon = (%q, %d), want (launchd, 4242)", via, pid)
 	}
-	got := strings.Join(*ran, " ")
+	got := calls.joined()
 	if !strings.HasPrefix(got, "launchctl kickstart -k gui/") || !strings.HasSuffix(got, "/com.gastown.daemon") {
 		t.Fatalf("supervisor command = %q, want launchctl kickstart -k gui/<uid>/com.gastown.daemon", got)
 	}
 }
 
+// A job the service manager does not know — the state gt daemon stop leaves
+// on macOS — cannot be kickstarted, so start bootstraps it rather than
+// falling back to a hand spawn that recreates the crash loop.
+func TestStartDaemon_BootstrapsAJobTheManagerDoesNotKnow(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubSupervisor(t, "darwin", plist, templates.SupervisorState{Loaded: false, LastExit: -1},
+		errors.New("Could not find service"))
+
+	via, pid, err := startDaemon(town)
+	if err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 || calls.spawned {
+		t.Fatalf("startDaemon = (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
+	}
+	if len(calls.argv) != 2 {
+		t.Fatalf("supervisor commands = %v, want a kickstart that failed and a bootstrap", calls.argv)
+	}
+	if got := calls.joined(); got != "launchctl bootstrap gui/"+strconv.Itoa(os.Getuid())+" "+plist {
+		t.Fatalf("second supervisor command = %q, want the bootstrap for %s", got, plist)
+	}
+}
+
 // No plist → the direct spawn, exactly as before.
 func TestStartDaemon_SpawnsDirectlyWithoutSupervisor(t *testing.T) {
-	ran, spawned := stubDaemonStart(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), nil)
+	calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), loadedJob(), nil)
 	via, _, err := startDaemon(t.TempDir())
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if len(*ran) != 0 || via != "" {
-		t.Fatalf("ran=%v via=%q with no supervisor provisioned", *ran, via)
+	if len(calls.argv) != 0 || via != "" {
+		t.Fatalf("ran=%v via=%q with no supervisor provisioned", calls.argv, via)
 	}
-	if !*spawned {
+	if !calls.spawned {
 		t.Fatal("did not spawn the daemon directly")
 	}
 }
@@ -101,13 +164,13 @@ func TestStartDaemon_SpawnsDirectlyWithoutSupervisor(t *testing.T) {
 // other town's daemon and then wait for this one's lock in vain).
 func TestStartDaemon_IgnoresSupervisorOfAnotherTown(t *testing.T) {
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", filepath.Join(t.TempDir(), "other-town"))
-	ran, spawned := stubDaemonStart(t, "darwin", plist, nil)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 	via, _, err := startDaemon(t.TempDir())
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if len(*ran) != 0 || via != "" || !*spawned {
-		t.Fatalf("ran=%v via=%q spawned=%v; want the direct spawn, no supervisor", *ran, via, *spawned)
+	if len(calls.argv) != 0 || via != "" || !calls.spawned {
+		t.Fatalf("ran=%v via=%q spawned=%v; want the direct spawn, no supervisor", calls.argv, via, calls.spawned)
 	}
 }
 
@@ -118,18 +181,17 @@ func TestStartDaemon_IgnoresSupervisorOfAnotherTown(t *testing.T) {
 func TestStartDaemon_SupervisorFailureIsAnErrorNotAManualSpawn(t *testing.T) {
 	town := t.TempDir()
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	ran, spawned := stubDaemonStart(t, "darwin", plist, errors.New("Could not find service"))
-	// The daemon never comes up: the stub's second answer would say running,
-	// so make every answer "not running" for this case.
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("launchd refused"))
+	// The daemon never comes up: every answer is "not running" for this case.
 	daemonIsRunning = func(string) (bool, int, error) { return false, 0, nil }
 	_, _, err := startDaemon(town)
 	if err == nil {
 		t.Fatal("startDaemon succeeded although launchd could not start the daemon")
 	}
-	if len(*ran) == 0 {
+	if len(calls.argv) == 0 {
 		t.Fatal("did not try the supervisor first")
 	}
-	if *spawned {
+	if calls.spawned {
 		t.Fatal("spawned a manual daemon beside a provisioned supervisor")
 	}
 	if !strings.Contains(err.Error(), "launchctl bootstrap gui/") || !strings.Contains(err.Error(), plist) {
@@ -142,13 +204,13 @@ func TestStartDaemon_SupervisorFailureIsAnErrorNotAManualSpawn(t *testing.T) {
 func TestStartDaemon_SupervisorErrorButDaemonCameUp(t *testing.T) {
 	town := t.TempDir()
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	_, spawned := stubDaemonStart(t, "darwin", plist, errors.New("kickstart: noise on stderr"))
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("kickstart: noise on stderr"))
 	via, pid, err := startDaemon(town)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if via != "launchd" || pid != 4242 || *spawned {
-		t.Fatalf("got (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, *spawned)
+	if via != "launchd" || pid != 4242 || calls.spawned {
+		t.Fatalf("got (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
 	}
 }
 
@@ -164,12 +226,12 @@ func TestStartDaemon_UnreadableSupervisorFileIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(plist, 0o644) })
-	ran, spawned := stubDaemonStart(t, "darwin", plist, nil)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 	if _, _, err := startDaemon(town); err == nil {
 		t.Fatal("startDaemon succeeded with an unreadable supervisor file")
 	}
-	if len(*ran) != 0 || *spawned {
-		t.Fatalf("ran=%v spawned=%v; want neither with an unreadable supervisor file", *ran, *spawned)
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Fatalf("ran=%v spawned=%v; want neither with an unreadable supervisor file", calls.argv, calls.spawned)
 	}
 }
 
@@ -178,27 +240,27 @@ func TestStartDaemon_UnreadableSupervisorFileIsAnError(t *testing.T) {
 func TestStartDaemon_UsesSystemdWhenProvisioned(t *testing.T) {
 	town := t.TempDir()
 	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
-	ran, spawned := stubDaemonStart(t, "linux", unit, nil)
+	calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	via, _, err := startDaemon(town)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if *spawned || via != "systemd" {
-		t.Fatalf("via=%q spawned=%v, want systemd and no direct spawn", via, *spawned)
+	if calls.spawned || via != "systemd" {
+		t.Fatalf("via=%q spawned=%v, want systemd and no direct spawn", via, calls.spawned)
 	}
-	if got := strings.Join(*ran, " "); got != "systemctl --user restart gastown-daemon.service" {
+	if got := calls.joined(); got != "systemctl --user restart gastown-daemon.service" {
 		t.Fatalf("supervisor command = %q", got)
 	}
 }
 
 // An OS with no supervisor support spawns directly.
 func TestStartDaemon_UnsupportedOSSpawnsDirectly(t *testing.T) {
-	ran, spawned := stubDaemonStart(t, "windows", filepath.Join(t.TempDir(), "whatever"), nil)
+	calls := stubSupervisor(t, "windows", filepath.Join(t.TempDir(), "whatever"), loadedJob(), nil)
 	if _, _, err := startDaemon(t.TempDir()); err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if len(*ran) != 0 || !*spawned {
-		t.Fatalf("ran=%v spawned=%v, want no supervisor command and a direct spawn", *ran, *spawned)
+	if len(calls.argv) != 0 || !calls.spawned {
+		t.Fatalf("ran=%v spawned=%v, want no supervisor command and a direct spawn", calls.argv, calls.spawned)
 	}
 }
 
@@ -212,13 +274,13 @@ func TestStartDaemon_MatchesSupervisorThroughSymlink(t *testing.T) {
 		t.Skipf("symlink: %v", err)
 	}
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", real)
-	ran, spawned := stubDaemonStart(t, "darwin", plist, nil)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 	via, _, err := startDaemon(link)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if via != "launchd" || *spawned || len(*ran) == 0 {
-		t.Fatalf("via=%q spawned=%v ran=%v; want launchd through the symlinked town", via, *spawned, *ran)
+	if via != "launchd" || calls.spawned || len(calls.argv) == 0 {
+		t.Fatalf("via=%q spawned=%v ran=%v; want launchd through the symlinked town", via, calls.spawned, calls.argv)
 	}
 }
 
@@ -230,12 +292,207 @@ func TestStartDaemon_SupervisorFileWithoutWorkingDirectoryIsAnError(t *testing.T
 	if err := os.WriteFile(plist, []byte("<plist><dict><key>Label</key><string>com.gastown.daemon</string></dict></plist>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ran, spawned := stubDaemonStart(t, "darwin", plist, nil)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 	_, _, err := startDaemon(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "WorkingDirectory") {
 		t.Fatalf("err = %v, want an error naming the missing WorkingDirectory", err)
 	}
-	if len(*ran) != 0 || *spawned {
-		t.Fatalf("ran=%v spawned=%v; want neither", *ran, *spawned)
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Fatalf("ran=%v spawned=%v; want neither", calls.argv, calls.spawned)
+	}
+}
+
+// A signal alone does not stop a supervised daemon: the loaded job respawns
+// what it manages. Stop must go through the supervisor so the job is left
+// unloaded, and must not signal the process as well (gt-sq9e).
+func TestRunDaemonStop_StopsTheJobThroughTheSupervisor(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	// Holding the lock when stop starts, free once the job has taken the
+	// process down.
+	checks := 0
+	daemonIsRunning = func(string) (bool, int, error) {
+		checks++
+		return checks == 1, 4242, nil
+	}
+	chdirTown(t, town)
+
+	if err := runDaemonStop(nil, nil); err != nil {
+		t.Fatalf("runDaemonStop: %v", err)
+	}
+	if got := calls.joined(); got != "launchctl bootout gui/"+strconv.Itoa(os.Getuid())+"/com.gastown.daemon" {
+		t.Fatalf("supervisor command = %q, want launchctl bootout gui/<uid>/com.gastown.daemon", got)
+	}
+	if calls.stopped {
+		t.Fatal("signalled the process although the supervisor job took it down")
+	}
+}
+
+// With the job unloaded, there is no supervisor to stop: the daemon is the
+// only thing left to signal, and nothing should be run against launchd.
+func TestRunDaemonStop_UnloadedJobSignalsTheDaemon(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubSupervisor(t, "darwin", plist, templates.SupervisorState{Loaded: false, LastExit: -1}, nil)
+	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	chdirTown(t, town)
+
+	if err := runDaemonStop(nil, nil); err != nil {
+		t.Fatalf("runDaemonStop: %v", err)
+	}
+	if len(calls.argv) != 0 {
+		t.Fatalf("ran=%v, want no supervisor command for an unloaded job", calls.argv)
+	}
+	if !calls.stopped {
+		t.Fatal("did not signal the daemon holding the lock")
+	}
+}
+
+// A supervisor that cannot stop the job must not leave the daemon running:
+// the signal still goes out, so a stop is never a no-op.
+func TestRunDaemonStop_SupervisorFailureFallsBackToASignal(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("Boot-out failed: 3: No such process"))
+	daemonIsRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	chdirTown(t, town)
+
+	if err := runDaemonStop(nil, nil); err != nil {
+		t.Fatalf("runDaemonStop: %v", err)
+	}
+	if len(calls.argv) == 0 {
+		t.Fatal("did not try the supervisor first")
+	}
+	if !calls.stopped {
+		t.Fatal("did not signal the daemon after the supervisor could not stop the job")
+	}
+}
+
+// chdirTown points the command's workspace lookup at a town root of its own.
+func chdirTown(t *testing.T, town string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(town)
+}
+
+// stubDaemonRunning answers the daemon's running check with pid; 0 means the
+// lock is free.
+func stubDaemonRunning(t *testing.T, pid int) {
+	t.Helper()
+	prev := daemonIsRunning
+	t.Cleanup(func() { daemonIsRunning = prev })
+	daemonIsRunning = func(string) (bool, int, error) { return pid != 0, pid, nil }
+}
+
+// stubSupervisorState answers the live read of the supervisor job with st.
+func stubSupervisorState(t *testing.T, st templates.SupervisorState) {
+	t.Helper()
+	prev := supervisorStateFor
+	t.Cleanup(func() { supervisorStateFor = prev })
+	supervisorStateFor = func(kind string) templates.SupervisorState {
+		s := st
+		s.Kind = kind
+		return s
+	}
+}
+
+// writeHostSupervisorFile installs the plist / unit this host would use, in an
+// isolated HOME, naming town as its WorkingDirectory. The resolved path is a
+// real per-user one, so moving HOME first is what keeps a test from writing at
+// the operator's own.
+func writeHostSupervisorFile(t *testing.T, town string) {
+	t.Helper()
+	home := t.TempDir()
+	dataHome := filepath.Join(home, "data")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	path, kind := templates.SupervisorFilePath()
+	if path == "" {
+		t.Skip("no supervisor on this host")
+	}
+	if !strings.HasPrefix(path, home) && !strings.HasPrefix(path, dataHome) {
+		t.Fatalf("supervisor file %s is outside the isolated HOME %s", path, home)
+	}
+	var body string
+	if kind == "launchd" {
+		body = "<plist><dict><key>WorkingDirectory</key>\n<string>" + town + "</string></dict></plist>"
+	} else {
+		body = "[Service]\nWorkingDirectory=" + town + "\n"
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gt-sq9e: a daemon holding the lock while the provisioned job crash-loops
+// behind it must not read as supervised. The job has no process of its own
+// between crashes, which is what the line has to name.
+func TestRunDaemonStatus_NamesACrashLoopingSupervisor(t *testing.T) {
+	town := t.TempDir()
+	writeHostSupervisorFile(t, town)
+	chdirTown(t, town)
+	stubDaemonRunning(t, 76426)
+	stubSupervisorState(t, templates.SupervisorState{Loaded: true, Runs: 58, LastExit: 1})
+
+	kind := templates.SupervisorStatus()
+	if kind == "none" {
+		t.Fatal("the supervisor file just written is not being seen")
+	}
+	out := captureStdout(t, func() { _ = runDaemonStatus(nil, nil) })
+
+	want := "Supervised: " + kind + " (DETACHED - " + kind + " is running no daemon while PID 76426 holds the lock, runs=58, last exit code=1)"
+	if !strings.Contains(out, want) {
+		t.Errorf("status output = %q, want it to contain %q", out, want)
+	}
+}
+
+// The daemon being the supervisor's own process is the one state that reads
+// as plain "Supervised: launchd".
+func TestRunDaemonStatus_PlainKindWhenTheJobRunsTheDaemon(t *testing.T) {
+	town := t.TempDir()
+	writeHostSupervisorFile(t, town)
+	chdirTown(t, town)
+	stubDaemonRunning(t, 64604)
+	stubSupervisorState(t, templates.SupervisorState{Loaded: true, PID: 64604, Runs: 53, LastExit: 0})
+
+	kind := templates.SupervisorStatus()
+	if kind == "none" {
+		t.Fatal("the supervisor file just written is not being seen")
+	}
+	out := captureStdout(t, func() { _ = runDaemonStatus(nil, nil) })
+
+	if !strings.Contains(out, "Supervised: "+kind+"\n") {
+		t.Errorf("status output = %q, want a bare 'Supervised: %s'", out, kind)
+	}
+}
+
+// With no daemon running and the job loaded but spawning nothing, the state
+// belongs in the not-running branch too: that is where an operator looks
+// after a failed restart.
+func TestRunDaemonStatus_NamesAFailingSupervisorWithNoDaemon(t *testing.T) {
+	town := t.TempDir()
+	writeHostSupervisorFile(t, town)
+	chdirTown(t, town)
+	stubDaemonRunning(t, 0)
+	stubSupervisorState(t, templates.SupervisorState{Loaded: true, Runs: 58, LastExit: 1})
+
+	kind := templates.SupervisorStatus()
+	if kind == "none" {
+		t.Fatal("the supervisor file just written is not being seen")
+	}
+	out := captureStdout(t, func() { _ = runDaemonStatus(nil, nil) })
+
+	want := "Supervised: " + kind + " (FAILING - loaded, running no daemon, runs=58, last exit code=1)"
+	if !strings.Contains(out, want) {
+		t.Errorf("status output = %q, want it to contain %q", out, want)
 	}
 }

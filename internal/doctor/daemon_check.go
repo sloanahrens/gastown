@@ -39,8 +39,6 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	supervised := templates.SupervisorStatus()
-
 	if running {
 		// Get more info about daemon state
 		state, err := daemon.LoadState(ctx.TownRoot)
@@ -52,7 +50,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 				details = append(details, "Heartbeats: "+string(rune(state.HeartbeatCount)))
 			}
 		}
-		details = append(details, "Supervised: "+supervised)
+		details = append(details, "Supervised: "+templates.SupervisorStatusLine(ctx.TownRoot, pid, templates.SupervisorJobState))
 
 		return &CheckResult{
 			Name:    c.Name(),
@@ -66,7 +64,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: "Daemon is not running",
-		Details: []string{"Supervised: " + supervised},
+		Details: []string{"Supervised: " + templates.SupervisorStatusLine(ctx.TownRoot, 0, templates.SupervisorJobState)},
 		FixHint: "Run 'gt daemon start' or 'gt doctor --fix'",
 	}
 }

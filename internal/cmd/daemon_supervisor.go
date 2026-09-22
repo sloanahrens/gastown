@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -23,11 +22,20 @@ import (
 type daemonSupervisor struct {
 	name  string   // "launchd" / "systemd", for messages
 	start []string // argv that (re)starts the daemon through it
-	load  string   // how to load the job when start says it is not loaded
+	// stop is argv that stops the daemon through it and leaves the job
+	// unloaded, so the daemon stays down: signaling the process alone leaves
+	// a KeepAlive job to respawn it (gt-sq9e).
+	stop []string
+	// bootstrap is argv that loads the job when the service manager does not
+	// know it — the state a stop leaves behind on macOS, where bootout
+	// unloads and kickstart then cannot reach the job.
+	bootstrap []string
+	load      string // how to load the job when start says it is not loaded
 }
 
-// Seams for tests: supervisor detection, running its command, the direct
-// spawn, and the running check. Production values are the real ones.
+// Seams for tests: supervisor detection, running its command, reading the
+// job's live state, the direct spawn, the stop and the running check.
+// Production values are the real ones.
 var (
 	supervisorPlistPath = templates.LaunchdPlistPath
 	supervisorUnitPath  = templates.SystemdUnitPath
@@ -38,9 +46,11 @@ var (
 		}
 		return nil
 	}
-	spawnDaemonDirect = spawnDaemonProcess
-	daemonIsRunning   = daemon.IsRunning
-	supervisorGOOS    = runtime.GOOS
+	supervisorStateFor templates.SupervisorReader = templates.SupervisorJobState
+	spawnDaemonDirect                             = spawnDaemonProcess
+	stopDaemonDirect                              = daemon.StopDaemon
+	daemonIsRunning                               = daemon.IsRunning
+	supervisorGOOS                                = runtime.GOOS
 )
 
 // detectDaemonSupervisor reports the supervisor provisioned FOR townRoot, or
@@ -60,95 +70,35 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 			// provisioned; same reading as templates.SupervisorStatus.
 			return nil, nil
 		}
-		isFor, err := supervisorFileIsFor(p, townRoot)
+		isFor, err := templates.SupervisorFileIsFor(p, townRoot)
 		if err != nil || !isFor {
 			return nil, err
 		}
 		return &daemonSupervisor{
-			name:  "launchd",
-			start: []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/com.gastown.daemon", os.Getuid())},
-			load:  fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), p),
+			name:      "launchd",
+			start:     []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), templates.LaunchdLabel)},
+			stop:      []string{"launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), templates.LaunchdLabel)},
+			bootstrap: []string{"launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), p},
+			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), p),
 		}, nil
 	case "linux":
 		p, err := supervisorUnitPath()
 		if err != nil {
 			return nil, nil
 		}
-		isFor, err := supervisorFileIsFor(p, townRoot)
+		isFor, err := templates.SupervisorFileIsFor(p, townRoot)
 		if err != nil || !isFor {
 			return nil, err
 		}
 		return &daemonSupervisor{
-			name:  "systemd",
-			start: []string{"systemctl", "--user", "restart", "gastown-daemon.service"},
-			load:  "systemctl --user daemon-reload && systemctl --user enable --now gastown-daemon.service",
+			name:      "systemd",
+			start:     []string{"systemctl", "--user", "restart", templates.SystemdUnit},
+			stop:      []string{"systemctl", "--user", "stop", templates.SystemdUnit},
+			bootstrap: []string{"systemctl", "--user", "enable", "--now", templates.SystemdUnit},
+			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
 		}, nil
 	}
 	return nil, nil
-}
-
-// supervisorFileIsFor reports whether the plist / unit at path names
-// townRoot as its WorkingDirectory (both templates render it as
-// "<string>{{.TownRoot}}</string>" / "WorkingDirectory={{.TownRoot}}"). An
-// absent file is (false, nil); a present but unreadable one is an error.
-func supervisorFileIsFor(path, townRoot string) (bool, error) {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("checking supervisor file %s: %w", path, err)
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // fixed per-user path from templates
-	if err != nil {
-		return false, fmt.Errorf("reading supervisor file %s: %w", path, err)
-	}
-	// The town may be reached by a different spelling than the one the
-	// file was rendered with (a symlinked path, GT_TOWN_ROOT vs a cwd walk;
-	// /tmp vs /private/tmp on macOS), and a miss here means a hand spawn
-	// beside a loaded job. Compare the recorded WorkingDirectory as a path,
-	// symlinks resolved, not as a string.
-	recorded := supervisorWorkingDirectory(string(data))
-	if recorded == "" {
-		// Present but not in the shape the templates render (hand-edited,
-		// older format): still a provisioned supervisor as far as launchd
-		// or systemd is concerned, so refusing beats a hand spawn beside it.
-		return false, fmt.Errorf("supervisor file %s has no WorkingDirectory; cannot tell which town it serves — fix or remove it", path)
-	}
-	return samePath(recorded, townRoot), nil
-}
-
-// supervisorWorkingDirectory pulls the WorkingDirectory out of a rendered
-// plist ("<key>WorkingDirectory</key>\n<string>X</string>") or unit
-// ("WorkingDirectory=X"); "" when neither form is present.
-func supervisorWorkingDirectory(body string) string {
-	if i := strings.Index(body, "<key>WorkingDirectory</key>"); i >= 0 {
-		rest := body[i:]
-		if a := strings.Index(rest, "<string>"); a >= 0 {
-			if b := strings.Index(rest[a:], "</string>"); b >= 0 {
-				return strings.TrimSpace(rest[a+len("<string>") : a+b])
-			}
-		}
-		return ""
-	}
-	for _, line := range strings.Split(body, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "WorkingDirectory="); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
-
-// samePath reports whether two paths name the same directory once cleaned
-// and with symlinks resolved; a path that cannot be resolved compares by
-// its cleaned spelling.
-func samePath(a, b string) bool {
-	canon := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Clean(r)
-		}
-		return filepath.Clean(p)
-	}
-	return canon(a) == canon(b)
 }
 
 // startDaemon starts the daemon for townRoot: through the provisioned
@@ -172,7 +122,17 @@ func startDaemon(townRoot string) (via string, pid int, err error) {
 		return "", 0, err
 	}
 	if sup != nil {
-		if runErr := supervisorRun(sup.start); runErr != nil {
+		runErr := supervisorRun(sup.start)
+		if runErr != nil {
+			// kickstart / restart reach only a job the service manager knows.
+			// One that gt daemon stop unloaded is bootstrapped instead, so that
+			// a stop-then-start pair leaves a supervised daemon rather than the
+			// hand spawn that recreates the crash loop (gt-3jrm).
+			if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
+				runErr = supervisorRun(sup.bootstrap)
+			}
+		}
+		if runErr != nil {
 			// The command may have failed after starting the daemon.
 			if pid, err := waitForDaemon(townRoot); err == nil {
 				return sup.name, pid, nil
