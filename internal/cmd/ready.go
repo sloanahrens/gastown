@@ -123,7 +123,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			defer wg.Done()
 			townBeadsPath := beads.GetTownBeadsPath(townRoot)
 			townBeads := beads.New(townBeadsPath)
-			issues, err := townBeads.Ready()
+			issues, err := townBeads.ReadyDispatchable()
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -158,7 +158,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			// Use rig root path where rig-level beads are stored
 			// BeadsPath returns rig root; redirect system handles mayor/rig routing
 			rigBeads := beads.New(r.BeadsPath())
-			issues, err := rigBeads.Ready()
+			issues, err := rigBeads.ReadyDispatchable()
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -559,6 +559,14 @@ func readyIssueRoutesToSource(townRoot, source, issueID string) bool {
 // button that cannot work. Membership is beads.IsNonDispatchableBead, shared
 // with `gt daemon dispatch-check`, so the board and the nudge it triggers
 // cannot disagree about what work is.
+//
+// This is a backstop, not the primary enforcement: both callers already
+// fetch through Beads.ReadyDispatchable(), which asks bd to exclude the same
+// label/type families server-side before it ever builds the response, so
+// this loop does not depend on labels surviving into what the caller
+// received. It still matters on its own — the title-prefix families
+// (Compaction Report, HANDOFF, the merge-slot title) have no label at all,
+// so bd's --exclude-label/--exclude-type cannot catch them.
 func filterNonDispatchableBeads(issues []*beads.Issue) []*beads.Issue {
 	filtered := make([]*beads.Issue, 0, len(issues))
 	for _, issue := range issues {

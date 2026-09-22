@@ -2562,7 +2562,14 @@ func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 		// every row it shows, so a row no polecat can take is a button that
 		// cannot work — the same rule, and the same definition, as the Ready
 		// lists (gt-b9wq).
-		if beads.IsNonDispatchableBead(&beads.Issue{Type: bead.Type, Labels: bead.Labels, Title: bead.Title}) {
+		//
+		// gt:keep and gt:standing-orders are excepted: ProtectedIssueLabel
+		// groups them with gt:role/gt:rig for a different question (what
+		// automated completion must not auto-close), but a kept or
+		// standing-orders task is still ordinary work a polecat can sling —
+		// the label marks it as protected from cleanup, not as internal
+		// bookkeeping the way a mail or merge-slot bead is.
+		if isWorkPanelNonDispatchable(bead.Type, bead.Labels, bead.Title) {
 			continue
 		}
 
@@ -2615,6 +2622,20 @@ func (f *LiveConvoyFetcher) FetchIssues() ([]IssueRow, error) {
 	})
 
 	return rows, nil
+}
+
+// isWorkPanelNonDispatchable reports whether an issue should be hidden from
+// the Work panel: the same bookkeeping families the Ready lists hide, minus
+// gt:keep and gt:standing-orders, which mark a bead protected from
+// auto-close rather than internal — a bead wearing one can still be real
+// work a polecat slings (gt-b9wq review).
+func isWorkPanelNonDispatchable(issueType string, labels []string, title string) bool {
+	for _, label := range labels {
+		if label == "gt:keep" || label == "gt:standing-orders" {
+			return false
+		}
+	}
+	return beads.IsNonDispatchableBead(&beads.Issue{Type: issueType, Labels: labels, Title: title})
 }
 
 // FetchActivity returns recent activity from the event log.

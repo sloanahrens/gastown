@@ -1810,6 +1810,59 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return issues, nil
 }
 
+// ReadyDispatchable returns ready issues with the town's bookkeeping
+// families (mail, escalations, identity, merge queue, event records)
+// excluded server-side via bd's own --exclude-label/--exclude-type filters.
+//
+// A caller that instead fetches with Ready() and filters client-side with
+// IsNonDispatchableBead depends on labels surviving into whatever response
+// it receives — true for the in-process store, not guaranteed for every bd
+// CLI release's `ready --json` shape. Passing the same exclusion to bd
+// itself removes that dependency: the family is gone before bd ever builds
+// the response (gt-b9wq).
+//
+// On a bd build old enough to reject the exclude flags, this falls back to
+// the unfiltered Ready() result; the caller's own IsNonDispatchableBead pass
+// remains the backstop in that case, same as before this method existed.
+func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
+	if b.store != nil {
+		return b.storeReadyWithFilter(beadsdk.WorkFilter{
+			ExcludeLabels: nonDispatchableIssueLabels,
+			ExcludeTypes:  nonDispatchableIssueTypesSDK(),
+		})
+	}
+
+	args := []string{
+		"ready", "--json",
+		"--exclude-label", strings.Join(nonDispatchableIssueLabels, ","),
+		"--exclude-type", strings.Join(nonDispatchableIssueTypes, ","),
+	}
+	out, err := b.run(args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown flag") {
+			return b.Ready()
+		}
+		return nil, err
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --exclude-label/--exclude-type output: %w", err)
+	}
+
+	return issues, nil
+}
+
+// nonDispatchableIssueTypesSDK converts nonDispatchableIssueTypes to the SDK's
+// IssueType for WorkFilter.ExcludeTypes.
+func nonDispatchableIssueTypesSDK() []beadsdk.IssueType {
+	types := make([]beadsdk.IssueType, len(nonDispatchableIssueTypes))
+	for i, t := range nonDispatchableIssueTypes {
+		types[i] = beadsdk.IssueType(t)
+	}
+	return types
+}
+
 // ReadyForMol returns ready steps within a specific molecule.
 // Delegates to bd ready --mol which uses beads' canonical blocking semantics
 // (blocked_issues_cache), handling all blocking types, transitive propagation,

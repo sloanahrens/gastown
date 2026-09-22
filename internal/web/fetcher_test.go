@@ -2551,3 +2551,37 @@ func TestRigOpLabelsKeepsAnswersThatBeatTheDeadline(t *testing.T) {
 		t.Errorf("labels = %v, want hm parked", got)
 	}
 }
+
+// TestIsWorkPanelNonDispatchable is the gt-b9wq rework's regression test for
+// the om-editorial finding: folding the Work panel's filter into the full
+// beads.IsNonDispatchableBead predicate silently started hiding gt:keep and
+// gt:standing-orders beads too. Those mark a bead protected from auto-close
+// (see beads.ProtectedIssueLabel), not internal bookkeeping the way mail or
+// a merge slot is — a kept or standing-orders task is still real work a
+// polecat can sling, so the Work panel must keep offering it.
+func TestIsWorkPanelNonDispatchable(t *testing.T) {
+	tests := []struct {
+		name   string
+		typ    string
+		labels []string
+		title  string
+		want   bool
+	}{
+		{name: "ordinary task stays", typ: "task", want: false},
+		{name: "mail is hidden", typ: "task", labels: []string{"gt:message"}, want: true},
+		{name: "merge-request type is hidden", typ: "merge-request", want: true},
+		{name: "gt:keep stays", typ: "task", labels: []string{"gt:keep"}, want: false},
+		{name: "gt:standing-orders stays", typ: "task", labels: []string{"gt:standing-orders"}, want: false},
+		{name: "gt:role is still hidden", typ: "task", labels: []string{"gt:role"}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isWorkPanelNonDispatchable(tc.typ, tc.labels, tc.title)
+			if got != tc.want {
+				t.Errorf("isWorkPanelNonDispatchable(%q, %v, %q) = %v, want %v",
+					tc.typ, tc.labels, tc.title, got, tc.want)
+			}
+		})
+	}
+}
