@@ -24,6 +24,7 @@ type SlotReuseInput struct {
 	UnpushedCommits        int
 	GitCheckFailed         bool
 	GitCheckFailedReason   string
+	GitStateSource         string
 	ActiveMR               string
 	ActiveMRBlocker        string
 	ActiveMRSourceTerminal bool
@@ -66,6 +67,7 @@ func DecideSlotReuse(in SlotReuseInput) SlotReuseDecision {
 		UnpushedCommits:        in.UnpushedCommits,
 		GitCheckFailed:         in.GitCheckFailed,
 		GitCheckFailedReason:   in.GitCheckFailedReason,
+		GitStateSource:         in.GitStateSource,
 		ActiveMR:               in.ActiveMR,
 		ActiveMRBlocker:        in.ActiveMRBlocker,
 		ActiveMRSourceTerminal: in.ActiveMRSourceTerminal,

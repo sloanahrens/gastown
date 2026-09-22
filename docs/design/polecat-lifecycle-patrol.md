@@ -136,9 +136,11 @@ Polecat calls gt done
          ▼
 Witness receives POLECAT_DONE
     │
-    ├── Checks cleanup_status (ZFC: trust polecat self-report)
-    ├── If clean → sends MERGE_READY to refinery
-    ├── If dirty → creates cleanup wisp (cannot auto-nuke)
+    ├── Probes the worktree live (dirty / stash / unpushed) — discover-first
+    ├── Reads cleanup_status as a recorded hint; it can only add blockers
+    ├── If live git is clean → sends MERGE_READY to refinery
+    ├── If live git is dirty → creates cleanup wisp (cannot auto-nuke)
+    ├── If the probe failed → fails closed: cleanup wisp, git_state=unknown
     └── Nudges refinery session
          │
          ▼
@@ -172,6 +174,47 @@ Each stage can fail independently. Recovery is handled by the next patrol cycle:
 | Merge conflict | Refinery `doMerge()` detects | Creates conflict resolution task, blocks MR |
 | `MERGED` mail lost | Refinery closed the bead; witness patrol finds closed bead with live session | `DetectZombiePolecats()` bead-closed-still-running |
 | Nuke fails | Session still running after kill attempt | Next patrol detects zombie, retries nuke |
+
+### 3.5 Reuse Verdicts Are Discovered, Not Recalled
+
+`cleanup_status` is written once, by `gt done`, onto the polecat's agent bead
+(`cmd/done.go`). It is a **recorded hint**: a report about a moment in the past,
+made by the agent that was about to stop existing. Nothing re-derives it on
+read, and nothing checks it before it is trusted.
+
+That self-report was the *only* input to the reuse verdict for the three
+git-derived statuses (`has_uncommitted`, `has_stash`, `has_unpushed`). On
+2026-09-10 01:14 a polecat's bead read `has_stash` / `NEEDS_RECOVERY` ten
+minutes after the stash had been dropped — a verified 0 stashes and 0 dirty
+files — and the recorded value was believed, so the slot stayed blocked.
+
+The verdict is now **discover-first** (`internal/polecat/workstate.go`,
+`DecideWorkstate` / `RecordedCleanupBlocks`):
+
+- **Live git is the primary source.** Every evaluation probes the worktree for
+  the three facts the recorded status was *about* — dirty tree, stash count,
+  unpushed commits (`polecat.ProbeLiveGitState`; the Manager's reuse gate
+  measures the same three inline and additionally credits MR target refs).
+  The recorded status is superseded whenever such a probe answered, because it
+  can only ever restate what the probe just measured.
+- **The recorded hint stays, tagged `recorded`.** It is not deleted: it is
+  reported with its provenance (`cleanup_status_source: recorded`,
+  `git_state_source: live|unknown|recorded`) so a reader can tell a hint from a
+  measurement.
+- **The demotion is one-directional.** The recorded value can make the verdict
+  *stricter*, never *cleaner*: it still blocks when no probe ran, a recorded
+  `CleanClean` cannot rescue a dirty live worktree, and a missing or `unknown`
+  recorded status keeps failing closed (it is the absence of an answer, not an
+  observation) unless the narrow partial-spawn / gone-worktree hatches resolve
+  it (`ResolveIgnoreCleanupStatus`).
+- **A failed probe fails closed.** `git_state_source: unknown` with the failure
+  reason, verdict `NEEDS_RECOVERY`. Failing open on an unreadable worktree
+  would authorize destructive cleanup on work nobody managed to look at.
+- **The probe measures the polecat's own worktree or nothing.** A path that is
+  not itself a git worktree root (a leftover directory from an incomplete
+  nuke) is `unknown`, never "live": git resolves upward, so probing it naively
+  would report the *rig root's* branch, dirt, and stashes as the polecat's — a
+  confident answer about somebody else's tree (`polecat.IsWorktreeRoot`).
 
 ---
 

@@ -1021,6 +1021,9 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	var targetRefs []string
 	if branch, err := g.CurrentBranch(); err == nil {
 		input.Branch = branch
+		// claude-41j.1 D9: label this as a measured answer so the reuse verdict
+		// re-derives from it and demotes the recorded cleanup_status to a hint.
+		input.GitStateSource = polecat.GitStateSourceLive
 		var targetRefLookupFailed bool
 		targetRefs, targetRefLookupFailed = witnessRecoveryTargetRefs(bd, fields, branch)
 		if targetRefLookupFailed {
@@ -1032,14 +1035,17 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 			input.UnpushedCommits = status.UnpushedCommits
 		} else {
 			input.GitCheckFailed = true
+			input.GitStateSource = polecat.GitStateSourceUnknown
 		}
 		if preservation, err := g.BranchPreservationStatus(branch, "origin", targetRefs); err == nil {
 			input.UnpushedCommits = preservation.UnpreservedPatchCount
 		} else {
 			input.GitCheckFailed = true
+			input.GitStateSource = polecat.GitStateSourceUnknown
 		}
 	} else {
 		input.GitCheckFailed = true
+		input.GitStateSource = polecat.GitStateSourceUnknown
 	}
 	// gt-hsg: gitSafe is passed straight into AssessActiveMR below and
 	// nowhere else — DecideSlotReuse re-derives it, and IgnoreCleanupStatus,

@@ -10,6 +10,39 @@ const (
 	WorkstateVerdictNeedsMQSubmit = "NEEDS_MQ_SUBMIT"
 )
 
+// CleanupStatusSourceRecorded is the provenance tag for a cleanup_status
+// value. Every cleanup_status in the system is a self-report written by
+// `gt done` onto the polecat's agent bead (cmd/done.go selfReportCleanupStatus)
+// — a recorded hint about a moment in the past, never a live measurement.
+// claude-41j.1 D9 retires the "ZFC: trust polecat self-report" carve-out
+// (docs/design/polecat-lifecycle-patrol.md) that treated it as authoritative;
+// consumers must show which side of that line a field came from, and the tag
+// exists so the demotion is visible at the API boundary instead of only in a
+// doc comment.
+const CleanupStatusSourceRecorded = "recorded"
+
+// GitStateSource labels where a WorkstateInput's git facts came from. The
+// reuse verdict re-derives from live git on every evaluation, so a consumer
+// must be able to tell a measured answer from a recalled one.
+const (
+	// GitStateSourceLive means a live probe ran and answered: GitDirty,
+	// StashCount and UnpushedCommits are that probe's measurement, and they
+	// supersede the recorded cleanup_status for git-derived verdicts.
+	GitStateSourceLive = "live"
+
+	// GitStateSourceUnknown means a live probe was attempted and failed.
+	// Git facts are unknown and the verdict fails closed.
+	GitStateSourceUnknown = "unknown"
+
+	// GitStateSourceRecorded means no live probe was attempted at all, so the
+	// recorded cleanup_status stays authoritative for git-derived verdicts.
+	// This is the zero value's meaning: a caller that has no worktree to
+	// probe (a counts-only capacity projection, a bead-only pool check) keeps
+	// failing closed rather than silently acquiring a cleaner verdict it
+	// never measured.
+	GitStateSourceRecorded = "recorded"
+)
+
 // WorkstateInput contains the lifecycle, git, and merge-queue facts needed to
 // classify a polecat consistently across list, recovery, witness, and capacity.
 type WorkstateInput struct {
@@ -27,6 +60,7 @@ type WorkstateInput struct {
 	UnpushedCommits                int
 	GitCheckFailed                 bool
 	GitCheckFailedReason           string
+	GitStateSource                 string
 	ActiveWorkBlocker              string
 	ActiveWorkCountsTowardCapacity bool
 	ActiveMR                       string
@@ -53,10 +87,81 @@ type WorkstateDisposition struct {
 	CountsTowardCapacity bool     `json:"counts_toward_capacity"`
 	ReuseStatus          string   `json:"reuse_status,omitempty"`
 	Blockers             []string `json:"blockers,omitempty"`
+	// CleanupStatusSource is the provenance of the recorded cleanup_status
+	// hint this disposition was decided against — always "recorded", because
+	// there is no live cleanup_status (see CleanupStatusSourceRecorded).
+	CleanupStatusSource string `json:"cleanup_status_source,omitempty"`
+	// GitStateSource says whether the verdict's git facts were measured
+	// ("live"), failed to be measured ("unknown"), or never measured at all
+	// ("recorded" — the recorded hint stood in).
+	GitStateSource string `json:"git_state_source,omitempty"`
+	// GitStateReason explains an "unknown" GitStateSource.
+	GitStateReason string `json:"git_state_reason,omitempty"`
 }
 
 // DecideWorkstate returns the canonical disposition for a polecat.
 func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
+	return labelFactSources(in, decideWorkstate(in))
+}
+
+// labelFactSources stamps each decided disposition with the provenance of the
+// facts behind it, so every return path out of decideWorkstate reports where
+// its verdict came from without repeating the labeling eight times.
+func labelFactSources(in WorkstateInput, d WorkstateDisposition) WorkstateDisposition {
+	d.CleanupStatusSource = CleanupStatusSourceRecorded
+	switch in.GitStateSource {
+	case GitStateSourceLive:
+		d.GitStateSource = GitStateSourceLive
+	case GitStateSourceUnknown:
+		d.GitStateSource = GitStateSourceUnknown
+		d.GitStateReason = in.GitCheckFailedReason
+		if d.GitStateReason == "" {
+			d.GitStateReason = "git_state=unknown"
+		}
+	default:
+		d.GitStateSource = GitStateSourceRecorded
+	}
+	return d
+}
+
+// RecordedCleanupBlocks reports whether a recorded cleanup_status still
+// contributes a blocker, given where the input's git facts came from.
+//
+// claude-41j.1 D9: reuse eligibility re-derives from live git on every
+// evaluation, and the recorded self-report is demoted to a hint.
+// has_uncommitted/has_stash/has_unpushed are recorded observations of exactly
+// the three facts a live probe measures (GitDirty, StashCount, UnpushedCommits),
+// so when such a probe answered (GitStateSourceLive) its answer supersedes the
+// record: a stale has_stash cannot block a worktree that is demonstrably clean.
+// On 2026-09-10 01:14 the recorded value reported has_stash / NEEDS_RECOVERY ten
+// minutes after the stash had been dropped, with a verified 0 stashes and a
+// clean tree — the self-report was simply wrong, and it was the only thing
+// consulted.
+//
+// The demotion is one-directional and fails closed:
+//
+//   - no probe attempt (GitStateSourceRecorded) → the record still blocks,
+//     because nothing has replaced it;
+//   - a failed probe (GitStateSourceUnknown) → the record still blocks, on top
+//     of the git-check-failed blocker the classifier already raises;
+//   - missing/unknown recorded values are the *absence* of an answer rather
+//     than an observation, so they keep blocking unless a caller's narrow
+//     escape hatch (partial spawn, structurally gone worktree) resolves them
+//     through ResolveIgnoreCleanupStatus;
+//   - a recorded status never makes a verdict cleaner than live git: with the
+//     probe answering dirty/stashed/unpushed the verdict is NEEDS_RECOVERY no
+//     matter what the record claims (CleanupClean included).
+func RecordedCleanupBlocks(status CleanupStatus, gitStateSource string) bool {
+	if status.IsSafe() {
+		return false
+	}
+	if status.RequiresRecovery() && gitStateSource == GitStateSourceLive {
+		return false
+	}
+	return true
+}
+
+func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.ActiveMRBlocker != "" && !in.PushFailed && !in.MRFailed && in.State == StateDone {
 		return WorkstateDisposition{
 			Verdict:     WorkstateVerdictPendingMR,
@@ -113,7 +218,7 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.ActiveWorkBlocker != "" {
 		block("active-work", in.ActiveWorkBlocker, in.ActiveWorkCountsTowardCapacity)
 	}
-	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
+	if !in.IgnoreCleanupStatus && RecordedCleanupBlocks(in.CleanupStatus, in.GitStateSource) {
 		reason := "cleanup-" + string(in.CleanupStatus)
 		blocker := "cleanup_status=" + string(in.CleanupStatus)
 		if in.CleanupStatus == "" {
@@ -212,6 +317,13 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 // cleanup_status is older than the direct predicates proving no work is at risk.
 // The status remains unsafe globally; callers must opt into this reconciliation
 // path only after gathering live git, hook, work, and active-MR facts.
+//
+// claude-41j.1 D9: for the reuse verdict this is no longer the reconciliation
+// path — RecordedCleanupBlocks supersedes a git-derived recorded status on
+// live-git evidence alone, without requiring a terminal work ref. What remains
+// here is the *stricter* destructive-op gate (internal/cmd/polecat_helpers.go
+// checkPolecatSafety, which sits in front of nuke), where demanding terminal
+// work and a safe hook/active-MR before proceeding is exactly right.
 func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
 		return false
@@ -226,6 +338,12 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 
 // ResolveIgnoreCleanupStatus is the single fail-closed gate for whether a
 // non-safe CleanupStatus may be ignored when assembling a WorkstateInput.
+//
+// Since claude-41j.1 D9 the gate's live work is the missing/unknown case:
+// git-derived statuses (uncommitted/stash/unpushed) are superseded outright by
+// a live git probe through RecordedCleanupBlocks, so the CanIgnoreStaleCleanupStatus
+// fallback below is retained for direct callers and for statuses the demotion
+// does not reach, not because the classifier still needs it.
 //
 // It wraps CanIgnoreStaleCleanupStatus with two narrow extensions, each
 // gated by the SAME hook/active-MR safety facts required for every other
@@ -272,6 +390,11 @@ func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpaw
 // anywhere else in production code reintroduces the duplicated,
 // independently-drifting input-building layer responsible for gt-7kr,
 // gt-14a, and gt-hsg (see TestNoWorkstateInputLiteralsOutsideConstructor).
+//
+// GitStateSource must be set by any caller that ran a live git probe
+// (GitStateSourceLive, or GitStateSourceUnknown if the probe failed). Leaving
+// it unset is a claim of its own — "no live probe was attempted" — and keeps
+// the recorded cleanup_status authoritative for git-derived verdicts.
 type WorkstateFacts struct {
 	State                          State
 	HookBead                       string
@@ -289,6 +412,7 @@ type WorkstateFacts struct {
 	UnpushedCommits                int
 	GitCheckFailed                 bool
 	GitCheckFailedReason           string
+	GitStateSource                 string
 	ActiveWorkBlocker              string
 	ActiveWorkCountsTowardCapacity bool
 	ActiveMR                       string
@@ -325,6 +449,7 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		UnpushedCommits:                f.UnpushedCommits,
 		GitCheckFailed:                 f.GitCheckFailed,
 		GitCheckFailedReason:           f.GitCheckFailedReason,
+		GitStateSource:                 f.GitStateSource,
 		ActiveWorkBlocker:              f.ActiveWorkBlocker,
 		ActiveWorkCountsTowardCapacity: f.ActiveWorkCountsTowardCapacity,
 		ActiveMR:                       f.ActiveMR,

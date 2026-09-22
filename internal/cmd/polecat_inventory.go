@@ -44,6 +44,13 @@ type polecatInventoryItem struct {
 	SessionRunning bool
 	SessionName    string
 	Disposition    polecat.WorkstateDisposition
+	// CleanupStatusSource/GitStateSource/GitStateReason are the provenance of
+	// the two cleanup inputs above, copied from Disposition: cleanup_status is
+	// always a recorded hint, while the git facts are live whenever a probe ran
+	// (see polecat.CleanupStatusSourceRecorded / polecat.GitStateSource*).
+	CleanupStatusSource string
+	GitStateSource      string
+	GitStateReason      string
 }
 
 // polecatInventoryEnv carries the per-rig facts the list path has and the
@@ -53,6 +60,17 @@ type polecatInventoryItem struct {
 type polecatInventoryEnv struct {
 	MRs   polecatMRIndex
 	Spawn polecatSpawnFacts
+	// WorktreePath is the polecat's git worktree, probed live so the reuse
+	// verdict re-derives from measured git state instead of the recorded
+	// cleanup_status hint (claude-41j.1 D9). Empty means "no live probe" — the
+	// recorded hint stays authoritative, which is what the counts-only capacity
+	// projection (applyAgentFieldsToCapacitySnapshot) wants: it reports counts,
+	// not reuse decisions, so it must not pay a git subprocess per polecat on
+	// the admission path. Falling back to the recorded hint there errs *toward*
+	// recovery-blocked, i.e. it under-reports free slots rather than
+	// over-admitting; the actual reuse gate (Manager.ReuseDecisionForPolecat)
+	// does probe.
+	WorktreePath string
 }
 
 // polecatSpawnFacts dates the agent bead's most recent write. SpawnGrace
@@ -189,6 +207,22 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		facts.ActiveMR = item.ActiveMR
 	}
 
+	// claude-41j.1 D9: measure the worktree before deciding anything that
+	// depends on git, so the verdict (and the review-needed rewrite below)
+	// re-derives from live state. The recorded cleanup_status remains the
+	// input when no probe target is available; the source label records which
+	// of the two actually fed the decision.
+	if env.WorktreePath != "" {
+		live := polecat.ProbeLiveGitState(env.WorktreePath)
+		live.ApplyFacts(&facts)
+		if live.Branch != "" {
+			// A live branch supersedes the recorded one, the same way live git
+			// supersedes a recorded dirty status: the bead's branch field is
+			// another stale-able self-report.
+			item.Branch = live.Branch
+		}
+	}
+
 	if !activeWorkEvidence.BlocksCleanup && fields != nil {
 		activeWorkEvidence = assessPolecatAgentStateWork(beads.AgentState(strings.TrimSpace(fields.AgentState)))
 	}
@@ -206,12 +240,12 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 			default:
 				item.State = polecat.StateStalled
 			}
-		} else if running && !polecat.CleanupStatus(item.CleanupStatus).IsSafe() {
+		} else if running && polecat.RecordedCleanupBlocks(polecat.CleanupStatus(item.CleanupStatus), facts.GitStateSource) {
 			item.State = polecat.StateReviewNeeded
 		}
 		facts.ActiveWorkBlocker = activeWorkEvidence.Blocker
 		facts.ActiveWorkCountsTowardCapacity = activeWorkEvidence.CountsTowardCapacity
-	} else if item.State == polecat.StateIdle && running && !polecat.CleanupStatus(item.CleanupStatus).IsSafe() {
+	} else if item.State == polecat.StateIdle && running && polecat.RecordedCleanupBlocks(polecat.CleanupStatus(item.CleanupStatus), facts.GitStateSource) {
 		item.State = polecat.StateReviewNeeded
 	}
 
@@ -234,6 +268,11 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	facts.State = item.State
 	item.Disposition = polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
+	// The disposition is the one place the verdict's fact provenance is
+	// labeled (labelFactSources) — copy it rather than re-deriving it here.
+	item.CleanupStatusSource = item.Disposition.CleanupStatusSource
+	item.GitStateSource = item.Disposition.GitStateSource
+	item.GitStateReason = item.Disposition.GitStateReason
 	return item
 }
 
