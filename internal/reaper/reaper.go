@@ -290,16 +290,19 @@ func mrProtectedJoin() (joinClause, whereCondition string) {
 }
 
 var activeMRFieldPattern = regexp.MustCompile(`(?m)^active_mr:\s*(\S+)\s*$`)
+var hookBeadFieldPattern = regexp.MustCompile(`(?m)^hook_bead:\s*(\S+)\s*$`)
 var agentStateFieldPattern = regexp.MustCompile(`(?m)^agent_state:\s*(\S+)\s*$`)
 
-// activeMRProtectedIDs returns the set of wisp IDs referenced as active_mr by a
-// live (non-nuked) agent bead. These must survive age-based reaping even when
-// unlabeled — the reaper closing an MR out from under a polecat that still
-// believes it owns it is worse than a late reap (gt-4okk).
-func activeMRProtectedIDs(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+// liveAgentReferencedWispIDs returns the set of wisp IDs a live (non-nuked) agent
+// bead still names as its active_mr or hook_bead. Both are durable pointers into
+// the wisp tables, so a sweep that removes the target leaves the reference
+// dangling and unreconcilable — the polecat then waits on work that cannot be
+// looked up (gt-gyb6, gt-4okk). The protection lapses when the pointer does: on
+// the agent's next MR, on hook release, or on nuke.
+func liveAgentReferencedWispIDs(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, "SELECT description FROM wisps WHERE issue_type = 'agent'")
 	if err != nil {
-		return nil, fmt.Errorf("query agent beads for active_mr: %w", err)
+		return nil, fmt.Errorf("query agent beads for references: %w", err)
 	}
 	defer rows.Close()
 
@@ -312,19 +315,19 @@ func activeMRProtectedIDs(ctx context.Context, db *sql.DB) (map[string]bool, err
 		if m := agentStateFieldPattern.FindStringSubmatch(description); m != nil && m[1] == "nuked" {
 			continue
 		}
-		m := activeMRFieldPattern.FindStringSubmatch(description)
-		if m == nil || m[1] == "null" {
-			continue
+		for _, pattern := range []*regexp.Regexp{activeMRFieldPattern, hookBeadFieldPattern} {
+			if m := pattern.FindStringSubmatch(description); m != nil && m[1] != "null" {
+				protected[m[1]] = true
+			}
 		}
-		protected[m[1]] = true
 	}
 	return protected, rows.Err()
 }
 
-// activeMRExcludeClause renders a parameterized "AND w.id NOT IN (...)" clause
+// wispExcludeClause renders a parameterized "AND w.id NOT IN (...)" clause
 // for the wisp IDs in ids, plus its bind args in the same order. Returns ("", nil)
 // when ids is empty so callers can append the result unconditionally.
-func activeMRExcludeClause(ids map[string]bool) (clause string, args []interface{}) {
+func wispExcludeClause(ids map[string]bool) (clause string, args []interface{}) {
 	if len(ids) == 0 {
 		return "", nil
 	}
@@ -447,25 +450,29 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// that reap will never close.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	// Closed-molecule steps are counted separately above and excluded here so counts stay disjoint.
-	activeMRIDs, err := activeMRProtectedIDs(ctx, db)
+	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("compute active_mr protected ids: %w", err)
+		return nil, fmt.Errorf("compute live agent referenced ids: %w", err)
 	}
-	activeMRClause, activeMRArgs := activeMRExcludeClause(activeMRIDs)
+	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
 	reapQuery := fmt.Sprintf(
 		"SELECT COUNT(*) FROM wisps w %s %s %s WHERE %s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL AND %s%s",
-		parentJoin, moleculeStepExcludeJoin, mrJoin, openWispStatusWhere, parentWhere, mrWhere, activeMRClause)
-	reapArgs := append([]interface{}{now.Add(-maxAge)}, activeMRArgs...)
+		parentJoin, moleculeStepExcludeJoin, mrJoin, openWispStatusWhere, parentWhere, mrWhere, referencedClause)
+	reapArgs := append([]interface{}{now.Add(-maxAge)}, referencedArgs...)
 	if err := db.QueryRowContext(ctx, reapQuery, reapArgs...).Scan(&result.ReapCandidates); err != nil {
 		return nil, fmt.Errorf("count reap candidates: %w", err)
 	}
 
 	// Count purge candidates: closed wisps past purge_age.
-	// No parent check needed — closed wisps past the delete age are unconditionally purgeable.
+	// No parent check needed — closed wisps past the delete age are purgeable except
+	// for the ones a live agent bead still references, which Purge() also spares.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m) query
 	// cost with 1800+ closed wisps, leading to CPU spikes and connection timeouts (gt-wvd2).
-	purgeQuery := "SELECT COUNT(*) FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?"
-	if err := db.QueryRowContext(ctx, purgeQuery, now.Add(-purgeAge)).Scan(&result.PurgeCandidates); err != nil {
+	purgeQuery := fmt.Sprintf(
+		"SELECT COUNT(*) FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s",
+		referencedClause)
+	purgeArgs := append([]interface{}{now.Add(-purgeAge)}, referencedArgs...)
+	if err := db.QueryRowContext(ctx, purgeQuery, purgeArgs...).Scan(&result.PurgeCandidates); err != nil {
 		return nil, fmt.Errorf("count purge candidates: %w", err)
 	}
 
@@ -530,22 +537,23 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
 	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
 	mrJoin, mrWhere := mrProtectedJoin()
-	activeMRIDs, err := activeMRProtectedIDs(ctx, db)
+	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("compute active_mr protected ids: %w", err)
+		return nil, fmt.Errorf("compute live agent referenced ids: %w", err)
 	}
-	activeMRClause, activeMRArgs := activeMRExcludeClause(activeMRIDs)
+	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
 	// Exclude agent beads (issue_type='agent') from reaping — they have persistent
 	// identity and should not be closed by the wisp reaper regardless of age.
 	// Exclude live merge-queue wisps (mrWhere) and any wisp a live agent still
-	// references as active_mr (activeMRClause) — age is never sufficient on its
-	// own to close these, since a dormant town can make a live MR look stale (gt-4okk).
+	// references as active_mr or hook_bead (referencedClause) — age is never
+	// sufficient on its own to close these, since a dormant town can make a live MR
+	// look stale (gt-4okk).
 	// Closed-molecule steps are closed immediately through a separate path, so stale
 	// max-age counts exclude them to keep dry-run and scan counts disjoint.
 	whereClause := fmt.Sprintf(
 		"%s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL AND %s%s",
-		openWispStatusWhere, parentWhere, mrWhere, activeMRClause)
-	whereArgs := append([]interface{}{cutoff}, activeMRArgs...)
+		openWispStatusWhere, parentWhere, mrWhere, referencedClause)
+	whereArgs := append([]interface{}{cutoff}, referencedArgs...)
 
 	// absentParentJoin and absentParentWhere are used for both dry-run counting
 	// and real execution. Define them once here.
@@ -749,12 +757,25 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	deleteCutoff := time.Now().UTC().Add(-purgeAge)
 	var anomalies []Anomaly
 
+	// A wisp a live agent bead still points at is spared: deleting it strands the
+	// pointer where no lookup can resolve it, which is the wedge — not the size of
+	// the table — that parks the polecat (gt-gyb6). The close path already spares
+	// these, so without this the same sweep deletes what the reap just protected.
+	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
+	if err != nil {
+		return 0, nil, fmt.Errorf("compute live agent referenced ids: %w", err)
+	}
+	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
+
 	// Digest: count by wisp_type.
-	// No parent check — closed wisps past the delete age are unconditionally purgeable.
+	// No parent check — closed wisps past the delete age are purgeable.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m)
 	// query cost with 1800+ closed wisps, leading to CPU spikes and timeouts (gt-wvd2).
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
-	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff)
+	digestQuery := fmt.Sprintf(
+		"SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s GROUP BY wtype",
+		referencedClause) //nolint:gosec // G201: referencedClause is a parameterized NOT IN clause, never a value
+	digestArgs := append([]interface{}{deleteCutoff}, referencedArgs...)
+	rows, err := db.QueryContext(ctx, digestQuery, digestArgs...)
 	if err != nil {
 		return 0, nil, fmt.Errorf("digest query: %w", err)
 	}
@@ -785,13 +806,13 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
-	// Batch delete — simple status+age filter, no parent check needed for purge.
+	// Batch delete — status+age filter, plus the live-reference exclusion above.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
-		DefaultBatchSize)
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s LIMIT %d",
+		referencedClause, DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables)
+	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables, referencedArgs...)
 	if err != nil {
 		return totalDeleted, anomalies, err
 	}
@@ -1063,10 +1084,12 @@ func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResu
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string) (int, error) {
+// extraArgs bind the query's remaining placeholders after the age cutoff.
+func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, extraArgs ...interface{}) (int, error) {
+	queryArgs := append([]interface{}{cutoffArg}, extraArgs...)
 	totalDeleted := 0
 	for {
-		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)
+		idRows, err := db.QueryContext(ctx, idQuery, queryArgs...)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("select batch: %w", err)
 		}

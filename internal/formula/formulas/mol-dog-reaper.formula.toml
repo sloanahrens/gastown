@@ -185,7 +185,9 @@ gt reaper purge --db=<name> \\
 - Verify purge counts are reasonable (not suspiciously high or low)
 
 **Safety:** Only deletes wisps that are already closed AND past the purge
-retention window. Active wisps are never touched. Reverse dependency
+retention window, and it spares any wisp a live agent bead still names as
+active_mr or hook_bead — deleting one strands a pointer the polecat can never
+resolve again (gt-gyb6). Active wisps are never touched. Reverse dependency
 references are cleaned up to prevent dangling parent refs.
 
 **Exit criteria:** Old closed wisps and mail purged."""
