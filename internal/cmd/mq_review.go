@@ -311,7 +311,14 @@ var doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
 			}, nil
 		}
 		mrID = wisp.ID
-		defer bd.Close(mrID)
+		defer func() {
+			// The handle wisp is ours for the duration of this one review:
+			// close it whenever we leave, so a crash or refusal path still
+			// reaps it (wisp GC covers what we can't).
+			if err := bd.Close(mrID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: closing retro-review handle %s: %v\n", mrID, err)
+			}
+		}()
 	}
 
 	req := editorial.ReviewRequest{
