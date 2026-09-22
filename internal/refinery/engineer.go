@@ -324,6 +324,12 @@ type Engineer struct {
 	// pre-verification fast-path staleness check (om-gate T8). Overridable
 	// in tests so the check doesn't require a real rig config layout.
 	currentGateSetSHAFn func() string
+
+	// findOrphanDoltServersFn scans for orphaned test 'dolt sql-server'
+	// processes immediately before a gate run, so a hang or timeout caused by
+	// contention with a leaked server isn't silently attributed to the diff
+	// under test (gt-twil). Overridable in tests.
+	findOrphanDoltServersFn func() ([]util.DoltOrphanServer, error)
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -382,6 +388,9 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		// stamp site, so the values could never agree and the fast-path
 		// never fired (om-gate T8 review, attempt 2).
 		return config.CombineGateSetSHA(mq, namedGates)
+	}
+	e.findOrphanDoltServersFn = func() ([]util.DoltOrphanServer, error) {
+		return util.FindOrphanDoltServers(filepath.Dir(r.Path))
 	}
 	return e
 }
@@ -1238,6 +1247,33 @@ func ValidateTestCommand(cmd string) error {
 	return nil
 }
 
+// checkGateContamination scans for orphaned test 'dolt sql-server' processes
+// and, if any are present, writes a warning to e.output naming them. It
+// returns true when contamination was detected, so callers can prefix a
+// subsequent failure with a "CONTAMINATED:" marker — evidence that a
+// timeout or hang below may not be attributable to the diff under test
+// (gt-twil). Best-effort: a scan error is logged, not treated as
+// contamination.
+func (e *Engineer) checkGateContamination() bool {
+	if e.findOrphanDoltServersFn == nil {
+		return false
+	}
+	orphans, err := e.findOrphanDoltServersFn()
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: dolt orphan server scan failed: %v\n", err)
+		return false
+	}
+	if len(orphans) == 0 {
+		return false
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] WARNING: %d orphaned dolt sql-server process(es) present before gate run — "+
+		"CONTAMINATED: a hang, timeout, or failure below may be caused by this, not the diff under test\n", len(orphans))
+	for _, o := range orphans {
+		_, _ = fmt.Fprintf(e.output, "[Engineer]   PID %d ppid=%d (%s): %s\n", o.PID, o.PPID, o.Reason, o.ConfigPath)
+	}
+	return true
+}
+
 // runTests runs the configured test command and returns the result.
 func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 	if err := ValidateTestCommand(e.config.TestCommand); err != nil {
@@ -1246,6 +1282,8 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 			Error:   fmt.Sprintf("invalid test command: %v", err),
 		}
 	}
+
+	contaminated := e.checkGateContamination()
 
 	// Run the test command with retries for flaky tests
 	maxRetries := e.config.RetryFlakyTests
@@ -1285,10 +1323,14 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		}
 	}
 
+	errMsg := fmt.Sprintf("tests failed after %d attempts: %v", maxRetries, lastErr)
+	if contaminated {
+		errMsg = "CONTAMINATED: " + errMsg
+	}
 	return ProcessResult{
 		Success:     false,
 		TestsFailed: true,
-		Error:       fmt.Sprintf("tests failed after %d attempts: %v", maxRetries, lastErr),
+		Error:       errMsg,
 	}
 }
 
@@ -1468,6 +1510,8 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 		return ProcessResult{Success: true}
 	}
 
+	contaminated := e.checkGateContamination()
+
 	// Sort gate names for deterministic ordering
 	names := make([]string, 0, len(gates))
 	for name := range gates {
@@ -1516,10 +1560,14 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 	}
 
 	if len(failures) > 0 {
+		errMsg := fmt.Sprintf("quality gates failed: %s", strings.Join(failures, "; "))
+		if contaminated {
+			errMsg = "CONTAMINATED: " + errMsg
+		}
 		return ProcessResult{
 			Success:     false,
 			TestsFailed: true,
-			Error:       fmt.Sprintf("quality gates failed: %s", strings.Join(failures, "; ")),
+			Error:       errMsg,
 		}
 	}
 

@@ -90,3 +90,62 @@ func assertPayloadString(t *testing.T, payload map[string]interface{}, key, want
 		t.Fatalf("payload[%q] = %#v, want %q", key, payload[key], want)
 	}
 }
+
+func TestRunLogPruneWorktreeEmitsFeedEvent(t *testing.T) {
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	origKind, origOwner, origPath := prunedWorktreeKind, prunedWorktreeOwner, prunedWorktreePath
+	t.Cleanup(func() {
+		prunedWorktreeKind = origKind
+		prunedWorktreeOwner = origOwner
+		prunedWorktreePath = origPath
+	})
+	prunedWorktreeKind = "dog"
+	prunedWorktreeOwner = "rex"
+	prunedWorktreePath = "/Users/rex/gt/deacon/dogs/rex/gastown"
+
+	if err := runLogPruneWorktree(nil, nil); err != nil {
+		t.Fatalf("runLogPruneWorktree: %v", err)
+	}
+
+	rawEvents, err := os.ReadFile(filepath.Join(townRoot, gtevents.EventsFile))
+	if err != nil {
+		t.Fatalf("read events log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawEvents)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("event count = %d, want 1: %s", len(lines), rawEvents)
+	}
+
+	var event gtevents.Event
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	if event.Type != gtevents.TypeWorktreePrune {
+		t.Fatalf("event type = %q, want %q", event.Type, gtevents.TypeWorktreePrune)
+	}
+	if event.Visibility != gtevents.VisibilityFeed {
+		t.Fatalf("visibility = %q", event.Visibility)
+	}
+	assertPayloadString(t, event.Payload, "kind", "dog")
+	assertPayloadString(t, event.Payload, "owner", "rex")
+	assertPayloadString(t, event.Payload, "path", "/Users/rex/gt/deacon/dogs/rex/gastown")
+}

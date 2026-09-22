@@ -267,7 +267,7 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 
 	var sessions []poolSession
 	if settings.PolecatPool != nil && settings.PolecatPool.LocalAgent != "" {
-		sessions, err = listPolecatSessions(newPoolSessionLister())
+		sessions, err = listPolecatSessions(newPoolSessionLister(), townRoot)
 		if err != nil {
 			return dispatchSeats{}, fmt.Errorf("listing polecat sessions for dispatch seats: %w", err)
 		}

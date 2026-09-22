@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 func TestDefaultMergeQueueConfig(t *testing.T) {
@@ -1091,6 +1092,79 @@ func TestRunGates_Empty(t *testing.T) {
 	result := e.runGates(context.Background())
 	if !result.Success {
 		t.Error("expected success with no gates configured")
+	}
+}
+
+func TestRunGatesForPhase_ContaminationStampsFailure(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	e := NewEngineer(r)
+	e.workDir = t.TempDir()
+	var out bytes.Buffer
+	e.output = &out
+	e.config.Gates = map[string]*GateConfig{
+		"a": {Cmd: "exit 1"},
+	}
+	e.findOrphanDoltServersFn = func() ([]util.DoltOrphanServer, error) {
+		return []util.DoltOrphanServer{
+			{PID: 76098, PPID: 1, ConfigPath: "/tmp/beads-bd-tests-1/shared-server/dolt-server-config.yaml", Age: 67140, Reason: "orphan"},
+		}, nil
+	}
+
+	result := e.runGates(context.Background())
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if !strings.HasPrefix(result.Error, "CONTAMINATED: ") {
+		t.Errorf("expected Error to be stamped CONTAMINATED, got: %s", result.Error)
+	}
+	if !strings.Contains(out.String(), "76098") {
+		t.Errorf("expected orphan PID to be logged to output, got: %s", out.String())
+	}
+}
+
+func TestRunGatesForPhase_NoContaminationNoStamp(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	e := NewEngineer(r)
+	e.workDir = t.TempDir()
+	e.output = io.Discard
+	e.config.Gates = map[string]*GateConfig{
+		"a": {Cmd: "exit 1"},
+	}
+	e.findOrphanDoltServersFn = func() ([]util.DoltOrphanServer, error) {
+		return nil, nil
+	}
+
+	result := e.runGates(context.Background())
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if strings.HasPrefix(result.Error, "CONTAMINATED: ") {
+		t.Errorf("expected Error not to be stamped CONTAMINATED when no orphans found, got: %s", result.Error)
+	}
+}
+
+func TestRunTests_ContaminationStampsFailure(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	e := NewEngineer(r)
+	e.workDir = t.TempDir()
+	e.output = io.Discard
+	e.config.TestCommand = "exit 1"
+	e.config.RetryFlakyTests = 1
+	e.findOrphanDoltServersFn = func() ([]util.DoltOrphanServer, error) {
+		return []util.DoltOrphanServer{
+			{PID: 13741, PPID: 1, Reason: "orphan"},
+		}, nil
+	}
+
+	result := e.runTests(context.Background())
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if !strings.HasPrefix(result.Error, "CONTAMINATED: ") {
+		t.Errorf("expected Error to be stamped CONTAMINATED, got: %s", result.Error)
 	}
 }
 

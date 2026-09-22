@@ -666,6 +666,11 @@
             color: var(--blue);
             font-weight: 600;
             margin-right: 4px;
+            text-decoration: none;
+        }
+
+        .polecat-mr .mr-id:hover {
+            text-decoration: underline;
         }
 
         .polecat-agent .no-issue,
@@ -1051,6 +1056,11 @@
         tr.ready-p2 { background: rgba(255, 180, 84, 0.08); }
         tr.polecat-stuck { background: rgba(240, 113, 120, 0.08); }
         tr.polecat-idle { opacity: 0.7; }
+        /* A finished polecat whose MR has not landed: not idle, not working. */
+        tr.polecat-mr-pending { background: rgba(255, 180, 84, 0.04); }
+
+        /* The Polecats panel links an MR id to its Merge Queue row (gt-ppja). */
+        tr.mr-row:target { outline: 1px solid var(--blue); }
 
         /* Mail styles */
         .mail-unread {

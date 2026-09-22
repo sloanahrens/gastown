@@ -86,6 +86,12 @@ const (
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
 	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
 	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
+
+	// TypeWorktreePrune records a destructive `git worktree remove` performed
+	// by a bash-executed patrol step (e.g. the dead-dog-worktree cleanup in
+	// mol-deacon-patrol.formula.toml) that has no Go call site of its own to
+	// emit events.LogFeed directly. See "gt log prune-worktree".
+	TypeWorktreePrune = "worktree_prune"
 )
 
 // EventsFile is the name of the raw events log.
@@ -455,5 +461,17 @@ func SchedulerDispatchFailedPayload(beadID, rig, errMsg string) map[string]inter
 		"bead":  beadID,
 		"rig":   rig,
 		"error": errMsg,
+	}
+}
+
+// WorktreePrunePayload creates a payload for worktree prune events.
+// kind: what kind of orphaned worktree this was (e.g. "dog")
+// owner: the name of the entity that owned the worktree (e.g. dog name)
+// path: filesystem path of the pruned worktree
+func WorktreePrunePayload(kind, owner, path string) map[string]interface{} {
+	return map[string]interface{}{
+		"kind":  kind,
+		"owner": owner,
+		"path":  path,
 	}
 }

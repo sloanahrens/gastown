@@ -476,6 +476,8 @@ func polecatStatusClass(status string) string {
 		return "polecat-stuck"
 	case "idle":
 		return "polecat-idle"
+	case "mr-pending":
+		return "polecat-mr-pending"
 	default:
 		return "polecat-unknown"
 	}

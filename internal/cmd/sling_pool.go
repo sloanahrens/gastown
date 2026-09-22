@@ -14,6 +14,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -316,7 +317,18 @@ var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 // carries ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on
 // the same server are not counted. GT_AGENT is written into the session
 // environment at spawn (SessionStartOptions.Agent / AgentEnv fallback).
-func listPolecatSessions(t sessionLister) ([]poolSession, error) {
+//
+// A session surviving past `gt done` (preserved for recovery, or torn down
+// a beat later than the polecat's own agent_state write) does not mean the
+// polecat is still spending the seat: a done polecat sitting on an open MR
+// is idle, waiting on the refinery, not on the GPU or the flash API (gt-2nft
+// — a 4/3 overflow refusal with only two live sessions, the third and fourth
+// "occupants" both done with their MR still in the queue). polecatSeatOccupied
+// reads the polecat's own bead state, the same signal `gt polecat list` and
+// scheduler.max_polecats (polecat_capacity.go) already trust over a session's
+// mere presence, so a session that outlives its polecat's done+MR-open state
+// never counts twice against two different capacity models.
+func listPolecatSessions(t sessionLister, townRoot string) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
@@ -335,9 +347,85 @@ func listPolecatSessions(t sessionLister) ([]poolSession, error) {
 			// two thousand years old).
 			created = time.Now()
 		}
+		if rigName, polecatName, ok := parsePolecatRole(role); ok && !polecatSeatOccupied(townRoot, rigName, polecatName) {
+			continue
+		}
 		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created})
 	}
 	return out, nil
+}
+
+// parsePolecatRole splits a session's GT_ROLE ("<rig>/polecats/<name>") into
+// the rig and polecat name poolPolecatDisposition needs to look up the bead.
+// A role that does not match the shape (already filtered by the caller, but
+// checked again defensively) reports ok=false rather than guessing.
+func parsePolecatRole(role string) (rig, name string, ok bool) {
+	const marker = "/polecats/"
+	i := strings.Index(role, marker)
+	if i < 0 {
+		return "", "", false
+	}
+	rig = role[:i]
+	name = role[i+len(marker):]
+	if rig == "" || name == "" {
+		return "", "", false
+	}
+	return rig, name, true
+}
+
+// polecatSeatOccupied reports whether the named polecat's own bead state
+// still counts as occupying a seat. It fails open (true, "still occupied")
+// on a lookup error or a townRoot-less caller (the peek helpers in tests):
+// a pool that cannot read a polecat's state is not a pool that knows the
+// seat is free, and undercounting risks the GPU overrun the pool exists to
+// prevent (gt-md4z) rather than the overflow-refusal this fix targets.
+func polecatSeatOccupied(townRoot, rigName, polecatName string) bool {
+	if townRoot == "" {
+		return true
+	}
+	disposition, err := poolPolecatDisposition(townRoot, rigName, polecatName)
+	if err != nil {
+		return true
+	}
+	return disposition.ReuseStatus != "idle-pr-open"
+}
+
+// poolPolecatDisposition reads one polecat's own agent bead and classifies it
+// through the same WorkstateDisposition every other capacity model reads
+// (polecat_capacity.go, `gt polecat list`), so "done with an open MR" means
+// the same thing here as it does everywhere else. A var so tests can drive
+// it without a live database.
+var poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	_, fields, err := beads.New(filepath.Join(townRoot, rigName)).ForAgentBead().GetAgentBead(agentID)
+	if err != nil {
+		return polecat.WorkstateDisposition{}, err
+	}
+	if fields == nil {
+		// No agent bead: nothing to read, and safest read is "still occupied"
+		// (see polecatSeatOccupied's fail-open note) rather than a disposition
+		// that happens to read as idle-pr-open by construction.
+		return polecat.WorkstateDisposition{ReuseStatus: ""}, nil
+	}
+
+	state := polecat.StateIdle
+	if beads.AgentState(strings.TrimSpace(fields.AgentState)) == beads.AgentStateDone {
+		state = polecat.StateDone
+	}
+	facts := polecat.WorkstateFacts{
+		State:         state,
+		CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus),
+		PushFailed:    fields.PushFailed,
+		MRFailed:      fields.MRFailed,
+		Branch:        fields.Branch,
+		HookBeadSafe:  true,
+	}
+	if activeMR := strings.TrimSpace(fields.ActiveMR); activeMR != "" {
+		facts.ActiveMR = activeMR
+		facts.ActiveMRBlocker = "active_mr=" + activeMR
+	}
+	return polecat.DecideWorkstate(polecat.NewWorkstateInput(facts)), nil
 }
 
 // Seat claims (gt-eoi9).
@@ -716,7 +804,7 @@ func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason str
 	if beadID != "" {
 		bead, beadErr = poolBeadLookup(townRoot, beadID)
 	}
-	sessions, err := listPolecatSessions(newPoolSessionLister())
+	sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
 	if err != nil {
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather

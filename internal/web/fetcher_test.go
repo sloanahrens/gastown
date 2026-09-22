@@ -1627,7 +1627,8 @@ func TestCountMergesOnMainUsesParseableSince(t *testing.T) {
 // polecatListFixture is the shape `gt polecat list --all --json` emits after
 // gt-2540 added the agent and MR fields: a working polecat with a merge request
 // the refinery can take, an idle polecat whose MR already merged, a polecat with
-// no MR at all, and one whose active_mr points at nothing.
+// no MR at all, one whose active_mr points at nothing, and a done polecat whose
+// MR the town is still waiting on (gt-ppja).
 const polecatListFixture = `[
   {"rig":"gastown","name":"agate","state":"working","issue":"gt-kqi2",
    "agent":"claude-opus-5","mr_id":"gt-wisp-ready","mr_status":"ready"},
@@ -1636,6 +1637,8 @@ const polecatListFixture = `[
   {"rig":"gastown","name":"opal","state":"idle","agent":"deepseek-flash"},
   {"rig":"gastown","name":"shale","state":"done","active_mr":"gt-wisp-gone",
    "mr_id":"gt-wisp-gone","mr_status":"missing"},
+  {"rig":"gastown","name":"jasper","state":"done","mr_id":"gt-wisp-8cs",
+   "mr_status":"ready"},
   {"rig":"beads","name":"agate","state":"working","agent":"other-rig-agent",
    "mr_id":"gt-wisp-beads","mr_status":"blocked"}
 ]`
@@ -2129,11 +2132,17 @@ echo '[]'
 	if err != nil {
 		t.Fatalf("FetchWorkers() error = %v", err)
 	}
-	if len(workers) != 1 {
-		t.Fatalf("got %d workers, want 1: %+v", len(workers), workers)
+	var crew *WorkerRow
+	for i := range workers {
+		if workers[i].Name == "agate" {
+			crew = &workers[i]
+		}
 	}
-	if got := workers[0]; got.Agent != "" || got.MRID != "" || got.MRStatus != "" {
-		t.Errorf("crew row = %+v, want no agent or MR borrowed from the polecat named agate", got)
+	if crew == nil {
+		t.Fatalf("no crew row for agate; got %+v", workers)
+	}
+	if crew.Agent != "" || crew.MRID != "" || crew.MRStatus != "" {
+		t.Errorf("crew row = %+v, want no agent or MR borrowed from the polecat named agate", *crew)
 	}
 }
 
@@ -2205,6 +2214,124 @@ func TestFetchWorkersTakesIssueFromInventoryWhenHqMapMisses(t *testing.T) {
 	}
 	if opal.IssueID != "" || opal.WorkStatus != "idle" {
 		t.Errorf("opal = issue %q status %q, want empty/idle", opal.IssueID, opal.WorkStatus)
+	}
+}
+
+// TestPendingMRWorkersMintsRowsForDonePolecatsWithAnInFlightMR covers the gate
+// behind gt-ppja. Exactly one class earns a row: a finished polecat whose MR
+// the town is still waiting on and whose session is gone. Everything else is
+// either covered by the tmux pass, still moving, or already resolved.
+func TestPendingMRWorkersMintsRowsForDonePolecatsWithAnInFlightMR(t *testing.T) {
+	index := polecatIndex{
+		"gastown": {
+			"jasper":    {Rig: "gastown", Name: "jasper", State: "done", MRID: "gt-wisp-8cs", MRStatus: "ready"},
+			"malachite": {Rig: "gastown", Name: "malachite", State: "done", MRID: "gt-wisp-merged", MRStatus: "merged"},
+			"shale":     {Rig: "gastown", Name: "shale", State: "done", MRID: "gt-wisp-gone", MRStatus: "missing"},
+			"agate":     {Rig: "gastown", Name: "agate", State: "working", MRID: "gt-wisp-open", MRStatus: "open"},
+			"live":      {Rig: "gastown", Name: "live", State: "done", MRID: "gt-wisp-live", MRStatus: "blocked"},
+			"muted":     {Rig: "gastown", Name: "muted", State: "done"},
+		},
+		"beads": {
+			"quartz": {Rig: "beads", Name: "quartz", State: "done", MRID: "be-wisp-1", MRStatus: "open"},
+		},
+	}
+	// "live" already has a tmux session row, so the tmux pass owns it.
+	rendered := map[string]bool{"gastown/live": true}
+
+	rows := pendingMRWorkers(index, rendered)
+
+	got := make([]string, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.Rig+"/"+row.Name)
+	}
+	if want := "beads/quartz,gastown/jasper"; strings.Join(got, ",") != want {
+		t.Fatalf("pendingMRWorkers() rows = %v, want %s (rig then name)", got, want)
+	}
+
+	// The row has to carry what the panel renders: the MR and its state, the
+	// status that keeps the row out of the idle/working vocabulary, and no
+	// session it does not have.
+	jasper := rows[1]
+	if jasper.MRID != "gt-wisp-8cs" || jasper.MRStatus != "ready" {
+		t.Errorf("jasper MR = %q/%q, want gt-wisp-8cs/ready", jasper.MRID, jasper.MRStatus)
+	}
+	if jasper.WorkStatus != "mr-pending" {
+		t.Errorf("jasper.WorkStatus = %q, want mr-pending", jasper.WorkStatus)
+	}
+	if jasper.SessionID != "" {
+		t.Errorf("jasper.SessionID = %q, want empty — the polecat has no live session", jasper.SessionID)
+	}
+	if jasper.LastActivity.FormattedAge != "unknown" {
+		t.Errorf("jasper age = %q, want unknown — there is no session to read activity from", jasper.LastActivity.FormattedAge)
+	}
+}
+
+// TestFetchWorkersShowsDonePolecatWithAPendingMR is the wiring half of
+// gt-ppja: the panel the town reads must list the finished polecat whose MR is
+// still outstanding, and must not resurrect the ones already settled.
+func TestFetchWorkersShowsDonePolecatWithAPendingMR(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	townRoot := townRootWithRigs(t, "gastown")
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho '[]'\n"), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	restore := fetcherRunCmd
+	defer func() { fetcherRunCmd = restore }()
+	now := time.Now().Unix()
+	fetcherRunCmd = func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name == "tmux" {
+			return bytes.NewBufferString(fmt.Sprintf("gt-agate|%d\n", now)), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		cmdTimeout:     5 * time.Second,
+		bdBin:          bdPath,
+		registry:       registry,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 15 * time.Minute,
+		listPolecats:   func() ([]byte, error) { return []byte(polecatListFixture), nil },
+	}
+	f.workerPolecatIndex()
+	waitForPolecatRefresh(t, f)
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+	byName := make(map[string]WorkerRow, len(workers))
+	for _, w := range workers {
+		byName[w.Name] = w
+	}
+
+	jasper, ok := byName["jasper"]
+	if !ok {
+		t.Fatalf("no jasper row — a done polecat with an in-flight MR is invisible; got %+v", workers)
+	}
+	if jasper.WorkStatus != "mr-pending" || jasper.MRID != "gt-wisp-8cs" {
+		t.Errorf("jasper = status %q mr %q, want mr-pending/gt-wisp-8cs", jasper.WorkStatus, jasper.MRID)
+	}
+	if jasper.SessionID != "" {
+		t.Errorf("jasper.SessionID = %q, want empty", jasper.SessionID)
+	}
+
+	// Settled MRs stay out of the panel: a merged one is not work outstanding,
+	// and one with no bead behind it is not a merge request at all.
+	for _, name := range []string{"malachite", "shale"} {
+		if row, ok := byName[name]; ok {
+			t.Errorf("%s should not render while its MR is settled: %+v", name, row)
+		}
 	}
 }
 

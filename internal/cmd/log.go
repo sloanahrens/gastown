@@ -27,6 +27,11 @@ var (
 	crashAgent    string
 	crashSession  string
 	crashExitCode int
+
+	// log prune-worktree flags
+	prunedWorktreeKind  string
+	prunedWorktreeOwner string
+	prunedWorktreePath  string
 )
 
 var logCmd = &cobra.Command{
@@ -71,6 +76,24 @@ Examples:
 	RunE: runLogCrash,
 }
 
+var logPruneWorktreeCmd = &cobra.Command{
+	Use:   "prune-worktree",
+	Short: "Record a worktree-prune feed event (called by patrol cleanup steps)",
+	Long: `Record a feed event for an orphaned worktree removed by a bash-executed
+patrol cleanup step.
+
+Go call sites emit a feed event directly via events.LogFeed whenever they
+destroy a polecat or its worktree (e.g. nukePolecatFullWithOptions logs
+TypeKill). Bash-executed cleanup steps — like the dead-dog-worktree step in
+mol-deacon-patrol.formula.toml — have no Go call site to do the same from,
+so this command gives them that primitive instead of leaving the removal
+unlogged.
+
+Examples:
+  gt log prune-worktree --kind dog --owner rex --path ~/gt/deacon/dogs/rex/gastown`,
+	RunE: runLogPruneWorktree,
+}
+
 func init() {
 	logCmd.Flags().IntVarP(&logTail, "tail", "n", 20, "Number of events to show")
 	logCmd.Flags().StringVarP(&logType, "type", "t", "", "Filter by event type (spawn,wake,nudge,handoff,done,crash,kill)")
@@ -85,7 +108,14 @@ func init() {
 	logCrashCmd.Flags().IntVar(&crashExitCode, "exit-code", -1, "Exit code from pane")
 	_ = logCrashCmd.MarkFlagRequired("agent")
 
+	// prune-worktree subcommand flags
+	logPruneWorktreeCmd.Flags().StringVar(&prunedWorktreeKind, "kind", "dog", "What kind of orphaned worktree this was")
+	logPruneWorktreeCmd.Flags().StringVar(&prunedWorktreeOwner, "owner", "", "Name of the entity that owned the worktree (e.g. dog name)")
+	logPruneWorktreeCmd.Flags().StringVar(&prunedWorktreePath, "path", "", "Filesystem path of the pruned worktree")
+	_ = logPruneWorktreeCmd.MarkFlagRequired("path")
+
 	logCmd.AddCommand(logCrashCmd)
+	logCmd.AddCommand(logPruneWorktreeCmd)
 	rootCmd.AddCommand(logCmd)
 }
 
@@ -422,6 +452,24 @@ func logCrashFeedEvent(townRoot, agent, session string, exitCode int) {
 	// ambient variant resolves from cwd and is a hard no-op under go test
 	// (events.write, gt-x9o/gt-lwi), regardless of any chdir here.
 	_ = events.LogFeedTo(townRoot, events.TypeSessionDeath, agent, payload)
+}
+
+// runLogPruneWorktree handles "gt log prune-worktree", called by bash-executed
+// patrol cleanup steps (e.g. the dead-dog-worktree step in
+// mol-deacon-patrol.formula.toml) after they remove an orphaned worktree.
+// Those steps have no Go call site to emit events.LogFeed from directly, so
+// this command exists to give them the same durable, feed-visible record
+// Go-side destructive paths already produce (e.g. TypeKill from
+// nukePolecatFullWithOptions).
+func runLogPruneWorktree(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	actor := detectActor()
+	payload := events.WorktreePrunePayload(prunedWorktreeKind, prunedWorktreeOwner, prunedWorktreePath)
+	return events.LogFeedTo(townRoot, events.TypeWorktreePrune, actor, payload)
 }
 
 // LogEvent is a helper that logs an event from anywhere in the codebase.

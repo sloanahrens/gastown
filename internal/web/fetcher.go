@@ -207,11 +207,13 @@ type LiveConvoyFetcher struct {
 	// markers.
 	rigOpState rigOpStateFunc
 
-	// polecatIndex is the `gt polecat list --all --json` snapshot the Polecats
-	// panel joins onto its tmux sessions for the AGENT and MR columns. The list
-	// costs a bd query and a bulk merge-request join per rig, so it follows the
-	// merge-queue snapshot's shape: a render reads the cache, and a background
-	// refresh replaces it once stale (gt-kqi2).
+	// polecatIndex is the `gt polecat list --all --json` snapshot behind the
+	// Polecats panel. The panel joins it onto its tmux sessions for the AGENT
+	// and MR columns, and mints a row from it for a polecat whose session is
+	// gone but whose MR is still in flight (gt-ppja). The list costs a bd query
+	// and a bulk merge-request join per rig, so it follows the merge-queue
+	// snapshot's shape: a render reads the cache, and a background refresh
+	// replaces it once stale (gt-kqi2).
 	polecatMu        sync.Mutex
 	polecatIndex     polecatIndex
 	polecatFetchedAt time.Time
@@ -1398,6 +1400,7 @@ const polecatListTimeout = 90 * time.Second
 type polecatListItem struct {
 	Rig      string `json:"rig"`
 	Name     string `json:"name"`
+	State    string `json:"state"`
 	Issue    string `json:"issue"`
 	Agent    string `json:"agent"`
 	MRID     string `json:"mr_id"`
@@ -1408,6 +1411,29 @@ type polecatListItem struct {
 // to its MR" by rig and polecat name. A missing rig or name means no row: the
 // panel shows an empty cell rather than inventing a status.
 type polecatIndex map[string]map[string]polecatListItem
+
+const (
+	// workStatusMRPending is the Polecats panel status for a finished polecat
+	// whose merge request has not landed yet (gt-ppja).
+	workStatusMRPending = "mr-pending"
+
+	// polecatStateDone is the `gt polecat list` state of a polecat that
+	// submitted its work and has no session left.
+	polecatStateDone = "done"
+)
+
+// mrStillPending reports whether an MR queue state still owes the town a merge.
+// The vocabulary is `gt polecat list`'s (internal/cmd/polecat_inventory.go):
+// merged and rejected are terminal, and missing means no bead backs the
+// pointer — none of the three is a reason to keep showing the row.
+func mrStillPending(status string) bool {
+	switch status {
+	case "open", "ready", "blocked":
+		return true
+	default:
+		return false
+	}
+}
 
 // polecatLister derives the town's polecat inventory. It is the seam tests
 // replace so the panel renders without spawning gt.
@@ -1582,6 +1608,9 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 	mergeQueueCount := f.getMergeQueueCount()
 
 	var workers []WorkerRow
+	// rendered records the rig/name pairs the tmux pass already covers, so the
+	// inventory pass below adds a row only for a polecat with no session.
+	rendered := make(map[string]bool)
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 
 	for _, line := range lines {
@@ -1697,9 +1726,65 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 			worker.MRStatus = polecat.MRStatus
 		}
 		workers = append(workers, worker)
+		rendered[workerKey(rig, workerName)] = true
 	}
 
+	workers = append(workers, pendingMRWorkers(polecats, rendered)...)
+
 	return workers, nil
+}
+
+// pendingMRWorkers mints a row for every done polecat whose merge request is
+// still in flight and which no tmux session covers (gt-ppja).
+//
+// The tmux pass can only see live sessions, and a polecat's session is gone by
+// the time its MR is the thing the town is waiting on — so the one worker with
+// work outstanding was the one the panel hid, and the MR column never had a
+// row to fill. The inventory already answers both halves of the question.
+//
+// The row disappears the way the merge does: mrStillPending goes false once
+// the MR is terminal, and nuking the polecat drops its inventory row entirely.
+func pendingMRWorkers(polecats polecatIndex, rendered map[string]bool) []WorkerRow {
+	var workers []WorkerRow
+	for rig, rows := range polecats {
+		for name, polecat := range rows {
+			if rendered[workerKey(rig, name)] || !mrStillPending(polecat.MRStatus) {
+				continue
+			}
+			if polecat.State != polecatStateDone {
+				continue
+			}
+			workers = append(workers, WorkerRow{
+				Name: name,
+				Rig:  rig,
+				// No session means no activity clock to read. The zero time
+				// renders as "unknown", the same reading an MR with no bead
+				// behind it gets, rather than an empty cell.
+				LastActivity: activity.Calculate(time.Time{}),
+				IssueID:      polecat.Issue,
+				WorkStatus:   workStatusMRPending,
+				AgentType:    constants.RolePolecat,
+				Agent:        polecat.Agent,
+				MRID:         polecat.MRID,
+				MRStatus:     polecat.MRStatus,
+			})
+		}
+	}
+	// Deterministic order: polecatIndex is a map, and a panel whose rows
+	// reshuffle between renders is unreadable next to the sorted panels.
+	sort.Slice(workers, func(i, j int) bool {
+		if workers[i].Rig != workers[j].Rig {
+			return workers[i].Rig < workers[j].Rig
+		}
+		return workers[i].Name < workers[j].Name
+	})
+	return workers
+}
+
+// workerKey identifies one polecat within its rig. A polecat name is unique
+// per rig, so the rig must be part of the key.
+func workerKey(rig, name string) string {
+	return rig + "/" + name
 }
 
 // assignedIssue holds issue info for the assigned issues map.
