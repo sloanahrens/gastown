@@ -390,6 +390,41 @@ func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
 	}
 }
 
+func TestTopLevelResolvesUpward(t *testing.T) {
+	root := initTestRepo(t)
+	nested := filepath.Join(root, "sub", "deeper")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	got, err := NewGit(root).TopLevel()
+	if err != nil {
+		t.Fatalf("TopLevel(%s): %v", root, err)
+	}
+	want, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		want = root
+	}
+	if got != want {
+		t.Errorf("TopLevel(%s) = %q, want %q", root, got, want)
+	}
+
+	// A directory inside the repo resolves to the repo root, NOT to itself —
+	// this is why callers that need "is this directory its own worktree?" must
+	// compare the result against the path they asked about.
+	nestedTop, err := NewGit(nested).TopLevel()
+	if err != nil {
+		t.Fatalf("TopLevel(%s): %v", nested, err)
+	}
+	if nestedTop != got {
+		t.Errorf("TopLevel(%s) = %q, want the enclosing repo root %q", nested, nestedTop, got)
+	}
+
+	if _, err := NewGit(t.TempDir()).TopLevel(); err == nil {
+		t.Error("TopLevel outside any repository should fail")
+	}
+}
+
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)

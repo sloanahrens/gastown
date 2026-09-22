@@ -94,6 +94,26 @@ func (g *Git) IsRepo() bool {
 	return err == nil
 }
 
+// TopLevel returns the root of the git worktree containing the working
+// directory, or an error when there is none.
+//
+// Git resolves upward, so a directory that merely sits *inside* a repository
+// returns that repository's root — the enclosing repo's state, not the
+// directory's own. Callers that must know whether a path is itself a worktree
+// (a polecat worktree, say) have to compare the result against the path they
+// asked about rather than treating a successful call as proof.
+func (g *Git) TopLevel() (string, error) {
+	out, err := g.run("rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	top := strings.TrimSpace(out)
+	if top == "" {
+		return "", fmt.Errorf("git rev-parse --show-toplevel returned no path for %s", g.workDir)
+	}
+	return filepath.Clean(top), nil
+}
+
 // run executes a git command and returns stdout.
 func (g *Git) run(args ...string) (string, error) {
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {

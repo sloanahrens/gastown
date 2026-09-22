@@ -2375,9 +2375,29 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// veto reclaiming this slot. See ResolveIgnoreCleanupStatus.
 	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(VerifyWorktreeExists(clonePath))
 	g := git.NewGit(clonePath)
+	// claude-41j.1 D9: this is the reuse gate's live probe, and it is the
+	// primary source for the verdict — the recorded cleanup_status is demoted
+	// to a hint (RecordedCleanupBlocks). Label the facts so the verdict and
+	// every reporter can say the git answer was measured, not recalled.
+	// It measures the same three facts as ProbeLiveGitState, then overlays MR
+	// target refs onto UnpushedCommits, so the count here can only be lower
+	// (less likely to block) than the list path's standalone probe.
+	// NOTE: this probe deliberately does NOT require IsWorktreeRoot, unlike
+	// ProbeLiveGitState. This path is also the reclaim gate for structurally
+	// broken polecats, whose whole point is that the worktree is gone or
+	// broken and there is nothing of its own left to measure (gt-2h6). Making
+	// an absent worktree a hard git failure here would permanently strand the
+	// slot, which is the bug gt-2h6 fixed; the structural-absence hatch
+	// (facts.WorktreeStructurallyMissing, below) is what carries those cases.
+	// The cost is that a broken worktree can measure the enclosing rig repo
+	// instead, so this probe's git facts are only as good as its callers'
+	// other evidence — listing, which has no such hatch, probes through
+	// ProbeLiveGitState and refuses to measure a non-worktree at all.
+	facts.GitStateSource = GitStateSourceLive
 	branch, branchErr := g.CurrentBranch()
 	if branchErr != nil {
 		facts.GitCheckFailed = true
+		facts.GitStateSource = GitStateSourceUnknown
 	} else {
 		facts.Branch = branch
 	}
@@ -2385,18 +2405,27 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	if targetRefLookupFailed {
 		facts.MQLookupFailed = true
 	}
+	// Leave GitCheckFailedReason unset on a failed probe: the classifier's own
+	// "git_state=unknown" fallback is load-bearing here.
+	// brokenIdleReclaimDispositionBlocker (reclaim.go) reclaims a structurally
+	// broken idle polecat only when the disposition's single blocker is exactly
+	// "git_state=unknown", so a richer reason string would read to that gate as
+	// a *different* blocker and strand the slot. The detailed reason belongs to
+	// the list path (ProbeLiveGitState), which has no such gate.
 	if status, err := g.CheckUncommittedWork(); err == nil {
 		facts.GitDirty = !status.CleanExcludingRuntime()
 		facts.StashCount = status.StashCount
 		facts.UnpushedCommits = status.UnpushedCommits
 	} else {
 		facts.GitCheckFailed = true
+		facts.GitStateSource = GitStateSourceUnknown
 	}
 	if branch != "" {
 		if preservation, err := g.BranchPreservationStatus(branch, "origin", targetRefs); err == nil {
 			facts.UnpushedCommits = preservation.UnpreservedPatchCount
 		} else {
 			facts.GitCheckFailed = true
+			facts.GitStateSource = GitStateSourceUnknown
 		}
 	}
 	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,

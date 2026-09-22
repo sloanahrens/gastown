@@ -439,6 +439,16 @@ type PolecatListItem struct {
 	MRStatus             string   `json:"mr_status,omitempty"`
 	CleanupStatus        string   `json:"cleanup_status,omitempty"`
 	ActiveMR             string   `json:"active_mr,omitempty"`
+	// CleanupStatusSource and GitStateSource label where cleanup_status and the
+	// git facts came from, so a consumer can tell a recorded self-report from a
+	// live measurement: cleanup_status is always "recorded" (it is written once
+	// by gt done and never re-derived), while git_state_source is "live" when
+	// the worktree was probed, "unknown" (with git_state_reason) when that probe
+	// failed, and "recorded" when no probe was attempted at all and the reuse
+	// verdict fell back to the recorded hint (claude-41j.1 D9).
+	CleanupStatusSource  string   `json:"cleanup_status_source,omitempty"`
+	GitStateSource       string   `json:"git_state_source,omitempty"`
+	GitStateReason       string   `json:"git_state_reason,omitempty"`
 	Branch               string   `json:"branch,omitempty"`
 	Verdict              string   `json:"verdict,omitempty"`
 	Reason               string   `json:"reason,omitempty"`
@@ -515,6 +525,39 @@ func polecatAgentMRDetails(p PolecatListItem) string {
 		fields = append(fields, details)
 	}
 	return strings.Join(fields, " ")
+}
+
+// polecatReuseDetailLine renders one polecat's "reuse: ..." detail line, or ""
+// when the polecat has no reuse status to report.
+//
+// The provenance of each cleanup input is marked inline (claude-41j.1 D9):
+// cleanup_status is always a recorded self-report, so it is tagged as such
+// rather than left to look like state measured now, and the git facts behind
+// the verdict say whether they were "live", "unknown" (with the reason that
+// failed the probe), or a "recorded" hint standing in for a probe that never
+// ran. A reader must be able to tell which side of that line the verdict came
+// from without asking the JSON.
+func polecatReuseDetailLine(p PolecatListItem) string {
+	if p.ReuseStatus == "" {
+		return ""
+	}
+	details := "reuse: " + p.ReuseStatus
+	if p.CleanupStatus != "" {
+		details += " cleanup=" + p.CleanupStatus
+		if p.CleanupStatusSource != "" {
+			details += " (" + p.CleanupStatusSource + ")"
+		}
+	}
+	if p.GitStateSource != "" {
+		details += " git=" + p.GitStateSource
+		if p.GitStateReason != "" {
+			details += " (" + p.GitStateReason + ")"
+		}
+	}
+	if p.ActiveMR != "" {
+		details += " active_mr=" + p.ActiveMR
+	}
+	return details
 }
 
 type reuseMRShower interface {
@@ -640,6 +683,11 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 					Grace:     spawnWindow,
 					Now:       now,
 				},
+				// claude-41j.1 D9: probe the worktree so the listed verdict
+				// re-derives from live git rather than the recorded hint. An
+				// unresolvable path (no worktree behind the directory) leaves
+				// the probe off, and the verdict stays on the recorded hint.
+				WorktreePath: resolvePolecatWorktree(filepath.Join(r.Path, "polecats"), name, r.Name),
 			}
 			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions, env)
 			if activeWorkErr != nil {
@@ -662,6 +710,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 				MRStatus:             item.MRStatus,
 				CleanupStatus:        item.CleanupStatus,
 				ActiveMR:             item.ActiveMR,
+				CleanupStatusSource:  item.CleanupStatusSource,
+				GitStateSource:       item.GitStateSource,
+				GitStateReason:       item.GitStateReason,
 				Branch:               item.Branch,
 				Verdict:              disposition.Verdict,
 				Reason:               disposition.Reason,
@@ -761,15 +812,8 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		if details := polecatAgentMRDetails(p); details != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(details))
 		}
-		if p.ReuseStatus != "" {
-			details := "reuse: " + p.ReuseStatus
-			if p.CleanupStatus != "" {
-				details += " cleanup=" + p.CleanupStatus
-			}
-			if p.ActiveMR != "" {
-				details += " active_mr=" + p.ActiveMR
-			}
-			fmt.Printf("    %s\n", style.Dim.Render(details))
+		if line := polecatReuseDetailLine(p); line != "" {
+			fmt.Printf("    %s\n", style.Dim.Render(line))
 		}
 		if p.BeadLookupFailed && p.SessionName != "" {
 			fmt.Printf("    %s\n", style.Warning.Render("session: "+p.SessionName+" (no worktree, bead lookup FAILED — unconfirmed zombie, do not treat as foreign)"))
@@ -1253,6 +1297,15 @@ type RecoveryStatus struct {
 	Diagnostics          []string              `json:"diagnostics,omitempty"`
 	RecoveryActions      []string              `json:"recovery_actions,omitempty"`
 	Reconciled           bool                  `json:"reconciled,omitempty"`
+	// CleanupStatusSource is always "recorded": cleanup_status is the polecat's
+	// own self-report from gt done, never a live measurement. GitStateSource
+	// says whether the git facts behind the verdict were measured ("live"),
+	// failed to be measured ("unknown", with GitStateReason), or never measured
+	// at all ("recorded" — the recorded hint stood in). See
+	// polecat.RecordedCleanupBlocks.
+	CleanupStatusSource string `json:"cleanup_status_source,omitempty"`
+	GitStateSource      string `json:"git_state_source,omitempty"`
+	GitStateReason      string `json:"git_state_reason,omitempty"`
 }
 
 func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
@@ -1486,8 +1539,17 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 		directGitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
-		if !facts.CleanupStatus.IsSafe() && polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe) {
-			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing))
+		if !facts.CleanupStatus.IsSafe() {
+			// claude-41j.1 D9 splits this diagnostic in two, because the record
+			// can now be ignored for either of two reasons: a live git probe
+			// answered and superseded a git-derived status, or the narrow
+			// partial-spawn/gone-worktree hatches resolved a missing one.
+			switch {
+			case !polecat.RecordedCleanupBlocks(facts.CleanupStatus, facts.GitStateSource):
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s cleanup_status_source=%s git_state_source=%s live_git_supersedes=recorded", facts.CleanupStatus, polecat.CleanupStatusSourceRecorded, facts.GitStateSource))
+			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe):
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing))
+			}
 		}
 	}
 	input := polecat.NewWorkstateInput(facts)
@@ -1515,7 +1577,19 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 // future new verdict can't silently reintroduce that split.
 func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 	fmt.Fprintf(w, "%s\n\n", style.Bold.Render(fmt.Sprintf("Recovery Status: %s/%s", status.Rig, status.Polecat)))
-	fmt.Fprintf(w, "  Cleanup Status:  %s\n", status.CleanupStatus)
+	cleanup := string(status.CleanupStatus)
+	if status.CleanupStatusSource != "" {
+		// The recorded hint is labeled where a human reads it, not only in
+		// the JSON: an unlabeled cleanup_status reads like live state.
+		cleanup += " (" + status.CleanupStatusSource + ")"
+	}
+	if status.GitStateSource != "" {
+		cleanup += " git=" + status.GitStateSource
+		if status.GitStateReason != "" {
+			cleanup += " (" + status.GitStateReason + ")"
+		}
+	}
+	fmt.Fprintf(w, "  Cleanup Status:  %s\n", cleanup)
 	if status.Branch != "" {
 		fmt.Fprintf(w, "  Branch:          %s\n", status.Branch)
 	}
@@ -1585,14 +1659,22 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 }
 
 func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath string, gitState *GitState, gitErr error) {
+	// claude-41j.1 D9: the git facts applied here are a live measurement, and
+	// the verdict now re-derives from them — the recorded cleanup_status is
+	// demoted to a hint (polecat.RecordedCleanupBlocks). Label the provenance
+	// before any early return, including the clean case: "the probe ran and
+	// found nothing" is exactly the answer that supersedes a stale record.
+	facts.GitStateSource = polecat.GitStateSourceLive
 	if gitErr != nil {
 		facts.GitCheckFailed = true
 		facts.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
+		facts.GitStateSource = polecat.GitStateSourceUnknown
 		return
 	}
 	if gitState != nil && gitState.PreservationCheckFailed {
 		facts.GitCheckFailed = true
 		facts.GitCheckFailedReason = fmt.Sprintf("git_state=unknown path=%s: unpushed-commit check failed: %s", worktreePath, gitState.PreservationCheckFailure)
+		facts.GitStateSource = polecat.GitStateSourceUnknown
 		return
 	}
 	if gitState == nil || gitState.Clean {
@@ -1653,6 +1735,12 @@ func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, dispositi
 	status.ReuseStatus = disposition.ReuseStatus
 	status.MQStatus = disposition.MQStatus
 	status.Blockers = disposition.Blockers
+	// Provenance travels with the verdict everywhere it is reported, so a
+	// consumer of check-recovery output can tell the recorded cleanup hint from
+	// the live git measurement behind a verdict (claude-41j.1 D9).
+	status.CleanupStatusSource = disposition.CleanupStatusSource
+	status.GitStateSource = disposition.GitStateSource
+	status.GitStateReason = disposition.GitStateReason
 	status.RecoveryActions = recoveryActionsForBlockers(disposition.Blockers)
 }
 
