@@ -68,6 +68,7 @@ type fakeMQPostMergeGit struct {
 	prunedRemotes    []string
 	preservedAgainst []string
 	targetRefs       []string
+	mergeBaseSubmits []string
 }
 
 func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, commit string) error {
@@ -98,6 +99,13 @@ func (g *fakeMQPostMergeGit) CleanDefaultBranchBaseRef(remote, defaultBranch str
 	return remote + "/" + defaultBranch
 }
 
+func (g *fakeMQPostMergeGit) CleanBaseRef(remote, defaultBranch, target string) string {
+	if target == "" || target == defaultBranch {
+		return g.CleanDefaultBranchBaseRef(remote, defaultBranch)
+	}
+	return remote + "/" + target
+}
+
 func (g *fakeMQPostMergeGit) FetchPrune(remote string) error {
 	g.prunedRemotes = append(g.prunedRemotes, remote)
 	return g.pruneErr
@@ -118,7 +126,8 @@ func (g *fakeMQPostMergeGit) Rev(ref string) (string, error) {
 	return g.localHead, nil
 }
 
-func (g *fakeMQPostMergeGit) MergeBase(_, _ string) (string, error) {
+func (g *fakeMQPostMergeGit) MergeBase(_, submittedCommit string) (string, error) {
+	g.mergeBaseSubmits = append(g.mergeBaseSubmits, submittedCommit)
 	return g.mergeBase, g.mergeBaseErr
 }
 
@@ -262,6 +271,38 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit(t 
 	}
 }
 
+// TestRunVerifiedMQPostMerge_LandedCommitAttestationUsesLiveBranchHeadWhenCommitSHAIsStale
+// covers the reported incident (gt-lk6g): a conflict-resolution push
+// advanced the source branch after submission without the MR bead's
+// commit_sha ever being updated. Binding the attestation to that stale
+// commit_sha compared it against content that no longer reflected the
+// branch's real work; here the fix must resolve the branch's live remote tip
+// and bind the attestation to that instead.
+func TestRunVerifiedMQPostMerge_LandedCommitAttestationUsesLiveBranchHeadWhenCommitSHAIsStale(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const liveHead = "1089ca701089ca701089ca701089ca701089ca70"
+	rigGit := &fakeMQPostMergeGit{
+		remoteTip:      liveHead,
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		landedFiles:    []string{"internal/cmd/mq.go"},
+	}
+	const landedCommit = "80b0bcd80b0bcd80b0bcd80b0bcd80b0bcd80b0"
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called after attested proof")
+	}
+	if len(rigGit.mergeBaseSubmits) != 1 || rigGit.mergeBaseSubmits[0] != liveHead {
+		t.Fatalf("attestation bound against %v, want the live branch tip [%s] instead of the stale commit_sha %s", rigGit.mergeBaseSubmits, liveHead, mgr.mr.CommitSHA)
+	}
+}
+
 func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) {
 	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
@@ -288,6 +329,68 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	}
 	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
 		t.Fatalf("local delete = cleanup=%+v local=%v", cleanup, rigGit.localDeleted)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_MovedBranchTipDeletesAtLiveHeadWhenPreserved
+// covers the other half of the reported incident (gt-lk6g): the remote tip
+// moved past the submitted commit_sha (a conflict-resolution push that never
+// updated the MR bead), so the CAS delete pinned to the stale commit_sha is
+// rejected by the remote as "stale info" even though the branch's current
+// content is preserved on target. The delete must pin to the live tip
+// instead, once that tip is proven preserved.
+func TestRunVerifiedMQPostMerge_MovedBranchTipDeletesAtLiveHeadWhenPreserved(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const movedHead = "1089ca701089ca701089ca701089ca701089ca70"
+	rigGit := &fakeMQPostMergeGit{remoteTip: movedHead, localHead: movedHead, preserved: true}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if len(rigGit.prunedRemotes) != 1 || rigGit.prunedRemotes[0] != "origin" {
+		t.Fatalf("pruned remotes = %v, want [origin] (the comparison ref must be current)", rigGit.prunedRemotes)
+	}
+	if len(rigGit.preservedAgainst) != 1 || rigGit.preservedAgainst[0] != "refs/heads/"+mgr.mr.Branch {
+		t.Fatalf("preservation checked for %v, want [refs/heads/%s]", rigGit.preservedAgainst, mgr.mr.Branch)
+	}
+	if len(rigGit.targetRefs) != 1 || rigGit.targetRefs[0] != "origin/main" {
+		t.Fatalf("preservation targets = %v, want [origin/main]", rigGit.targetRefs)
+	}
+	if !cleanup.RemoteDeleted || len(rigGit.deletedBranches) != 1 || rigGit.deletedBranches[0] != mgr.mr.Branch {
+		t.Fatalf("remote delete = cleanup=%+v branches=%v", cleanup, rigGit.deletedBranches)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != movedHead {
+		t.Fatalf("deleted heads = %v, want [%s] (the live tip, not the stale commit_sha %s)", rigGit.deletedHeads, movedHead, mgr.mr.CommitSHA)
+	}
+	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
+		t.Fatalf("local delete = cleanup=%+v local=%v", cleanup, rigGit.localDeleted)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_MovedBranchTipRefusedWhenNotPreserved keeps the
+// moved-tip adoption from becoming a way to delete a branch that picked up
+// unverified commits after submission: only a live tip proven preserved on
+// target is trusted as the delete anchor.
+func TestRunVerifiedMQPostMerge_MovedBranchTipRefusedWhenNotPreserved(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const movedHead = "1089ca701089ca701089ca701089ca701089ca70"
+	rigGit := &fakeMQPostMergeGit{remoteTip: movedHead, preserved: false, unpreserved: 2}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "not preserved on origin/main") || !strings.Contains(err.Error(), "2 patch-unique commits") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want unpreserved-tip refusal", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called after successful proof")
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted despite an unpreserved moved tip: %v", rigGit.deletedBranches)
+	}
+	if cleanup.RemoteDeleted || cleanup.LocalDeleted {
+		t.Fatalf("cleanup claims a delete it did not do: %+v", cleanup)
 	}
 }
 

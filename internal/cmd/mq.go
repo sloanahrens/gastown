@@ -233,6 +233,7 @@ type mqPostMergeGit interface {
 	PushRemoteRefTargetStatus(remote string, ref git.RemoteRef, target string) (git.BranchPreservationStatus, error)
 	RemoteDefaultBranch() string
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
+	CleanBaseRef(remote, defaultBranch, target string) string
 	FetchPrune(remote string) error
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -862,7 +863,8 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, la
 		if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, landedCommit); err != nil {
 			return fmt.Errorf("merge proof failed for MR %s: attested landed commit %s not reachable from %s: %w", mr.ID, landedCommit, target, err)
 		}
-		if err := verifyLandedCommitMatchesSubmitted(rigGit, target, commit, landedCommit); err != nil {
+		submittedCommit := liveMQPostMergeBranchHead(rigGit, mr.Branch, commit)
+		if err := verifyLandedCommitMatchesSubmitted(rigGit, target, submittedCommit, landedCommit); err != nil {
 			return fmt.Errorf("merge proof failed for MR %s: attestation does not match MR: %w", mr.ID, err)
 		}
 		mr.MergeCommit = landedCommit
@@ -872,6 +874,30 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, la
 		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
 	}
 	return nil
+}
+
+// liveMQPostMergeBranchHead prefers the source branch's live remote tip over
+// the commit_sha recorded on the MR bead. A conflict-resolution push
+// legitimately advances the source branch after submission (the queue's
+// sequential-rebase protocol requires it), but nothing updates the MR bead's
+// commit_sha when that happens, so it goes stale (gt-lk6g). Binding the
+// --landed-commit attestation to the stale value can compare it against
+// content that no longer reflects the branch's real, currently-landed work —
+// in the reported incident the stale commit had already become an ancestor
+// of target by the time post-merge ran, so its own diff was empty and the
+// binding check rejected a merge that had, in fact, correctly landed.
+// Falling back to commit_sha when the branch is already gone (a retry after
+// the branch was already deleted) keeps that case working exactly as before.
+func liveMQPostMergeBranchHead(rigGit mqPostMergeGit, branch, commit string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return commit
+	}
+	tip, err := rigGit.PushRemoteBranchTip("origin", branch)
+	if err != nil || strings.TrimSpace(tip) == "" {
+		return commit
+	}
+	return strings.TrimSpace(tip)
 }
 
 // verifyLandedCommitMatchesSubmitted binds a --landed-commit attestation to
@@ -949,6 +975,7 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 	if expectedHead == "" {
 		return cleanup, fmt.Errorf("remote branch delete %s: missing submitted commit_sha", cleanup.Branch)
 	}
+	deleteAt := expectedHead
 
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR as
 	// "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
@@ -959,19 +986,62 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		if err != nil {
 			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
 		}
-		if strings.TrimSpace(remoteTip) == "" {
+		remoteTip = strings.TrimSpace(remoteTip)
+		if remoteTip == "" {
 			cleanup.AlreadyGone = true
-		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, expectedHead); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, expectedHead, err)
 		} else {
+			if remoteTip != expectedHead {
+				preservedAt, err := resolveMovedMQPostMergeBranchTip(rigGit, mr, cleanup.Branch, expectedHead, remoteTip)
+				if err != nil {
+					return cleanup, err
+				}
+				deleteAt = preservedAt
+			}
+			if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, deleteAt); err != nil {
+				return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, deleteAt, err)
+			}
 			cleanup.RemoteDeleted = true
 		}
 	}
 
-	if deleteMQPostMergeLocalBranchIfAt(rigGit, cleanup.Branch, expectedHead) {
+	if deleteMQPostMergeLocalBranchIfAt(rigGit, cleanup.Branch, deleteAt) {
 		cleanup.LocalDeleted = true
 	}
 	return cleanup, nil
+}
+
+// resolveMovedMQPostMergeBranchTip authorizes a CAS branch-delete to pin to
+// the branch's live remote tip instead of the submitted commit_sha recorded
+// on the MR bead, for the same reason liveMQPostMergeBranchHead adopts the
+// live tip for attestation binding: a conflict-resolution push legitimately
+// advances the source branch after submission without ever updating the MR
+// bead's commit_sha, so the delete's expected value (git push
+// --force-with-lease=<ref>:<expectedHash>) is pinned to a hash the remote no
+// longer has — rejected as "stale info" even though the branch's current
+// content already landed (gt-lk6g).
+//
+// The live tip is trusted only once every commit it carries beyond
+// expectedHead is proven preserved on the merge target, the same
+// content-preservation proof the orphan-branch cleanup path (gt-qjp2) uses to
+// authorize deleting a branch with no MR bead at all: a branch that moved for
+// any other reason is still refused rather than deleted out from under it.
+func resolveMovedMQPostMergeBranchTip(rigGit mqPostMergeGit, mr *refinery.MergeRequest, branch, expectedHead, remoteTip string) (string, error) {
+	defaultBranch := rigGit.RemoteDefaultBranch()
+	target := rigGit.CleanBaseRef("origin", defaultBranch, mr.TargetBranch)
+	if targetRemote := git.RemoteForRef(target); targetRemote != "" {
+		if err := rigGit.FetchPrune(targetRemote); err != nil {
+			return "", fmt.Errorf("remote branch delete %s: refreshing %s to compare against %s: %w", branch, targetRemote, target, err)
+		}
+	}
+	status, err := rigGit.PushRemoteRefTargetStatus("origin", git.RemoteRef{Name: "refs/heads/" + branch, Hash: remoteTip}, target)
+	if err != nil {
+		return "", fmt.Errorf("remote branch delete %s: checking live tip %s against %s: %w", branch, remoteTip, target, err)
+	}
+	if !status.Preserved {
+		return "", fmt.Errorf("remote branch delete %s: live tip %s has moved past submitted head %s and is not preserved on %s (%d patch-unique commits); refusing to delete it",
+			branch, remoteTip, expectedHead, target, status.UnpreservedPatchCount)
+	}
+	return remoteTip, nil
 }
 
 func deleteMQPostMergeLocalBranchIfAt(rigGit mqPostMergeGit, branch, expectedHead string) bool {
