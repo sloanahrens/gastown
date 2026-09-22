@@ -291,15 +291,29 @@ func extractFormulaVar(formulaVars, key string) string {
 // if the fallback ALSO equals branch (defaultBranch itself is somehow the
 // branch being submitted), since there is then no safe target to fall back
 // to and the caller must be told explicitly rather than guess.
-func resolveMRTarget(target, branch, defaultBranch string) (string, error) {
-	if target != branch {
-		return target, nil
+//
+// Also refuses a resolved target that is a DIFFERENT polecat's branch
+// (polecat/*) unless explicit is true. explicit is true only when the
+// caller declared target itself, via --target (gt done) or --epic (gt mq
+// submit) — never when it came from formula_vars base_branch or integration
+// auto-detect. Those two paths are exactly how gt-a8i3's self-target leak
+// happened (a stray base_branch formula var); a polecat/* target reaching
+// here through them is the same class of leak, just pointed at someone
+// else's in-flight branch instead of the submitter's own, so it gets the
+// same refusal rather than silently merging into another polecat's
+// unfinished work.
+func resolveMRTarget(target, branch, defaultBranch string, explicit bool) (string, error) {
+	if target == branch {
+		style.PrintWarning("MR target %q equals the source branch; refusing self-target, falling back to rig default %q", target, defaultBranch)
+		if defaultBranch == branch {
+			return "", fmt.Errorf("cannot submit MR: resolved target %q equals the source branch and the rig default branch also equals the source branch; specify the target explicitly", target)
+		}
+		target = defaultBranch
 	}
-	style.PrintWarning("MR target %q equals the source branch; refusing self-target, falling back to rig default %q", target, defaultBranch)
-	if defaultBranch == branch {
-		return "", fmt.Errorf("cannot submit MR: resolved target %q equals the source branch and the rig default branch also equals the source branch; specify the target explicitly", target)
+	if !explicit && strings.HasPrefix(target, "polecat/") {
+		return "", fmt.Errorf("cannot submit MR: resolved target %q is another polecat's branch; pass --target (or --epic) explicitly if merging into it is intentional", target)
 	}
-	return defaultBranch, nil
+	return target, nil
 }
 
 // truncateDescription truncates a multi-line description to a single line summary.

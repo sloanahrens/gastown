@@ -185,6 +185,29 @@ func assertOriginMainUnchangedAndReset(t *testing.T, workDir, before string) {
 	}
 }
 
+// TestRecheckMRStillMergeable_RejectsSelfTarget guards gt-w2jc: the
+// submit-time self-target refusal (resolveMRTarget in cmd/prime_molecule.go)
+// is defense in depth, not the only line of defense — this independent
+// pre-merge check catches an MR bead whose target equals its branch however
+// it was constructed, including a path that bypasses gt done/gt mq submit
+// entirely.
+func TestRecheckMRStillMergeable_RejectsSelfTarget(t *testing.T) {
+	t.Parallel()
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+	store := newPrepushStore(prepushMRIssue("gt-mr", "polecat/thunder/gt-x+abc", "polecat/thunder/gt-x+abc", "gt-src"))
+	e := newPrepushEngineer(t, workDir, store)
+
+	mr := &MRInfo{ID: "gt-mr", Branch: "polecat/thunder/gt-x+abc", Target: "polecat/thunder/gt-x+abc", SourceIssue: "gt-src"}
+	result := e.recheckMRStillMergeable(mr, "polecat/thunder/gt-x+abc", true)
+	if result.Success || !result.NoMerge {
+		t.Fatalf("self-targeted MR should be rejected, got: %+v", result)
+	}
+	if got := store.closeReasons["gt-mr"]; !strings.Contains(got, "equals source branch") {
+		t.Fatalf("MR close reason = %q, want self-target rejection", got)
+	}
+}
+
 func TestRecheckMRStillMergeable_RejectsMissingSourceField(t *testing.T) {
 	t.Parallel()
 	workDir, _, cleanup := testGitRepo(t)

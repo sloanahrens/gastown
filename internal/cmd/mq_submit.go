@@ -164,6 +164,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// Determine target branch
 	// Priority: explicit --epic > formula_vars base_branch > integration branch auto-detect > rig default.
 	target := defaultBranch
+	explicitTarget := mqSubmitEpic != ""
 	if mqSubmitEpic != "" {
 		// Explicit --epic flag: read stored branch name, fall back to template
 		rigPath := filepath.Join(townRoot, rigName)
@@ -197,9 +198,11 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	// gt-a8i3: refuse a self-targeted MR no matter which of the sources above
-	// produced it.
+	// produced it. Also refuses an unexplained polecat/* target (gt-w2jc):
+	// explicitTarget is true only for the --epic flag path above, never for
+	// the formula_vars/auto-detect paths.
 	var targetErr error
-	target, targetErr = resolveMRTarget(target, branch, defaultBranch)
+	target, targetErr = resolveMRTarget(target, branch, defaultBranch, explicitTarget)
 	if targetErr != nil {
 		return targetErr
 	}
