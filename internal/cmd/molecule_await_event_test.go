@@ -542,14 +542,20 @@ func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
 }
 
 func TestAwaitEventContextYieldPreservesBackoffWindow(t *testing.T) {
-	until := time.Now().Add(2 * time.Second).Unix()
-	log := runAwaitEventBackoffTest(t, []string{"gt:agent", "idle:1", fmt.Sprintf("backoff-until:%d", until)}, "5s", "50ms")
+	// Window (2s) fits inside the 5s timeout, so the run resumes the existing
+	// window instead of arming a fresh one.
+	log := runAwaitEventBackoffTest(t, 2*time.Second, "5s", "50ms")
 
 	updates := updateLines(log)
 	if len(updates) == 0 {
 		t.Fatalf("expected bd update calls, log:\n%s", log)
 	}
 	for _, line := range updates {
+		// The timeout path bumps the stub's idle:1 to idle:2 before clearing
+		// the window; a context-yield does neither.
+		if strings.Contains(line, "idle:2") {
+			t.Fatalf("expected context-yield, got the timeout path; log:\n%s", log)
+		}
 		if !strings.Contains(line, "backoff-until:") {
 			t.Fatalf("context-yield cleared backoff window; update %q in log:\n%s", line, log)
 		}
@@ -557,8 +563,8 @@ func TestAwaitEventContextYieldPreservesBackoffWindow(t *testing.T) {
 }
 
 func TestAwaitEventTimeoutClearsBackoffWindow(t *testing.T) {
-	until := time.Now().Add(2 * time.Second).Unix()
-	log := runAwaitEventBackoffTest(t, []string{"gt:agent", "idle:1", fmt.Sprintf("backoff-until:%d", until)}, "80ms", "")
+	// Window (2s) outlives the 80ms timeout, so the clear is the timeout's.
+	log := runAwaitEventBackoffTest(t, 2*time.Second, "80ms", "")
 
 	updates := updateLines(log)
 	if len(updates) == 0 {
@@ -570,7 +576,16 @@ func TestAwaitEventTimeoutClearsBackoffWindow(t *testing.T) {
 	}
 }
 
-func runAwaitEventBackoffTest(t *testing.T, labels []string, timeout, contextCheck string) string {
+// runAwaitEventBackoffTest runs the await-event command against a stub bd
+// reporting the agent bead as gt:agent, idle:1, with a backoff window of
+// backoffWindow (whole seconds), and returns the bd call log.
+//
+// The stub computes the window's deadline when bd reads the labels, not when
+// the test starts: a deadline fixed before the harness setup is consumed by
+// that setup under load, and a window whose remaining time is down to the
+// context-check interval sends the wait down its timeout path instead, which
+// clears the label both callers assert on (gt-ixtg).
+func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout, contextCheck string) string {
 	t.Helper()
 
 	root := t.TempDir()
@@ -592,19 +607,11 @@ func runAwaitEventBackoffTest(t *testing.T, labels []string, timeout, contextChe
 		t.Fatalf("mkdir bin: %v", err)
 	}
 	logPath := filepath.Join(root, "bd.log")
-	showJSON, err := json.Marshal([]struct {
-		Labels []string `json:"labels"`
-	}{{Labels: labels}})
-	if err != nil {
-		t.Fatalf("marshal labels: %v", err)
-	}
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$1" in
 show)
-cat <<'JSON'
-%s
-JSON
+printf '[{"labels":["gt:agent","idle:1","backoff-until:%%s"]}]\n' "$(( $(date +%%s) + %d ))"
 ;;
 update)
 exit 0
@@ -613,7 +620,7 @@ exit 0
 exit 0
 ;;
 esac
-`, logPath, string(showJSON))
+`, logPath, int(backoffWindow/time.Second))
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
 		t.Fatalf("write bd stub: %v", err)
 	}
