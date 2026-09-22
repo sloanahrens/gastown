@@ -735,6 +735,23 @@ bd close <id>
 bd dep add <child> <parent>  # child depends on parent
 ```
 
+### Reading a bead's history
+
+`bd history <id>` prints one snapshot per retained Dolt commit. A flatten
+(`gt maintain`, `gt dolt flatten`, compactor-dog) discards those commits, and
+the command does not say so — a bead whose snapshots begin at the flatten reads
+exactly like one whose snapshots begin at its creation, so a field showing a
+single value looks like a field that never changed.
+
+```bash
+gt history <id>              # Where the snapshots start, and whether that is truncated
+gt history <id> --json       # Machine-readable verdict
+bd history <id> --events     # Change events, which a flatten preserves
+```
+
+Check the floor before concluding that a field never changed before it, and
+read `--events` for the span the commit snapshots lost.
+
 ## Patrol Agents
 
 Deacon, Witness, and Refinery run continuous patrol loops using wisps:
