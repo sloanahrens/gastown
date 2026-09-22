@@ -180,7 +180,7 @@ func TestCompleteScriptRun(t *testing.T) {
 // (gt-oqbw) — and a deferral is not a failure, so there is nothing for a dog
 // to do either.
 func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
-	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p", Execution: &plugin.Execution{AllowDeferredExit: true}}
 	recs := 0
 	dispatched := 0
 	var logs []string
@@ -210,6 +210,34 @@ func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
 	}
 	if recs != 2 || dispatched != 2 {
 		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d dispatched=%d", recs, dispatched)
+	}
+}
+
+// Exit 3 only means deferral for a plugin whose plugin.md opts in with
+// [execution] allow_deferred_exit = true. Without the opt-in — the default,
+// and every script plugin except rebuild-gt at the time of writing — exit 3
+// is an ordinary failure: recorded and dispatched to a dog like any other
+// nonzero exit. This is what keeps one plugin's private exit-code contract
+// from silently swallowing a real failure in an unrelated plugin that
+// happens to exit 3 (gt-oqbw).
+func TestCompleteScriptRun_DeferralRequiresOptIn(t *testing.T) {
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
+	var recs []plugin.PluginRunRecord
+	dispatched := 0
+	hooks := scriptRunHooks{
+		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		logf:      func(string, ...any) {},
+	}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultFailure || dispatched != 1 {
+		t.Fatalf("exit 3 without opt-in must be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
+	}
+
+	p.Execution = &plugin.Execution{AllowDeferredExit: false}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || dispatched != 2 {
+		t.Fatalf("exit 3 with allow_deferred_exit=false must still be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
 	}
 }
 

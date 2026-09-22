@@ -16,6 +16,7 @@ type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"
+allow_deferred_exit = true
 +++
 
 # Rebuild gt Binary
@@ -31,13 +32,26 @@ these steps.
 ## Exit codes
 
 The plugin's contract with the daemon. Before changing it, read
-`internal/daemon/plugin_script.go`.
+`internal/daemon/plugin_script.go`. Both sides must agree, and each row has a
+test in `run_test.sh` (recorded there per case, not per exit code, since
+several exit-0 and exit-1 cases differ in what they escalate).
 
-| exit | meaning | recorded |
-|------|---------|----------|
-| 0 | did the work — installed, or nothing to install | yes |
-| 3 | deferred: nothing accomplished, retry next heartbeat | no |
-| 1 | refused or failed | yes, and escalated |
+| exit | when | recorded | escalates |
+|------|------|----------|-----------|
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | no |
+| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | no |
+| 1 | failed: `make build`/`make safe-install` failed, or the install could not be verified as in force | yes, as failure | yes, under a stable fingerprint |
+
+Exit 3 means deferral only because this plugin's `[execution]` block sets
+`allow_deferred_exit = true`; a script plugin without that opt-in has exit 3
+read as an ordinary failure (`internal/daemon/plugin_script.go`), so a real
+failure elsewhere can never be silently swallowed as "nothing to see here".
+
+A refusal (exit 0, recorded as skipped) is not the same as a failure (exit 1,
+recorded as failure and escalated): waiting cannot fix a failure, but most
+refusals clear on their own (a human commits the dirty checkout, main catches
+up), so they do not escalate on their own — the unconditional drift check
+below is what alarms if a refusal persists long enough to matter.
 
 A run record is what satisfies the cooldown gate, so exit 3 writing none is
 what holds the retry to one heartbeat (3 min) instead of one cooldown (1 h).
@@ -97,12 +111,13 @@ Parse the JSON output and check these fields:
   binary commit (would be a downgrade).
 - If `"safe_to_rebuild": true` → continue
 
-Past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install at the
-first quiet moment: a merged commit that is not in force is a live defect, not
-a rounding error — gt-ww20 (a batch path that bypassed the editorial gate, so
-4 MRs landed unreviewed) and gt-rbfj (composer-stall recovery typing the
-literal text `C-x C-s` into the composer) were each merged while the town kept
-running a binary without them. Under the threshold, defer.
+At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install
+at the first quiet moment: a merged commit that is not in force is a live
+defect, not a rounding error — gt-ww20 (a batch path that bypassed the
+editorial gate, so 4 MRs landed unreviewed) and gt-rbfj (composer-stall
+recovery typing the literal text `C-x C-s` into the composer) were each merged
+while the town kept running a binary without them. Under the threshold
+(strictly fewer commits behind than it), defer.
 
 An unknown `commits_behind` here is treated as *at* the threshold, not under
 it — proceed with the install rather than defer. Reading "unknown" as "0
@@ -171,11 +186,7 @@ the rig's HEAD immediately before the build, not from the earlier staleness
 check — see below) is the full 40-character hash. Comparing those two forms
 directly as strings never matches, so the abbreviated form is resolved to a
 full hash inside the rig checkout first — the one repo it's guaranteed
-unambiguous in — before the two are compared. Getting this wrong is not
-theoretical: it is exactly what made version 3's first attempt at this plugin
-report every real install as a failure while its own shell tests passed,
-because the tests happened to use the abbreviated form on both sides
-(gt-oqbw).
+unambiguous in — before the two are compared (gt-oqbw).
 
 The expected commit is deliberately not the `repo_commit` field from the
 staleness check earlier in the run: `gt stale --json` does its own
@@ -205,6 +216,8 @@ The receipt names the commits brought into force — `in force <old> -> <new>
 (N commits)` plus their subjects — so "was gt-ww20 ever in force, and when" is
 answered by the record instead of reconstructed from merge timestamps.
 
-Failures and refusals escalate under a stable fingerprint each
-(`rebuild-gt:build-failed`, `:not-in-force`, `:unverified`,
-`:restart-failed`), so a persisting state alarms once.
+Failures escalate under a stable fingerprint each (`rebuild-gt:build-failed`,
+`:not-in-force`, `:unverified`, `:restart-failed`), so a persisting state
+alarms once. Refusals do not escalate on their own (see Exit codes above) —
+a persisting refusal is what the drift check's `rebuild-gt:drift` /
+`:drift-unknown` fingerprints are for.

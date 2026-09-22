@@ -28,9 +28,33 @@ const (
 	// databases one at a time, each with its own doltPushTimeout (60s) per
 	// add/commit/push step, so it has no bound of its own — an unreachable
 	// remote could otherwise make shutdown (and so a restart's "new binary is
-	// in force" wait, see waitForRestart) open-ended (gt-oqbw MAJOR #5).
+	// in force" wait, see waitForRestart) open-ended (gt-oqbw).
 	shutdownDoltPushBudget = 20 * time.Second
+
+	// otelShutdownBudget bounds Shutdown's OTel flush (daemon.go). Part of
+	// ShutdownBudget below.
+	otelShutdownBudget = 5 * time.Second
 )
+
+// ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): the sum
+// of its three bounded steps in the order they run — pushDoltRemotesBounded,
+// then the Dolt SQL server's own graceful-stop wait (doltServerStopBudget,
+// dolt.go) before it SIGKILLs, then the OTel flush. Everything else in
+// shutdown (stopping the curator, convoy manager, KRC pruner) is in-process
+// and returns immediately; these three are the only steps that wait on
+// something external.
+//
+// This is the actual value a daemon restart must plan around — not an
+// estimate — because both restart paths bound the OLD daemon's lifetime by a
+// mechanism outside shutdown() itself: `gt daemon restart`'s launchd
+// supervisor (internal/cmd/daemon_supervisor.go) sets the job's ExitTimeOut
+// to this same budget, so a SIGTERM'd daemon that hasn't exited by then is
+// SIGKILLed regardless of which step it is on; the hand path's StopDaemon
+// (daemon.go) uses a much shorter ShutdownNotifyDelay (500ms) before it does
+// the same. Either way, ShutdownBudget is the longest the old process can
+// legitimately take, and it is what waitForRestart's poll budget is derived
+// from.
+const ShutdownBudget = shutdownDoltPushBudget + doltServerStopBudget + otelShutdownBudget
 
 // doltRemotesInterval returns the configured push interval, or the default (15m).
 func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {

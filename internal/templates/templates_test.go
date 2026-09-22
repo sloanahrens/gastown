@@ -814,6 +814,32 @@ func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
 	}
 }
 
+// TestRenderLaunchdPlist_ExitTimeOut verifies ExitTimeOutSeconds renders as
+// launchd's ExitTimeOut key, and that a zero value (the default before a
+// caller opts in) omits the key entirely rather than writing <integer>0</integer>,
+// which would make launchd SIGKILL the daemon almost immediately on restart.
+func TestRenderLaunchdPlist_ExitTimeOut(t *testing.T) {
+	output, err := renderLaunchdPlist(SupervisorData{
+		GTPath:             "/usr/local/bin/gt",
+		TownRoot:           "/test/town",
+		ExitTimeOutSeconds: 85,
+	})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	if !strings.Contains(output, "<key>ExitTimeOut</key>") || !strings.Contains(output, "<integer>85</integer>") {
+		t.Errorf("plist missing ExitTimeOut=85:\n%s", output)
+	}
+
+	output, err = renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/test/town"})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	if strings.Contains(output, "<key>ExitTimeOut</key>") {
+		t.Errorf("plist set ExitTimeOut for a zero ExitTimeOutSeconds, leaving launchd's default in effect requires omitting the key:\n%s", output)
+	}
+}
+
 // TestSupervisorStatus_None verifies SupervisorStatus reports "none" when
 // no plist/unit file is present.
 func TestSupervisorStatus_None(t *testing.T) {

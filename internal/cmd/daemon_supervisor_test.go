@@ -595,6 +595,28 @@ func TestRestartDaemon_HandRestartWithoutASupervisor(t *testing.T) {
 	}
 }
 
+// The hand path must not spawn a new daemon into the lock before the old one
+// is confirmed gone: stopDaemonDirect sends SIGKILL and returns without
+// waiting to confirm it took, so restartDaemon confirms it itself
+// (waitForDaemonGone) before calling startDaemon. Here the lock keeps
+// reporting the old PID for the whole confirm budget, so the restart must
+// fail loudly instead of racing a spawn against a still-live old daemon.
+func TestRestartDaemon_HandPathRefusesToStartBeforeTheOldDaemonIsGone(t *testing.T) {
+	town := t.TempDir()
+	calls := stubRestart(t, "darwin", "", 1111) // never reports gone
+
+	_, _, err := restartDaemon(town)
+	if err == nil {
+		t.Fatal("restartDaemon reported success although the old daemon's lock was never confirmed released")
+	}
+	if !calls.stopped {
+		t.Error("stopDaemonDirect was never called")
+	}
+	if calls.spawned {
+		t.Error("a new daemon was spawned before the old one was confirmed gone")
+	}
+}
+
 // A restart with no daemon running is a start: the caller asking for "the
 // daemon on the current binary" does not have to check first.
 func TestRestartDaemon_StartsAStoppedDaemon(t *testing.T) {
@@ -634,18 +656,47 @@ func TestRestartDaemon_ErrorsWhenTheNewDaemonNeverTakesTheLock(t *testing.T) {
 	}
 }
 
-// waitForRestart's budget must outlast the outgoing daemon's own bounded
-// shutdown stages (pushDoltRemotesBounded's 20s + Dolt server stop's ~5s +
-// OTel's 5s) plus the incoming daemon's startup preflight — the exact gap
-// the original 10s budget (100 attempts) did not cover (gt-oqbw MAJOR #5).
-// This simulates a restart that is genuinely slow, not stuck: the lock keeps
-// naming the outgoing PID for 550 of the 600 attempts before the new daemon
-// takes it. Under the old budget this would time out and be misreported as
-// a failed restart although it was still in progress.
+// A lock reporting running=true with pid 0 is a start still in flight (the
+// PID file has not been written yet), not the new daemon a restart is
+// waiting for — waitForRestart must keep polling past it rather than
+// returning pid 0 as success.
+func TestRestartDaemon_WaitForRestartIgnoresPidZero(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	// oldPID, then a stretch of "running but pid unknown yet", then the real
+	// new daemon.
+	calls := stubRestart(t, "darwin", plist, 1111, 1111, 0, 0, 4242)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	if !strings.Contains(calls.joined(), "kickstart") {
+		t.Errorf("the restart was never attempted: %v", calls.argv)
+	}
+}
+
+// waitForRestart's budget (restartWaitBudget = daemon.ShutdownBudget +
+// daemonStartupMargin) must outlast the outgoing daemon's own bounded
+// shutdown stages (pushDoltRemotesBounded's 20s + the Dolt server's own
+// graceful-stop wait, 30s + OTel's 5s) plus the incoming daemon's startup
+// preflight — the exact gap the original 10s budget (100 attempts) did not
+// cover (gt-oqbw). This simulates a restart that is genuinely slow,
+// not stuck: the lock keeps naming the outgoing PID for slowAttempts of
+// restartWaitAttempts before the new daemon takes it, comfortably inside the
+// budget but well past what the original one allowed. Under the old budget
+// this would time out and be misreported as a failed restart although it was
+// still in progress.
 func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
 	town := t.TempDir()
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
 	const oldPID, newPID, slowAttempts = 1111, 4242, 550
+	if slowAttempts >= restartWaitAttempts {
+		t.Fatalf("slowAttempts (%d) must stay below restartWaitAttempts (%d) or this test proves nothing", slowAttempts, restartWaitAttempts)
+	}
 	pids := make([]int, 0, slowAttempts+1)
 	for range slowAttempts {
 		pids = append(pids, oldPID)

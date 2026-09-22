@@ -2650,9 +2650,10 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		}
 	}
 
-	// Flush and stop OTel providers (5s deadline to avoid blocking shutdown).
+	// Flush and stop OTel providers. Bounded so it cannot block shutdown; part
+	// of ShutdownBudget (see dolt_remotes.go).
 	if d.otelProvider != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), otelShutdownBudget)
 		defer cancel()
 		if err := d.otelProvider.Shutdown(shutCtx); err != nil {
 			d.logger.Printf("Warning: telemetry shutdown: %v", err)

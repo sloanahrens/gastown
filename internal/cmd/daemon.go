@@ -475,7 +475,7 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("a daemon is already running — stop the running daemon first: gt daemon stop")
 	}
 
-	msg, err := templates.ProvisionSupervisor(townRoot)
+	msg, err := templates.ProvisionSupervisor(townRoot, daemon.ShutdownBudget)
 	if err != nil {
 		return fmt.Errorf("configuring supervisor: %w", err)
 	}

@@ -171,6 +171,34 @@ func waitForDaemon(townRoot string) (int, error) {
 	return 0, fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
 }
 
+// handStopConfirmBudget bounds waitForDaemonGone: how long restartDaemon's
+// hand path waits, after stopDaemonDirect returns, for the OS to actually
+// finish tearing the old process down and releasing daemon.lock. SIGKILL
+// itself is near-instant, so this is confirming the OS finished, not waiting
+// out a graceful shutdown — a short budget, unlike restartWaitBudget above.
+const handStopConfirmBudget = 5 * time.Second
+
+// handStopConfirmAttempts is handStopConfirmBudget expressed as a poll count
+// the same way restartWaitAttempts is (see its doc): against the fixed
+// production poll interval, not the possibly-shrunk test one.
+const handStopConfirmAttempts = int(handStopConfirmBudget / (100 * time.Millisecond))
+
+// waitForDaemonGone polls the lock for up to handStopConfirmBudget and
+// reports an error if the daemon is still running at the end of it.
+func waitForDaemonGone(townRoot string) error {
+	for range handStopConfirmAttempts {
+		running, _, err := daemonIsRunning(townRoot)
+		if err != nil {
+			return fmt.Errorf("checking daemon status: %w", err)
+		}
+		if !running {
+			return nil
+		}
+		time.Sleep(daemonPollInterval)
+	}
+	return fmt.Errorf("daemon still held its lock %s after stopping (check logs with 'gt daemon logs')", handStopConfirmBudget)
+}
+
 // restartDaemon brings the daemon back up on the program now on disk: through
 // the provisioned supervisor when there is one, by hand when there is not. It
 // is the primitive that makes a freshly installed binary take effect in a
@@ -210,6 +238,15 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 		if err := stopDaemonDirect(townRoot); err != nil {
 			return "", 0, fmt.Errorf("stopping the daemon: %w", err)
 		}
+		// stopDaemonDirect (daemon.StopDaemon) sends SIGKILL and returns
+		// without confirming it took: its own caller (`gt daemon stop`) has
+		// nothing further to do with the process either way. This caller
+		// does — it is about to spawn a new daemon into the same lock — so
+		// starting that race before the old holder is confirmed gone risks
+		// the new process losing the flock to a not-quite-dead old one.
+		if err := waitForDaemonGone(townRoot); err != nil {
+			return "", 0, err
+		}
 		return startDaemon(townRoot)
 	}
 	runErr := supervisorRun(sup.start)
@@ -228,29 +265,63 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 	return sup.name, pid, nil
 }
 
-// waitForRestart polls the lock for up to 60 s and returns the PID of a
-// daemon other than oldPID. The longer budget than waitForDaemon's is for the
-// restart's extra step: the outgoing process has to release the lock and the
-// supervisor has to bring the job back before there is anything to see, and a
-// build-ahead-of-start wait that times out early would report a restart that
-// did happen as a failure.
+// daemonStartupMargin is how long waitForRestart allows the INCOMING daemon
+// to run its own preflight (Dolt metadata repair, opening beads stores) and
+// acquire daemon.lock, on top of the time the OUTGOING one takes to let go of
+// it. It has no measured source the way ShutdownBudget's steps do; it is a
+// deliberately generous margin.
+const daemonStartupMargin = 30 * time.Second
+
+// restartWaitBudget bounds waitForRestart's poll. It is derived from the two
+// real enforcement mechanisms that bound how long the OLD daemon can hold
+// daemon.lock after a restart is asked for — not from Daemon.shutdown's own
+// step budgets, which neither restart path actually lets run to completion:
 //
-// 10 s (the original budget) does not cover the outgoing daemon's own
-// shutdown (gt-oqbw MAJOR #5): Daemon.shutdown pushes pending Dolt remotes
-// (bounded to 20 s, see pushDoltRemotesBounded), stops the Dolt SQL server
-// (up to ~5 s) and flushes OTel (up to 5 s) before the process exits and the
-// lock is released — and only then can the incoming daemon acquire it and
-// run its own preflight (Dolt metadata repair, opening beads stores) before
-// waitForDaemon's poll would see it. 60 s covers that chain with real margin
-// without leaving a hung restart to poll forever.
+//   - Under a provisioned launchd job (the only path that uses this budget;
+//     see restartDaemon), `gt daemon restart` is `launchctl kickstart -k`,
+//     which sends SIGTERM and — critically — launchd itself SIGKILLs the job
+//     if it has not exited within ExitTimeOut. ProvisionSupervisor sets that
+//     to daemon.ShutdownBudget (see internal/templates), so the old daemon is
+//     guaranteed gone within ShutdownBudget of the restart, whatever its own
+//     shutdown steps add up to.
+//   - The hand path (no supervisor) does not use this function at all:
+//     restartDaemon calls stopDaemonDirect (daemon.StopDaemon) instead, whose
+//     own SIGKILL grace is constants.ShutdownNotifyDelay (500 ms) — an order
+//     of magnitude tighter, because there is no supervisor to leave the job
+//     loaded for, so the caller can afford to force the issue immediately.
+//
+// So ShutdownBudget is the bound this function actually has to plan around;
+// daemonStartupMargin covers the incoming daemon on top of it.
+const restartWaitBudget = daemon.ShutdownBudget + daemonStartupMargin
+
+// restartWaitAttempts is how many times waitForRestart polls: chosen so that
+// restartWaitAttempts * daemonPollInterval's PRODUCTION value (100ms) equals
+// restartWaitBudget. It is computed against that fixed default, not against
+// the current daemonPollInterval, so that shrinking daemonPollInterval in
+// tests (see its doc) shrinks the real wait proportionally instead of
+// canceling out against a count recomputed from the same shrunk value.
+const restartWaitAttempts = int(restartWaitBudget / (100 * time.Millisecond))
+
+// waitForRestart polls the lock for up to restartWaitBudget and returns the
+// PID of a daemon other than oldPID. The longer budget than waitForDaemon's
+// is for the restart's extra step: the outgoing process has to release the
+// lock and the supervisor has to bring the job back before there is anything
+// to see, and a wait that times out early would report a restart that did
+// happen as a failure.
+//
+// pid <= 0 never satisfies the wait, even when running is true and 0 !=
+// oldPID: IsRunning reports running with pid 0 when the lock is held but the
+// PID file has not been written yet (the same race daemon.StopDaemon's own
+// comment calls out) — a start still in flight, not the new daemon this is
+// waiting for.
 func waitForRestart(townRoot string, oldPID int) (int, error) {
-	for range 600 {
+	for range restartWaitAttempts {
 		time.Sleep(daemonPollInterval)
 		running, pid, err := daemonIsRunning(townRoot)
 		if err != nil {
 			return 0, fmt.Errorf("checking daemon status: %w", err)
 		}
-		if running && pid != oldPID {
+		if running && pid > 0 && pid != oldPID {
 			return pid, nil
 		}
 	}

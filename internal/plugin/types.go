@@ -149,6 +149,17 @@ type Execution struct {
 	// Example: ["exitbox", "run", "--profile=gastown-polecat", "--"]
 	// Only used when Type is "exec-wrapper".
 	Wrapper []string `json:"wrapper,omitempty" toml:"wrapper,omitempty"`
+
+	// AllowDeferredExit opts a script plugin into exit code 3 meaning
+	// "deferred: nothing accomplished, retry on the next heartbeat, write no
+	// run record" instead of an ordinary failure. It defaults to false: exit 3
+	// is otherwise just another nonzero exit, recorded as a failure and
+	// dispatched to a dog like any other. Without a per-plugin opt-in, every
+	// script plugin would share one exit code's meaning, so a plugin that
+	// happens to exit 3 for an unrelated reason (a shell builtin, a tool it
+	// shells out to) would have a real failure silently swallowed as a
+	// deferral (gt-oqbw).
+	AllowDeferredExit bool `json:"allow_deferred_exit,omitempty" toml:"allow_deferred_exit,omitempty"`
 }
 
 // PluginFrontmatter represents the TOML frontmatter in plugin.md files.

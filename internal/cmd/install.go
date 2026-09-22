@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -470,7 +471,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Configure supervisor (launchd/systemd) for daemon auto-restart
 	if installSupervisor {
 		fmt.Println()
-		if msg, err := templates.ProvisionSupervisor(absPath); err != nil {
+		if msg, err := templates.ProvisionSupervisor(absPath, daemon.ShutdownBudget); err != nil {
 			fmt.Printf("   %s Could not configure supervisor: %v\n", style.Dim.Render("⚠"), err)
 		} else {
 			fmt.Printf("   ✓ %s\n", msg)

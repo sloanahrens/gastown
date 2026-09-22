@@ -20,6 +20,12 @@ import (
 
 const doltCmdTimeout = 15 * time.Second
 
+// doltServerStopBudget bounds how long stopLocked waits for the Dolt SQL
+// server to exit on its own before sending SIGKILL. It is part of
+// ShutdownBudget (see dolt_remotes.go) — the real wall-clock ceiling a daemon
+// restart has to account for, not an estimate.
+const doltServerStopBudget = 30 * time.Second
+
 // DefaultDoltHealthCheckInterval is how often the dedicated Dolt health check
 // ticker fires, independent of the general daemon heartbeat (3 min).
 // 30 seconds provides fast crash detection: a Dolt server crash is detected
@@ -1040,10 +1046,11 @@ func (m *DoltServerManager) stopLocked() {
 	select {
 	case <-done:
 		m.logger("Dolt SQL server stopped gracefully")
-	case <-time.After(30 * time.Second):
-		// Force kill — 30s allows Dolt to flush its append-only journal under load.
-		// A SIGKILL mid-journal-write causes corruption requiring dolt fsck to recover.
-		m.logger("Dolt SQL server did not stop gracefully after 30s, forcing termination")
+	case <-time.After(doltServerStopBudget):
+		// Force kill — this budget allows Dolt to flush its append-only journal
+		// under load. A SIGKILL mid-journal-write causes corruption requiring
+		// dolt fsck to recover.
+		m.logger("Dolt SQL server did not stop gracefully after %s, forcing termination", doltServerStopBudget)
 		_ = sendKillSignal(process)
 	}
 

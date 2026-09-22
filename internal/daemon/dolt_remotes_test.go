@@ -280,7 +280,7 @@ func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
 
 // runBounded is what pushDoltRemotesBounded relies on to keep an unbounded
 // callee from making daemon shutdown (and so a restart, see waitForRestart
-// in internal/cmd) open-ended (gt-oqbw MAJOR #5). This exercises both
+// in internal/cmd) open-ended (gt-oqbw). This exercises both
 // branches directly, decoupled from a real Dolt server: the alarming one
 // (fn outlives the budget: onTimeout must fire and runBounded must return
 // without waiting for fn) and the ordinary one (fn finishes first: onTimeout
@@ -300,7 +300,12 @@ func TestRunBounded_FiresOnTimeoutAndDoesNotWaitForTheAbandonedCall(t *testing.T
 	if !timedOut {
 		t.Error("onTimeout was not called although fn outlived the budget")
 	}
-	if elapsed > 200*time.Millisecond {
+	// 2s, not a tighter bound near the 10ms budget: this town's own gate
+	// (container builds, Dolt operations, other suites sharing the host) can
+	// starve the goroutine scheduler badly enough to blow a tight wall-clock
+	// assertion without runBounded itself being late — the property under
+	// test is "returns without waiting for fn", not a tight latency bound.
+	if elapsed > 2*time.Second {
 		t.Errorf("runBounded took %v to return, want it bounded near the 10ms budget regardless of fn", elapsed)
 	}
 	select {

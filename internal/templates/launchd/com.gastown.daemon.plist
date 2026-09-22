@@ -18,6 +18,11 @@
     <key>RunAtLoad</key>
     <true/>
 
+    {{- if .ExitTimeOutSeconds }}
+    <key>ExitTimeOut</key>
+    <integer>{{.ExitTimeOutSeconds}}</integer>
+    {{- end }}
+
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>

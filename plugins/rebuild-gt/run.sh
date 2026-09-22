@@ -11,12 +11,17 @@
 # unrepaired (gt-oqbw). So this plugin installs, then verifies what came into
 # force.
 #
-# Exit codes are this script's contract with the daemon: 0 did the work (a run
-# record is written), 3 DEFERRED — nothing accomplished, so deliberately no
-# run record, because a record satisfies the cooldown gate and a run that
-# accomplished nothing must not buy an hour before the retry; 1 refused or
-# failed (recorded and escalated). Before changing that contract, read
-# plugins/rebuild-gt/plugin.md.
+# Exit codes are this script's contract with the daemon (plugin.md sets
+# [execution] allow_deferred_exit = true, without which the daemon reads exit
+# 3 as an ordinary failure): 0 did the work OR refused safely — dirty
+# checkout, wrong branch, diverged main, not safe to rebuild, no rig root
+# (recorded as success or skipped, never escalated on its own); 3 DEFERRED —
+# nothing accomplished, so deliberately no run record, because a record
+# satisfies the cooldown gate and a run that accomplished nothing must not buy
+# an hour before the retry; 1 FAILED — build failed, or the install could not
+# be verified as in force (recorded as failure and escalated under a stable
+# fingerprint). Before changing that contract, read plugins/rebuild-gt/plugin.md
+# and internal/daemon/plugin_script.go.
 
 set -euo pipefail
 
@@ -66,8 +71,7 @@ if DRIFT_JSON=$(gt stale --json 2>/dev/null); then
   # missing/null count the same as "0 behind" and silently retire the alarm
   # this check exists for. An unknown count while the binary IS stale means
   # the drift could be 1 commit or 1000 — this cannot be ruled safe, so it
-  # escalates too (gt-oqbw MAJOR #3: "unknown commits_behind parks the
-  # install forever with no alarm").
+  # escalates too (gt-oqbw).
   DRIFT_BEHIND=$(echo "$DRIFT_JSON" | python3 -c "
 import json, sys
 v = json.load(sys.stdin).get('commits_behind')
@@ -153,7 +157,7 @@ print(v if v is not None else 'unknown')
 # repo_commit is deliberately not read here: it would only be used to verify
 # what came into force after the build, and that comparison needs EXPECTED_COMMIT
 # instead (read fresh from RIG_ROOT right before the build, below) — this
-# field can move past what was actually built (gt-oqbw MAJOR #2).
+# field can move past what was actually built (gt-oqbw).
 BINARY_COMMIT=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || echo "")
 
 if [ "$IS_STALE" != "True" ]; then
@@ -183,7 +187,7 @@ THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
 # An unknown count must not read as "0 behind, safely under threshold" —
 # that reading is exactly what let a stale, quiet, safe-to-rebuild binary
 # sit deferred every heartbeat with the install threshold never satisfied
-# and no alarm anywhere (gt-oqbw MAJOR #3). The drift check above already
+# and no alarm anywhere (gt-oqbw). The drift check above already
 # escalates this state; here, since we're already stale + safe + quiet,
 # proceed with the install rather than withhold it pending a count that
 # 'gt stale' could not produce.
@@ -231,16 +235,24 @@ if [ -n "$GATE_BUSY" ]; then
   defer "not quiet: $GATE_BUSY"
 fi
 
+# Fails open like the gate check above (a broken 'gt mq list' must not park
+# rebuilds forever), but unlike that check, unreadable and empty look
+# identical here (both print nothing usable) — so a silent 'or 0' would hide
+# a broken mq command behind the same reading as a genuinely quiet queue.
+# Log it instead, the same way the gate check's own comment demands.
 IN_FLIGHT=$(gt mq list gastown --status=in_progress --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     print(len(json.load(sys.stdin)))
 except Exception:
-    print(0)
+    print("unreadable")
 ' 2>/dev/null | tail -1)
-case "${IN_FLIGHT:-}" in
-  ''|*[!0-9]*) IN_FLIGHT=0 ;;
-esac
+if [ -z "$IN_FLIGHT" ] || [ "$IN_FLIGHT" = "unreadable" ]; then
+  log "WARNING: could not read in-flight MR count from 'gt mq list'; failing open (treating as quiet) rather than parking the rebuild"
+  IN_FLIGHT=0
+elif ! [[ "$IN_FLIGHT" =~ ^[0-9]+$ ]]; then
+  IN_FLIGHT=0
+fi
 if [ "$IN_FLIGHT" -gt 0 ]; then
   defer "not quiet: $IN_FLIGHT merge(s) in flight in gastown"
 fi
@@ -251,7 +263,7 @@ log "Rebuilding gt from $RIG_ROOT ($BEHIND commits behind)..."
 # repo_commit read earlier from 'gt stale --json'. That call does its own
 # independent fetch (CheckStaleBinaryFresh) and can therefore report a
 # repo_commit that has already moved past what this checkout's HEAD (and thus
-# this build) contains (gt-oqbw MAJOR #2). Reading it fresh from RIG_ROOT
+# this build) contains (gt-oqbw). Reading it fresh from RIG_ROOT
 # immediately before the build ties the expectation to the tree actually
 # compiled.
 EXPECTED_COMMIT=$(git -C "$RIG_ROOT" rev-parse HEAD)
@@ -275,15 +287,11 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
       --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
     exit 1
   fi
-  # CRITICAL FIX (gt-oqbw): 'gt version' prints the binary's build-time commit
-  # ABBREVIATED (internal/version.ShortCommit, <=12 chars — the Makefile
-  # embeds it via 'git rev-parse --short HEAD'). EXPECTED_COMMIT above, like
-  # 'gt stale --json's repo_commit, is a full 40-character hash. Comparing
-  # those two strings directly never matches — a short string and a full one
-  # are never string-equal — so every real install was being recorded as a
-  # failure while the shell test's fixture hid it by using --short for both
-  # sides. Resolve the abbreviated form to a full hash inside RIG_ROOT (the
-  # one repo it's guaranteed unambiguous in) before comparing like with like.
+  # 'gt version' prints the binary's build-time commit abbreviated
+  # (internal/version.ShortCommit, <=12 chars); EXPECTED_COMMIT is a full
+  # 40-character hash. Resolve the abbreviated form to a full hash inside
+  # RIG_ROOT (the one repo it's guaranteed unambiguous in) before comparing
+  # like with like (gt-oqbw).
   GOT_COMMIT=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT_SHORT" 2>/dev/null || true)
   if [ -z "$GOT_COMMIT" ]; then
     log "FAILED: installed commit $GOT_COMMIT_SHORT does not resolve inside $RIG_ROOT"

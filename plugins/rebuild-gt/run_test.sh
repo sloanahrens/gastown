@@ -7,8 +7,11 @@
 # accomplished nothing exits 3 so the next heartbeat retries it (a run record
 # would spend the whole cooldown), the install is verified against the gt the
 # town will actually execute, the commits brought into force are recorded, and
-# the daemon is restarted last. Refusals (dirty checkout, diverged main,
-# install that did not take) are the only things that escalate.
+# the daemon is restarted last. Refusals (dirty checkout, diverged main, not
+# safe to rebuild) exit 0 and do NOT escalate on their own — they usually
+# clear by themselves, and the unconditional drift check is what alarms if
+# one persists. Only failures (build failed, install did not take, installed
+# commit unverifiable, daemon restart failed) exit 1 and escalate.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -144,7 +147,7 @@ echo '{"held": true, "busy": false, "slots": [{"index": 0, "held": false}, {"ind
 rc=$(run_plugin "$T")
 if [ -e "$T/build.marker" ]; then pass "polecat holder: build ran"; else fail "polecat holder: build did not run: $(cat "$T/run.out")"; fi
 
-# --- Case 4: a suite running outside the gate is not quiet: delete the
+# --- Case 4: a suite running outside the gate is not quiet: defer the
 # rebuild, but an unreadable Docker is NOT a deferral — a Docker VM that is
 # down runs no suite, and treating "could not tell" as busy would park the
 # install forever. ---
@@ -175,6 +178,20 @@ T=$(make_town)
 echo '[{"id": "gt-wisp-x", "status": "in_progress", "title": "Merge: gt-x"}]' > "$T/mq.json"
 rc=$(run_plugin "$T")
 if [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ]; then pass "MR in flight: deferred"; else fail "MR in flight: rc=$rc: $(cat "$T/run.out")"; fi
+
+# --- Case 6b: a broken 'gt mq list' (non-JSON) fails OPEN like the gate
+# check, but must say so in the log instead of silently reading it as "0 in
+# flight" (gt-oqbw minor: the in-flight check failed open without saying so)
+# ---
+T=$(make_town)
+echo "gt mq list: dolt unreachable" > "$T/mq.json"
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "broken mq list: fail-open, build ran"; else fail "broken mq list: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"; fi
+if grep -q "WARNING: could not read in-flight MR count" "$T/run.out"; then
+  pass "broken mq list: fail-open is logged"
+else
+  fail "broken mq list: fail-open was silent: $(cat "$T/run.out")"
+fi
 
 # --- Case 7: quiet and past the threshold -> build, verify, record the
 # commits that came into force, restart the daemon ---
@@ -341,7 +358,7 @@ fi
 # --- Case 18: commits_behind missing from 'gt stale --json' must not read as
 # "0 behind, under threshold" -- that reading is what let a stale, safe,
 # quiet binary sit deferred every heartbeat forever, since the threshold gate
-# could never be satisfied by an unmeasurable count (gt-oqbw MAJOR #3). The
+# could never be satisfied by an unmeasurable count (gt-oqbw). The
 # install must proceed, and the drift check (unconditional, at the top of the
 # script) must also escalate rather than silently reading the same unknown
 # count as "0 behind, nothing to worry about". ---
@@ -369,6 +386,46 @@ if grep -q "escalate .*commits_behind could not be determined" "$T/gt.log" 2>/de
   pass "commits_behind unknown: drift-unknown escalation fired (cannot rule out being over the drift threshold)"
 else
   fail "commits_behind unknown: no drift-unknown escalation: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# --- Case 19: the exit-code contract itself (plugin.md's table), one
+# assertion per code, so a future change to any of the three has to touch
+# this test as well as the doc — the thing gt-oqbw's rework was rejected for
+# leaving out of sync. Reuses the scenarios above rather than re-deriving
+# them, so this is a contract check, not new coverage. ---
+# exit 0 (worked): Case 7's success run.
+T=$(make_town)
+write_stale "$T" 5
+rc=$(run_plugin "$T")
+[ "$rc" = "0" ] || fail "contract exit 0 (worked): got rc=$rc"
+# exit 0 (refused safely, not escalated): Case 9's dirty checkout.
+T=$(make_town)
+echo "junk" >> "$T/gastown/mayor/rig/Makefile"
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && ! grep -q "escalate" "$T/gt.log" 2>/dev/null; then
+  pass "contract exit 0 (refused): rc=0, no escalation"
+else
+  fail "contract exit 0 (refused): rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+# exit 3 (deferred, no record): Case 8's under-threshold defer.
+T=$(make_town)
+write_stale "$T" 2
+rc=$(run_plugin "$T")
+if [ "$rc" = "3" ] && [ ! -s "$T/gt.log" ]; then
+  pass "contract exit 3 (deferred): rc=3, nothing recorded"
+else
+  fail "contract exit 3 (deferred): rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+# exit 1 (failed, recorded and escalated): Case 12's broken build.
+T=$(make_town)
+printf 'build:\n\tfalse\nsafe-install:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
+git -C "$T/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -am "break build"
+git -C "$T/gastown/mayor/rig" push -q origin main
+rc=$(run_plugin "$T")
+if [ "$rc" = "1" ] && grep -q -- "--result failure" "$T/gt.log" 2>/dev/null && grep -q "escalate" "$T/gt.log" 2>/dev/null; then
+  pass "contract exit 1 (failed): rc=1, recorded as failure, escalated"
+else
+  fail "contract exit 1 (failed): rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
