@@ -28,6 +28,7 @@ Available guards:
   formula-allowlist  - Constrain dog sessions to their formula's declared commands
   container-suite    - Block unwrapped go test/make test on testcontainers-backed packages
   polecat-paths      - Block Edit/Write/Bash targets outside the polecat's own worktree
+  bd-close-invariant - Block raw bd close of a bead whose branch carries unmerged work
 
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh

@@ -1070,7 +1070,13 @@ func DefaultBase() *HooksConfig {
 		// grep -r/ls -R matchers included). container-suite is the same
 		// shape: it blocks a bare go test/make test on a testcontainers-backed
 		// package in polecat/refinery context unless wrapped in 'gt slot run'
-		// (gt-e2rs).
+		// (gt-e2rs). bd-close-invariant is the town-wide half of the gt-6hmz
+		// close-time invariant: gt done applies it to its own self-close, but
+		// a raw `bd close <id>` from a Bash call is an external binary and
+		// never reaches gt's Go code, so the same predicate runs here
+		// (gt-arno). It is scoped to ids the current branch was cut for
+		// (polecat/<name>/<bead-id>+<suffix>) and fails open on everything
+		// else, so it is a no-op for every other close in the town.
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash",
@@ -1086,6 +1092,10 @@ func DefaultBase() *HooksConfig {
 					{
 						Type:    "command",
 						Command: gtCommand("gt tap guard container-suite"),
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard bd-close-invariant"),
 					},
 				},
 			},

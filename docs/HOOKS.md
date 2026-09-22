@@ -76,6 +76,16 @@ path that is not the polecat's worktree, its own polecat directory, or its
 rig's `.repo.git`. Read-only commands stay allowed anywhere, and a target the
 guard cannot resolve is blocked rather than allowed.
 
+The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
+on the `Bash` matcher for every role, from `DefaultBase()`. It is the town-wide
+half of the gt-6hmz close-time invariant: `gt done` applies that invariant to
+its own self-close, but `bd` is an external binary, so a raw `bd close <id>`
+never reaches gt's Go code. This guard parses the command from the hook payload
+and evaluates the same predicate, refusing exactly what `gt done` refuses — plus
+the `supersede:`/`cancel:` operator override a raw close can carry. Only ids
+naming the bead the current branch was cut for are judged; other closes and
+unresolvable input pass.
+
 The `boot` override adds the raw-tmux-send-keys guard (`gt tap guard
 boot-sendkeys`, gt-3mp1) on the `Bash` matcher. Boot is the ephemeral agent
 that starts the Deacon after a town restart; typing into the Deacon's pane
