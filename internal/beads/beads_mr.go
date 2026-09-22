@@ -68,10 +68,7 @@ func (b *Beads) FindMRForBranchAndSHA(branch, commitSHA string) (*Issue, error) 
 func (b *Beads) findMRForBranch(branch string, skipClosed bool) (*Issue, error) {
 	branchPrefix := "branch: " + branch + "\n"
 
-	issues, err := b.ListMergeRequests(ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
-	})
+	issues, err := b.mergeRequestsForBranchSearch()
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +82,53 @@ func (b *Beads) findMRForBranch(branch string, skipClosed bool) (*Issue, error) 
 	}
 
 	return nil, nil
+}
+
+// mergeRequestsForBranchSearch returns the merge-request beads findMRForBranch
+// scans, preferring a PreloadMergeRequests() cache over the full-table
+// `bd list --label=gt:merge-request` scan it otherwise repeats on every call.
+//
+// mrCache.loaded (not "mrCache.issues != nil") gates the cache hit: a rig
+// with zero merge-request beads legitimately preloads a nil issues slice
+// (ListMergeRequests' underlying bd list falls back to nil on bd's "No
+// issues found." plain-text response — see listIssues), and that must still
+// read as "warmed, nothing there" rather than "never warmed, fetch again".
+func (b *Beads) mergeRequestsForBranchSearch() ([]*Issue, error) {
+	if b.mrCache != nil && b.mrCache.loaded {
+		return b.mrCache.issues, nil
+	}
+	return b.ListMergeRequests(ListOptions{
+		Status: "all",
+		Label:  "gt:merge-request",
+	})
+}
+
+// mrCacheState is PreloadMergeRequests' warmed snapshot. loaded distinguishes
+// "warmed with zero results" from "never warmed" — see
+// mergeRequestsForBranchSearch.
+type mrCacheState struct {
+	loaded bool
+	issues []*Issue
+}
+
+// PreloadMergeRequests warms this *Beads' merge-request cache with a single
+// ListMergeRequests(status=all) call, so every subsequent
+// FindMRForBranch/FindMRForBranchAny made through this same instance answers
+// from memory instead of repeating the full-table label scan. Intended for
+// fleet-wide callers (e.g. check-recovery-batch, gt-b839) that need every
+// polecat's branch checked within one process lifetime; the cache never
+// refreshes, so don't enable it on a *Beads held across writes that could
+// create/close merge-request beads mid-run.
+func (b *Beads) PreloadMergeRequests() error {
+	mrs, err := b.ListMergeRequests(ListOptions{
+		Status: "all",
+		Label:  "gt:merge-request",
+	})
+	if err != nil {
+		return err
+	}
+	b.mrCache = &mrCacheState{loaded: true, issues: mrs}
+	return nil
 }
 
 // FindOpenMRsForIssue returns all open merge-request beads whose source_issue
