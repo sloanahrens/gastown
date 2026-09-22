@@ -33,140 +33,12 @@ import (
 // question (the target commit's parent, the target commit, the target tip, and
 // the branch tip) and asks whether the branch undoes a live change.
 
-// revertScanCommits bounds how far back through the target's history the check
-// looks. A branch can only revert commits merged after its checkout was cut, so
-// the revert candidates are always recent; this window is the allowance for how
-// long a single worktree may have sat stale, not a limit on history depth.
-const revertScanCommits = 2000
-
 // revertReportLimit caps how many reverted changes are listed before the message
 // summarizes the rest. The count is always reported in full.
 const revertReportLimit = 8
 
 // revertPathsPerCommit caps the paths listed under a single reverted commit.
 const revertPathsPerCommit = 4
-
-// revertedMerge is one commit on the target branch whose change the branch
-// undoes, with the paths on which it was observed.
-type revertedMerge struct {
-	Commit string   // the target-branch commit being undone, full sha
-	Paths  []string // every path of that commit the branch undoes
-}
-
-// detectRevertedMerges reports the changes merged into target that g's branch
-// tip (HEAD, in g's repository) undoes. An empty result means the branch's diff
-// against target removes only content the branch itself introduced.
-//
-// Two shapes are detected, both anchored on the same fact — that the branch
-// carries a live target content state that the target has moved past:
-//
-//   - exact: the branch's blob for a path equals the blob the commit's parent
-//     had. Covers whole-file reverts, including a path the branch deletes that
-//     the target commit created.
-//   - contained: the branch's line-level diff against the merge base inverts the
-//     commit's own line-level diff. Catches the case the exact test cannot see
-//     at all — a path the polecat both edited and reverted (the fix and the
-//     revert share one blob, so no blob comparison can separate them).
-//
-// Both are gated on the branch actually changing the path relative to the merge
-// base. Without that gate a branch that simply does not mention a path would be
-// reported for every historical change to it, when in fact merging such a branch
-// leaves the target's copy alone.
-func detectRevertedMerges(g *git.Git, target string) ([]revertedMerge, error) {
-	mergeBase, err := g.MergeBase(target, "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("resolving merge base of HEAD and %s: %w", target, err)
-	}
-	baseBlobs, err := g.TreeFileBlobs(mergeBase)
-	if err != nil {
-		return nil, fmt.Errorf("reading tree of %s: %w", mergeBase, err)
-	}
-	targetBlobs, err := g.TreeFileBlobs(target)
-	if err != nil {
-		return nil, fmt.Errorf("reading tree of %s: %w", target, err)
-	}
-	headBlobs, err := g.TreeFileBlobs("HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("reading tree of HEAD: %w", err)
-	}
-	changes, err := g.CommitFileChanges(target, revertScanCommits)
-	if err != nil {
-		return nil, fmt.Errorf("reading history of %s: %w", target, err)
-	}
-
-	var found []revertedMerge
-	byCommit := make(map[string]int) // commit -> index in found
-	for _, ch := range changes {
-		// preImage is the content the commit started from ("" if it created the
-		// path); postImage is what it changed the path to ("" if it deleted it).
-		preImage, postImage := ch.OldBlob, ch.NewBlob
-		base, head := baseBlobs[ch.Path], headBlobs[ch.Path]
-
-		// The branch must change this path relative to the merge base, or the
-		// merge leaves the target's copy as it is and there is nothing to
-		// report. ("" == "" covers a path absent from both.)
-		if head == base {
-			continue
-		}
-		// The target is back at the pre-image state, so the commit's change is
-		// no longer live and cannot be reverted.
-		if targetBlobs[ch.Path] == preImage {
-			continue
-		}
-
-		reverts := head == preImage
-		if !reverts && preImage != "" && postImage != "" && head != "" && base != "" {
-			reverts, err = changeIsInvertedBy(g, preImage, postImage, base, head)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !reverts {
-			continue
-		}
-		if i, seen := byCommit[ch.Commit]; seen {
-			found[i].Paths = append(found[i].Paths, ch.Path)
-			continue
-		}
-		byCommit[ch.Commit] = len(found)
-		found = append(found, revertedMerge{Commit: ch.Commit, Paths: []string{ch.Path}})
-	}
-	return found, nil
-}
-
-// changeIsInvertedBy reports whether the change from preImage to postImage is
-// present, inverted, in the change from base to head — i.e. whether the branch
-// removes what the commit added and restores what it removed.
-//
-// Containment is required in both directions: a branch that merely deletes a
-// file the commit touched, or that happens to add a line the commit removed,
-// is not reverting it.
-func changeIsInvertedBy(g *git.Git, preImage, postImage, base, head string) (bool, error) {
-	branchAdded, branchRemoved, err := g.BlobDiffLines(base, head)
-	if err != nil {
-		return false, fmt.Errorf("diffing %s..%s: %w", base, head, err)
-	}
-	changeAdded, changeRemoved, err := g.BlobDiffLines(preImage, postImage)
-	if err != nil {
-		return false, fmt.Errorf("diffing %s..%s: %w", preImage, postImage, err)
-	}
-	if len(changeAdded)+len(changeRemoved) == 0 {
-		return false, nil
-	}
-	return multisetContains(branchRemoved, changeAdded) && multisetContains(branchAdded, changeRemoved), nil
-}
-
-// multisetContains reports whether every line counted in want appears in have at
-// least as many times. Set containment would let one surviving copy of a line
-// stand in for two removed ones.
-func multisetContains(have, want map[string]int) bool {
-	for line, count := range want {
-		if have[line] < count {
-			return false
-		}
-	}
-	return true
-}
 
 // reportRevertedMerges prints the branch's diff against target and refuses the
 // submission when the branch undoes merged work.
@@ -186,7 +58,7 @@ func reportRevertedMerges(g *git.Git, target string) error {
 		fmt.Println()
 	}
 
-	found, err := detectRevertedMerges(g, target)
+	found, err := git.DetectRevertedMerges(g, target, "HEAD")
 	if err != nil {
 		// Refuse rather than submit: this check exists because a branch that
 		// reverts merged work is silently accepted by everything downstream,
@@ -205,7 +77,7 @@ func reportRevertedMerges(g *git.Git, target string) error {
 // work. The message deliberately does not name the flag that overrides it:
 // agents read refusal text and self-bypass, so the text says what to do about
 // the branch instead.
-func revertedMergeRefusal(g *git.Git, target string, found []revertedMerge) error {
+func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
 	fmt.Fprintf(&b, "These commits on %s are undone by your branch:\n", target)

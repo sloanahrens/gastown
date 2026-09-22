@@ -113,6 +113,13 @@ type Daemon struct {
 	rigStatusAlert func(key, source, message string)
 	rigStatusClear func(reason string, keys ...string)
 
+	// checkpointRevertAlert raises the escalation for a checkpoint_dog WIP
+	// commit that would revert content already merged to main (gt-2bp8). New
+	// wires it to the daemon's alert helper; it stays nil on a zero-value
+	// Daemon (unit tests), which logs the refusal but has no town to escalate
+	// into.
+	checkpointRevertAlert func(key, source, message string)
+
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
@@ -511,6 +518,7 @@ func New(config *Config) (*Daemon, error) {
 	// a log nobody reads while the rig sits dead (gt-4nu3).
 	d.rigStatusAlert = d.escalateAlert
 	d.rigStatusClear = d.clearAlerts
+	d.checkpointRevertAlert = d.escalateAlert
 
 	return d, nil
 }

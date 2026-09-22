@@ -133,7 +133,7 @@ func TestDetectRevertedMerges_StaleResetOverFreshBase(t *testing.T) {
 		t.Fatalf("scenario precondition: %d commits ahead of origin/main, want 1", ahead)
 	}
 
-	found, err := detectRevertedMerges(g, "origin/main")
+	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
 
 func assertNoRevertedMerges(t *testing.T, repo string) {
 	t.Helper()
-	found, err := detectRevertedMerges(git.NewGit(repo), "origin/main")
+	found, err := git.DetectRevertedMerges(git.NewGit(repo), "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testing.T) {
 	commitPolecat(t, s.polecat, map[string]string{"fix.txt": "the fix\n"}, "feat: work (gt-test)")
 
 	g := git.NewGit(s.polecat)
-	if _, err := detectRevertedMerges(g, "origin/does-not-exist"); err == nil {
+	if _, err := git.DetectRevertedMerges(g, "origin/does-not-exist", "HEAD"); err == nil {
 		t.Fatal("detectRevertedMerges returned no error for an unresolvable target, want failure")
 	}
 }
