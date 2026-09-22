@@ -746,7 +746,7 @@ func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
 		t.Errorf("expected the canary settings path in the error, got: %v", err)
 	}
 
-	crewSettings := filepath.Join(townRoot, "myrig", "crew", "alice", ".claude", "settings.json")
+	crewSettings := filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")
 	if _, statErr := os.Stat(crewSettings); !os.IsNotExist(statErr) {
 		t.Error("fan-out target was synced despite a failed canary — fan-out should have stopped")
 	}
@@ -768,7 +768,7 @@ func TestRunHooksSyncCanaryInconclusiveProceeds(t *testing.T) {
 		t.Fatalf("runHooksSync should proceed on an inconclusive (not failed) canary pair: %v", err)
 	}
 
-	crewSettings := filepath.Join(townRoot, "myrig", "crew", "alice", ".claude", "settings.json")
+	crewSettings := filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")
 	if _, statErr := os.Stat(crewSettings); statErr != nil {
 		t.Errorf("expected fan-out to proceed past an inconclusive canary: %v", statErr)
 	}
