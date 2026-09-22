@@ -1165,3 +1165,234 @@ func TestVerifyMQPostMergeProof_RealConflictResolvedRebase(t *testing.T) {
 		t.Fatal("verifyMQPostMergeProof accepted an unrelated on-target commit as attestation")
 	}
 }
+
+// mrCleanupRepo is a bare origin carrying the shape the refinery reported on
+// 2026-09-16 (gt-mkut), built once per test that needs it.
+type mrCleanupRepo struct {
+	originPath     string
+	branch         string
+	submittedHead  string
+	resolutionHead string
+	landedCommit   string
+}
+
+// initConflictResolvedMRRepo builds the incident end to end in a real
+// repository: a branch submitted at submittedHead, a concurrent target change
+// to the same line, the conflict-resolution merge pushed to the branch after
+// submission (which is what leaves the MR bead's commit_sha stale), and the
+// refinery's no-ff merge of that branch into main. The returned origin is bare
+// and untouched by any assertion, so each test clones it and observes the
+// remote delete independently.
+func initConflictResolvedMRRepo(t *testing.T) mrCleanupRepo {
+	t.Helper()
+	repo := mrCleanupRepo{branch: "polecat/amethyst/gt-mkut"}
+
+	tmp := t.TempDir()
+	repo.originPath = filepath.Join(tmp, "origin.git")
+	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", repo.originPath)
+
+	clone := filepath.Join(tmp, "clone")
+	runOrphanCleanupGit(t, tmp, "clone", repo.originPath, clone)
+	runOrphanCleanupGit(t, clone, "config", "user.email", "polecat@example.com")
+	runOrphanCleanupGit(t, clone, "config", "user.name", "Polecat Test")
+
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nline two\nline three\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "seed main")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", "main")
+
+	runOrphanCleanupGit(t, clone, "checkout", "-b", repo.branch)
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\npolecat middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "commit", "-am", "polecat change")
+	repo.submittedHead = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", repo.branch)
+
+	// The target moves underneath with a conflicting edit to the same line, so
+	// replaying the branch is a real conflict rather than a clean rebase.
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nmain middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "commit", "-am", "concurrent target change")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	movedTarget := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+
+	runOrphanCleanupGit(t, clone, "checkout", repo.branch)
+	if out, err := gitAllowFail(t, clone, "merge", movedTarget); err == nil {
+		t.Fatalf("test premise broken: merging the moved target did not conflict:\n%s", out)
+	}
+	writeOrphanCleanupFile(t, clone, "app.txt", "line one\nresolved middle\nline three\n")
+	runOrphanCleanupGit(t, clone, "add", "app.txt")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "resolve conflict")
+	repo.resolutionHead = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	if repo.resolutionHead == repo.submittedHead {
+		t.Fatal("test premise broken: conflict resolution left the submitted head unchanged")
+	}
+	runOrphanCleanupGit(t, clone, "push", "origin", repo.branch)
+
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--no-ff", "-m", "merge "+repo.branch, "origin/"+repo.branch)
+	repo.landedCommit = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	return repo
+}
+
+func cloneMRCleanupRepo(t *testing.T, originPath string) string {
+	t.Helper()
+	clone := filepath.Join(t.TempDir(), "clone")
+	runOrphanCleanupGit(t, filepath.Dir(clone), "clone", originPath, clone)
+	return clone
+}
+
+func mrCleanupRequest(repo mrCleanupRepo) *refinery.MergeRequest {
+	return &refinery.MergeRequest{
+		ID:           "gt-mr-conflict-resolved",
+		Branch:       repo.branch,
+		Worker:       "polecats/amethyst",
+		IssueID:      "gt-mkut",
+		TargetBranch: "main",
+		CommitSHA:    repo.submittedHead,
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteConflictResolvedBranch is the failing
+// path the bead reports, composed against real git: the branch tip has moved
+// past the MR bead's stale commit_sha (the conflict-resolution push), so the
+// lease delete pinned to that stale value is one the remote rejects, and the
+// live tip is not the submitted head either. It must still go away, and only
+// because the live tip's work is provably on main.
+func TestRunVerifiedMQPostMerge_RealRemoteConflictResolvedBranch(t *testing.T) {
+	t.Parallel()
+	repo := initConflictResolvedMRRepo(t)
+	clone := cloneMRCleanupRepo(t, repo.originPath)
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+
+	mgr := &fakeMQPostMergeManager{mr: mrCleanupRequest(repo)}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted at the live tip", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", repo.branch); remote != "" {
+		t.Fatalf("remote branch survived cleanup: %s", remote)
+	}
+	if cleanup.Target != "" {
+		t.Fatalf("cleanup.Target = %q, want empty on the MR path", cleanup.Target)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called on the conflict-resolved path")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteConflictResolvedBranchWithAttestation
+// is the same repository driven the other way, which is the second half of the
+// bead: the operator attests the merge commit the refinery pushed. A fresh
+// clone stands in for the retry, so the branch is still there and the attested
+// commit is the one the live tip yields to.
+func TestRunVerifiedMQPostMerge_RealRemoteConflictResolvedBranchWithAttestation(t *testing.T) {
+	t.Parallel()
+	repo := initConflictResolvedMRRepo(t)
+	clone := cloneMRCleanupRepo(t, repo.originPath)
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+
+	mgr := &fakeMQPostMergeManager{mr: mrCleanupRequest(repo)}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, repo.landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge with --landed-commit: %v", err)
+	}
+	// The resolution merge makes the live tip itself an ancestor of main, so
+	// the binding records that tip rather than the attested refiner commit: the
+	// contract is "the commit recorded demonstrably landed", not "the recorded
+	// commit is the one the operator typed" (see
+	// verifyLandedCommitMatchesSubmitted).
+	if mgr.postMergeMR == nil || mgr.postMergeMR.MergeCommit == "" {
+		t.Fatalf("recorded merge commit = %+v, want the commit that landed", mgr.postMergeMR)
+	}
+	if repo.resolutionHead != mgr.postMergeMR.MergeCommit {
+		t.Fatalf("recorded merge commit = %q, want the live tip %q that landed on main",
+			mgr.postMergeMR.MergeCommit, repo.resolutionHead)
+	}
+	runOrphanCleanupGit(t, clone, "merge-base", "--is-ancestor", mgr.postMergeMR.MergeCommit, "origin/main")
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", repo.branch); remote != "" {
+		t.Fatalf("remote branch survived cleanup: %s", remote)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteRefusesUnmergedMovedTip is the guard
+// side of the same composition: the submitted head landed, but the branch then
+// picked up work that is not on main at all. Adopting the live tip there would
+// delete unmerged commits, so the delete must be refused and the branch must
+// survive.
+func TestRunVerifiedMQPostMerge_RealRemoteRefusesUnmergedMovedTip(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	originPath := filepath.Join(tmp, "origin.git")
+	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", originPath)
+
+	clone := filepath.Join(tmp, "clone")
+	runOrphanCleanupGit(t, tmp, "clone", originPath, clone)
+	runOrphanCleanupGit(t, clone, "config", "user.email", "polecat@example.com")
+	runOrphanCleanupGit(t, clone, "config", "user.name", "Polecat Test")
+
+	writeOrphanCleanupFile(t, clone, "README.md", "seed\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "seed main")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", "main")
+
+	const branch = "polecat/amethyst/gt-mkut-unmerged"
+	runOrphanCleanupGit(t, clone, "checkout", "-b", branch)
+	writeOrphanCleanupFile(t, clone, "work.txt", "submitted work\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "submitted work")
+	submittedHead := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", branch)
+
+	// The submitted work lands, satisfying the MR's merge proof...
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--squash", branch)
+	runOrphanCleanupGit(t, clone, "commit", "-m", "land submitted work")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+
+	// ...but the branch keeps moving with work main never saw.
+	runOrphanCleanupGit(t, clone, "checkout", branch)
+	writeOrphanCleanupFile(t, clone, "work.txt", "submitted work\nunmerged follow-up\n")
+	runOrphanCleanupGit(t, clone, "commit", "-am", "unmerged follow-up")
+	runOrphanCleanupGit(t, clone, "push", "origin", branch)
+
+	_, cleanup, err := runVerifiedMQPostMerge(
+		&fakeMQPostMergeManager{mr: &refinery.MergeRequest{
+			ID:           "gt-mr-unmerged-tip",
+			Branch:       branch,
+			TargetBranch: "main",
+			CommitSHA:    submittedHead,
+		}},
+		t.TempDir(), orphanCleanupRealGit{git.NewGit(clone)}, "gt-mr-unmerged-tip", false, "")
+	if err == nil || !strings.Contains(err.Error(), "not preserved on origin/main") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want unpreserved-live-tip refusal", err)
+	}
+	if cleanup.RemoteDeleted || cleanup.LocalDeleted {
+		t.Fatalf("cleanup claims a delete it did not do: %+v", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote == "" {
+		t.Fatal("remote branch deleted despite carrying work that never landed")
+	}
+}
+
+// TestMQPostMergeSilencesUsageOnError pins the messenger side of the bead:
+// cobra appends the failing command's usage block to any RunE error, which in
+// the reported incident put two screens of flags between the operator and the
+// refusal that actually mattered.
+//
+// It reads the flag cobra consults rather than driving the command, because
+// ExecuteC on a command with a parent re-dispatches through the real root, and
+// root's persistentPreRun touches heartbeat files and the session registry —
+// side effects no unit test should cause.
+func TestMQPostMergeSilencesUsageOnError(t *testing.T) {
+	t.Parallel()
+	if !mqPostMergeCmd.SilenceUsage {
+		t.Fatal("mq post-merge prints its usage block after an operational error; see SilenceUsage on doneCmd")
+	}
+}

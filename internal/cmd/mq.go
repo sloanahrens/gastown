@@ -219,7 +219,11 @@ Examples:
   gt mq post-merge gastown gt-mr-abc123 --landed-commit 2bb0bf7f
   gt mq post-merge gastown polecat/Nux/gt-xyz    # orphaned branch, MR bead gone`,
 	Args: cobra.ExactArgs(2),
-	RunE: runMQPostMerge,
+	// Every failure here is an operational refusal — a proof that did not hold,
+	// a moved branch whose work is not on the target — and the usage block cobra
+	// appends to it buries the one line the operator needs (gt-mkut).
+	SilenceUsage: true,
+	RunE:         runMQPostMerge,
 }
 
 type mqPostMergeManager interface {
