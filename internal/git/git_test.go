@@ -3651,6 +3651,179 @@ func TestVerifyPushedCommitReachableFromPushTargetAllowsContentPreservedRebase(t
 	}
 }
 
+func TestCommitLandedOnTarget_ExactTipAndAncestor(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.CreateBranch("feature"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("feat: add feature"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	submitted, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := g.MergeNoFF("feature", "Merge feature into main"); err != nil {
+		t.Fatalf("MergeNoFF: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// The merge commit itself is the exact tip.
+	mergeCommit, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev merge commit: %v", err)
+	}
+	if !g.CommitLandedOnTarget("origin", mainBranch, mergeCommit) {
+		t.Error("expected the exact tip to be reported as landed")
+	}
+	// The submitted commit is an ancestor of the merge commit (its second parent).
+	if !g.CommitLandedOnTarget("origin", mainBranch, submitted) {
+		t.Error("expected the submitted commit (an ancestor of the merge commit) to be reported as landed")
+	}
+}
+
+func TestCommitLandedOnTarget_ContentPreservedRebase(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.CreateBranch("feature"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("feat: add feature"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	submitted, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+
+	// Another MR lands on target first, moving it ahead of feature's base.
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "other.txt"), []byte("other\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("other.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("other: unrelated MR landed first"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// Rebase feature onto the moved target — same patch, new SHA — and land it.
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := g.Rebase(mainBranch); err != nil {
+		t.Fatalf("Rebase: %v", err)
+	}
+	rebased, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev rebased: %v", err)
+	}
+	if rebased == submitted {
+		t.Fatal("rebase should have rewritten the commit SHA")
+	}
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := g.MergeFFOnly("feature"); err != nil {
+		t.Fatalf("MergeFFOnly: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// The originally-submitted SHA never appears on target, but its content
+	// (same patch-id) did.
+	if !g.CommitLandedOnTarget("origin", mainBranch, submitted) {
+		t.Error("expected the content-preserved rebase to be reported as landed")
+	}
+}
+
+// TestCommitLandedOnTarget_EmptyNetDiff_NotLanded is the check this method
+// exists to get right where VerifyPushedCommitReachableFromPushTarget would
+// not: a branch whose commits net out to no change (added then removed the
+// same payload) has never actually been merged anywhere, but merging it now
+// would still be a no-op — the same "merge-tree no-op" signal
+// VerifyPushedCommitReachableFromPushTarget's patch-preservation fallback
+// accepts. CommitLandedOnTarget must not report this as landed: reporting a
+// never-merged, still-open MR as already landed would skip closing it as the
+// empty/superseded submission it actually is (gt-j5cc).
+func TestCommitLandedOnTarget_EmptyNetDiff_NotLanded(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.CreateBranch("feature"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "payload.txt"), []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := g.Add("payload.txt"); err != nil {
+		t.Fatalf("Add payload: %v", err)
+	}
+	if err := g.Commit("feat: add payload"); err != nil {
+		t.Fatalf("Commit payload: %v", err)
+	}
+	if err := os.Remove(filepath.Join(localDir, "payload.txt")); err != nil {
+		t.Fatalf("remove payload: %v", err)
+	}
+	if err := g.Add("payload.txt"); err != nil {
+		t.Fatalf("Add removal: %v", err)
+	}
+	if err := g.Commit("fix: drop the payload again"); err != nil {
+		t.Fatalf("Commit removal: %v", err)
+	}
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+
+	// Sanity check: this really would present as a merge-tree no-op, the
+	// broader (and here, wrong) signal this method deliberately avoids.
+	if noop, err := g.mergeTreeNoopBetweenRefs(head, mainBranch); err != nil || !noop {
+		t.Fatalf("expected merging %s into %s to be a tree no-op (err=%v, noop=%v)", shortSHA(head), mainBranch, err, noop)
+	}
+
+	if g.CommitLandedOnTarget("origin", mainBranch, head) {
+		t.Error("expected an empty/never-merged submission not to be reported as landed")
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)

@@ -642,6 +642,17 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
 
+	// Step 2.1: Recognize an MR a prior pass already merged and pushed before
+	// dying between the push and its own bookkeeping (gt-wh66). This must run
+	// before the empty-merge check below: when nothing else has landed on
+	// target since, the merge result's tree is byte-identical to mergeRef's
+	// own tree, which is exactly what an empty merge looks like too — without
+	// this check first, a crashed-but-landed MR reads as "changes nothing"
+	// and gets closed ineligible instead of completed as merged.
+	if e.mergeAlreadyLanded(target, mergeRef) {
+		return e.resumeLandedMerge(mr, target, mergeRef)
+	}
+
 	// Step 2.5: Refuse a submission that changes nothing. Gating a no-op MR
 	// spends the suite on the target's own tree and then lands it as merged.
 	if empty := e.checkSubmittedHeadAddsChange(mr, target, mergeRef); !empty.Success {

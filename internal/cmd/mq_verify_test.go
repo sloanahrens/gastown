@@ -139,3 +139,82 @@ func TestVerifyBranch(t *testing.T) {
 		})
 	}
 }
+
+// mockLandedVerifier implements mrLandedVerifier for testing.
+type mockLandedVerifier struct {
+	landed map[string]bool // key: remote+"/"+target+"@"+commit
+}
+
+func (m *mockLandedVerifier) CommitLandedOnTarget(remote, target, commit string) bool {
+	return m.landed[remote+"/"+target+"@"+commit]
+}
+
+func TestVerifyAlreadyLanded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		verify bool
+		client mrLandedVerifier
+		fields *beads.MRFields
+		want   bool
+	}{
+		{
+			name:   "verify disabled",
+			verify: false,
+			client: &mockLandedVerifier{landed: map[string]bool{"origin/main@abc123": true}},
+			fields: &beads.MRFields{Target: "main", CommitSHA: "abc123"},
+			want:   false,
+		},
+		{
+			name:   "nil client",
+			verify: true,
+			client: nil,
+			fields: &beads.MRFields{Target: "main", CommitSHA: "abc123"},
+			want:   false,
+		},
+		{
+			name:   "nil fields",
+			verify: true,
+			client: &mockLandedVerifier{},
+			fields: nil,
+			want:   false,
+		},
+		{
+			name:   "missing commit sha",
+			verify: true,
+			client: &mockLandedVerifier{landed: map[string]bool{"origin/main@": true}},
+			fields: &beads.MRFields{Target: "main", CommitSHA: ""},
+			want:   false,
+		},
+		{
+			name:   "missing target",
+			verify: true,
+			client: &mockLandedVerifier{landed: map[string]bool{"origin/@abc123": true}},
+			fields: &beads.MRFields{Target: "", CommitSHA: "abc123"},
+			want:   false,
+		},
+		{
+			name:   "already landed",
+			verify: true,
+			client: &mockLandedVerifier{landed: map[string]bool{"origin/main@abc123": true}},
+			fields: &beads.MRFields{Target: "main", CommitSHA: "abc123"},
+			want:   true,
+		},
+		{
+			name:   "genuinely not landed",
+			verify: true,
+			client: &mockLandedVerifier{landed: map[string]bool{}},
+			fields: &beads.MRFields{Target: "main", CommitSHA: "abc123"},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := verifyAlreadyLanded(tt.verify, tt.client, tt.fields)
+			if got != tt.want {
+				t.Errorf("verifyAlreadyLanded() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
