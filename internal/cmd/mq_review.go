@@ -260,7 +260,7 @@ var doMQReviewLanded = func(args []string) (editorial.ReviewResult, error) {
 	// config error, not a verdict: it reports exit 2, never 1, so a caller
 	// cannot read "not reviewable" as "request_changes".
 	landed, err := editorial.ResolveLandedRange(g, mqReviewLanded, target)
-	if err != nil && strings.Contains(err.Error(), "not on "+target) {
+	if err != nil && (strings.Contains(err.Error(), "not on "+target) || strings.Contains(err.Error(), "not reachable from")) {
 		return editorial.ReviewResult{
 			Exit:   2,
 			Class:  editorial.ConfigError,

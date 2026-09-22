@@ -7,8 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"strconv"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
@@ -134,6 +135,14 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	run(repoDir, "add", ".")
 	run(repoDir, "commit", "-m", "landed work")
 	run(repoDir, "push", "origin", defaultBranch)
+	// An unpushed branch tip: the refusal test points --landed at it. It is
+	// a descendant of the landed tip (so a mid-chain commit is NOT what the
+	// test needs — that one is reachable from origin/<target>), but it is
+	// never pushed, so origin/<target> cannot contain it: IsAncestor returns
+	// false and ResolveLandedRange refuses with exit 2.
+	run(repoDir, "checkout", "-b", "unpushed-branch")
+	run(repoDir, "commit", "--allow-empty", "-m", "unpushed")
+	run(repoDir, "checkout", defaultBranch)
 
 	t.Chdir(cwd)
 	return cwd, repoDir, rigDir
@@ -181,16 +190,18 @@ func TestMQReviewLanded_RefusalExitsTwo(t *testing.T) {
 	t.Setenv("GT_RIG", "gastown")
 	_, repoDir, rigDir := testRigRoot(t, "main")
 	initBeadsDB(t, rigDir)
-	// The base commit is not reachable from origin/main (the tip is its
-	// child), so --landed refuses it.
-	base := revForCmd(t, repoDir, "HEAD^")
+	// A commit that was never pushed: the tip of a local-only branch. It is
+	// NOT an ancestor of origin/main, so ResolveLandedRange refuses it with
+	// exit 2. (A mid-chain commit like HEAD^ is reachable from origin/main
+	// — IsAncestor accepts it — so that would not exercise a refusal.)
+	unpushed := revForCmd(t, repoDir, "unpushed-branch")
 
 	code, captured := runReviewArgs(t, rigDir,
 		func(req editorial.ReviewRequest) editorial.ReviewResult {
 			t.Error("the gate must not run when the range is refused")
 			return editorial.ReviewResult{Exit: 0}
 		},
-		"mq", "review", "--landed", base)
+		"mq", "review", "--landed", unpushed)
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (a refused range is a config error, never request_changes)", code)
 	}
