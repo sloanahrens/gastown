@@ -148,6 +148,8 @@ var (
 	polecatNukeForce                     bool
 	polecatCheckRecoveryJSON             bool
 	polecatCheckRecoveryReconcileCleanup bool
+	polecatCheckRecoveryBatchJSON        bool
+	polecatCheckRecoveryBatchReconcile   bool
 	polecatPoolInitDryRun                bool
 	polecatPoolInitSize                  int
 )
@@ -247,6 +249,28 @@ Examples:
   gt polecat check-recovery greenplace/Toast --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPolecatCheckRecovery,
+}
+
+var polecatCheckRecoveryBatchCmd = &cobra.Command{
+	Use:   "check-recovery-batch <rig>",
+	Short: "Check recovery status for every polecat in a rig in one pass",
+	Long: `Check recovery status for every polecat in a rig, fleet-wide, in one process.
+
+Answers the same SAFE_TO_NUKE / NEEDS_MQ_SUBMIT / PENDING_MR / NEEDS_RECOVERY
+question as 'gt polecat check-recovery' for each polecat in the rig, but
+without spawning one 'gt polecat check-recovery' subprocess per polecat.
+
+check-recovery's per-polecat cost is dominated by bd subprocess round trips:
+one bulk agent-bead fetch and one bulk merge-request fetch, shared by every
+polecat in the sweep, replace what would otherwise be that many repeated
+full-table scans (see gt-b839, follow-up to gt-ct3). Each polecat's git-state
+check still runs per-worktree — that part is unavoidable and not a bd cost.
+
+Examples:
+  gt polecat check-recovery-batch greenplace
+  gt polecat check-recovery-batch greenplace --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPolecatCheckRecoveryBatch,
 }
 
 var (
@@ -362,6 +386,10 @@ func init() {
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryJSON, "json", false, "Output as JSON")
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryReconcileCleanup, "reconcile-cleanup", false, "Safely rewrite stale dirty cleanup_status to clean when live recovery predicates prove no work is at risk")
 
+	// Check-recovery-batch flags
+	polecatCheckRecoveryBatchCmd.Flags().BoolVar(&polecatCheckRecoveryBatchJSON, "json", false, "Output as JSON")
+	polecatCheckRecoveryBatchCmd.Flags().BoolVar(&polecatCheckRecoveryBatchReconcile, "reconcile-cleanup", false, "Safely rewrite stale dirty cleanup_status to clean when live recovery predicates prove no work is at risk")
+
 	// Stale flags
 	polecatStaleCmd.Flags().BoolVar(&polecatStaleJSON, "json", false, "Output as JSON")
 	polecatStaleCmd.Flags().IntVar(&polecatStaleThreshold, "threshold", 20, "Commits behind main to consider stale")
@@ -383,6 +411,7 @@ func init() {
 	polecatCmd.AddCommand(polecatStatusCmd)
 	polecatCmd.AddCommand(polecatGitStateCmd)
 	polecatCmd.AddCommand(polecatCheckRecoveryCmd)
+	polecatCmd.AddCommand(polecatCheckRecoveryBatchCmd)
 	polecatCmd.AddCommand(polecatGCCmd)
 	polecatCmd.AddCommand(polecatNukeCmd)
 	polecatCmd.AddCommand(polecatStaleCmd)
@@ -1243,10 +1272,88 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("polecat '%s' not found in rig '%s'", polecatName, rigName)
 	}
 
+	bd := beads.New(r.Path)
+	status := checkRecoveryForPolecat(bd, r, rigName, polecatName, p, polecatCheckRecoveryReconcileCleanup)
+
+	// JSON output
+	if polecatCheckRecoveryJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(status)
+	}
+
+	// Human-readable output
+	renderCheckRecoveryText(os.Stdout, status)
+
+	return nil
+}
+
+// runPolecatCheckRecoveryBatch answers check-recovery for every polecat in a
+// rig within one process, sharing a single bulk agent-bead fetch and a single
+// bulk merge-request fetch across all of them (gt-b839, follow-up to gt-ct3)
+// instead of paying for both, per polecat, the way N independent
+// 'gt polecat check-recovery' subprocess invocations would.
+func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
+	rigName := args[0]
+
+	mgr, r, err := getPolecatManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	bd := beads.New(r.Path)
+	// Each preload degrades independently into a warning: a failed bulk fetch
+	// leaves that cache unwarmed, and the per-polecat helpers it feeds
+	// (GetAgentBead, FindMRForBranchAny) fall back to their normal per-call bd
+	// path for every polecat instead of silently reporting wrong data for all
+	// of them — the same degrade-per-query pattern loadBeadsBatch uses for
+	// runPolecatList (gt-ls4u).
+	if err := bd.PreloadAgentBeads(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload agent beads in %s: %v — falling back to per-polecat bd show\n", rigName, err)
+	}
+	if err := bd.PreloadMergeRequests(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload merge requests in %s: %v — falling back to per-polecat bd list\n", rigName, err)
+	}
+
+	polecatNames, err := listPolecatDirectoryNames(r.Path)
+	if err != nil {
+		return fmt.Errorf("listing polecats in %s: %w", rigName, err)
+	}
+
+	statuses := make([]RecoveryStatus, 0, len(polecatNames))
+	for _, polecatName := range polecatNames {
+		p, err := mgr.Get(polecatName)
+		if err != nil {
+			// Vanished between the directory listing and mgr.Get (e.g. nuked
+			// mid-sweep) — not this sweep's job to report on a polecat that no
+			// longer exists.
+			continue
+		}
+		statuses = append(statuses, checkRecoveryForPolecat(bd, r, rigName, polecatName, p, polecatCheckRecoveryBatchReconcile))
+	}
+
+	if polecatCheckRecoveryBatchJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(statuses)
+	}
+
+	for _, status := range statuses {
+		renderCheckRecoveryText(os.Stdout, status)
+		fmt.Fprintln(os.Stdout)
+	}
+	return nil
+}
+
+// checkRecoveryForPolecat computes one polecat's RecoveryStatus. It is the
+// per-polecat body both runPolecatCheckRecovery (a single polecat) and
+// runPolecatCheckRecoveryBatch (every polecat in a rig, sharing one bd
+// instance and its preloaded caches — see PreloadAgentBeads/
+// PreloadMergeRequests) drive; the two callers differ only in how many times
+// they call it and whether bd's caches are warmed first.
+func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
-	rigPath := r.Path
-	bd := beads.New(rigPath)
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
@@ -1390,21 +1497,11 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
-	if polecatCheckRecoveryReconcileCleanup {
+	if reconcileCleanup {
 		reconcileCleanupStatusIfSafe(&status, bd, agentBeadID, p, fields)
 	}
 
-	// JSON output
-	if polecatCheckRecoveryJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(status)
-	}
-
-	// Human-readable output
-	renderCheckRecoveryText(os.Stdout, status)
-
-	return nil
+	return status
 }
 
 // renderCheckRecoveryText writes the human-readable check-recovery report for

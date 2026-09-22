@@ -647,6 +647,21 @@ type Beads struct {
 	// rig-prefixed agents, town for hq- agents — no town fallback for
 	// rig-prefixed IDs (gt-a6g completed the gt-8we migration).
 	agentScope bool
+
+	// agentBeadCache is an opt-in, never-refreshed snapshot of ListAgentBeads(),
+	// warmed by PreloadAgentBeads() for fleet-wide callers (e.g.
+	// check-recovery-batch, gt-b839) that would otherwise pay one bd show
+	// subprocess per polecat for data a single bulk query already answers.
+	// nil means "not warmed" — GetAgentBead falls back to its normal Show()
+	// path unchanged. Not safe to enable on a *Beads held across writes that
+	// could create/close agent beads mid-run; it never invalidates.
+	agentBeadCache map[string]*Issue
+
+	// mrCache is the same opt-in snapshot for merge-request beads, warmed by
+	// PreloadMergeRequests() (see mrCacheState in beads_mr.go). nil means "not
+	// warmed" — findMRForBranch falls back to its normal per-call
+	// ListMergeRequests scan unchanged.
+	mrCache *mrCacheState
 }
 
 // beadsFields holds every constructor-settable field of Beads. It exists so

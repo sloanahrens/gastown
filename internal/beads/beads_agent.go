@@ -725,7 +725,23 @@ func (b *Beads) GetAgentBeadInStoreOnly(id string) (*Issue, *AgentFields, error)
 
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
+//
+// A PreloadAgentBeads() cache hit is checked first, on b itself, before the
+// agentBeadTarget() redirect below: the redirect re-roots to a freshly
+// constructed *Beads (see ForAgentBead) that never carries this instance's
+// cache, so checking after the redirect would make the cache unreachable
+// from ordinary callers. ListAgentBeads (what warms the cache) only returns
+// open beads plus wisps, so a miss falls back through the original
+// redirect+Show path unchanged — the same degrade-per-item pattern
+// manager.go's lookupAgentBead uses for the runPolecatList fast path
+// (gt-ls4u), applied here for check-recovery-batch (gt-b839).
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
+	if b.agentBeadCache != nil {
+		if issue, ok := b.agentBeadCache[id]; ok {
+			return agentBeadFields(id, issue)
+		}
+	}
+
 	if target := b.agentBeadTarget(); target != b {
 		return target.GetAgentBead(id)
 	}
@@ -738,6 +754,12 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 		return nil, nil, err
 	}
 
+	return agentBeadFields(id, issue)
+}
+
+// agentBeadFields validates issue as an agent bead and parses its fields —
+// the shared tail of GetAgentBead's cache-hit and Show()-hit paths.
+func agentBeadFields(id string, issue *Issue) (*Issue, *AgentFields, error) {
 	if !IsAgentBead(issue) {
 		return nil, nil, fmt.Errorf("issue %s is not an agent bead (type=%s)", id, issue.Type)
 	}
@@ -745,6 +767,22 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	fields := ParseAgentFields(issue.Description)
 	fields.AgentState = ResolveAgentState(issue.Description, issue.AgentState)
 	return issue, fields, nil
+}
+
+// PreloadAgentBeads warms this *Beads' agent-bead cache with a single
+// ListAgentBeads() call, so every subsequent GetAgentBead() made through this
+// same instance answers from memory instead of spawning its own bd show.
+// Intended for fleet-wide callers (e.g. check-recovery-batch) that need
+// every polecat's agent bead within one process lifetime; the cache never
+// refreshes, so don't enable it on a *Beads held across writes that could
+// create/close agent beads mid-run.
+func (b *Beads) PreloadAgentBeads() error {
+	agents, err := b.ListAgentBeads()
+	if err != nil {
+		return err
+	}
+	b.agentBeadCache = agents
+	return nil
 }
 
 // ListAgentBeads returns all agent beads in a single query.
