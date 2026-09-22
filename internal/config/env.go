@@ -14,13 +14,23 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
+// EnvAgent names the coding agent a session runs. It is written to the tmux
+// session table at spawn so liveness checks read the right process names.
+const EnvAgent = "GT_AGENT"
+
+// EnvAgentOverride marks a session whose EnvAgent came from an explicit
+// --agent override rather than from role_agents resolution. A handoff
+// re-resolves the role's agent from live role_agents config, but an explicit
+// override is not a snapshot of that config and must survive (gt-di8p).
+const EnvAgentOverride = "GT_AGENT_OVERRIDE"
+
 // IdentityEnvVars are agent identity env vars that must not leak across
 // process or session boundaries. Used by daemon sanitization (clearing
 // inherited vars), tmux global cleanup, and prime session env repair.
 // See GH#3006.
 var IdentityEnvVars = []string{
 	"GT_ROLE", "GT_RIG", "GT_CREW", "GT_POLECAT", "GT_DOG_NAME",
-	"GT_SESSION", "GT_AGENT", "BD_ACTOR", "GIT_AUTHOR_NAME", "BEADS_AGENT_NAME",
+	"GT_SESSION", EnvAgent, EnvAgentOverride, "BD_ACTOR", "GIT_AUTHOR_NAME", "BEADS_AGENT_NAME",
 }
 
 var bdTargetSelectorEnvVars = []string{
@@ -192,8 +202,12 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// Set GT_AGENT when an agent override is in use.
 	// This makes the override visible via tmux show-environment so that
 	// IsAgentAlive and waitForPolecatReady use the correct process names.
+	// EnvAgentOverride records that the pin came from --agent rather than from
+	// role_agents resolution, so a handoff can tell a deliberate override from
+	// a stale snapshot of config it is free to re-resolve (gt-di8p).
 	if cfg.Agent != "" {
-		env["GT_AGENT"] = cfg.Agent
+		env[EnvAgent] = cfg.Agent
+		env[EnvAgentOverride] = "1"
 	}
 
 	// Disable bd's per-repo JSONL auto-backup for all Gas Town agents.

@@ -3140,6 +3140,13 @@ func (t *Tmux) SetEnvironment(session, key, value string) error {
 	return err
 }
 
+// UnsetEnvironment removes an environment variable from the session, so
+// GetEnvironment reports it as missing rather than set to empty.
+func (t *Tmux) UnsetEnvironment(session, key string) error {
+	_, err := t.run("set-environment", "-t", session, "-u", key)
+	return err
+}
+
 // GetEnvironment gets an environment variable from the session.
 func (t *Tmux) GetEnvironment(session, key string) (string, error) {
 	out, err := t.run("show-environment", "-t", session, key)

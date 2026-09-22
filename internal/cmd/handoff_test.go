@@ -1058,11 +1058,15 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 // then ran without --append-system-prompt-file even though the role's
 // system-prompt file existed, so gt prime kept printing the static role text
 // inline and the hook output stayed over the 10k cap forever.
+//
+// GT_AGENT alone no longer means "override" after gt-di8p — the resolver is
+// now chosen by GT_AGENT_OVERRIDE, which only --agent spawns set.
 func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing.T) {
 	setupHandoffTestRegistry(t)
 
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
+	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
 	origRoot := os.Getenv("GT_ROOT")
 
@@ -1071,6 +1075,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	t.Cleanup(func() {
 		_ = os.Chdir(origCwd)
 		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
 		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
 		_ = os.Setenv("GT_ROOT", origRoot)
 	})
@@ -1109,7 +1114,10 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		},
 	}
 	// role_agents names a different agent so the assertion below proves the
-	// GT_AGENT override still wins over role resolution.
+	// GT_AGENT override still wins over role resolution. The override is only
+	// identifiable as such by its provenance marker: a bare GT_AGENT that this
+	// process did not set via --agent is treated as a stale snapshot of
+	// role_agents and re-resolved (gt-di8p).
 	townSettings.RoleAgents = map[string]string{"witness": "claude-proxy-role"}
 	townSettings.Agents["claude-proxy-role"] = &config.RuntimeConfig{
 		Command: "claude",
@@ -1123,6 +1131,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	}
 
 	_ = os.Setenv("GT_AGENT", "claude-proxy")
+	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
 	_ = os.Setenv("GT_TOWN_ROOT", "")
 	_ = os.Setenv("GT_ROOT", "")
 	if err := os.Chdir(witnessDir); err != nil {
@@ -1225,5 +1234,234 @@ func TestBuildRestartCommand_DogCarriesKennelSystemPromptFile(t *testing.T) {
 	}
 	if info, err := os.Stat(promptPath); err != nil || info.Size() == 0 {
 		t.Fatalf("dog system prompt must have been rendered at resolve time: %v", err)
+	}
+}
+
+// A self-handoff re-pinned the session's own GT_AGENT, which made
+// role_agents.<role> a write-once setting: the successor inherited the preset
+// the session was originally spawned with, so changing role_agents (town or
+// rig) did nothing until the role was restarted out of band — the gastown
+// witness kept spawning claude-opus after role_agents.witness was set to
+// claude-opus-cycle (gt-di8p). The mapping is live config; the pin is a
+// snapshot of it taken at spawn.
+func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+
+	townRoot := t.TempDir()
+
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+	rigPath := filepath.Join(townRoot, "gastown")
+	witnessDir := filepath.Join(rigPath, "witness")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.MkdirAll(witnessDir, 0755); err != nil {
+		t.Fatalf("mkdir witness dir: %v", err)
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"claude-opus": {
+			Command: "claude",
+			Args:    []string{"--dangerously-skip-permissions", "--model", "pinned-model"},
+		},
+		"claude-opus-cycle": {
+			Command: "claude",
+			Args:    []string{"--dangerously-skip-permissions", "--model", "cycle-model"},
+		},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	// The rig mapping is the one the bug report changed mid-session.
+	writeRigRoleAgents := func(agent string) {
+		t.Helper()
+		rigSettings := config.NewRigSettings()
+		rigSettings.RoleAgents = map[string]string{"witness": agent}
+		if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), rigSettings); err != nil {
+			t.Fatalf("SaveRigSettings: %v", err)
+		}
+	}
+	writeRigRoleAgents("claude-opus")
+
+	// The session was spawned while role_agents.witness was claude-opus, so
+	// that is the GT_AGENT its environment carries.
+	_ = os.Setenv("GT_AGENT", "claude-opus")
+	_ = os.Setenv("GT_AGENT_OVERRIDE", "")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	if err := os.Chdir(witnessDir); err != nil {
+		t.Fatalf("chdir witness dir: %v", err)
+	}
+
+	spawned, err := buildRestartCommand("gt-witness")
+	if err != nil {
+		t.Fatalf("buildRestartCommand before the config change: %v", err)
+	}
+	if !strings.Contains(spawned, "--model pinned-model") {
+		t.Fatalf("spawn-time mapping must be honored\ncmd: %s", spawned)
+	}
+
+	// The operator now points the role at a different preset. The running
+	// session still carries the old GT_AGENT.
+	writeRigRoleAgents("claude-opus-cycle")
+
+	handoff, err := buildRestartCommand("gt-witness")
+	if err != nil {
+		t.Fatalf("buildRestartCommand after the config change: %v", err)
+	}
+	if !strings.Contains(handoff, "--model cycle-model") {
+		t.Errorf("role_agents change must take effect on the next handoff\ncmd: %s", handoff)
+	}
+	if strings.Contains(handoff, "pinned-model") {
+		t.Errorf("handoff re-pinned the previous GT_AGENT instead of resolving role_agents\ncmd: %s", handoff)
+	}
+	// The successor's environment must name the agent it actually runs, so
+	// its own handoff and liveness checks read current config too.
+	if !strings.Contains(handoff, config.EnvAgent+"=claude-opus-cycle") {
+		t.Errorf("respawned session must record the agent it runs\ncmd: %s", handoff)
+	}
+
+	// An explicit --agent override is not a snapshot of role_agents, so it
+	// survives the handoff even when the role is mapped.
+	_ = os.Setenv("GT_AGENT", "claude-opus")
+	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
+
+	overridden, err := buildRestartCommand("gt-witness")
+	if err != nil {
+		t.Fatalf("buildRestartCommand with an explicit override: %v", err)
+	}
+	if !strings.Contains(overridden, "--model pinned-model") {
+		t.Errorf("explicit --agent override must survive handoff\ncmd: %s", overridden)
+	}
+	if strings.Contains(overridden, "cycle-model") {
+		t.Errorf("role_agents must not displace an explicit override\ncmd: %s", overridden)
+	}
+	if !strings.Contains(overridden, config.EnvAgentOverride+"=1") {
+		t.Errorf("override provenance must be handed to the successor\ncmd: %s", overridden)
+	}
+}
+
+// A crew member's worker_agents mapping outranks role_agents.crew, so its pin
+// is not a snapshot of role_agents: it must survive a handoff even when the rig
+// also maps the crew role — otherwise the per-worker agent would be silently
+// swapped for the role's preset — and a change to the worker's own mapping must
+// take effect, exactly as it would on a fresh spawn (gt-di8p).
+func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+
+	townRoot := t.TempDir()
+
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+	rigPath := filepath.Join(townRoot, "gastown")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "toast"), 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
+	}
+
+	agents := map[string]*config.RuntimeConfig{
+		"claude-role": {
+			Command: "claude",
+			Args:    []string{"--model", "role-model"},
+		},
+		"claude-worker": {
+			Command: "claude",
+			Args:    []string{"--model", "worker-model"},
+		},
+		"claude-worker2": {
+			Command: "claude",
+			Args:    []string{"--model", "worker-model2"},
+		},
+	}
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	townSettings.Agents = agents
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	writeWorkerAgent := func(agent string) {
+		t.Helper()
+		rigSettings := config.NewRigSettings()
+		rigSettings.Agents = agents
+		rigSettings.RoleAgents = map[string]string{"crew": "claude-role"}
+		if agent != "" {
+			rigSettings.WorkerAgents = map[string]string{"toast": agent}
+		}
+		if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), rigSettings); err != nil {
+			t.Fatalf("SaveRigSettings: %v", err)
+		}
+	}
+	writeWorkerAgent("claude-worker")
+
+	_ = os.Setenv("GT_AGENT", "claude-worker")
+	_ = os.Setenv("GT_AGENT_OVERRIDE", "")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	if err := os.Chdir(filepath.Join(rigPath, "crew", "toast")); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
+	}
+
+	cmd, err := buildRestartCommand("gt-crew-toast")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+	if !strings.Contains(cmd, "--model worker-model") {
+		t.Errorf("worker_agents pin must survive handoff\ncmd: %s", cmd)
+	}
+	if strings.Contains(cmd, "--model role-model") {
+		t.Errorf("role_agents.crew must not displace the worker's own mapping\ncmd: %s", cmd)
+	}
+
+	// The worker's own mapping changed. Its pin is now stale, and the respawn
+	// must land on the new mapping rather than on role_agents.crew — a fresh
+	// spawn of the same worker resolves worker_agents first.
+	writeWorkerAgent("claude-worker2")
+
+	changed, err := buildRestartCommand("gt-crew-toast")
+	if err != nil {
+		t.Fatalf("buildRestartCommand after the worker mapping change: %v", err)
+	}
+	if !strings.Contains(changed, "--model worker-model2") {
+		t.Errorf("changed worker_agents mapping must take effect on handoff\ncmd: %s", changed)
+	}
+	if strings.Contains(changed, "--model role-model") {
+		t.Errorf("role_agents.crew must not capture a re-resolved worker mapping\ncmd: %s", changed)
 	}
 }

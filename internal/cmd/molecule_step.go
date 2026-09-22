@@ -331,6 +331,10 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 
 	t := tmux.NewTmux()
 
+	// Refresh the tmux session env, which liveness checks read, so it names the
+	// agent the respawned pane is about to run (gt-di8p).
+	updateSessionEnvForHandoff(t, currentSession)
+
 	// Kill all processes in the pane before respawning to prevent process leaks
 	if err := t.KillPaneProcesses(pane); err != nil {
 		// Non-fatal but log the warning

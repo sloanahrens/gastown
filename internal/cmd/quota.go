@@ -972,6 +972,10 @@ func executeKeychainRotation(
 		return result
 	}
 
+	// Refresh the tmux session env, which liveness checks read, so it names the
+	// agent the rotated pane is about to run (gt-di8p).
+	updateSessionEnvForHandoff(t, session)
+
 	// Set remain-on-exit to prevent pane destruction during restart
 	if err := t.SetRemainOnExit(pane, true); err != nil {
 		style.PrintWarning("could not set remain-on-exit for %s: %v", session, err)
