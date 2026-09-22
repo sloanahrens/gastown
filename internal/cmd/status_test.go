@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 )
@@ -680,5 +682,74 @@ func TestExtractBaseName(t *testing.T) {
 				t.Errorf("extractBaseName(%q) = %q, want %q", tt.cmdline, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAgentMarkerTriple covers the address → marker-coordinate mapping gt
+// status uses to read pause markers. A single-segment address is a town-level
+// agent whose marker lives at .runtime/agents/<role>.json, so it must resolve
+// to an empty rig and a real role rather than to no marker at all
+// (gt-wisp-6ajo).
+func TestAgentMarkerTriple(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		address         string
+		rig, role, name string
+		ok              bool
+	}{
+		{"gastown/flint", "gastown", constants.RolePolecat, "flint", true},
+		{"gastown/polecats/flint", "gastown", constants.RolePolecat, "flint", true},
+		{"gastown/witness", "gastown", constants.RoleWitness, "", true},
+		{"gastown/refinery", "gastown", constants.RoleRefinery, "", true},
+		{"gastown/crew/opal", "gastown", constants.RoleCrew, "opal", true},
+		{"mayor/", "", constants.RoleMayor, "", true},
+		{"deacon/", "", constants.RoleDeacon, "", true},
+		// Not addressable agents: no marker, no reason to look.
+		{"overseer", "", "", "", false},
+		{"", "", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.address, func(t *testing.T) {
+			rig, role, name, ok := agentMarkerTriple(tt.address)
+			if ok != tt.ok || rig != tt.rig || role != tt.role || name != tt.name {
+				t.Errorf("agentMarkerTriple(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
+					tt.address, rig, role, name, ok, tt.rig, tt.role, tt.name, tt.ok)
+			}
+		})
+	}
+}
+
+// TestApplyPauseMarkerNamesAgent is the end-to-end check for the status line:
+// pause an agent the way `gt agent pause` does, then confirm the address gt
+// status uses resolves to the same marker and carries the reason.
+func TestApplyPauseMarkerNamesAgent(t *testing.T) {
+	townRoot := t.TempDir()
+
+	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan", "mayor"); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	agent := AgentRuntime{Address: "gastown/flint"}
+	applyPauseMarker(&agent, townRoot)
+	if agent.PausedReason != "filesystem scan" {
+		t.Errorf("rig agent PausedReason = %q, want %q", agent.PausedReason, "filesystem scan")
+	}
+
+	// Town-level: `gt agent pause mayor` writes agents/mayor.json with an
+	// empty rig, and the status address is "mayor/".
+	if err := agentpause.Pause(townRoot, "", "mayor", "", "operator hold", "human"); err != nil {
+		t.Fatalf("Pause mayor: %v", err)
+	}
+	mayor := AgentRuntime{Address: "mayor/"}
+	applyPauseMarker(&mayor, townRoot)
+	if mayor.PausedReason != "operator hold" {
+		t.Errorf("mayor PausedReason = %q, want %q (town-level marker not read)", mayor.PausedReason, "operator hold")
+	}
+
+	// An unpaused agent must not pick up a reason from anywhere.
+	idle := AgentRuntime{Address: "gastown/witness"}
+	applyPauseMarker(&idle, townRoot)
+	if idle.PausedReason != "" {
+		t.Errorf("unpaused witness PausedReason = %q, want empty", idle.PausedReason)
 	}
 }

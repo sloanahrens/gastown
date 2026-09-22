@@ -1751,8 +1751,8 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 // (gt-ahik) and records the reason on the AgentRuntime so the status
 // line can show [paused (reason)]. File layer only — cheap, no Dolt.
 func applyPauseMarker(agent *AgentRuntime, townRoot string) {
-	rigName, role, name := agentMarkerTriple(agent.Address)
-	if rigName == "" {
+	rigName, role, name, ok := agentMarkerTriple(agent.Address)
+	if !ok {
 		return
 	}
 	if st := agentpause.PausedByState(townRoot, rigName, role, name); st != nil {
@@ -1760,29 +1760,22 @@ func applyPauseMarker(agent *AgentRuntime, townRoot string) {
 	}
 }
 
-// agentMarkerTriple maps an agent address to the (rig, role, name) used
-// by the pause marker path. Addresses: "mayor/" and "deacon/" are
-// town-level (no marker — they use deacon-style state instead),
-// "rig/name" is a polecat, "rig/witness", "rig/refinery", "rig/crew/name".
-func agentMarkerTriple(address string) (rig, role, name string) {
-	parts := strings.Split(strings.TrimSuffix(address, "/"), "/")
-	if len(parts) == 1 {
-		return "", "", ""
+// agentMarkerTriple maps an agent status address to the (rig, role, name)
+// used by the pause marker path, and reports whether the address names a
+// marker-backed agent at all.
+//
+// It goes through session.ParseAddress rather than splitting the string, so
+// every address form the rest of the system uses resolves to the same marker
+// the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
+// "rig/witness", "rig/refinery", "rig/crew/name" — and the town-level
+// "mayor/" and "deacon/", whose marker lives at .runtime/agents/<role>.json,
+// so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
+func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
+	id, err := session.ParseAddress(address)
+	if err != nil {
+		return "", "", "", false
 	}
-	rig = parts[0]
-	switch parts[1] {
-	case constants.RoleCrew:
-		if len(parts) >= 3 {
-			name = parts[2]
-		}
-		role = constants.RoleCrew
-	case constants.RoleWitness, constants.RoleRefinery:
-		role = parts[1]
-	default:
-		role = constants.RolePolecat
-		name = parts[1]
-	}
-	return rig, role, name
+	return id.Rig, string(id.Role), id.Name, true
 }
 
 // applyMailSummary copies a pre-fetched batch mail summary onto an agent.

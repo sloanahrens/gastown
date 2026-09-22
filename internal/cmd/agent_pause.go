@@ -141,6 +141,18 @@ func (a *agentAddr) roleAndName() (string, string) {
 	}
 }
 
+// displayAddress returns the address to print for this target, derived from
+// the marker coordinates rather than from the caller's string. One agent
+// under two names is a copy-paste bug waiting to happen at the moment an
+// operator is freezing something (gt-wisp-6ajo), and the derived form still
+// parses, so the printed "resume with" line is copy-pasteable.
+func (a *agentAddr) displayAddress(role, name string) string {
+	if addr := agentpause.AddressFor(a.Rig, role, name); addr != "" {
+		return addr
+	}
+	return a.Address()
+}
+
 func runAgentPause(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -151,12 +163,16 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	role, name := target.roleAndName()
+	display := target.displayAddress(role, name)
 
-	// Idempotency: already paused?
+	// Idempotency: already paused? A marker that exists but cannot be read
+	// is reported as paused *and* as an error (agentpause.IsPaused fails
+	// closed). Don't treat that as "already paused" — Pause rewrites the
+	// marker atomically, which is the repair.
 	if paused, st, perr := agentpause.IsPaused(townRoot, target.Rig, role, name); perr != nil {
-		return fmt.Errorf("checking pause state: %w", perr)
+		style.PrintWarning("existing pause marker for %s is unreadable (%v); rewriting it", display, perr)
 	} else if paused {
-		fmt.Printf("%s %s is already paused\n", style.Dim.Render("○"), target.Address())
+		fmt.Printf("%s %s is already paused\n", style.Dim.Render("○"), display)
 		if st != nil && st.Reason != "" {
 			fmt.Printf("  Reason: %s\n", st.Reason)
 		}
@@ -183,7 +199,7 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 		style.PrintWarning("could not freeze session %s: %v (marker still written — scanners will honor it)", target.SessionName(), ferr)
 	}
 
-	fmt.Printf("%s %s paused\n", style.Bold.Render("⏸️"), target.Address())
+	fmt.Printf("%s %s paused\n", style.Bold.Render("⏸️"), display)
 	if agentPauseReason != "" {
 		fmt.Printf("  Reason: %s\n", agentPauseReason)
 	}
@@ -195,7 +211,7 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Marker: %s\n", agentpause.FilePath(townRoot, target.Rig, role, name))
 	fmt.Println()
 	fmt.Println("Witness, patrol scan, and the stuck-agent dog will not touch it.")
-	fmt.Printf("Resume with: %s\n", style.Dim.Render("gt agent resume "+target.Address()))
+	fmt.Printf("Resume with: %s\n", style.Dim.Render("gt agent resume "+display))
 	return nil
 }
 
@@ -209,20 +225,39 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	role, name := target.roleAndName()
+	display := target.displayAddress(role, name)
+	client := beads.New(townRoot)
 
-	paused, st, perr := agentpause.IsPaused(townRoot, target.Rig, role, name)
-	if perr != nil {
-		return fmt.Errorf("checking pause state: %w", perr)
+	// Resume must consult BOTH layers, exactly as PauseGate does: a pause
+	// held in the bead layer alone (the marker-file-loss case the fallback
+	// exists for) is otherwise unclearable, and the stuck-agent dog would
+	// skip a live agent forever (gt-wisp-6ajo). The already-resolved bead ID
+	// is passed through so town-level agents (mayor, deacon), which have no
+	// rig segment to derive one from, are covered too.
+	layers := agentpause.ReadLayers(townRoot, target.Rig, role, name, target.BeadID, client.ForAgentBead())
+	if layers.FileErr != nil {
+		// The marker is unreadable, not absent: it counts as paused, and
+		// Resume below removes (rather than parses) it.
+		style.PrintWarning("pause marker for %s is unreadable (%v); clearing it anyway", display, layers.FileErr)
 	}
-	if !paused {
-		fmt.Printf("%s %s is not paused\n", style.Dim.Render("○"), target.Address())
+	if layers.BeadErr != nil {
+		// Unknown, not unpaused: warn and still clear both layers, since
+		// clearing is idempotent and this is the operator's only undo.
+		style.PrintWarning("could not read agent bead %s (%v); clearing both layers anyway", target.BeadID, layers.BeadErr)
+	}
+	if !layers.Paused() {
+		fmt.Printf("%s %s is not paused\n", style.Dim.Render("○"), display)
 		return nil
 	}
-	if st != nil && st.Reason != "" {
+	switch st := layers.State(); {
+	case st != nil && st.Reason != "":
 		fmt.Printf("  Was paused: %s\n", st.Reason)
+	case layers.BeadPaused && !layers.FilePaused:
+		// The marker file was gone; the bead layer is what held it.
+		fmt.Println("  Was paused: agent bead was still agent_state=paused")
 	}
 
-	// 1. Clear the marker file.
+	// 1. Clear the marker file (no-op if it is already gone).
 	if err := agentpause.Resume(townRoot, target.Rig, role, name); err != nil {
 		return fmt.Errorf("removing pause marker: %w", err)
 	}
@@ -230,7 +265,9 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 	// 2. Restore agent_state. The agent was running (or idle) before the
 	//    freeze; "idle" is the safe canonical state — polecat_spawn writes
 	//    "working" on the next spawn, and nothing treats "idle" as terminal.
-	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStateIdle)); err != nil {
+	//    Done unconditionally: a bead-layer-only pause is exactly the case
+	//    that must be cleared here.
+	if err := client.ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStateIdle)); err != nil {
 		style.PrintWarning("could not restore agent_state=idle on bead %s: %v", target.BeadID, err)
 	}
 
@@ -244,7 +281,7 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("%s %s resumed\n", style.Bold.Render("▶️"), target.Address())
+	fmt.Printf("%s %s resumed\n", style.Bold.Render("▶️"), display)
 	if thawed {
 		fmt.Printf("  Session: %s (thawed)\n", target.SessionName())
 	} else {

@@ -16,7 +16,15 @@
 //     marker file loss; written by `gt agent pause`, cleared by
 //     `gt agent resume`.
 //
-// PauseGate consults both, so a pause survives in either layer.
+// PauseGate consults both, so a pause survives in either layer — and
+// `gt agent resume` clears both, so a pause that survives in only one is
+// still undoable.
+//
+// Every reader here fails CLOSED. A marker that exists but cannot be read or
+// parsed is reported as a pause, because the callers are don't-touch guards:
+// making a stuck agent wait is recoverable, restarting an agent the operator
+// deliberately parked is the incident this package exists to prevent
+// (gt-ahik, gt-wisp-6ajo).
 package agentpause
 
 import (
@@ -68,23 +76,50 @@ func FilePath(townRoot, rig, role, name string) string {
 
 // IsPaused checks the file marker only. Returns (false, nil, nil)
 // when no marker file exists.
+//
+// A marker that exists but cannot be read or parsed is reported as a pause
+// AND as an error, with a State whose Reason names the problem: the error is
+// for the operator's log, the pause is for the guard (fail closed).
 func IsPaused(townRoot, rig, role, name string) (bool, *State, error) {
-	data, err := os.ReadFile(FilePath(townRoot, rig, role, name)) //nolint:gosec // G304: path is built from trusted townRoot + validated role/name
+	return readMarker(FilePath(townRoot, rig, role, name))
+}
+
+// readMarker is the single marker reader behind IsPaused and PausedByPath.
+// It fails closed (see the package comment): an existing marker that cannot
+// be read or parsed reads as paused, so a guard never mistakes a broken
+// write or a hand-edit for "not paused".
+func readMarker(path string) (bool, *State, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: caller-built trusted path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil, nil
 		}
-		return false, nil, err
+		return true, &State{Paused: true, Reason: unreadableReason, Address: AddressFromMarkerPath(path)},
+			fmt.Errorf("reading pause marker %q: %w", path, err)
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		return false, nil, fmt.Errorf("malformed pause marker %q: %w", FilePath(townRoot, rig, role, name), err)
+		return true, &State{Paused: true, Reason: malformedReason, Address: AddressFromMarkerPath(path)},
+			fmt.Errorf("malformed pause marker %q: %w", path, err)
 	}
-	st.Address = AddressFromMarkerPath(FilePath(townRoot, rig, role, name))
+	st.Address = AddressFromMarkerPath(path)
 	return st.Paused, &st, nil
 }
 
-// Pause writes the pause marker file.
+// Reasons attached to a marker that could not be read or parsed. They are
+// shown verbatim by gt status and by the scanner logs, so they say what is
+// wrong rather than pretending to be an operator reason.
+const (
+	unreadableReason = "unreadable pause marker (treated as paused)"
+	malformedReason  = "malformed pause marker (treated as paused)"
+)
+
+// Pause writes the pause marker file, overwriting any existing marker.
+//
+// The write is atomic: a temp file in the same directory, fsynced, then
+// renamed over the target. A truncated marker reads as paused (fail closed),
+// but it also loses the operator's reason and cannot be told apart from a
+// hand-edit, so no reader should ever see a half-written one.
 func Pause(townRoot, rig, role, name, reason, pausedBy string) error {
 	path := FilePath(townRoot, rig, role, name)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -99,7 +134,37 @@ func Pause(townRoot, rig, role, name, reason, pausedBy string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644) //nolint:gosec // G301: intended world-readable runtime state
+	return writeFileAtomic(path, append(data, '\n'))
+}
+
+// writeFileAtomic writes data to path via a sibling temp file and a rename,
+// so a reader sees either the previous contents or the complete new ones —
+// never a partial write. The temp file is created in the target directory so
+// the rename stays on one filesystem.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // no-op once the rename succeeds
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(0o644); err != nil { //nolint:gosec // G302: intended world-readable runtime state
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Resume removes the pause marker file.
@@ -113,12 +178,53 @@ func Resume(townRoot, rig, role, name string) error {
 
 // PausedByState returns the pause state for an agent when it is paused
 // in the file layer (regardless of the bead layer). Used by gt status.
+//
+// The read error is deliberately dropped: a broken marker still yields a
+// State (with a Reason naming the problem), and showing that in gt status is
+// how an operator learns the marker needs rewriting.
 func PausedByState(townRoot, rig, role, name string) *State {
-	paused, st, err := IsPaused(townRoot, rig, role, name)
-	if err != nil || !paused {
+	paused, st, _ := IsPaused(townRoot, rig, role, name)
+	if !paused {
 		return nil
 	}
 	return st
+}
+
+// BeadReader is the narrow slice of *beads.Beads the bead-layer pause check
+// needs. *beads.Beads satisfies it; tests substitute a fake so the fallback
+// layer is covered without a Dolt fixture.
+type BeadReader interface {
+	GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error)
+}
+
+// BeadPaused reports whether the bead layer marks the agent paused
+// (agent_state=paused) and returns the pause state derived from the bead.
+//
+// A nil reader or an empty beadID means there is no bead layer to consult
+// and reports not paused. A read error is returned: the caller must treat it
+// as "unknown", which for a don't-touch guard means paused (fail closed).
+func BeadPaused(reader BeadReader, beadID string) (bool, *State, error) {
+	if reader == nil || beadID == "" {
+		return false, nil, nil
+	}
+	issue, fields, err := reader.GetAgentBead(beadID)
+	if err != nil {
+		return false, nil, err
+	}
+	if issue == nil || fields == nil {
+		// No agent bead: there is no bead-layer pause to honor.
+		return false, nil, nil
+	}
+	if beads.AgentState(beads.ResolveAgentState(issue.Description, fields.AgentState)) != beads.AgentStatePaused {
+		return false, nil, nil
+	}
+	st := &State{Paused: true}
+	if issue.UpdatedAt != "" {
+		if t, terr := time.Parse(time.RFC3339, issue.UpdatedAt); terr == nil {
+			st.PausedAt = t
+		}
+	}
+	return true, st, nil
 }
 
 // PauseGate consults both pause layers and reports whether the agent
@@ -129,36 +235,89 @@ func PausedByState(townRoot, rig, role, name string) *State {
 //     returning AgentStatePaused — covers the case where the marker file
 //     was lost but the agent bead still carries agent_state=paused.
 //
-// A nil beadsClient disables the bead-layer check (file layer only).
-// The bead read is best-effort: errors are returned in the error out
-// parameter but do NOT clear a file-layer pause.
-func PauseGate(townRoot, rig, role, name string, beadsClient *beads.Beads) (bool, *State, error) {
-	filePaused, fileState, err := IsPaused(townRoot, rig, role, name)
-	if err != nil {
-		return false, nil, err
+// A nil reader disables the bead-layer check (file layer only), which is what
+// the witness restart hot loop uses: it must not take a config lookup or a
+// Dolt read to decide, and `gt agent pause` always writes the marker file
+// before it touches the bead.
+//
+// The gate fails CLOSED, and that guarantee is carried by the single `paused`
+// return value: an error is only ever returned together with paused=true, so
+// a caller that ignores the error still refuses to touch the agent. Callers
+// should log the error, then skip.
+func PauseGate(townRoot, rig, role, name string, reader BeadReader) (bool, *State, error) {
+	beadID := ""
+	if reader != nil && rig != "" {
+		beadID = beads.AgentBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rig), rig, role, name)
 	}
-	if filePaused {
-		return true, fileState, nil
-	}
-	if beadsClient == nil || rig == "" {
+	return PauseGateBeadID(townRoot, rig, role, name, beadID, reader)
+}
+
+// PauseGateBeadID is PauseGate for a caller that already knows the agent bead
+// ID — town-level agents (mayor, deacon) have no rig segment to derive one
+// from, so `gt agent resume` passes the ID it resolved from the address
+// instead of leaving the bead layer unreachable.
+func PauseGateBeadID(townRoot, rig, role, name, beadID string, reader BeadReader) (bool, *State, error) {
+	layers := ReadLayers(townRoot, rig, role, name, beadID, reader)
+	if !layers.Paused() {
 		return false, nil, nil
 	}
-	prefix := beads.GetPrefixForRig(townRoot, rig)
-	id := beads.AgentBeadIDWithPrefix(prefix, rig, role, name)
-	issue, fields, berr := beadsClient.ForAgentBead().GetAgentBead(id)
-	if berr != nil || fields == nil {
-		return false, nil, berr
+	return true, layers.State(), layers.Err()
+}
+
+// Layers is one agent's pause state, layer by layer. PauseGate collapses the
+// layers into a single fail-closed answer, which is what a don't-touch guard
+// wants; a caller that must ACT on each layer needs them apart. `gt agent
+// resume` is that caller — it clears both layers, so a pause held in only one
+// (a lost marker file) is still undoable (gt-wisp-6ajo).
+type Layers struct {
+	FilePaused bool
+	FileState  *State
+	FileErr    error
+	BeadPaused bool
+	BeadState  *State
+	BeadErr    error
+}
+
+// Paused reports whether the agent must be treated as paused: either layer
+// says so, or a layer could not be read (fail closed, like PauseGate). An
+// unknown pause state is never reported as "not paused".
+func (l Layers) Paused() bool {
+	return l.FilePaused || l.BeadPaused || l.FileErr != nil || l.BeadErr != nil
+}
+
+// State returns the pause state to show an operator, preferring the file
+// layer — it carries the reason they typed. Nil when neither layer produced
+// one: a bead-only pause records a state, not a reason, and a failed read
+// records nothing.
+func (l Layers) State() *State {
+	if l.FileState != nil {
+		return l.FileState
 	}
-	if beads.AgentState(beads.ResolveAgentState(issue.Description, fields.AgentState)) == beads.AgentStatePaused {
-		st := &State{Paused: true}
-		if issue.UpdatedAt != "" {
-			if t, terr := time.Parse(time.RFC3339, issue.UpdatedAt); terr == nil {
-				st.PausedAt = t
-			}
-		}
-		return true, st, nil
+	return l.BeadState
+}
+
+// Err returns the read failure that matters: the file layer's when the file
+// layer decided the answer, else the bead layer's. A bead read that failed
+// after the file layer already answered "paused" is not a check failure, and
+// reporting it as one would send a scanner down its error path for a decision
+// it never needed to make.
+func (l Layers) Err() error {
+	if l.FilePaused || l.FileErr != nil {
+		return l.FileErr
 	}
-	return false, nil, nil
+	return l.BeadErr
+}
+
+// ReadLayers reads both pause layers without collapsing their outcomes.
+// beadID is passed explicitly because town-level agents have no rig segment to
+// derive one from; an empty beadID or nil reader means there is no bead layer
+// (and no read to pay for — the restart hot loop calls PauseGate with a nil
+// reader for exactly that reason).
+func ReadLayers(townRoot, rig, role, name, beadID string, reader BeadReader) Layers {
+	var l Layers
+	l.FilePaused, l.FileState, l.FileErr = IsPaused(townRoot, rig, role, name)
+	l.BeadPaused, l.BeadState, l.BeadErr = BeadPaused(reader, beadID)
+	return l
 }
 
 // ListPaused returns the pause states of every agent paused in the file
@@ -181,18 +340,17 @@ func ListPaused(townRoot string) []*State {
 	return out
 }
 
-// PausedByPath reads a marker file directly (file layer only).
+// PausedByPath reads a marker file directly (file layer only). Like every
+// reader here it fails closed: an unreadable marker is reported as a pause
+// (with a Reason naming the problem), not as an absent one — otherwise
+// gt status would show nothing for an agent the rest of the system refuses
+// to touch.
 func PausedByPath(path string) *State {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path comes from a walk of the runtime dir
-	if err != nil {
+	paused, st, _ := readMarker(path)
+	if !paused {
 		return nil
 	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil || !st.Paused {
-		return nil
-	}
-	st.Address = AddressFromMarkerPath(path)
-	return &st
+	return st
 }
 
 // AddressFromMarkerPath derives the Gas Town address of a paused agent
@@ -221,6 +379,27 @@ func AddressFromMarkerPath(path string) string {
 	default:
 		return "" // not a marker path
 	}
+}
+
+// AddressFor renders the Gas Town address of an agent from the same
+// coordinates FilePath takes:
+//
+//	AddressFor("gastown", "polecat", "flint") → "gastown/flint"
+//	AddressFor("gastown", "crew", "opal")     → "gastown/crew/opal"
+//	AddressFor("", "mayor", "")               → "mayor"
+//
+// It is the exact inverse of AddressFromMarkerPath: AddressFor(rig, role,
+// name) == AddressFromMarkerPath(FilePath(townRoot, rig, role, name)) for
+// every agent. That invariant is why `gt agent pause`/`resume` print this
+// form rather than the caller's address string: the operator reads the pause
+// output and the gt status banner side by side, and one agent under two names
+// is a copy-paste bug waiting to happen (gt-wisp-6ajo).
+func AddressFor(rig, role, name string) string {
+	stem := role
+	if name != "" {
+		stem = role + "." + name
+	}
+	return markerAddress(rig, stem)
 }
 
 // markerAddress renders <rig>/<role>[.<name>] as a Gas Town address.

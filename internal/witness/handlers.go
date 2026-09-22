@@ -1309,27 +1309,50 @@ func RestartPolecatSession(workDir, rigName, polecatName string) error {
 	// path (zombie dead-session, stale-working, done-intent-dead, and the
 	// restart seam), so the gate here covers them all.
 	//
-	// File layer only (nil beads client): this path is the restart hot
-	// loop, so it must not take a Dolt read to decide. That is sufficient
-	// in practice because `gt agent pause` always writes the marker file
-	// before it touches the bead, and the marker file is the layer that
-	// survives Dolt being unavailable — exactly when a spurious restart
-	// would hurt most. The bead-layer fallback in PauseGate covers callers
-	// that already hold a client.
+	// File layer only (nil reader): this path is the restart hot loop, so it
+	// must not take a config lookup or a Dolt read to decide. That is
+	// sufficient in practice because `gt agent pause` always writes the
+	// marker file before it touches the bead, and the marker file is the
+	// layer that survives Dolt being unavailable — exactly when a spurious
+	// restart would hurt most. The bead-layer fallback in PauseGate covers
+	// callers that already hold a bead reader.
+	//
+	// The gate fails CLOSED (gt-wisp-6ajo): PauseGate reports paused=true
+	// whenever it cannot prove the agent is unpaused, including an unreadable
+	// marker or a check error, so the error branch below skips the restart.
+	// Restarting an agent the operator parked is the harm; making a stuck
+	// agent wait is recoverable.
 	townRoot := workDirToTownRoot(workDir)
-	if paused, st, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName, nil); perr != nil {
-		log.Printf("warning: pause gate check for %s/%s failed: %v", rigName, polecatName, perr)
-	} else if paused {
+	paused, st, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName, nil)
+	switch {
+	case perr != nil:
+		log.Printf("warning: pause gate check for %s/%s failed (%v); skipping restart (fail closed)",
+			rigName, polecatName, perr)
+		return nil
+	case paused:
+		actor := ""
+		if st != nil {
+			actor = st.PausedBy
+		}
 		log.Printf("info: skip restart of %s/%s: agent is paused (%s, %s)",
-			rigName, polecatName, agentpause.Reason(st), st.PausedBy)
+			rigName, polecatName, agentpause.Reason(st), actor)
 		return nil
 	}
 
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
-	if err := util.ExecRun(workDir, "gt", "session", "restart", address, "--force"); err != nil {
+	if err := restartSessionExec(workDir, address); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)
 	}
 	return nil
+}
+
+// restartSessionExec performs the actual session restart. It is a package
+// variable so tests can assert the pause gate's decision without spawning a
+// real `gt session restart`, which a non-hermetic test process could point at
+// the live town (gt-wisp-6ajo). Swap it only from a non-parallel test, and
+// restore it in t.Cleanup.
+var restartSessionExec = func(workDir, address string) error {
+	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
 }
 
 // NukePolecat executes the actual nuke operation for a polecat.
