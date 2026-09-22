@@ -22,6 +22,14 @@ const (
 	// rather than the driver's own readTimeout aborting a large, legitimately
 	// slow DOLT_PUSH mid-flight with a raw i/o timeout.
 	doltRemotesReadTimeout = doltPushTimeout + 30*time.Second
+
+	// shutdownDoltPushBudget bounds how long daemon shutdown waits for
+	// pushDoltRemotesBounded before moving on. pushDoltRemotes pushes
+	// databases one at a time, each with its own doltPushTimeout (60s) per
+	// add/commit/push step, so it has no bound of its own — an unreachable
+	// remote could otherwise make shutdown (and so a restart's "new binary is
+	// in force" wait, see waitForRestart) open-ended (gt-oqbw MAJOR #5).
+	shutdownDoltPushBudget = 20 * time.Second
 )
 
 // doltRemotesInterval returns the configured push interval, or the default (15m).
@@ -32,6 +40,36 @@ func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return defaultDoltRemotesInterval
+}
+
+// runBounded runs fn in a goroutine and waits at most budget for it to
+// finish. If it doesn't, runBounded returns anyway — calling onTimeout first
+// — while fn keeps running in the background; it is never canceled, only
+// abandoned. Used where a callee has no context/cancellation support of its
+// own but the caller cannot afford to block on it indefinitely.
+func runBounded(budget time.Duration, fn func(), onTimeout func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		onTimeout()
+	}
+}
+
+// pushDoltRemotesBounded runs pushDoltRemotes with a hard wall-clock ceiling
+// so shutdown can never block on it indefinitely. The push it abandons on
+// timeout keeps running in the background against a Dolt server the caller
+// is about to stop — best case it finishes anyway, worst case it fails and
+// logs, and either is preferable to a shutdown (and thus a restart, see
+// waitForRestart) that never returns.
+func (d *Daemon) pushDoltRemotesBounded() {
+	runBounded(shutdownDoltPushBudget, d.pushDoltRemotes, func() {
+		d.logger.Printf("Warning: dolt_remotes push still running after %s at shutdown; continuing shutdown without waiting for it", shutdownDoltPushBudget)
+	})
 }
 
 // pushDoltRemotes commits and pushes each configured database to its remote.

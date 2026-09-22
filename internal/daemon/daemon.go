@@ -2636,8 +2636,10 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("KRC pruner stopped")
 	}
 
-	// Push Dolt remotes before stopping the server (if patrol is enabled)
-	d.pushDoltRemotes()
+	// Push Dolt remotes before stopping the server (if patrol is enabled).
+	// Bounded: an unreachable remote must not make shutdown open-ended (see
+	// pushDoltRemotesBounded).
+	d.pushDoltRemotesBounded()
 
 	// Stop Dolt server if we're managing it
 	if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {

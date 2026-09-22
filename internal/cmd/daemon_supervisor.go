@@ -149,10 +149,17 @@ func startDaemon(townRoot string) (via string, pid int, err error) {
 	return "", pid, err
 }
 
+// daemonPollInterval is how often waitForDaemon/waitForRestart re-check the
+// lock. A seam so tests can shrink it and finish in milliseconds: the
+// attempt counts below are chosen for their real-time products (interval *
+// attempts), so shrinking the interval shrinks wall-clock wait time without
+// changing how many times the lock gets checked relative to the budget.
+var daemonPollInterval = 100 * time.Millisecond
+
 // waitForDaemon polls the lock for up to 3 s and returns the daemon's PID.
 func waitForDaemon(townRoot string) (int, error) {
 	for range 30 {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(daemonPollInterval)
 		running, pid, err := daemonIsRunning(townRoot)
 		if err != nil {
 			return 0, fmt.Errorf("checking daemon status: %w", err)
@@ -162,4 +169,90 @@ func waitForDaemon(townRoot string) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
+}
+
+// restartDaemon brings the daemon back up on the program now on disk: through
+// the provisioned supervisor when there is one, by hand when there is not. It
+// is the primitive that makes a freshly installed binary take effect in a
+// process that is already running, and it is deliberately NOT a stop
+// followed by a start.
+//
+// On macOS the supervisor's stop is `launchctl bootout`, which unloads the
+// job: between a stop and a start the daemon is not supervised at all, so
+// anything that fails in that window — a rebuild-gt run killed by the very
+// restart it asked for, a crash, a reboot — leaves the town with no daemon
+// and no loaded job to bring one back (gt-sq9e). kickstart -k restarts the
+// job in place: no unsupervised gap, and no dependence on a second command
+// succeeding afterwards.
+//
+// A daemon that is not running is started rather than restarted, so callers
+// that want "the daemon is running the current binary" do not have to check
+// first. When no supervisor is provisioned the daemon is only ever run by
+// hand, so the hand stop/start pair is the whole of it there.
+//
+// The outgoing PID is read before the restart so the wait can tell the new
+// daemon from the old one: waitForDaemon returns as soon as the lock reads as
+// running, and throughout a restart that is true of the process on its way
+// out as well.
+func restartDaemon(townRoot string) (via string, pid int, err error) {
+	running, oldPID, err := daemonIsRunning(townRoot)
+	if err != nil {
+		return "", 0, fmt.Errorf("checking daemon status: %w", err)
+	}
+	if !running {
+		return startDaemon(townRoot)
+	}
+	sup, err := detectDaemonSupervisor(townRoot)
+	if err != nil {
+		return "", 0, err
+	}
+	if sup == nil {
+		if err := stopDaemonDirect(townRoot); err != nil {
+			return "", 0, fmt.Errorf("stopping the daemon: %w", err)
+		}
+		return startDaemon(townRoot)
+	}
+	runErr := supervisorRun(sup.start)
+	if runErr != nil {
+		// The command may have failed after the job came up; a live daemon
+		// that is not the old one is what the caller asked for either way.
+		if pid, waitErr := waitForRestart(townRoot, oldPID); waitErr == nil {
+			return sup.name, pid, nil
+		}
+		return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not restart the daemon: %v\n  load it with: %s\n  or remove its file to run the daemon by hand", sup.name, runErr, sup.load)
+	}
+	pid, err = waitForRestart(townRoot, oldPID)
+	if err != nil {
+		return sup.name, 0, fmt.Errorf("daemon did not come back under %s: %w", sup.name, err)
+	}
+	return sup.name, pid, nil
+}
+
+// waitForRestart polls the lock for up to 60 s and returns the PID of a
+// daemon other than oldPID. The longer budget than waitForDaemon's is for the
+// restart's extra step: the outgoing process has to release the lock and the
+// supervisor has to bring the job back before there is anything to see, and a
+// build-ahead-of-start wait that times out early would report a restart that
+// did happen as a failure.
+//
+// 10 s (the original budget) does not cover the outgoing daemon's own
+// shutdown (gt-oqbw MAJOR #5): Daemon.shutdown pushes pending Dolt remotes
+// (bounded to 20 s, see pushDoltRemotesBounded), stops the Dolt SQL server
+// (up to ~5 s) and flushes OTel (up to 5 s) before the process exits and the
+// lock is released — and only then can the incoming daemon acquire it and
+// run its own preflight (Dolt metadata repair, opening beads stores) before
+// waitForDaemon's poll would see it. 60 s covers that chain with real margin
+// without leaving a hung restart to poll forever.
+func waitForRestart(townRoot string, oldPID int) (int, error) {
+	for range 600 {
+		time.Sleep(daemonPollInterval)
+		running, pid, err := daemonIsRunning(townRoot)
+		if err != nil {
+			return 0, fmt.Errorf("checking daemon status: %w", err)
+		}
+		if running && pid != oldPID {
+			return pid, nil
+		}
+	}
+	return 0, fmt.Errorf("daemon failed to restart (check logs with 'gt daemon logs')")
 }

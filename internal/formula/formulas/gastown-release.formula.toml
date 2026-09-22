@@ -355,8 +355,15 @@ description = """
 Restart gt daemon to pick up the new version.
 
 ```bash
-gt daemon stop && gt daemon start
+gt daemon restart
 ```
+
+Do NOT use `gt daemon stop && gt daemon start`: on macOS the supervisor's stop
+is `launchctl bootout`, which unloads the launchd job. Between that stop and
+the following start the daemon is unsupervised — anything that fails in that
+window (a crash, a reboot, the restart itself) leaves the town with no daemon
+and no loaded job to bring one back (gt-sq9e). `gt daemon restart` is
+`launchctl kickstart -k`: no unsupervised gap.
 
 Verify:
 ```bash

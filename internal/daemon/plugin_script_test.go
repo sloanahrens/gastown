@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -170,6 +171,45 @@ func TestCompleteScriptRun(t *testing.T) {
 	completeScriptRun(p, scriptResult{timedOut: true, exitCode: -1}, hooks)
 	if dispatched != 2 {
 		t.Error("a failed record must not suppress the failure dispatch")
+	}
+}
+
+// A deferral (exit 3) writes no record and touches no dog. The record is what
+// satisfies a cooldown gate, so writing one for a run that accomplished
+// nothing is what starves a plugin whose window opens and closes on its own
+// (gt-oqbw) — and a deferral is not a failure, so there is nothing for a dog
+// to do either.
+func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
+	recs := 0
+	dispatched := 0
+	var logs []string
+	hooks := scriptRunHooks{
+		record:    func(plugin.PluginRunRecord) error { recs++; return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		logf:      func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "gate busy"}, hooks)
+	if recs != 0 {
+		t.Errorf("a deferral must write no run record (wrote %d)", recs)
+	}
+	if dispatched != 0 {
+		t.Error("a deferral must not hand off to a dog")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "deferred") || !strings.Contains(logs[0], "next heartbeat") {
+		t.Errorf("deferral must be logged as a retry: %v", logs)
+	}
+
+	// The exit code only means deferral on its own: the same code with a
+	// timeout, or with the process never starting, is an ordinary failure.
+	for _, res := range []scriptResult{
+		{exitCode: scriptExitDeferred, timedOut: true},
+		{exitCode: scriptExitDeferred, err: errors.New("no such file")},
+	} {
+		completeScriptRun(p, res, hooks)
+	}
+	if recs != 2 || dispatched != 2 {
+		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d dispatched=%d", recs, dispatched)
 	}
 }
 

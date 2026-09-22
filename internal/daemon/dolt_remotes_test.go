@@ -277,3 +277,46 @@ func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
 		t.Errorf("remote-tracking origin/main = %s, want it to match local HEAD %s", remoteHead, localHead)
 	}
 }
+
+// runBounded is what pushDoltRemotesBounded relies on to keep an unbounded
+// callee from making daemon shutdown (and so a restart, see waitForRestart
+// in internal/cmd) open-ended (gt-oqbw MAJOR #5). This exercises both
+// branches directly, decoupled from a real Dolt server: the alarming one
+// (fn outlives the budget: onTimeout must fire and runBounded must return
+// without waiting for fn) and the ordinary one (fn finishes first: onTimeout
+// must not fire).
+func TestRunBounded_FiresOnTimeoutAndDoesNotWaitForTheAbandonedCall(t *testing.T) {
+	release := make(chan struct{})
+	fnDone := make(chan struct{})
+	var timedOut bool
+
+	before := time.Now()
+	runBounded(10*time.Millisecond, func() {
+		<-release // held open well past the budget
+		close(fnDone)
+	}, func() { timedOut = true }) // onTimeout runs synchronously in this goroutine, before runBounded returns
+	elapsed := time.Since(before)
+
+	if !timedOut {
+		t.Error("onTimeout was not called although fn outlived the budget")
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("runBounded took %v to return, want it bounded near the 10ms budget regardless of fn", elapsed)
+	}
+	select {
+	case <-fnDone:
+		t.Error("fn had already finished when runBounded returned; the test does not exercise abandonment")
+	default:
+		// fn is still running in the background, as intended.
+	}
+	close(release)
+	<-fnDone
+}
+
+func TestRunBounded_NoTimeoutWhenFnFinishesFirst(t *testing.T) {
+	var timedOut bool
+	runBounded(time.Second, func() {}, func() { timedOut = true })
+	if timedOut {
+		t.Error("onTimeout was called although fn finished well within the budget")
+	}
+}
