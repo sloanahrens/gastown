@@ -1318,6 +1318,54 @@ func (g *Git) PatchIDs(base, head string) ([]string, error) {
 	return ids, nil
 }
 
+// PatchIDCommit pairs a commit with the patch-id of its own diff (against its
+// first parent).
+type PatchIDCommit struct {
+	PatchID string
+	Commit  string
+}
+
+// FirstParentPatchIDs returns each first-parent commit in base..head paired
+// with the stable patch-id of its own diff against its first parent, newest
+// first (git log --first-parent -p base..head | git patch-id --stable).
+//
+// Two differences from PatchIDs, both deliberate. Merge commits are kept:
+// --first-parent makes git log print each one's diff against its first
+// parent, so a landing merge commit's patch-id is the whole branch's
+// cumulative diff — the value a reviewed range's note is keyed to
+// (PatchID(base, head) over that range). And the walk follows only the
+// first-parent chain, which is the sequence of landings on the target.
+// Together they answer "which commit on this branch carries the content of
+// that patch?", a question per-commit branch comparison (PatchIDs) cannot:
+// a rebase or cherry-pick rewrites every sha, so the commit that landed a
+// given reviewed range is identifiable only by patch-id (gt-9t0p).
+//
+// An empty range yields an empty slice, as in PatchIDs. Commits whose diff
+// is empty (an empty commit) produce no patch-id line and are omitted.
+func (g *Git) FirstParentPatchIDs(base, head string) ([]PatchIDCommit, error) {
+	log, err := g.run("log", "--first-parent", "-p", "--no-color", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(log) == "" {
+		return nil, nil
+	}
+	out, err := g.runWithStdin(log, "patch-id", "--stable")
+	if err != nil {
+		return nil, err
+	}
+	var pairs []PatchIDCommit
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		// Each line is "<patch-id> <commit-id>", in git log's order.
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pairs = append(pairs, PatchIDCommit{PatchID: fields[0], Commit: fields[1]})
+	}
+	return pairs, nil
+}
+
 // NotesAdd attaches content as a note on commit under the given notes ref,
 // overwriting any note already there (git notes --ref <ref> add -f -m).
 func (g *Git) NotesAdd(ref, commit, content string) error {

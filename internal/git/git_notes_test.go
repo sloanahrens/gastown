@@ -393,6 +393,103 @@ func TestPatchIDs_EmptyRange(t *testing.T) {
 	}
 }
 
+// TestFirstParentPatchIDs_MergeCommitCarriesBranchPatchID pins the property
+// the refinery's landed-commit lookup depends on (gt-9t0p): a landing merge
+// commit's own patch-id, measured against its first parent, is the whole
+// merged branch's cumulative patch-id — the value a reviewed range's note is
+// keyed to. Without that, the commit that landed an MR whose sha a rebase
+// rewrote could not be found at all.
+func TestFirstParentPatchIDs_MergeCommitCarriesBranchPatchID(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	mainBranch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	runGit(t, dir, "checkout", "-b", "feature", base)
+	featureHead := commitFile(t, dir, "feature.txt", "feature\n", "feat: add feature")
+	runGit(t, dir, "checkout", mainBranch)
+	other := commitFile(t, dir, "other.txt", "other\n", "other: unrelated landing")
+	runGit(t, dir, "merge", "--no-ff", "feature", "-m", "Merge feature into main")
+	merge, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev merge: %v", err)
+	}
+
+	branchPatchID, err := g.PatchID(base, featureHead)
+	if err != nil {
+		t.Fatalf("PatchID branch range: %v", err)
+	}
+
+	pairs, err := g.FirstParentPatchIDs(base, "HEAD")
+	if err != nil {
+		t.Fatalf("FirstParentPatchIDs: %v", err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("FirstParentPatchIDs over a moved-base merge = %d entries (%v), want 2 (the merge and the landing before it)", len(pairs), pairs)
+	}
+	if pairs[0].Commit != merge {
+		t.Fatalf("newest entry is %s, want the merge commit %s", pairs[0].Commit, merge)
+	}
+	if pairs[0].PatchID != branchPatchID {
+		t.Fatalf("merge commit patch-id = %s, want the merged branch's cumulative patch-id %s", pairs[0].PatchID, branchPatchID)
+	}
+	if pairs[1].Commit != other {
+		t.Fatalf("oldest entry is %s, want the landing before it %s", pairs[1].Commit, other)
+	}
+	for _, p := range pairs {
+		if p.Commit == featureHead {
+			t.Fatal("the branch commit is not on the first-parent chain and must not be returned")
+		}
+	}
+
+	// The same patch replayed as a cherry-pick has a different sha and the
+	// same patch-id, which is what makes the lookup survive a rewritten sha.
+	runGit(t, dir, "checkout", "-b", "moved", base)
+	movedBase := commitFile(t, dir, "upstream.txt", "upstream progress\n", "unrelated upstream commit")
+	runGit(t, dir, "checkout", "-b", "picked", movedBase)
+	runGit(t, dir, "cherry-pick", featureHead)
+	picked, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev picked: %v", err)
+	}
+	if picked == featureHead {
+		t.Fatal("cherry-pick should have rewritten the commit sha")
+	}
+	pickedPairs, err := g.FirstParentPatchIDs(movedBase, picked)
+	if err != nil {
+		t.Fatalf("FirstParentPatchIDs picked: %v", err)
+	}
+	if len(pickedPairs) != 1 || pickedPairs[0].Commit != picked || pickedPairs[0].PatchID != branchPatchID {
+		t.Fatalf("cherry-picked commit = %v, want one entry {%s %s}", pickedPairs, branchPatchID, picked)
+	}
+}
+
+// TestFirstParentPatchIDs_EmptyRange: like PatchIDs, "this range has no
+// commits of its own" is a state callers reason about, so it reads as an
+// empty list rather than the error PatchID raises with no diff to hash.
+func TestFirstParentPatchIDs_EmptyRange(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	pairs, err := g.FirstParentPatchIDs(head, head)
+	if err != nil {
+		t.Fatalf("FirstParentPatchIDs on an empty range: %v", err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf("FirstParentPatchIDs on an empty range = %v, want empty", pairs)
+	}
+}
+
 func sortedCopy(in []string) []string {
 	out := append([]string(nil), in...)
 	sort.Strings(out)
