@@ -1212,7 +1212,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if issueID == "" {
 		issueID = info.Issue
 	}
-	worker := info.Worker
+
+	// The MR's worker must be whoever is actually running `gt done` right
+	// now (polecatName, validated above against BD_ACTOR/GT_POLECAT and the
+	// worktree path), never the name parsed out of the branch. A --branch
+	// rework reuses the ORIGINAL polecat's branch name under a different
+	// worker, so trusting info.Worker here misattributes the MR and later
+	// misroutes FIX_NEEDED to a polecat that no longer holds the issue
+	// (gt-fl0n).
+	worker := polecatName
 
 	// Get agent bead ID for cross-referencing.
 	ctx, actor := resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName)

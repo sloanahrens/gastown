@@ -185,6 +185,69 @@ func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 	assertBDLogNotContains(t, log, currentBeadsDir, "show bd-source --json")
 }
 
+// TestRunDoneReworkBranchRecordsActualWorkerNotBranchName covers gt-fl0n: a
+// --branch rework reuses the ORIGINAL polecat's branch name (here
+// "malachite"), but the polecat actually running `gt done` is a different
+// one ("refuge", set via env). The MR bead's worker field must record the
+// actual submitter so the refinery routes FIX_NEEDED (and dead-worker
+// recovery) to whoever holds the issue now, never to the name embedded in
+// the reused branch.
+func TestRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testing.T) {
+	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
+	setupRoutedSubmitCommandTown(t, workDir)
+	setupReworkBranchGitRepo(t, workDir, "polecat/malachite/bd-source+mudreworkab")
+	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	resetDoneFlagsForTest(t)
+	townRoot := routedSourceTestTownRoot(workDir)
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Setenv("GT_ROOT", townRoot)
+	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "refuge")
+	t.Setenv("BD_ACTOR", "gastown/polecats/refuge")
+	t.Chdir(workDir)
+
+	doneIssue = "bd-source"
+	doneCleanupStatus = "unpushed"
+	doneSkipVerify = true
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	if err := runDone(nil, nil); err != nil {
+		t.Fatalf("runDone: %v", err)
+	}
+
+	log := readSubmitSourceBDLog(t, logPath)
+	if !strings.Contains(log, "worker: refuge") {
+		t.Fatalf("bd create log missing worker: refuge (actual submitter):\n%s", log)
+	}
+	if strings.Contains(log, "worker: malachite") {
+		t.Fatalf("bd create log recorded worker: malachite from the reused branch name instead of the actual submitter:\n%s", log)
+	}
+}
+
+// setupReworkBranchGitRepo mirrors setupRoutedSubmitGitRepo but takes an
+// explicit branch name so a test can simulate `gt sling --branch` reusing a
+// different polecat's surviving branch.
+func setupReworkBranchGitRepo(t *testing.T, workDir, branch string) string {
+	t.Helper()
+	remote := t.TempDir()
+	runGitForMQSubmitTest(t, remote, "init", "--bare")
+	runGitForMQSubmitTest(t, workDir, "init")
+	runGitForMQSubmitTest(t, workDir, "config", "user.email", "test@example.com")
+	runGitForMQSubmitTest(t, workDir, "config", "user.name", "Test User")
+	runGitForMQSubmitTest(t, workDir, "remote", "add", "origin", remote)
+	writeMQSubmitTestFile(t, workDir, ".gitignore", ".beads/\n.runtime/\n")
+	writeMQSubmitTestFile(t, workDir, "file.txt", "main\n")
+	runGitForMQSubmitTest(t, workDir, "add", ".gitignore", "file.txt")
+	runGitForMQSubmitTest(t, workDir, "commit", "-m", "main")
+	runGitForMQSubmitTest(t, workDir, "branch", "-M", "main")
+	runGitForMQSubmitTest(t, workDir, "push", "-u", "origin", "main")
+	runGitForMQSubmitTest(t, workDir, "checkout", "-b", branch)
+	writeMQSubmitTestFile(t, workDir, "file.txt", "rework\n")
+	runGitForMQSubmitTest(t, workDir, "commit", "-am", "rework")
+	return branch
+}
+
 func setupRoutedSourceTestTown(t *testing.T) (workDir, currentBeadsDir, ownerBeadsDir string) {
 	t.Helper()
 	townRoot := t.TempDir()
