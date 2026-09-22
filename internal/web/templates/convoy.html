@@ -380,7 +380,7 @@
                                 </td>
                                 <td class="polecat-mr">
                                     {{if .MRStatus}}
-                                    {{if .MRID}}<span class="mr-id">{{.MRID}}</span>{{end}}
+                                    {{if .MRID}}<a class="mr-id" href="#mr-{{.MRID}}">{{.MRID}}</a>{{end}}
                                     <span class="badge {{mrStatusClass .MRStatus}}">{{.MRStatus}}</span>
                                     {{else}}
                                     <span class="no-issue">—</span>
@@ -389,6 +389,8 @@
                                 <td>
                                     {{if eq .WorkStatus "working"}}
                                     <span class="badge badge-green">Working</span>
+                                    {{else if eq .WorkStatus "mr-pending"}}
+                                    <span class="badge badge-yellow">MR pending</span>
                                     {{else if eq .WorkStatus "stale"}}
                                     <span class="badge badge-yellow">Stale</span>
                                     {{else if eq .WorkStatus "stuck"}}
@@ -674,7 +676,7 @@
                             </thead>
                             <tbody>
                                 {{range .TownMergeQueue.Rows}}
-                                <tr class="mr-row {{.ColorClass}}">
+                                <tr class="mr-row {{.ColorClass}}" id="mr-{{.ID}}">
                                     <td><span class="issue-id">{{.ID}}</span></td>
                                     <td>
                                         {{if eq .Priority 0}}<span class="badge badge-red">P0</span>

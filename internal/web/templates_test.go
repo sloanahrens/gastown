@@ -451,6 +451,60 @@ func TestConvoyTemplate_PolecatsPanelShowsAgentAndMR(t *testing.T) {
 	}
 }
 
+// TestConvoyTemplate_PolecatsPanelShowsPendingMR covers gt-ppja: a finished
+// polecat whose MR has not landed reads "MR pending" rather than "Idle", and
+// its MR id links to the Merge Queue row that will merge it.
+func TestConvoyTemplate_PolecatsPanelShowsPendingMR(t *testing.T) {
+	tmpl, err := LoadTemplates()
+	if err != nil {
+		t.Fatalf("LoadTemplates() error = %v", err)
+	}
+
+	data := ConvoyData{
+		Workers: []WorkerRow{
+			{
+				Name:       "jasper",
+				Rig:        "gastown",
+				AgentType:  "polecat",
+				WorkStatus: "mr-pending",
+				MRID:       "gt-wisp-8cs",
+				MRStatus:   "ready",
+			},
+		},
+		TownMergeQueue: TownMergeQueue{
+			Loaded: true,
+			Rows: []TownMergeQueueRow{
+				{ID: "gt-wisp-8cs", Rig: "gastown", Branch: "polecat/jasper/om-d4p", Status: "ready"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	output := buf.String()
+
+	panel := panelSection(t, output, "🦨 Polecats", "📟 Sessions")
+
+	if !strings.Contains(panel, `class="badge badge-yellow">MR pending`) {
+		t.Error("a done polecat with an in-flight MR should read MR pending, not Idle")
+	}
+	if strings.Contains(panel, `>Idle</span>`) {
+		t.Error("an MR-pending row is not idle and must not claim to be")
+	}
+
+	// The link has to reach the Merge Queue row, or the MR column is a label
+	// with nowhere to go.
+	const anchor = `href="#mr-gt-wisp-8cs"`
+	if !strings.Contains(panel, anchor) {
+		t.Errorf("Polecats panel should link the MR id to its queue row; want %s", anchor)
+	}
+	if !strings.Contains(output, `id="mr-gt-wisp-8cs"`) {
+		t.Error(`the Merge Queue row should carry id="mr-gt-wisp-8cs" as the link target`)
+	}
+}
+
 // panelSection returns the rendered slice between two panel headings, failing
 // the test if either is absent — otherwise a renamed heading would silently
 // widen the window to the whole page and let the assertions below match another
