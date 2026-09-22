@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
@@ -237,14 +238,7 @@ func runLiveFireClaude(claudePath, settingsPath, dir, prompt string) (stdout, st
 
 	cmd := exec.CommandContext(cctx, claudePath, "--dangerously-skip-permissions", "--settings", settingsPath, "-p", prompt)
 	cmd.Dir = dir
-	// GT_POLECAT puts the spawned claude subprocess in Gas Town agent
-	// context so the pr-workflow guard's isGasTownAgentContext() check
-	// actually evaluates true here — without it, a sandbox with no GT_*
-	// env and a /tmp path (not under /polecats/ etc.) and no origin remote
-	// makes the guard allow the command regardless of matcher wiring,
-	// so the check would pass even against broken wiring (finding 1,
-	// gt-wisp-db27).
-	cmd.Env = append(withoutNestedSessionEnv(os.Environ()), "GT_POLECAT=live-fire")
+	cmd.Env = liveFireProbeEnv(os.Environ())
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -419,6 +413,48 @@ func sandboxBranchExists(dir, branch string) bool {
 func sandboxFileExists(dir, name string) bool {
 	_, err := os.Stat(dir + string(os.PathSeparator) + name)
 	return err == nil
+}
+
+// liveFireProbeEnvKeys are the variables a probe must not inherit: Gas
+// Town's role markers, which every guard's agent-context and role check
+// reads, plus the pointers that scope a guard to one agent's checkout.
+// Location variables (GT_ROOT, GT_TOWN_ROOT, GT_DOLT_*) stay — hook
+// commands resolve the town through them.
+var liveFireProbeEnvKeys = []string{
+	"GT_ROLE",
+	"GT_RIG",
+	"GT_POLECAT",
+	"GT_POLECAT_PATH",
+	"GT_CREW",
+	"GT_WITNESS",
+	"GT_REFINERY",
+	"GT_REFINERY_WORKER",
+	"GT_MAYOR",
+	"GT_DEACON",
+	"GT_DOG_NAME",
+}
+
+// liveFireProbeEnv builds the environment for a live-fire probe subprocess:
+// this process's environment minus nested-session and Gas Town identity
+// variables, plus the one GT_POLECAT that puts the probe in agent context —
+// without it a sandbox with a /tmp path and no origin remote makes the guard
+// allow the command regardless of matcher wiring, so the check would pass
+// even against broken wiring (finding 1, gt-wisp-db27).
+//
+// The probe asserts what a POLEcat session's settings do, so it must not
+// inherit who THIS process is. Inheriting GT_REFINERY/GT_ROLE from a
+// refinery session handed the child the pr-workflow guard's deliberate
+// refinery merge-rehearsal exemption (gt-r2xm), so the blocked shape's 'git
+// checkout -b' legitimately succeeded, and the probe read that as broken
+// matcher wiring (gt-xy4b). GT_POLECAT_PATH is stripped for the same reason:
+// it scopes the polecat-paths guard to the parent's worktree while the
+// probe's cwd is a disposable sandbox.
+func liveFireProbeEnv(environ []string) []string {
+	env := withoutNestedSessionEnv(environ)
+	for _, key := range liveFireProbeEnvKeys {
+		env = beads.StripEnvKey(env, key)
+	}
+	return append(env, "GT_POLECAT=live-fire")
 }
 
 // withoutNestedSessionEnv strips Claude Code's nested-session-detection

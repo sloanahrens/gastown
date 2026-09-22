@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -233,6 +234,101 @@ func TestEvaluatePairResult(t *testing.T) {
 			}
 			if result.Status == StatusOK && result.Message == "" {
 				t.Error("StatusOK result should carry an explanatory message")
+			}
+		})
+	}
+}
+
+// envLookup returns the value of key in env and how many times it appears.
+func envLookup(env []string, key string) (string, int) {
+	value, count := "", 0
+	for _, entry := range env {
+		k, v, ok := strings.Cut(entry, "=")
+		if ok && k == key {
+			value, count = v, count+1
+		}
+	}
+	return value, count
+}
+
+// TestLiveFireProbeEnv pins the probe's environment contract: the probe
+// asserts what a polecat session's settings do, so it must carry the
+// polecat agent-context marker and nothing of the invoking session's
+// identity. Inheriting a refinery's GT_REFINERY/GT_ROLE handed the child
+// the pr-workflow guard's merge-rehearsal exemption, so the blocked shape's
+// 'git checkout -b' succeeded and the check reported a false failure
+// (gt-xy4b).
+func TestLiveFireProbeEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		environ []string
+		// wantKept must survive into the probe env untouched.
+		wantKept []string
+	}{
+		{
+			name: "refinery session",
+			environ: []string{
+				"GT_REFINERY=1",
+				"GT_ROLE=gastown/refinery",
+				"GT_RIG=gastown",
+				"GT_REFINERY_WORKER=refinery-2",
+				"PATH=/usr/bin",
+				"GT_ROOT=/town",
+				"GT_DOLT_PORT=3307",
+				"CLAUDECODE=1",
+				"CLAUDE_CODE_ENTRYPOINT=cli",
+			},
+			wantKept: []string{"PATH", "GT_ROOT", "GT_DOLT_PORT"},
+		},
+		{
+			name: "polecat session",
+			environ: []string{
+				"GT_POLECAT=granite",
+				"GT_POLECAT_PATH=/town/rig/polecats/granite/rig",
+				"GT_ROLE=gastown/polecats/granite",
+				"GT_RIG=gastown",
+				"PATH=/usr/bin",
+				"GT_ROOT=/town",
+			},
+			wantKept: []string{"PATH", "GT_ROOT"},
+		},
+		{
+			name:     "no Gas Town identity at all",
+			environ:  []string{"PATH=/usr/bin"},
+			wantKept: []string{"PATH"},
+		},
+		{
+			name:     "duplicate parent GT_POLECAT collapses to one",
+			environ:  []string{"GT_POLECAT=granite", "GT_POLECAT=topaz", "PATH=/usr/bin"},
+			wantKept: []string{"PATH"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probeEnv := liveFireProbeEnv(tt.environ)
+
+			if got, count := envLookup(probeEnv, "GT_POLECAT"); got != "live-fire" || count != 1 {
+				t.Errorf("GT_POLECAT = %q (x%d), want exactly one \"live-fire\"", got, count)
+			}
+			for _, key := range liveFireProbeEnvKeys {
+				if key == "GT_POLECAT" {
+					continue
+				}
+				if got, count := envLookup(probeEnv, key); count != 0 {
+					t.Errorf("identity variable %s=%q survived into the probe env", key, got)
+				}
+			}
+			for _, key := range []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"} {
+				if _, count := envLookup(probeEnv, key); count != 0 {
+					t.Errorf("nested-session variable %s survived into the probe env", key)
+				}
+			}
+			for _, key := range tt.wantKept {
+				want, _ := envLookup(tt.environ, key)
+				if got, count := envLookup(probeEnv, key); count != 1 || got != want {
+					t.Errorf("%s = %q (x%d), want %q kept once", key, got, count, want)
+				}
 			}
 		})
 	}
