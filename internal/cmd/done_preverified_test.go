@@ -180,6 +180,51 @@ func TestRunPreVerificationGates(t *testing.T) {
 	})
 }
 
+// stubPreVerificationGateTimeout shrinks the per-gate pre-verification budget
+// so a test can drive a real expiry (gt-ypkc) rather than sleeping out the 10m
+// default.
+func stubPreVerificationGateTimeout(t *testing.T, budget time.Duration) {
+	t.Helper()
+	prev := preVerificationGateTimeout
+	preVerificationGateTimeout = budget
+	t.Cleanup(func() { preVerificationGateTimeout = prev })
+}
+
+// TestRunPreVerificationGates_TimeoutKillsTheWholeGroup guards gt-ypkc: a gate
+// killed at its timeout must take its children with it. The gate command here
+// backgrounds a grandchild and waits on it — the shape of a real rig gate
+// (sh → make → test binary). Killing only the shell, which is all a process
+// group without a Cancel hook does, leaves the grandchild writing to the
+// worktree after gt done has moved on.
+func TestRunPreVerificationGates_TimeoutKillsTheWholeGroup(t *testing.T) {
+	dir := t.TempDir()
+	orphan := filepath.Join(dir, "orphan-ran")
+	stubPreVerificationGateTimeout(t, 300*time.Millisecond)
+
+	mq := &config.MergeQueueConfig{
+		TestCommand: fmt.Sprintf("(sleep 2; touch %q) & wait", orphan),
+	}
+
+	start := time.Now()
+	result, err := runPreVerificationGates(dir, mq)
+	if err != nil {
+		t.Fatalf("runPreVerificationGates: %v", err)
+	}
+	if result.success {
+		t.Errorf("success = true, want false for a gate killed at its timeout (failedGate=%q exitCode=%d)", result.failedGate, result.exitCode)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("runPreVerificationGates took %s: the per-gate budget did not bound it", elapsed)
+	}
+
+	// Past the grandchild's own sleep: had it survived the kill, the marker
+	// would exist by now.
+	time.Sleep(2500 * time.Millisecond)
+	if _, statErr := os.Stat(orphan); statErr == nil {
+		t.Error("the gate's grandchild ran to completion after the gate was killed — the timeout orphaned it")
+	}
+}
+
 func initPreVerifyTestGitRepo(t *testing.T, dir string) {
 	t.Helper()
 	runGit := func(args ...string) {
