@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -200,6 +202,11 @@ type LiveConvoyFetcher struct {
 	// listMRs derives one rig's merge queue; nil means listRigMergeRequests.
 	listMRs mrListerFunc
 
+	// rigOpState derives one rig's operational state; nil means
+	// rig.GetOpState. Seam for the Rigs and Merge Queue panels' parked
+	// markers.
+	rigOpState rigOpStateFunc
+
 	// polecatIndex is the `gt polecat list --all --json` snapshot behind the
 	// Polecats panel. The panel joins it onto its tmux sessions for the AGENT
 	// and MR columns, and mints a row from it for a polecat whose session is
@@ -223,12 +230,10 @@ type LiveConvoyFetcher struct {
 	mergesAt    time.Time
 	countMerges countMergesFunc
 
-	// Local Pool panel: llama-server's /slots endpoint (empty means
-	// defaultLlamaSlotsURL) and the breaker that holds the poll off while the
+	// Local Pool panel: localServerBreaker holds the poll off while the model
 	// server is down. listPoolAgents overrides the tmux seat read in tests.
-	llamaSlotsURL  string
-	llamaBreaker   fetchCircuitBreaker
-	listPoolAgents poolAgentLister
+	localServerBreaker fetchCircuitBreaker
+	listPoolAgents     poolAgentLister
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -444,22 +449,24 @@ type depRef struct {
 
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInfo, error) {
-	// Query tracked dependencies using bd dep list
-	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	// Query tracked dependencies using bd's raw-edge form (see rawTrackedDeps).
+	deps, err := f.rawTrackedDeps(convoyID)
 	if err != nil {
-		return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		// The raw-edge form (ID passed twice) is newer than the single-ID form.
+		// Older bd builds reject it — fall back so an upgrade path never takes
+		// the whole convoy panel down.
+		log.Printf("dashboard: convoy %s: raw dep query failed (%v), falling back to bd dep list", convoyID, err)
+		deps, err = f.depListTrackedDeps(convoyID)
+		if err != nil {
+			return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		}
 	}
 
-	var deps []depRef
-	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
-		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
-	}
-
-	// bd dep list --type=tracks joins against the issues table, which
-	// silently drops cross-database dependencies (external:<rig>:<id> edges)
-	// and only warns on stderr (see GH #2624, #2832). Fall back to bd show,
-	// which returns the convoy's raw dependency list without that join, and
-	// filter to "tracks" edges client-side (gt-q0is).
+	// Final fallback: bd show's dependency array. Unlike the dep queries above
+	// this never joins against the issues table, so cross-database edges
+	// survive — but bd only populates the array when the targets resolve
+	// locally, and emits "dependencies": null when every edge is external
+	// (gt-44z1). Kept for bd builds that lack the raw-edge form.
 	if len(deps) == 0 {
 		deps, err = f.bdShowTrackedDeps(convoyID)
 		if err != nil {
@@ -467,10 +474,23 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 		}
 	}
 
-	// Collect resolved issue IDs, unwrapping external:prefix:id format
+	// Collect resolved issue IDs, unwrapping external:prefix:id format.
+	// Unparseable targets are skipped rather than failing the row: a convoy
+	// with one garbage edge (e.g. "external:om:om-gate coverage: om", a title
+	// used as an ID) must still render the rest of its progress (gt-44z1).
 	issueIDs := make([]string, 0, len(deps))
+	seenIDs := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
-		issueIDs = append(issueIDs, beads.ExtractIssueID(dep.ID))
+		id := beads.ExtractIssueID(dep.ID)
+		if !isResolvableIssueID(id) {
+			log.Printf("dashboard: convoy %s: skipping unparseable tracked edge %q", convoyID, dep.ID)
+			continue
+		}
+		if _, dup := seenIDs[id]; dup {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		issueIDs = append(issueIDs, id)
 	}
 
 	// Batch fetch issue details
@@ -507,11 +527,94 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 	return result, nil
 }
 
+// rawTrackedDeps returns a convoy's "tracks" edges via `bd dep list <convoyID>
+// <convoyID> --json` — the same ID passed twice, which is the raw-edge form bd
+// itself points callers to.
+//
+// With a single ID, `bd dep list` joins the dependency records against the
+// local issues table. That join silently drops every cross-database edge
+// (external:<rig>:<id>, how a town-level convoy tracks a bead living in
+// another rig's Dolt database) and only mentions it on stderr, which this
+// fetcher discards — so convoys tracking cross-rig beads rendered 0/0
+// (gt-q0is, gt-44z1; GH #2624, #2832). The batch form returns the raw records
+// with depends_on_id intact, which also carries the target for edges whose
+// target row is not in this database.
+//
+// Returned IDs are unwrapped; the caller validates them. An empty slice means
+// "try the next strategy", never "this convoy tracks nothing".
+func (f *LiveConvoyFetcher) rawTrackedDeps(convoyID string) ([]depRef, error) {
+	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, convoyID, "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var edges []struct {
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &edges); err != nil {
+		return nil, fmt.Errorf("parsing raw deps for %s: %w", convoyID, err)
+	}
+
+	deps := make([]depRef, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Type != "tracks" {
+			continue
+		}
+		deps = append(deps, depRef{ID: beads.ExtractIssueID(edge.DependsOnID)})
+	}
+	return deps, nil
+}
+
+// depListTrackedDeps is the single-ID `bd dep list --type=tracks` query. It is
+// the pre-raw-edge code path, retained only as a compatibility fallback for bd
+// builds that reject the batch form (see rawTrackedDeps): its join drops
+// cross-database edges, so it is never the first choice.
+func (f *LiveConvoyFetcher) depListTrackedDeps(convoyID string) ([]depRef, error) {
+	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var deps []depRef
+	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
+		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
+	}
+	return deps, nil
+}
+
+// isResolvableIssueID reports whether id looks like a bead ID rather than a
+// mangled edge target. Cross-rig edges are stored as external:<rig>:<id>, and
+// a malformed one ("external:om:om-gate coverage: om" — a title where an ID
+// belongs) unwraps to something with spaces that no bd query can resolve.
+// Such an edge is dropped so it cannot blank out an otherwise healthy row.
+func isResolvableIssueID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+			// Allowed, but not as the first character: every bead ID starts
+			// with its alphabetic prefix (gt-, hq-, om-).
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // bdShowTrackedDeps falls back to `bd show <convoyID> --json` and extracts
 // "tracks" dependency edges from the convoy's raw dependency list. Unlike
 // `bd dep list --type=tracks`, this avoids the join against the issues
 // table that silently drops cross-database (external:<rig>:<id>) edges
-// (see GH #2624, #2832).
+// (see GH #2624, #2832). bd emits "dependencies": null when none of the
+// convoy's edges resolve locally, so this is a last resort, not the fix
+// for cross-rig convoys (gt-44z1).
 func (f *LiveConvoyFetcher) bdShowTrackedDeps(convoyID string) ([]depRef, error) {
 	stdout, err := f.runBdCmd(f.townRoot, "show", convoyID, "--json")
 	if err != nil {
@@ -551,6 +654,12 @@ type issueDetail struct {
 }
 
 // getIssueDetailsBatch fetches details for multiple issues.
+//
+// Runs from the town root, not the dashboard's own working directory: bd
+// discovers the beads database relative to cwd, so a server started outside
+// the town cannot resolve any of these IDs (gt-80o, gt-44z1). From the town
+// root, prefix routing in routes.jsonl reaches the rig that owns each bead,
+// including the cross-rig targets a convoy tracks.
 func (f *LiveConvoyFetcher) getIssueDetailsBatch(issueIDs []string) (map[string]*issueDetail, error) {
 	result := make(map[string]*issueDetail)
 	if len(issueIDs) == 0 {
@@ -560,7 +669,7 @@ func (f *LiveConvoyFetcher) getIssueDetailsBatch(issueIDs []string) (map[string]
 	args := append([]string{"show"}, issueIDs...)
 	args = append(args, "--json")
 
-	stdout, err := fetcherRunCmd(f.cmdTimeout, "bd", args...)
+	stdout, err := f.runBdCmd(f.townRoot, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd show failed (issue_count=%d): %w", len(issueIDs), err)
 	}
@@ -895,9 +1004,80 @@ const (
 	mergesCountTimeout = 10 * time.Second
 )
 
+// rigOpProbeTimeout bounds one render's whole operational-state probe (see
+// rigOpLabels). internal/beads caps a single bd subprocess at 60s, which is
+// longer than a render may take. A var so the deadline test does not have to
+// sit out the real one.
+var rigOpProbeTimeout = 5 * time.Second
+
 // mrListerFunc derives one rig's merge-request wisps. It is the seam tests
 // replace so the derivation runs without spawning bd.
 type mrListerFunc func(beadsDir string, opts beads.ListOptions) ([]*beads.Issue, error)
+
+// rigOpStateFunc derives one rig's operational state. The seam tests replace
+// so the panels can render a parked rig without a town.
+type rigOpStateFunc func(rigName string) (rig.OpState, string)
+
+// rigOpLabels returns the parked/docked marker for each named rig, and no
+// entry for a rig that accepts work.
+//
+// A parked rig used to be invisible to the dashboard, which is how a
+// five-day-old READY MR in a parked rig sat at the top of the queue reading
+// as a refinery stall. The state is probed at render time rather than baked
+// into the three-minute merge-queue snapshot: a marker older than the panel
+// it decorates is the same lie in a different font.
+//
+// The probe is cheap exactly where it matters. `gt rig park` writes the rig's
+// wisp config, a local file read that spawns nothing, so a parked rig is
+// marked however loaded the town is. Only a rig whose wisp says nothing
+// reaches for its identity bead — one `bd show`, measured at ~50ms warm —
+// which is the persistent fallback that keeps a rig parked after wisp
+// cleanup (#2079).
+//
+// The fan-out is bounded all the same, because a wedged Dolt would otherwise
+// hold a render for beads' 60s subprocess cap and undo the merge queue's
+// careful off-render derivation. Rigs whose probe misses the deadline go
+// unmarked — the panel's behavior before it knew about parked rigs — and the
+// next render tries again. Fast probes have already landed by then: a parked
+// rig answers in the time it takes to read one small file.
+func (f *LiveConvoyFetcher) rigOpLabels(rigNames []string) map[string]string {
+	probe := f.rigOpState
+	if probe == nil {
+		probe = func(rigName string) (rig.OpState, string) {
+			return rig.GetOpState(f.townRoot, rigName)
+		}
+	}
+
+	type probeResult struct {
+		rig   string
+		state rig.OpState
+	}
+	// Buffered to one result per rig so a probe that outlives the deadline
+	// still has somewhere to send, and no goroutine leaks blocked on a
+	// channel nobody is left to read.
+	resCh := make(chan probeResult, len(rigNames))
+	for _, name := range rigNames {
+		go func(name string) {
+			state, _ := probe(name)
+			resCh <- probeResult{rig: name, state: state}
+		}(name)
+	}
+
+	labels := make(map[string]string, len(rigNames))
+	timeout := time.NewTimer(rigOpProbeTimeout)
+	defer timeout.Stop()
+	for range rigNames {
+		select {
+		case res := <-resCh:
+			if label := res.state.Label(); label != "" {
+				labels[res.rig] = label
+			}
+		case <-timeout.C:
+			return labels
+		}
+	}
+	return labels
+}
 
 // listRigMergeRequests is the production lister: the `gt mq list` derivation,
 // which searches both the issues and the wisps table and hydrates each MR so
@@ -929,6 +1109,46 @@ func (f *LiveConvoyFetcher) FetchTownMergeQueue() TownMergeQueue {
 	// every render.
 	if stale && f.mqBreaker.allow() {
 		go f.refreshTownMergeQueue()
+	}
+	return f.markParkedRigs(snapshot)
+}
+
+// markParkedRigs stamps each MR row with the operational state of the rig
+// that owns it, and counts them for the panel header.
+//
+// The stamp is applied here, on the render path, and deliberately not in
+// townMergeQueueSnapshot: that snapshot is served for up to
+// townMergeQueueTTL, and a parked marker three minutes behind the rig it
+// describes is the staleness this marker exists to expose.
+func (f *LiveConvoyFetcher) markParkedRigs(snapshot TownMergeQueue) TownMergeQueue {
+	if len(snapshot.Rows) == 0 {
+		return snapshot
+	}
+
+	// Copy before stamping: snapshot.Rows aliases the cached mqSnapshot's
+	// backing array, and writing labels into it would pin them there — a rig
+	// unparked later would keep its marker until the next derivation.
+	rows := make([]TownMergeQueueRow, len(snapshot.Rows))
+	copy(rows, snapshot.Rows)
+	snapshot.Rows = rows
+
+	// Every MR is labeled by its rig, so probe each rig once.
+	rigNames := make([]string, 0, len(rows))
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if !seen[row.Rig] {
+			seen[row.Rig] = true
+			rigNames = append(rigNames, row.Rig)
+		}
+	}
+	opLabels := f.rigOpLabels(rigNames)
+
+	snapshot.ParkedCount = 0
+	for i := range rows {
+		rows[i].RigOpState = opLabels[rows[i].Rig]
+		if rows[i].RigOpState != "" {
+			snapshot.ParkedCount++
+		}
 	}
 	return snapshot
 }
@@ -1856,12 +2076,22 @@ func (f *LiveConvoyFetcher) FetchRigs() ([]RigRow, error) {
 
 	livePolecatCounts := f.countLivePolecatsByRig()
 
+	// A parked rig keeps its witness and refinery icons from the last session
+	// state, so the counts alone cannot tell "paused" from "running" — and
+	// the dashboard exists to catch the difference.
+	rigNames := make([]string, 0, len(rigsConfig.Rigs))
+	for name := range rigsConfig.Rigs {
+		rigNames = append(rigNames, name)
+	}
+	opLabels := f.rigOpLabels(rigNames)
+
 	var rows []RigRow
 	for name, entry := range rigsConfig.Rigs {
 		row := RigRow{
 			Name:         name,
 			GitURL:       entry.GitURL,
 			PolecatCount: livePolecatCounts[name],
+			OpState:      opLabels[name],
 		}
 
 		rigPath := filepath.Join(f.townRoot, name)
@@ -2659,23 +2889,19 @@ func eventSummary(eventType, actor string, payload map[string]interface{}) strin
 	}
 }
 
-// defaultLlamaSlotsURL is llama-server's slot listing. The dashboard and the
-// pool's local agent share one box, so the address is fixed; tests point the
-// fetcher's llamaSlotsURL elsewhere.
-const defaultLlamaSlotsURL = "http://127.0.0.1:8099/slots"
-
-// llamaSlotsTimeout bounds one /slots poll: a page render waits on it, and a
-// wedged server must not hold the page.
-const llamaSlotsTimeout = 2 * time.Second
+// localServerTimeout bounds one poll of the model server: a page render waits
+// on it, and a wedged server must not hold the page.
+const localServerTimeout = 2 * time.Second
 
 // poolAgentLister returns the GT_AGENT of every live polecat session. The
 // production read goes to tmux; tests supply a fake.
 type poolAgentLister func() ([]string, error)
 
-// FetchLocalPool reports the pool's local seats against llama-server's slots.
-// It returns nil when the town has no polecat_pool, which keeps the panel off
-// the page; a failed seat or slot read sets the matching *Err field so the
-// panel says what is unreadable instead of reporting a zero.
+// FetchLocalPool reports the pool's local seats and the state of the model
+// server those seats are configured against. It returns nil when the town has
+// no polecat_pool, which keeps the panel off the page; a failed seat or server
+// read sets the matching *Err field so the panel says what is unreadable
+// instead of reporting a zero.
 func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(f.townRoot))
 	if err != nil {
@@ -2712,63 +2938,131 @@ func (f *LiveConvoyFetcher) FetchLocalPool() (*LocalPoolData, error) {
 		}
 	}
 
-	busy, total, err := f.llamaServerSlots()
-	if err != nil {
-		data.SlotsErr = "llama-server: down"
+	data.ServerEndpoint = localServerEndpoint(ts, pool.LocalAgent)
+	probe, probeErr := f.modelServerStatus(data.ServerEndpoint)
+	if data.ServerEndpoint == "" {
+		// Nothing to probe: a pool whose local agent names no base URL must
+		// not read as a server that is down.
+		data.ServerErr = "no endpoint"
+	} else if probeErr != nil {
+		data.ServerErr = "down"
 	} else {
-		data.SlotsBusy, data.SlotsTotal = busy, total
+		data.ServerModel = probe.model
+		data.ServerKind = probe.kind
+		data.ServerInFlight = probe.inFlight
+		data.ServerMaxFlight = probe.maxInFlight
+		data.ServerInFlightKnown = probe.inFlightKnown
 	}
 	return data, nil
 }
 
-// llamaServerSlots counts llama-server's busy slots and its total. Failures go
-// through the breaker so a down server costs one request per backoff window
-// rather than one per render.
-func (f *LiveConvoyFetcher) llamaServerSlots() (int, int, error) {
-	if !f.llamaBreaker.allow() {
-		return 0, 0, errors.New("backing off after a failed slots poll")
+// localServerEndpoint is the base URL the pool's local agent is configured
+// against: ANTHROPIC_BASE_URL from the alias's env in the town settings. Empty
+// when that alias sets none, which is what keeps the panel from probing an
+// address nobody configured (gt-w0x3).
+func localServerEndpoint(ts *config.TownSettings, alias string) string {
+	if alias == "" || ts.Agents == nil {
+		return ""
+	}
+	agent, ok := ts.Agents[alias]
+	if !ok || agent == nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(agent.Env["ANTHROPIC_BASE_URL"]), "/")
+}
+
+// modelServerProbe is what a model server says about itself when asked.
+type modelServerProbe struct {
+	// model and kind come from GET /v1/models: the id it serves and the owner
+	// it reports. kind is the server's own word, never a name we chose.
+	model string
+	kind  string
+	// inFlight and maxInFlight come from GET /health when the server serves
+	// one; inFlightKnown is false when it does not, so an unreported count
+	// never renders as zero requests.
+	inFlight      int
+	maxInFlight   int
+	inFlightKnown bool
+}
+
+// modelServerStatus probes the endpoint the local pool is configured against.
+// Up is decided by GET /v1/models — every OpenAI-compatible server answers it,
+// and it names the model; /health is read second for the in-flight count and
+// is not required. Failures go through the breaker so a down server costs one
+// request per backoff window rather than one per render.
+func (f *LiveConvoyFetcher) modelServerStatus(baseURL string) (modelServerProbe, error) {
+	var probe modelServerProbe
+	if baseURL == "" {
+		return probe, errors.New("no endpoint configured for the pool's local agent")
+	}
+	if !f.localServerBreaker.allow() {
+		return probe, errors.New("backing off after a failed poll")
 	}
 
-	url := f.llamaSlotsURL
-	if url == "" {
-		url = defaultLlamaSlotsURL
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), llamaSlotsTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), localServerTimeout)
 	defer cancel()
+	client := &http.Client{Timeout: localServerTimeout}
+
+	body, err := getJSON(ctx, client, baseURL+"/v1/models")
+	if err != nil {
+		f.localServerBreaker.recordFailure()
+		return probe, err
+	}
+	var models struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		f.localServerBreaker.recordFailure()
+		return probe, err
+	}
+	f.localServerBreaker.recordSuccess()
+	if len(models.Data) > 0 {
+		probe.model = models.Data[0].ID
+		probe.kind = models.Data[0].OwnedBy
+	}
+
+	// Best effort: a server without /health still reports up and model.
+	if body, err := getJSON(ctx, client, baseURL+"/health"); err == nil {
+		var health struct {
+			Model          string `json:"model"`
+			ActiveRequests *int   `json:"active_requests"`
+			MaxActive      *int   `json:"max_active_requests"`
+		}
+		if json.Unmarshal(body, &health) == nil {
+			if probe.model == "" {
+				probe.model = health.Model
+			}
+			if health.ActiveRequests != nil {
+				probe.inFlight = *health.ActiveRequests
+				probe.inFlightKnown = true
+			}
+			if health.MaxActive != nil {
+				probe.maxInFlight = *health.MaxActive
+			}
+		}
+	}
+	return probe, nil
+}
+
+// getJSON fetches url and returns its body, or an error for anything that is
+// not a 200.
+func getJSON(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
+		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: llamaSlotsTimeout}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, fmt.Errorf("slots: %s", resp.Status)
+		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
-
-	var slots []struct {
-		ID           int  `json:"id"`
-		IsProcessing bool `json:"is_processing"`
-		NCtx         int  `json:"n_ctx"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&slots); err != nil {
-		f.llamaBreaker.recordFailure()
-		return 0, 0, err
-	}
-	f.llamaBreaker.recordSuccess()
-
-	busy := 0
-	for _, s := range slots {
-		if s.IsProcessing {
-			busy++
-		}
-	}
-	return busy, len(slots), nil
+	return io.ReadAll(resp.Body)
 }
 
 // poolAgents returns the GT_AGENT of every live polecat session, or the
