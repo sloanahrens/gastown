@@ -289,7 +289,7 @@ type BranchStrandFinding struct {
 // suppressed branch is visible rather than silently dropped.
 type SupersededBranch struct {
 	IssueID string `json:"issue"`        // The closed source issue
-	Branch  string `json:"branch"`       // The branch recorded as rejected
+	Branch  string `json:"branch"`       // The branch belonging to the superseded attempt
 	MRID    string `json:"mr,omitempty"` // MR or later issue named by the close reason as carrying the fix forward
 }
 
