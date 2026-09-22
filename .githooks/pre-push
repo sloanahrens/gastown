@@ -111,6 +111,15 @@ while read local_ref local_sha remote_ref remote_sha; do
     echo "If this push is a legitimate landing (Refinery merge, or a gt done"
     echo "direct-merge convoy) it must come from that gt code path, which sets"
     echo "GT_REFINERY_MERGE=1 / GT_DONE_DIRECT_MERGE=1 for this push."
+    echo ""
+    echo "Two other flows push the default branch and get no env signal here,"
+    echo "because a signal an agent sets for itself is a user override, not a"
+    echo "gate (gt-deff):"
+    echo "  - a release (beads-release 'push-main' / gastown-release 'push-release')"
+    echo "  - a plugin script's own push, when an agent runs its instructions"
+    echo "      (plugins write both, but the daemon runs them as GT_ROLE=daemon/plugin"
+    echo "       and is not a polecat caller - this only bites a manual run)"
+    echo "Both belong to a crew, mayor, or refinery session. Run them there."
     exit 1
   fi
 

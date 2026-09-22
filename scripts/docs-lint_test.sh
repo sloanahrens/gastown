@@ -53,12 +53,14 @@ docs/guides/marked.md:6: stray-markup: committed tool-call or merge-conflict mar
 docs/guides/marked.md:7: stray-markup: committed tool-call or merge-conflict markup
 docs/plans/conflict.md:1: status-conflict: more than one \"> Status:\" line
 docs/plans/old-plan.md:1: status-header: first non-blank line must start with \"> Status:\"
+internal/formula/formulas/mol-release.formula.toml:12: polecat-main-push: pushes main/master and offers a polecat; the guards refuse a polecat session (gt-ibt8)
 plugins/p/plugin.md:1: word-ceiling: 2102 words, ceiling 2000"
 assert_eq "finding lines" "$expected" "$actual"
 assert_eq "exit 1 on findings" "1" "$rc"
 
 echo "docs-lint: clean tree exits 0"
 rm "$TMP/plugins/p/plugin.md"
+rm "$TMP/internal/formula/formulas/mol-release.formula.toml"
 rm "$TMP/docs/guides/marked.md" "$TMP/docs/plans/conflict.md"
 printf '> Status: historical (2026-01). Abandoned: none. Not maintained.\n\n# Old plan\n' > "$TMP/docs/plans/old-plan.md"
 sed -i.bak -e '/missing.md/d' -e '/make nope/d' "$TMP/docs/guides/guide.md" && rm "$TMP/docs/guides/guide.md.bak"
@@ -77,6 +79,7 @@ docs/guides/guide.md
 docs/guides/marked.md" "$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --list reference)"
 assert_eq "agent-facing tier" "AGENTS.md
 docs/HOOKS.md
+internal/formula/formulas/mol-release.formula.toml
 internal/formula/formulas/mol-x.formula.toml
 internal/templates/polecat-CLAUDE.md
 plugins/p/plugin.md" "$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --list agent-facing)"

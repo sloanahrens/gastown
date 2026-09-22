@@ -31,7 +31,9 @@ This guard blocks operations that could cause irreversible damage:
   - git push --force/-f  (--force-with-lease is allowed)
   - git push to main/master from a polecat session (GT_POLECAT_PATH set):
     HEAD:main, <sha>:main, :main, refs/heads/main, main, --all, --mirror.
-    Polecat work lands through gt done -> MR -> Refinery (gt-ibt8).
+    Polecat work lands through gt done -> MR -> Refinery (gt-ibt8). A release
+    or a manual plugin run pushes main legitimately; both belong to a
+    crew/mayor/refinery session, not a polecat one (gt-deff).
   - git reset --hard
   - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
     onto origin/main etc. reverts everything merged since the checkout was cut
@@ -975,11 +977,20 @@ func matchesDangerousGitPush(tokens []string) string {
 
 // polecatMainPushReason and polecatMainPushAlternative are the block banner
 // and its allow-path suggestion for a polecat pushing the default branch.
+//
+// The alternative names the two flows that legitimately push a default branch
+// but get no env signal here (gt-deff): a release (beads-release /
+// gastown-release) and a plugin script's own push when an agent runs its
+// instructions by hand. Neither gets a signal because a signal an agent sets
+// for itself is a user override, not a gate - only the Refinery's merge and
+// `gt done`'s direct-merge convoy, which gt itself sets, are gates. So the
+// allow path for both is a crew, mayor, or refinery session.
 const (
 	polecatMainPushReason      = "Polecats never push to main/master (use gt done)"
 	polecatMainPushAlternative = "Alternative: `gt done` pushes your polecat/<name>/<bead> branch and the Refinery " +
 		"merges it to the default branch after verification — a direct push to main skips " +
-		"the MR, the Refinery gate run, and the om review (gt-ibt8)."
+		"the MR, the Refinery gate run, and the om review (gt-ibt8). A release, or a plugin " +
+		"script's own push, runs from a crew/mayor/refinery session instead (gt-deff)."
 )
 
 // polecatMainPushBranches are the destination branch names a polecat session

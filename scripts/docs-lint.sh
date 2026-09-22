@@ -159,6 +159,35 @@ check_status_conflict() {
   done
 }
 
+# polecat-main-push: a formula that pushes the rig's default branch and also
+# offers a `gt sling .../polecats/...` assignment is advertising a flow the
+# guards refuse. A polecat session cannot push main: the tap guard
+# (matchesPolecatMainPush) blocks the command before git runs and
+# .githooks/pre-push refuses the push itself, both by design (gt-ibt8). The
+# allow path a release has is a crew/mayor/refinery session (gt-deff), so a
+# formula that pushes main must not offer a polecat.
+#
+# Scoped to formulas. plugin.md is exempt: the plugins that push a default
+# branch run from the daemon, which sets GT_ROLE=daemon/plugin and is not a
+# polecat caller, so their instructions are correct as written.
+formula_pushes_default() { # <file>: does a command send work to main/master?
+  # The refspec's DESTINATION decides, so "main:polecat/x" (a read from main)
+  # is left alone while "HEAD:main" and ":main" are findings. A bare
+  # --all/--mirror is out of scope: no formula writes one, and the guards
+  # catch it at runtime regardless.
+  grep -qE 'git[[:space:]]+(-[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)*push([[:space:]]+-[^[:space:]]+)*[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]*:)?(refs/heads/)?(main|master)([^[:alnum:]:_-]|$)' "$1" 2>/dev/null
+}
+
+check_polecat_main_push() {
+  tier_agent_facing | grep '\.formula\.toml$' | while IFS= read -r f; do
+    formula_pushes_default "$f" || continue
+    grep -nE '\bsling[[:space:]]+[^[:space:]]*polecats/' "$f" 2>/dev/null \
+      | while IFS=: read -r line rest; do
+          finding "$f" "$line" polecat-main-push 'pushes main/master and offers a polecat; the guards refuse a polecat session (gt-ibt8)'
+        done
+  done
+}
+
 check_word_ceiling() {
   tier_ceiling | while IFS= read -r f; do
     w="$(wc -w < "$f" | tr -d ' ')"
@@ -169,7 +198,7 @@ check_word_ceiling() {
 
 run_checks() {
   # Checks run in subshell pipelines, so the verdict is read from their output.
-  out="$( { check_dead_links; check_dead_make_targets; check_status_headers; check_status_conflict; check_stray_markup; check_word_ceiling; } | LC_ALL=C sort -t: -k1,1 -k2,2n )"
+  out="$( { check_dead_links; check_dead_make_targets; check_status_headers; check_status_conflict; check_stray_markup; check_polecat_main_push; check_word_ceiling; } | LC_ALL=C sort -t: -k1,1 -k2,2n )"
   if [[ -n "$out" ]]; then printf '%s\n' "$out"; exit 1; fi
   exit 0
 }

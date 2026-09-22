@@ -1,0 +1,28 @@
+description = """
+A release formula.
+
+## Usage
+
+```bash
+gt mol wisp create mol-release --var version=1.0.0
+```
+
+Or assign to a polecat:
+```bash
+gt sling rig/polecats/p1 --formula mol-release --var version=1.0.0
+```
+"""
+formula = "mol-release"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "push-main"
+title = "Push to main"
+description = """
+Push the release commit.
+
+```bash
+git push origin main
+```
+"""
