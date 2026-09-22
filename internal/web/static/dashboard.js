@@ -49,13 +49,17 @@
     var panelRetryState = {};
     var panelLoaders = {};
 
-    function fetchPanelJSON(url) {
+    // timeoutMs is optional: panels whose endpoint has its own, longer server
+    // budget pass a tiered value so the client outwaits the server instead of
+    // aborting the request the handler was still working on (see READY_FETCH_TIMEOUT_MS).
+    function fetchPanelJSON(url, timeoutMs) {
+        var budget = timeoutMs || PANEL_FETCH_TIMEOUT_MS;
         var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
         var timedOut = false;
         var timeoutId = controller && setTimeout(function() {
             timedOut = true;
             controller.abort();
-        }, PANEL_FETCH_TIMEOUT_MS);
+        }, budget);
 
         return fetch(url, controller ? { signal: controller.signal } : {})
             .then(function(r) {
@@ -1695,6 +1699,50 @@
     // ============================================
     // READY WORK PANEL
     // ============================================
+
+    // /api/ready fans out across every rig's bd, so its server-side budget is
+    // 12s (readyFetchTimeoutDefault). The default 8s panel timeout aborted the
+    // request while the handler was still working, so the failure reached the
+    // panel as a bare client-side abort and the endpoint's own honest answer
+    // was never seen (gt-w7eg). Outwait the server.
+    var READY_FETCH_TIMEOUT_MS = 15000;
+
+    // renderReadyError paints the failed-fetch state. The count badge is the
+    // load-bearing part: it must not hold a number here, because "0" is also
+    // what a genuinely empty queue renders — a broken panel would then read as
+    // "town has no ready work", which was exactly the gt-w7eg bug (observed
+    // reporting 0 while `bd ready --json` returned 100 issues). '?' plus the
+    // error class cannot be mistaken for a count. The empty state is hidden
+    // too: leaving a stale "No ready work" visible beside the error is the
+    // same confusion with extra steps.
+    function renderReadyError(text) {
+        var loading = document.getElementById('ready-loading');
+        var table = document.getElementById('ready-table');
+        var empty = document.getElementById('ready-empty');
+        var count = document.getElementById('ready-count');
+
+        if (table) table.style.display = 'none';
+        if (empty) empty.style.display = 'none';
+        if (count) {
+            count.textContent = '?';
+            count.classList.add('count-error');
+            count.setAttribute('title', text);
+        }
+        if (loading) {
+            loading.style.display = '';
+            loading.textContent = text;
+        }
+    }
+
+    // clearReadyError undoes renderReadyError as soon as a fetch succeeds, so
+    // the badge goes back to carrying a real count.
+    function clearReadyError() {
+        var count = document.getElementById('ready-count');
+        if (!count) return;
+        count.classList.remove('count-error');
+        count.removeAttribute('title');
+    }
+
     function loadReady() {
         var loading = document.getElementById('ready-loading');
         var table = document.getElementById('ready-table');
@@ -1704,10 +1752,11 @@
 
         if (!loading || !table || !tbody) return;
 
-        fetchPanelJSON('/api/ready')
+        fetchPanelJSON('/api/ready', READY_FETCH_TIMEOUT_MS)
             .then(function(data) {
                 resetPanelRetry('ready');
                 loading.style.display = 'none';
+                clearReadyError();
 
                 if (data.items && data.items.length > 0) {
                     table.style.display = 'table';
@@ -1746,8 +1795,7 @@
                 }
             })
             .catch(function(err) {
-                loading.style.display = '';
-                loading.textContent = 'Failed to load ready work: ' + describePanelError(err);
+                renderReadyError('Failed to load ready work: ' + describePanelError(err));
                 console.error('Ready work load error:', err);
                 schedulePanelRetry('ready', loadReady);
             });

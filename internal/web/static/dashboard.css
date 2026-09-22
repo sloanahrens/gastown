@@ -727,6 +727,14 @@
             font-size: 0.8rem;
         }
 
+        /* Ready panel: a failed fetch must not be mistakable for an empty
+           queue. The badge drops its number for '?' and goes red, so it can
+           never read as a count of 0 (gt-w7eg). */
+        #ready-count.count-error {
+            background: var(--red);
+            color: var(--bg-dark);
+        }
+
         /* Crew attention badge */
         .count.needs-attention {
             background: var(--orange);
