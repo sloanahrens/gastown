@@ -252,6 +252,25 @@ func buildBatchGateSteps(mq *config.MergeQueueConfig) []refinery.GateStep {
 	return steps
 }
 
+// applyBatchEditorialConfig wires the rig's resolved merge_queue.editorial
+// section onto the batch Engineer, the same way Engineer.LoadConfig defaults
+// it (WithDefaults) for every other caller. refinery.NewEngineer never loads
+// config.json itself, and runMQBatchRun otherwise only threads through
+// RunTests/BatchGateSteps/RetryFlakyTests — so without this call
+// e.config.Editorial stayed nil for every batch Engineer regardless of the
+// rig's config, and reviewBatchCandidates/ejectPatchIDChanged both treat a
+// nil Editorial as "this rig never asked for review" and pass every
+// candidate straight through unreviewed. That is what let 'gt mq batch run'
+// land 4 MRs on gastown with no om editorial review despite
+// editorial.required=true (gt-ww20): a silent bypass, not a refusal.
+func applyBatchEditorialConfig(eng *refinery.Engineer, mq *config.MergeQueueConfig) {
+	if mq == nil || mq.Editorial == nil {
+		return
+	}
+	defaulted := mq.Editorial.WithDefaults()
+	eng.Config().Editorial = &defaulted
+}
+
 func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 	townRoot, r, err := getRig(rigName)
@@ -343,6 +362,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	minCount := resolveBatchMinCount(mqBatchRunMinCount, mq)
 
 	eng := refinery.NewEngineer(r)
+	applyBatchEditorialConfig(eng, mq)
 
 	gateSteps := buildBatchGateSteps(mq)
 	hasGate := len(gateSteps) > 0

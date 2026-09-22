@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // P0 is the only priority excluded from batching. P1 used to be excluded too,
@@ -139,6 +140,77 @@ func TestBuildBatchGateSteps(t *testing.T) {
 			got := buildBatchGateSteps(tt.mq)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("buildBatchGateSteps() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyBatchEditorialConfig is gt-ww20's acceptance case: refinery.NewEngineer
+// never loads config.json (Engineer.LoadConfig has no production caller), so
+// runMQBatchRun's Engineer used to leave Editorial nil regardless of the
+// rig's config — reviewBatchCandidates and ejectPatchIDChanged both no-op on
+// a nil Editorial, so 'gt mq batch run' landed MRs with no om review at all
+// on a rig with editorial.required=true (a silent bypass, not a refusal).
+// applyBatchEditorialConfig is the wiring that closes that gap; this guards
+// it directly rather than through the full cobra command, which needs a
+// live rig/workspace to resolve.
+func TestApplyBatchEditorialConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		mq         *config.MergeQueueConfig
+		wantNil    bool
+		wantResult config.EditorialConfig
+	}{
+		{name: "nil merge queue config", mq: nil, wantNil: true},
+		{name: "no editorial section configured", mq: &config.MergeQueueConfig{}, wantNil: true},
+		{
+			name: "editorial.required=true is wired through with defaults applied",
+			mq: &config.MergeQueueConfig{
+				Editorial: &config.EditorialConfig{Required: true},
+			},
+			wantResult: config.EditorialConfig{
+				Required:          true,
+				Command:           "scripts/om-gate.sh",
+				MaxAttempts:       5,
+				ReviewParallelism: 3,
+			},
+		},
+		{
+			name: "editorial.required=false is still wired through (not a no-op)",
+			mq: &config.MergeQueueConfig{
+				Editorial: &config.EditorialConfig{Required: false},
+			},
+			wantResult: config.EditorialConfig{
+				Required:          false,
+				Command:           "scripts/om-gate.sh",
+				MaxAttempts:       5,
+				ReviewParallelism: 3,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eng := refinery.NewEngineer(&rig.Rig{Name: "test-rig", Path: t.TempDir()})
+			if got := eng.Config().Editorial; got != nil {
+				t.Fatalf("precondition: fresh Engineer already has Editorial set: %+v", got)
+			}
+
+			applyBatchEditorialConfig(eng, tt.mq)
+
+			got := eng.Config().Editorial
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("Config().Editorial = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("Config().Editorial = nil, want %+v", tt.wantResult)
+			}
+			if *got != tt.wantResult {
+				t.Errorf("Config().Editorial = %+v, want %+v", *got, tt.wantResult)
 			}
 		})
 	}
