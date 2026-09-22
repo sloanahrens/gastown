@@ -25,7 +25,7 @@ import (
 // polecat (opal, gt-hmaf) with 408 tool calls and a file write 17 minutes
 // before the restart. This type exists to give the patrol a sound signal.
 //
-// Two signals are sound, and both are captured here:
+// Signals that are sound are captured here:
 //
 //	(a) transcript recency — Claude Code appends to its JSONL transcript on
 //	    conversation events (tool calls, file writes, assistant messages) and
@@ -33,6 +33,8 @@ import (
 //	(b) pane content change — the pane's non-volatile lines (spinner chrome
 //	    stripped) are hashed, so an unchanged signature means the screen has
 //	    not changed in any way that reflects work.
+//	(c) pane output recency — tmux's window_activity, which dates output that
+//	    never reaches the transcript.
 //
 // Deliberately NOT used, because they do not discriminate: the pane's rendered
 // elapsed label, session uptime, token count, and the string "stalled" from
@@ -55,6 +57,12 @@ type RealActivity struct {
 	// LastActivity is the timestamp of the last real work event. Zero means
 	// unknown — there is no transcript to date the session by.
 	LastActivity time.Time
+	// PaneOutputAt is when the pane last produced output, from tmux's
+	// window_activity. It dates work that never reaches the transcript — a
+	// compaction progress bar, a long streaming tool call. Zero means unknown.
+	// It is not the pane's rendered elapsed label, which measures the current
+	// turn and cannot date anything (gt-xb27).
+	PaneOutputAt time.Time
 	// ActivitySource names where LastActivity came from: "transcript" when a
 	// Claude Code JSONL backed it, "none" when nothing could be dated.
 	ActivitySource string
@@ -137,6 +145,15 @@ func ObserveRealActivity(t *tmux.Tmux, polecatName, sessionName, workDir string)
 		act.PaneSignature = sig
 	} else {
 		act.Errors = append(act.Errors, fmt.Sprintf("hashing pane content: %v", err))
+	}
+
+	// Signal (c): last pane output. tmux advances window_activity on real pane
+	// writes even for unattended sessions (gt-2sln), so this dates work that
+	// never reaches the transcript.
+	if at, err := t.GetWindowActivity(sessionName); err == nil {
+		act.PaneOutputAt = at
+	} else {
+		act.Errors = append(act.Errors, fmt.Sprintf("reading pane activity: %v", err))
 	}
 
 	return act

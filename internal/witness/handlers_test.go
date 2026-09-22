@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -912,6 +913,26 @@ func installFakeTmuxNoServer(t *testing.T) {
 	}
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// installNoopGt puts a `gt` that does nothing first on PATH, so a detection test
+// can drive a restart path without starting, restarting or killing a real
+// session. Pair it with installFakeTmuxNoServer when the test needs a dead one.
+func installNoopGt(t *testing.T) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	path := filepath.Join(binDir, "gt")
+	script := "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		path += ".bat"
+		script = "@echo off\r\nexit /b 0\r\n"
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write noop gt: %v", err)
 	}
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -2028,6 +2049,108 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 	}
 	if zombie.Classification != ZombieNeverHeartbeated {
 		t.Errorf("Classification = %q, want %q", zombie.Classification, ZombieNeverHeartbeated)
+	}
+}
+
+// TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence is the
+// gt-gx2v wiring: a live, heartbeatless polecat with work on its hook is flagged
+// only when no signal shows output, and the flag names the evidence it read.
+// Not parallel — it overrides the neverHeartbeatedLiveness seam.
+func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	socket := constants.TestSocketName("gt-test-gx2v")
+	tm := tmux.NewTmuxWithSocket(socket)
+	t.Cleanup(func() { _ = tm.KillServer() })
+
+	sessionName := "gt-test-emerald"
+	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
+		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	witCfg := &config.WitnessThresholds{HeartbeatStartupGrace: "1ms"}
+	bd, _ := fakeBd()
+	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-gx2v"}
+
+	old := neverHeartbeatedLiveness
+	t.Cleanup(func() { neverHeartbeatedLiveness = old })
+
+	detect := func(ev neverHeartbeatedEvidence) (ZombieResult, bool) {
+		neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time) neverHeartbeatedEvidence {
+			return ev
+		}
+		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "emerald", sessionName, tm, nil, witCfg, snap, "")
+	}
+
+	// Working: the cross-check found the transcript a second old, so the patrol
+	// emits nothing at all — no zombie, no POLECAT_DIED mail, no witness cycle.
+	if zombie, found := detect(neverHeartbeatedEvidence{
+		Working: true,
+		Detail:  "gate-slot=none, transcript=1s old/900000 bytes (dates this session)",
+	}); found {
+		t.Fatalf("working heartbeatless polecat flagged as zombie: %+v", zombie)
+	}
+
+	// Wedged: still flagged, and the flag carries the evidence it used, so a
+	// false positive is diagnosable from the mail alone.
+	evidence := "gate-slot=none, transcript=none, pane-output=19m0s old"
+	zombie, found := detect(neverHeartbeatedEvidence{Detail: evidence})
+	if !found {
+		t.Fatal("expected a quiet heartbeatless session to still be flagged")
+	}
+	if zombie.Classification != ZombieNeverHeartbeated {
+		t.Errorf("Classification = %q, want %q", zombie.Classification, ZombieNeverHeartbeated)
+	}
+	if !strings.Contains(zombie.Action, evidence) || !strings.Contains(zombie.Action, "session-age=") {
+		t.Errorf("Action = %q, want it to name the evidence (%q) and the session age", zombie.Action, evidence)
+	}
+}
+
+// TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged is the gt-gx2v
+// control. The liveness cross-check lives in the live-session path, so a polecat
+// whose session and agent process are both gone is still classified and
+// escalated — the gate cannot be "fixed" by silencing the rule. Not parallel:
+// it installs a no-op gt on PATH so the restart starts nothing real.
+func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T) {
+	installNoopGt(t)
+
+	townRoot := t.TempDir()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"open"}]`, nil
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+	snap := &agentBeadSnapshot{
+		AgentState: "working",
+		HookBead:   "gt-gx2v",
+		UpdatedAt:  time.Now().Format(time.RFC3339),
+	}
+
+	zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "gastown", "deadcat",
+		"gt-gastown-deadcat", tmux.NewTmux(), nil, time.Now(), &config.WitnessThresholds{}, snap, "")
+	t.Logf("found=%v zombie=%+v", found, zombie)
+	if !found {
+		t.Fatal("a polecat with no session and no process was not flagged")
+	}
+	if zombie.Classification != ZombieSessionDeadActive {
+		t.Errorf("Classification = %q, want %q", zombie.Classification, ZombieSessionDeadActive)
+	}
+	if !zombie.WasActive {
+		t.Error("WasActive = false, want true for a dead session holding work")
 	}
 }
 
@@ -3439,6 +3562,172 @@ func TestZombieNeverHeartbeated_Classification(t *testing.T) {
 	if !shouldNotFlag {
 		t.Errorf("expected no flag for session age=%v, threshold=%v",
 			time.Since(newSession).Round(time.Second), config.DefaultWitnessHeartbeatStartupGrace)
+	}
+}
+
+// TestClassifyNeverHeartbeatedLiveness_WorkingIsNotFlagged is the gt-gx2v
+// acceptance set. The witness verified all four of these shapes live on
+// 2026-09-22 — emerald mid self-review, diamond 50m into a context compaction,
+// garnet 45m into a turn with output tokens still rising, granite with a
+// transcript 1-8s old — and every flag it raised cost a peek plus a
+// POLECAT_DIED mail. A polecat producing output is working, whatever its
+// heartbeat file says.
+func TestClassifyNeverHeartbeatedLiveness_WorkingIsNotFlagged(t *testing.T) {
+	t.Parallel()
+
+	// A session that started 20m ago and cleared its 5m startup grace 15m ago.
+	now := time.Now()
+	graceDeadline := now.Add(-15 * time.Minute)
+	transcript := func(age time.Duration) RealActivity {
+		return RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceTranscript, LastActivity: now.Add(-age), TranscriptBytes: 900_000}
+	}
+	pane := func(age time.Duration) RealActivity {
+		return RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceNone, PaneOutputAt: now.Add(-age)}
+	}
+
+	cases := []struct {
+		name     string
+		act      RealActivity
+		gateSlot string
+		wantIn   string
+	}{
+		{"emerald: mid self-review, transcript 1s old", transcript(time.Second), "", "transcript=1s old"},
+		{"diamond: mid-compaction, pane showing a progress bar", pane(2 * time.Second), "", "pane-output=2s old"},
+		{"garnet: 45m turn, output tokens still rising", transcript(3 * time.Second), "", "transcript=3s old"},
+		{"granite: transcript active 8s ago", transcript(8 * time.Second), "", "transcript=8s old"},
+		{"holding the container-gate slot", pane(40 * time.Minute), "gate-slot held by gastown/granite (verification suite running)", "gastown/granite"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := classifyNeverHeartbeatedLiveness(tc.act, tc.gateSlot, graceDeadline, now)
+			if !ev.Working {
+				t.Errorf("healthy polecat flagged as never-heartbeated; evidence=%q", ev.Detail)
+			}
+			if !strings.Contains(ev.Detail, tc.wantIn) {
+				t.Errorf("evidence %q does not name %q", ev.Detail, tc.wantIn)
+			}
+		})
+	}
+}
+
+// TestClassifyNeverHeartbeatedLiveness_QuietStartupIsFlagged keeps the rule
+// reachable: a session that has produced nothing since it should have written a
+// heartbeat is still the startup wedge the rule exists to surface (gt-uk7).
+func TestClassifyNeverHeartbeatedLiveness_QuietStartupIsFlagged(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	graceDeadline := now.Add(-15 * time.Minute) // session started 20m ago, 5m grace
+
+	cases := []struct {
+		name string
+		act  RealActivity
+	}{
+		{
+			// The auth-401 shape: the spawn banner, then nothing.
+			"nothing since the spawn banner",
+			RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceNone, PaneOutputAt: now.Add(-20 * time.Minute)},
+		},
+		{
+			// Died before its grace elapsed, so no output ever postdated it.
+			"last output before the grace deadline",
+			RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceTranscript, LastActivity: now.Add(-18 * time.Minute)},
+		},
+		{
+			// One burst of work must not immunize the session for the rest of
+			// its life: output after grace, but long stopped.
+			"output after grace that stopped 10m ago",
+			RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceTranscript, LastActivity: now.Add(-10 * time.Minute)},
+		},
+		{
+			// No readable evidence either way is not evidence of work.
+			"unreadable transcript and no pane output",
+			RealActivity{AgentAlive: true, ObservedAt: now, ActivitySource: ActivitySourceNone, Errors: []string{"locating transcript: no such file"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := classifyNeverHeartbeatedLiveness(tc.act, "", graceDeadline, now)
+			if ev.Working {
+				t.Errorf("wedged polecat reported as working; evidence=%q", ev.Detail)
+			}
+			if !strings.Contains(ev.Detail, "gate-slot=none") {
+				t.Errorf("evidence %q should record the gate slot check", ev.Detail)
+			}
+		})
+	}
+}
+
+// TestOutputSince_FreshOutputAfterGraceIsWork pins the freshness half: output a
+// moment ago is work, output that stopped is not — an early burst must not
+// immunize a session for the rest of its life (gt-gx2v).
+func TestOutputSince_FreshOutputAfterGraceIsWork(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	graceDeadline := now.Add(-15 * time.Minute) // session started 20m ago, 5m grace
+
+	if !outputSince(now.Add(-time.Second), true, graceDeadline, now) {
+		t.Error("output produced a second ago should count as work")
+	}
+	if outputSince(now.Add(-40*time.Minute), true, graceDeadline, now) {
+		t.Error("output older than the freshness window should not count as work")
+	}
+	if outputSince(time.Time{}, true, graceDeadline, now) {
+		t.Error("an unknown timestamp should not count as work")
+	}
+	if outputSince(now, false, graceDeadline, now) {
+		t.Error("a signal that is not known should not count as work")
+	}
+}
+
+// TestOutputSince_SpawnBannerIsNotWork pins the deadline half: a pane writes at
+// session creation, so without it any session younger than the freshness window
+// reads as busy and the rule goes silent.
+func TestOutputSince_SpawnBannerIsNotWork(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	createdAt := now.Add(-20 * time.Millisecond)
+	graceDeadline := createdAt.Add(time.Millisecond)
+
+	if outputSince(createdAt, true, graceDeadline, now) {
+		t.Error("the spawn banner counts as work; a freshly created session would never be flaggable")
+	}
+}
+
+// TestHeldGateSlot_NoneHeld covers the reader against an empty town: the
+// never-heartbeated gate must not invent a holder (gt-gx2v).
+func TestHeldGateSlot_NoneHeld(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	if got := heldGateSlot(townRoot, "gastown", "diamond"); got != "" {
+		t.Errorf("heldGateSlot on an empty town = %q, want no holder", got)
+	}
+}
+
+// TestHeldGateSlot_NamedByRigAndPolecat pins the role string the reader looks up
+// against the one `gt slot run` records, since a mismatch would silently
+// disable the gate-slot half of the liveness check. Not parallel — it stubs the
+// container lister that Acquire consults.
+func TestHeldGateSlot_NamedByRigAndPolecat(t *testing.T) {
+	restore := slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
+	t.Cleanup(restore)
+
+	townRoot := t.TempDir()
+	h, err := slot.AcquirePool(townRoot, "gastown/diamond", 5*time.Second, slot.Pool{Slots: 1})
+	if err != nil {
+		t.Fatalf("acquiring a slot in the test town: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Release() })
+
+	got := heldGateSlot(townRoot, "gastown", "diamond")
+	if !strings.Contains(got, "gastown/diamond") {
+		t.Errorf("heldGateSlot = %q, want the slot held by gastown/diamond", got)
+	}
+	if other := heldGateSlot(townRoot, "gastown", "emerald"); other != "" {
+		t.Errorf("heldGateSlot for a non-holder = %q, want no holder", other)
 	}
 }
 

@@ -1,9 +1,14 @@
 package witness
 
 import (
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // base is a healthy live observation: transcript written recently, pane hashing
@@ -271,6 +276,35 @@ func TestTranscriptDatesSession(t *testing.T) {
 	}
 	if !transcriptDatesSession(sessionStart, sessionStart) {
 		t.Error("a transcript written at session start was not attributed to it")
+	}
+}
+
+// TestObserveRealActivity_RecordsPaneOutput pins the pane-output signal the
+// never-heartbeated gate reads: it dates work that never reaches the transcript,
+// so a nil or stale value there silences that half of the check (gt-gx2v).
+func TestObserveRealActivity_RecordsPaneOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	tm := tmux.NewTmuxWithSocket(constants.TestSocketName("gt-test-gx2v-pane"))
+	t.Cleanup(func() { _ = tm.KillServer() })
+
+	sessionName := "gt-test-diamond"
+	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+
+	act := ObserveRealActivity(tm, "diamond", sessionName, "")
+	if act.PaneOutputAt.IsZero() {
+		t.Errorf("PaneOutputAt is unset (%v); evidence=%s", act.Errors, act.Describe(time.Now()))
+	}
+	if age := time.Since(act.PaneOutputAt); age > time.Minute {
+		t.Errorf("PaneOutputAt = %s ago, want the session's own creation", age.Round(time.Second))
 	}
 }
 

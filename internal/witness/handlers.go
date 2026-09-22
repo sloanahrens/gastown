@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1892,23 +1893,134 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// nuked states never reach this function, so this can't fire on a healthy
 	// idle polecat.
 	// ZFC (gt-uk7): No auto-restart — auth errors don't self-heal on restart.
+	// gt-gx2v: the absent heartbeat is missing metadata, not evidence of death,
+	// so a working session is not flagged at all.
 	if (snapHook != "" || beads.AgentState(snapState).IsActive()) && hb == nil {
 		if createdAt, err := t.GetSessionCreatedTime(sessionName); err == nil {
 			age := time.Since(createdAt)
-			if age > witCfg.HeartbeatStartupGraceD() {
+			grace := witCfg.HeartbeatStartupGraceD()
+			if age > grace {
+				live := neverHeartbeatedLiveness(t, townRoot, rigName, polecatName, sessionName, createdAt.Add(grace))
+				if live.Working {
+					return ZombieResult{}, false
+				}
 				return ZombieResult{
 					PolecatName:    polecatName,
 					AgentState:     snapState,
 					Classification: ZombieNeverHeartbeated,
 					HookBead:       snapHook,
 					WasActive:      true,
-					Action:         fmt.Sprintf("flagged-for-review (no heartbeat, session-age=%v)", age.Round(time.Second)),
+					Action:         fmt.Sprintf("flagged-for-review (no heartbeat, session-age=%v, %s)", age.Round(time.Second), live.Detail),
 				}, true
 			}
 		}
 	}
 
 	return ZombieResult{}, false
+}
+
+// neverHeartbeatedFreshWindow is how recently a signal must have moved for a
+// live session with no heartbeat file to count as working rather than wedged.
+// Derived from SessionHeartbeatStaleThreshold — the shortest freshness window
+// any other consumer applies — so "recent" means the same thing to everyone.
+const neverHeartbeatedFreshWindow = polecat.SessionHeartbeatStaleThreshold
+
+// neverHeartbeatedEvidence is the liveness verdict the never-heartbeated rule
+// needs before it flags a live, heartbeatless polecat (gt-gx2v). The heartbeat
+// file is written by `gt` subcommands, so its absence dates the last `gt` call,
+// not the last work — a polecat inside one long turn runs none for many minutes.
+type neverHeartbeatedEvidence struct {
+	// Working is true when a signal shows the session producing output.
+	Working bool
+	// Detail names every signal read and what it showed. It is carried verbatim
+	// into the flag so a false positive is diagnosable from the patrol mail
+	// alone, without a second peek at the session.
+	Detail string
+}
+
+// neverHeartbeatedLiveness gathers that evidence and decides from it. A seam:
+// the gate reads tmux, a transcript on disk and the container-gate pool, and
+// tests pin health without any of the three.
+var neverHeartbeatedLiveness = assessNeverHeartbeatedLiveness
+
+func assessNeverHeartbeatedLiveness(t *tmux.Tmux, townRoot, rigName, polecatName, sessionName string, graceDeadline time.Time) neverHeartbeatedEvidence {
+	act := ObserveRealActivity(t, polecatName, sessionName, "")
+	return classifyNeverHeartbeatedLiveness(act, heldGateSlot(townRoot, rigName, polecatName), graceDeadline, time.Now())
+}
+
+// classifyNeverHeartbeatedLiveness decides whether a live heartbeatless session
+// is working. Pure, so each verified false-positive shape is pinnable without
+// tmux, a slot pool, or a transcript on disk (gt-gx2v).
+func classifyNeverHeartbeatedLiveness(act RealActivity, gateSlot string, graceDeadline, now time.Time) neverHeartbeatedEvidence {
+	gateDetail := "gate-slot=none"
+	if gateSlot != "" {
+		gateDetail = gateSlot
+	}
+	ev := neverHeartbeatedEvidence{
+		Detail: strings.Join([]string{
+			gateDetail,
+			transcriptEvidence(act, now),
+			paneOutputEvidence(act, now),
+		}, ", "),
+	}
+	// The slot is read live, so holding one needs no timestamp test: a holder
+	// that never heartbeated has lost its heartbeat file, not its suite.
+	ev.Working = gateSlot != "" ||
+		outputSince(act.LastActivity, act.ActivitySource == ActivitySourceTranscript, graceDeadline, now) ||
+		outputSince(act.PaneOutputAt, !act.PaneOutputAt.IsZero(), graceDeadline, now)
+	return ev
+}
+
+// outputSince reports whether a signal timestamp proves current work: output
+// inside the freshness window that also postdates graceDeadline. Both halves
+// matter. A pane writes at session creation, so without the deadline the spawn
+// banner of a just-created session reads as work; and output that stopped long
+// ago must not immunize a wedge for the rest of its life.
+func outputSince(at time.Time, known bool, graceDeadline, now time.Time) bool {
+	if !known || at.IsZero() {
+		return false
+	}
+	return at.After(graceDeadline) && now.Sub(at) < neverHeartbeatedFreshWindow
+}
+
+// transcriptEvidence renders the transcript signal for the flag message. An
+// unreadable transcript is reported as such, never as quiet: absence of
+// evidence is not evidence of a wedge.
+func transcriptEvidence(act RealActivity, now time.Time) string {
+	switch {
+	case act.ActivitySource == ActivitySourceTranscript && !act.LastActivity.IsZero():
+		return fmt.Sprintf("transcript=%v old/%d bytes (dates this session)",
+			now.Sub(act.LastActivity).Round(time.Second), act.TranscriptBytes)
+	case len(act.Errors) > 0:
+		return fmt.Sprintf("transcript=unreadable (%s)", strings.Join(act.Errors, "; "))
+	default:
+		return "transcript=none"
+	}
+}
+
+func paneOutputEvidence(act RealActivity, now time.Time) string {
+	if act.PaneOutputAt.IsZero() {
+		return "pane-output=none"
+	}
+	return fmt.Sprintf("pane-output=%v old", now.Sub(act.PaneOutputAt).Round(time.Second))
+}
+
+// heldGateSlot names the container-gate slot this polecat holds, or "" when it
+// holds none — a holder has its own verification suite running right now. The
+// "<rig>/<polecat>" role format is the one `gt slot run` records, and the one
+// the polecat Stop hook already matches on (internal/cmd/tap_polecat_stop.go);
+// a mismatch here would silently disable this half of the liveness check.
+func heldGateSlot(townRoot, rigName, polecatName string) string {
+	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
+	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()})
+	if err != nil {
+		return ""
+	}
+	mine := rep.HeldBy(rigName + "/" + polecatName)
+	if len(mine) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("gate-slot held by %s (verification suite running)", mine[0].Owner.Role)
 }
 
 func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {
