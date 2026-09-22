@@ -217,7 +217,7 @@ func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	// shape of command isGasTownAgentContext() otherwise blocks for every
 	// role. Exempt only that shape, and only for the refinery role: "gh pr
 	// create" stays blocked for refineries same as everyone else (gt-r2xm).
-	if isRefineryRole() && isFeatureBranchCommand(command) && !isPRCreateCommand(command) {
+	if isRefineryRole() && isRehearsalCheckout(command) {
 		return prWorkflowAllow
 	}
 
@@ -339,42 +339,52 @@ func isRefineryRole() bool {
 // one pr-workflow pattern that stays blocked for every role, refinery
 // included. Matched as three consecutive tokens (case-insensitive) rather
 // than a substring, so it isn't fooled by "gh" or "pr" appearing quoted
-// elsewhere in the command.
+// elsewhere in the command. The scan is per-segment, not per-token-position:
+// the exemption that consults this guard fires when the command's FIRST
+// token is gh, and the exemption's own test is segment-first, so a "gh pr
+// create" glued after an "&&" on one line must match here too or the
+// refinery exemption chains past it (gt-cyz8).
 func isPRCreateCommand(command string) bool {
-	tokens := shellTokenize(command)
-	for i := 0; i+2 < len(tokens); i++ {
-		if strings.EqualFold(tokens[i], "gh") &&
-			strings.EqualFold(tokens[i+1], "pr") &&
-			strings.EqualFold(tokens[i+2], "create") {
+	for _, seg := range splitShellSegments(shellTokenize(strings.TrimSpace(command))) {
+		if len(seg) < 3 {
+			continue
+		}
+		if strings.EqualFold(seg[0], "gh") &&
+			strings.EqualFold(seg[1], "pr") &&
+			strings.EqualFold(seg[2], "create") {
 			return true
 		}
 	}
 	return false
 }
 
-// isFeatureBranchCommand reports whether command creates a new branch via
-// "git checkout -b" or "git switch -c" — the two shapes mol-refinery-patrol
-// step 1 and mol-polecat-conflict-resolve mandate ("git checkout -b temp
-// origin/<branch>") for merge rehearsal. Uses containment rather than
-// strict adjacency (like the dangerous-command guard's fragment matching)
-// so an extra flag between the subcommand and "-b"/"-c" (e.g. "git checkout
-// -q -b temp") still matches.
-func isFeatureBranchCommand(command string) bool {
-	tokens := shellTokenize(command)
-	lower := make([]string, len(tokens))
-	for i, t := range tokens {
-		lower[i] = strings.ToLower(t)
-	}
-	if !containsToken(lower, "git") {
+// isRehearsalCheckout reports whether command is the exact branch-creation
+// shape the refinery's merge rehearsal mandates — "git checkout -b" or
+// "git switch -c" — matched only against the LEADING command, with
+// containment for the creation flag so an extra flag between the
+// subcommand and "-b"/"-c" (e.g. "git checkout -q -b temp") still matches.
+// Leading-command by design: the hook "if" globs that route a command here
+// (Bash(git checkout -b*), Bash(gh pr create*)) are anchored to the
+// command's first word, so the exemption must be too. Keying the old
+// isFeatureBranchCommand's line-wide containment here instead would let a
+// "gh pr create && git checkout -b" chain its PR create past the exemption
+// (gt-cyz8) — so a checkout glued after an && on the same line is NOT the
+// rehearsal and does not exempt.
+func isRehearsalCheckout(command string) bool {
+	segs := splitShellSegments(shellTokenize(strings.TrimSpace(command)))
+	if len(segs) == 0 {
 		return false
 	}
-	if containsToken(lower, "checkout") && containsToken(lower, "-b") {
-		return true
+	seg := segs[0]
+	if len(seg) < 2 || !strings.EqualFold(seg[0], "git") {
+		return false
 	}
-	if containsToken(lower, "switch") && containsToken(lower, "-c") {
-		return true
+	lower := make([]string, len(seg))
+	for i, tok := range seg {
+		lower[i] = strings.ToLower(tok)
 	}
-	return false
+	return (containsToken(lower, "checkout") || containsToken(lower, "switch")) &&
+		(containsToken(lower, "-b") || containsToken(lower, "-c"))
 }
 
 // containsToken reports whether want appears as an exact element of tokens.

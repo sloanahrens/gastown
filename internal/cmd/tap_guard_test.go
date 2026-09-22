@@ -16,6 +16,7 @@ func TestIsPRCreateCommand(t *testing.T) {
 	}{
 		{"gh pr create", "gh pr create --title foo", true},
 		{"gh pr create mixed case", "GH PR CREATE --title foo", true},
+		{"chained after unrelated segment", "echo hi && gh pr create --title foo", true},
 		{"git checkout -b", "git checkout -b temp origin/branch", false},
 		{"git switch -c", "git switch -c temp origin/branch", false},
 		{"unrelated", "echo hello", false},
@@ -30,7 +31,13 @@ func TestIsPRCreateCommand(t *testing.T) {
 	}
 }
 
-func TestIsFeatureBranchCommand(t *testing.T) {
+// gt-cyz8: the refinery exemption must be keyed on isRehearsalCheckout, not
+// the old line-wide isFeatureBranchCommand (now removed). The two matched the
+// same leading-command shapes but differed on the chained case — the
+// exemption's escape was a "git checkout -b" glued after a "gh pr create" on
+// one line, which line-wide containment matches but a leading-command match
+// does not.
+func TestIsRehearsalCheckout(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -45,11 +52,14 @@ func TestIsFeatureBranchCommand(t *testing.T) {
 		{"plain switch (no -c)", "git switch main", false},
 		{"no git", "checkout -b temp", false},
 		{"empty", "", false},
+		{"chained after unrelated segment", "echo hi && git checkout -b temp origin/branch", false},
+		{"chained after pr create", "gh pr create --title foo && git checkout -b temp", false},
+		{"chained before pr create", "git checkout -b temp && gh pr create --title foo", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isFeatureBranchCommand(tt.command); got != tt.want {
-				t.Errorf("isFeatureBranchCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			if got := isRehearsalCheckout(tt.command); got != tt.want {
+				t.Errorf("isRehearsalCheckout(%q) = %v, want %v", tt.command, got, tt.want)
 			}
 		})
 	}
@@ -280,4 +290,46 @@ func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
 			t.Errorf("evaluatePRWorkflowGuard(unrelated command) = %v, want prWorkflowAllow", got)
 		}
 	})
+}
+
+// gt-cyz8: the refinery exemption (gt-r2xm) was keyed on isFeatureBranchCommand,
+// which matches "git checkout -b" ANYWHERE on the line, while the "gh pr create
+// stays blocked" guard was anchored differently. Asymmetric matchers let a
+// "gh pr create ... && git checkout -b temp" chain fire the exemption (feature
+// branch found) while the PR-create guard never matched, so the exemption let
+// the chained PR create through. The exemption is now keyed on
+// isRehearsalCheckout — anchored to the command's first word, exactly as the
+// hook "if" glob that routes the command here is anchored — so the escape is
+// closed.
+func TestRunTapGuardPRWorkflow_RefineryChainedPRCreateStillBlocks(t *testing.T) {
+	t.Setenv("GT_REFINERY", "1")
+	t.Setenv("GT_ROLE", "gastown/refinery")
+
+	hookInput := `{"tool_name":"Bash","tool_input":{"command":"gh pr create --title foo && git checkout -b temp origin/main"}}`
+	var err error
+	withStdin(t, hookInput, func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err == nil {
+		t.Error("expected chained 'gh pr create && git checkout -b' to remain blocked for the refinery role, got nil error")
+	}
+}
+
+// The reverse chain must keep working exactly as gt-r2xm intended: the
+// rehearsal checkout first is exempt even though a gh pr create follows on
+// the same line — the "if" glob (Bash(git checkout -b*)) anchors to the
+// command's first word, so that line's routing decision was always the
+// checkout, and the exemption honors that.
+func TestRunTapGuardPRWorkflow_RefineryRehearsalFirstStillExempt(t *testing.T) {
+	t.Setenv("GT_REFINERY", "1")
+	t.Setenv("GT_ROLE", "gastown/refinery")
+
+	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git checkout -b temp origin/main && gh pr create --title foo"}}`
+	var err error
+	withStdin(t, hookInput, func() {
+		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
+	})
+	if err != nil {
+		t.Errorf("expected rehearsal-first chain to stay exempt for the refinery role, got error: %v", err)
+	}
 }
