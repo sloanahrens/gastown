@@ -115,13 +115,13 @@ investigation, not as a follow-up.
 
 Examples:
   gt bead probe "TEST-ROUTING-PROBE: does --repo route to gastown?"
-  gt bead probe "Does bd query find beads by label?" --description "checking gt-abc"`,
-	Args: cobra.ExactArgs(1),
+  gt bead probe Does bd query find beads by label? --description "checking gt-abc"`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runBeadProbe,
 }
 
 func runBeadProbe(cmd *cobra.Command, args []string) error {
-	title := args[0]
+	title := strings.Join(args, " ")
 
 	workDir, err := os.Getwd()
 	if err != nil {
