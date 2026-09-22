@@ -387,6 +387,13 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		note.Attempts = history
 	}
 
+	// resultStderr, unlike lastStderr (the raw gate-script output, kept
+	// around for the failure-path diagnostics above), is what ReviewResult.Stderr
+	// reports on a verdict: callers (mq_review.go, batch_editorial.go) print it
+	// as "approved with warning", so it must carry only genuine non-fatal
+	// follow-up trouble, not the gate script's routine stderr chatter — a
+	// clean approve where the script merely logged to stderr is not a warning.
+	var resultStderr string
 	if note.Verdict == "approve" {
 		var majors []verdictFinding
 		for _, f := range v.Findings {
@@ -398,7 +405,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			ids, ferr := fileFollowups(deps.Beads, req.MRID, note.Score, majors)
 			note.Followups = ids
 			if ferr != nil {
-				lastStderr = fmt.Sprintf("followups: %v", ferr)
+				resultStderr = fmt.Sprintf("followups: %v", ferr)
 			}
 		}
 	}
@@ -432,9 +439,9 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		if err := setEditorialReviewedHead(deps.Beads, req.MRID, head); err != nil {
 			return failureResultWithRawOutput(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), retries, tmpDir)
 		}
-		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: lastStderr}
+		return ReviewResult{Exit: 0, Note: &note, Retries: retries, Stderr: resultStderr}
 	}
-	return ReviewResult{Exit: 1, Note: &note, Retries: retries, Stderr: lastStderr}
+	return ReviewResult{Exit: 1, Note: &note, Retries: retries, Stderr: resultStderr}
 }
 
 // captureRawOutput reads the verdict.json file from tmpDir (if it exists) and
@@ -570,19 +577,49 @@ func Rehearse(g *git.Git, target, branch string) (string, error) {
 // a busy rig does not accumulate one gt-mq-review-* branch per candidate
 // per cycle.
 func RehearseBranch(g *git.Git, target, branch string) (head, tempBranch string, err error) {
-	tempBranch = fmt.Sprintf("gt-mq-review-%d", time.Now().UnixNano())
-	if err := g.CreateBranchFrom(tempBranch, "origin/"+target); err != nil {
+	name := fmt.Sprintf("gt-mq-review-%d", time.Now().UnixNano())
+	if err := g.CreateBranchFrom(name, "origin/"+target); err != nil {
 		return "", "", fmt.Errorf("create rehearsal branch from origin/%s: %w", target, err)
 	}
-	if err := g.Checkout(tempBranch); err != nil {
+	if err := g.Checkout(name); err != nil {
+		// Never checked out: nothing to restore, but the branch itself was
+		// created and must not be left behind for the caller to never learn
+		// its name (this return discards it, like every other error return
+		// here).
+		if delErr := g.DeleteBranch(name, true); delErr != nil {
+			return "", "", fmt.Errorf("checkout rehearsal branch: %w (also failed to delete %s: %v)", err, name, delErr)
+		}
 		return "", "", fmt.Errorf("checkout rehearsal branch: %w", err)
 	}
 	if err := g.MergeNoFF("origin/"+branch, "rehearsal merge for om review"); err != nil {
 		_ = g.AbortMerge()
+		// AbortMerge clears the merge state but leaves HEAD checked out on
+		// name — the very branch this function is about to delete. Detach
+		// HEAD back onto origin/target first so RepoDir is never left
+		// pointed at a branch that no longer exists (gt-evk4): an earlier
+		// version returned tempBranch="" here, so the caller had no name to
+		// clean up and RepoDir was stranded on an orphan gt-mq-review-*
+		// branch with an aborted merge.
+		if checkoutErr := g.CheckoutDetach("origin/" + target); checkoutErr != nil {
+			return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w (also failed to restore HEAD onto origin/%s: %v)", branch, target, err, target, checkoutErr)
+		}
+		if delErr := g.DeleteBranch(name, true); delErr != nil {
+			return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w (also failed to delete rehearsal branch %s: %v)", branch, target, err, name, delErr)
+		}
 		return "", "", fmt.Errorf("merge origin/%s onto origin/%s: %w", branch, target, err)
 	}
+	tempBranch = name
 	head, err = g.Rev("HEAD")
 	if err != nil {
+		// Merge succeeded but resolving HEAD did not: RepoDir is still
+		// checked out on name with a real merge commit, so the same
+		// stranding this function otherwise guards against applies here too.
+		if checkoutErr := g.CheckoutDetach("origin/" + target); checkoutErr != nil {
+			return "", "", fmt.Errorf("resolve rehearsal head: %w (also failed to restore HEAD onto origin/%s: %v)", err, target, checkoutErr)
+		}
+		if delErr := g.DeleteBranch(name, true); delErr != nil {
+			return "", "", fmt.Errorf("resolve rehearsal head: %w (also failed to delete rehearsal branch %s: %v)", err, name, delErr)
+		}
 		return "", "", err
 	}
 	return head, tempBranch, nil

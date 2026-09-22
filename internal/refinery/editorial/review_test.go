@@ -913,6 +913,109 @@ func TestRun_ApproveFollowupFilingFailureSurfacedInStderr(t *testing.T) {
 	}
 }
 
+// TestRun_ApproveCleanDoesNotLeakGateScriptStderr covers the companion bug: a
+// clean approve (no majors, no follow-up filing failure) must not surface the
+// gate script's own raw stderr as ReviewResult.Stderr. Callers (mq_review.go,
+// batch_editorial.go) treat any non-empty Stderr on an approve as "approved
+// with warning" and print it verbatim, so a gate script that merely logs
+// diagnostics to stderr on a clean run must not make every approve look
+// suspect (gt-evk4).
+func TestRun_ApproveCleanDoesNotLeakGateScriptStderr(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "gate-script: routine diagnostic chatter, not an error", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Stderr != "" {
+		t.Fatalf("Stderr = %q, want empty — a clean approve must not surface the gate script's routine stderr", result.Stderr)
+	}
+}
+
+// TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout covers gt-evk4: a
+// merge conflict during RehearseBranch used to abort the merge but leave the
+// repo checked out on the doomed gt-mq-review-* temp branch, with the branch
+// itself never deleted (and the caller had no name to clean it up either,
+// since tempBranch came back empty on error). A conflict must instead leave
+// the repo detached at origin/<target> with no rehearsal branch behind.
+func TestRehearseBranch_MergeConflictLeavesNoOrphanCheckout(t *testing.T) {
+	dir := initTestRepo(t)
+	g := git.NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	mainHead := commitFileReview(t, dir, "conflict.txt", "main version\n", "main change")
+	setTestRef(t, dir, "refs/remotes/origin/main", mainHead)
+
+	// Branch off base (not mainHead) so the merge actually conflicts instead
+	// of fast-forwarding.
+	if err := g.CheckoutDetach(base); err != nil {
+		t.Fatalf("checkout base: %v", err)
+	}
+	branchHead := commitFileReview(t, dir, "conflict.txt", "branch version\n", "branch change")
+	setTestRef(t, dir, "refs/remotes/origin/feature", branchHead)
+
+	// Leave the repo detached at base before calling RehearseBranch — it
+	// must not depend on, or disturb, whatever was checked out beforehand.
+	if err := g.CheckoutDetach(base); err != nil {
+		t.Fatalf("re-detach at base: %v", err)
+	}
+
+	_, tempBranch, err := RehearseBranch(g, "main", "feature")
+	if err == nil {
+		t.Fatal("RehearseBranch succeeded, want a merge conflict error")
+	}
+	if tempBranch != "" {
+		t.Fatalf("tempBranch = %q, want empty on error", tempBranch)
+	}
+
+	current, cbErr := g.CurrentBranch()
+	if cbErr != nil {
+		t.Fatalf("CurrentBranch: %v", cbErr)
+	}
+	if current != "HEAD" {
+		t.Fatalf("CurrentBranch = %q, want %q (detached) — repo left checked out on a rehearsal branch", current, "HEAD")
+	}
+	head, revErr := g.Rev("HEAD")
+	if revErr != nil {
+		t.Fatalf("rev HEAD: %v", revErr)
+	}
+	if head != mainHead {
+		t.Fatalf("HEAD = %s, want %s (origin/main) after a failed rehearsal", head, mainHead)
+	}
+
+	branches, lbErr := g.ListBranches("gt-mq-review-*")
+	if lbErr != nil {
+		t.Fatalf("ListBranches: %v", lbErr)
+	}
+	if len(branches) != 0 {
+		t.Fatalf("orphan rehearsal branch(es) left behind: %v", branches)
+	}
+}
+
+func setTestRef(t *testing.T, dir, ref, sha string) {
+	t.Helper()
+	cmd := exec.Command("git", "update-ref", ref, sha)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("update-ref %s: %v\n%s", ref, err, out)
+	}
+}
+
 func TestRun_RehearsesWhenNoRehearsedHeadGiven(t *testing.T) {
 	fakeBDForReview(t)
 
