@@ -808,6 +808,64 @@ func TestLogMissingRequiredStore_IsRateLimited(t *testing.T) {
 	}
 }
 
+// TestConvoyManager_DoesNotWriteThroughCallerStoreMap pins the ownership rule
+// the retry path depends on: the map handed to NewConvoyManager belongs to the
+// caller, and the manager must adopt stores into a map of its own.
+//
+// The daemon passes d.beadsStores and keeps ranging over that same map from the
+// patrol goroutine (hasActiveWork). A manager that added the reopened store in
+// place would be writing to a map another goroutine iterates — a concurrent map
+// iteration and write, which is fatal rather than recoverable, and would take
+// the daemon down; under launchd that needs a launchctl bootstrap to come back
+// (gt-i36h).
+func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
+	t.Parallel()
+
+	startup := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
+	reopened := &closeTrackingStorage{}
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour, startup,
+		func() storeOpenResult {
+			return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": reopened}}
+		}, nil)
+
+	m.retryMissingStores(time.Now())
+	if m.stores["hq"] != reopened {
+		t.Fatal("hq should have been adopted from the retry")
+	}
+
+	// The caller's map is untouched. Its handle is still the one handed over —
+	// the manager shares handles, it just does not share the map.
+	if _, leaked := startup["hq"]; leaked {
+		t.Error("manager wrote the reopened store through to the caller's map")
+	}
+	if startup["gastown"] == nil {
+		t.Error("manager removed the caller's store from the caller's map")
+	}
+
+	// The read the daemon actually performs, concurrent with the manager's
+	// write: ranging the caller's map while a store is adopted. Under -race
+	// this is what fails on write-through. Each iteration gets a fresh pair so
+	// the adopt really happens — a confirmed manager stops opening stores, so
+	// reusing one would leave every attempt after the first a no-op.
+	townRoot := t.TempDir()
+	noop := func(string, ...interface{}) {}
+	opener := func() storeOpenResult {
+		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": &closeTrackingStorage{}}}
+	}
+	for i := 0; i < 200; i++ {
+		caller := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
+		m := NewConvoyManager(townRoot, noop, "gt", time.Hour, caller, opener, nil)
+		adopted := make(chan struct{})
+		go func() {
+			defer close(adopted)
+			m.retryMissingStores(time.Now())
+		}()
+		for range caller {
+		}
+		<-adopted
+	}
+}
+
 // closeTrackingStorage is a Storage stub that records Close, for tests that
 // only care which handles the manager keeps and which it releases. The embedded
 // interface panics on anything else, which is what a test wants if the code

@@ -247,11 +247,33 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		ctx:          ctx,
 		cancel:       cancel,
 		logger:       logger,
-		stores:       stores,
+		stores:       copyStores(stores),
 		openStores:   openStores,
 		isRigParked:  isRigParked,
 		gtPath:       gtPath,
 	}
+}
+
+// copyStores takes a private copy of a store map, preserving nil.
+//
+// The manager writes to m.stores as it adopts stores a retry reopened, and it
+// must never write to the caller's map: the daemon keeps its own reference to
+// the map it hands over (d.beadsStores) and ranges over it from the patrol
+// goroutine (hasActiveWork), so writing through to it would be a concurrent map
+// iteration and write — a fatal error the daemon cannot recover from, against a
+// patrol run that only wanted to know whether work was in flight (gt-i36h).
+//
+// The stores themselves are shared, not cloned: this is about who owns the map,
+// not the handles in it. Handles already held are kept by both sides.
+func copyStores(stores map[string]beadsdk.Storage) map[string]beadsdk.Storage {
+	if stores == nil {
+		return nil
+	}
+	owned := make(map[string]beadsdk.Storage, len(stores))
+	for name, store := range stores {
+		owned[name] = store
+	}
+	return owned
 }
 
 // Start begins the convoy manager goroutines (event poll + stranded scan).
