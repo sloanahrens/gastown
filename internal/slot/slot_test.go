@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // stubNoContainers makes runningGateContainers deterministic for tests that
@@ -255,6 +257,27 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 		t.Fatalf("slot still held after SIGKILLing the holder: %v", err)
 	}
 	_ = h2.Release()
+
+	// The killed holder's acquisition is still in the ring file, with its hold
+	// left open: the record is written at grant time for exactly this case, so
+	// a suite that dies mid-run is accounted for rather than lost with the
+	// process (gt-dc81).
+	history, err := History(townRoot)
+	if err != nil {
+		t.Fatalf("History after the holder was killed: %v", err)
+	}
+	var killed *HistoryEntry
+	for i := range history {
+		if history[i].Role == "helper" {
+			killed = &history[i]
+		}
+	}
+	if killed == nil {
+		t.Fatalf("the SIGKILLed holder left no history entry: %+v", history)
+	}
+	if killed.HeldS != nil {
+		t.Errorf("the killed holder's hold was closed by a Release that never ran: %+v", killed)
+	}
 }
 
 // TestHelperHoldSlotUntilKilled is not a real test; it is spawned as a
@@ -750,6 +773,40 @@ func TestAcquire_TimesOutWhileUnwrappedContainersPersist(t *testing.T) {
 	}
 	if elapsed < timeout {
 		t.Fatalf("Acquire returned after %s, before its %s timeout elapsed", elapsed, timeout)
+	}
+
+	// Giving up is recorded (gt-dc81): a caller that times out behind an
+	// unwrapped suite is the strongest evidence of a constricting gate, and the
+	// one case a history of successful acquisitions alone would drop.
+	history, err := History(townRoot)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history holds %d entries for a timed-out wait, want 1: %+v", len(history), history)
+	}
+	if !history[0].TimedOut {
+		t.Errorf("the timed-out wait is not marked timed_out: %+v", history[0])
+	}
+	if history[0].Reason != WaitReasonUnwrappedContainers {
+		t.Errorf("reason = %q, want %q", history[0].Reason, WaitReasonUnwrappedContainers)
+	}
+	if history[0].HeldS != nil {
+		t.Errorf("a slot nobody held has held_s set: %+v", history[0])
+	}
+
+	waits := slotEventsOfType(t, townRoot, events.TypeSlotWait)
+	if len(waits) != 1 {
+		t.Fatalf("slot_wait events = %d, want the timed-out wait reported", len(waits))
+	}
+	if got := waits[0].Payload["outcome"]; got != "timeout" {
+		t.Errorf("slot_wait outcome = %v, want timeout", got)
+	}
+	msg, _ := waits[0].Payload["message"].(string)
+	for _, want := range []string{"gave up", "cap"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("slot_wait message = %q, want it to say the caller gave up against its cap", msg)
+		}
 	}
 }
 

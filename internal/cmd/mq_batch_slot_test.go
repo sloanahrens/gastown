@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	gtevents "github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -212,5 +216,72 @@ func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 	}
 	if err := h.Release(); err != nil {
 		t.Fatalf("child Release: %v", err)
+	}
+}
+
+// TestAcquireBatchGateSlot_RecordsTheSameTelemetry is gt-dc81's acceptance for
+// the batch path: the refinery's batch gate acquires through the same
+// slot.Acquire the CLI does, so its wait, hold and wait reason must land in the
+// same event log and ring file — the batch gate is the holder that queued five
+// MRs behind a 29-minute wait (gt-dc81), and it is the one an operator needs to
+// see without reading panes.
+func TestAcquireBatchGateSlot_RecordsTheSameTelemetry(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+
+	h, err := acquireBatchGateSlot(townRoot, "gastown", true)
+	if err != nil {
+		t.Fatalf("acquireBatchGateSlot: %v", err)
+	}
+	if h == nil {
+		t.Fatalf("acquireBatchGateSlot returned a nil handle with a gate configured")
+	}
+	time.Sleep(120 * time.Millisecond)
+	if err := h.ReleaseWithExit(1); err != nil {
+		t.Fatalf("ReleaseWithExit: %v", err)
+	}
+
+	history, err := slot.History(townRoot)
+	if err != nil {
+		t.Fatalf("slot.History: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history holds %d entries, want one per acquisition: %+v", len(history), history)
+	}
+	if history[0].Role != "gastown/refinery-batch" {
+		t.Errorf("history role = %q, want the batch gate's own role", history[0].Role)
+	}
+	if history[0].HeldS == nil || *history[0].HeldS < 0.1 {
+		t.Errorf("history held_s = %v, want the ~0.12s hold", history[0].HeldS)
+	}
+
+	rawEvents, err := os.ReadFile(filepath.Join(townRoot, gtevents.EventsFile))
+	if err != nil {
+		t.Fatalf("read events log: %v", err)
+	}
+	seen := map[string]gtevents.Event{}
+	for _, line := range strings.Split(strings.TrimSpace(string(rawEvents)), "\n") {
+		if line == "" {
+			continue
+		}
+		var event gtevents.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("unmarshal event %q: %v", line, err)
+		}
+		seen[event.Type] = event
+	}
+	for _, want := range []string{gtevents.TypeSlotWait, gtevents.TypeSlotHold} {
+		event, ok := seen[want]
+		if !ok {
+			t.Fatalf("no %s event in %s: %s", want, gtevents.EventsFile, rawEvents)
+		}
+		assertPayloadString(t, event.Payload, "role", "gastown/refinery-batch")
+		if event.Visibility != gtevents.VisibilityBoth {
+			t.Errorf("%s visibility = %q, want %q so gt feed --plain shows it", want, event.Visibility, gtevents.VisibilityBoth)
+		}
+	}
+	// The exit status the batch gate reports is its own outcome, not the CLI's.
+	if got := seen[gtevents.TypeSlotHold].Payload["exit_status"]; got != float64(1) {
+		t.Errorf("slot_hold exit_status = %#v, want 1", got)
 	}
 }
