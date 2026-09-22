@@ -85,6 +85,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		score           float64
 		branchMissing   bool // true if branch doesn't exist in git (when --verify is set)
 		branchVerifyErr bool // true if git check errored (corrupt repo, permission, etc.)
+		alreadyLanded   bool // true if the submitted commit is already on target (when --verify is set): merged, bookkeeping incomplete
 	}
 	var scored []scoredIssue
 
@@ -140,9 +141,14 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		// Check branch existence if --verify is set (local + remote-tracking refs)
 		branchMissing, branchVerifyErr := verifyBranch(mqListVerify, gitClient, fields)
 
+		// Check whether the submitted commit already landed on target — an MR
+		// a prior refinery pass merged and pushed but crashed before finishing
+		// bookkeeping still reads 'open'/'ready' otherwise (gt-wh66).
+		alreadyLanded := verifyAlreadyLanded(mqListVerify, gitClient, fields)
+
 		// Calculate priority score
 		score := calculateMRScore(issue, fields, now)
-		scored = append(scored, scoredIssue{issue: issue, fields: fields, score: score, branchMissing: branchMissing, branchVerifyErr: branchVerifyErr})
+		scored = append(scored, scoredIssue{issue: issue, fields: fields, score: score, branchMissing: branchMissing, branchVerifyErr: branchVerifyErr, alreadyLanded: alreadyLanded})
 	}
 
 	// Sort by score descending (highest priority first)
@@ -162,12 +168,13 @@ func runMQList(cmd *cobra.Command, args []string) error {
 			// Extend JSON with verification results
 			type verifiedIssue struct {
 				*beads.Issue
-				BranchExists *bool `json:"branch_exists,omitempty"`
-				VerifyError  bool  `json:"verify_error,omitempty"`
+				BranchExists  *bool `json:"branch_exists,omitempty"`
+				VerifyError   bool  `json:"verify_error,omitempty"`
+				AlreadyLanded bool  `json:"already_landed,omitempty"`
 			}
 			var verified []verifiedIssue
 			for _, s := range scored {
-				vi := verifiedIssue{Issue: s.issue}
+				vi := verifiedIssue{Issue: s.issue, AlreadyLanded: s.alreadyLanded}
 				if s.fields != nil && s.fields.Branch != "" {
 					if s.branchVerifyErr {
 						vi.VerifyError = true
@@ -199,12 +206,20 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		issue := item.issue
 		fields := item.fields
 
-		// Determine display status
+		// Determine display status. A submitted commit already reachable from
+		// target takes priority over ready/blocked: the MR is not waiting to
+		// be merged, it already was — a prior pass merged and pushed it but
+		// crashed before finishing bookkeeping (gt-wh66), and reporting it as
+		// 'ready' invites both an operator and the refinery itself to re-gate
+		// a diff that is already proven and already live.
 		displayStatus := issue.Status
 		if issue.Status == "open" {
-			if beads.HasUnresolvedBlockers(issue) {
+			switch {
+			case item.alreadyLanded:
+				displayStatus = "landed"
+			case beads.HasUnresolvedBlockers(issue):
 				displayStatus = "blocked"
-			} else {
+			default:
 				displayStatus = "ready"
 			}
 		}
@@ -214,6 +229,8 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		switch displayStatus {
 		case "ready":
 			styledStatus = style.Success.Render("ready")
+		case "landed":
+			styledStatus = style.Warning.Render("landed*")
 		case "in_progress":
 			styledStatus = style.Warning.Render("active")
 		case "blocked":
@@ -299,6 +316,18 @@ func runMQList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n  %s %d MR(s) with missing branches\n",
 				style.Error.Render("⚠"),
 				missingCount)
+		}
+
+		landedCount := 0
+		for _, item := range scored {
+			if item.alreadyLanded {
+				landedCount++
+			}
+		}
+		if landedCount > 0 {
+			fmt.Printf("\n  %s %d MR(s) marked landed*: the submitted commit is already on target — merged, but post-merge bookkeeping did not finish (gt-wh66); the next refinery cycle resumes it, not re-gates it\n",
+				style.Warning.Render("●"),
+				landedCount)
 		}
 	}
 
@@ -432,4 +461,25 @@ func verifyBranch(verify bool, client branchVerifier, fields *beads.MRFields) (b
 		return true, false
 	}
 	return false, false
+}
+
+// mrLandedVerifier abstracts the reachability check gt mq list --verify uses
+// to distinguish an MR that is genuinely ready to merge from one whose
+// submitted commit already landed on its target — the state a refinery
+// crash between push and bookkeeping leaves behind (gt-wh66).
+type mrLandedVerifier interface {
+	CommitLandedOnTarget(remote, target, commit string) bool
+}
+
+// verifyAlreadyLanded reports whether fields' submitted commit is already on
+// its target branch — the same check the refinery's own resume path uses
+// (git.CommitLandedOnTarget). False whenever --verify is off, the client is
+// absent, or required fields are missing: this is best-effort enrichment of
+// the list, not a new failure mode for a command that otherwise runs without
+// git access.
+func verifyAlreadyLanded(verify bool, client mrLandedVerifier, fields *beads.MRFields) bool {
+	if !verify || client == nil || fields == nil || fields.CommitSHA == "" || fields.Target == "" {
+		return false
+	}
+	return client.CommitLandedOnTarget("origin", fields.Target, fields.CommitSHA)
 }

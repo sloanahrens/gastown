@@ -2718,6 +2718,57 @@ func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	return true, nil
 }
 
+// CommitLandedOnTarget reports whether commit was already pushed to
+// remote/target by an earlier merge: its exact tip, an ancestor of a later
+// commit, or (a rebase-based queue can rewrite a commit's SHA while
+// preserving content) a commit every one of whose own patches is already
+// applied upstream by patch-id (git cherry).
+//
+// This deliberately stops short of counting a "merge-tree no-op" as landed,
+// unlike VerifyPushedCommitReachableFromPushTarget: that signal is equally
+// true of a commit that never contributed anything to target to begin with,
+// which is a different question (an empty or superseded submission, not a
+// landed one — see the refinery's own empty-merge checks, gt-j5cc). Reusing
+// the broader check here would misreport that case as already landed
+// instead of merge-ineligible, so this checks strictly: literal
+// reachability, or every one of commit's own commits individually already
+// present upstream by patch-id — never merely that merging it now would add
+// nothing.
+//
+// A queue that squashes a multi-commit branch into one upstream commit
+// defeats even the cherry check (no single upstream patch-id equals any one
+// of the branch's own commits); that case has no fully-automatic answer here
+// (see gt mq post-merge --landed-commit, which takes an explicit human
+// attestation instead) and this reports it as not landed.
+func (g *Git) CommitLandedOnTarget(remote, target, commit string) bool {
+	commit = strings.TrimSpace(commit)
+	target = strings.TrimSpace(target)
+	if commit == "" || target == "" {
+		return false
+	}
+	targetRef := remote + "/" + target
+
+	if tip, err := g.Rev(targetRef); err == nil && strings.TrimSpace(tip) == commit {
+		return true
+	}
+	if reachable, err := g.IsAncestor(commit, targetRef); err == nil && reachable {
+		return true
+	}
+
+	base, err := g.MergeBase(targetRef, commit)
+	if err != nil || base == commit {
+		// commit is itself the merge-base (or the base couldn't be
+		// resolved): there is no range of commit's own patches for cherry to
+		// check, so there is no landed-content signal here.
+		return false
+	}
+	out, err := g.Cherry(targetRef, commit)
+	if err != nil {
+		return false
+	}
+	return out != "" && CountCherryUnmergedCommits(out) == 0
+}
+
 // LogGrep reports whether any commit reachable from ref has a message
 // containing pattern as a literal substring (git log --grep -F). Unlike
 // IsAncestor, this survives a squash merge: a squash rewrites the branch
