@@ -919,26 +919,6 @@ func installFakeTmuxNoServer(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// installNoopGt puts a `gt` that does nothing first on PATH, so a detection test
-// can drive a restart path without starting, restarting or killing a real
-// session. Pair it with installFakeTmuxNoServer when the test needs a dead one.
-func installNoopGt(t *testing.T) {
-	t.Helper()
-
-	binDir := t.TempDir()
-	path := filepath.Join(binDir, "gt")
-	script := "#!/bin/sh\nexit 0\n"
-	if runtime.GOOS == "windows" {
-		path += ".bat"
-		script = "@echo off\r\nexit /b 0\r\n"
-	}
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write noop gt: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // fakeBd creates a test-local *BdCli matching the old shell script behavior:
 // list/query→"[]", update→ok, show→cleanup wisp JSON. Returns BdCli and captured call log.
 func fakeBd() (*BdCli, *mockBdCalls) {
@@ -2121,9 +2101,10 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 // control. The liveness cross-check lives in the live-session path, so a polecat
 // whose session and agent process are both gone is still classified and
 // escalated — the gate cannot be "fixed" by silencing the rule. Not parallel:
-// it installs a no-op gt on PATH so the restart starts nothing real.
+// it stubs the restart seam so the restart starts nothing real (gt-5itbt: the
+// real restartSessionExec now panics in a test binary unless faked).
 func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T) {
-	installNoopGt(t)
+	stubRestartSessionExec(t)
 
 	townRoot := t.TempDir()
 	bd, _ := mockBd(
@@ -3997,6 +3978,34 @@ func stubNukePolecat(t *testing.T, err error) func() bool {
 	return func() bool { return called }
 }
 
+// stubNukePolecatExecs replaces NukePolecat's own tmux-kill and `gt polecat
+// nuke` seams so a test exercising NukePolecat directly (not through the
+// coarser nukePolecatFunc/stubNukePolecat) can see exactly what it was asked
+// to destroy without spawning either: the real implementations panic under a
+// test binary unless faked (gt-5itbt).
+//
+// Must not be combined with t.Parallel: it mutates package variables.
+func stubNukePolecatExecs(t *testing.T) (killed *[]string, nuked *[]string) {
+	t.Helper()
+	killed = &[]string{}
+	nuked = &[]string{}
+
+	oldKill := nukeKillSessionExec
+	nukeKillSessionExec = func(sessionName string) {
+		*killed = append(*killed, sessionName)
+	}
+	t.Cleanup(func() { nukeKillSessionExec = oldKill })
+
+	oldNuke := nukePolecatWorktreeExec
+	nukePolecatWorktreeExec = func(workDir, address string) error {
+		*nuked = append(*nuked, address)
+		return nil
+	}
+	t.Cleanup(func() { nukePolecatWorktreeExec = oldNuke })
+
+	return killed, nuked
+}
+
 // TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged verifies the aa-apw fix:
 // when a stopped polecat's branch work is already merged to origin/main (e.g.,
 // via squash-merge), the witness must NOT restart the session — restarting
@@ -4039,8 +4048,8 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 // behavior is preserved when work is NOT merged: handleZombieRestart proceeds
 // to its normal cleanup/restart flow.
 //
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
-// nukePolecatFunc vars.
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged,
+// nukePolecatFunc and restartSessionExec vars.
 func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
 	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
@@ -4048,6 +4057,7 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
 	nuked := stubNukePolecat(t, nil)
+	restarts := stubRestartSessionExec(t)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4063,6 +4073,9 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	}
 	if nuked() {
 		t.Error("nukePolecatFunc was called; archive path should not fire when work is not merged")
+	}
+	if len(*restarts) != 1 || (*restarts)[0] != "zz-test-rig/zz-test-cat" {
+		t.Errorf("restarts = %v, want exactly [\"zz-test-rig/zz-test-cat\"]", *restarts)
 	}
 }
 
@@ -4080,8 +4093,8 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 // name here would let a regression in this gate shell out to the real
 // `gt polecat nuke` and kill a real tmux session.
 //
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
-// nukePolecatFunc vars.
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged,
+// nukePolecatFunc and restartSessionExec vars.
 func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
 	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
@@ -4093,6 +4106,7 @@ func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
 	nuked := stubNukePolecat(t, nil)
+	stubRestartSessionExec(t)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4171,4 +4185,81 @@ func TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged(t *testing.T) {
 	if !nuked() {
 		t.Error("nukePolecatFunc was not called; an empty hookBead with a real merge must still archive")
 	}
+}
+
+// TestNukePolecatCallsInjectedExecsWhenFaked is the positive companion to
+// TestNukePolecatPanicsWithoutFakeExecutors: with stubNukePolecatExecs
+// injected, NukePolecat runs clean and drives both seams with the expected
+// session name and address, rather than merely avoiding the panic.
+//
+// Not parallel: mutates package-level vars via stubNukePolecatExecs.
+func TestNukePolecatCallsInjectedExecsWhenFaked(t *testing.T) {
+	killed, nuked := stubNukePolecatExecs(t)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	if err := NukePolecat(bd, t.TempDir(), "zz-test-rig", "zz-test-cat"); err != nil {
+		t.Fatalf("NukePolecat: %v", err)
+	}
+	if len(*nuked) != 1 || (*nuked)[0] != "zz-test-rig/zz-test-cat" {
+		t.Errorf("nuked = %v, want exactly [\"zz-test-rig/zz-test-cat\"]", *nuked)
+	}
+	if len(*killed) != 1 {
+		t.Errorf("killed sessions = %v, want exactly one", *killed)
+	}
+}
+
+// TestNukePolecatPanicsWithoutFakeExecutors is the enforcement test for
+// gt-5itbt: NukePolecat's real tmux-kill and `gt polecat nuke` seams must
+// refuse to run for real inside a test binary. A test that reaches them
+// without injecting a fake (stubNukePolecatExecs) must fail loud instead of
+// running the real nuke against whatever rig/polecat name it happened to
+// pass in.
+//
+// Not parallel: NukePolecat's veto/MR checks touch package state via bd.
+func TestNukePolecatPanicsWithoutFakeExecutors(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NukePolecat returned without panicking — the real kill/nuke path ran unguarded")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "HERMETIC VIOLATION") {
+			t.Fatalf("panic = %v, want a HERMETIC VIOLATION message", r)
+		}
+	}()
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	// Real rig/polecat names, exactly like the incident this guards against —
+	// the guard must trip before either name is ever inspected.
+	_ = NukePolecat(bd, t.TempDir(), "gastown", "flint")
+	t.Fatal("NukePolecat returned without panicking — the real kill/nuke path ran unguarded")
+}
+
+// TestRestartPolecatSessionPanicsWithoutFakeExecutor is the enforcement test
+// for restartSessionExec's default: a test reaching RestartPolecatSession
+// without stubbing it (stubRestartSessionExec) must fail loud instead of
+// running a real `gt session restart` (gt-5itbt, companion to
+// TestNukePolecatPanicsWithoutFakeExecutors).
+func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("RestartPolecatSession returned without panicking — the real restart path ran unguarded")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "HERMETIC VIOLATION") {
+			t.Fatalf("panic = %v, want a HERMETIC VIOLATION message", r)
+		}
+	}()
+
+	_ = RestartPolecatSession(t.TempDir(), "gastown", "flint")
+	t.Fatal("RestartPolecatSession returned without panicking — the real restart path ran unguarded")
 }

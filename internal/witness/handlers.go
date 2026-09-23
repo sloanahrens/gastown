@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
@@ -1338,20 +1339,76 @@ func RestartPolecatSession(workDir, rigName, polecatName string) error {
 	return nil
 }
 
+// panicIfTestBinary makes a destructive real-world operation (killing a tmux
+// session, nuking a polecat worktree, restarting a live session) impossible
+// to reach from a `go test` binary unless the caller has injected a fake over
+// the package-level executor variable that guards it. testing.Testing() is
+// authoritative for any `go test` binary regardless of env vars or the
+// workDir/rig/polecat name arguments a particular test passes in — env-based
+// mitigations can be bypassed by a real name slipping through as a plain
+// string, this cannot (gt-5itbt).
+func panicIfTestBinary(op string) {
+	if testing.Testing() {
+		panic(fmt.Sprintf(
+			"HERMETIC VIOLATION: %s attempted a real, destructive operation from "+
+				"inside a test binary. Inject a fake over the package-level executor "+
+				"variable instead of exercising the real implementation (gt-5itbt).", op))
+	}
+}
+
 // restartSessionExec performs the actual session restart. It is a package
 // variable so tests can assert the pause gate's decision without spawning a
 // real `gt session restart`, which a non-hermetic test process could point at
 // the live town (gt-wisp-6ajo). Swap it only from a non-parallel test, and
-// restore it in t.Cleanup.
+// restore it in t.Cleanup. The default panics under a test binary (gt-5itbt)
+// instead of silently running for real when a test forgets to swap it.
 var restartSessionExec = func(workDir, address string) error {
+	panicIfTestBinary("RestartPolecatSession: gt session restart " + address)
 	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
 }
 
 // nukePolecatFunc is a package variable so tests can assert the zombie
 // archive path's decision without shelling out to the real `gt polecat
 // nuke`, which kills a live tmux session and deletes a real worktree (gt-evdg).
-// Swap it only from a non-parallel test, and restore it in t.Cleanup.
+// Swap it only from a non-parallel test, and restore it in t.Cleanup. A test
+// that forgets to swap it still cannot reach a real subprocess: the default
+// is NukePolecat, whose own tmux-kill and `gt polecat nuke` seams
+// (nukeKillSessionExec, nukePolecatWorktreeExec below) panic under a test
+// binary unless separately faked (gt-5itbt).
 var nukePolecatFunc = NukePolecat
+
+// nukeKillSessionExec kills sessionName's tmux session, the first step of a
+// polecat nuke. Package variable so tests can inject a fake instead of
+// touching a real tmux server; the default panics under a test binary
+// (gt-5itbt) instead of silently running for real when a test forgets to
+// swap it.
+var nukeKillSessionExec = func(sessionName string) {
+	panicIfTestBinary("NukePolecat: kill tmux session " + sessionName)
+	t := tmux.NewTmux()
+
+	// Check if session exists and kill it
+	if running, _ := t.HasSession(sessionName); running {
+		// Try graceful shutdown first (Ctrl-C), then force kill
+		_ = t.SendKeysRaw(sessionName, "C-c")
+		// Brief delay for graceful handling
+		time.Sleep(100 * time.Millisecond)
+		// Force kill the session
+		if err := t.KillSession(sessionName); err != nil {
+			// Log but continue - session might already be dead
+			// The important thing is we tried
+		}
+	}
+}
+
+// nukePolecatWorktreeExec runs `gt polecat nuke <address>` to clean up the
+// worktree, branch and beads. Package variable so tests can inject a fake
+// instead of touching the live town; the default panics under a test binary
+// (gt-5itbt) instead of silently running for real when a test forgets to
+// swap it.
+var nukePolecatWorktreeExec = func(workDir, address string) error {
+	panicIfTestBinary("NukePolecat: gt polecat nuke " + address)
+	return util.ExecRun(workDir, "gt", "polecat", "nuke", address)
+}
 
 // NukePolecat executes the actual nuke operation for a polecat.
 // This kills the tmux session, removes the worktree, and cleans up beads.
@@ -1379,25 +1436,11 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 	// session due to rig loading issues or race conditions with IsRunning checks.
 	// See: gt-g9ft5 - sessions were piling up because nuke wasn't killing them.
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
-	t := tmux.NewTmux()
-
-	// Check if session exists and kill it
-	if running, _ := t.HasSession(sessionName); running {
-		// Try graceful shutdown first (Ctrl-C), then force kill
-		_ = t.SendKeysRaw(sessionName, "C-c")
-		// Brief delay for graceful handling
-		time.Sleep(100 * time.Millisecond)
-		// Force kill the session
-		if err := t.KillSession(sessionName); err != nil {
-			// Log but continue - session might already be dead
-			// The important thing is we tried
-		}
-	}
+	nukeKillSessionExec(sessionName)
 
 	// Now run gt polecat nuke to clean up worktree, branch, and beads
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
-
-	if err := util.ExecRun(workDir, "gt", "polecat", "nuke", address); err != nil {
+	if err := nukePolecatWorktreeExec(workDir, address); err != nil {
 		return fmt.Errorf("nuke failed: %w", err)
 	}
 
