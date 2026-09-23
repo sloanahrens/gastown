@@ -37,9 +37,11 @@ const rubricBaseJSON = `{
 }`
 
 // newRubricFixture is newReviewFixture with a real rubric: the base commit
-// carries rubricBaseJSON, the head commit carries headRubric, and the rig
-// manifest records the WORKING TREE copy's sha. AssertVersion therefore passes
-// on either side of the change and only the criterion guard is under test.
+// carries rubricBaseJSON, the head commit carries headRubric, origin/main
+// tracks base, and the rig manifest records base's (the deployed rubric's)
+// sha — what Run's rubric-touch routing checks a touching diff against
+// (gt-7bvf) — so AssertVersion/AssertVersionWithRubric passes regardless of
+// what headRubric proposes, and only the criterion guard is under test.
 func newRubricFixture(t *testing.T, headRubric string) *reviewFixture {
 	t.Helper()
 	repoDir := initTestRepo(t)
@@ -79,7 +81,12 @@ func newRubricFixture(t *testing.T, headRubric string) *reviewFixture {
 		t.Fatalf("write om stub binary: %v", err)
 	}
 	binSum := sha256.Sum256([]byte("#!/bin/sh\necho om\n"))
-	rubricSum := sha256.Sum256([]byte(headRubric))
+	// The manifest pins the DEPLOYED rubric — base's content, since
+	// origin/main tracks base above — never headRubric: a diff that touches
+	// .om.json now asserts against origin/<target>'s committed content
+	// (gt-7bvf), and stamping the branch's own proposed content here would
+	// make AssertVersionWithRubric pass for the wrong reason.
+	rubricSum := sha256.Sum256([]byte(rubricBaseJSON))
 	var m Manifest
 	m.OMBinary.Path = binPath
 	m.OMBinary.SHA256 = hex.EncodeToString(binSum[:])
@@ -563,5 +570,268 @@ func TestRun_RubricUntouchedIsNotRefused(t *testing.T) {
 	}
 	if result.Exit != 0 {
 		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+}
+
+// TestRun_RubricTouchDoesNotFalsePositiveVersionMismatch is the gt-7bvf
+// repro: the single-review CLI path checks RepoDir out onto the reviewed
+// head before invoking Run, so a branch that touches .om.json leaves
+// RepoDir's working tree holding the branch's OWN proposed rubric, never
+// what the manifest (correctly) pins — the deployed one. Before the fix,
+// AssertVersion hashed that working tree and every such review failed
+// version_mismatch before the gate ever ran, for a completely valid change.
+func TestRun_RubricTouchDoesNotFalsePositiveVersionMismatch(t *testing.T) {
+	const headRubric = `{
+  "threshold": 0.6,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."},
+    {"name": "fail-open-branch", "weight": 2, "guidance": "Any gate whose failure path emits the success value is a finding."},
+    {"name": "docs-and-comments", "weight": 2, "guidance": "Docs follow the writing rules."}
+  ]
+}`
+	fixture := newRubricFixture(t, headRubric)
+	deps, calls := reviewDeps(t, fixture)
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Class == VersionMismatch {
+		t.Fatalf("Class = %q (stderr=%q): a diff touching .om.json must assert against the target's committed rubric, not RepoDir's working tree", result.Class, result.Stderr)
+	}
+	if *calls != 1 {
+		t.Fatalf("gate script invoked %d times, want 1 (an addition is reviewed, not refused)", *calls)
+	}
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+}
+
+// TestRun_RubricTouchStillFailsClosedOnStaleManifest pins the other half of
+// the fix: routing the assertion onto the target's own committed rubric must
+// still fail closed when that content genuinely does not match what the
+// manifest records (e.g. deploy.sh has not re-run since a legitimate rubric
+// change landed) — AssertVersionWithRubric must refuse exactly like
+// AssertVersion does, not defer silently to whatever origin/target holds.
+func TestRun_RubricTouchStillFailsClosedOnStaleManifest(t *testing.T) {
+	const headRubric = `{
+  "threshold": 0.6,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."},
+    {"name": "fail-open-branch", "weight": 2, "guidance": "Any gate whose failure path emits the success value is a finding."},
+    {"name": "docs-and-comments", "weight": 2, "guidance": "Docs follow the writing rules."}
+  ]
+}`
+	fixture := newRubricFixture(t, headRubric)
+	m, err := LoadManifest(fixture.rigDir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	m.Rubric.SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.rigDir, manifestFileName), data, 0644); err != nil {
+		t.Fatalf("rewrite manifest: %v", err)
+	}
+	deps, calls := reviewDeps(t, fixture)
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if *calls != 0 {
+		t.Fatalf("gate script invoked %d times, want 0 (version_mismatch caught before invoke)", *calls)
+	}
+	if result.Exit != 2 || result.Class != VersionMismatch {
+		t.Fatalf("Exit/Class = %d/%q, want 2/%q", result.Exit, result.Class, VersionMismatch)
+	}
+}
+
+// TestRun_ThresholdLoweringMRIsReviewedAgainstTargetsThreshold is the other
+// documented test for gt-7bvf: DiffRubricAt only compares the rubric
+// CRITERIA array, so a branch that lowers "threshold" alone (leaving every
+// criterion unchanged) carries no delta for that guard to refuse. The
+// fail-closed guarantee has to come from where the review itself runs — the
+// gate script's cwd must be the target's own rubric, never the branch's, so
+// om grades against the OLD threshold regardless of what the branch's
+// .om.json requests.
+func TestRun_ThresholdLoweringMRIsReviewedAgainstTargetsThreshold(t *testing.T) {
+	const headRubric = `{
+  "threshold": 0.1,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."},
+    {"name": "fail-open-branch", "weight": 2, "guidance": "Any gate whose failure path emits the success value is a finding."}
+  ]
+}`
+	fixture := newRubricFixture(t, headRubric)
+	fakeBDForReview(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	calls := 0
+	var gotDir string
+	var gotRubric []byte
+	var readErr error
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, dir string) (string, int, error) {
+			calls++
+			gotDir = dir
+			// Read here, not after Run returns: Run removes this worktree in
+			// its own deferred cleanup before it returns.
+			gotRubric, readErr = os.ReadFile(filepath.Join(dir, ".om.json"))
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if calls != 1 {
+		t.Fatalf("gate script invoked %d times, want 1 (the criteria are unchanged; the threshold alone is not this guard's own job to refuse)", calls)
+	}
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if gotDir == fixture.repoDir {
+		t.Fatal("gate script ran with cwd = req.RepoDir; a diff touching .om.json must never be reviewed against the branch's own working tree")
+	}
+	if readErr != nil {
+		t.Fatalf("read reviewed cwd's rubric: %v", readErr)
+	}
+	if !strings.Contains(string(gotRubric), `"threshold": 0.6`) {
+		t.Errorf("gate script's cwd carries .om.json %s, want the target's own (threshold 0.6), not the branch's lowered one", gotRubric)
+	}
+}
+
+// TestRun_LandedRubricTouchGradesUnderPreChangeRubric is the landed/retro
+// half of the mayor's gt-7bvf design decision. Once a rubric-touching commit
+// lands, it is already on origin/<target>'s first-parent chain, so reading
+// "the target's rubric" from origin/<target> itself — as the non-landed path
+// correctly does — would grade the change under the very rubric it just
+// introduced. A landed review must instead read the PRE-change rubric: the
+// landed range's Base, the state before this diff landed. The manifest here
+// still pins the base (pre-change) rubric, exactly what it holds right after
+// this commit lands: post-merge no longer restamps automatically (see
+// mq.go's detectRubricChangeAfterMerge), so AssertVersionWithRubric passing
+// against Base is the expected steady state, not a coincidence of the test.
+func TestRun_LandedRubricTouchGradesUnderPreChangeRubric(t *testing.T) {
+	fakeBDForReview(t)
+	repoDir := initTestRepo(t)
+	commitFileReview(t, repoDir, ".om.json", rubricBaseJSON, "add rubric")
+	g := git.NewGit(repoDir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	updateRef := func(ref, commit string) {
+		t.Helper()
+		cmd := exec.Command("git", "update-ref", ref, commit)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("update-ref %s %s: %v\n%s", ref, commit, err, out)
+		}
+	}
+	updateRef("refs/remotes/origin/main", base)
+
+	// A real origin remote so the post-approve note push has somewhere to go.
+	bareDir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare origin: %v\n%s", err, out)
+	}
+	if _, err := g.AddRemote("origin", bareDir); err != nil {
+		t.Fatalf("add remote origin: %v", err)
+	}
+
+	// The landed commit lowers the threshold alone, leaving every criterion
+	// unchanged — DiffRubricAt has nothing to refuse here (it only compares
+	// the criteria array), so the only thing that can catch a self-graded
+	// threshold drop is where the review itself runs.
+	const landedRubric = `{
+  "threshold": 0.1,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."},
+    {"name": "fail-open-branch", "weight": 2, "guidance": "Any gate whose failure path emits the success value is a finding."}
+  ]
+}`
+	landed := commitFileReview(t, repoDir, ".om.json", landedRubric, "lower threshold")
+
+	// This commit already landed on main: move origin/main's ref onto it —
+	// the shape gt mq review --landed sees for a fast-forward landing.
+	updateRef("refs/remotes/origin/main", landed)
+
+	rng, err := ResolveLandedRange(g, landed, "main")
+	if err != nil {
+		t.Fatalf("ResolveLandedRange: %v", err)
+	}
+
+	rigDir := t.TempDir()
+	binPath := filepath.Join(rigDir, "om-stub-binary")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho om\n"), 0755); err != nil {
+		t.Fatalf("write om stub binary: %v", err)
+	}
+	binSum := sha256.Sum256([]byte("#!/bin/sh\necho om\n"))
+	rubricSum := sha256.Sum256([]byte(rubricBaseJSON))
+	var m Manifest
+	m.OMBinary.Path = binPath
+	m.OMBinary.SHA256 = hex.EncodeToString(binSum[:])
+	m.OMBinary.Version = "1.4.0"
+	m.Rubric.Path = ".om.json"
+	m.Rubric.SHA256 = hex.EncodeToString(rubricSum[:])
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, manifestFileName), data, 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	store := newReviewStore() // no MR bead: a landed review has none
+	var gotDir string
+	var gotRubric []byte
+	var readErr error
+	calls := 0
+	deps := Deps{
+		Git:      g,
+		Beads:    beads.NewWithStore(repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, dir string) (string, int, error) {
+			calls++
+			gotDir = dir
+			// Read here, not after Run returns: Run removes this worktree in
+			// its own deferred cleanup before it returns.
+			gotRubric, readErr = os.ReadFile(filepath.Join(dir, ".om.json"))
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	req := ReviewRequest{
+		RigDir:  rigDir,
+		RepoDir: repoDir,
+		Rig:     "gastown",
+		Target:  "main",
+		Landed:  &rng,
+		Attempt: 1,
+		Config:  config.EditorialConfig{Required: true},
+	}
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Class == VersionMismatch {
+		t.Fatalf("Class = %q (stderr=%q): the manifest's pre-change rubric sha must match the landed range's Base content", result.Class, result.Stderr)
+	}
+	if calls != 1 {
+		t.Fatalf("gate script invoked %d times, want 1 (stderr=%q class=%q)", calls, result.Stderr, result.Class)
+	}
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if readErr != nil {
+		t.Fatalf("read reviewed cwd's rubric: %v", readErr)
+	}
+	if gotDir == repoDir {
+		t.Fatal("gate script ran with cwd = req.RepoDir; a landed diff touching .om.json must run in a fresh worktree, never RepoDir's own checkout")
+	}
+	if !strings.Contains(string(gotRubric), `"threshold": 0.6`) {
+		t.Errorf("gate script's cwd carries .om.json %s, want the PRE-change rubric (threshold 0.6) — origin/main already carries the landed (lowered) one, and reading it there would self-grade", gotRubric)
 	}
 }

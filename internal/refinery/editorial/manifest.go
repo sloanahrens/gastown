@@ -55,15 +55,53 @@ func LoadManifest(rigDir string) (*Manifest, error) {
 // (m.Files — om-gate.sh, formula overlays, directives; the same set
 // `gt doctor harness-drift` checks) has an on-disk sha256 matching the
 // manifest; the om binary is present and its content sha256 matches the
-// manifest; the rubric file's content sha256 matches the manifest; and,
-// when cfg.MinVersion is set, the manifest's recorded om version is not
-// below it. "dev" (the unset-ldflags default) is treated as below any
-// floor. A mismatch anywhere returns a *ClassifiedError classed
-// BinaryMissing or VersionMismatch — callers must run this before invoking
-// the gate script, per the fail-closed table's ordering. Without the
-// managed-file check, a hand-edited gate script is trusted and run as if it
-// were the deployed one (gt-qxot).
+// manifest; the rubric file's content sha256 (read from rigRepoDir's WORKING
+// TREE) matches the manifest; and, when cfg.MinVersion is set, the
+// manifest's recorded om version is not below it. "dev" (the
+// unset-ldflags default) is treated as below any floor. A mismatch anywhere
+// returns a *ClassifiedError classed BinaryMissing or VersionMismatch —
+// callers must run this before invoking the gate script, per the
+// fail-closed table's ordering. Without the managed-file check, a
+// hand-edited gate script is trusted and run as if it were the deployed one
+// (gt-qxot).
+//
+// rigRepoDir's working tree is not always the deployed rubric: the
+// single-review CLI path checks it out onto the reviewed head before
+// invoking `gt mq review`, so a diff that touches the rubric file leaves
+// this hashing the branch's own proposed rubric — the branch grading itself
+// under its own rules. A caller whose diff touches the rubric must use
+// AssertVersionWithRubric instead (gt-7bvf); see Run.
 func AssertVersion(m *Manifest, cfg config.EditorialConfig, rigDir, rigRepoDir string) error {
+	return assertVersion(m, cfg, rigDir, func() (string, error) {
+		rubricPath := m.Rubric.Path
+		if !filepath.IsAbs(rubricPath) {
+			rubricPath = filepath.Join(rigRepoDir, m.Rubric.Path)
+		}
+		return sha256File(rubricPath)
+	})
+}
+
+// AssertVersionWithRubric is AssertVersion for a review whose diff touches
+// the rubric file: it checks the manifest's recorded rubric hash against
+// rubricBlob's own content — normally read via `git show origin/<target>:<path>`,
+// the TARGET's committed rubric — rather than reading m.Rubric.Path off a
+// working tree that may hold the branch's own modified copy. Everything else
+// AssertVersion checks (the managed harness files, the om binary, the
+// version floor) is unaffected by which rubric is in play, so this shares
+// that body (gt-7bvf).
+func AssertVersionWithRubric(m *Manifest, cfg config.EditorialConfig, rigDir, rubricBlob string) error {
+	return assertVersion(m, cfg, rigDir, func() (string, error) {
+		sum := sha256.Sum256([]byte(rubricBlob))
+		return hex.EncodeToString(sum[:]), nil
+	})
+}
+
+// assertVersion is AssertVersion's body, parameterized on how the rubric's
+// current content is obtained — a working-tree file (AssertVersion) or an
+// already-read blob (AssertVersionWithRubric). rubricSHA is never called
+// when m.Rubric.Path is unset: a rig that declares no rubric has nothing for
+// either caller to read.
+func assertVersion(m *Manifest, cfg config.EditorialConfig, rigDir string, rubricSHA func() (string, error)) error {
 	if m == nil {
 		return &ClassifiedError{Class: BinaryMissing, Err: fmt.Errorf("no harness manifest loaded")}
 	}
@@ -108,13 +146,9 @@ func AssertVersion(m *Manifest, cfg config.EditorialConfig, rigDir, rigRepoDir s
 	}
 
 	if m.Rubric.Path != "" {
-		rubricPath := m.Rubric.Path
-		if !filepath.IsAbs(rubricPath) {
-			rubricPath = filepath.Join(rigRepoDir, m.Rubric.Path)
-		}
-		actualRubricSHA, err := sha256File(rubricPath)
+		actualRubricSHA, err := rubricSHA()
 		if err != nil {
-			return &ClassifiedError{Class: VersionMismatch, Err: fmt.Errorf("hashing rubric %s: %w", rubricPath, err)}
+			return &ClassifiedError{Class: VersionMismatch, Err: fmt.Errorf("hashing rubric %s: %w", m.Rubric.Path, err)}
 		}
 		if actualRubricSHA != m.Rubric.SHA256 {
 			return &ClassifiedError{Class: VersionMismatch, Err: fmt.Errorf("rubric sha256 %s does not match manifest %s", actualRubricSHA, m.Rubric.SHA256)}
@@ -132,6 +166,20 @@ func AssertVersion(m *Manifest, cfg config.EditorialConfig, rigDir, rigRepoDir s
 	}
 
 	return nil
+}
+
+// SaveManifest writes m back to rigDir's harness manifest file, in the same
+// format LoadManifest reads. Used to re-stamp a single field (the rubric
+// hash, after a merge that legitimately changed the deployed rubric) without
+// re-running the whole deploy — everything else in the manifest is
+// deploy.sh's to write, and callers of this function leave those fields
+// exactly as LoadManifest returned them.
+func SaveManifest(rigDir string, m *Manifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal harness manifest: %w", err)
+	}
+	return os.WriteFile(filepath.Join(rigDir, manifestFileName), data, 0644)
 }
 
 func sha256File(path string) (string, error) {

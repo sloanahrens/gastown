@@ -3,6 +3,8 @@ package refinery
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -901,5 +903,87 @@ func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *tes
 	gtCalls := readLog(t, gtLog)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
 		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+	}
+}
+
+// TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator is the batch
+// path's half of the mayor's gt-7bvf design decision: before this, only the
+// CLI's `gt mq post-merge` re-stamped the manifest after a rubric-touching
+// merge, so a rubric change that landed through the batch path (this
+// function) left the manifest stale with no escalation at all — the exact
+// outage gt-7bvf exists to fix, on the one path nothing caught it. Now
+// both paths detect the touch and escalate to the operator; neither
+// restamps the manifest automatically (a rubric change never self-deploys).
+func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
+	_, gtLog := fakeBDAndGt(t)
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	const baseRubric = `{
+  "threshold": 0.6,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."}
+  ]
+}`
+	const loweredRubric = `{
+  "threshold": 0.1,
+  "rubric": [
+    {"name": "correctness", "weight": 3, "guidance": "Logic errors outrank all else."}
+  ]
+}`
+	writeFile(t, workDir, ".om.json", baseRubric)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add rubric")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	branch := "polecat/test/rubric-change"
+	run(t, workDir, "git", "checkout", "-b", branch, "main")
+	writeFile(t, workDir, ".om.json", loweredRubric)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "lower threshold")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+
+	// The manifest still pins the pre-change (base) rubric — exactly what it
+	// holds right after this merge lands, since post-merge no longer
+	// restamps automatically.
+	baseSum := sha256.Sum256([]byte(baseRubric))
+	baseSHA := hex.EncodeToString(baseSum[:])
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = ".om.json"
+	manifest.Rubric.SHA256 = baseSHA
+	if err := editorial.SaveManifest(workDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	e := newTestEngineer(t, workDir, g)
+	if !e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-rubric-change",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit}) {
+		t.Fatalf("HandleMRInfoSuccess failed:\n%s", e.output.(interface{ String() string }).String())
+	}
+
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "escalate") {
+		t.Fatalf("gt escalate was not invoked, gt log:\n%s", gtCalls)
+	}
+	if !strings.Contains(gtCalls, "rubric changed on main") {
+		t.Fatalf("escalation message missing rubric-change context, gt log:\n%s", gtCalls)
+	}
+
+	reloaded, err := editorial.LoadManifest(workDir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if reloaded.Rubric.SHA256 != baseSHA {
+		t.Errorf("manifest rubric sha = %s, want unchanged %s (no auto-restamp)", reloaded.Rubric.SHA256, baseSHA)
 	}
 }

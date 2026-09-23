@@ -1,6 +1,8 @@
 package editorial
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -125,6 +127,90 @@ func DiffRubric(base, head []RubricCriterion) []RubricDelta {
 	return deltas
 }
 
+// rubricRelPath resolves rubricPath to the repo-relative form git diff and
+// git show report paths in. ok is false when rubricPath is unset, or an
+// absolute path that resolves outside repoDir — the latter can never appear
+// in a diff of repoDir, so there is nothing there for a caller to check.
+func rubricRelPath(repoDir, rubricPath string) (rel string, ok bool) {
+	if rubricPath == "" {
+		return "", false
+	}
+	rel = rubricPath
+	if filepath.IsAbs(rel) {
+		r, err := filepath.Rel(repoDir, rel)
+		if err != nil || strings.HasPrefix(r, "..") {
+			return "", false
+		}
+		rel = r
+	}
+	return filepath.ToSlash(filepath.Clean(rel)), true
+}
+
+// RubricTouched reports whether the change from mergeBase to head touches
+// the rubric file at rubricPath, and its repo-relative path when so (the
+// same form ShowFile and DiffNameOnly use). false, "", nil means the rig
+// declares no rubric, the path resolves outside repoDir, or the diff simply
+// does not touch it.
+//
+// This is Run's signal to route a review away from a working tree that may
+// hold the branch's own rubric and onto the target's deployed one instead
+// (gt-7bvf) — a decision that has to be made whether or not the touch turns
+// out to be a regression, so it is exposed independently of DiffRubricAt's
+// criterion-level comparison.
+func RubricTouched(g *git.Git, repoDir, rubricPath, mergeBase, head string) (touched bool, rel string, err error) {
+	rel, ok := rubricRelPath(repoDir, rubricPath)
+	if !ok {
+		return false, "", nil
+	}
+	files, err := g.DiffNameOnly(mergeBase, head)
+	if err != nil {
+		return false, "", fmt.Errorf("diff %s...%s: %w", mergeBase, head, err)
+	}
+	return containsPath(files, rel), rel, nil
+}
+
+// RubricChangeAfterMerge reports whether the landed range ending at
+// landedArg (resolved against target via ResolveLandedRange) touched the
+// rig's deployed rubric file, and the sha256 of the rubric content that
+// landed. It never writes anything: the mayor's gt-7bvf design decision is
+// that a rubric change never self-deploys, so a caller that gets
+// touched=true must escalate to the operator, not restamp the manifest.
+//
+// manifest may be nil (no harness manifest deployed) — that, an unset
+// manifest.Rubric.Path, or an unresolvable landedArg/target each mean
+// "nothing for this merge to escalate" and return touched=false, nil. A
+// landing whose range this cannot reconstruct from the commit graph
+// (ResolveLandedRange refuses a non-mergeable landing) is reported as an
+// error instead: the caller already knows something landed and needs to
+// know why this could not check it, not have that read as "no rubric
+// change".
+func RubricChangeAfterMerge(g *git.Git, repoRootDir string, manifest *Manifest, landedArg, target string) (touched bool, rel string, sha string, err error) {
+	if manifest == nil || manifest.Rubric.Path == "" {
+		return false, "", "", nil
+	}
+	landedArg = strings.TrimSpace(landedArg)
+	target = strings.TrimSpace(target)
+	if landedArg == "" || target == "" {
+		return false, "", "", nil
+	}
+
+	rng, err := ResolveLandedRange(g, landedArg, target)
+	if err != nil {
+		return false, "", "", fmt.Errorf("resolve landed range for rubric check: %w", err)
+	}
+	touched, rel, err = RubricTouched(g, repoRootDir, manifest.Rubric.Path, rng.Base, rng.Head)
+	if err != nil || !touched {
+		return touched, rel, "", err
+	}
+
+	blob, err := g.ShowFile(rng.Commit, rel)
+	if err != nil {
+		return true, rel, "", fmt.Errorf("reading landed rubric %s at %s: %w", rel, rng.Commit, err)
+	}
+	sum := sha256.Sum256([]byte(blob))
+	return true, rel, hex.EncodeToString(sum[:]), nil
+}
+
 // DiffRubricAt returns the criteria the change from mergeBase to head removes
 // from, or alters within, the rubric at rubricPath — and nil when the rubric is
 // untouched or every base criterion survives unchanged.
@@ -143,27 +229,11 @@ func DiffRubric(base, head []RubricCriterion) []RubricDelta {
 // unreadable rubric at head, by contrast, is a deleted rubric — every base
 // criterion is reported as removed.
 func DiffRubricAt(g *git.Git, repoDir, rubricPath, mergeBase, head string) ([]RubricDelta, error) {
-	if rubricPath == "" {
-		return nil, nil
-	}
-	// The diff reports repo-relative paths, so an absolute rubric path that
-	// resolves under the repo is compared in that form. One that resolves
-	// outside it cannot appear in any diff, so there is nothing to refuse.
-	rel := rubricPath
-	if filepath.IsAbs(rel) {
-		r, err := filepath.Rel(repoDir, rel)
-		if err != nil || strings.HasPrefix(r, "..") {
-			return nil, nil
-		}
-		rel = r
-	}
-	rel = filepath.ToSlash(filepath.Clean(rel))
-
-	touched, err := g.DiffNameOnly(mergeBase, head)
+	touched, rel, err := RubricTouched(g, repoDir, rubricPath, mergeBase, head)
 	if err != nil {
-		return nil, fmt.Errorf("diff %s...%s: %w", mergeBase, head, err)
+		return nil, err
 	}
-	if !containsPath(touched, rel) {
+	if !touched {
 		return nil, nil
 	}
 

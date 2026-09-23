@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
@@ -763,8 +765,69 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if touched, rel, sha, checkErr := detectRubricChangeAfterMerge(r.Path, rigGit, result.MR, branchCleanup.SubmittedHead); checkErr != nil {
+		style.PrintWarning("rubric change check: %v", checkErr)
+	} else if touched {
+		fmt.Printf("  %s Rubric changed by this merge; escalated to the operator (the manifest is not re-stamped automatically)\n", style.Warning.Render("⚠"))
+		escalateRubricChange(r.Name, result.MR.TargetBranch, rel, sha, result.MR.ID)
+		if commentErr := beads.New(r.Path).AddComment(result.MR.ID, fmt.Sprintf("rubric_changed_escalated: %s sha256=%s", rel, sha)); commentErr != nil {
+			style.PrintWarning("could not record rubric_changed_escalated comment on %s: %v", result.MR.ID, commentErr)
+		}
+	}
+
 	printMQPostMergeResult(result, branchCleanup)
 	return nil
+}
+
+// detectRubricChangeAfterMerge reports whether the merge that produced head
+// touched the rig's deployed rubric (.om.json), and the sha256 of what
+// landed there. It never writes to the manifest: the mayor's gt-7bvf design
+// decision is that a rubric change never self-deploys, so re-stamping the
+// harness manifest stays a deliberate operator step (re-running deploy.sh),
+// never something a merge does on its own. The caller escalates instead —
+// see escalateRubricChange.
+//
+// Returns touched=false for a rig with no manifest deployed, no rubric
+// configured, or a merge that didn't touch it. A landing whose range this
+// cannot reconstruct (ResolveLandedRange refuses a non-mergeable landing) is
+// reported as an error to the caller to surface as a warning, never as a
+// reason to fail a merge that already landed and closed.
+func detectRubricChangeAfterMerge(rigDir string, rigGit *git.Git, mr *refinery.MergeRequest, head string) (touched bool, rel, sha string, err error) {
+	if mr == nil {
+		return false, "", "", nil
+	}
+	manifest, err := editorial.LoadManifest(rigDir)
+	if err != nil {
+		// No manifest deployed: nothing to check, and not this command's
+		// failure to report.
+		return false, "", "", nil
+	}
+	landedArg := strings.TrimSpace(mr.MergeCommit)
+	if landedArg == "" {
+		landedArg = strings.TrimSpace(head)
+	}
+	// The rubric path in the manifest may be absolute (deploy.sh --rubric
+	// <rig>/refinery/rig/.om.json or <rig>/mayor/rig/.om.json) — resolving it
+	// against rigDir (the rig root, one level above the git working tree)
+	// would silently never match anything a diff of the repo reports.
+	// repoRootDir is the git working tree's own root, the same one gt mq
+	// review resolves for RepoDir.
+	repoRootDir := filepath.Join(rigDir, "refinery", "rig")
+	if _, statErr := os.Stat(repoRootDir); os.IsNotExist(statErr) {
+		repoRootDir = filepath.Join(rigDir, "mayor", "rig")
+	}
+	return editorial.RubricChangeAfterMerge(rigGit, repoRootDir, manifest, landedArg, mr.TargetBranch)
+}
+
+// escalateRubricChange notifies the operator that a merge changed the rig's
+// deployed rubric, without touching the harness manifest. Best-effort: a
+// failed escalation is logged, not fatal — the merge already landed.
+func escalateRubricChange(rigName, target, rubricPath, sha, mrID string) {
+	msg := fmt.Sprintf("rubric changed on %s: re-stamp the harness manifest from main content (rig=%s rubric=%s sha256=%s MR=%s)", target, rigName, rubricPath, sha, mrID)
+	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "rubric-changed", msg)
+	if err := cmd.Run(); err != nil {
+		style.PrintWarning("rubric-change escalation failed: %v", err)
+	}
 }
 
 // resolveMQPostMerge runs the MR-driven cleanup and, when ref resolves to no MR
