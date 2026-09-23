@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -130,6 +131,20 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 		role = fmt.Sprintf("pid-%d", os.Getpid())
 	}
 
+	// Resolve and validate the command before taking the slot. The gate is the
+	// merge path's critical section — every other test runner queues behind
+	// whoever holds it — so a command that cannot run has to be refused while
+	// this invocation is still holding nothing (gt-f4xe).
+	//
+	// env(1) semantics: leading VAR=value tokens set the child's environment.
+	// The polecat formula wraps the rig's test_command verbatim
+	// ("gt slot run -- GOFLAGS=-p=8 make test"), and exec'ing "GOFLAGS=-p=8"
+	// as a program fails with "executable file not found" (gt-18nx).
+	envAssigns, cmdArgs := splitEnvPrefix(args)
+	if err := validateSlotCommand(envAssigns, cmdArgs); err != nil {
+		return fmt.Errorf("gt slot run: %w", err)
+	}
+
 	fmt.Fprintf(cmd.OutOrStdout(), "Waiting for container-gate slot (role=%s)...\n", role)
 	pool := containerGatePool(townRoot)
 	h, err := slot.AcquirePool(townRoot, role, slotRunTimeout, pool)
@@ -142,19 +157,15 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot acquired (role=%s, waited %s, slot %d/%d).\n",
 		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
 
-	// env(1) semantics: leading VAR=value tokens set the child's environment.
-	// The polecat formula wraps the rig's test_command verbatim
-	// ("gt slot run -- GOFLAGS=-p=8 make test"), and exec'ing "GOFLAGS=-p=8"
-	// as a program fails with "executable file not found" (gt-18nx).
-	envAssigns, cmdArgs := splitEnvPrefix(args)
-	if len(cmdArgs) == 0 {
-		return fmt.Errorf("gt slot run: no command after environment assignment(s) %v", envAssigns)
-	}
 	// Gate-class holders (refinery, batch gate, main-branch test) are the
 	// merge path's critical section; a polecat's own suite is optional
 	// verification. When both run at once on a CPU-bound host, three
 	// concurrent suites tripled the refinery's gate (gt-93m1), so non-gate
 	// holders run under nice(1) unless --nice says otherwise.
+	//
+	// The wrapper goes on only now, after validation: it becomes argv[0], and
+	// checking argv[0] then would check nice(1) rather than the program the
+	// operator actually named.
 	niceness := slotRunNiceness(role, slotRunNice)
 	cmdArgs = withNice(cmdArgs, niceness)
 	if niceness > 0 {
@@ -524,6 +535,62 @@ func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
 		i++
 	}
 	return args[:i], args[i:]
+}
+
+// validateSlotCommand rejects a command that gt slot run must not take a gate
+// slot for: one naming no program at all (only VAR=value assignments), or one
+// naming a program that cannot be exec'd. It is called before slot.AcquirePool
+// so the refusal costs nothing — the slot it would otherwise have held is the
+// one every other test runner is queued behind (gt-f4xe).
+func validateSlotCommand(envAssigns, cmdArgs []string) error {
+	if len(cmdArgs) == 0 {
+		return fmt.Errorf("no command after environment assignment(s) %v", envAssigns)
+	}
+	if _, err := lookPathForSlot(cmdArgs[0], slotChildPath(envAssigns)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// slotChildPath is the PATH the child will resolve its program against. An
+// explicit PATH= among the leading assignments wins over the ambient one,
+// exactly as it will in the child: os/exec keeps the last value of a duplicate
+// key, and these assignments are appended after os.Environ().
+func slotChildPath(envAssigns []string) string {
+	for i := len(envAssigns) - 1; i >= 0; i-- {
+		if path, ok := strings.CutPrefix(envAssigns[i], "PATH="); ok {
+			return path
+		}
+	}
+	return os.Getenv("PATH")
+}
+
+// lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
+// resolves against the ambient one, including an empty entry meaning the
+// current directory. exec.LookPath reads the process environment and offers no
+// way to substitute a PATH, but it resolves a name containing a path separator
+// directly — so joining each entry and delegating keeps a single implementation
+// of "is this an executable file" (exec.LookPath's own).
+func lookPathForSlot(name, pathEnv string) (string, error) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		resolved, err := exec.LookPath(name)
+		if err != nil {
+			// Deliberately not exec.LookPath's own error: it reads well for a
+			// bare name and poorly for a path, where it blames a $PATH that was
+			// never consulted.
+			return "", fmt.Errorf("not an executable file: %s", name)
+		}
+		return resolved, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		if resolved, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("executable file not found in $PATH: %s", name)
 }
 
 // defaultNonGateNice is the nice(1) increment for non-gate slot holders.
