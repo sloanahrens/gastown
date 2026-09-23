@@ -1578,6 +1578,19 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			return err
 		}
 
+		// Refuse a rework whose content is byte-identical to an attempt the
+		// refinery already rejected (gt-0jzd5). Runs after the rebase above,
+		// for the same reason the revert check does: patch-id is
+		// base-invariant, so what matters is the content about to be pushed.
+		var sourceNotes string
+		if sourceIssueForNoMerge != nil {
+			sourceNotes = sourceIssueForNoMerge.Notes
+		}
+		rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sourceBD, mrID) }
+		if err := reportUnchangedSinceRejection(g, sourceNotes, issueID, contaminationBase, rejectedTip); err != nil {
+			return err
+		}
+
 		// Rewrite machine-generated commit messages before submission (gt-3wf).
 		// The gt-pvx safety net and checkpoint dog commit real work under
 		// generic subjects ("fix: auto-save uncommitted implementation work",
