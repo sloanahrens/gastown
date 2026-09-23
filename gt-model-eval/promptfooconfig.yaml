@@ -68,7 +68,6 @@ defaultTest:
 tests:
   # Class B: Directive role_context (instruction-following)
   - file://tests/deacon-zombie.yaml
-  - file://tests/deacon-plugin-gate.yaml
   - file://tests/deacon-dog-health.yaml
   - file://tests/witness-stuck.yaml
   - file://tests/witness-cleanup.yaml

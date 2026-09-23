@@ -61,7 +61,8 @@ hourly tick landing inside a busy window is what starved it before.
 
 ## Gate Check
 
-The Deacon evaluates this before dispatch. If gate closed, skip.
+The daemon heartbeat evaluates this gate and runs `run.sh` in-process; the
+Deacon does not dispatch it (see `plugins/README.md` Scheduling, gt-o1z7).
 
 ## Drift Escalation
 

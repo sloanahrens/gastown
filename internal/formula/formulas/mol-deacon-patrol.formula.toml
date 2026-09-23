@@ -860,29 +860,43 @@ investigate why the Witness isn't cleaning up properly."""
 
 [[steps]]
 id = "plugin-run"
-title = "Execute registered plugins"
+title = "Run manual-gate plugins"
 needs = ["zombie-scan"]
 description = """
-Execute registered plugins.
+Plugin scheduling belongs to the daemon heartbeat, not to this patrol: the
+daemon runs the gate-open plugins and keeps the run history (the receipts),
+so this step never evaluates a gate. Who dispatches which gate is in
+`plugins/README.md` (Scheduling).
 
-Scan $GT_ROOT/plugins/ for plugin directories. Each plugin has a plugin.md with TOML frontmatter defining its gate (when to run) and instructions (what to do).
+What remains here is on-demand trigger: a `[gate] type = "manual"` plugin is
+parked off the automatic path by design, and it stays parked unless something
+asks for it. A manual plugin is run only when a bead, mail, or mayor
+instruction names it. Default outcome for this step: nothing to run.
 
-See docs/deacon-plugins.md for full documentation.
+`gt plugin run <name>` does no work of its own. For a script-type plugin (one
+with a run.sh) it refuses outright — there is no script interpreter here,
+and only the daemon heartbeat runs that plugin's script. For every other
+plugin it only prints the plugin's instructions; it does no work. Carry out
+those instructions, then record the honest result (105ab901d318):
 
-Gate types:
-- cooldown: Time since last run (e.g., 24h)
-- cron: Schedule-based (e.g., "0 9 * * *")
-- condition: Metric threshold (e.g., wisp count > 50)
-- event: Trigger-based (e.g., startup, heartbeat)
+```bash
+gt plugin run <name>
+# do the printed work, then:
+gt plugin record-run --plugin <name> --result success --title "..." --description "..."
+gt plugin record-run --plugin <name> --result failure --title "FAILED" --description "..."
+```
 
-For each plugin:
-1. Read plugin.md frontmatter to check gate
-2. Compare against state.json (last run, etc.)
-3. If gate is open, execute the plugin
+Never run a cooldown-gate plugin here: the daemon already dispatches it, and
+a second run in the same cycle is a double-dispatch (gt-o1z7).
 
-Plugins marked parallel: true can run concurrently using Task tool subagents. Sequential plugins run one at a time in directory order.
+**Exit criteria:** every plugin run here is a manual-gate one named by a bead,
+mail, or mayor instruction; each run ended in a receipt that is an honest
+result — success only if the plugin's own work succeeded. Nothing to run and
+no receipts written: the step is done.
 
-Skip this step if $GT_ROOT/plugins/ does not exist or is empty."""
+- [ ] No plugin is run unless a bead, mail, or mayor instruction named it
+- [ ] Every run ended in a receipt: success only if the plugin's work succeeded
+- [ ] A cooldown-gate plugin was never run from this step"""
 
 [[steps]]
 id = "dog-pool-maintenance"

@@ -2102,7 +2102,8 @@ func (m *Manager) createPluginDirectories(rigPath string) error {
 	if _, err := os.Stat(townReadme); os.IsNotExist(err) {
 		content := `# Gas Town Plugins
 
-This directory contains town-level plugins that run during Deacon patrol cycles.
+This directory contains town-level plugins. The daemon heartbeat dispatches
+them: it reads each plugin's gate and runs the ones whose gate is open.
 
 ## Plugin Structure
 
@@ -2111,12 +2112,11 @@ Each plugin is a directory containing:
 
 ## Gate Types
 
-- cooldown: Time since last run (e.g., 24h)
-- cron: Schedule-based (e.g., "0 9 * * *")
-- condition: Metric threshold
-- event: Trigger-based (startup, heartbeat)
-
-See docs/deacon-plugins.md for full documentation.
+- cooldown: Time since last run (e.g., 24h) — dispatched by the daemon heartbeat
+- cron: Schedule-based (e.g., "0 9 * * *") — parsed; nothing dispatches it (gt-qehkn)
+- condition: Metric threshold — parsed; nothing dispatches it (gt-qehkn)
+- event: Trigger-based (startup, heartbeat) — parsed; nothing dispatches it (gt-qehkn)
+- manual: Never auto-dispatched; run it with 'gt plugin run <name>'
 `
 		if writeErr := os.WriteFile(townReadme, []byte(content), 0644); writeErr != nil {
 			// Non-fatal

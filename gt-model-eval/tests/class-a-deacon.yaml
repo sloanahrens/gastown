@@ -1,8 +1,8 @@
 # Class A Reasoning Tests: Deacon
 # These tests use a FIXED neutral role_context with NO answer hints.
 # They measure whether the model can derive the correct action from evidence alone.
-# Compare against deacon-zombie.yaml / deacon-plugin-gate.yaml (Class B) which
-# provide directive context.
+# Compare against deacon-zombie.yaml (Class B) which
+# provides directive context.
 
 # Shared neutral context — describes the role without hinting at any decision.
 # Promptfoo doesn't support YAML anchors across list items, so this is repeated.

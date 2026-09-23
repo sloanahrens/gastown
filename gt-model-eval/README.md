@@ -36,7 +36,6 @@ Each test provides a role_context that describes the expected behavior. These va
 | File | Role | Tests | What It Measures |
 |------|------|-------|-----------------|
 | `deacon-zombie.yaml` | Deacon | 10 | Zombie session detection vs healthy/idle/crashed |
-| `deacon-plugin-gate.yaml` | Deacon | 10 | Plugin cooldown/cron gate evaluation (mechanical) |
 | `deacon-dog-health.yaml` | Deacon | 10 | Dog timeout matrix and pool spawn/retire decisions |
 | `witness-stuck.yaml` | Witness | 12 | Stuck polecat assessment: no-op → nudge → escalate |
 | `witness-cleanup.yaml` | Witness | 10 | Dead session cleanup: nuke vs recover vs escalate |
@@ -55,7 +54,7 @@ Each test provides a **neutral** role_context with NO answer hints. These measur
 | `class-a-refinery.yaml` | Refinery | 3 | Branch-caused vs pre-existing vs push failure from raw evidence |
 | `class-a-dog.yaml` | Dog | 3 | Reset vs recover vs escalate from raw evidence |
 
-**Total: 94 test cases** (82 Class B + 12 Class A) across 4 patrol roles.
+**Total: 84 test cases** (72 Class B + 12 Class A) across 4 patrol roles.
 
 Each test provides simulated shell output and expects a structured JSON decision. Class B tests are split into "clear" cases (all models should agree) and "edge" cases (where model quality matters). Class A results are what directly informs the downgrade decision.
 
@@ -122,7 +121,6 @@ gt-model-eval/
 │   └── patrol-decision.txt        # System prompt template
 ├── tests/
 │   ├── deacon-zombie.yaml         # 10 Class B tests
-│   ├── deacon-plugin-gate.yaml    # 10 Class B tests
 │   ├── deacon-dog-health.yaml     # 10 Class B tests
 │   ├── witness-stuck.yaml         # 12 Class B tests
 │   ├── witness-cleanup.yaml       # 10 Class B tests
