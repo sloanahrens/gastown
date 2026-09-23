@@ -661,3 +661,82 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_NoteUnrecoverable_EscalatesBu
 		t.Fatalf("expected the witness to be nudged about the unrecoverable note, gt log:\n%s", gtCalls)
 	}
 }
+
+// TestLandedCommitHasApproveNote_Verdicts pins landedCommitHasApproveNote's
+// guard.Result verdicts directly: Pass for a matching note, Fail for an
+// absent or mismatched one, and Unknown — not folded into Fail — when the
+// note can't even be read, or the commit has no parent to diff against
+// (gt-udrrw, gt-jj29p).
+func TestLandedCommitHasApproveNote_Verdicts(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+
+	root := run(t, workDir, "git", "rev-parse", "main")
+
+	t.Run("no note is Fail, not Unknown", func(t *testing.T) {
+		branch := "polecat/test/verdict-nonote"
+		createFeatureBranch(t, workDir, branch, "nonote.txt", "hello\n")
+		head := run(t, workDir, "git", "rev-parse", branch)
+		if v := e.landedCommitHasApproveNote(head); !v.IsFail() {
+			t.Fatalf("commit with no note: want Fail, got %v", v)
+		}
+	})
+
+	t.Run("matching approve note is Pass", func(t *testing.T) {
+		branch := "polecat/test/verdict-pass"
+		createFeatureBranch(t, workDir, branch, "pass.txt", "hello\n")
+		head := run(t, workDir, "git", "rev-parse", branch)
+		writeApproveNote(t, g, "mr-verdict-pass", "polecats/max", head)
+		if v := e.landedCommitHasApproveNote(head); !v.IsPass() {
+			t.Fatalf("matching approve note: want Pass, got %v", v)
+		}
+	})
+
+	t.Run("unreadable note content is Unknown, not Fail", func(t *testing.T) {
+		branch := "polecat/test/verdict-corrupt"
+		createFeatureBranch(t, workDir, branch, "corrupt.txt", "hello\n")
+		head := run(t, workDir, "git", "rev-parse", branch)
+		// Bypass editorial.WriteNote's JSON marshal to simulate a note this
+		// reader cannot parse — the check could not run, so it must not read
+		// the same as a confirmed-absent note.
+		if err := g.NotesAdd(editorial.NotesRef, head, "not valid json"); err != nil {
+			t.Fatalf("NotesAdd: %v", err)
+		}
+		v := e.landedCommitHasApproveNote(head)
+		if !v.IsUnknown() {
+			t.Fatalf("unparseable note: want Unknown, got %v", v)
+		}
+		if v.Err() == nil {
+			t.Fatalf("unparseable note: want a non-nil Err(), got nil")
+		}
+	})
+
+	t.Run("commit with no parent is Unknown, not Fail", func(t *testing.T) {
+		// The repo's own root commit has no parent to diff against, so a
+		// patch-id comparison cannot run even though the note itself reads
+		// fine. writeApproveNote can't be used here — it computes the
+		// note's patch-id from a real diff, and root has none — so the note
+		// is written directly with a placeholder patch-id.
+		if err := editorial.WriteNote(g, editorial.Note{
+			OMVersion:  "1.4.0",
+			Rig:        "test-rig",
+			MR:         "mr-verdict-root",
+			Worker:     "polecats/max",
+			BaseSHA:    root,
+			HeadSHA:    root,
+			PatchID:    "placeholder",
+			Score:      0.9,
+			Verdict:    "approve",
+			Attempt:    1,
+			ReviewedAt: time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC),
+		}); err != nil {
+			t.Fatalf("WriteNote: %v", err)
+		}
+		v := e.landedCommitHasApproveNote(root)
+		if !v.IsUnknown() {
+			t.Fatalf("root commit (no parent): want Unknown, got %v", v)
+		}
+	})
+}

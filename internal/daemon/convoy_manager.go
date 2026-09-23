@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/util"
@@ -930,7 +931,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		if m.hasRejectionMarker(rig, issueID) {
+		if verdict := m.hasRejectionMarker(rig, issueID); verdict.IsFail() {
 			// This bead was previously rejected and reopened for recovery
 			// (RECOVERED_BEAD). Redispatch of rejected work belongs solely
 			// to the deacon, which applies cooldown/escalation gating and
@@ -938,6 +939,12 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// to it rather than race it with a fresh sling (gt-qw4u).
 			m.logger("Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
 			continue
+		} else if verdict.IsUnknown() {
+			// Unreadable is treated the same as a confirmed-clean record here
+			// (see hasRejectionMarker doc), but logged rather than folded in
+			// silently, so the gap is visible instead of indistinguishable
+			// from "checked and fine" (gt-udrrw).
+			m.logger("Convoy %s: could not confirm rejection-marker state for %s, proceeding as clear: %v", c.ID, issueID, verdict.Err())
 		}
 
 		if assignee := m.issueAssignee(rig, issueID); assignee != "" {
@@ -1167,26 +1174,39 @@ func (m *ConvoyManager) dispatchHoldReason(rig, issueID string) string {
 }
 
 // hasRejectionMarker reports whether issueID's notes carry the refinery's
-// merge-rejection marker, meaning it was previously rejected and reopened
-// for the deacon's RECOVERED_BEAD recovery flow. Looks up the issue via the
-// already-open per-rig store (populated at daemon startup alongside "hq";
-// see openBeadsStores). If the rig's store isn't available (e.g. in tests
-// that only wire "hq", or a rig whose store failed to open), this fails
-// open and returns false so unrelated stranded-scan behavior is unaffected —
-// the deacon's own gating still applies on any subsequent recovery attempt.
-func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) bool {
+// merge-rejection marker — Fail when it does (previously rejected and
+// reopened for the deacon's RECOVERED_BEAD recovery flow), Pass when the
+// notes were read and it does not, Unknown when the rig's store isn't
+// available or the record could not be read (gt-udrrw, gt-jj29p). Looks up
+// the issue via the already-open per-rig store (populated at daemon startup
+// alongside "hq"; see openBeadsStores).
+//
+// Unknown is deliberately treated the same as Pass at the call site: a rig
+// whose store never opened (e.g. in tests that only wire "hq", or a rig
+// whose store failed to open) is a town-level condition, already escalated
+// by the store alert, and blocking the stranded scan on it would stall every
+// convoy feeding that rig — the deacon's own gating still applies on any
+// subsequent recovery attempt. The call site now logs the Unknown instead of
+// folding it silently into the same code path as a confirmed-clean record.
+func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) guard.Result {
 	m.storesMu.Lock()
 	store := m.stores[rig]
 	m.storesMu.Unlock()
 	if store == nil {
-		return false
+		return guard.Unknown(fmt.Errorf("no open store for rig %s", rig))
 	}
 
 	issue, err := store.GetIssue(m.ctx, issueID)
-	if err != nil || issue == nil {
-		return false
+	if err != nil {
+		return guard.Unknown(fmt.Errorf("reading issue %s: %w", issueID, err))
 	}
-	return strings.Contains(issue.Notes, refinery.MergeRejectionNoteMarker)
+	if issue == nil {
+		return guard.Unknown(fmt.Errorf("issue %s: store returned no record and no error", issueID))
+	}
+	if strings.Contains(issue.Notes, refinery.MergeRejectionNoteMarker) {
+		return guard.Fail("notes carry the refinery merge-rejection marker")
+	}
+	return guard.Pass()
 }
 
 // issueAssignee returns issueID's assignee via the already-open per-rig

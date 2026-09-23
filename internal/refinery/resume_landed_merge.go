@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 )
 
@@ -246,8 +247,14 @@ func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit st
 		return nil
 	}
 
-	if covered, checkErr := e.landedCommitHasApproveNote(landedCommit); checkErr == nil && covered {
+	if verdict := e.landedCommitHasApproveNote(landedCommit); verdict.IsPass() {
 		return nil
+	} else if verdict.IsUnknown() {
+		// Could not confirm either way (an unreadable note, or a commit
+		// whose diff can't be computed) — proceed to backfill exactly as an
+		// absent note would, but say why, instead of the check's failure
+		// silently reading the same as "not covered" (gt-udrrw, gt-jj29p).
+		_, _ = fmt.Fprintf(e.output, "[Engineer] could not confirm an existing om note on %s, backfilling: %v\n", shortSHA(landedCommit), verdict.Err())
 	}
 
 	result, err := editorial.RekeyNote(e.git, editorial.RekeyRequest{
@@ -296,24 +303,35 @@ func (e *Engineer) findMergeCommitFor(target, mergeRef string) (string, error) {
 // landedCommitHasApproveNote reports whether commit already carries an
 // approve note whose patch-id matches its own diff from its first parent —
 // the same test the editorial-coverage doctor check applies.
-func (e *Engineer) landedCommitHasApproveNote(commit string) (bool, error) {
+//
+// Returns guard.Result: Pass when a matching approve note is confirmed,
+// Fail when the note is confirmed absent or does not match, Unknown when
+// the check could not run at all — an unreadable note, or a commit whose
+// diff from its parent can't be computed (gt-udrrw, gt-jj29p).
+func (e *Engineer) landedCommitHasApproveNote(commit string) guard.Result {
 	note, err := editorial.ReadNote(e.git, commit)
 	if err != nil {
 		if err == git.ErrNoNote {
-			return false, nil
+			return guard.Fail("no om note on " + shortSHA(commit))
 		}
-		return false, err
+		return guard.Unknown(fmt.Errorf("reading om note on %s: %w", shortSHA(commit), err))
 	}
 	if note.Verdict != "approve" {
-		return false, nil
+		return guard.Fail("om note on " + shortSHA(commit) + " is not an approve")
 	}
 	parents, err := e.git.Parents(commit)
-	if err != nil || len(parents) == 0 {
-		return false, err
+	if err != nil {
+		return guard.Unknown(fmt.Errorf("reading parents of %s: %w", shortSHA(commit), err))
+	}
+	if len(parents) == 0 {
+		return guard.Unknown(fmt.Errorf("%s has no parent to diff against", shortSHA(commit)))
 	}
 	patchID, err := e.git.PatchID(parents[0], commit)
 	if err != nil {
-		return false, err
+		return guard.Unknown(fmt.Errorf("patch-id of %s: %w", shortSHA(commit), err))
 	}
-	return note.PatchID == patchID, nil
+	if note.PatchID != patchID {
+		return guard.Fail("om note's patch-id does not match " + shortSHA(commit))
+	}
+	return guard.Pass()
 }

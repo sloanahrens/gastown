@@ -34,7 +34,6 @@ internal/git/git.go:*Git.RemoteTrackingBranchExists
 internal/krc/autoprune.go:AutoPrune
 internal/lock/flock_unix.go:FlockTryAcquire
 internal/polecat/target_clean.go:cleanTargetDir
-internal/refinery/resume_landed_merge.go:*Engineer.landedCommitHasApproveNote
 internal/templates/supervisor_state.go:SupervisorFileIsFor
 internal/tmux/socket_guard_unix.go:unixSocketStale
 internal/tmux/tmux.go:*Tmux.HasSession
