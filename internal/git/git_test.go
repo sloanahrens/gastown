@@ -2802,13 +2802,13 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		if !status.HasUncommittedChanges {
 			t.Fatal("staged skew must still be visible as an uncommitted change")
 		}
-		if len(status.IndexSkewFiles) != 1 || status.IndexSkewFiles[0] != "README.md" {
-			t.Fatalf("IndexSkewFiles = %v, want [README.md]", status.IndexSkewFiles)
+		if skew := status.IndexSkewFiles(g); len(skew) != 1 || skew[0] != "README.md" {
+			t.Fatalf("IndexSkewFiles = %v, want [README.md]", skew)
 		}
 		if status.CleanExcludingRuntime() {
 			t.Fatal("CleanExcludingRuntime must still see index skew as dirty (unaffected, gt done path)")
 		}
-		if !status.CleanExcludingRuntimeAndIndexSkew() {
+		if !status.CleanExcludingRuntimeAndIndexSkew(g) {
 			t.Fatal("index-skew-only seat must be treated as clean for reuse")
 		}
 	})
@@ -2829,10 +2829,10 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckUncommittedWork: %v", err)
 		}
-		if len(status.IndexSkewFiles) != 0 {
-			t.Fatalf("IndexSkewFiles = %v, want none: content is not on origin", status.IndexSkewFiles)
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: content is not on origin", skew)
 		}
-		if status.CleanExcludingRuntimeAndIndexSkew() {
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
 			t.Fatal("staged content absent from origin/main must still block reuse")
 		}
 	})
@@ -2849,10 +2849,10 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckUncommittedWork: %v", err)
 		}
-		if len(status.IndexSkewFiles) != 0 {
-			t.Fatalf("IndexSkewFiles = %v, want none: an unstaged edit is never a skew candidate", status.IndexSkewFiles)
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: an unstaged edit is never a skew candidate", skew)
 		}
-		if status.CleanExcludingRuntimeAndIndexSkew() {
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
 			t.Fatal("a real unstaged edit is exactly the risk this check exists to catch")
 		}
 	})
@@ -2885,10 +2885,10 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckUncommittedWork: %v", err)
 		}
-		if len(status.IndexSkewFiles) != 1 || status.IndexSkewFiles[0] != name {
-			t.Fatalf("IndexSkewFiles = %v, want [%q]", status.IndexSkewFiles, name)
+		if skew := status.IndexSkewFiles(g); len(skew) != 1 || skew[0] != name {
+			t.Fatalf("IndexSkewFiles = %v, want [%q]", skew, name)
 		}
-		if !status.CleanExcludingRuntimeAndIndexSkew() {
+		if !status.CleanExcludingRuntimeAndIndexSkew(g) {
 			t.Fatal("pathspec-special filename with content already on origin must still classify as skew")
 		}
 	})
@@ -2910,13 +2910,157 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckUncommittedWork: %v", err)
 		}
-		if len(status.IndexSkewFiles) != 0 {
-			t.Fatalf("IndexSkewFiles = %v, want none: a pathspec that fails to match must fail CLOSED, not be silently classified as skew", status.IndexSkewFiles)
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: a pathspec that fails to match must fail CLOSED, not be silently classified as skew", skew)
 		}
-		if status.CleanExcludingRuntimeAndIndexSkew() {
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
 			t.Fatal("a pathspec-special filename's real, unpreserved content must still block reuse")
 		}
 	})
+
+	// The next two subtests exercise a name porcelain actually C-quotes (a
+	// literal double quote, and a non-ASCII byte under the default
+	// core.quotepath=true) rather than merely a pathspec-magic one. Left
+	// quoted, the string Status() would have handed classifyIndexSkew is not
+	// the real filename at all — see TestStatusUnquotesCQuotedPaths — so this
+	// is the end-to-end path the om review flagged as untested.
+	t.Run("C-quoted filename (embedded quote) with content on origin is classified as skew", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := `notes "draft" v2.txt`
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		runGitTestCmd(t, localDir, "push", "origin", "HEAD")
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if skew := status.IndexSkewFiles(g); len(skew) != 1 || skew[0] != name {
+			t.Fatalf("IndexSkewFiles = %v, want [%q]", skew, name)
+		}
+		if !status.CleanExcludingRuntimeAndIndexSkew(g) {
+			t.Fatal("C-quoted filename with content already on origin must still classify as skew")
+		}
+	})
+
+	t.Run("C-quoted filename (embedded quote) absent from origin MUST block", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := `notes "draft" v2.txt`
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		// Deliberately do NOT push: this content is real, unpreserved work.
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: real content not on origin must never classify as skew", skew)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
+			t.Fatal("a C-quoted filename's real, unpreserved content MUST block reuse")
+		}
+	})
+
+	t.Run("non-ASCII filename with content on origin is classified as skew", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := "café résumé.txt"
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		runGitTestCmd(t, localDir, "push", "origin", "HEAD")
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if skew := status.IndexSkewFiles(g); len(skew) != 1 || skew[0] != name {
+			t.Fatalf("IndexSkewFiles = %v, want [%q]", skew, name)
+		}
+		if !status.CleanExcludingRuntimeAndIndexSkew(g) {
+			t.Fatal("non-ASCII filename with content already on origin must still classify as skew")
+		}
+	})
+
+	t.Run("non-ASCII filename absent from origin MUST block", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := "café résumé.txt"
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		// Deliberately do NOT push: this content is real, unpreserved work.
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: real content not on origin must never classify as skew", skew)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
+			t.Fatal("a non-ASCII filename's real, unpreserved content MUST block reuse")
+		}
+	})
+}
+
+// TestCheckUncommittedWorkIndexSkewIsLazy guards the gt-8q0s perf regression:
+// classifyIndexSkew costs several extra git subprocesses (ls-files, ls-tree
+// per candidate ref), so CheckUncommittedWork must not run it for a caller —
+// like gt done — that never asks for IndexSkewFiles or
+// CleanExcludingRuntimeAndIndexSkew. StagedOnly is populated for free from
+// the porcelain status already parsed; only calling IndexSkewFiles triggers
+// the classification.
+func TestCheckUncommittedWorkIndexSkewIsLazy(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test v2\n"), 0644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	runGitTestCmd(t, localDir, "commit", "-am", "v2")
+	runGitTestCmd(t, localDir, "push", "origin", "HEAD")
+	runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWork: %v", err)
+	}
+	if len(status.StagedOnly) != 1 || status.StagedOnly[0] != "README.md" {
+		t.Fatalf("StagedOnly = %v, want [README.md]: this must come for free from Status(), no classification needed", status.StagedOnly)
+	}
+	if status.indexSkewComputed {
+		t.Fatal("classifyIndexSkew must not run inside CheckUncommittedWork itself — only a caller that asks via IndexSkewFiles should trigger it (gt-8q0s)")
+	}
+
+	// Asking now must trigger (and memoize) the classification.
+	if skew := status.IndexSkewFiles(g); len(skew) != 1 || skew[0] != "README.md" {
+		t.Fatalf("IndexSkewFiles = %v, want [README.md]", skew)
+	}
+	if !status.indexSkewComputed {
+		t.Fatal("IndexSkewFiles must memoize its result")
+	}
 }
 
 func runGitTestCmd(t *testing.T, dir string, args ...string) {

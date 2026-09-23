@@ -1038,7 +1038,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 			input.MQLookupFailed = true
 		}
 		if status, err := g.CheckUncommittedWork(); err == nil {
-			input.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew()
+			input.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew(g)
 			input.StashCount = status.StashCount
 			input.UnpushedCommits = status.UnpushedCommits
 		} else {
