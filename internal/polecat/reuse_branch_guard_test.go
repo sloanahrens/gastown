@@ -1,21 +1,16 @@
 package polecat
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
-// gt-0kk2. Reusing an idle polecat with --branch prepares the shared worktree by
-// resetting it to the resume branch's origin tip. The reset used to run while
-// whatever branch the worktree happened to hold was still checked out, which in
-// a shared .repo.git moves that ref — someone else's in-flight branch — onto the
-// resume target (gt-9ed0: quartz's branch was reset onto jasper's origin tip
-// mid-session, and only the reflog could say what it used to point at).
-//
-// This is the crossed swap the bead asks for: the polecat being reused holds
-// another bead's branch, and the branch it is reused onto belongs to a third
-// bead. Neither ref may move except as the resume itself intends.
+// gt-0kk2: no polecat reuse may move a branch it does not own.
 
 // TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone is the regression:
 // the branch the worktree was holding must still name its own commit after reuse.
@@ -73,6 +68,43 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 	}
 }
 
+// TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone covers the fresh path
+// (no --branch): a reuse resets to origin/main, and the branch the worktree was
+// holding must not follow it there.
+func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
+	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+
+	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+
+	// alpha's worktree holds another bead's branch, one commit ahead of main so a
+	// reset to origin/main would be visible in the ref.
+	heldBranch := "polecat/pearl/gt-mjll+mud9574c"
+	heldSHA := branchAtNewCommit(t, mayorRig, heldBranch, mainSHA, "pearl work (gt-mjll)")
+	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+
+	reused, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next"})
+	if err != nil {
+		t.Fatalf("ReuseIdlePolecat: %v", err)
+	}
+
+	heldAfter := gitProbeOutput(t, reused.ClonePath, "rev-parse", "refs/heads/"+heldBranch)
+	if heldAfter != heldSHA {
+		t.Errorf("refs/heads/%s moved from %s to %s during a fresh sling — the reuse must not rewrite the branch it merely held",
+			heldBranch, heldSHA, heldAfter)
+	}
+	if reused.Branch == heldBranch {
+		t.Errorf("fresh sling reused branch %q instead of creating one", heldBranch)
+	}
+	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != mainSHA {
+		t.Errorf("HEAD = %s, want the fresh branch at origin/main %s", tip, mainSHA)
+	}
+}
+
 // TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree covers the other half
 // of the crossed swap: when the resume target is checked out in a different
 // worktree, reuse must refuse loudly and leave both worktrees untouched.
@@ -106,6 +138,9 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	if err == nil {
 		t.Fatal("ReuseIdlePolecat resumed a branch checked out in another worktree; want refusal")
 	}
+	if !errors.Is(err, ErrBranchHeld) {
+		t.Fatalf("refusal is not ErrBranchHeld, so callers cannot tell it from a recoverable failure: %v", err)
+	}
 	if !strings.Contains(err.Error(), "already checked out at") {
 		t.Fatalf("refusal does not explain the conflict: %v", err)
 	}
@@ -122,6 +157,58 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	}
 	if tip := gitProbeOutput(t, beta.ClonePath, "rev-parse", "refs/heads/"+heldBranch); tip != mainSHA {
 		t.Errorf("refs/heads/%s moved to %s on a refused reuse, want %s", heldBranch, tip, mainSHA)
+	}
+}
+
+// TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree covers the fallback
+// a refused reuse lands on: attaching a brand-new worktree to the held branch
+// with `worktree add --force`, which git permits and so needs the same check.
+func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
+	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+
+	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions(alpha): %v", err)
+	}
+
+	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	heldBranch := "polecat/alpha/gt-x+aaa"
+	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
+	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
+	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+
+	_, err = mgr.AddWithOptions("beta", AddOptions{HookBead: "gt-next", ResumeBranch: heldBranch})
+	if err == nil {
+		t.Fatal("AddWithOptions attached a second worktree to a held branch; want refusal")
+	}
+	if !errors.Is(err, ErrBranchHeld) {
+		t.Fatalf("refusal is not ErrBranchHeld: %v", err)
+	}
+
+	// The refused allocation must roll back: no beta directory left to occupy a slot.
+	if mgr.exists("beta") {
+		t.Error("refused AddWithOptions left beta behind")
+	}
+	if head := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD"); head != heldBranch {
+		t.Errorf("alpha's checked-out branch = %q, want %q", head, heldBranch)
+	}
+}
+
+// TestHeldByOtherWorktree_FailsClosedOnUnreadableList pins the failure path: a
+// worktree list that cannot be read must refuse, not report the branch free.
+func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
+	notARepo := t.TempDir()
+	branch := "polecat/other/gt-x+aaa"
+
+	err := heldByOtherWorktree(git.NewGit(notARepo), branch)
+	if err == nil {
+		t.Fatal("unreadable worktree list reported the branch as free; want a refusal")
+	}
+	if !errors.Is(err, ErrBranchHeld) {
+		t.Fatalf("want ErrBranchHeld, got %v", err)
+	}
+	if !strings.Contains(err.Error(), branch) {
+		t.Errorf("refusal does not name the branch: %v", err)
 	}
 }
 
@@ -159,7 +246,7 @@ func gitProbeOutput(t *testing.T, dir string, args ...string) string {
 
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(cmd.Env,
+	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",

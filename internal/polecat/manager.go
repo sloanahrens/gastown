@@ -123,6 +123,11 @@ var (
 	ErrDoltUnhealthy      = errors.New("dolt health check failed")
 	ErrDoltAtCapacity     = errors.New("dolt server at connection capacity")
 	ErrDiskSpaceLow       = errors.New("insufficient disk space")
+
+	// ErrBranchHeld marks a refusal to put a worktree on a branch another
+	// worktree of the same repo has checked out. A fresh worktree is not a safe
+	// retry — it recreates the conflict — so callers abort instead (gt-0kk2).
+	ErrBranchHeld = errors.New("branch checked out in another worktree")
 )
 
 // UncommittedWorkError provides details about uncommitted work.
@@ -787,9 +792,13 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602). Make sure we have the latest tip
-		// for the named branch, then attach the worktree directly. WorktreeAddExistingForce
-		// handles the case where another worktree previously had this branch checked out.
+		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
+		// worktree directly to it. WorktreeAddExistingForce skips git's own
+		// already-checked-out refusal, so the branch must be free to take (gt-0kk2).
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -985,10 +994,13 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602): attach the worktree directly to the
-		// named branch. WorktreeAddExistingForce tolerates the branch being checked
-		// out elsewhere (stale worktree), and the explicit fetch ensures we have
-		// the latest tip before checkout.
+		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
+		// worktree directly to it. WorktreeAddExistingForce skips git's own
+		// already-checked-out refusal, so the branch must be free to take (gt-0kk2).
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -1616,8 +1628,13 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	_ = os.RemoveAll(tmpClonePath) // clean up any leftover temp dir
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch: fetch and attach the temp worktree directly
-		// to the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
+		// Resume an existing branch: fetch and attach the temp worktree directly to
+		// the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
+		// The worktree being repaired is exempt — it holds the branch now and is
+		// removed once the temp worktree is up (gt-0kk2).
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch, oldClonePath); err != nil {
+			return nil, fmt.Errorf("repairing polecat %s: %w", name, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -1888,31 +1905,20 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		branchName = opts.ResumeBranch
 	}
 
-	// gt-0kk2: refuse to switch this worktree onto a branch another worktree
-	// already has checked out. Polecat worktrees share the rig's .repo.git, so a
-	// branch held elsewhere is another polecat's live HEAD; two worktrees on one
-	// ref commit into each other's work and make every subsequent reset a
-	// cross-polecat write.
-	if holder, held := worktreeHoldingBranch(polecatGit, branchName); held {
-		return nil, fmt.Errorf("refusing to reuse %s on branch %s: already checked out at %s\n"+
-			"Another worktree is working on that branch — finish, release, or drop it there "+
-			"before resuming it here, or dispatch this bead on a fresh branch (omit --branch)",
-			name, branchName, holder)
+	// gt-0kk2: this worktree must not end up on a branch another worktree holds.
+	if err := heldByOtherWorktree(polecatGit, branchName); err != nil {
+		return nil, fmt.Errorf("refusing to reuse %s: %w\n"+
+			"Release that branch there, or dispatch this bead on a fresh branch (omit --branch)",
+			name, err)
 	}
 
-	// GH#2536: Clean worktree state before branch switch — the worktree may have
-	// stale state from a previous dog/pool dispatch (uncommitted changes, untracked
-	// files, detached HEAD, or checked out on an old dog/alpha-* branch).
-	// Reset to the start point directly (not HEAD) to avoid "local changes would
-	// be overwritten" errors when the start point has different file content.
+	// GH#2536: clean state left by a previous dispatch — uncommitted changes,
+	// untracked files, an old dog/alpha-* branch — by resetting to the start point
+	// rather than HEAD, so a start point with different content cannot fail on
+	// local changes.
 	//
-	// gt-0kk2: detach first. This worktree may merely *hold* a branch that belongs
-	// to another bead — a leftover from a prior reuse, or a hand-rolled recovery.
-	// A `git reset --hard` here runs on whatever branch happens to be checked out,
-	// which in a shared .repo.git moves that ref under its owner and strands their
-	// in-flight work (gt-9ed0: quartz's branch was reset onto jasper's origin tip
-	// this way). Detached, the cleanup reset moves HEAD and nothing else; the
-	// target branch is then moved deliberately by the switch below.
+	// Detach first: reset --hard moves whatever branch is checked out, and in a
+	// shared .repo.git that is a ref this polecat does not own (gt-0kk2).
 	if err := polecatGit.CheckoutDetachForce("HEAD"); err != nil {
 		return nil, fmt.Errorf("detaching HEAD to clean worktree for reuse: %w", err)
 	}
@@ -1997,26 +2003,39 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}, nil
 }
 
-// worktreeHoldingBranch reports the path of a worktree other than g's own that
-// has branch checked out. Polecat worktrees share one .repo.git, so a branch
-// checked out somewhere else is a live HEAD there, not a free name to switch to.
-// A missing branch, or a repo whose worktree list cannot be read, reports false
-// — callers only use this to refuse, so failing open would be silent damage.
-func worktreeHoldingBranch(g *git.Git, branch string) (string, bool) {
+// heldByOtherWorktree returns an ErrBranchHeld error when branch is checked out
+// in a worktree other than g's own. Polecat worktrees share one .repo.git, so a
+// branch held elsewhere is that polecat's live HEAD, not a free name to switch
+// to. An unreadable worktree list refuses as well: "cannot tell" must not read
+// as "free". Paths in ignore are exempt, for a worktree the caller is about to
+// remove (gt-0kk2).
+func heldByOtherWorktree(g *git.Git, branch string, ignore ...string) error {
 	if branch == "" {
-		return "", false
+		return nil
 	}
 	worktrees, err := g.WorktreeList()
 	if err != nil {
-		return "", false
+		return fmt.Errorf("%w: cannot tell whether %s is checked out elsewhere: %v",
+			ErrBranchHeld, branch, err)
 	}
-	self := g.WorkDir()
+	exempt := append([]string{g.WorkDir()}, ignore...)
 	for _, wt := range worktrees {
-		if wt.Branch == branch && !sameWorktreePath(wt.Path, self) {
-			return wt.Path, true
+		if wt.Branch != branch || sameAnyWorktreePath(wt.Path, exempt) {
+			continue
+		}
+		return fmt.Errorf("%w: %s is already checked out at %s", ErrBranchHeld, branch, wt.Path)
+	}
+	return nil
+}
+
+// sameAnyWorktreePath reports whether path names any of the candidate worktrees.
+func sameAnyWorktreePath(path string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if sameWorktreePath(path, candidate) {
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // killExistingPolecatSession clears an existing tmux session before reusing or
