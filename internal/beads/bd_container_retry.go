@@ -62,6 +62,31 @@ var bdConnectionFailureMarkers = []string{
 	"broken pipe",              // write to a connection the server already closed
 }
 
+// bdCatalogRaceMarkers are the stderr fragments that mean bd's store open died
+// on a database of the test Dolt server's that the session has no starting root
+// for (gt-unq4l).
+//
+// The name in the message is never the caller's own database, and that mismatch
+// is the signature:
+//
+//	bd init --prefix pt13dd3b6a --database testdb_21eb6271a1b36e34 ...
+//	Error: failed to open Dolt store: ... could not resolve initial root for
+//	database testdb_e7165de82d57b7dd/
+//
+// The trailing slash is Dolt's revision qualifier carrying an empty branch, the
+// name it builds when a session is asked about a database it took no start
+// point for (dolthub/dolt: Database.WithBranchRevision, dsess.TransactionRoot).
+// The test server's catalog is shared by every test in the package, so a
+// concurrent test's CREATE or DROP DATABASE is the leading explanation for a
+// session meeting such a database; what is certain is that the name leaves: the
+// next attempt opens against a catalog the offending name is gone from.
+//
+// Every one of these fires in bd's open path, before the command has any
+// effect, so retrying is safe for writes as well as reads.
+var bdCatalogRaceMarkers = []string{
+	"could not resolve initial root for database",
+}
+
 // targetsTestDoltContainer reports whether this wrapper points at testutil's
 // ephemeral Dolt container rather than a production server. Only
 // NewIsolatedWithPort sets both fields, and its only callers are tests.
@@ -82,6 +107,10 @@ func (b *Beads) targetsTestDoltContainer() bool {
 // real failure (gt-cbtl). Only a wrapper built by NewIsolatedWithPort can
 // answer true, and the container retry loop has already spent its attempts by
 // the time a caller sees the error.
+//
+// A catalog-race failure (bdCatalogRaceMarkers) is deliberately not part of
+// this verdict: nothing about it says the container is gone, so a run that
+// exhausts its retries on one still fails rather than skipping.
 func (b *Beads) ContainerUnavailable(err error) bool {
 	return b.retryableBdConnectionFailure(err)
 }
@@ -89,25 +118,42 @@ func (b *Beads) ContainerUnavailable(err error) bool {
 // retryableBdConnectionFailure reports whether err is a connection-stage
 // failure worth retrying against a test Dolt container.
 func (b *Beads) retryableBdConnectionFailure(err error) bool {
+	return b.matchesTransientMarkers(err, bdConnectionFailureMarkers)
+}
+
+// retryableBdCatalogRace reports whether err is the test Dolt server's catalog
+// changing under bd's store open rather than an answer from bd.
+func (b *Beads) retryableBdCatalogRace(err error) bool {
+	return b.matchesTransientMarkers(err, bdCatalogRaceMarkers)
+}
+
+// retryableBdTransientFailure is the class the retry loop rides on: a failure
+// that is worth another attempt against the test container rather than an
+// answer from bd.
+func (b *Beads) retryableBdTransientFailure(err error) bool {
+	return b.retryableBdConnectionFailure(err) || b.retryableBdCatalogRace(err)
+}
+
+// matchesTransientMarkers applies the scoping every retry class shares: only a
+// wrapper pointed at the test container, and never a subprocess killed at its
+// own deadline — that one is wedged, not contended: bd had its whole budget and
+// still said nothing, so retrying multiplies the wait for a failure that will
+// repeat (gt-824d). A marker in the message is bd saying it never reached the
+// command, which is what makes the retry safe and what an answer — ErrNotFound
+// and behavioral refusals alike — is not.
+func (b *Beads) matchesTransientMarkers(err error, markers []string) bool {
 	if err == nil || !b.targetsTestDoltContainer() {
 		return false
 	}
-	// A subprocess killed at its own deadline is wedged, not contended: bd had
-	// its whole budget and still said nothing. Retrying it multiplies the wait
-	// for a failure that will repeat (gt-824d).
 	if errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	// A marker in the message is bd saying it never reached the command, which
-	// is the property this retry rides on.
 	msg := err.Error()
-	for _, marker := range bdConnectionFailureMarkers {
+	for _, marker := range markers {
 		if strings.Contains(msg, marker) {
 			return true
 		}
 	}
-	// Everything else — ErrNotFound and behavioral refusals alike — is an
-	// answer rather than a lost connection, and an answer is not retried.
 	return false
 }
 
@@ -139,9 +185,10 @@ func bdContainerRetryBackoff(attempt int) time.Duration {
 var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 
 // runBdWithRetry runs one bd command (stdinData, args, runEnv as built by the
-// caller's run path) and retries it while the failure looks like a lost
-// connection to the test Dolt container. Retries stop at the first of: a
-// failure that is not a lost connection, the attempt cap, or the retry window.
+// caller's run path) and retries it while the failure looks like infrastructure
+// rather than an answer: a lost connection to the test Dolt container, or its
+// catalog changing under bd's store open. Retries stop at the first of: a
+// failure that is neither, the attempt cap, or the retry window.
 //
 // Outside the container case the loop runs exactly once, so this is the same
 // single invocation callers had before it existed. The last attempt's error is
@@ -161,7 +208,7 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 			return out, nil
 		}
 		lastErr = err
-		if !b.retryableBdConnectionFailure(err) || attempt >= attempts {
+		if !b.retryableBdTransientFailure(err) || attempt >= attempts {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -188,6 +235,6 @@ func retryNotice(attempt, attempts int, err error) string {
 	if idx := strings.IndexByte(first, '\n'); idx >= 0 {
 		first = first[:idx]
 	}
-	return fmt.Sprintf("beads: bd container connection failed on attempt %d of %d, retrying: %s",
+	return fmt.Sprintf("beads: bd call against the test Dolt container failed on attempt %d of %d, retrying: %s",
 		attempt, attempts, first)
 }

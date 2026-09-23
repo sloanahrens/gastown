@@ -22,6 +22,17 @@ const (
 		`probing schema_migrations existence: invalid connection`
 )
 
+// observedCatalogRaceStderr is the line the refinery gates went red on
+// (gt-unq4l), verbatim. The database it names is not the one the command line
+// named — bd was told to open testdb_21eb6271a1b36e34 and the store open died
+// on another test's testdb_e7165de82d57b7dd — which is the signature of the
+// server's catalog changing under the open rather than any fault of the
+// caller's own database.
+const observedCatalogRaceStderr = `Error: failed to open Dolt store: failed to initialize schema: ` +
+	`schema migration: reading pre-migration schema version: probing ` +
+	`schema_migrations existence: Error 1105 (HY000): could not resolve ` +
+	`initial root for database testdb_e7165de82d57b7dd/`
+
 // TestBdContainerRetryRecoversFromConnectionFailure is gt-6uhq: a bd command
 // that loses its Dolt connection to the test container must be retried, and
 // the retry must return the command's result rather than the failure.
@@ -42,6 +53,48 @@ func TestBdContainerRetryRecoversFromConnectionFailure(t *testing.T) {
 	}
 	if got := stub.calls(t); got != 3 {
 		t.Errorf("bd invocations = %d, want 3 (two failures then the success)", got)
+	}
+}
+
+// TestBdInitRetriesTheCatalogRace is gt-unq4l: an init that loses its store
+// open to the test server's catalog changing under it must be attempted again,
+// because the name that could not be resolved is gone from the catalog by then.
+func TestBdInitRetriesTheCatalogRace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyCatalogRaceBDStub(t, 2)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55069)
+	if err := b.Init("pt13dd3b6a"); err != nil {
+		t.Fatalf("Init after a transient catalog race: %v", err)
+	}
+	if got := stub.calls(t); got != 3 {
+		t.Errorf("bd invocations = %d, want 3 (two races then the success)", got)
+	}
+}
+
+// TestBdContainerRetryStopsAtAttemptCapForTheCatalogRace: the second retry class
+// carries the same bound as the first. A catalog that keeps changing under every
+// attempt costs a fixed number of bd processes and reports bd's own stderr.
+func TestBdContainerRetryStopsAtAttemptCapForTheCatalogRace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyCatalogRaceBDStub(t, 99)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55069)
+	_, err := b.run("init", "--prefix", "pt13dd3b6a", "--quiet")
+	if err == nil {
+		t.Fatal("run() should fail when every attempt loses the store open")
+	}
+	if !strings.Contains(err.Error(), "could not resolve initial root") {
+		t.Errorf("exhausted-retry error should keep bd's stderr, got %v", err)
+	}
+	if got := stub.calls(t); got != bdContainerRetryAttempts {
+		t.Errorf("bd invocations = %d, want %d (the cap)", got, bdContainerRetryAttempts)
 	}
 }
 
@@ -157,6 +210,75 @@ func TestRetryableBdConnectionFailure(t *testing.T) {
 	}
 }
 
+// TestRetryableBdCatalogRace pins the second class's edges against the first:
+// a store open lost to the test server's catalog is retried, the connection
+// markers that already had a class stay in that one, and neither class reaches
+// a wrapper that is not pointed at the container (gt-unq4l).
+func TestRetryableBdCatalogRace(t *testing.T) {
+	container := NewIsolatedWithPort(t.TempDir(), 55069)
+	noContainer := New(t.TempDir())
+
+	observed := fmt.Errorf("bd init --prefix pt13dd3b6a --database testdb_21eb6271a1b36e34: %s",
+		observedCatalogRaceStderr)
+
+	tests := []struct {
+		name             string
+		b                *Beads
+		err              error
+		wantCatalogRace  bool
+		wantRetriedAtAll bool
+	}{
+		{name: "observed catalog race", b: container, err: observed, wantCatalogRace: true, wantRetriedAtAll: true},
+		{name: "production wrapper", b: noContainer, err: observed, wantCatalogRace: false, wantRetriedAtAll: false},
+		{name: "nil error", b: container, err: nil, wantCatalogRace: false, wantRetriedAtAll: false},
+		{name: "not found is an answer", b: container, err: ErrNotFound, wantCatalogRace: false, wantRetriedAtAll: false},
+		{name: "behavioral failure", b: container, err: fmt.Errorf("bd update x: invalid status"), wantCatalogRace: false, wantRetriedAtAll: false},
+		{
+			// Same deadline rule as the connection class: a subprocess killed at
+			// its own budget is wedged, and the catalog it saw is not the reason.
+			name:            "subprocess deadline",
+			b:               container,
+			err:             fmt.Errorf("%s: %w", observedCatalogRaceStderr, context.DeadlineExceeded),
+			wantCatalogRace: false, wantRetriedAtAll: false,
+		},
+		{
+			// The first class keeps its own predicate: a lost connection is not
+			// a catalog race, and a suite that reports it as one would skip.
+			name:            "connection failure stays its own class",
+			b:               container,
+			err:             fmt.Errorf("bd show x: %s", observedOpenFailureStderr),
+			wantCatalogRace: false, wantRetriedAtAll: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.b.retryableBdCatalogRace(tt.err); got != tt.wantCatalogRace {
+				t.Errorf("retryableBdCatalogRace(%v) = %v, want %v", tt.err, got, tt.wantCatalogRace)
+			}
+			if got := tt.b.retryableBdTransientFailure(tt.err); got != tt.wantRetriedAtAll {
+				t.Errorf("retryableBdTransientFailure(%v) = %v, want %v", tt.err, got, tt.wantRetriedAtAll)
+			}
+		})
+	}
+}
+
+// TestCatalogRaceIsNotAContainerGoneSkip picks the wider of the two verdicts a
+// caller can reach from a spent retry, and pins the narrower one for this class
+// (gt-cbtl): a catalog race says nothing about the container being gone, so
+// exhausting the retries on one leaves the suite red rather than skipping it
+// green.
+func TestCatalogRaceIsNotAContainerGoneSkip(t *testing.T) {
+	container := NewIsolatedWithPort(t.TempDir(), 55069)
+	race := fmt.Errorf("bd init: %s", observedCatalogRaceStderr)
+
+	if container.retryableBdTransientFailure(race) != true {
+		t.Fatal("the catalog race is not retried at all")
+	}
+	if container.ContainerUnavailable(race) {
+		t.Error("a catalog race was reported as the test container being gone")
+	}
+}
+
 // TestContainerUnavailableNeverExcusesAProductionFailure pins the guard that
 // the container-backed suites' skip rides on (gt-cbtl): the predicate is scoped
 // to a wrapper built for a test container, so no production caller can turn a
@@ -261,6 +383,27 @@ fi
 printf '%%s\n' '[{"id":"gt-rqn","title":"MR","status":"open"}]'
 exit 0
 `, failUntil, observedIoTimeoutStderr, observedOpenFailureStderr))
+}
+
+// installFlakyCatalogRaceBDStub writes a fake bd that fails the first failUntil
+// invocations with gt-unq4l's store-open race and then succeeds.
+func installFlakyCatalogRaceBDStub(t *testing.T, failUntil int) *flakyBdStub {
+	t.Helper()
+	return installBdStub(t, fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+count=0
+[ -f __COUNT__ ] && count=$(cat __COUNT__)
+count=$((count + 1))
+echo "$count" > __COUNT__
+if [ "$count" -le %d ]; then
+  echo %q >&2
+  exit 1
+fi
+exit 0
+`, failUntil, observedCatalogRaceStderr))
 }
 
 // installBdStub writes a fake bd whose body is script, substitutes __COUNT__
