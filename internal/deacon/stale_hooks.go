@@ -407,6 +407,15 @@ func checkWorktreeState(townRoot, assignee string, result *StaleHookResult) {
 	}
 }
 
+// AssigneeWorktreePath resolves an assignee address (e.g. "rig/polecats/name")
+// to its git worktree path, for callers outside this package that need the
+// same resolution the stale-hook scan uses — the convoy manager's dead-holder
+// preservation check (gt-utt4) is the other caller. Returns "" if the
+// assignee format is unrecognized or no worktree exists there.
+func AssigneeWorktreePath(townRoot, assignee string) string {
+	return assigneeToWorktreePath(townRoot, assignee)
+}
+
 // assigneeToWorktreePath resolves an assignee address to its git worktree path.
 // Returns "" if the assignee format is unrecognized or the worktree doesn't exist.
 // Supports polecat format "rig/polecats/name" and crew format "rig/crew/name".
