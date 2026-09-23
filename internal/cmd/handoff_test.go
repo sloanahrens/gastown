@@ -636,7 +636,7 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 			binDir := t.TempDir()
 			gtLog := filepath.Join(t.TempDir(), "gt.log")
 			_ = writeBDStub(t, binDir, "#!/bin/sh\nexit 0\n", "@echo off\r\nexit /b 0\r\n")
-			gtStub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + gtLog + "\"\nprintf 'stub gt %s\\n' \"$*\"\nexit 0\n"
+			gtStub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + gtLog + "\"\nenv | grep -q '^" + envDoneFromHandoff + "=1$' && printf 'env-marker-set\\n' >> \"" + gtLog + "\"\nprintf 'stub gt %s\\n' \"$*\"\nexit 0\n"
 			if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtStub), 0755); err != nil {
 				t.Fatalf("write gt stub: %v", err)
 			}
@@ -695,6 +695,12 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 			stubRan := strings.Contains(string(gtLogBytes), "done --status DEFERRED")
 			if stubRan != tt.wantBlock {
 				t.Errorf("gt stub ran = %v, want %v; log: %s", stubRan, tt.wantBlock, gtLogBytes)
+			}
+			// The handoff-triggered gt done must carry the marker that tells it
+			// to preserve the session instead of retiring it (gt-5g3e).
+			envMarkerSet := strings.Contains(string(gtLogBytes), "env-marker-set")
+			if envMarkerSet != tt.wantBlock {
+				t.Errorf("%s propagated to gt done subprocess = %v, want %v; log: %s", envDoneFromHandoff, envMarkerSet, tt.wantBlock, gtLogBytes)
 			}
 		})
 	}

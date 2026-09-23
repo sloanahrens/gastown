@@ -155,6 +155,11 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		// Polecats don't respawn themselves - Witness handles lifecycle
 		// Call gt done with DEFERRED status to preserve work state
 		doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
+		// Mark this as a handoff-originated call so gt done preserves the
+		// session instead of retiring it (gt-5g3e): a mid-work handoff must
+		// keep the polecat (or its successor) going, exactly as
+		// polecat-CLAUDE.md promises, not end the session.
+		doneCmd.Env = append(os.Environ(), envDoneFromHandoff+"=1")
 		doneCmd.Stdout = os.Stdout
 		doneCmd.Stderr = os.Stderr
 		return doneCmd.Run()
