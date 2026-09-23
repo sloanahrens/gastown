@@ -180,16 +180,6 @@ func (g *Git) CommitSubject(rev string) (string, error) {
 	return g.run("log", "-1", "--format=%s", rev)
 }
 
-// BlobContent returns the raw text of a blob object. "" (no such side of the
-// comparison) reads back as "" rather than an error, matching how BlobDiffLines
-// treats an absent blob.
-func (g *Git) BlobContent(blob string) (string, error) {
-	if blob == "" {
-		return "", nil
-	}
-	return g.run("show", blob)
-}
-
 // DiffStatThreeDot returns git diff --stat for base...head, the diff restricted
 // to what head introduces on top of the merge base (as opposed to the pair-wise
 // base..head range, which also reports base's own progress as a deletion).

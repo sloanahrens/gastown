@@ -105,6 +105,59 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 	fmt.Fprintf(&b, "Integrate with:\n"+
 		"  git fetch origin && git rebase %s\n\n", target)
 	fmt.Fprintf(&b, "Then confirm the branch lists only YOUR files and re-run gt done:\n"+
-		"  git diff --stat %s...HEAD", target)
+		"  git diff --stat %s...HEAD\n\n", target)
+	b.WriteString("If you are certain this removal is intentional and not a rebase artifact, " +
+		"do not try to talk your way past this check: no commit message can authorize it. " +
+		"Escalate to the mayor for a ruling; only that can authorize submitting it.")
 	return fmt.Errorf("%s", b.String())
+}
+
+// requireRevertOverrideAuthorization enforces that an agent invoking
+// --allow-reverts names the bead recording the mayor ruling that authorized
+// it (gt-0wy03 attempt 2): commit-message text can no longer excuse a
+// revert, so the one remaining override must be traceable to an explicit
+// ruling the same way gt-61x requires for a forced Dolt cleanup. A human at
+// a plain terminal (actor == "") is not gated — it is the agent path, run
+// unattended, that must not self-authorize.
+func requireRevertOverrideAuthorization(actor, authorizedBy string) error {
+	if actor == "" || authorizedBy != "" {
+		return nil
+	}
+	return fmt.Errorf(`agent actor %q may not run 'gt done --allow-reverts' without recorded authorization (gt-0wy03)
+
+Reverting merged work requires an authorization bead:
+  1. Escalate to the mayor and get an explicit ruling
+  2. Reference the bead that records the decision:
+       gt done --allow-reverts --allow-reverts-authorized-by <bead-id>
+
+The override will be logged as a comment on that bead`, actor)
+}
+
+// recordRevertOverride writes the audit trail --allow-reverts must leave
+// (gt-0wy03 attempt 2): the ruling bead gets a permanent comment naming who
+// invoked the override and which commits it let through. addComment is
+// injected so this is testable without a live beads store; it fails closed —
+// if the record cannot be written, the override must not proceed, mirroring
+// cleanupAuditor.recordIntent (gt-87a).
+func recordRevertOverride(g *git.Git, addComment func(id, text string) error, actor, authorizedBy, target string) error {
+	found, detectErr := git.DetectRevertedMerges(g, target, "HEAD")
+	var detail string
+	switch {
+	case detectErr != nil:
+		detail = fmt.Sprintf("could not determine (error: %v)", detectErr)
+	case len(found) == 0:
+		detail = "none detected"
+	default:
+		commits := make([]string, 0, len(found))
+		for _, f := range found {
+			commits = append(commits, shortSHA(f.Commit))
+		}
+		detail = strings.Join(commits, ", ")
+	}
+	comment := fmt.Sprintf("gt done --allow-reverts by %s: bypassing merged-work revert check against %s; reverted commit(s): %s",
+		actor, target, detail)
+	if err := addComment(authorizedBy, comment); err != nil {
+		return fmt.Errorf("cannot write --allow-reverts audit record to %s — refusing to submit (gt-0wy03): %w", authorizedBy, err)
+	}
+	return nil
 }

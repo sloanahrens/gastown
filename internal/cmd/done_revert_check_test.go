@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,15 +279,14 @@ func containsString(haystack []string, needle string) bool {
 	return false
 }
 
-// The three scenarios below cover gt-0wy03: the contained (line-multiset)
+// The four scenarios below cover gt-0wy03: the contained (line-multiset)
 // half of DetectRevertedMerges has no positional or context anchor, so it
 // cannot by itself tell an actual revert apart from a candidate that merely
 // deletes one instance of a repeated line a merged commit also added
-// elsewhere in the same file. Each scenario shares the same shape — a
-// candidate fully rebased onto (so containing every one of) a target commit
-// that adds a line already present, for an unrelated reason, somewhere else
-// in the same file — and differs only in how, if at all, that removal is
-// rescued from being read as an inversion of the merged commit.
+// elsewhere. Each scenario shares the same shape — a candidate fully rebased
+// onto (so containing every one of) a target commit that adds a line — and
+// differs only in whether, and why, that removal should or should not be
+// read as an inversion of the merged commit.
 
 // newRebasedPackageScenario builds origin.git with a base commit holding
 // path with initial content, clones it into a seed (standing in for
@@ -322,11 +322,10 @@ func newRebasedPackageScenario(t *testing.T, path, initial string) scenarioPaths
 }
 
 // rebasePolecatOntoSeed advances main past its current tip with a commit
-// that writes path to advanced (the merged commit under test — subject
-// carries the issue tag DetectRevertedMerges' documentedRemoval check looks
-// for), pushes it, then fast-forwards the polecat checkout onto it — so the
-// polecat's tree genuinely contains the merged change, the shape the
-// contained test's escape hatches assume.
+// that writes path to advanced (the merged commit under test), pushes it,
+// then fast-forwards the polecat checkout onto it — so the polecat's tree
+// genuinely contains the merged change, the shape the contained test's
+// relocation hatch assumes.
 func rebasePolecatOntoSeed(t *testing.T, s scenarioPaths, path, advanced, subject string) {
 	t.Helper()
 	writeTestFile(t, filepath.Join(s.seed, path), advanced)
@@ -366,13 +365,14 @@ func TestDetectRevertedMerges_RelocationSurvivesInPackage(t *testing.T) {
 	assertNoRevertedMerges(t, s.polecat)
 }
 
-// TestDetectRevertedMerges_DocumentedRemovalIsNotRefused covers a removal
-// whose content genuinely does not survive anywhere in the package — so
-// linesSurviveInPackage cannot rescue it — but whose own commit message
-// documents, by the merged commit's issue id, that the removal is
-// deliberate and reviewed (gt-k317's convention). That commit message is
-// the only signal available in this shape, and it must be enough.
-func TestDetectRevertedMerges_DocumentedRemovalIsNotRefused(t *testing.T) {
+// TestDetectRevertedMerges_RevertsTrailerDoesNotBypass covers a removal
+// whose content genuinely does not survive anywhere in the package, with a
+// commit message that claims, by a "Reverts: <issue-id>" trailer, that the
+// removal is deliberate and reviewed. That claim is author-controlled text
+// and must never bypass the guard on its own (gt-0wy03 attempt 2): the
+// commit is still refused, exactly as an identical commit with no trailer
+// would be.
+func TestDetectRevertedMerges_RevertsTrailerDoesNotBypass(t *testing.T) {
 	t.Parallel()
 	const path = "pkg/bar.go"
 	base := "package pkg\n\nfunc Bar() {\n\tdoA()\n}\n"
@@ -388,15 +388,65 @@ func TestDetectRevertedMerges_DocumentedRemovalIsNotRefused(t *testing.T) {
 			"Reverts: gt-uniq1 doB guard in Bar\n\n"+
 			"The guard is redundant now that callers check first; verified in review.")
 
-	assertNoRevertedMerges(t, s.polecat)
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (a Reverts: trailer must not bypass the check): %+v", len(found), found)
+	}
 }
 
-// TestDetectRevertedMerges_RefusesUndocumentedFullRemoval is the case (c)
-// guard: the identical shape as the documented-removal scenario above —
-// content gone from the whole package, so linesSurviveInPackage cannot
-// rescue it either — but with no "Reverts:" trailer naming the merged
-// commit. Neither escape hatch applies, and this must still be refused:
-// the fix must not make every single-line removal pass.
+// TestDetectRevertedMerges_PreexistingCopyDoesNotRescue is gt-0wy03 attempt
+// 2's own repro for the relocation escape hatch being too permissive: the
+// merged commit adds t.Parallel() to TestA in pkg/foo_test.go, and an
+// unrelated file in the same package, pkg/bar_test.go, has always had its
+// own t.Parallel() in TestC — present since the base commit, never touched
+// by either the merged commit or the candidate. The candidate removes
+// TestA's t.Parallel() (reverting the merged commit's own change) while also
+// adding an unrelated new test, so the exact whole-file test cannot fire and
+// only the contained (line-multiset) test, with its relocation hatch, is in
+// play. TestC's t.Parallel() still sits in the package at head, but it was
+// never ADDED by this branch — it predates the branch entirely — so it must
+// not rescue the removal. The old content-scanning check counted any current
+// copy anywhere in the directory and would have wrongly rescued this.
+func TestDetectRevertedMerges_PreexistingCopyDoesNotRescue(t *testing.T) {
+	t.Parallel()
+	const (
+		fooPath = "pkg/foo_test.go"
+		barPath = "pkg/bar_test.go"
+	)
+	fooBase := "package pkg\n\nfunc TestA(t *testing.T) {\n\tdoStuff()\n}\n"
+	fooAdvanced := "package pkg\n\nfunc TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n"
+	fooFinal := "package pkg\n\nfunc TestA(t *testing.T) {\n\tdoStuff()\n}\n\n" +
+		"func TestD(t *testing.T) {\n\tdoD()\n}\n"
+	barContent := "package pkg\n\nfunc TestC(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+
+	s := newRebasedPackageScenario(t, fooPath, fooBase)
+	writeTestFile(t, filepath.Join(s.seed, barPath), barContent)
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", "pkg: add TestC (gt-test)")
+	runGitCmd(t, s.seed, "push", "origin", "main")
+	runGitCmd(t, s.polecat, "fetch", "origin")
+	runGitCmd(t, s.polecat, "rebase", "origin/main")
+
+	rebasePolecatOntoSeed(t, s, fooPath, fooAdvanced, "cmd tests: t.Parallel for TestA (gt-kf0r)")
+	commitPolecat(t, s.polecat, map[string]string{fooPath: fooFinal}, "fix(pkg): TestA cannot run in parallel, it swaps a global; add TestD (gt-test)")
+
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (a pre-existing copy in another file must not rescue the removal): %+v", len(found), found)
+	}
+}
+
+// TestDetectRevertedMerges_RefusesUndocumentedFullRemoval is the baseline
+// guard: the identical shape as the Reverts-trailer scenario above — content
+// gone from the whole package, so relocation cannot rescue it — but with no
+// commit-message trailer naming the merged commit either. This must still be
+// refused: the fix must not make every single-line removal pass.
 func TestDetectRevertedMerges_RefusesUndocumentedFullRemoval(t *testing.T) {
 	t.Parallel()
 	const path = "pkg/bar.go"
@@ -415,4 +465,78 @@ func TestDetectRevertedMerges_RefusesUndocumentedFullRemoval(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (undocumented removal must still be refused): %+v", len(found), found)
 	}
+}
+
+// TestRequireRevertOverrideAuthorization pins the gt-61x-style guardrail: an
+// agent invoking --allow-reverts must name the bead that authorized it, since
+// commit-message text can no longer excuse a revert on its own. A human at a
+// plain terminal is not gated the same way.
+func TestRequireRevertOverrideAuthorization(t *testing.T) {
+	t.Parallel()
+	t.Run("refuses an agent without an authorization bead", func(t *testing.T) {
+		err := requireRevertOverrideAuthorization("gastown/polecats/onyx", "")
+		if err == nil {
+			t.Fatal("expected refusal for an agent using --allow-reverts without --allow-reverts-authorized-by")
+		}
+		if !strings.Contains(err.Error(), "gt-0wy03") {
+			t.Errorf("error should reference the guardrail bead, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "--allow-reverts-authorized-by") {
+			t.Errorf("error should explain the remedy, got: %v", err)
+		}
+	})
+
+	t.Run("allows an agent with an authorization bead", func(t *testing.T) {
+		if err := requireRevertOverrideAuthorization("gastown/polecats/onyx", "hq-abc"); err != nil {
+			t.Errorf("expected authorization to pass, got: %v", err)
+		}
+	})
+
+	t.Run("does not gate a human actor", func(t *testing.T) {
+		if err := requireRevertOverrideAuthorization("", ""); err != nil {
+			t.Errorf("expected a human actor to pass without a bead, got: %v", err)
+		}
+	})
+}
+
+// TestRecordRevertOverride pins the audit trail --allow-reverts must leave:
+// the authorizing bead gets a permanent comment naming the actor and the
+// commits the override let through, and a failure to write that comment
+// refuses the override rather than proceeding silently (gt-0wy03 attempt 2).
+func TestRecordRevertOverride(t *testing.T) {
+	t.Parallel()
+	s := newRevertScenario(t)
+	commitPolecat(t, s.polecat, map[string]string{
+		"shared.txt": "base\npolecat line\n",
+		"fix.txt":    "the fix\n",
+	}, "wip: start")
+	advanceMain(t, s.seed)
+	staleResetOntoMain(t, s.polecat)
+	g := git.NewGit(s.polecat)
+
+	t.Run("writes the reverted commits to the authorizing bead", func(t *testing.T) {
+		var comments []string
+		addComment := func(id, text string) error {
+			comments = append(comments, id+": "+text)
+			return nil
+		}
+		if err := recordRevertOverride(g, addComment, "gastown/polecats/onyx", "hq-abc", "origin/main"); err != nil {
+			t.Fatalf("recordRevertOverride: %v", err)
+		}
+		if len(comments) != 1 {
+			t.Fatalf("expected 1 audit comment, got %d: %v", len(comments), comments)
+		}
+		for _, want := range []string{"hq-abc:", "gastown/polecats/onyx", "origin/main"} {
+			if !strings.Contains(comments[0], want) {
+				t.Errorf("audit comment missing %q: %s", want, comments[0])
+			}
+		}
+	})
+
+	t.Run("fails closed when the bead comment cannot be written", func(t *testing.T) {
+		addComment := func(id, text string) error { return fmt.Errorf("bead not found") }
+		if err := recordRevertOverride(g, addComment, "gastown/polecats/onyx", "hq-missing", "origin/main"); err == nil {
+			t.Fatal("expected recordRevertOverride to fail when the audit comment cannot be written")
+		}
+	})
 }

@@ -67,15 +67,16 @@ Examples:
 }
 
 var (
-	doneIssue         string
-	donePriority      int
-	doneStatus        string
-	doneCleanupStatus string
-	doneResume        bool
-	donePreVerified   bool
-	doneTarget        string
-	doneSkipVerify    bool
-	doneAllowReverts  bool
+	doneIssue                    string
+	donePriority                 int
+	doneStatus                   string
+	doneCleanupStatus            string
+	doneResume                   bool
+	donePreVerified              bool
+	doneTarget                   string
+	doneSkipVerify               bool
+	doneAllowReverts             bool
+	doneAllowRevertsAuthorizedBy string
 
 	doneAllowThrowawayPaths bool
 )
@@ -1103,6 +1104,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
 	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
+	doneCmd.Flags().StringVar(&doneAllowRevertsAuthorizedBy, "allow-reverts-authorized-by", "", "Bead ID recording the mayor ruling authorizing --allow-reverts (required for --allow-reverts when run by an agent)")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
@@ -1650,6 +1652,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// it neither causes nor cures this and the check must see the branch in
 		// the state that would actually be pushed.
 		if doneAllowReverts {
+			if err := requireRevertOverrideAuthorization(actor, doneAllowRevertsAuthorizedBy); err != nil {
+				return err
+			}
+			if doneAllowRevertsAuthorizedBy != "" {
+				if err := recordRevertOverride(g, beads.New(cwd).AddComment, actor, doneAllowRevertsAuthorizedBy, contaminationBase); err != nil {
+					return err
+				}
+			}
 			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
 		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {
 			return err

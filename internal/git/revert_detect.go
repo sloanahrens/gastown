@@ -2,7 +2,6 @@ package git
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -77,15 +76,19 @@ type RevertedMerge struct {
 //
 // The contained test has no positional or context anchor — it only compares
 // line multisets — so a candidate that removes one instance of a line the
-// commit added is a match whether or not that is what actually happened
-// (gt-0wy03). Before reporting either kind of match, two escape hatches ask
-// whether the removal is not actually a revert: linesSurviveInPackage (the
-// commit's content is still there, just relocated, gt-x748o — checked only
-// for a contained match, since an exact match already requires the whole
-// path back at its literal pre-commit blob, leaving no partial shape for it
-// to find) and documentedRemoval (the candidate's own commit message says so
-// by issue id, gt-k317 — checked for either kind of match). A real revert
-// has neither and is still refused.
+// commit added reads as a match whether or not that is what actually
+// happened (gt-0wy03). Before reporting a contained match, one escape hatch
+// asks whether the removal is really a relocation: see packageAddedLines for
+// what counts as relocated and why the anchor has to be the flagged commit's
+// own parent, not the merge base. Only checked for a contained match: an
+// exact match already requires the whole path back at its literal pre-commit
+// blob, leaving no partial shape for relocation to find.
+//
+// There is no escape hatch keyed off commit-message text — an author's own
+// words must never bypass a landing check. The one sanctioned override is
+// --allow-reverts, gated on an explicit mayor ruling (see
+// requireRevertOverrideAuthorization in internal/cmd/done_revert_check.go).
+// A real revert has no relocation and is still refused.
 func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, error) {
 	mergeBase, err := g.MergeBase(target, "HEAD")
 	if err != nil {
@@ -106,6 +109,37 @@ func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, 
 	changes, err := g.CommitFileChanges(target, revertScanCommits)
 	if err != nil {
 		return nil, fmt.Errorf("reading history of %s: %w", target, err)
+	}
+
+	// parentTreeCache and packageAddedCache memoize, respectively, a flagged
+	// commit's own parent tree and the per-package added-lines multiset
+	// derived from it: several flagged paths sharing a commit, or a package
+	// with several flagged paths, would otherwise re-read or re-diff the same
+	// trees once per contained match.
+	parentTreeCache := map[string]map[string]string{}
+	packageAddedCache := map[string]map[string]int{}
+	relocated := func(commit, path string, want map[string]int) (bool, error) {
+		pkg := packageDir(path)
+		cacheKey := commit + "\x00" + pkg
+		have, cached := packageAddedCache[cacheKey]
+		if !cached {
+			parentBlobs, ok := parentTreeCache[commit]
+			if !ok {
+				var err error
+				parentBlobs, err = g.TreeFileBlobs(commit + "^")
+				if err != nil {
+					return false, fmt.Errorf("reading parent tree of %s: %w", commit, err)
+				}
+				parentTreeCache[commit] = parentBlobs
+			}
+			var err error
+			have, err = packageAddedLines(g, parentBlobs, headBlobs, pkg)
+			if err != nil {
+				return false, err
+			}
+			packageAddedCache[cacheKey] = have
+		}
+		return multisetContains(have, want), nil
 	}
 
 	var found []RevertedMerge
@@ -140,29 +174,18 @@ func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, 
 			continue
 		}
 
-		// Two escape hatches ask whether this apparent revert is something
-		// else before it gets refused. linesSurviveInPackage only applies to
-		// a contained match (changeAdded set): the exact match above already
-		// requires the whole path back at its literal pre-commit blob, so
-		// there is no partial, still-present-elsewhere shape for it to find.
-		// documentedRemoval applies to both — a small removal named by issue
-		// id is just as legitimate when it happens to restore the path to
-		// its exact pre-commit content as when it does not.
+		// The one escape hatch applies only to a contained match
+		// (changeAdded set): the exact match above already requires the
+		// whole path back at its literal pre-commit blob, so there is no
+		// partial, still-present-elsewhere shape for relocation to find.
 		if changeAdded != nil {
-			relocated, err := linesSurviveInPackage(g, headBlobs, ch.Path, changeAdded)
+			ok, err := relocated(ch.Commit, ch.Path, changeAdded)
 			if err != nil {
 				return nil, err
 			}
-			if relocated {
+			if ok {
 				continue
 			}
-		}
-		documented, err := documentedRemoval(g, mergeBase, ch.Commit)
-		if err != nil {
-			return nil, err
-		}
-		if documented {
-			continue
 		}
 		if i, seen := byCommit[ch.Commit]; seen {
 			found[i].Paths = append(found[i].Paths, ch.Path)
@@ -226,71 +249,45 @@ func packageDir(path string) string {
 	return "."
 }
 
-// linesSurviveInPackage reports whether every line counted in want still
-// appears, at least that many times in total, somewhere in path's package on
-// the branch tip — i.e. the content changeIsInvertedBy flagged as removed was
-// actually relocated within the package, not deleted.
+// packageAddedLines returns the multiset of lines gained anywhere in pkg
+// between beforeBlobs and headBlobs — across every file in the directory, not
+// just the one path a flagged commit touched. The caller passes the flagged
+// commit's OWN PARENT tree as beforeBlobs, not the merge base: by the time
+// this check runs the merge base commonly already equals target's tip, which
+// already contains the flagged commit's own contribution, so a merge-base
+// anchor would never see that contribution as "added" and could never rescue
+// even a genuine relocation. Anchoring on the commit's own parent instead
+// captures everything gained since just before it ran — the commit's own
+// addition, any later target commits, and the candidate's own commits — while
+// still excluding a line that already sat in the package beforehand and
+// never moved (gt-0wy03 attempt 2: that laxer, merge-base-current-content
+// form let a real revert of a boilerplate line pass whenever an unrelated,
+// older copy of the same line existed anywhere in the directory).
 //
-// This catches two shapes with the same test: a repeated line the flagged
-// commit added in one spot while the candidate independently touched another
-// spot with the same text (gt-0wy03's t.Parallel() case, where the commit's
-// own added line is untouched and still sitting right there), and a block of
-// code moved into a new helper in the same file, whole (gt-x748o).
-//
-// It reads full current file content rather than diffs, since an untouched
-// line that survived from before the branch even started never appears in
-// any diff at all.
-func linesSurviveInPackage(g *Git, headBlobs map[string]string, path string, want map[string]int) (bool, error) {
-	if len(want) == 0 {
-		return false, nil
+// This catches the two shapes relocation is meant to: a repeated line the
+// flagged commit added in one spot while the candidate independently touched
+// another spot with the same text (gt-0wy03's own t.Parallel() case), and a
+// block of code moved whole into a new helper in the same file (gt-x748o).
+func packageAddedLines(g *Git, beforeBlobs, headBlobs map[string]string, pkg string) (map[string]int, error) {
+	paths := make(map[string]struct{}, len(headBlobs))
+	for p := range beforeBlobs {
+		paths[p] = struct{}{}
 	}
-	pkg := packageDir(path)
-	have := map[string]int{}
-	for p, blob := range headBlobs {
-		if blob == "" || packageDir(p) != pkg {
+	for p := range headBlobs {
+		paths[p] = struct{}{}
+	}
+	added := map[string]int{}
+	for p := range paths {
+		if packageDir(p) != pkg {
 			continue
 		}
-		content, err := g.BlobContent(blob)
+		a, _, err := g.BlobDiffLines(beforeBlobs[p], headBlobs[p])
 		if err != nil {
-			return false, fmt.Errorf("reading content of %s: %w", p, err)
+			return nil, fmt.Errorf("diffing %s in package %s: %w", p, pkg, err)
 		}
-		for _, line := range strings.Split(content, "\n") {
-			have[line]++
+		for line, n := range a {
+			added[line] += n
 		}
 	}
-	return multisetContains(have, want), nil
-}
-
-// trailingIssueTag extracts the issue id this repo's commit subjects
-// conventionally end with, e.g. "cmd tests: ... (gt-kf0r)" -> "gt-kf0r".
-// Empty if the subject does not follow the convention.
-var trailingIssueTagPattern = regexp.MustCompile(`\(([A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]+)\)\s*$`)
-
-func trailingIssueTag(subject string) string {
-	m := trailingIssueTagPattern.FindStringSubmatch(strings.TrimSpace(subject))
-	if m == nil {
-		return ""
-	}
-	return m[1]
-}
-
-// documentedRemoval reports whether the candidate's own history (mergeBase..
-// HEAD) names commit, by its issue id, as a deliberate and reviewed removal —
-// the "Reverts: <issue-id> <why>" convention (e.g. "Reverts: gt-kf0r
-// t.Parallel in TestFoo", gt-k317). This is the escape hatch for a small
-// intentional removal whose content really is gone, so linesSurviveInPackage
-// cannot rescue it: the author is expected to say so in the removing commit's
-// own message rather than rely on --allow-reverts, which this package's
-// refusal message deliberately never names (see revertedMergeRefusal in
-// internal/cmd/done_revert_check.go).
-func documentedRemoval(g *Git, mergeBase, commit string) (bool, error) {
-	subject, err := g.CommitSubject(commit)
-	if err != nil {
-		return false, fmt.Errorf("reading subject of %s: %w", commit, err)
-	}
-	issueTag := trailingIssueTag(subject)
-	if issueTag == "" {
-		return false, nil
-	}
-	return g.LogGrep(mergeBase+"..HEAD", "Reverts: "+issueTag)
+	return added, nil
 }
