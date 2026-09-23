@@ -293,6 +293,12 @@ as branches may exist without MR beads, or MR beads may exist for already-merged
 
 If queue empty, skip to "check-integration-branches" step.
 
+If any MR's STATUS column reads `duplicate`, two open MRs claim the same
+branch (gt-k1qf). Do not process either through process-branch: mail
+`<rig>/witness` naming both MR IDs and the branch (`gt mq list <rig>`
+prints both under a "DUPLICATE BRANCH MRs" banner), then continue queue-scan
+with the remaining MRs.
+
 For each MR in the queue, verify the branch still exists:
 ```bash
 git branch -r | grep <branch>

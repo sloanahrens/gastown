@@ -2906,15 +2906,16 @@ func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
 	return beads.FirstUnresolvedBlockerID(issue)
 }
 
-// ErrDuplicateBranchMRs is returned by ListReadyMRs when two or more open MRs
-// claim the same branch — the invariant conflict resolution must never break
-// (gt-k1qf). See duplicateBranchMRs.
+// ErrDuplicateBranchMRs marks the duplicate-branch anomaly (gt-k1qf): two or
+// more open MRs claiming one branch, the invariant conflict resolution must
+// never break. See DuplicateBranchMRs.
 var ErrDuplicateBranchMRs = errors.New("two open MRs claim the same branch")
 
-// ListReadyMRs returns MRs that are ready for processing:
-// - Not claimed by another worker (checked via assignee field)
-// - Not blocked by unresolved dependencies
-// Sorted by priority (highest first).
+// ListReadyMRs returns unclaimed, unblocked MRs, sorted by priority (highest
+// first). An MR sharing its branch with another open MR is excluded rather
+// than gated (gt-k1qf) and reported separately by ListQueueAnomalies as a
+// duplicate-branch anomaly, so one colliding pair no longer blocks every
+// other MR in the rig.
 //
 // Uses bd list instead of bd ready because MRs are ephemeral beads and
 // bd ready filters out ephemeral issues (see gt-t5t6y). This matches the
@@ -2933,25 +2934,19 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
 	}
 
-	// gt-k1qf: fail closed the moment two open MRs (ready or still blocked)
-	// claim the same branch, rather than silently handing back one of them as
-	// "ready" and leaving the other to be gated or merged too, or stranded
-	// past the normal post-merge cleanup path. supersedeOpenMRsForIssue
-	// (mr_supersede.go) is supposed to keep this from ever happening — it
-	// closes the older MR for a source issue the instant a replacement is
-	// created — but it swallows a close failure as a warning rather than
-	// failing the submission that already landed, so a Dolt hiccup at exactly
-	// the wrong moment can leave both open. This is the safety net for that
-	// residual window, not the primary fix.
-	if dups := duplicateBranchMRs(issues, e.rig.Name); len(dups) > 0 {
-		return nil, fmt.Errorf("%w: %s", ErrDuplicateBranchMRs, formatDuplicateBranchMRs(dups))
-	}
+	// gt-k1qf: never gate an MR that shares its branch with another open MR
+	// (see DuplicateBranchMRs for why this check exists).
+	duplicateIDs := duplicateBranchMRIDs(issues, e.rig.Name)
 
 	// Convert beads issues to MRInfo
 	var mrs []*MRInfo
 	for _, issue := range issues {
 		// Skip closed MRs (workaround for bd list not respecting --status filter)
 		if issue.Status != "open" {
+			continue
+		}
+
+		if duplicateIDs[issue.ID] {
 			continue
 		}
 
@@ -3218,25 +3213,66 @@ func detectQueueAnomalies(
 		}
 	}
 
+	// 3) Duplicate-branch detection (gt-k1qf): report every MR sharing a
+	// branch with another open MR, so a patrol that only ever sees "ready"
+	// or "blocked" still learns to refuse and escalate the pair. issues is
+	// already rig-scoped by ListQueueAnomalies.
+	for _, dup := range duplicateBranchMRsInScope(issues) {
+		for _, id := range dup.IDs {
+			anomalies = append(anomalies, &MRAnomaly{
+				ID:     id,
+				Branch: dup.Branch,
+				Type:   "duplicate-branch",
+				Detail: fmt.Sprintf("branch claimed by multiple open MRs: %s", strings.Join(dup.IDs, ", ")),
+			})
+		}
+	}
+
 	return anomalies
 }
 
-// duplicateBranchMR pairs one branch with every open MR ID that claims it,
+// DuplicateBranchMR pairs one branch with every open MR ID that claims it,
 // sorted for deterministic output. len(IDs) is always >= 2.
-type duplicateBranchMR struct {
+type DuplicateBranchMR struct {
 	Branch string
 	IDs    []string
 }
 
-// duplicateBranchMRs finds branches claimed by more than one open MR in
+// DuplicateBranchMRs finds branches claimed by more than one open MR in
 // issues, scoped to rigName the same way the rest of the queue is (wisps are
 // shared across all rigs — GH#2718). Two live MRs for one branch is exactly
 // the gt-k1qf failure: whichever the refinery picks up first, the other is
 // left either double-processed or stranded past the normal post-merge path
 // once the branch actually lands. supersedeOpenMRsForIssue is supposed to
 // prevent this by closing the older MR the instant a replacement is created;
-// this is the check that catches it if that ever fails silently.
-func duplicateBranchMRs(issues []*beads.Issue, rigName string) []duplicateBranchMR {
+// this is the check that catches it if that ever fails silently. Collisions
+// are keyed by branch, not by source_issue: two MRs racing to land the same
+// branch are unsafe together regardless of which issue(s) they cite (see
+// TestDuplicateBranchMRs_DifferentSourceIssuesSameBranchStillCollide).
+//
+// Shared by ListReadyMRs (excludes the colliding MRs), ListQueueAnomalies
+// (reports them for escalation), and `gt mq list` (marks them "duplicate" so
+// the single-MR patrol path agrees with the batch path) so every queue view
+// treats a collision the same way.
+func DuplicateBranchMRs(issues []*beads.Issue, rigName string) []DuplicateBranchMR {
+	scoped := make([]*beads.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		fields := beads.ParseMRFields(issue)
+		if fields != nil && fields.Rig != "" && !strings.EqualFold(fields.Rig, rigName) {
+			continue
+		}
+		scoped = append(scoped, issue)
+	}
+	return duplicateBranchMRsInScope(scoped)
+}
+
+// duplicateBranchMRsInScope groups already rig-scoped open MRs by branch.
+// Callers that have already filtered by rig (ListQueueAnomalies) use this
+// directly instead of DuplicateBranchMRs to avoid filtering twice.
+func duplicateBranchMRsInScope(issues []*beads.Issue) []DuplicateBranchMR {
 	byBranch := map[string][]string{}
 	var order []string
 	for _, issue := range issues {
@@ -3247,30 +3283,39 @@ func duplicateBranchMRs(issues []*beads.Issue, rigName string) []duplicateBranch
 		if fields == nil || fields.Branch == "" {
 			continue
 		}
-		if fields.Rig != "" && !strings.EqualFold(fields.Rig, rigName) {
-			continue
-		}
 		if _, seen := byBranch[fields.Branch]; !seen {
 			order = append(order, fields.Branch)
 		}
 		byBranch[fields.Branch] = append(byBranch[fields.Branch], issue.ID)
 	}
 
-	var dups []duplicateBranchMR
+	var dups []DuplicateBranchMR
 	for _, branch := range order {
 		ids := byBranch[branch]
 		if len(ids) < 2 {
 			continue
 		}
 		sort.Strings(ids)
-		dups = append(dups, duplicateBranchMR{Branch: branch, IDs: ids})
+		dups = append(dups, DuplicateBranchMR{Branch: branch, IDs: ids})
 	}
 	return dups
 }
 
-// formatDuplicateBranchMRs renders duplicateBranchMRs' findings for an error
+// duplicateBranchMRIDs flattens DuplicateBranchMRs into the set of MR IDs
+// that must not be gated.
+func duplicateBranchMRIDs(issues []*beads.Issue, rigName string) map[string]bool {
+	ids := map[string]bool{}
+	for _, d := range DuplicateBranchMRs(issues, rigName) {
+		for _, id := range d.IDs {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// FormatDuplicateBranchMRs renders DuplicateBranchMRs' findings for a
 // message: one clause per colliding branch, naming every MR that claims it.
-func formatDuplicateBranchMRs(dups []duplicateBranchMR) string {
+func FormatDuplicateBranchMRs(dups []DuplicateBranchMR) string {
 	parts := make([]string, 0, len(dups))
 	for _, d := range dups {
 		parts = append(parts, fmt.Sprintf("branch %s: %s", d.Branch, strings.Join(d.IDs, ", ")))
