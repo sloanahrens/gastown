@@ -499,8 +499,14 @@ func (c *PatrolPluginDriftCheck) Fix(ctx *CheckContext) error {
 	if c.sourceDir == "" || c.targetDir == "" {
 		return fmt.Errorf("drift check did not run; cannot fix")
 	}
-	_, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false)
-	return err
+	result, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false)
+	if err != nil {
+		return err
+	}
+	if len(result.Protected) > 0 {
+		return fmt.Errorf("left %d plugin(s) with runtime edits untouched; run 'gt plugin sync' to see them, --force to discard", len(result.Protected))
+	}
+	return nil
 }
 
 // discoverRigs finds all registered rigs.

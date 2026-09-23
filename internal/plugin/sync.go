@@ -18,12 +18,55 @@ type SyncResult struct {
 	Removed []string // plugin names that were removed (clean mode)
 	Skipped []string // plugin names that were already up-to-date
 	Errors  []string // errors encountered
+	// Protected maps a plugin name to the runtime files a sync would have
+	// destroyed (content the source repo never held); the plugin was left
+	// untouched. Empty under SyncOptions.Force.
+	Protected map[string][]string
+}
+
+// SyncOptions controls SyncPluginsWithOptions.
+type SyncOptions struct {
+	Clean bool // remove target plugins that are not in the source
+	Force bool // overwrite/remove even plugins holding runtime edits
 }
 
 // SyncPlugins copies plugin directories from source to target.
 // If clean is true, removes plugins from target that don't exist in source.
+// Plugins whose runtime copy holds edits the source repo never had are left
+// untouched and reported in Protected (gt-o848l).
 func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
+	return SyncPluginsWithOptions(sourceDir, targetDir, SyncOptions{Clean: clean})
+}
+
+// SyncPluginsWithOptions is SyncPlugins with explicit options.
+func SyncPluginsWithOptions(sourceDir, targetDir string, opts SyncOptions) (*SyncResult, error) {
 	result := &SyncResult{}
+	clean := opts.Clean
+	var hist blobHistory
+	var prefix string
+	if !opts.Force {
+		hist, prefix = sourceHistory(sourceDir)
+	}
+	// guard reports whether dstPluginDir may be replaced or removed; when it
+	// may not, it records the runtime edits in result.Protected.
+	guard := func(name, srcPluginDir, dstPluginDir string) bool {
+		if opts.Force {
+			return true
+		}
+		edits, err := runtimeEdits(name, srcPluginDir, dstPluginDir, hist, prefix)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: checking for runtime edits: %v", name, err))
+			return false
+		}
+		if len(edits) == 0 {
+			return true
+		}
+		if result.Protected == nil {
+			result.Protected = map[string][]string{}
+		}
+		result.Protected[name] = edits
+		return false
+	}
 
 	srcInfo, err := os.Stat(sourceDir)
 	if err != nil {
@@ -60,6 +103,9 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 			result.Skipped = append(result.Skipped, entry.Name())
 			continue
 		}
+		if _, err := os.Stat(dstPluginDir); err == nil && !guard(entry.Name(), srcPluginDir, dstPluginDir) {
+			continue
+		}
 
 		if err := copyDir(srcPluginDir, dstPluginDir); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", entry.Name(), err))
@@ -77,6 +123,9 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 				}
 				if !srcPlugins[entry.Name()] {
 					dstPath := filepath.Join(targetDir, entry.Name())
+					if !guard(entry.Name(), filepath.Join(sourceDir, entry.Name()), dstPath) {
+						continue
+					}
 					if err := os.RemoveAll(dstPath); err != nil {
 						result.Errors = append(result.Errors, fmt.Sprintf("removing %s: %v", entry.Name(), err))
 					} else {
@@ -278,7 +327,7 @@ func hasPlugins(dir string) bool {
 // DriftReport describes differences between source and runtime plugins.
 type DriftReport struct {
 	Source  string       `json:"source"`
-	Target string       `json:"target"`
+	Target  string       `json:"target"`
 	Drifted []DriftEntry `json:"drifted,omitempty"`
 	Missing []string     `json:"missing,omitempty"` // in source but not target
 	Extra   []string     `json:"extra,omitempty"`   // in target but not source
