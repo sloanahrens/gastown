@@ -414,6 +414,13 @@ func TestHookSessionBeaconLines_SilentForPreCompact(t *testing.T) {
 // TestPrimeRoleFixturesFitHookBudget is the acceptance guard for gt-layt: every
 // role's dynamic payload, rendered against its largest realistic content,
 // stays under primeHookTestBudget and leads with the work.
+//
+// A role whose work formula is attached renders its checklist through the
+// hooked-work section (outputMoleculeWorkflow), so its molecule section stays
+// empty; no role text appears here, because in production it rides the role's
+// system-prompt file. For the dog (gt-mbuf) that file is what keeps the prime
+// inside the hook budget — TestBuildStartupCommand_FirstDogSpawnCarriesSystemPromptFlag
+// guards it.
 func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	t.Setenv(config.EnvSystemPromptFile, "")
 	town := t.TempDir()
@@ -424,17 +431,25 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	memories := strings.Repeat("- some-memory-key: first sentence of the memory preview\n", 120)
 
 	patrol := map[Role]string{RoleWitness: constants.MolWitnessPatrol, RoleRefinery: constants.MolRefineryPatrol, RoleDeacon: constants.MolDeaconPatrol}
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleWitness, RoleRefinery, RoleDeacon, RoleMayor} {
+	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work", RoleDog: "mol-dog-reaper"}
+	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleWitness, RoleRefinery, RoleDeacon, RoleMayor} {
 		role := role
 		t.Run(string(role), func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+			if role == RoleDog {
+				// A dog is town-level (no rig) and runs from its own kennel.
+				ctx = RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}
+				if err := os.MkdirAll(ctx.WorkDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var bead *beads.Issue
-			if role == RolePolecat || role == RoleCrew {
+			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",
-					Description: "attached_molecule: gt-wisp-1\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
+					Description: "attached_molecule: gt-wisp-1\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
 			}
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },
