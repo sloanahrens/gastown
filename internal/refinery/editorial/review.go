@@ -556,6 +556,15 @@ func failureResultWithRawOutput(deps Deps, req ReviewRequest, class FailureClass
 	return ReviewResult{Exit: 2, Class: class, Retries: retries, Stderr: rawOutput}
 }
 
+// gateUsageErrorMarker is what the rig's gate script writes to stderr when its
+// own argument parser rejects an invocation: om-gate.sh's usage_error() logs
+// "usage error: <detail>" and exits 2. That parser prints its whole flag list
+// on rejection, and the list advertises "--timeout", so the BackendTimeout
+// search below would read a caller/harness disagreement as a backend timeout —
+// a Retryable class — and run the gate twice on a deterministic error
+// (gt-o6xh).
+const gateUsageErrorMarker = "usage error:"
+
 // classifyOutcome maps one gate-script invocation's outcome to either a
 // parsed verdict (class == "") or a FailureClass, in the fail-closed
 // table's order: BinaryMissing, ConfigError, BackendTimeout, MalformedVerdict,
@@ -573,6 +582,9 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 		return nil, ConfigError, errors.New(strings.TrimSpace(stderr))
 	}
 	lowerStderr := strings.ToLower(stderr)
+	if exitCode == 2 && strings.Contains(lowerStderr, gateUsageErrorMarker) {
+		return nil, ConfigError, errors.New(strings.TrimSpace(stderr))
+	}
 	if exitCode == 2 && (strings.Contains(lowerStderr, "timeout") || strings.Contains(lowerStderr, "timed out")) {
 		return nil, BackendTimeout, errors.New(strings.TrimSpace(stderr))
 	}

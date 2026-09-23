@@ -14,7 +14,10 @@ const (
 	// VersionMismatch means the om binary or rubric sha does not match the
 	// harness manifest, or the installed om version is below min_version.
 	VersionMismatch FailureClass = "version_mismatch"
-	// ConfigError means om reported a rubric/config problem before review.
+	// ConfigError means the review never started for a configuration reason:
+	// om reported a rubric/config problem, or the rig's gate script rejected
+	// the invocation outright — an argument its parser does not know, such as
+	// --timeout against a gate that predates the flag (gt-o6xh).
 	ConfigError FailureClass = "config_error"
 	// BackendTimeout means the review backend timed out.
 	BackendTimeout FailureClass = "backend_timeout"
