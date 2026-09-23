@@ -50,6 +50,46 @@ func runCmd(timeout time.Duration, name string, args ...string) (*bytes.Buffer, 
 	return &stdout, nil
 }
 
+// subprocessConcurrency bounds the dashboard's short bd/gt reads — the
+// fetcher's runBdCmd and the merge-queue snapshot's bd list seam. bd/Dolt
+// contention is fsync-bound, not CPU-bound (gt-05vk): concurrent bd children
+// queue behind a single-threaded store and only slow each other down. Long
+// commands use userCommandConcurrency instead, on a separate pool, so they
+// cannot hold every slot this one guards and starve the render (gt-d5xr).
+const subprocessConcurrency = 4
+
+// userCommandConcurrency sizes each handler's long-command pool: the
+// fetcher's userCmdSem (the background 90s `gt polecat list` inventory
+// refresh) and APIHandler's userCmdSem (the user-driven /api/run up to
+// maxRunTimeout, gh via runGhCommand, and rig add). The two channels are not
+// shared with each other, only sized the same (gt-d5xr). tmux calls stay
+// unbounded.
+const userCommandConcurrency = 4
+
+// acquireCmdSlot blocks until a slot in sem is free or ctx is done,
+// whichever comes first. A nil sem means no bound is configured (e.g. a
+// fetcher built directly in a test) and the call proceeds unthrottled.
+func acquireCmdSlot(ctx context.Context, sem chan struct{}) error {
+	if sem == nil {
+		return nil
+	}
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseCmdSlot releases a slot acquired via acquireCmdSlot. Safe to call
+// with a nil sem (no-op, mirrors acquireCmdSlot's nil handling).
+func releaseCmdSlot(sem chan struct{}) {
+	if sem == nil {
+		return
+	}
+	<-sem
+}
+
 // runTmuxCmd runs a tmux command using the per-town socket.
 // Without -L, tmux queries the default socket which has no Gas Town sessions.
 func (f *LiveConvoyFetcher) runTmuxCmd(args ...string) (*bytes.Buffer, error) {
@@ -66,10 +106,33 @@ var fetcherGetSessionEnv = func(sessionName, key string) (string, error) {
 	return tmux.NewTmux().GetEnvironment(sessionName, key)
 }
 
+// waitBudget bounds how long a call queues for a subprocess slot, kept
+// separate from execTimeout so a queued call still gets the full timeout
+// once it starts running. Defaults to execTimeout: a fixed budget shorter
+// than that turned slow-but-successful bd reads into hard failures under
+// exactly the Dolt contention this bound exists for (gt-d5xr).
+// slotWaitBudget overrides the default so a test's pool-full case can
+// resolve in milliseconds instead of waiting out a realistic timeout.
+func (f *LiveConvoyFetcher) waitBudget(execTimeout time.Duration) time.Duration {
+	if f.slotWaitBudget > 0 {
+		return f.slotWaitBudget
+	}
+	return execTimeout
+}
+
 // runBdCmd executes a bd command with the configured cmdTimeout in the specified beads directory.
 func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Buffer, error) {
 	// bd v0.59+ requires --flat for list --json to produce JSON output
 	args = beads.InjectFlatForListJSON(args)
+
+	// The slot wait has its own budget, so cmdTimeout bounds only execution.
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), f.waitBudget(f.cmdTimeout))
+	if err := acquireCmdSlot(waitCtx, f.cmdSem); err != nil {
+		cancelWait()
+		return nil, fmt.Errorf("bd: waiting for subprocess slot: %w", err)
+	}
+	cancelWait()
+	defer releaseCmdSlot(f.cmdSem)
 
 	ctx, cancel := context.WithTimeout(context.Background(), f.cmdTimeout)
 	defer cancel()
@@ -234,6 +297,21 @@ type LiveConvoyFetcher struct {
 	// server is down. listPoolAgents overrides the tmux seat read in tests.
 	localServerBreaker fetchCircuitBreaker
 	listPoolAgents     poolAgentLister
+
+	// cmdSem bounds this fetcher's bd reads (see subprocessConcurrency).
+	// Left nil by struct literals built directly in tests, which
+	// acquireCmdSlot/releaseCmdSlot treat as "no bound configured".
+	cmdSem chan struct{}
+
+	// userCmdSem bounds this fetcher's long-running gt children — the
+	// background polecat inventory refresh — against userCommandConcurrency,
+	// separate from cmdSem's bd reads (gt-d5xr). Same nil semantics as cmdSem.
+	userCmdSem chan struct{}
+
+	// slotWaitBudget overrides waitBudget's default for every cmdSem/userCmdSem
+	// acquire this fetcher makes. Zero (the default) means "use the call's own
+	// exec timeout"; tests set it short so a full-pool case resolves fast.
+	slotWaitBudget time.Duration
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -278,6 +356,8 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		stuckThreshold:          config.ParseDurationOrDefault(workerCfg.StuckThreshold, constants.GUPPViolationTimeout),
 		heartbeatFreshThreshold: config.ParseDurationOrDefault(workerCfg.HeartbeatFreshThreshold, 5*time.Minute),
 		mayorActiveThreshold:    config.ParseDurationOrDefault(workerCfg.MayorActiveThreshold, 5*time.Minute),
+		cmdSem:                  make(chan struct{}, subprocessConcurrency),
+		userCmdSem:              make(chan struct{}, userCommandConcurrency),
 	}
 
 	// Start the merge-queue refresh at startup rather than at the first page
@@ -1209,21 +1289,39 @@ func (f *LiveConvoyFetcher) townMergeQueueSnapshot() (TownMergeQueue, error) {
 		}
 		rigNames = append(rigNames, rigName)
 
-		issues, listErr := list(rigPath, beads.ListOptions{
-			Label:    mergeRequestLabel,
-			Status:   "open",
-			Priority: -1, // no priority filter; 0 would mean P0 only
-			Rig:      rigName,
-		})
+		// list ultimately shells out to bd via internal/beads, a different
+		// runner than runBdCmd's, so it acquires its own slot against the
+		// bd-read pool (gt-d5xr).
+		slotCtx, cancel := context.WithTimeout(context.Background(), f.waitBudget(f.cmdTimeout))
+		slotErr := acquireCmdSlot(slotCtx, f.cmdSem)
+		cancel()
+		if slotErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: waiting for subprocess slot: %w", rigName, slotErr)
+			}
+			continue
+		}
+		listErr := func() error {
+			defer releaseCmdSlot(f.cmdSem) // released on every return path, panic included
+			issues, err := list(rigPath, beads.ListOptions{
+				Label:    mergeRequestLabel,
+				Status:   "open",
+				Priority: -1, // no priority filter; 0 would mean P0 only
+				Rig:      rigName,
+			})
+			if err == nil {
+				answered++
+				for _, issue := range issues {
+					rows = append(rows, townMergeQueueRow(issue, rigName, now))
+				}
+			}
+			return err
+		}()
 		if listErr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", rigName, listErr)
 			}
 			continue
-		}
-		answered++
-		for _, issue := range issues {
-			rows = append(rows, townMergeQueueRow(issue, rigName, now))
 		}
 	}
 	// A rig that answered with nothing is an answer. Only a town where no read
@@ -1464,8 +1562,18 @@ func (f *LiveConvoyFetcher) listTownPolecats() ([]byte, error) {
 }
 
 // runGtCmd executes a gt subcommand from the town root. The fetcher's other
-// runners are bd- and tmux-specific; the polecat inventory is gt's.
+// subprocess runners are bd- and tmux-specific; the polecat inventory is
+// gt's, and it is the fetcher's long-running child, so it draws its slot
+// from userCmdSem (gt-d5xr).
 func (f *LiveConvoyFetcher) runGtCmd(timeout time.Duration, args ...string) (*bytes.Buffer, error) {
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), f.waitBudget(timeout))
+	if err := acquireCmdSlot(waitCtx, f.userCmdSem); err != nil {
+		cancelWait()
+		return nil, fmt.Errorf("gt %s: waiting for subprocess slot: %w", strings.Join(args, " "), err)
+	}
+	cancelWait()
+	defer releaseCmdSlot(f.userCmdSem)
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

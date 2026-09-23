@@ -520,6 +520,9 @@ func NewDashboardMux(fetcher ConvoyFetcher, webCfg *config.WebTimeoutsConfig) (h
 	// dashboard-hash probe (computeDashboardHash) reuses its batched,
 	// in-process calls instead of shelling out to "gt status --json" (gt-978i).
 	apiHandler.fetcher = fetcher
+	// The subprocess pools are deliberately not shared between the two
+	// handlers — see subprocessConcurrency's comment in fetcher.go for why
+	// (gt-d5xr).
 
 	// Create static file server from embedded files
 	staticFS, err := fs.Sub(staticFiles, "static")

@@ -61,8 +61,23 @@ type APIHandler struct {
 	optionsCache     *OptionsResponse
 	optionsCacheTime time.Time
 	optionsCacheMu   sync.RWMutex
-	// cmdSem limits concurrent command executions to prevent resource exhaustion.
+	// cmdSem bounds this handler's short internal bd/gt reads to
+	// maxConcurrentCommands: runBdCommand, the options fan-out, the
+	// dashboard-hash probe, and every other runGtCommand caller (mail
+	// send/read, crew list, ready, setup) — so a burst of API requests cannot
+	// flood the dashboard process with subprocesses (gt-d5xr). Not every one
+	// of these is fast (mail send waits up to 30s on delivery), but none is
+	// the open-ended, user-driven kind userCmdSem exists for.
 	cmdSem chan struct{}
+	// userCmdSem bounds the long-running children — runUserGtCommand
+	// (/api/run up to maxRunTimeout, rig add) and runGhCommand — to
+	// userCommandConcurrency, on a pool cmdSem's short reads never draw from
+	// (gt-d5xr).
+	userCmdSem chan struct{}
+	// slotWaitBudget overrides waitBudget's default for every cmdSem/userCmdSem
+	// acquire this handler makes. Zero (the default) means "use the call's own
+	// exec timeout"; tests set it short so a full-pool case resolves fast.
+	slotWaitBudget time.Duration
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
 
@@ -136,14 +151,13 @@ type APIHandler struct {
 const optionsCacheTTL = 30 * time.Second
 
 // optionsFetchTimeout bounds each individual gt/bd subprocess fetch inside
-// handleOptions (and the rig list it shares with loadRigOptions). It bounds
-// both the cmdSem wait and the command execution (see runGtCommand), so
-// under host contention a short per-fetch timeout can trip well before the
-// subprocess itself is slow. Previously these were ad hoc 3s/5s literals;
-// the 5s "status --json" fetch in particular was observed exceeding its
-// budget under full-town load (gt-axh, same bdReadTimeout-centralization
-// pattern as gt-911). One generous, centrally-defined timeout for all of
-// them removes that per-call guesswork.
+// handleOptions (and the rig list it shares with loadRigOptions): the cmdSem
+// wait and the command execution each get this long, as separate budgets
+// (see waitBudget), so queuing behind other short reads cannot eat into the
+// time the command itself gets to run (gt-d5xr). Previously these were ad
+// hoc 3s/5s literals; the 5s "status --json" fetch in particular was
+// observed exceeding its budget under full-town load (gt-axh, same
+// bdReadTimeout-centralization pattern as gt-911).
 const optionsFetchTimeout = 10 * time.Second
 
 // dashboardPollIntervalDefault is the production cadence for
@@ -156,8 +170,9 @@ const dashboardPollIntervalDefault = 2 * time.Second
 // underlying model is assembled at most this often (gt-978i).
 const dashboardComputeCacheTTLDefault = 30 * time.Second
 
-// maxConcurrentCommands limits how many gt subprocesses can run at once.
-// handleOptions alone spawns 7; allow headroom for other concurrent handlers.
+// maxConcurrentCommands bounds the handler's short internal bd/gt reads
+// (cmdSem). handleOptions alone spawns 7; allow headroom for the other
+// concurrent readers (mail, ready, the dashboard-hash probe).
 const maxConcurrentCommands = 12
 
 // readyFetchTimeoutDefault bounds the `gt ready --json` subprocess behind
@@ -186,6 +201,7 @@ func NewAPIHandler(defaultRunTimeout, maxRunTimeout time.Duration, csrfToken str
 		defaultRunTimeout: defaultRunTimeout,
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		userCmdSem:        make(chan struct{}, userCommandConcurrency),
 		csrfToken:         csrfToken,
 		dashboardHashCh:   make(chan struct{}),
 	}
@@ -290,9 +306,10 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Sanitize args
 	args = SanitizeArgs(args)
 
-	// Execute command
+	// Execute command. User-driven runs are long-lived (up to maxRunTimeout),
+	// so they run under the user-command pool, not the short-read cmdSem.
 	start := time.Now()
-	output, err := h.runGtCommand(r.Context(), timeout, args)
+	output, err := h.runUserGtCommand(r.Context(), timeout, args)
 	duration := time.Since(start)
 
 	resp := CommandResponse{
@@ -328,19 +345,64 @@ func (h *APIHandler) handleCommands(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// runGtCommand executes a gt command with the given args.
+// acquireUserCmdSlot acquires a userCmdSem slot, or fails on ctx deadline.
+// A nil pool (struct-literal test handlers) means unbounded, mirroring
+// acquireCmdSlot.
+func (h *APIHandler) acquireUserCmdSlot(ctx context.Context) error {
+	return acquireCmdSlot(ctx, h.userCmdSem)
+}
+
+// waitBudget bounds how long a call queues for a subprocess slot, kept
+// separate from execTimeout so a queued call still gets the full timeout
+// once it starts running. Defaults to execTimeout: a fixed budget shorter
+// than that turned slow-but-successful reads into hard failures under
+// exactly the contention this bound exists for (gt-d5xr).
+// slotWaitBudget overrides the default so a test's pool-full case can
+// resolve in milliseconds instead of waiting out a realistic timeout.
+func (h *APIHandler) waitBudget(execTimeout time.Duration) time.Duration {
+	if h.slotWaitBudget > 0 {
+		return h.slotWaitBudget
+	}
+	return execTimeout
+}
+
+// runUserGtCommand executes a user-driven gt command under the long-command
+// pool (userCommandConcurrency) only. It calls runGtCommandExec directly
+// rather than runGtCommand, which also acquires cmdSem: wrapping that
+// function held a short-read slot for a long command's whole lifetime,
+// undoing the pool split (gt-d5xr).
+func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	err := h.acquireUserCmdSlot(waitCtx)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.userCmdSem)
+
+	return h.runGtCommandExec(ctx, timeout, args)
+}
+
+// runGtCommand executes a short internal gt command under cmdSem.
 func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	// Apply timeout first so it bounds both semaphore wait and command execution.
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	err := acquireCmdSlot(waitCtx, h.cmdSem)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.cmdSem)
+
+	return h.runGtCommandExec(ctx, timeout, args)
+}
+
+// runGtCommandExec runs a gt subcommand without acquiring any subprocess
+// slot. Callers that already hold one — cmdSem via runGtCommand, or
+// userCmdSem via runUserGtCommand — call this directly so a command never
+// draws a slot from both pools at once (gt-d5xr).
+func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration, args []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire semaphore slot to limit concurrent subprocess spawns.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, h.gtPath, args...)
 	if h.workDir != "" {
@@ -1477,16 +1539,16 @@ func (h *APIHandler) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 
 // runBdCommand executes a bd command with the given args.
 func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	err := acquireCmdSlot(waitCtx, h.cmdSem)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.cmdSem)
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire semaphore slot — shared with runGtCommand/runGhCommand.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	if h.workDir != "" {
@@ -1498,7 +1560,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	output := stdout.String()
 	if stderr.Len() > 0 {
@@ -1753,18 +1815,20 @@ func (h *APIHandler) handlePRShow(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// runGhCommand executes a gh command with the given args.
+// runGhCommand executes a gh command with the given args. gh latency is
+// network-bound, not Dolt-bound, so it rides the long-command pool with the
+// user-driven gt runs (gt-d5xr).
 func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	if err := h.acquireUserCmdSlot(waitCtx); err != nil {
+		cancelWait()
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	cancelWait()
+	defer releaseCmdSlot(h.userCmdSem)
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire semaphore slot — shared with runGtCommand/runBdCommand.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	if h.workDir != "" {
@@ -2626,7 +2690,7 @@ func (h *APIHandler) handleRigAdd(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	output, err := h.runGtCommand(ctx, 55*time.Second, []string{"rig", "add", req.Name, repoURL})
+	output, err := h.runUserGtCommand(ctx, 55*time.Second, []string{"rig", "add", req.Name, repoURL})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
