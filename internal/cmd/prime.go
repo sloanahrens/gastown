@@ -545,11 +545,13 @@ func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
 		ensureBeadsRedirect(ctx)
 	}
 	repairSessionEnv(ctx, roleInfo)
-	// Only emit session_start when gt prime is running as a SessionStart or
-	// PreCompact hook. Bare gt prime calls (e.g. an agent reading another
-	// agent's context) must not emit session_start — doing so logs a spurious
-	// event with the target agent's persisted session_id, which pollutes the
-	// event stream and can confuse gt seance discovery.
+	// --hook is the flag that lets a run emit session_start at all; whether
+	// this particular run is a start, or the agent's own re-prime (the beacon
+	// tells it to run `gt prime --hook`), is emitSessionEvent's call: a session
+	// records its start once, and only a runtime hook invocation records one.
+	// A bare gt prime (e.g. an agent reading another agent's context) must not
+	// emit — that would log a spurious event with the target agent's persisted
+	// session_id, which pollutes the event stream and confuses gt seance.
 	if primeHookMode {
 		emitSessionEvent(ctx)
 	}

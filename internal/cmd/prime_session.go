@@ -23,6 +23,11 @@ import (
 // prime prints nothing for it.
 var primeHookEventName string
 
+// primeHookInputSeen records whether the runtime piped a hook payload on stdin
+// for this run — one of the two signals that a `gt prime --hook` run came from
+// the runtime rather than from the agent itself. See isRuntimeHookInvocation.
+var primeHookInputSeen bool
+
 // hookInput represents the JSON input from LLM runtime hooks.
 // Claude Code sends this on stdin for SessionStart hooks.
 type hookInput struct {
@@ -50,6 +55,7 @@ type hookInput struct {
 func readHookSessionID() (sessionID, source string) {
 	primeStructuredSessionStartOutput = false
 	primeHookEventName = ""
+	primeHookInputSeen = false
 	// Source can come from env (any runtime) or stdin JSON (Claude only).
 	// Check env first so it's available even when stdin provides the session ID.
 	source = os.Getenv("GT_HOOK_SOURCE")
@@ -65,6 +71,7 @@ func readHookSessionID() (sessionID, source string) {
 	//    Checked before persisted file so a fresh Claude session always wins
 	//    over a potentially stale .runtime/session_id from a previous session.
 	if input := readStdinJSON(); input != nil {
+		primeHookInputSeen = true
 		primeStructuredSessionStartOutput = input.HookEventName == "SessionStart"
 		primeHookEventName = input.HookEventName
 		if input.SessionID != "" {
@@ -152,42 +159,35 @@ func readStdinJSON() *hookInput {
 // persistSessionID writes the session ID to .runtime/session_id
 // This allows subsequent gt prime calls to find the session ID.
 func persistSessionID(dir, sessionID string) {
-	runtimeDir := filepath.Join(dir, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-		return // Non-fatal
-	}
-
-	sessionFile := filepath.Join(runtimeDir, "session_id")
-	content := fmt.Sprintf("%s\n%s\n", sessionID, time.Now().Format(time.RFC3339))
-	_ = os.WriteFile(sessionFile, []byte(content), 0644) // Non-fatal
+	writeRuntimeStateFile(dir, constants.FileSessionID, sessionID)
 }
 
 // ReadPersistedSessionID reads a previously persisted session ID.
 // Checks cwd first, then town root.
 // Returns empty string if not found.
 func ReadPersistedSessionID() string {
-	// Try cwd first
-	cwd, err := os.Getwd()
-	if err == nil {
-		if id := readSessionFile(cwd); id != "" {
-			return id
-		}
-	}
-
-	// Try town root
-	townRoot, err := workspace.FindFromCwd()
-	if err == nil && townRoot != "" {
-		if id := readSessionFile(townRoot); id != "" {
-			return id
-		}
-	}
-
-	return ""
+	return readRuntimeStateFileSearched(constants.FileSessionID)
 }
 
-func readSessionFile(dir string) string {
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	data, err := os.ReadFile(sessionFile)
+// writeRuntimeStateFile writes one line of per-session state to
+// <dir>/.runtime/<name>, stamped with when it was written.
+//
+// Failing to write is not fatal: the reader falls back to the behavior the state
+// existed to suppress.
+func writeRuntimeStateFile(dir, name, value string) {
+	runtimeDir := filepath.Join(dir, constants.DirRuntime)
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return // Non-fatal
+	}
+
+	content := fmt.Sprintf("%s\n%s\n", value, time.Now().Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(runtimeDir, name), []byte(content), 0644) // Non-fatal
+}
+
+// readRuntimeStateFile returns the first line of <dir>/.runtime/<name>,
+// or "" when the file is missing or empty.
+func readRuntimeStateFile(dir, name string) string {
+	data, err := os.ReadFile(filepath.Join(dir, constants.DirRuntime, name))
 	if err != nil {
 		return ""
 	}
@@ -196,6 +196,29 @@ func readSessionFile(dir string) string {
 	if len(lines) > 0 {
 		return strings.TrimSpace(lines[0])
 	}
+	return ""
+}
+
+// readRuntimeStateFileSearched reads <name> from the cwd first, then from the
+// town root — the two places a hook invocation writes its session state, so
+// that a prime run from a nested directory still finds what its session wrote.
+func readRuntimeStateFileSearched(name string) string {
+	// Try cwd first
+	cwd, err := os.Getwd()
+	if err == nil {
+		if value := readRuntimeStateFile(cwd, name); value != "" {
+			return value
+		}
+	}
+
+	// Try town root
+	townRoot, err := workspace.FindFromCwd()
+	if err == nil && townRoot != "" {
+		if value := readRuntimeStateFile(townRoot, name); value != "" {
+			return value
+		}
+	}
+
 	return ""
 }
 
@@ -216,6 +239,53 @@ func resolveSessionIDForPrime(actor string) string {
 	return fmt.Sprintf("%s-%d", actor, os.Getpid())
 }
 
+// isRuntimeHookInvocation reports whether the *runtime* invoked this run as a
+// hook — SessionStart or PreCompact — rather than the agent running
+// `gt prime --hook` by hand.
+//
+// Only the runtime produces either signal: a hook payload on stdin, or
+// GT_HOOK_SOURCE named by the hook command. Attribution cannot stand in for
+// them, because a spawner's GT_SESSION_START_REASON lives on the *session* env:
+// the agent's own re-prime inherits it and reports it too.
+func isRuntimeHookInvocation() bool {
+	return primeHookInputSeen || primeHookSource != ""
+}
+
+// sessionStartAlreadyEmitted reports whether sessionID's session_start is
+// already on the record for this session.
+func sessionStartAlreadyEmitted(sessionID string) bool {
+	return readRuntimeStateFileSearched(constants.FileSessionStartEmitted) == sessionID
+}
+
+// recordSessionStartEmitted notes that sessionID's session_start is on the
+// record. Written wherever the session ID is persisted — the cwd, and the town
+// root when different — so a later run finds it the way it finds the ID.
+func recordSessionStartEmitted(workDir, townRoot, sessionID string) {
+	writeRuntimeStateFile(workDir, constants.FileSessionStartEmitted, sessionID)
+	if townRoot != "" && townRoot != workDir {
+		writeRuntimeStateFile(townRoot, constants.FileSessionStartEmitted, sessionID)
+	}
+}
+
+// shouldEmitSessionStart reports whether this `gt prime --hook` run records a
+// session_start for sessionID. (gt-da73)
+//
+// The startup beacon tells every agent to run `gt prime --hook` for context, so
+// a session's hook recorded a start and the agent's own re-prime recorded a
+// second one for the same ID, which it resolves from the .runtime/session_id
+// the hook wrote. One session records one start.
+//
+// A later run still records when the runtime invoked it — compaction, resume,
+// clear — so a long session keeps its lifecycle events (the field gt-uj9k added
+// to tell them apart). A first run records even unattributed, so a runtime whose
+// hook names no source is not silenced.
+func shouldEmitSessionStart(sessionID string) bool {
+	if !sessionStartAlreadyEmitted(sessionID) {
+		return true
+	}
+	return isRuntimeHookInvocation()
+}
+
 // emitSessionEvent emits a session_start event for seance discovery.
 // The event is written to ~/gt/.events.jsonl and can be queried via gt seance.
 // Session ID resolution order: GT_SESSION_ID, CLAUDE_SESSION_ID, persisted file, fallback.
@@ -233,6 +303,11 @@ func emitSessionEvent(ctx RoleContext) {
 	// Get session ID from multiple sources
 	sessionID := resolveSessionIDForPrime(actor)
 
+	// One session_start per session (gt-da73).
+	if !shouldEmitSessionStart(sessionID) {
+		return
+	}
+
 	// Determine topic from hook state or default
 	topic := ""
 	if ctx.Role == RoleWitness || ctx.Role == RoleRefinery || ctx.Role == RoleDeacon {
@@ -248,7 +323,12 @@ func emitSessionEvent(ctx RoleContext) {
 		Reason:    sessionStartReason(),
 		Caller:    sessionStartCaller(),
 	})
-	_ = events.LogFeed(events.TypeSessionStart, actor, payload)
+	if err := events.LogFeed(events.TypeSessionStart, actor, payload); err != nil {
+		return
+	}
+	// Record the start only once it is logged: if the write failed, the session
+	// stays unrecorded and a later run can still put it on the record.
+	recordSessionStartEmitted(ctx.WorkDir, ctx.TownRoot, sessionID)
 }
 
 // sessionStartReason reports why this session started.
@@ -257,10 +337,14 @@ func emitSessionEvent(ctx RoleContext) {
 // "daemon-heartbeat" or "install"): that is the only signal that can tell a
 // deliberate restart apart from a burst. Otherwise fall back to the runtime's
 // own hook source — startup/resume/clear/compact, resolved into primeHookSource
-// by prime's source handling — and finally to the hook event name. A bare
-// `gt prime --hook` with no stdin and no GT_HOOK_SOURCE resolves to "unknown",
-// which is itself diagnostic: it marks a start that did not come through an
-// instrumented spawner or a runtime hook.
+// by prime's source handling — and finally to the hook event name.
+//
+// "unknown" is what remains for an emitted start that names none of those: a
+// hook that piped a session ID without naming its event, or a session's first
+// recorded start when no hook named its source. It is diagnostic — a start that
+// came through neither an instrumented spawner nor a named runtime hook — and
+// it is no longer the label the agent's own re-prime gets, because that run is
+// not a session start and does not emit (shouldEmitSessionStart).
 func sessionStartReason() string {
 	if r := os.Getenv(constants.EnvSessionStartReason); r != "" {
 		return r
