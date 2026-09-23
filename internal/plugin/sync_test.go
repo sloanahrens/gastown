@@ -3,10 +3,34 @@ package plugin
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
+
+// gitCommitAll commits everything under dir (initialising a repo on first
+// use), so a sync source has history: the guard treats runtime content that
+// the repo once held at the same path as an older copy, safe to overwrite.
+func gitCommitAll(t *testing.T, dir, msg string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		run("init", "-q")
+	}
+	run("add", "-A")
+	run("commit", "-q", "--allow-empty", "-m", msg)
+}
 
 // helper to create a plugin directory with a plugin.md and optional extra files.
 func createTestPlugin(t *testing.T, dir, name, content string, extras map[string]string) {
@@ -69,7 +93,12 @@ func TestSyncPlugins_UpdatesChanged(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
+	// The runtime copy holds v1, which the source repo once held: an older
+	// copy, so the sync may replace it.
+	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv1 instructions", nil)
+	gitCommitAll(t, srcDir, "v1")
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv2 instructions", nil)
+	gitCommitAll(t, srcDir, "v2")
 	createTestPlugin(t, dstDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv1 instructions", nil)
 
 	result, err := SyncPlugins(srcDir, dstDir, false)
@@ -127,7 +156,15 @@ func TestSyncPlugins_CleanRemovesExtra(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
+	// old-plugin was retired from the repo: its runtime copy matches what
+	// the repo once held, so --clean may remove it.
 	createTestPlugin(t, srcDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
+	createTestPlugin(t, srcDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
+	gitCommitAll(t, srcDir, "both")
+	if err := os.RemoveAll(filepath.Join(srcDir, "old-plugin")); err != nil {
+		t.Fatal(err)
+	}
+	gitCommitAll(t, srcDir, "retire old-plugin")
 	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
 	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
 
@@ -341,5 +378,110 @@ func TestFindGastownSource_NoneFoundReturnsError(t *testing.T) {
 	townRoot := t.TempDir() // Empty: no gastown checkout anywhere.
 	if _, err := FindGastownSource(townRoot); err == nil {
 		t.Error("FindGastownSource() error = nil, want error when no source exists")
+	}
+}
+
+// gt-o848l: a runtime edit the repo never held (2026-09-18: the mayor's
+// CHECK_ONLY safety default in compactor-dog/run.sh) must survive a sync
+// instead of being silently replaced by the destructive repo default.
+func TestSyncPlugins_ProtectsRuntimeEdit(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestPlugin(t, srcDir, "compactor", "+++\nname = \"compactor\"\n+++\n", map[string]string{"run.sh": "MODE=flatten\n"})
+	gitCommitAll(t, srcDir, "repo default")
+	createTestPlugin(t, dstDir, "compactor", "+++\nname = \"compactor\"\n+++\n", map[string]string{"run.sh": "MODE=check-only # hand edit\n"})
+
+	result, err := SyncPlugins(srcDir, dstDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Copied) != 0 {
+		t.Errorf("copied %v over a runtime edit", result.Copied)
+	}
+	if want := map[string][]string{"compactor": {"run.sh"}}; !reflect.DeepEqual(result.Protected, want) {
+		t.Errorf("Protected = %v, want %v", result.Protected, want)
+	}
+	data, _ := os.ReadFile(filepath.Join(dstDir, "compactor", "run.sh"))
+	if string(data) != "MODE=check-only # hand edit\n" {
+		t.Errorf("runtime edit was overwritten: %q", data)
+	}
+}
+
+// A file that exists only in the runtime copy (copyDir replaces the whole
+// directory) is a runtime edit too.
+func TestSyncPlugins_ProtectsRuntimeOnlyFile(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestPlugin(t, srcDir, "p", "+++\nname = \"p\"\n+++\nv2", nil)
+	gitCommitAll(t, srcDir, "v2")
+	createTestPlugin(t, dstDir, "p", "+++\nname = \"p\"\n+++\nv2", map[string]string{"local.env": "X=1\n"})
+
+	result, err := SyncPlugins(srcDir, dstDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"p": {"local.env"}}; !reflect.DeepEqual(result.Protected, want) {
+		t.Errorf("Protected = %v, want %v", result.Protected, want)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "p", "local.env")); err != nil {
+		t.Errorf("runtime-only file was deleted: %v", err)
+	}
+}
+
+func TestSyncPluginsWithOptions_ForceOverwritesRuntimeEdit(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestPlugin(t, srcDir, "p", "+++\nname = \"p\"\n+++\nrepo", nil)
+	gitCommitAll(t, srcDir, "repo")
+	createTestPlugin(t, dstDir, "p", "+++\nname = \"p\"\n+++\nhand edit", nil)
+
+	result, err := SyncPluginsWithOptions(srcDir, dstDir, SyncOptions{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Copied) != 1 || len(result.Protected) != 0 {
+		t.Errorf("Copied = %v, Protected = %v; want p copied under --force", result.Copied, result.Protected)
+	}
+}
+
+// Without git history the guard cannot tell an older copy from an edit, so
+// it fails closed: drifted plugins are protected, new ones still copy.
+func TestSyncPlugins_NoHistoryFailsClosed(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestPlugin(t, srcDir, "drifted", "+++\nname = \"drifted\"\n+++\nv2", nil)
+	createTestPlugin(t, srcDir, "fresh", "+++\nname = \"fresh\"\n+++\nnew", nil)
+	createTestPlugin(t, dstDir, "drifted", "+++\nname = \"drifted\"\n+++\nv1", nil)
+
+	result, err := SyncPlugins(srcDir, dstDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result.Protected["drifted"]; !ok {
+		t.Errorf("drifted plugin not protected without history: %+v", result)
+	}
+	if !reflect.DeepEqual(result.Copied, []string{"fresh"}) {
+		t.Errorf("Copied = %v, want [fresh]", result.Copied)
+	}
+}
+
+// --clean must not delete a runtime-only plugin the repo never held.
+func TestSyncPlugins_CleanProtectsRuntimeOnlyPlugin(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestPlugin(t, srcDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
+	gitCommitAll(t, srcDir, "keep")
+	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
+	createTestPlugin(t, dstDir, "local-only", "+++\nname = \"local-only\"\n+++\nmine", nil)
+
+	result, err := SyncPlugins(srcDir, dstDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("removed %v, a plugin the repo never held", result.Removed)
+	}
+	if _, ok := result.Protected["local-only"]; !ok {
+		t.Errorf("local-only not protected: %+v", result)
 	}
 }

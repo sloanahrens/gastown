@@ -27,6 +27,7 @@ var (
 	pluginSyncSource   string
 	pluginSyncClean    bool
 	pluginSyncDryRun   bool
+	pluginSyncForce    bool
 	pluginRecordPlugin string
 	pluginRecordResult string
 	pluginRecordTitle  string
@@ -132,7 +133,14 @@ Examples:
   gt plugin sync                           # Auto-detect source, sync to town
   gt plugin sync --source ./plugins        # Explicit source directory
   gt plugin sync --clean                   # Remove plugins not in source
-  gt plugin sync --dry-run                 # Show what would happen`,
+  gt plugin sync --dry-run                 # Show what would happen
+  gt plugin sync --force                   # Also overwrite runtime edits
+
+A runtime plugin holding content the source repo never had (a hand edit, or
+a file that exists only in the runtime copy) is left untouched and listed,
+and the command exits non-zero: land the edit through the merge queue, or
+pass --force to discard it. Content the repo once held is an older copy and
+is replaced as usual (gt-o848l).`,
 	RunE: runPluginSync,
 }
 
@@ -195,6 +203,7 @@ func init() {
 	pluginSyncCmd.Flags().StringVar(&pluginSyncSource, "source", "", "Source plugins directory (auto-detected if omitted)")
 	pluginSyncCmd.Flags().BoolVar(&pluginSyncClean, "clean", false, "Remove plugins from target that don't exist in source")
 	pluginSyncCmd.Flags().BoolVar(&pluginSyncDryRun, "dry-run", false, "Show what would happen without syncing")
+	pluginSyncCmd.Flags().BoolVar(&pluginSyncForce, "force", false, "Overwrite runtime plugin edits the source repo does not have")
 
 	// Add subcommands
 	pluginCmd.AddCommand(pluginListCmd)
@@ -612,15 +621,41 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	result, err := plugin.SyncPlugins(sourceDir, targetDir, pluginSyncClean)
+	result, err := plugin.SyncPluginsWithOptions(sourceDir, targetDir, plugin.SyncOptions{Clean: pluginSyncClean, Force: pluginSyncForce})
 	if err != nil {
 		return fmt.Errorf("syncing plugins: %w", err)
 	}
+	printPluginSyncResult(result, sourceDir)
+	return reportProtectedPlugins(result.Protected)
+}
 
-	if len(result.Copied) == 0 && len(result.Removed) == 0 {
+// reportProtectedPlugins lists plugins the sync left untouched because their
+// runtime copy holds edits the source repo lacks, and returns an error so
+// callers (make install, rebuild-gt) see the drift instead of a success line.
+func reportProtectedPlugins(protected map[string][]string) error {
+	if len(protected) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(protected))
+	for name := range protected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fmt.Fprintf(os.Stderr, "%s Left untouched: runtime edits the source repo does not have\n", style.Warning.Render("⚠"))
+	for _, name := range names {
+		for _, f := range protected[name] {
+			fmt.Fprintf(os.Stderr, "  %s %s/%s\n", style.Warning.Render("!"), name, f)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Land these through the merge queue, or re-run with --force to discard them.\n")
+	return fmt.Errorf("%d plugin(s) hold runtime edits and were not synced", len(protected))
+}
+
+func printPluginSyncResult(result *plugin.SyncResult, sourceDir string) {
+	if len(result.Copied) == 0 && len(result.Removed) == 0 && len(result.Protected) == 0 {
 		fmt.Printf("%s Plugins already up to date (%d checked)\n",
 			style.Success.Render("✓"), len(result.Skipped))
-		return nil
+		return
 	}
 
 	fmt.Printf("%s Synced plugins from %s\n", style.Success.Render("●"), style.Dim.Render(sourceDir))
@@ -637,8 +672,6 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	for _, e := range result.Errors {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", style.Error.Render("!"), e)
 	}
-
-	return nil
 }
 
 func runPluginHistory(cmd *cobra.Command, args []string) error {
