@@ -676,9 +676,11 @@ REJECTION (attempt` entries in the issue's bd notes, plus 1 — first attempt
 is N=1). Reuse this same N below in the FIX_NEEDED mail and MERGE REJECTION
 notes.
 
-**2. Decide whether test_command needs the container-gate slot** (gt-tuiy,
-shared with mol-polecat-work's pre-verify step and
-mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
+**2. Decide the `--test` value** (skip this decision entirely when run_tests
+is "false" or test_command is empty — pass `--test ""` and move on; there is
+nothing to wrap). Otherwise, decide whether test_command needs the
+container-gate slot (gt-tuiy, shared with mol-polecat-work's pre-verify step
+and mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
 `{{test_command}}` through the slot only when it spins Docker containers
 (Dolt, testcontainers) for THIS rig; pass it bare otherwise. The slot is a
 townwide lock shared by every rig — wrapping a non-Docker rig's gate
@@ -695,16 +697,18 @@ is `{{test_command}}` bare. **Never substitute a bare `go test ./...` for
 the configured `{{test_command}}` (gt-885g)** — pass the exact configured
 command, never your own substitute.
 
-**3. Run the join, in the foreground, and wait.** If run_tests is "false",
-omit every `--setup`/`--typecheck`/`--lint`/`--build`/`--test` flag — an
-empty command means "not configured for this project" and gt mq verify skips
-it silently, same as the old run-tests step. If editorial_required is not
-"true", the review is not started at all; gt mq verify decides that itself
-from the rig's config, so you never pass a flag for it. One Bash call, no
-pipeline (the exit code must come straight from the command, and PIPESTATUS
-does not exist in zsh), with a timeout of 2700000 ms (45 minutes; this
-role's preset allows up to 3600000 ms, use that if the suite legitimately
-needs it):
+**3. Run the join, in the foreground, and wait.** Always pass all five
+`--setup`/`--typecheck`/`--lint`/`--build`/`--test` flags with their
+template values verbatim, even when a value is empty — `gt mq verify` skips
+an empty command silently, same rule the old run-tests step applied, so
+there is nothing to conditionally omit. `--test` carries the value decided
+in Step 2 (bare, slot-wrapped, or empty), never a raw `{{test_command}}`
+substitution. If editorial_required is not "true", the review is not
+started at all; `gt mq verify` decides that itself from the rig's config, so
+you never pass a flag for it either way. One Bash call, no pipeline (the
+exit code must come straight from the command, and PIPESTATUS does not
+exist in zsh), with a timeout of 2700000 ms (45 minutes; this role's preset
+allows up to 3600000 ms, use that if the suite legitimately needs it):
 
 ```bash
 VERIFY_JSON=$(gt mq verify <mr-bead-id> --rehearsed temp --attempt <N> \\
