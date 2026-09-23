@@ -228,17 +228,26 @@ func (e *Engineer) findLandedCommitByPatchID(target, mergeRef string) (string, e
 // has not set merge_queue.editorial.required, where there is nothing to
 // require), or an error explaining why the proof could not be established.
 //
-// When landedCommit has no matching note, this backfills it from the
-// pre-push approve note this MR must have carried (the same one
-// editorialPrecondition required before the original push) via
-// editorial.RekeyNote, which independently verifies the patch-id still
-// matches before writing anything — the note is located by MR id, so a
-// rewritten sha does not hide it, and a note whose patch-id no longer matches
-// the landed diff is refused rather than copied. When no matching note can be
-// found, or the landed diff's patch-id no longer matches the note that
-// exists, the caller decides: the ancestor branch records and escalates it
-// while still completing (acceptance criterion 5), the rebase branch refuses
-// outright (gt-9t0p).
+// When landedCommit has no matching note, this backfills it from an approve
+// note whose patch-id matches the landed diff, via editorial.RekeyNote (which
+// independently re-verifies the patch-id before writing anything). RekeyNote
+// is asked with AllowAnyMR: true — the source note does not have to belong to
+// mr.ID (gt-bagu).
+//
+// This matters because the review step that produced the note does not scope
+// its reuse lookup by MR either: gt mq review answers a diff from any note in
+// refs/notes/om carrying the same patch-id, whatever MR wrote it
+// (FindVerdictForDiff, gt-qa2p — deliberate, since MR beads are wisps that
+// are routinely reaped and re-minted for the same diff). editorial_reviewed_
+// head can therefore legitimately name a commit whose note carries an older
+// or unrelated MR id. Requiring an exact MR match here — the shape gt-9t0p
+// originally shipped — refuses that landing every cycle with no path to a
+// verdict it will ever accept: the note that proves the diff exists and is
+// readable, but resumeLandedMerge and gt mq review disagree about whether an
+// MR id has to match it. Patch-id equality is what both CheckPrecondition and
+// FindVerdictForDiff already treat as proof; requiring MR-id equality on top
+// of it, only here, is what actually looped this MR (gt-bagu), not any
+// ancestor relationship between the reviewed head and the landing.
 func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit string) error {
 	if e.config.Editorial == nil || !e.config.Editorial.Required {
 		return nil
@@ -252,10 +261,11 @@ func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit st
 	}
 
 	result, err := editorial.RekeyNote(e.git, editorial.RekeyRequest{
-		MR:     mr.ID,
-		Landed: landedCommit,
-		Target: target,
-		Reason: "gt-wh66: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the pre-push approve note onto the commit that already landed",
+		MR:         mr.ID,
+		Landed:     landedCommit,
+		Target:     target,
+		AllowAnyMR: true,
+		Reason:     "gt-wh66/gt-bagu: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the approve note that covers this diff by patch-id onto the commit that already landed",
 	})
 	if err != nil {
 		return err

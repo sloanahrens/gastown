@@ -310,54 +310,30 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			// A landed review has no MR bead to record it on, and no push to
 			// precondition: the note is already on the landed commit, which
 			// is where the coverage check reads it.
-			if retroReview {
-				return ReviewResult{Exit: 0, Note: &prior.Note, Reused: true}
-			}
-			reviewedHead := prior.Commit
-			note := prior.Note
-			if prior.Commit != noteCommit {
-				// The verdict was found by the notes-ref-wide patch-id scan
-				// (FindVerdictForDiff): prior.Commit is the head the verdict
-				// was FOUND on, which is not this invocation's head. Pointing
-				// editorial_reviewed_head at prior.Commit anyway is what
-				// looped gt-bagu: a rebase since review (byte-identical diff,
-				// same patch-id) leaves prior.Commit no longer an ancestor of
-				// the tip, the landing check requires the reviewed head to be
-				// an ancestor of the tip, and nothing ever re-reviews the new
-				// head to satisfy it — the MR is refused and requeued
-				// unchanged, forever.
+			if !retroReview {
+				// Record the head the note was found on — the reviewed head
+				// — not this invocation's rehearsal commit. No note exists
+				// on the latter (that is why the lookup had to scan), and
+				// the push precondition (CheckPrecondition) finds the note
+				// by reading editorial_reviewed_head and comparing patch-id;
+				// it never requires the reviewed head to be reachable from
+				// anything (git notes read by sha regardless of ancestry —
+				// see ReadNote), so a found-on head from an earlier
+				// rehearsal, or from an earlier MR for the same diff,
+				// answers just as well as this invocation's own head.
 				//
-				// The patch-id match is exactly the proof that noteCommit
-				// carries the same, already-reviewed content, so copy the
-				// note onto it and record noteCommit itself as the reviewed
-				// head: the push precondition then finds a note exactly
-				// where it looks, and the reviewed head trivially IS the
-				// tip, so no ancestor check can ever fail on a reused
-				// verdict.
-				if deps.NotesMu != nil {
-					deps.NotesMu.Lock()
+				// gt-bagu was diagnosed as "the reviewed head must be an
+				// ancestor of the landing tip" — no such check exists here
+				// or on the push precondition. The actual refusal that MR
+				// hit lives in resumeLandedMerge's rewritten-SHA backfill
+				// (ensureLandedEditorialNote/RekeyNote), which used to
+				// require the backfilled note to belong to this exact MR id;
+				// see that function for the real fix.
+				if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
+					return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
 				}
-				copyErr := deps.Git.NotesCopy(NotesRef, prior.Commit, noteCommit)
-				var pushErr error
-				if copyErr == nil {
-					pushErr = deps.Git.PushNotes("origin", NotesRef)
-				}
-				if deps.NotesMu != nil {
-					deps.NotesMu.Unlock()
-				}
-				if copyErr != nil {
-					return failureResult(deps, req, RecordFailed, fmt.Sprintf("copy reused verdict onto %s: %v", noteCommit, copyErr), 0)
-				}
-				if pushErr != nil {
-					return failureResult(deps, req, RecordFailed, fmt.Sprintf("push copied verdict: %v", pushErr), 0)
-				}
-				reviewedHead = noteCommit
-				note.HeadSHA = noteCommit
 			}
-			if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, reviewedHead); err != nil {
-				return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
-			}
-			return ReviewResult{Exit: 0, Note: &note, Reused: true}
+			return ReviewResult{Exit: 0, Note: &prior.Note, Reused: true}
 		}
 		return ReviewResult{Exit: 1, Note: &prior.Note, Reused: true}
 	}
