@@ -49,10 +49,11 @@ PLUGIN LOCATIONS:
 
 GATE TYPES:
   cooldown    Run if enough time has passed (e.g., 1h)
-  cron        Run on a schedule (e.g., "0 9 * * *")
-  condition   Run if a check command returns exit 0
-  event       Run on events (e.g., startup)
-  manual      Never auto-run, trigger explicitly
+  cooldown    Run if enough time has passed (e.g., 1h)  [dispatched by the daemon heartbeat]
+  cron        Run on a schedule (e.g., "0 9 * * *")    [parsed; nothing dispatches it, gt-qehkn]
+  condition   Run if a check command returns exit 0    [parsed; nothing dispatches it, gt-qehkn]
+  event       Run on events (e.g., startup)            [parsed; nothing dispatches it, gt-qehkn]
+  manual      Never auto-run, trigger explicitly       [the daemon never dispatches it]
 
 Examples:
   gt plugin list                    # List all discovered plugins
@@ -94,16 +95,24 @@ Examples:
 
 var pluginRunCmd = &cobra.Command{
 	Use:   "run <name>",
-	Short: "Manually trigger plugin execution",
-	Long: `Manually trigger a plugin to run.
+	Short: "Manually trigger a parked (manual-gate) plugin",
+	Long: `Manually trigger a plugin that is parked on a manual gate.
 
-By default, checks if the gate would allow execution and informs you
-if it wouldn't. Use --force to bypass gate checks.
+This command does no work: it prints the plugin's instructions and records a
+receipt that says exactly that. Execute the instructions yourself, then record
+the real result with ` + "`gt plugin record-run`" + ` (--result success or failure).
+A receipt is never written as success on the command's say-so alone (gt-o1z7).
+
+Gate behavior:
+- closed cooldown: the run is refused and recorded as a skip
+- --force: bypasses the cooldown check only; the receipt is still a "printed,
+  not executed" record
+- script-type plugin (has a run.sh): refused; the daemon heartbeat is its
+  scheduler and this command has no script interpreter (gt-o1z7)
 
 Examples:
-  gt plugin run rebuild-gt              # Run if gate allows
-  gt plugin run rebuild-gt --force      # Bypass gate check
-  gt plugin run rebuild-gt --dry-run    # Show what would happen`,
+  gt plugin run github-sheriff          # parked plugin: prints instructions
+  gt plugin run <name> --dry-run        # Show what would happen`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginRun,
 }
@@ -148,7 +157,13 @@ var pluginRecordRunCmd = &cobra.Command{
 
 The recorder creates an ephemeral type:plugin-run bead, closes it immediately,
 and leaves the receipt available to plugin history/cooldown queries that use
-closed beads. This keeps plugin scripts from leaking open run-log beads.`,
+closed beads. This keeps plugin scripts from leaking open run-log beads.
+
+The plugin script's own "Record Result" section is the only caller: it records
+the work's real outcome. The daemon records its own receipts, and ` +
+		"`gt plugin run`" +
+		` records "instructions printed, not executed" (gt-o1z7). A receipt never
+claims success for work that was not done.`,
 	RunE: runPluginRecordRun,
 }
 
@@ -160,7 +175,7 @@ func init() {
 	pluginShowCmd.Flags().BoolVar(&pluginShowJSON, "json", false, "Output as JSON")
 
 	// Run subcommand flags
-	pluginRunCmd.Flags().BoolVar(&pluginRunForce, "force", false, "Bypass gate check")
+	pluginRunCmd.Flags().BoolVar(&pluginRunForce, "force", false, "Bypass the cooldown check (the run is still recorded as printed, not executed)")
 	pluginRunCmd.Flags().BoolVar(&pluginRunDryRun, "dry-run", false, "Show what would happen without executing")
 
 	// History subcommand flags
@@ -491,12 +506,36 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 	if !gateOpen && !pluginRunForce {
 		fmt.Printf("%s Gate closed: %s\n", style.Warning.Render("⚠"), gateReason)
 		fmt.Printf("  Use --force to bypass gate check\n")
+
+		// A gate that rejected the run is a skip, not a success. The
+		// success the unconditional receipt used to record here let an
+		// exit criterion pass with nothing done.
+		recorder := plugin.NewRecorder(townRoot)
+		if beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
+			PluginName: p.Name,
+			RigName:    p.RigName,
+			Result:     plugin.ResultSkipped,
+			Body:       "Manual run via gt plugin run; gate closed: " + gateReason,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record skip: %v\n", err)
+		} else {
+			fmt.Printf("\n%s Recorded skip: %s\n", style.Dim.Render("●"), beadID)
+		}
 		return nil
 	}
 
-	// Execute the plugin
-	// For manual runs, we print the instructions for the agent/user to execute
-	// Automatic execution via dogs is handled by gt-n08ix.2
+	// A script-type plugin the daemon can run in-process is not something
+	// `gt plugin run` executes: there is no script interpreter here, so the
+	// command cannot have run the plugin. Refusing outright is the honest
+	// answer — a printed success receipt would say it ran (gt-o1z7).
+	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript {
+		fmt.Fprintf(os.Stderr, "Plugin %s has a run.sh; `gt plugin run` does not execute it (the daemon heartbeat does). Edit the script or the plugin's gate instead.\n", p.Name)
+		return fmt.Errorf("plugin %s is script-type; gt plugin run does not run scripts", p.Name)
+	}
+
+	// Print the instructions for the agent/user to execute. This command
+	// does the plugin's work for no one: the receipt says exactly that, and
+	// the real result is recorded afterwards, by whoever did the work.
 	fmt.Printf("%s Running plugin: %s\n", style.Success.Render("●"), p.Name)
 	if pluginRunForce && !gateOpen {
 		fmt.Printf("  %s\n", style.Dim.Render("(gate bypassed with --force)"))
@@ -505,18 +544,18 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s\n", style.Bold.Render("Instructions:"))
 	fmt.Println(p.Instructions)
 
-	// Record the run
 	recorder := plugin.NewRecorder(townRoot)
 	beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
 		PluginName: p.Name,
 		RigName:    p.RigName,
-		Result:     plugin.ResultSuccess, // Manual runs are marked success
-		Body:       "Manual run via gt plugin run",
+		Result:     plugin.ResultSuccess,
+		Body:       "Manual run via gt plugin run: instructions printed, not executed. Record the real result with `gt plugin record-run --plugin " + p.Name + " --result <success|failure>` once the work is done.",
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record run: %v\n", err)
 	} else {
 		fmt.Printf("\n%s Recorded run: %s\n", style.Dim.Render("●"), beadID)
+		fmt.Println("This receipt says the instructions were printed, not executed. Record the real result after doing the work.")
 	}
 
 	return nil

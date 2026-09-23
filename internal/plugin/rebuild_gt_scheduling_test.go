@@ -1,10 +1,8 @@
 package plugin
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -25,19 +23,12 @@ func repoRoot(t *testing.T) string {
 // in-process, so a cooldown gate plus `[execution] type = "script"` is what
 // keeps the rebuild automatic.
 //
-// The park this guards is a real one: the runtime copy of this file read
-// `gate: manual` from 2026-09-18, which took rebuild-gt off the automatic path
-// — the daemon logged "skipping plugin rebuild-gt (gate=manual, requires
-// explicit trigger)" on every heartbeat while the binary drifted — until the
-// next `make install` re-synced the file from here. A manual gate committed
-// here is the same park with nothing to undo it, and an agent-driven execution
-// type would put a dog session back in front of every rebuild.
+// A hand-park is the failure this guards against: an agent that edits this
+// plugin directly under `<town_root>/plugins` — the daemon's runtime copy —
+// leaves the repo untouched until `gt plugin sync` overwrites it. What the
+// test can catch is the committed state, and the parsed checks below do.
 func TestRebuildGTRunsOnTheDaemonPath(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "plugins", "rebuild-gt", "plugin.md")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is the test's own repo
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
 
 	scanner := NewScanner(repoRoot(t), nil)
 	p, err := scanner.loadPlugin(filepath.Dir(path), LocationTown, "")
@@ -64,10 +55,5 @@ func TestRebuildGTRunsOnTheDaemonPath(t *testing.T) {
 	}
 	if !p.HasRunScript {
 		t.Error("rebuild-gt has no run.sh next to plugin.md: the daemon has nothing to execute")
-	}
-
-	// The hand-park itself, in the file an agent edits.
-	if strings.Contains(string(raw), "type = \"manual\"") {
-		t.Error("rebuild-gt declares a manual gate: that parks the automatic rebuild (gt-o1z7)")
 	}
 }

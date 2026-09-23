@@ -60,9 +60,9 @@ parked rig and a rig with no editorial gate contribute nothing and say so.
 
 A BREACH mails the deacon and escalates under the stable per-worker key
 `quality-review:breach:<rig>/<worker>`. It mails the deacon rather than the
-prose plugin's `mayor/` because the deacon dispatches this plugin and the keyed
-escalation already routes to the mayor, and two addresses for one condition get
-acknowledged twice and acted on once.
+prose plugin's `mayor/` because the keyed escalation already routes to the
+mayor, and two addresses for one condition get acknowledged twice and acted on
+once.
 
 A later run closes the key for any worker not in breach, including one with no
 reviews in the window at all: the sweep covers every worker seen in the last

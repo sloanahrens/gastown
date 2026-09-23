@@ -863,31 +863,37 @@ id = "plugin-run"
 title = "Run manual-gate plugins"
 needs = ["zombie-scan"]
 description = """
-Plugin scheduling belongs to the daemon heartbeat, not to this patrol:
-`dispatchPlugins` (internal/daemon/handler.go) reads every plugin's gate on each
-heartbeat and runs the ones whose gate is open — a script-type plugin
-in-process, an agent-type one as a dog. Nothing here evaluates a gate, and there
-is no run-state file to compare against: run history lives in ephemeral
-receipts (gt-o1z7).
+Plugin scheduling belongs to the daemon heartbeat, not to this patrol: the
+daemon runs the gate-open plugins and keeps the run history (the receipts),
+so this step never evaluates a gate. Who dispatches which gate is in
+`plugins/README.md` (Scheduling).
+
+What remains here is on-demand trigger: a `[gate] type = "manual"` plugin is
+parked off the automatic path by design, and it stays parked unless something
+asks for it. A manual plugin is run only when a bead, mail, or mayor
+instruction names it. Default outcome for this step: nothing to run.
+
+`gt plugin run <name>` only prints the plugin's instructions; it does no work.
+Carry out those instructions, then record the honest result:
 
 ```bash
-gt plugin history <name> --json   # gate, run count, recent receipts
+gt plugin run <name>
+# do the printed work, then:
+gt plugin record-run --plugin <name> --result success --title "..." --description "..."
+gt plugin record-run --plugin <name> --result failure --title "FAILED" --description "..."
 ```
 
-Your part is the trigger the daemon never gives a parked plugin. A
-`[gate] type = "manual"` plugin stays off the automatic path by design, and
-`gt plugin run <name>` is its only entry point.
+Never run a cooldown-gate plugin here: the daemon already dispatches it, and
+a second run in the same cycle is a double-dispatch (gt-o1z7).
 
-```bash
-gt plugin run <name>   # a cooldown gate still applies; --force bypasses it
-```
+**Exit criteria:** every plugin run here is a manual-gate one named by a bead,
+mail, or mayor instruction; each run ended in a receipt that is an honest
+result — success only if the plugin's own work succeeded. Nothing to run and
+no receipts written: the step is done.
 
-Running a plugin the daemon already dispatches gives it two runs in the same
-cycle.
-
-**Exit criteria:** every plugin you ran here is a manual-gate one, and each
-appears in `gt plugin history <name>` for this cycle. If `$GT_ROOT/plugins/` is
-empty or missing, this step is done."""
+- [ ] No plugin is run unless a bead, mail, or mayor instruction named it
+- [ ] Every run ended in a receipt: success only if the plugin's work succeeded
+- [ ] A cooldown-gate plugin was never run from this step"""
 
 [[steps]]
 id = "dog-pool-maintenance"

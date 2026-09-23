@@ -2112,10 +2112,10 @@ Each plugin is a directory containing:
 
 ## Gate Types
 
-- cooldown: Time since last run (e.g., 24h)
-- cron: Schedule-based (e.g., "0 9 * * *")
-- condition: Metric threshold
-- event: Trigger-based (startup, heartbeat)
+- cooldown: Time since last run (e.g., 24h) — dispatched by the daemon heartbeat
+- cron: Schedule-based (e.g., "0 9 * * *") — parsed; nothing dispatches it (gt-qehkn)
+- condition: Metric threshold — parsed; nothing dispatches it (gt-qehkn)
+- event: Trigger-based (startup, heartbeat) — parsed; nothing dispatches it (gt-qehkn)
 - manual: Never auto-dispatched; run it with 'gt plugin run <name>'
 `
 		if writeErr := os.WriteFile(townReadme, []byte(content), 0644); writeErr != nil {
