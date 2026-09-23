@@ -553,8 +553,8 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 // resolution ran whenever the tier's entry was Claude-provider, so
 // custom-groq-* tiers silently left dogs on local Haiku.
 func TestApplyCostTier_DogMappingReachesResolution(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: the groq subtests call t.Setenv, which is incompatible
+	// with a parallel ancestor (gt-wisp-jsm).
 	cases := []struct {
 		tier  CostTier
 		model string
@@ -567,8 +567,15 @@ func TestApplyCostTier_DogMappingReachesResolution(t *testing.T) {
 	}
 
 	for _, tc := range cases {
+		// t.Setenv (groq subtests) forbids t.Parallel on the subtests, so the
+		// cases run sequentially (gt-wisp-jsm).
 		t.Run(string(tc.tier), func(t *testing.T) {
-			t.Parallel()
+			// The groq-compound tier's agent stores a ${GROQ_API_KEY} reference;
+			// set it so the plain-path guard treats the reference as satisfiable
+			// and the test reaches its command-shape assertions (gt-wisp-jsm).
+			if tc.model == "groq" {
+				t.Setenv("GROQ_API_KEY", "gsk_test_dog_key")
+			}
 			townRoot := t.TempDir()
 			settings := NewTownSettings()
 			if err := ApplyCostTier(settings, tc.tier); err != nil {
@@ -612,7 +619,11 @@ func TestApplyCostTier_DogMappingReachesResolution(t *testing.T) {
 			}
 
 			// Integration: the spawned command must carry the mapping too.
-			assert(BuildAgentStartupCommand(constants.RoleDog, "", townRoot, "", ""))
+			dogCmd, ok := BuildAgentStartupCommand(constants.RoleDog, "", townRoot, "", "")
+			if !ok {
+				t.Fatal("BuildAgentStartupCommand returned ok=false; the cost tier must set a known dog env")
+			}
+			assert(dogCmd)
 		})
 	}
 }

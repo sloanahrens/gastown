@@ -57,7 +57,10 @@ func TestRigLevelCustomAgentIntegration(t *testing.T) {
 
 	// Test 2: Verify BuildPolecatStartupCommand includes the custom agent
 	t.Run("BuildPolecatStartupCommand uses custom agent", func(t *testing.T) {
-		cmd := BuildPolecatStartupCommand(rigName, "test-polecat", rigPath, "")
+		cmd, ok := BuildPolecatStartupCommand(rigName, "test-polecat", rigPath, "")
+		if !ok {
+			t.Fatal("BuildPolecatStartupCommand returned ok=false")
+		}
 
 		if !strings.Contains(cmd, stubAgentPath) {
 			t.Errorf("Expected command to contain stub agent path %q, got: %s", stubAgentPath, cmd)

@@ -765,7 +765,9 @@ func AgentEnvSimple(role, rig, agentName string) map[string]string {
 // A reference to an unset variable expands to the empty string, so a missing
 // credential reaches the provider as an empty value instead of authenticating
 // with the literal sentinel text. ValidateAgentConfig rejects such an agent,
-// and an agent resolved out of settings stops at BuildStartupCommand instead.
+// and an agent resolved out of settings stops at
+// BuildStartupCommandWithAgentOverride instead (gt-wisp-jsm); the plain
+// BuildStartupCommand reports the condition via its ok return.
 func ExpandEnvRefs(env map[string]string) map[string]string {
 	if len(env) == 0 {
 		return env

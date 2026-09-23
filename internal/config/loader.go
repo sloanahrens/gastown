@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2474,11 +2475,10 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 			name = rc.Provider
 		}
 		log.Printf("config: agent %q env references %s, which is not set in the environment", name, strings.Join(missing, ", "))
-		return cmd, false
+		return "", false
 	}
 
-	return cmd, true
-}
+	var cmd string
 	if runtime.GOOS == "windows" {
 		// On Windows, tmux (psmux) uses PowerShell and send-keys has line length
 		// limits. Write env vars + agent command to a temp .ps1 script and invoke
@@ -2557,7 +2557,7 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 		}
 	}
 
-	return cmd
+	return cmd, true
 }
 
 // SanitizeAgentEnv clears environment variables that are known to break agent
@@ -2837,11 +2837,12 @@ func BuildStartupCommandFromConfig(cfg AgentEnvConfig, rigPath, prompt, agentOve
 	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
 }
 
-// BuildAgentStartupCommand is a convenience function for starting agent sessions.
-// It uses AgentEnv to set all standard environment variables.
+// BuildAgentStartupCommand is a convenience function for starting agent
+// sessions. It uses AgentEnv to set all standard environment variables.
 // For rig-level roles (witness, refinery), pass the rig name and rigPath.
-// For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but provide townRoot.
-func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) string {
+// For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but
+// provide townRoot.
+func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) (string, bool) {
 	envVars := AgentEnv(AgentEnvConfig{
 		Role:     role,
 		Rig:      rig,
@@ -2864,7 +2865,7 @@ func BuildAgentStartupCommandWithAgentOverride(role, rig, townRoot, rigPath, pro
 
 // BuildPolecatStartupCommand builds the startup command for a polecat.
 // Sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
-func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) string {
+func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) (string, bool) {
 	var townRoot string
 	if rigPath != "" {
 		townRoot = filepath.Dir(rigPath)
@@ -2897,7 +2898,7 @@ func BuildPolecatStartupCommandWithAgentOverride(rigName, polecatName, rigPath, 
 
 // BuildCrewStartupCommand builds the startup command for a crew member.
 // Sets GT_ROLE, GT_RIG, GT_CREW, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
-func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) string {
+func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) (string, bool) {
 	var townRoot string
 	if rigPath != "" {
 		townRoot = filepath.Dir(rigPath)
