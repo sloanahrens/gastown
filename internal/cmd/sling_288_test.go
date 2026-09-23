@@ -667,7 +667,11 @@ exit /b 1
 			t.Setenv("BEADS_DB", "stale")
 			t.Setenv("BD_DB", "stale")
 
-			rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, formulaVarsForBead("mol-polecat-work", tc.beadID, "Test", nil))
+			bondVars, err := formulaVarsForBead("mol-polecat-work", tc.beadID, "Test", townRoot, nil)
+			if err != nil {
+				t.Fatalf("formulaVarsForBead: %v", err)
+			}
+			rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, bondVars)
 			if err != nil {
 				t.Fatalf("bondFormulaDirect: %v", err)
 			}

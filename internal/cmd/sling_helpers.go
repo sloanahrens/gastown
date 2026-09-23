@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1101,7 +1102,10 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 		telemetry.RecordMolCook(ctx, formulaName, nil)
 	}
 
-	formulaVars := formulaVarsForBead(formulaName, beadID, title, extraVars)
+	formulaVars, err := formulaVarsForBead(formulaName, beadID, title, townRoot, extraVars)
+	if err != nil {
+		return nil, err
+	}
 	wispRootID, err := bondFormulaDirect(resolvedFormula, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
 	if err != nil {
 		return nil, fmt.Errorf("bonding formula %s to bead %s: %w", formulaName, beadID, err)
@@ -1115,13 +1119,29 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	}, nil
 }
 
-func formulaVarsForBead(formulaName, beadID, title string, extraVars []string) []string {
+// formulaVarsForBead assembles the --var list for bonding formulaName to beadID:
+// the standard feature/issue pair, the caller's extraVars, and every variable the
+// formula declares a default for.
+func formulaVarsForBead(formulaName, beadID, title, townRoot string, extraVars []string) ([]string, error) {
 	formulaVars := []string{
 		fmt.Sprintf("feature=%s", title),
 		fmt.Sprintf("issue=%s", beadID),
 	}
 	formulaVars = append(formulaVars, extraVars...)
-	return ensureFormulaRequiredVars(formulaName, formulaVars)
+	return backfillFormulaDefaultVars(formulaName, formulaVars, townRoot, rigNameForBead(townRoot, beadID))
+}
+
+// rigNameForBead names the rig that owns beadID through the prefix routes, or ""
+// when the prefix routes nowhere (town-level beads, unknown prefixes).
+func rigNameForBead(townRoot, beadID string) string {
+	if townRoot == "" {
+		return ""
+	}
+	prefix := beads.ExtractPrefix(beadID)
+	if prefix == "" {
+		return ""
+	}
+	return beads.GetRigNameForPrefix(townRoot, prefix)
 }
 
 // bondFormulaDirect attaches a formula to a bead through bd's canonical bond path.
@@ -1195,38 +1215,104 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 	return fallbackID, true
 }
 
-// ensureFormulaRequiredVars appends missing required vars for formulas that enforce
-// strict var presence on direct bond paths.
-func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
-	// Currently only mol-polecat-work has strict required vars on bond.
-	if formulaName != "mol-polecat-work" && formulaName != "polecat-work" {
-		return vars
+// backfillFormulaDefaultVars returns vars plus a --var entry for every variable
+// formulaName declares with a default, so bd's bond stops demanding values the
+// formula already supplies.
+//
+// bd's bond requires a value for every {{placeholder}} in the cooked proto and
+// ignores the formula's own [vars] defaults (beads cmd/bd/mol_bond.go
+// buildAttachCloneOpts). gt therefore has to hand it those defaults. Reading them
+// from the formula's declarations — rather than a list hard-coded to
+// mol-polecat-work — is what lets any formula bond without --var flags (gt-25wi).
+//
+// A variable that is required, declares no default, has no value, and is used as
+// a {{placeholder}} in the formula is an error naming the formula and the
+// variables: bd rejects that bond anyway, and its own message does not say which
+// formula wanted them. A required variable the formula never interpolates is not
+// an error — bd does not demand a value for it, and failing there would block a
+// bond that works (mol-shutdown-dance's {target} is single-braced prose
+// substitution, not a placeholder). Values already in vars are never overwritten.
+//
+// When the formula cannot be loaded, vars are returned unchanged and bd reports
+// the real problem — a gt-side load failure must not block a bond bd can do.
+func backfillFormulaDefaultVars(formulaName string, vars []string, townRoot, rigName string) ([]string, error) {
+	f, err := loadFormulaForVarDefaults(formulaName, townRoot, rigName)
+	if err != nil {
+		return vars, nil
 	}
 
-	seen := make(map[string]bool, len(vars))
+	supplied := make(map[string]bool, len(vars))
 	for _, variable := range vars {
 		if eq := strings.Index(variable, "="); eq > 0 {
-			seen[variable[:eq]] = true
+			supplied[variable[:eq]] = true
 		}
 	}
 
-	requiredDefaults := []struct {
-		Key   string
-		Value string
-	}{
-		{"base_branch", "main"},
-		{"setup_command", ""},
-		{"typecheck_command", ""},
-		{"lint_command", ""},
-		{"test_command", ""},
-		{"build_command", ""},
+	used := make(map[string]bool)
+	for _, name := range f.UsedTemplateVariables() {
+		used[name] = true
 	}
-	for _, item := range requiredDefaults {
-		if !seen[item.Key] {
-			vars = append(vars, item.Key+"="+item.Value)
+
+	names := make([]string, 0, len(f.Vars))
+	for name := range f.Vars {
+		names = append(names, name)
+	}
+	sort.Strings(names) // map order is random; --var order is not
+
+	var missing []string
+	for _, name := range names {
+		if supplied[name] {
+			continue
 		}
+		def := f.Vars[name]
+		if def.Required && def.Default == "" {
+			// Nothing to backfill. Only a placeholder bd would reject is an error.
+			if used[name] {
+				missing = append(missing, name)
+			}
+			continue
+		}
+		vars = append(vars, name+"="+def.Default)
 	}
-	return vars
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("formula %s: required variable(s) %s have no default; pass --var <name>=<value>",
+			formulaName, strings.Join(missing, ", "))
+	}
+	return vars, nil
+}
+
+// loadFormulaForVarDefaults loads formulaName with its variable declarations:
+// content through the three-tier resolution (rig > town > embedded), parsed, with
+// extends resolved so a child that declares no vars still inherits the parent's
+// defaults (e.g. mol-polecat-work-monorepo-tdd).
+func loadFormulaForVarDefaults(formulaName, townRoot, rigName string) (*formula.Formula, error) {
+	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
+	if err != nil {
+		return nil, fmt.Errorf("loading formula %s: %w", formulaName, err)
+	}
+	f, err := formula.Parse(content)
+	if err != nil {
+		return nil, fmt.Errorf("parsing formula %s: %w", formulaName, err)
+	}
+	resolved, err := formula.Resolve(f, formulaSearchPaths(townRoot, rigName))
+	if err != nil {
+		return nil, fmt.Errorf("resolving formula %s: %w", formulaName, err)
+	}
+	return resolved, nil
+}
+
+// formulaSearchPaths lists the on-disk directories an extends parent may live in,
+// matching the tiers of formula.ResolveFormulaContent. Parents that ship embedded
+// are found without any path.
+func formulaSearchPaths(townRoot, rigName string) []string {
+	var paths []string
+	if townRoot != "" && rigName != "" {
+		paths = append(paths, filepath.Join(townRoot, rigName, ".beads", "formulas"))
+	}
+	if townRoot != "" {
+		paths = append(paths, filepath.Join(townRoot, ".beads", "formulas"))
+	}
+	return paths
 }
 
 // CookFormula cooks a formula to ensure its proto exists.
