@@ -145,12 +145,28 @@ func TestRunTapGuardPRWorkflow_RefineryStillBlocksPRCreate(t *testing.T) {
 	}
 }
 
+// TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout pins that the
+// refinery's merge-rehearsal exemption (gt-r2xm) is scoped to the refinery
+// role.
+//
+// Hermetic (gt-f1mun): the verdict must not move with the environment this
+// suite runs in. The gt-6hg7 exemption reads the session's role and its own
+// worktree from the process env, so an inherited polecat context — a
+// GT_POLECAT_PATH naming a worktree, or a cwd inside one, which
+// isInOwnPolecatWorktree falls back to when the payload omits it — would allow
+// this checkout instead of blocking it. Both are pinned: GT_POLECAT_PATH empty,
+// and a payload cwd in a fresh sandbox outside any polecat layout. The GT_*
+// variables isGasTownAgentContext reads can only add a block, which is the
+// verdict asserted here. The positive case — a polecat's session branch in its
+// own worktree — is TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed.
 func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout(t *testing.T) {
 	t.Setenv("GT_REFINERY", "")
 	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
 	t.Setenv("GT_POLECAT", "topaz")
+	t.Setenv("GT_POLECAT_PATH", "")
+	t.Setenv("GT_RIG", "")
 
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git checkout -b temp origin/main"}}`
+	hookInput := polecatBranchPayload(t.TempDir(), "git checkout -b temp origin/main")
 	var err error
 	withStdin(t, hookInput, func() {
 		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
