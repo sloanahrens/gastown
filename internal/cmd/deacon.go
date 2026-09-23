@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1601,6 +1604,74 @@ func runDeaconZombieScan(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// redispatchHoldLookupFn opens the dispatch-hold lookup the deacon's
+// RECOVERED_BEAD handling consults, plus the release that closes what it
+// opened. A seam for tests, which have no beads store to read a hold out of;
+// production uses openRedispatchHoldLookup.
+var redispatchHoldLookupFn = openRedispatchHoldLookup
+
+// openRedispatchHoldLookup opens the stores behind the dispatch-hold rule and
+// returns a lookup over them (gt-tq6l). The rule itself lives in convoy,
+// which the convoy feeders share, so the deacon cannot re-dispatch a bead the
+// feeder was told to leave alone.
+//
+// The lookup fails closed: if the town store will not open, every bead
+// resolves to a hold reason. Re-dispatching a bead whose record this process
+// could not read is the override the hold exists to prevent, and an
+// unreadable record is exactly the case where a held bead cannot be ruled
+// out.
+func openRedispatchHoldLookup(townRoot string) (func(beadID string) string, func()) {
+	ctx := context.Background()
+
+	townStore, err := beadsdk.Open(ctx, filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		reason := "record unreadable (" + util.FirstLine(err.Error()) + ")"
+		return func(string) string { return reason }, func() {}
+	}
+
+	// A convoy tracks beads in other rigs, whose records the town store
+	// cannot read: rig stores open on demand, the same plumbing
+	// checkConvoyCompletion uses (internal/cmd/close.go).
+	resolver := convoy.NewOpeningStoreResolver(townRoot, func(name string) (beadsdk.Storage, error) {
+		beadsDir := doltserver.FindRigBeadsDir(townRoot, name)
+		if beadsDir == "" {
+			return nil, fmt.Errorf("no beads directory for rig %s", name)
+		}
+		return beadsdk.OpenFromConfig(ctx, beadsDir)
+	})
+
+	lookup := func(beadID string) string {
+		return convoy.DispatchHoldReason(ctx, townStore, beadID, resolver)
+	}
+	release := func() {
+		_ = resolver.Close()
+		_ = townStore.Close()
+	}
+	return lookup, release
+}
+
+// deaconRedispatch reads the recovered bead's own record and hands it to the
+// deacon's RECOVERED_BEAD handler (deacon.RedispatchRecoveredBead), which
+// decides both whether the record holds the bead and whether its rejection
+// was editorial. The notes are read from the bead because that is where
+// refinery leaves the om review receipt the editorial route needs
+// (refinery.formatMergeRejectionNote, om-gate T10).
+func deaconRedispatch(townRoot, beadID string) *deacon.RedispatchResult {
+	holdFor, release := redispatchHoldLookupFn(townRoot)
+	defer release()
+
+	hold := holdFor(beadID)
+	record := deacon.RecoveredBeadRecord{Hold: hold}
+	if hold == "" {
+		// A held bead is answered without reading anything else: the notes
+		// read is a bd subprocess, and what it says decides nothing once the
+		// bead's own record has already refused the dispatch.
+		record.Notes = deacon.GetBeadNotesForRedispatch(townRoot, beadID)
+	}
+
+	return deacon.RedispatchRecoveredBead(record, townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
+}
+
 // runDeaconRedispatch handles re-dispatching a recovered bead.
 func runDeaconRedispatch(cmd *cobra.Command, args []string) error {
 	beadID := args[0]
@@ -1610,20 +1681,7 @@ func runDeaconRedispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// A merge rejection that came from an actual om review leaves a
-	// Score:/Unresolved: receipt on the source bead's notes
-	// (refinery.formatMergeRejectionNote, om-gate T10). When present, run
-	// RedispatchEditorial's convergence/max_attempts rule instead of the
-	// deacon inferring it from mail prose by hand (gt-htn2). A build/test
-	// rejection or a manual `gt mq reject` carries no such receipt, so this
-	// falls back to the plain attempt-count Redispatch.
-	var result *deacon.RedispatchResult
-	notes := deacon.GetBeadNotesForRedispatch(townRoot, beadID)
-	if cur, ok := deacon.ParseEditorialReceiptFromNotes(notes); ok {
-		result = deacon.RedispatchEditorial(townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown, cur, notes)
-	} else {
-		result = deacon.Redispatch(townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
-	}
+	result := deaconRedispatch(townRoot, beadID)
 
 	switch result.Action {
 	case "redispatched":

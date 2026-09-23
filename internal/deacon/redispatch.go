@@ -170,7 +170,7 @@ const ModelEscalationConfigPath = ".gastown/model-escalation.json"
 // RedispatchResult describes the outcome of a re-dispatch attempt.
 type RedispatchResult struct {
 	BeadID    string `json:"bead_id"`
-	Action    string `json:"action"` // "redispatched", "cooldown", "escalated", "error"
+	Action    string `json:"action"` // "redispatched", "cooldown", "escalated", "already-escalated", "skipped", "error"
 	TargetRig string `json:"target_rig,omitempty"`
 	Attempts  int    `json:"attempts"`
 	Message   string `json:"message,omitempty"`
@@ -280,16 +280,88 @@ func (s *BeadRedispatchState) RecordEscalation() {
 	s.EscalatedAt = time.Now().UTC()
 }
 
+// RecoveredBeadRecord is what the RECOVERED_BEAD handler reads of a bead's own
+// record before it decides what to do with the bead. It is a struct rather
+// than a reader interface because both reads are made once, up front, by the
+// caller that holds a beads store — the deacon package reaches beads only
+// through the bd subprocess, and the dispatch-hold rule lives in convoy
+// behind a store.
+type RecoveredBeadRecord struct {
+	// Notes is the bead's notes field. refinery.formatMergeRejectionNote
+	// appends one MERGE REJECTION block per attempt there, ending in the
+	// Score:/Unresolved: pair of an om review receipt when the rejection
+	// came from an actual om verdict (om-gate T10). Kept verbatim because
+	// RedispatchEditorial also attaches it to its escalation mail as the
+	// finding history.
+	Notes string
+
+	// Hold is the reason this bead's own record keeps it off the dispatch
+	// path (convoy.DispatchHoldReason): a deferred or pinned status, a
+	// needs-sonnet or needs-mayor-review label, a MAYOR DESIGN DECISION or
+	// do-not-redispatch in the bead's prose, or a record that could not be
+	// read at all. Empty when the bead may be re-dispatched (gt-tq6l).
+	Hold string
+}
+
+// RedispatchRecoveredBead is the deacon's RECOVERED_BEAD handler and the one
+// decision point between a recovered bead and a fresh sling. It routes an
+// editorial rejection — notes carrying an om review receipt — through
+// RedispatchEditorial, whose convergence gate stops a resubmit that keeps
+// failing the same findings, and everything else through the plain
+// attempt-count Redispatch. A build/test rejection, a manual `gt mq reject`
+// with no verdict behind it, and a bead with no rejection history at all all
+// carry no receipt and take the plain path. Without this fork the convergence
+// stop condition exists only on paper: the editorial path is reachable from
+// nowhere else (gt-wuqn).
+//
+// Both engines gate on rec.Hold, so this only has to pick between them.
+//
+// Parameters are Redispatch's; maxAttempts is also the editorial cap when the
+// bead routes editorially, which RedispatchEditorial resolves to
+// DefaultEditorialMaxAttempts when it is 0.
+func RedispatchRecoveredBead(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
+	if cur, ok := ParseEditorialReceiptFromNotes(rec.Notes); ok {
+		return RedispatchEditorial(rec, townRoot, beadID, sourceRig, maxAttempts, cooldown, cur)
+	}
+	return Redispatch(rec, townRoot, beadID, sourceRig, maxAttempts, cooldown)
+}
+
+// heldBeadResult returns the result for a bead its own record keeps off the
+// dispatch path, or nil when the record holds nothing.
+//
+// Both entry points call it before anything else, because a hold outranks
+// every other gate — the cooldown, the attempt count, and the editorial
+// convergence rule. The deacon is also the one dispatcher that overrides a
+// hold by design, re-slinging with --force, so it is the one place a hold
+// recorded on the bead's own record would otherwise be overridden by the very
+// loop the hold was written to stop (gt-tq6l).
+func heldBeadResult(rec RecoveredBeadRecord, beadID string) *RedispatchResult {
+	reason := strings.TrimSpace(rec.Hold)
+	if reason == "" {
+		return nil
+	}
+	return &RedispatchResult{
+		BeadID:  beadID,
+		Action:  "skipped",
+		Message: "not re-dispatched: " + reason,
+	}
+}
+
 // Redispatch handles a RECOVERED_BEAD message by re-slinging the bead to an
 // available polecat, or escalating to Mayor if the bead has failed too many times.
 //
 // Parameters:
+//   - rec: what the bead's own record said — a hold here skips the dispatch
 //   - townRoot: the Gas Town workspace root
 //   - beadID: the recovered bead to re-dispatch
 //   - sourceRig: the rig from which the bead was recovered (empty = auto-detect from prefix)
 //   - maxAttempts: max re-dispatches before escalating (0 = use default)
 //   - cooldown: min time between re-dispatches (0 = use default)
-func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
+func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
+	if held := heldBeadResult(rec, beadID); held != nil {
+		return held
+	}
+
 	result := &RedispatchResult{BeadID: beadID}
 
 	if maxAttempts <= 0 {
@@ -441,14 +513,20 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 // max_attempts -> stop, label needs_human, escalate with the finding
 // history").
 //
+//   - rec: what the bead's own record said. rec.Notes is the full finding
+//     history (every MERGE REJECTION block the bead accumulated) attached to
+//     the needs_human escalation mail so a human picks up with full context;
+//     a hold in rec skips the dispatch before the convergence rule runs.
 //   - maxAttempts: the rig's resolved merge_queue.editorial.max_attempts
 //     (0 = DefaultEditorialMaxAttempts).
 //   - cur: the receipt summary (score, unresolved finding ids) from the
 //     rejection that triggered this call.
-//   - findingHistory: the full finding history (e.g. every attempt's
-//     Rejection-Findings/-Summary lines) to attach to the needs_human
-//     escalation mail so a human picks up with full context.
-func RedispatchEditorial(townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration, cur ReceiptSummary, findingHistory string) *RedispatchResult {
+func RedispatchEditorial(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration, cur ReceiptSummary) *RedispatchResult {
+	if held := heldBeadResult(rec, beadID); held != nil {
+		return held
+	}
+
+	findingHistory := rec.Notes
 	result := &RedispatchResult{BeadID: beadID}
 
 	if maxAttempts <= 0 {
