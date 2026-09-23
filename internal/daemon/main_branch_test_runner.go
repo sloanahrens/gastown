@@ -370,21 +370,40 @@ func oneLine(s string) string {
 }
 
 // writeMainBranchTestLog captures the full output of a failed run to
-// <townRoot>/logs/main_branch_test/<rig>-<sha>-<ts>.log so the mayor can
-// inspect it without rerunning the test. The tested head is in the name
+// <townRoot>/logs/main_branch_test/<rig>-<sha>-<ts>-<run-id>.log so the mayor
+// can inspect it without rerunning the test. The tested head is in the name
 // because the temporary worktree the run happened in is removed afterwards,
 // taking the output with it — without the sha in the name, a log could not be
 // matched to the verdict it belongs to (gt-1s2g, gt-f57o).
+//
+// The trailing run-id comes from os.CreateTemp's random suffix, not a second
+// call to time.Now: the timestamp above it is second-granularity, so two
+// cycles for the same rig and commit landing in the same second — two
+// daemons racing during a restart, or a rig retested moments apart — would
+// otherwise resolve to the same path and the second os.WriteFile would
+// silently truncate the first run's evidence. CreateTemp's O_EXCL-backed
+// allocation guarantees the two runs get distinct files even when every
+// other component of the name matches (gt-tw45).
 func writeMainBranchTestLog(townRoot, rigName, commit, output string) (string, error) {
 	dir := filepath.Join(townRoot, "logs", "main_branch_test")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating log dir: %w", err)
 	}
-	logPath := filepath.Join(dir, fmt.Sprintf("%s-%s-%s.log", rigName, shortCommit(commit), time.Now().UTC().Format("20060102T150405Z")))
-	if err := os.WriteFile(logPath, []byte(output), 0644); err != nil {
+	pattern := fmt.Sprintf("%s-%s-%s-*.log", rigName, shortCommit(commit), time.Now().UTC().Format("20060102T150405Z"))
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("creating log file: %w", err)
+	}
+	defer f.Close()
+	// CreateTemp opens at 0600; match os.WriteFile's prior 0644 so a log the
+	// mayor reads isn't newly unreadable to whatever else runs as another user.
+	if err := f.Chmod(0644); err != nil {
+		return "", fmt.Errorf("setting log file permissions: %w", err)
+	}
+	if _, err := f.WriteString(output); err != nil {
 		return "", fmt.Errorf("writing log file: %w", err)
 	}
-	return logPath, nil
+	return f.Name(), nil
 }
 
 // shortCommit abbreviates a commit sha for a log line or filename. An
@@ -700,11 +719,20 @@ func (d *Daemon) runMainBranchTests() {
 			// misreport: as a failure it is the same false red as a timeout
 			// reported as a crash, and as a pass it would clear a live alert on
 			// a run that checked nothing (gt-59yz).
-			d.logger.Printf("main_branch_test: %s: interrupted, not a verdict about main: %v", rigName, err)
+			d.logger.Printf("main_branch_test: %s: interrupted, not a verdict about main: %s", rigName, oneLine(err.Error()))
 			continue
 		}
 		if err != nil {
-			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, err)
+			// oneLine, not %v: err's body (built by analyzeRunFailure) carries
+			// the diagnostic lines verbatim, on purpose, for the escalation
+			// below — real newlines and column-0 "FAIL"/"--- FAIL" markers, the
+			// same shape go test itself writes. Printf'd raw into this log line
+			// those markers would read as this rig's own real-time verdict
+			// rather than as the *content* of one, in a stream nothing scopes
+			// the way extractDiagnosticLines scopes the escalation body (gt-tw45,
+			// same defect class oneLine already closed at the command-echo call
+			// site above; this was the sibling call the fix didn't reach).
+			d.logger.Printf("main_branch_test: %s: FAILED: %s", rigName, oneLine(err.Error()))
 			failures = append(failures, fmt.Sprintf("%s: %v", rigName, err))
 			failed++
 		} else {

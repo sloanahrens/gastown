@@ -5,17 +5,36 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/slot"
 )
+
+// discardLogger is what a test reaches for when it needs a Daemon.logger but
+// never inspects what it writes: log.New(os.Stderr, ...) was the shape every
+// one of these tests used before gt-tw45, and os.Stderr is the real,
+// process-wide stderr fd — the same fd `go test ./...` inherits and streams,
+// unbuffered, straight into whatever captured the parent invocation. A test
+// in this file that hits that logger runs printf'd go-test-shaped fixture
+// text (goTestFixtureOneFailingPackage's "ok .../internal/aaa", "--- FAIL:
+// TestWidgetRenders", "FAIL .../internal/widget") through it, so a
+// concurrently-running package's real output and this test's fixture text
+// landed side by side in one gate log — the incident gt-tw45 reports: a
+// refinery gate log's "FAIL .../internal/widget" for a package that has never
+// existed in this tree. io.Discard writes touch no fd at all, closing the
+// leak at its source rather than trying to keep the one Printf call this bead
+// was filed over flattened forever.
+var discardLogger = log.New(io.Discard, "", 0)
 
 func TestMainBranchTestInterval(t *testing.T) {
 	// Nil config returns default
@@ -349,6 +368,116 @@ func TestWriteMainBranchTestLog_NamesTheTestedHead(t *testing.T) {
 	}
 }
 
+// TestWriteMainBranchTestLog_SameRigCommitAndSecondNeverCollide is the
+// gt-tw45 regression test for the run-id gap: the filename's timestamp
+// component only has second granularity, so two runs for the same rig and
+// commit — the two calls below land well within the same wall-clock second —
+// used to resolve to the same path, and the second os.WriteFile silently
+// clobbered the first run's evidence.
+func TestWriteMainBranchTestLog_SameRigCommitAndSecondNeverCollide(t *testing.T) {
+	townRoot := t.TempDir()
+
+	path1, err := writeMainBranchTestLog(townRoot, "gastown", "deadbeef", "first run\n")
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	path2, err := writeMainBranchTestLog(townRoot, "gastown", "deadbeef", "second run\n")
+	if err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if path1 == path2 {
+		t.Fatalf("two runs for the same rig and commit were given the same path: %s", path1)
+	}
+
+	data1, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path1, err)
+	}
+	if string(data1) != "first run\n" {
+		t.Errorf("first run's log was overwritten by the second: got %q", data1)
+	}
+	data2, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path2, err)
+	}
+	if string(data2) != "second run\n" {
+		t.Errorf("second run's log holds the wrong content: got %q", data2)
+	}
+}
+
+// TestRunCommandOnWorktree_ConcurrentRunsSeeOnlyTheirOwnOutput is the gt-tw45
+// acceptance case: two main_branch_test-shaped runs firing at the same
+// time — realistic once more than one rig is configured, or a restart
+// overlaps a cycle already in flight — must not let either run's escalation
+// body or persisted log pick up a line the other run produced. Every
+// goroutine below shares one Daemon (one logger, one townRoot) and uses the
+// same rig and commit, the worst case for the log filename, so a collision
+// in either the in-memory body or the on-disk log shows up here if one
+// exists.
+func TestRunCommandOnWorktree_ConcurrentRunsSeeOnlyTheirOwnOutput(t *testing.T) {
+	townRoot := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: discardLogger,
+	}
+
+	const n = 8
+	logPaths := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			marker := fmt.Sprintf("internal/run%d", i)
+			output := fmt.Sprintf("--- FAIL: TestRun%d (0.00s)\n    run_test.go:1: boom\nFAIL\nFAIL\tgithub.com/steveyegge/gastown/%s\t0.01s\n", i, marker)
+			cmd := "printf '%s' " + shellQuote(output) + "; exit 1"
+
+			err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", cmd)
+			if err == nil {
+				t.Errorf("run %d: expected an error", i)
+				return
+			}
+			body := err.Error()
+			idx := strings.Index(body, "log: ")
+			if idx < 0 {
+				t.Errorf("run %d: expected a log path in the body, got:\n%s", i, body)
+				return
+			}
+			logPaths[i] = strings.TrimSpace(body[idx+len("log: "):])
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]int{}
+	for i, path := range logPaths {
+		if path == "" {
+			continue // this run already failed its own assertions above
+		}
+		if prev, ok := seen[path]; ok {
+			t.Fatalf("run %d and run %d were handed the same log path %s", prev, i, path)
+		}
+		seen[path] = i
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("run %d: could not read %s: %v", i, path, err)
+		}
+		mine := fmt.Sprintf("internal/run%d", i)
+		if !strings.Contains(string(data), mine) {
+			t.Errorf("run %d: %s does not contain its own package %q, got:\n%s", i, path, mine, data)
+		}
+		for j := 0; j < n; j++ {
+			if j == i {
+				continue
+			}
+			other := fmt.Sprintf("internal/run%d", j)
+			if strings.Contains(string(data), other) {
+				t.Errorf("run %d: %s contains run %d's package %q — output crossed between concurrent runs", i, path, j, other)
+			}
+		}
+	}
+}
+
 // TestExtractDiagnosticLines_KeepsAssertionAfterFail is the gt-f57o core
 // requirement: the escalation must name the failing TEST and what it
 // asserted, not just the package. A "--- FAIL: TestX" marker with no
@@ -641,7 +770,7 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 	workDir := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
@@ -743,7 +872,7 @@ func TestRunCommandOnWorktree_ReportsThePackageThatExists(t *testing.T) {
 	townRoot := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	cmd := "printf '%s' " + shellQuote(goTestFixtureNestedTranscript) + "; exit 1"
@@ -1039,7 +1168,7 @@ func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
 
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
@@ -1121,7 +1250,7 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 	})
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1194,7 +1323,7 @@ func parseBudgetSeconds(t *testing.T, body string) time.Duration {
 func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -1220,7 +1349,7 @@ func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
 func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1249,7 +1378,7 @@ func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1276,7 +1405,7 @@ func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
 func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
@@ -1375,7 +1504,7 @@ func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
 	workDir := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	marker := filepath.Join(workDir, "setup-ran")
@@ -1402,7 +1531,7 @@ func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
 	workDir := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	marker := filepath.Join(workDir, "test-ran")
@@ -1431,7 +1560,7 @@ func TestRunRigGates_MissingSetupCommandUnchanged(t *testing.T) {
 	workDir := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 	}
 
 	gateCfg := &rigGateConfig{TestCommand: "exit 0"}
@@ -1580,7 +1709,7 @@ func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 // concurrent main_branch_test cycle on top of one that's still running.
 func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
 	d := &Daemon{
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 		// patrolConfig is nil, so main_branch_test is inactive and
 		// runMainBranchTests returns immediately without touching rigs —
 		// this test exercises only the single-flight guard, not a real cycle.
