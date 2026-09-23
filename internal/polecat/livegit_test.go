@@ -228,8 +228,18 @@ func TestRecordedCleanupBlocks(t *testing.T) {
 		{name: "no probe keeps recorded has_stash blocking", status: CleanupStash, source: GitStateSourceRecorded, want: true},
 		{name: "failed probe keeps recorded has_stash blocking", status: CleanupStash, source: GitStateSourceUnknown, want: true},
 		{name: "unset source keeps recorded has_uncommitted blocking", status: CleanupUncommitted, source: "", want: true},
-		{name: "missing status always blocks", status: "", source: GitStateSourceLive, want: true},
-		{name: "unknown status always blocks", status: CleanupUnknown, source: GitStateSourceLive, want: true},
+		// gt-ui2x: a live probe demotes missing/unknown exactly like the
+		// git-derived statuses above — the actual dirty/stash/unpushed facts
+		// it measured are re-checked as their own blockers immediately after
+		// this call in decideWorkstate, so this only removes the redundant,
+		// permanently-stuck-forever veto a missing self-report used to cast.
+		{name: "live probe clears missing status", status: "", source: GitStateSourceLive, want: false},
+		{name: "live probe clears unknown status", status: CleanupUnknown, source: GitStateSourceLive, want: false},
+		{name: "no probe keeps missing status blocking", status: "", source: GitStateSourceRecorded, want: true},
+		{name: "no probe keeps unknown status blocking", status: CleanupUnknown, source: GitStateSourceRecorded, want: true},
+		{name: "failed probe keeps missing status blocking", status: "", source: GitStateSourceUnknown, want: true},
+		{name: "failed probe keeps unknown status blocking", status: CleanupUnknown, source: GitStateSourceUnknown, want: true},
+		{name: "unset source keeps missing status blocking", status: "", source: "", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

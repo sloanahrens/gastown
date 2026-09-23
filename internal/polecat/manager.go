@@ -2415,7 +2415,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// a *different* blocker and strand the slot. The detailed reason belongs to
 	// the list path (ProbeLiveGitState), which has no such gate.
 	if status, err := g.CheckUncommittedWork(); err == nil {
-		facts.GitDirty = !status.CleanExcludingRuntime()
+		facts.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew()
 		facts.StashCount = status.StashCount
 		facts.UnpushedCommits = status.UnpushedCommits
 	} else {

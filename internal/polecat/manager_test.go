@@ -225,8 +225,7 @@ esac
 
 // installMockBdMissingCleanupStatus behaves like installMockBd but omits
 // cleanup_status from the agent bead description entirely, simulating a
-// polecat whose cleanup_status was never (or not yet) reported — the exact
-// condition gt-7kr's fail-closed fix must refuse to treat as safe.
+// polecat whose cleanup_status was never (or not yet) reported.
 func installMockBdMissingCleanupStatus(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1864,15 +1863,30 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 	return "printf dirty > " + marker + "; exit 7"
 }
 
-// TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed is the
-// regression test for gt-7kr: check-recovery returned SAFE_TO_NUKE for a
-// polecat whose cleanup_status was missing, because a narrow local git check
-// (no uncommitted changes, no stash, no unpushed commits) was treated as
-// sufficient proof the missing status could be silently promoted to "clean".
-// That local check says nothing about a live session or a still-hooked bead,
-// so it must never authorize destruction on its own — missing/unknown
-// cleanup_status has to fail closed to NEEDS_RECOVERY.
-func TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed(t *testing.T) {
+// TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit
+// covers the gt-7kr -> gt-ui2x evolution of this exact scenario.
+//
+// gt-7kr found check-recovery returning SAFE_TO_NUKE for a missing
+// cleanup_status off of an ad hoc, standalone local git check — one that said
+// nothing about a live session or a still-hooked bead, so a clean-looking
+// worktree alone was silently promoted to "clean" with no other signal
+// consulted. The fix made missing/unknown fail closed unconditionally.
+//
+// gt-ui2x closes the resulting hole: a polecat whose cleanup_status was never
+// self-reported (gt done crashed before writing it, or the seat predates the
+// field) could then NEVER become reusable again, no matter how much evidence
+// accumulated — 9 of 36 blocked seats in the field measurement that filed
+// this bug. The distinction from gt-7kr's bad promotion is that
+// workstateInputForPolecat (below) runs its git probe through the SAME
+// unified WorkstateInput/decideWorkstate path every other verdict uses:
+// GitStateSourceLive is a real, current measurement, and hook/active-MR
+// safety are separate, independent blockers that fire whether or not
+// cleanup_status is missing (see the "hooked bead blocks alone" case in
+// TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupStatus).
+// So once that live probe finds nothing at risk AND hook/active-MR are
+// separately verified safe, there is nothing left for a missing self-report
+// to add — see RecordedCleanupBlocks.
+func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -1883,16 +1897,17 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed(t *testi
 
 	// Swap to a mock bd that omits cleanup_status entirely while everything
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
-	// worktree itself is locally clean — exactly the pre-fix promotion path.
+	// worktree itself is locally clean, verified by workstateInputForPolecat's
+	// own live probe (GitStateSourceLive) — not a bypass of it.
 	installMockBdMissingCleanupStatus(t)
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
-	if d.Verdict != WorkstateVerdictNeedsRecovery {
-		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — missing cleanup_status must fail closed even when local git looks clean",
-			d.Verdict, d.Reason, d.Blockers, WorkstateVerdictNeedsRecovery)
+	if d.Verdict != WorkstateVerdictSafeToNuke {
+		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — a verified-clean live probe plus safe hook/MR must clear a missing cleanup_status",
+			d.Verdict, d.Reason, d.Blockers, WorkstateVerdictSafeToNuke)
 	}
-	if d.Reusable || d.SafeToNuke {
-		t.Fatalf("WorkstateDispositionForPolecat() Reusable=%v SafeToNuke=%v, want both false", d.Reusable, d.SafeToNuke)
+	if !d.Reusable || !d.SafeToNuke {
+		t.Fatalf("WorkstateDispositionForPolecat() Reusable=%v SafeToNuke=%v, want both true", d.Reusable, d.SafeToNuke)
 	}
 }
 

@@ -138,24 +138,32 @@ func labelFactSources(in WorkstateInput, d WorkstateDisposition) WorkstateDispos
 // clean tree — the self-report was simply wrong, and it was the only thing
 // consulted.
 //
+// gt-ui2x: missing/unknown gets exactly the same demotion. A missing
+// cleanup_status is the *absence* of a self-report (gt done crashed before
+// selfReportCleanupStatus ran, or never ran at all on an old seat) — it is
+// not evidence of risk, and once a live probe has actually measured
+// GitDirty/StashCount/UnpushedCommits there is nothing left for the missing
+// record to add. Those three measurements are re-checked as their own
+// blockers immediately after this call returns (decideWorkstate's
+// GitDirty/StashCount/UnpushedCommits ifs), so a live probe that finds real
+// risk still blocks — this only removes the SECOND, redundant veto that used
+// to strand a seat forever with no probe result able to ever clear it.
+//
 // The demotion is one-directional and fails closed:
 //
 //   - no probe attempt (GitStateSourceRecorded) → the record still blocks,
 //     because nothing has replaced it;
 //   - a failed probe (GitStateSourceUnknown) → the record still blocks, on top
 //     of the git-check-failed blocker the classifier already raises;
-//   - missing/unknown recorded values are the *absence* of an answer rather
-//     than an observation, so they keep blocking unless a caller's narrow
-//     escape hatch (partial spawn, structurally gone worktree) resolves them
-//     through ResolveIgnoreCleanupStatus;
 //   - a recorded status never makes a verdict cleaner than live git: with the
 //     probe answering dirty/stashed/unpushed the verdict is NEEDS_RECOVERY no
-//     matter what the record claims (CleanupClean included).
+//     matter what the record claims (CleanupClean included, and missing/unknown
+//     included since gt-ui2x).
 func RecordedCleanupBlocks(status CleanupStatus, gitStateSource string) bool {
 	if status.IsSafe() {
 		return false
 	}
-	if status.RequiresRecovery() && gitStateSource == GitStateSourceLive {
+	if gitStateSource == GitStateSourceLive {
 		return false
 	}
 	return true

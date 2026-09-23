@@ -449,3 +449,79 @@ func TestNewWorkstateInputRealisticCleanPolecatStillClears(t *testing.T) {
 		t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want SAFE_TO_NUKE", facts, d)
 	}
 }
+
+// TestNewWorkstateInputMissingCleanupStatusClearsOnLiveCleanProbe is the
+// gt-ui2x acceptance case: a seat whose cleanup_status was never recorded
+// (gt done crashed before self-reporting, or predates the field) must not be
+// stuck in NEEDS_RECOVERY forever just because nothing ever answers for it.
+// Once a live git probe measures the worktree clean, that measurement is
+// itself the verified path CanIgnoreStaleCleanupStatus's narrow hatches could
+// not reach — see RecordedCleanupBlocks.
+func TestNewWorkstateInputMissingCleanupStatusClearsOnLiveCleanProbe(t *testing.T) {
+	facts := WorkstateFacts{
+		State:          StateIdle,
+		CleanupStatus:  "",
+		HookBeadSafe:   true,
+		Branch:         "polecat/opal",
+		GitStateSource: GitStateSourceLive,
+		// GitDirty/StashCount/UnpushedCommits all zero: the live probe found
+		// nothing at risk.
+	}
+	d := DecideWorkstate(NewWorkstateInput(facts))
+	if !d.SafeToNuke || d.Verdict != WorkstateVerdictSafeToNuke {
+		t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want SAFE_TO_NUKE", facts, d)
+	}
+	if len(d.Blockers) != 0 {
+		t.Fatalf("Blockers = %v, want none", d.Blockers)
+	}
+}
+
+// TestNewWorkstateInputMissingCleanupStatusStillBlocksOnLiveDirtyProbe proves
+// the gt-ui2x fix does not weaken protection: a missing cleanup_status paired
+// with a live probe that actually finds risk (real uncommitted work) must
+// still block, exactly like every other status.
+func TestNewWorkstateInputMissingCleanupStatusStillBlocksOnLiveDirtyProbe(t *testing.T) {
+	facts := WorkstateFacts{
+		State:          StateIdle,
+		CleanupStatus:  "",
+		HookBeadSafe:   true,
+		Branch:         "polecat/jade",
+		GitStateSource: GitStateSourceLive,
+		GitDirty:       true,
+		GitDirtyReason: "git_state=has_uncommitted uncommitted_files=1",
+	}
+	d := DecideWorkstate(NewWorkstateInput(facts))
+	if d.SafeToNuke || d.Verdict != WorkstateVerdictNeedsRecovery {
+		t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want NEEDS_RECOVERY", facts, d)
+	}
+	found := false
+	for _, b := range d.Blockers {
+		if b == facts.GitDirtyReason {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Blockers = %v, want it to include %q", d.Blockers, facts.GitDirtyReason)
+	}
+}
+
+// TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutLiveProbe proves
+// the demotion requires an actual live measurement: a missing cleanup_status
+// with no probe attempted (the caller never measured git at all) must still
+// fail closed, exactly as before gt-ui2x.
+func TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutLiveProbe(t *testing.T) {
+	facts := WorkstateFacts{
+		State:         StateIdle,
+		CleanupStatus: "",
+		HookBeadSafe:  true,
+		Branch:        "polecat/pyrite",
+		// GitStateSource left unset: GitStateSourceRecorded, no probe ran.
+	}
+	d := DecideWorkstate(NewWorkstateInput(facts))
+	if d.SafeToNuke || d.Verdict != WorkstateVerdictNeedsRecovery {
+		t.Fatalf("DecideWorkstate(NewWorkstateInput(%+v)) = %+v, want NEEDS_RECOVERY", facts, d)
+	}
+	if len(d.Blockers) != 1 || d.Blockers[0] != "cleanup_status=<missing>" {
+		t.Fatalf("Blockers = %v, want [cleanup_status=<missing>]", d.Blockers)
+	}
+}

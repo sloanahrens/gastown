@@ -1240,7 +1240,7 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 		return nil, fmt.Errorf("git status: %w", err)
 	}
 	if workStatus.HasUncommittedChanges {
-		state.UncommittedFiles = workStatus.NonRuntimePaths()
+		state.UncommittedFiles = workStatus.NonRuntimeNonSkewPaths()
 		if len(state.UncommittedFiles) > 0 {
 			state.Clean = false
 		}

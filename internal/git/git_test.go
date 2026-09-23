@@ -495,6 +495,28 @@ func TestStatusOnMissingWorkDirReportsMissingDirectoryNotGitBinary(t *testing.T)
 	}
 }
 
+// TestStatusPreservesLeadingSpaceColumnOnSoleUnstagedModification guards
+// against a regression where Status() read porcelain output through run(),
+// whose TrimSpace ate the leading space of a lone " M path" entry (index
+// clean, worktree modified) — the only status line present, so it was also
+// the first — shifting every column and truncating the path by one
+// character ("README.md" parsed as "EADME.md"). Status() must use the
+// untrimmed runOutput() instead.
+func TestStatusPreservesLeadingSpaceColumnOnSoleUnstagedModification(t *testing.T) {
+	dir := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("unstaged edit\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	status, err := NewGit(dir).Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Modified) != 1 || status.Modified[0] != "README.md" {
+		t.Fatalf("Modified = %v, want [README.md]", status.Modified)
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
@@ -2723,6 +2745,92 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 		}
 		if status.CleanExcludingRuntime() {
 			t.Fatal("unmerged conflict must block runtime-excluding clean check")
+		}
+	})
+}
+
+// TestCheckUncommittedWorkIndexSkewVsRealDirty is the gt-ui2x regression
+// table. The shared-.repo.git pattern leaves a dormant polecat checkout's
+// index describing a commit that moved out from under it: HEAD points at an
+// older commit than the index/worktree, but the index/worktree content is
+// exactly what's already on origin's default branch. That must classify as
+// skew, not risk — while a real staged edit that ISN'T already known
+// anywhere, and any unstaged edit at all, must still block.
+func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
+	t.Run("staged-only content already on origin is skew and does not block reuse", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "commit", "-am", "v2")
+		runGitTestCmd(t, localDir, "push", "origin", "HEAD")
+		// Move the branch ref back one commit WITHOUT touching the index or
+		// worktree — this is the checkout-skew shape: HEAD regresses (as if a
+		// shared ref move landed under a dormant checkout) while the index and
+		// working tree still hold content origin already has.
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if !status.HasUncommittedChanges {
+			t.Fatal("staged skew must still be visible as an uncommitted change")
+		}
+		if len(status.IndexSkewFiles) != 1 || status.IndexSkewFiles[0] != "README.md" {
+			t.Fatalf("IndexSkewFiles = %v, want [README.md]", status.IndexSkewFiles)
+		}
+		if status.CleanExcludingRuntime() {
+			t.Fatal("CleanExcludingRuntime must still see index skew as dirty (unaffected, gt done path)")
+		}
+		if !status.CleanExcludingRuntimeAndIndexSkew() {
+			t.Fatal("index-skew-only seat must be treated as clean for reuse")
+		}
+	})
+
+	t.Run("staged content not yet on origin or main still blocks", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "commit", "-am", "v2")
+		// Deliberately do NOT push: origin's default branch still has only the
+		// original content, so the staged v2 content is real, unpreserved work.
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if len(status.IndexSkewFiles) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: content is not on origin", status.IndexSkewFiles)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew() {
+			t.Fatal("staged content absent from origin/main must still block reuse")
+		}
+	})
+
+	t.Run("unstaged edit always blocks regardless of skew classification", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("editor has this open\n"), 0644); err != nil {
+			t.Fatalf("write unstaged edit: %v", err)
+		}
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if len(status.IndexSkewFiles) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: an unstaged edit is never a skew candidate", status.IndexSkewFiles)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew() {
+			t.Fatal("a real unstaged edit is exactly the risk this check exists to catch")
 		}
 	})
 }
