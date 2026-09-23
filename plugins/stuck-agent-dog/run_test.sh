@@ -196,6 +196,10 @@ case "${1:-}" in
     if [ "${2:-}" = "send" ]; then
       printf '%s\n' "$*" >> "$TEST_STATE/mail.log"
       while IFS= read -r _line; do :; done
+      if [ -f "$TEST_STATE/mail_fail" ]; then
+        printf 'mail: router unavailable\n' >&2
+        exit 1
+      fi
       exit 0
     fi
     ;;
@@ -858,9 +862,51 @@ test_failed_escalation_exits_nonzero() {
   assert_file_contains "$TEST_STATE/output.log" "dolt unreachable" "failed escalation: stderr kept for the dog"
 }
 
+expect_exit_1() {
+  local rc=0 label="$1"
+  run_script_once || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    record_pass "$label: exit 1"
+  else
+    record_fail "$label: exit 1 (got $rc)"
+  fi
+}
+
+test_failed_restart_mail_exits_nonzero() {
+  setup_case
+  add_polecat alpha session-dead
+  touch "$TEST_STATE/mail_fail"
+  expect_exit_1 "failed restart mail"
+
+  assert_file_contains "$TEST_STATE/output.log" "ACTION FAILED: restart mail for gastown/alpha" "failed restart mail: named in output"
+  assert_file_contains "$TEST_STATE/output.log" "router unavailable" "failed restart mail: stderr kept for the dog"
+}
+
+test_failed_zombie_restart_mail_exits_nonzero() {
+  setup_case
+  add_polecat alpha agent-dead
+  touch "$TEST_STATE/mail_fail"
+  expect_exit_1 "failed zombie restart mail"
+
+  assert_file_contains "$TEST_STATE/kill.log" "gt-alpha" "failed zombie restart mail: zombie still cleared"
+  assert_file_contains "$TEST_STATE/output.log" "ACTION FAILED: restart mail for gastown/alpha" "failed zombie restart mail: named in output"
+}
+
+test_failed_deacon_escalation_exits_nonzero() {
+  setup_case
+  rm -f "$TEST_STATE/sessions/hq-deacon"
+  touch "$TEST_STATE/escalate_fail"
+  expect_exit_1 "failed deacon escalation"
+
+  assert_file_contains "$TEST_STATE/output.log" "ACTION FAILED: deacon escalation (crashed)" "failed deacon escalation: named in output"
+}
+
 test_town_tmux_socket_used
 test_no_socket_uses_ambient_tmux
 test_failed_escalation_exits_nonzero
+test_failed_restart_mail_exits_nonzero
+test_failed_zombie_restart_mail_exits_nonzero
+test_failed_deacon_escalation_exits_nonzero
 test_healthy_runtime opencode
 test_healthy_runtime bun
 test_healthy_runtime node
