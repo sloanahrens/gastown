@@ -3,6 +3,7 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,8 +34,9 @@ func TestCommitFileChanges_ReportsEveryFileOfEveryCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitFileChanges: %v", err)
 	}
-	// Changes arrive newest-first, and the older "initial" commit also touches
-	// README.md, so keep each path's newest entry.
+	// Changes arrive newest-first; the "initial" commit is this repo's root and
+	// so contributes nothing (see the graft-boundary test below), leaving one
+	// entry per path, but keep each path's newest entry either way.
 	got := map[string]CommitFileChange{}
 	for _, ch := range changes {
 		if ch.Commit == "" {
@@ -98,6 +100,53 @@ func TestCommitFileChanges_CreationAndDeletionUseEmptyNotNullBlob(t *testing.T) 
 	}
 	if changes[0].OldBlob == "" || changes[0].OldBlob == nullBlob {
 		t.Errorf("deletion reported OldBlob=%q, want the removed content's blob", changes[0].OldBlob)
+	}
+}
+
+// TestCommitFileChanges_ShallowBoundaryContributesNothing pins the graft
+// boundary: a shallow clone's boundary commit has no parent object, git reports
+// it as parentless, and --raw then prints the boundary's WHOLE tree as
+// creations. Those entries name content the boundary commit never added, and a
+// caller comparing blobs cannot tell them from a real creation — which is how a
+// deliberate deletion came to read as a revert (gt-zeuip).
+func TestCommitFileChanges_ShallowBoundaryContributesNothing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	clone := filepath.Join(dir, "clone")
+
+	runGit(t, "", "init", "--bare", remote)
+	runGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(t, "", "clone", remote, seed)
+	runGit(t, seed, "config", "user.email", "seed@example.com")
+	runGit(t, seed, "config", "user.name", "Seed")
+	write(t, filepath.Join(seed, "victim.txt"), "victim\n")
+	runGit(t, seed, "add", "-A")
+	runGit(t, seed, "commit", "-m", "add victim")
+	write(t, filepath.Join(seed, "later.txt"), "later\n")
+	runGit(t, seed, "add", "-A")
+	runGit(t, seed, "commit", "-m", "add later")
+	runGit(t, seed, "push", "origin", "main")
+
+	runGit(t, "", "clone", "--depth", "1", "file://"+remote, clone)
+
+	// The scan must really be looking at a fabricated block, or this test
+	// passes for the wrong reason.
+	if parents := runGitIn(t, clone, "log", "-1", "--format=%P", "origin/main"); parents != "" {
+		t.Fatalf("scenario precondition: origin/main has parents %q, want a graft boundary", parents)
+	}
+	raw := runGitIn(t, clone, "log", "--raw", "--no-abbrev", "--no-renames", "-1", "origin/main")
+	if !strings.Contains(raw, "A\tvictim.txt") {
+		t.Fatalf("scenario precondition: git no longer reports the boundary's tree as creations:\n%s", raw)
+	}
+
+	changes, err := NewGit(clone).CommitFileChanges("origin/main", 10)
+	if err != nil {
+		t.Fatalf("CommitFileChanges: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("CommitFileChanges reported %d changes from a graft boundary, want none: %+v", len(changes), changes)
 	}
 }
 

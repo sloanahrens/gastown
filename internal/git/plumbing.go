@@ -43,11 +43,17 @@ type CommitFileChange struct {
 // commits it merges, which the same walk visits. That is the behavior this
 // caller wants — a merge's own patch is not a unit anyone reverts.
 //
+// A commit git reports without a parent contributes nothing either: with no
+// parent tree to diff against, git prints that commit's ENTIRE tree as
+// creations, which for the graft boundary of a shallow clone describes content
+// the commit never touched. Reporting it lets a caller read the clone's
+// baseline as a change (gt-zeuip).
+//
 // Paths are read with -z so files with spaces, quotes or newlines in their
 // names come through verbatim instead of being C-quoted.
 func (g *Git) CommitFileChanges(rev string, limit int) ([]CommitFileChange, error) {
 	out, err := g.run("log", "--raw", "--no-abbrev", "--no-renames", "-z",
-		"--format=C %H", rev, "-n", strconv.Itoa(limit))
+		"--format=C %H %P", rev, "-n", strconv.Itoa(limit))
 	if err != nil {
 		return nil, err
 	}
@@ -55,10 +61,10 @@ func (g *Git) CommitFileChanges(rev string, limit int) ([]CommitFileChange, erro
 }
 
 // parseRawLogChanges walks the NUL-separated stream produced by
-// CommitFileChanges' git log invocation: a "C <sha>" header token, then
-// alternating "<raw meta>" / "<path>" token pairs. A token is only ever read as
-// a path from the position immediately after a meta token, so a path that
-// happens to look like a header is not misread.
+// CommitFileChanges' git log invocation: a "C <sha> <parents>" header token,
+// then alternating "<raw meta>" / "<path>" token pairs. A token is only ever
+// read as a path from the position immediately after a meta token, so a path
+// that happens to look like a header is not misread.
 func parseRawLogChanges(out string) []CommitFileChange {
 	var changes []CommitFileChange
 	var commit string
@@ -72,7 +78,13 @@ func parseRawLogChanges(out string) []CommitFileChange {
 		tok := strings.TrimLeft(tokens[i], "\n")
 		switch {
 		case strings.HasPrefix(tok, "C "):
-			commit = strings.TrimSpace(tok[2:])
+			// The header names the parents too, and a commit with none is a
+			// root or a graft boundary whose block is not a change. Leaving
+			// commit empty drops that block (see CommitFileChanges).
+			commit = ""
+			if fields := strings.Fields(tok[2:]); len(fields) > 1 {
+				commit = fields[0]
+			}
 		case strings.HasPrefix(tok, ":"):
 			if i+1 >= len(tokens) {
 				break
