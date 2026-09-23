@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,40 +92,116 @@ func waitForPaneText(t *testing.T, tm *tmux.Tmux, session, want string, lines in
 	}
 }
 
-// markPaneBusy renders the Claude Code busy spinner into the session's pane
-// and blocks until the shell has demonstrably run the command that prints it,
-// then asserts the pane reads as busy.
+// busyProofPrefix heads the proof token markPaneBusy waits for. The shell
+// appends a per-run tail, so only the command's output carries the joined
+// token.
+const busyProofPrefix = "gt-test-busy-proof"
+
+// busyProofCommand returns the command markPaneBusy types into the pane and the
+// proof token its OUTPUT contains.
 //
-// The spinner and a unique proof marker are printed by one command, so seeing
-// the marker in the capture proves the spinner line above it is already
-// rendered. The pane then stays busy for the life of the test: nothing pushes
-// the spinner out of the capture window.
+// The shell computes both the token's tail and the spinner's token count, so
+// neither the joined token nor a "↓ <digits>" readout appears in the command
+// text. A pane shows the shell's ECHO of that text during SendKeys's debounce,
+// before Enter runs anything, and either string appearing verbatim in the
+// command would let that echo satisfy the barrier and the IsBusy check alike
+// (gt-a53g).
+func busyProofCommand() (cmd, proof string) {
+	tail := 1 + rand.Intn(1<<30)
+	return fmt.Sprintf(
+			`printf '✵ Leavening… (3m 17s · ↓ %%s.1k tokens)\n%s-%%s\n' "$((13+1))" "$((%d+1))"`,
+			busyProofPrefix, tail,
+		),
+		fmt.Sprintf("%s-%d", busyProofPrefix, tail+1)
+}
+
+// markPaneBusy renders the Claude Code busy spinner into the session's pane and
+// returns once the pane shows the executed output and reads as busy. Nothing
+// pushes the spinner out of the capture window afterwards, so the pane stays
+// busy for the life of the test.
 //
-// The previous version sent the printf and then polled IsBusy against a fixed
-// 5s deadline, failing the test if the pane had not gone busy by then. Under a
-// loaded host (the full suite at -p=8 on the same box) that deadline is a
-// wall-clock race against the shell's scheduling — the gt-38ss flake. The
-// barrier below has no such race: the only bounded wait is for real work the
-// test can see the result of.
+// It polls rather than samples because IsBusy matches line by line and a wrap
+// landing inside the token readout makes a single snapshot return false
+// (gt-isp0): a slow host makes this slower, never flakier. It fails closed,
+// returning only once the proof token — which the echo cannot carry, see
+// busyProofCommand — is present, and giving up with the last capture as
+// evidence at paneBarrierTimeout. IsBusy reports true when it cannot capture
+// the pane at all; the token is read only from a capture that succeeded, so
+// that fail-safe cannot carry the barrier on its own.
 func markPaneBusy(t *testing.T, tm *tmux.Tmux, session string) {
 	t.Helper()
 
-	// Spinner text is the shape IsBusy detects (busyTokenSpinnerPattern);
-	// neither it nor the marker contains shell metacharacters, so a single
-	// printf with both lines is safe to type into the pane.
-	const (
-		spinner = `✵ Leavening… (3m 17s · ↓ 14.1k tokens)`
-		proof   = "gt-test-busy-proof"
-	)
-
-	if err := tm.SendKeys(session, fmt.Sprintf("printf '%s\\n%s\\n'", spinner, proof)); err != nil {
+	cmd, proof := busyProofCommand()
+	if err := tm.SendKeys(session, cmd); err != nil {
 		t.Fatalf("SendKeys: %v", err)
 	}
-	waitForPaneText(t, tm, session, proof, 20)
 
-	if !tm.IsBusy(session) {
-		out, _ := tm.CapturePane(session, 20)
-		t.Fatalf("pane rendered the busy spinner but IsBusy reported false; pane:\n%s", out)
+	deadline := time.Now().Add(paneBarrierTimeout)
+	var last string
+	for {
+		out, err := tm.CapturePane(session, 20)
+		if err == nil {
+			last = out
+			if strings.Contains(flattenPane(out), proof) && tm.IsBusy(session) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane never rendered %q with the spinner read as busy within %s; last capture:\n%s", proof, paneBarrierTimeout, last)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestMarkPaneBusy_BarrierIgnoresEchoedCommand guards gt-a53g: markPaneBusy's
+// barrier must be satisfied by the command's executed output, never by the
+// shell's echo of the typed line.
+//
+// The pane's only process is /bin/cat, so the typed command is echoed by the
+// tty and read back by cat but never executed, however long the test waits —
+// the withheld-Enter condition the barrier has to refuse, with no dependence on
+// the host's $SHELL, prompt, or rc files.
+func TestMarkPaneBusy_BarrierIgnoresEchoedCommand(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tm := tmux.NewTmux()
+	ensureServerKeeper(t, tm)
+	sessionName := "gt-test-busy-proof-echo"
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommand(sessionName, "", "/bin/cat"); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+
+	cmd, proof := busyProofCommand()
+	// The invariant on the command text, so a regression fails fast naming the
+	// cause rather than only through the pane checks below.
+	if strings.Contains(cmd, proof) {
+		t.Fatalf("the typed command carries the proof token %q verbatim, so its echo alone would satisfy the barrier: %s", proof, cmd)
+	}
+
+	// Waiting for the command's last field pins the pane checks to a complete
+	// echo.
+	fields := strings.Fields(cmd)
+	if err := tm.SendKeys(sessionName, cmd); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	waitForPaneText(t, tm, sessionName, fields[len(fields)-1], 40)
+
+	out, err := tm.CapturePane(sessionName, 40)
+	if err != nil {
+		t.Fatalf("CapturePane: %v", err)
+	}
+	// The same property as the pane shows it: the token is not on screen.
+	if strings.Contains(flattenPane(out), proof) {
+		t.Fatalf("pane shows the proof token %q with nothing executed, so the echoed command satisfies the barrier:\n%s", proof, out)
+	}
+	// IsBusy matches the token readout anywhere in a line, so typing that
+	// readout verbatim would make the echo read as busy.
+	if tm.IsBusy(sessionName) {
+		t.Fatalf("pane reads as busy with nothing executed, so the echoed command satisfies the busy check:\n%s", out)
 	}
 }
 
