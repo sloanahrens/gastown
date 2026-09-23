@@ -225,6 +225,12 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		telemetry.RecordSling(ctx, bead, target, retErr)
 	}()
+	// The same boundary as executeSling's: a seat the pool claimed for this
+	// sling stops standing when the command returns. StartSession drops it on
+	// the success path, and the failure paths drop it here — including the ones
+	// that return after the spawn without rolling it back, which the rollback
+	// paths alone would miss (gt-t8q5).
+	defer releasePoolSeatClaim()
 	// Polecats cannot sling - check early before writing anything.
 	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the

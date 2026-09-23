@@ -280,6 +280,24 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		opts.Agent = poolAgent
 	}
 
+	// The seat claimed above belongs to the polecat this call is about to
+	// spawn: the SpawnedPolecatInfo returned below carries it to StartSession,
+	// which drops it once the tmux session exists — the session is what the
+	// pool counts from then on. Every other way out of this function leaves no
+	// session behind — a rig that will not load, Dolt down, no connection
+	// capacity, a parked rig, the respawn breaker, the per-rig directory cap, a
+	// failed allocation — so the claim is dropped on the way out. A claim a
+	// failed spawn kept stands for a polecat that never existed: every other
+	// sling counts it as a seat taken, and cleanup leaves it alone for
+	// poolSeatClaimTTL (30m) because the process holding it is still alive
+	// (gt-t8q5).
+	claimHandedOver := false
+	defer func() {
+		if !claimHandedOver {
+			releasePoolSeatClaim()
+		}
+	}()
+
 	// Load rig config
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
@@ -368,6 +386,9 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, err
 	}
 	if reusedIdle != nil {
+		// A reused sandbox still has its session started by the caller, which
+		// is where the claim stops standing for a seat.
+		claimHandedOver = true
 		return reusedIdle, nil
 	}
 
@@ -458,6 +479,10 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	recordRespawn()
 
 	effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
+
+	// The spawn is real: the claim now belongs to a polecat whose session the
+	// caller will start, and StartSession is what drops it.
+	claimHandedOver = true
 
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,

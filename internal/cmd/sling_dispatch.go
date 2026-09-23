@@ -114,6 +114,16 @@ func buildSlingFormulaVars(rigCmdVars, userVars []string, spawnBaseBranch, resum
 //  11. Create Dolt branch
 //  12. Start polecat session
 func executeSling(params SlingParams) (*SlingResult, error) {
+	// A seat the pool claimed for this dispatch stops standing when the
+	// dispatch returns: the tmux session exists by then and is what the pool
+	// counts, or the dispatch failed and no session will exist. Every spawn
+	// this function makes is started here, so this is the boundary that
+	// guarantees the claim cannot outlive the dispatch — the batch and
+	// scheduler callers (sling_batch.go, scheduler_convoy.go, scheduler_epic.go,
+	// capacity_dispatch.go) keep the process alive afterwards, where a leaked
+	// claim would hold its seat for poolSeatClaimTTL (gt-t8q5).
+	defer releasePoolSeatClaim()
+
 	townRoot := params.TownRoot
 	if townRoot == "" {
 		var err error
