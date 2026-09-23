@@ -171,7 +171,9 @@ func poolSeatCounts(pool *config.PolecatPool, sessions []poolSession) (local, ov
 // own seats is served by that seat's own rules or refused — never by the other
 // seat, which would spend on the paid provider the caller did not ask for
 // (gt-x40u). An agent the pool does not own leaves it nothing to admit, and the
-// request stands untouched (gt-4lbz).
+// request stands untouched (gt-4lbz) — ahead of the spent-local-attempt rule,
+// which records an attempt on the pool's own seat and so cannot answer for one
+// the pool never owned (gt-gcrk).
 //
 // Every reason names the agent it chose or the seat it could not take. The
 // three lines that name no agent — no pool configured, no local_agent, and a
@@ -276,18 +278,28 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	case bead.hasLabel(routeFlashLabel):
 		return overflowFor("label " + routeFlashLabel)
 	}
-	// 2. One local attempt per bead (B3). The label is attached by the idle-seat
+	// 2. An agent the pool does not own is not the pool's to admit, and the
+	//    request stands untouched (gt-4lbz). It runs before rule 3 because
+	//    local-attempt:1 records a spent attempt on the pool's own seat and says
+	//    nothing about a seat the pool never owned: answering such a request with
+	//    the overflow seat, or refusing it as full, spends where the caller never
+	//    asked (gt-gcrk).
+	if requested != "" && requested != pool.LocalAgent && requested != pool.OverflowAgent {
+		return "", "", false
+	}
+	// 3. One local attempt per bead (B3). The label is attached by the idle-seat
 	//    fill branch, so a bead carrying it has already tried the local seat and
 	//    lost — this is the redispatch.
 	if bead.hasLabel(localAttemptLabel) {
 		return overflowFor(localAttemptLabel + " failed")
 	}
-	// 3. The agent the caller asked for. It names a seat, it does not license
-	//    taking one: a request for a seat the pool owns is admitted by that
-	//    seat's own rules — so `--agent=<local>` on a full local pool is refused
-	//    rather than over-filling the GPU or paying for the overflow seat the
-	//    caller did not ask for (gt-x40u). An agent the pool does not own is not
-	//    the pool's to admit, and the request stands untouched (gt-4lbz).
+	// 4. The agent the caller asked for, when rule 2 left it in the pool's hands.
+	//    It names a seat, it does not license taking one: a request for a seat the
+	//    pool owns is admitted by that seat's own rules — so `--agent=<local>` on
+	//    a full local pool is refused rather than over-filling the GPU or paying
+	//    for the overflow seat the caller did not ask for (gt-x40u). The switch is
+	//    exhaustive over the two seats rule 2 lets through; the return after it
+	//    keeps a seat added later from falling into the bead-shape rules.
 	if requested != "" {
 		switch requested {
 		case pool.LocalAgent:
@@ -297,7 +309,7 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 		}
 		return "", "", false
 	}
-	// 4. Bead shape.
+	// 5. Bead shape.
 	if bead.hasLabel(reworkLabel) {
 		return seat(reworkLabel)
 	}
@@ -320,7 +332,7 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 		}
 		return overflowFor("type=" + beadTypeLabel(bead))
 	}
-	// 5. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
+	// 6. Unknown shape (a wisp, an epic, a bead whose lookup failed): the seat
 	//    count alone decides, as it did before B1.
 	return seat("type=" + beadTypeLabel(bead))
 }
