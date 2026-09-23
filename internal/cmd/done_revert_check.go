@@ -126,8 +126,22 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 //
 // The one sanctioned override path is a mayor-side action from a non-polecat
 // clone: gt mq submit --allow-reverts --branch <branch> --reason <why>.
+//
+// cwd is resolved to an absolute, symlink-free path before the check: a
+// relative path or a symlink pointing out of a polecat worktree must not
+// read as a non-polecat clone. A path that cannot be resolved refuses
+// closed rather than falling back to the unresolved string — an override
+// gate must not proceed on a path it could not actually verify.
 func requireNonPolecatCloneForRevertOverride(cwd string) error {
-	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(cwd)), "/") {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return fmt.Errorf("--allow-reverts cannot resolve the working directory (refusing rather than risk a polecat worktree going undetected): %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("--allow-reverts cannot resolve the working directory's real path (refusing rather than risk a polecat worktree going undetected): %w", err)
+	}
+	for _, part := range strings.Split(filepath.ToSlash(resolved), "/") {
 		if part == "polecats" {
 			return fmt.Errorf(`--allow-reverts is refused from a polecat worktree (gt-0wy03)
 
