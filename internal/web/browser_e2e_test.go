@@ -259,9 +259,10 @@ func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 			"binding silently fails without an sse-connect source and dashboard never live-updates")
 	}
 
-	// Verify htmx library is loaded
-	if !strings.Contains(html, "htmx.org") {
-		t.Error("Expected htmx library to be loaded")
+	// Verify htmx binds: the vendored htmx.min.js sets window.htmx (gt-iav5
+	// moved the library from unpkg to /static/vendor so the page runs offline)
+	if bound, evalErr := page.Eval(`typeof window.htmx`); evalErr != nil || bound.Value == "undefined" {
+		t.Error("Expected htmx to be bound — the vendored /static/vendor/htmx.min.js never executed")
 	}
 
 	t.Log("PASSED: htmx auto-refresh attributes present")

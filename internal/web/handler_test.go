@@ -1063,7 +1063,8 @@ func TestE2E_Server_HTMLStructure(t *testing.T) {
 		"<html",
 		"<head>",
 		"<title>Gas Town Control Center</title>",
-		"htmx.org",
+		`<script src="/static/vendor/htmx.min.js"></script>`,
+		`<script src="/static/vendor/idiomorph-ext.min.js"></script>`,
 		"<body>",
 		"</body>",
 		"</html>",
@@ -1078,6 +1079,38 @@ func TestE2E_Server_HTMLStructure(t *testing.T) {
 	// Validate CSS file is linked (CSS variables are now in external file)
 	if !strings.Contains(body, `href="/static/dashboard.css"`) {
 		t.Error("Should link to external CSS file dashboard.css")
+	}
+}
+
+// TestE2E_Server_ServesVendoredLibraries guards gt-iav5: htmx and the
+// idiomorph morph extension live under /static/vendor (pinned versions, see
+// NOTICE.md) so the dashboard works with outbound network blocked. A vendored
+// file that fails to serve is a silent 404 — htmx never loads and the refresh
+// never binds, so the page renders but stops updating, which is worse than
+// not loading at all.
+func TestE2E_Server_ServesVendoredLibraries(t *testing.T) {
+	handler, err := NewDashboardMux(&MockConvoyFetcher{}, nil)
+	if err != nil {
+		t.Fatalf("NewDashboardMux() error = %v", err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	for _, path := range []string{"/static/vendor/htmx.min.js", "/static/vendor/idiomorph-ext.min.js"} {
+		resp, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s failed: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Errorf("GET %s = %d, want 200: a vendored 404 leaves the dashboard dead but rendered (gt-iav5)", path, resp.StatusCode)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if len(body) == 0 {
+			t.Errorf("GET %s returned an empty body — vendored file missing from the embedded FS (gt-iav5)", path)
+		}
 	}
 }
 
