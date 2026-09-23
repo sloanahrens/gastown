@@ -1866,7 +1866,12 @@ exit 0
 		t.Fatalf("write mock gt: %v", err)
 	}
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1882,6 +1887,45 @@ exit 0
 	}
 	if !strings.Contains(string(data), "gt-issue1") {
 		t.Errorf("expected sling for gt-issue1, got: %q", string(data))
+	}
+
+	// The Unknown verdict (no store for the rig) must be logged explicitly,
+	// not folded silently into the same path as a confirmed-clean record
+	// (gt-udrrw, gt-jj29p).
+	assertLogged(t, logged, "gt-issue1", "could not confirm rejection-marker state")
+}
+
+// TestHasRejectionMarker_Unknown pins the guard.Result verdict directly: a
+// store read failure is Unknown (not Pass folded into false), a present
+// marker is Fail, and a clean record is Pass.
+func TestHasRejectionMarker_Unknown(t *testing.T) {
+	t.Parallel()
+
+	readErr := fmt.Errorf("dolt: connection refused")
+	store := &holdTestStorage{
+		issues: map[string]*beadsdk.Issue{
+			"gt-clean":    {Notes: "nothing to see here"},
+			"gt-rejected": {Notes: "MERGE REJECTION (attempt 1): see review"},
+		},
+	}
+	errStore := &holdTestStorage{readErr: readErr}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute,
+		map[string]beadsdk.Storage{"gt": store, "broken": errStore}, nil, nil)
+
+	if v := m.hasRejectionMarker("missing-rig", "gt-clean"); !v.IsUnknown() {
+		t.Errorf("no store for rig: want Unknown, got %v", v)
+	}
+	if v := m.hasRejectionMarker("broken", "gt-clean"); !v.IsUnknown() {
+		t.Errorf("store read error: want Unknown, got %v", v)
+	} else if v.Err() == nil {
+		t.Errorf("store read error: want a non-nil Err(), got nil")
+	}
+	if v := m.hasRejectionMarker("gt", "gt-clean"); !v.IsPass() {
+		t.Errorf("clean record: want Pass, got %v", v)
+	}
+	if v := m.hasRejectionMarker("gt", "gt-rejected"); !v.IsFail() {
+		t.Errorf("rejected record: want Fail, got %v", v)
 	}
 }
 
