@@ -3380,3 +3380,209 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 		t.Errorf("resolveSetupCommand() = %q, want %q (rig-local wins over repo and root)", got, "local-setup")
 	}
 }
+
+// TestLoadFromBeads_SpawnGraceEndToEnd pins the gt-yteq symptom at the
+// level where the witness reads it: a polecat dispatched seconds ago, with
+// work hooked but no live tmux session yet, must report spawning rather than
+// stalled while its agent bead is inside the spawn grace window, and must
+// report stalled the moment the window passes. The unit tests cover
+// SpawnGrace itself; this covers the full loadFromBeads derivation with a
+// real beads client and a session that is genuinely absent, including the
+// fail-toward-stalled case of an unparseable bead timestamp.
+func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+	// loadFromBeads only reaches the session-down state (and therefore the
+	// spawn grace) when it can PROVE the session is absent — a nil tmux
+	// client means "state unknown" and must default to alive. Proving it
+	// requires a real has-session probe against a socket that exists but
+	// hosts nothing, so this test needs tmux.
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	const (
+		agentName   = "basalt"
+		rigName     = "testrig"
+		assigneeIDT = "testrig/polecats/basalt"
+		agentBeadID = "gt-testrig-polecat-basalt"
+		hookedID    = "gt-testrig-work"
+	)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// 30s is a 10x margin against the 5m window: the only way the fresh
+	// case can drift out of the window between test setup and the two
+	// loadFromBeads calls inside one subtest is a multi-minute pause.
+	fresh := now.Add(-30 * time.Second).Format(time.RFC3339)
+	stale := now.Add(-10 * time.Minute).Format(time.RFC3339)
+	callLog := filepath.Join(t.TempDir(), "bd-calls.log")
+
+	// bd stub that answers the rig-wide queries loadFromBeads issues:
+	// the agent bead (spawning, dated per the test), a hooked work bead,
+	// and the assigned-issue query.
+	// The beads client may prepend --allow-stale, so dispatch on the first
+	// non-flag argument. The JSON description uses \n escapes for real
+	// newlines (which ParseAgentFields splits on); in this Go raw string
+	// those are written as \n (backslash+n) so the emitted JSON contains
+	// the two-char escape, not an embedded newline. The quoted heredoc
+	// delimiter (<<'STUBJSON') copies the bytes verbatim — no shell
+	// expansion. The test-varying timestamp goes through a placeholder
+	// that sed substitutes, not a shell variable expansion.
+	bdStub := `#!/bin/sh
+echo "BD-CALL[$$] $*" >> "` + callLog + `"
+cmd=""
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        *) cmd="$a"; break ;;
+    esac
+done
+case "$cmd" in
+    version)
+        echo "bd 9.9-stub"
+        ;;
+    show)
+        seen=0
+        id=""
+        for a in "$@"; do
+            case "$a" in
+                --allow-stale) ;;
+                version|show|list) if [ "$seen" = "0" ]; then seen=1; fi ;;
+                *) if [ "$seen" = "1" ] && [ -z "$id" ]; then id="$a"; fi ;;
+            esac
+        done
+        if [ "$id" = "` + agentBeadID + `" ]; then
+            cat <<'STUBJSON' | sed "s/@@AGENT_UPDATED_AT@@/$AGENT_UPDATED_AT/"
+[{"id":"` + agentBeadID + `","issue_type":"agent","status":"open","updated_at":"@@AGENT_UPDATED_AT@@","description":"agent\n\nrole_type: polecat\nrig: ` + rigName + `\nagent_state: spawning\nhook_bead: ` + hookedID + `\ncleanup_status: clean"}]
+STUBJSON
+        else
+            printf '[]\n'
+        fi
+        ;;
+    list)
+        if printf '%s\n' "$@" | grep -q 'hooked'; then
+            cat <<'STUBJSON'
+[{"id":"` + hookedID + `","status":"hooked","assignee":"` + assigneeIDT + `","updated_at":"` + fresh + `"}]
+STUBJSON
+        else
+            printf '[]\n'
+        fi
+        ;;
+    *)
+        ;;
+esac
+exit 0
+`
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "polecats", agentName),
+		filepath.Join(root, "mayor", "rig"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdStub), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_UPDATED_AT", stale)
+
+	r := &rig.Rig{Name: rigName, Path: root}
+	// The grace path of loadFromBeads is only reached when the manager can
+	// PROVE the session is down: HasSession against a socket with no server
+	// running returns (false, nil) — but that is the same answer a socket
+	// with a server but no matching session gives, so the test drives the
+	// real tmux client both ways and asserts both. Bring up a disposable
+	// server on the test socket; the subtests kill it between cases.
+	socket := constants.TestSocketName("gt-test-spawn-grace")
+	tm := tmux.NewTmuxWithSocket(socket)
+	probeSession := constants.TestSocketName("gt-test-spawn-grace-probe")
+	tmuxAvailable := func() bool { _, err := exec.LookPath("tmux"); return err == nil }
+	if tmuxAvailable() {
+		if err := tm.NewSessionWithCommand(probeSession, root, "sleep 300"); err != nil {
+			t.Skipf("cannot start probe tmux server on test socket: %v", err)
+		}
+		t.Cleanup(func() { _ = tm.KillServer() })
+	}
+	mgr := &Manager{
+		rig:              r,
+		git:              git.NewGit(root),
+		beads:            beads.NewRigLocal(filepath.Join(root, "mayor", "rig")),
+		tmux:             tm,
+		townRoot:         root,
+		spawnGraceWindow: 5 * time.Minute,
+	}
+
+	// Each case asserts the same three facts against whatever live-session
+	// topology the case carries: the work bead is still reported as the
+	// polecat's issue (proof the hooked-work branch is the one taken), the
+	// state is the want, and a direct SpawnGrace evaluation on the bead's
+	// own data agrees with it. Cases:
+	//   fresh + no server  — no socket file at all (fresh tmux start)
+	//   fresh + empty server — the reported shape: dispatched, socket up,
+	//     session not created yet
+	//   expired + server   — the window passed; the same evidence is stalled
+	//   undateable + server — a bead nobody can date fails toward stalled
+	cases := []struct {
+		name      string
+		updatedAt string
+		serverUp  bool
+		wantState State
+	}{
+		{"fresh dispatch, no server yet", fresh, false, StateSpawning},
+		{"fresh dispatch, server up but no session yet", fresh, true, StateSpawning},
+		{"grace window expired reads stalled", stale, true, StateStalled},
+		{"undateable agent bead fails toward stalled", "not-a-time", true, StateStalled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_UPDATED_AT", tc.updatedAt)
+			if tc.serverUp && !tmuxAvailable() {
+				// Without a tmux binary no socket is ever created, so the
+				// server-up shape cannot be reproduced; the no-server shape
+				// exercises the same SpawnGrace input, so degrade to it.
+				t.Logf("tmux unavailable; testing the no-server shape instead of %q", tc.name)
+			} else if tc.serverUp {
+				if err := tm.KillServer(); err != nil {
+					t.Fatalf("tear down probe server: %v", err)
+				}
+				if err := tm.NewSessionWithCommand(probeSession, root, "sleep 300"); err != nil {
+					t.Fatalf("start probe server: %v", err)
+				}
+			} else if !tc.serverUp && tmuxAvailable() {
+				if err := tm.KillServer(); err != nil {
+					t.Fatalf("tear down probe server: %v", err)
+				}
+			}
+			p, err := mgr.loadFromBeads(agentName, nil)
+			if err != nil {
+				t.Fatalf("loadFromBeads: %v", err)
+			}
+			if p.Issue != hookedID {
+				t.Fatalf("issue = %q, want %q (wrong derivation branch taken)", p.Issue, hookedID)
+			}
+			if p.State != tc.wantState {
+				t.Errorf("state = %q, want %q", p.State, tc.wantState)
+			}
+			// Direct evaluation of the exact function loadFromBeads calls, on
+			// the same bead: it must agree with the state the derivation
+			// produced. A mismatch means the derivation consumed something
+			// other than the bead this stub returned.
+			agentIssue, fields, err := mgr.beads.GetAgentBead(mgr.agentBeadID(agentName))
+			if err != nil {
+				t.Fatalf("GetAgentBead: %v", err)
+			}
+			if fields == nil {
+				t.Fatalf("fields nil; the bead the stub returned is not surviving GetAgentBead (issue=%+v)", agentIssue)
+			}
+			if got := SpawnGrace(fields.AgentState, AgentBeadUpdatedAt(agentIssue), time.Now(), mgr.spawnGraceWindow); got != (p.State == StateSpawning) {
+				t.Errorf("SpawnGrace(%q, %v, now, %v) = %v, but loadFromBeads produced %q — the derivation is not consuming this bead's data",
+					fields.AgentState, AgentBeadUpdatedAt(agentIssue), mgr.spawnGraceWindow, got, p.State)
+			}
+		})
+	}
+}
