@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"errors"
+	"maps"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,11 @@ func TestParseStateLabels(t *testing.T) {
 			name:     "label with multiple colons",
 			labels:   []string{"last_activity:2025-01-01T12:00:00Z"},
 			wantKeys: []string{"last_activity"},
+		},
+		{
+			name:     "heartbeat is state like any other",
+			labels:   []string{"gt:agent", "heartbeat:1758000000"},
+			wantKeys: []string{"gt", "heartbeat"},
 		},
 	}
 
@@ -108,11 +114,17 @@ func TestApplyLabelOperations(t *testing.T) {
 			setOps:    []string{"invalid"},
 			wantError: true,
 		},
+		{
+			name:     "increment non-numeric value restarts at 1",
+			initial:  map[string]string{"idle": "2m"},
+			incrKey:  "idle",
+			wantKeys: map[string]string{"idle": "1"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			labels := copyMap(tt.initial)
+			labels := maps.Clone(tt.initial)
 			err := applyLabelOperations(labels, tt.setOps, tt.incrKey, tt.delKeys)
 
 			if tt.wantError {
@@ -141,83 +153,6 @@ func TestApplyLabelOperations(t *testing.T) {
 			}
 		})
 	}
-}
-
-// parseStateLabels extracts state labels (key:value format) from all labels.
-// This is a helper for testing that mirrors the logic in getAgentLabels.
-func parseStateLabels(allLabels []string) map[string]string {
-	labels := make(map[string]string)
-	for _, label := range allLabels {
-		if idx := indexOf(label, ":"); idx > 0 {
-			labels[label[:idx]] = label[idx+1:]
-		}
-	}
-	return labels
-}
-
-// indexOf returns the index of the first occurrence of substr in s, or -1 if not found.
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-// applyLabelOperations applies set, increment, and delete operations to a label map.
-// This mirrors the logic in modifyAgentState.
-func applyLabelOperations(labels map[string]string, setOps []string, incrKey string, delKeys []string) error {
-	// Apply increment
-	if incrKey != "" {
-		currentValue := 0
-		if valStr, ok := labels[incrKey]; ok {
-			for i := 0; i < len(valStr); i++ {
-				if valStr[i] >= '0' && valStr[i] <= '9' {
-					currentValue = currentValue*10 + int(valStr[i]-'0')
-				}
-			}
-		}
-		labels[incrKey] = intToString(currentValue + 1)
-	}
-
-	// Apply set operations
-	for _, setOp := range setOps {
-		idx := indexOf(setOp, "=")
-		if idx <= 0 {
-			return errors.New("invalid set format: " + setOp)
-		}
-		labels[setOp[:idx]] = setOp[idx+1:]
-	}
-
-	// Apply delete operations
-	for _, delKey := range delKeys {
-		delete(labels, delKey)
-	}
-
-	return nil
-}
-
-// copyMap creates a shallow copy of a string map.
-func copyMap(m map[string]string) map[string]string {
-	result := make(map[string]string)
-	for k, v := range m {
-		result[k] = v
-	}
-	return result
-}
-
-// intToString converts an int to a string without using strconv.
-func intToString(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	result := ""
-	for n > 0 {
-		result = string(rune('0'+n%10)) + result
-		n /= 10
-	}
-	return result
 }
 
 func TestParseAgentBeadLabels(t *testing.T) {
@@ -293,7 +228,7 @@ func TestParseAgentBeadLabels(t *testing.T) {
 					t.Errorf("expected error containing %q, got nil", tt.wantErr)
 					return
 				}
-				if indexOf(err.Error(), tt.wantErr) < 0 {
+				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
 				}
 				return

@@ -980,7 +980,7 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 
 	// Get baseline times AFTER sending nudge to avoid false positives.
 	// By sampling after the nudge, we only detect activity caused by our check.
-	baselineTime, err := getAgentBeadUpdateTime(townRoot, beadID)
+	baselineTime, err := getAgentBeadFreshness(townRoot, beadID)
 	if err != nil {
 		// Bead might not exist yet - use current time as baseline
 		// This way only updates AFTER this point count as responses
@@ -1018,8 +1018,11 @@ func runDeaconHealthCheck(cmd *cobra.Command, args []string) error {
 		case <-ctx.Done():
 			goto Done
 		case <-ticker.C:
-			// Primary signal: bead update (structured response channel)
-			newTime, err := getAgentBeadUpdateTime(townRoot, beadID)
+			// Primary signal: bead write (structured response channel). Reads the
+			// bead's updated_at and its heartbeat label, because the state
+			// self-reports agents answer with are label-only writes that leave
+			// updated_at frozen (gt-dq5z).
+			newTime, err := getAgentBeadFreshness(townRoot, beadID)
 			if err == nil && newTime.After(baselineTime) {
 				responded = true
 				goto Done
@@ -1242,8 +1245,8 @@ func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 	}
 }
 
-// getAgentBeadUpdateTime gets the update time from an agent bead.
-func getAgentBeadUpdateTime(townRoot, beadID string) (time.Time, error) {
+// getAgentBeadFreshness gets the most recent write time from an agent bead.
+func getAgentBeadFreshness(townRoot, beadID string) (time.Time, error) {
 	cmd := exec.Command("bd", "show", beadID, "--json")
 	cmd.Dir = townRoot
 
@@ -1253,7 +1256,8 @@ func getAgentBeadUpdateTime(townRoot, beadID string) (time.Time, error) {
 	}
 
 	var issues []struct {
-		UpdatedAt string `json:"updated_at"`
+		UpdatedAt string   `json:"updated_at"`
+		Labels    []string `json:"labels"`
 	}
 	if err := json.Unmarshal(output, &issues); err != nil {
 		return time.Time{}, err
@@ -1263,7 +1267,7 @@ func getAgentBeadUpdateTime(townRoot, beadID string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("bead not found: %s", beadID)
 	}
 
-	return time.Parse(time.RFC3339, issues[0].UpdatedAt)
+	return freshestBeadWrite(issues[0].UpdatedAt, issues[0].Labels)
 }
 
 // sendMail sends a mail message using gt mail send.

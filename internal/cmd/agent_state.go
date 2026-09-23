@@ -54,6 +54,12 @@ COMMON LABELS:
   idle:<n>           - Consecutive idle patrol cycles
   backoff:<duration> - Current backoff interval
   last_activity:<ts> - Last activity timestamp
+  heartbeat:<epoch>  - Liveness stamp: every operation stamps it with the
+                       current time, overriding any value passed to --set
+
+The stamp is the freshness field readers age out — the deacon's HEALTH_CHECK
+primary signal reads it — because bd leaves the bead's updated_at untouched on
+a label-only write.
 
 EXAMPLES:
   # Check current idle count
@@ -106,7 +112,7 @@ func runAgentState(cmd *cobra.Command, args []string) error {
 
 	if hasSet || hasIncr || hasDel {
 		// Modification mode
-		return modifyAgentState(agentBead, beadsDir, hasIncr)
+		return modifyAgentState(agentBead, beadsDir)
 	}
 
 	// Query mode
@@ -148,68 +154,24 @@ func queryAgentState(agentBead, beadsDir string) error {
 
 // modifyAgentState modifies labels on an agent bead.
 // Uses read-modify-write pattern: read current labels, apply changes, write back all.
-func modifyAgentState(agentBead, beadsDir string, hasIncr bool) error {
+func modifyAgentState(agentBead, beadsDir string) error {
 	// Read current labels
-	labels, err := getAgentLabels(agentBead, beadsDir)
-	if err != nil {
-		return err
-	}
-
-	// Also get non-state labels (ones without : separator) to preserve them
 	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
 	if err != nil {
 		return err
 	}
 
-	// Apply increment operation
-	if hasIncr {
-		currentValue := 0
-		if valStr, ok := labels[agentStateIncr]; ok {
-			if v, err := strconv.Atoi(valStr); err == nil {
-				currentValue = v
-			}
-		}
-		labels[agentStateIncr] = strconv.Itoa(currentValue + 1)
+	stateLabels := parseStateLabels(allLabels)
+	if err := applyLabelOperations(stateLabels, agentStateSet, agentStateIncr, agentStateDel); err != nil {
+		return err
 	}
 
-	// Apply set operations
-	for _, setOp := range agentStateSet {
-		parts := strings.SplitN(setOp, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid set format: %s (expected key=value)", setOp)
-		}
-		labels[parts[0]] = parts[1]
-	}
-
-	// Apply delete operations
-	for _, delKey := range agentStateDel {
-		delete(labels, delKey)
-	}
-
-	// Build final label list: non-state labels + state labels (key:value format)
-	var finalLabels []string
-
-	// First, keep non-state labels (those without : separator)
-	for _, label := range allLabels {
-		if !strings.Contains(label, ":") {
-			finalLabels = append(finalLabels, label)
-		}
-	}
-
-	// Add state labels from modified map
-	for key, value := range labels {
-		finalLabels = append(finalLabels, key+":"+value)
-	}
+	finalLabels := buildAgentStateLabels(allLabels, stateLabels, time.Now())
 
 	// Build update command with --set-labels to replace all
 	args := []string{"update", agentBead}
 	for _, label := range finalLabels {
 		args = append(args, "--set-labels="+label)
-	}
-
-	// If no labels, clear all
-	if len(finalLabels) == 0 {
-		args = append(args, "--set-labels=")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
@@ -233,16 +195,9 @@ func modifyAgentState(agentBead, beadsDir string, hasIncr bool) error {
 	return nil
 }
 
-// getAgentLabels retrieves state labels from an agent bead.
-// Returns only labels in key:value format, parsed into a map.
-// State labels are those with a : separator (e.g., idle:3, backoff:2m).
-func getAgentLabels(agentBead, beadsDir string) (map[string]string, error) {
-	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse state labels (those with : separator) into key:value map
+// parseStateLabels returns the key:value labels from allLabels as a map.
+// Labels without a : separator are not state and are left out.
+func parseStateLabels(allLabels []string) map[string]string {
 	labels := make(map[string]string)
 	for _, label := range allLabels {
 		parts := strings.SplitN(label, ":", 2)
@@ -250,8 +205,72 @@ func getAgentLabels(agentBead, beadsDir string) (map[string]string, error) {
 			labels[parts[0]] = parts[1]
 		}
 	}
+	return labels
+}
 
-	return labels, nil
+// applyLabelOperations applies the increment, set, and delete operations to
+// stateLabels, in that order. A set operation without a = is the only error.
+func applyLabelOperations(stateLabels map[string]string, setOps []string, incrKey string, delKeys []string) error {
+	if incrKey != "" {
+		currentValue := 0
+		if valStr, ok := stateLabels[incrKey]; ok {
+			if v, err := strconv.Atoi(valStr); err == nil {
+				currentValue = v
+			}
+		}
+		stateLabels[incrKey] = strconv.Itoa(currentValue + 1)
+	}
+
+	for _, setOp := range setOps {
+		parts := strings.SplitN(setOp, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid set format: %s (expected key=value)", setOp)
+		}
+		stateLabels[parts[0]] = parts[1]
+	}
+
+	for _, delKey := range delKeys {
+		delete(stateLabels, delKey)
+	}
+
+	return nil
+}
+
+// buildAgentStateLabels returns the complete label list to write back:
+// colon-free labels preserved, state labels from stateLabels, and a heartbeat
+// stamp of now that replaces any older one.
+//
+// The stamp carries evidence a reader can act on: a state change means the agent
+// is alive and processing, and bd writes labels to their own table, leaving the
+// issue row's updated_at stale. Without the stamp the change is invisible to any
+// freshness reader, the deacon's HEALTH_CHECK primary signal included (gt-dq5z).
+func buildAgentStateLabels(allLabels []string, stateLabels map[string]string, now time.Time) []string {
+	finalLabels := make([]string, 0, len(allLabels)+1)
+
+	// Colon-free labels first, then state.
+	for _, label := range allLabels {
+		if !strings.Contains(label, ":") {
+			finalLabels = append(finalLabels, label)
+		}
+	}
+	for key, value := range stateLabels {
+		if key == heartbeatLabelKey {
+			continue // replaced by the stamp below
+		}
+		finalLabels = append(finalLabels, key+":"+value)
+	}
+
+	return append(finalLabels, fmt.Sprintf("%s:%d", heartbeatLabelKey, now.Unix()))
+}
+
+// getAgentLabels retrieves an agent bead's state labels.
+func getAgentLabels(agentBead, beadsDir string) (map[string]string, error) {
+	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseStateLabels(allLabels), nil
 }
 
 // bdCallTimeout is the per-call timeout for bd subprocess invocations in agent-bead
