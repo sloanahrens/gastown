@@ -388,8 +388,13 @@ type DaemonThresholds struct {
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
-	// BootSpawnCooldown prevents Boot from spawning on every daemon heartbeat (default "2m").
+	// BootSpawnCooldown prevents Boot from spawning on every daemon heartbeat
+	// (default: two recovery heartbeats — see DefaultBootSpawnCooldown).
 	BootSpawnCooldown string `json:"boot_spawn_cooldown,omitempty"`
+
+	// BootTurnBudget is how long a live Boot session may keep working before the
+	// daemon reaps it as wedged (default "10m").
+	BootTurnBudget string `json:"boot_turn_budget,omitempty"`
 
 	// BootIdleSuppression is how long to suppress Boot spawns after Boot reported "nothing"
 	// (deacon was healthy). Prevents burning API calls when deacon is running fine (default "15m").

@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Boot is no longer killed and respawned on every daemon heartbeat**
+  (gt-w28o) — with `boot_mode: agent`, the daemon spawned Boot on each
+  recovery heartbeat and `boot.Spawn` killed any live session first, so a Boot
+  turn that outlasted a heartbeat (minutes on a local model) was killed
+  mid-prefill and its replacement paid the same ~23k-token prefill again —
+  every ~4 minutes in the 2026-09-16/18 logs, and the replacements never
+  reached triage, so the "deacon healthy" suppression that should have slowed
+  the cadence never engaged. A live Boot session is now left to finish until
+  it exceeds `boot_turn_budget` (new key, default `10m`), past which the daemon
+  treats it as wedged and reaps it; `boot_spawn_cooldown` now defaults to two
+  heartbeats, since a cooldown shorter than the heartbeat it is checked
+  against can never skip a tick.
+
 - **`gt mq post-merge`'s merge proof now passes for a multi-commit MR that
   landed as its own commits** (gt-fq4e) — the `--landed-commit` binding only
   asked what files the attested commit changed by itself, so an MR whose diff

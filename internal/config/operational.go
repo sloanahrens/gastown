@@ -55,9 +55,19 @@ const (
 	DefaultSyncFailureEscalationThreshold = 3
 	DefaultDoctorMolCooldown              = 5 * time.Minute
 	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
-	DefaultBootSpawnCooldown              = 2 * time.Minute
-	DefaultBootIdleSuppression            = 15 * time.Minute
-	DefaultDeaconGracePeriod              = 5 * time.Minute
+
+	// DefaultBootSpawnCooldown is only consulted when a heartbeat fires, so a
+	// value below the heartbeat gates nothing: every tick spawned a Boot and
+	// killed the previous one mid-turn, paying its ~23k-token prefill again
+	// (gt-w28o). Two heartbeats is the smallest value that can skip a tick.
+	DefaultBootSpawnCooldown = 2 * DefaultRecoveryHeartbeatInterval
+
+	DefaultBootIdleSuppression = 15 * time.Minute
+
+	// DefaultBootTurnBudget is how long a live Boot session may keep working
+	// before the daemon treats it as wedged and reaps it (gt-w28o).
+	DefaultBootTurnBudget    = 10 * time.Minute
+	DefaultDeaconGracePeriod = 5 * time.Minute
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
@@ -472,6 +482,14 @@ func (d *DaemonThresholds) BootModeValue() string {
 		return BootModeAgent
 	}
 	return BootModeMechanical
+}
+
+// BootTurnBudgetD returns the configured or default Boot turn budget.
+func (d *DaemonThresholds) BootTurnBudgetD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.BootTurnBudget, DefaultBootTurnBudget)
+	}
+	return DefaultBootTurnBudget
 }
 
 // BootIdleSuppressionD returns the configured or default boot idle suppression duration.

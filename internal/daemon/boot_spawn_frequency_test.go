@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,8 +48,19 @@ if [[ "${1:-}" == "-V" ]]; then
 fi
 
 # Keep session checks simple for this regression repro: no existing boot session.
+# TMUX_FAKE_SESSION=alive reports the queried session as live instead, and
+# TMUX_FAKE_SESSION_CREATED supplies the creation time the run-age guard reads.
 if [[ "$cmd" == "has-session" ]]; then
+  if [[ "${TMUX_FAKE_SESSION:-}" == "alive" ]]; then
+    exit 0
+  fi
   exit 1
+fi
+
+if [[ "$cmd" == "display-message" ]]; then
+  if [[ -n "${TMUX_FAKE_SESSION_CREATED:-}" ]]; then
+    printf "%s\n" "$TMUX_FAKE_SESSION_CREATED"
+  fi
 fi
 
 exit 0
@@ -212,6 +224,90 @@ func TestEnsureBootRunning_SpawnsWhenDeaconUnhealthy(t *testing.T) {
 	}
 	if spawns != 1 {
 		t.Fatalf("boot spawn count = %d, want 1 (should spawn when deacon was unhealthy)", spawns)
+	}
+}
+
+// bootTestTown returns a town root wired to a fake tmux, plus the path of the
+// tmux command log.
+func bootTestTown(t *testing.T) (townRoot, tmuxLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+	townRoot = t.TempDir()
+	fakeBinDir := t.TempDir()
+	tmuxLog = filepath.Join(t.TempDir(), "tmux.log")
+	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+		t.Fatalf("create tmux log: %v", err)
+	}
+	writeFakeTmux(t, fakeBinDir)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", tmuxLog)
+	t.Setenv("GT_DEGRADED", "false")
+	return townRoot, tmuxLog
+}
+
+// countTmuxCmd counts the tmux subcommands recorded in the fake tmux log.
+func countTmuxCmd(t *testing.T, tmuxLog, cmd string) int {
+	t.Helper()
+	data, err := os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, cmd+" ") {
+			n++
+		}
+	}
+	return n
+}
+
+// Regression test for gt-w28o: the daemon must leave a Boot session that is
+// still working alone. It used to kill the session and spawn a fresh Boot on
+// the next heartbeat, paying a new ~23k-token prefill every ~4 minutes.
+func TestEnsureBootRunning_LeavesWorkingBootAlive(t *testing.T) {
+	townRoot, tmuxLog := bootTestTown(t)
+	useAgentBootMode(t, townRoot)
+	t.Setenv("TMUX_FAKE_SESSION", "alive")
+	t.Setenv("TMUX_FAKE_SESSION_CREATED", strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10))
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+		tmux:   tmux.NewTmux(),
+	}
+
+	// Two heartbeats inside one Boot turn.
+	d.ensureBootRunning()
+	d.ensureBootRunning()
+
+	if got := countTmuxCmd(t, tmuxLog, "new-session"); got != 0 {
+		t.Errorf("boot spawns = %d, want 0 (a working Boot must survive the next heartbeat)", got)
+	}
+	if got := countTmuxCmd(t, tmuxLog, "kill-session"); got != 0 {
+		t.Errorf("boot kills = %d, want 0 (killing mid-turn is the prefill tax)", got)
+	}
+}
+
+// A Boot session that outlives the turn budget is wedged, not slow: the daemon
+// reaps it so Boot can reach the Deacon again.
+func TestEnsureBootRunning_ReapsBootPastTurnBudget(t *testing.T) {
+	townRoot, tmuxLog := bootTestTown(t)
+	useAgentBootMode(t, townRoot)
+	t.Setenv("TMUX_FAKE_SESSION", "alive")
+	t.Setenv("TMUX_FAKE_SESSION_CREATED", strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10))
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+		tmux:   tmux.NewTmux(),
+	}
+
+	d.ensureBootRunning()
+
+	if got := countTmuxCmd(t, tmuxLog, "new-session"); got != 1 {
+		t.Errorf("boot spawns = %d, want 1 (a wedged Boot is replaced)", got)
 	}
 }
 

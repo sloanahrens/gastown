@@ -153,6 +153,21 @@ func TestDaemonThresholds_Defaults(t *testing.T) {
 	}
 }
 
+// The cooldown is only consulted on a heartbeat, so a default at or below the
+// heartbeat gates nothing and Boot respawns every tick (gt-w28o).
+func TestBootSpawnCooldownOutlastsHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	if DefaultBootSpawnCooldown <= DefaultRecoveryHeartbeatInterval {
+		t.Errorf("DefaultBootSpawnCooldown (%v) must exceed DefaultRecoveryHeartbeatInterval (%v)",
+			DefaultBootSpawnCooldown, DefaultRecoveryHeartbeatInterval)
+	}
+	if DefaultBootTurnBudget <= DefaultBootSpawnCooldown {
+		t.Errorf("DefaultBootTurnBudget (%v) must exceed DefaultBootSpawnCooldown (%v): a turn killed within the cooldown wastes its prefill",
+			DefaultBootTurnBudget, DefaultBootSpawnCooldown)
+	}
+}
+
 func TestDaemonThresholds_Overrides(t *testing.T) {
 	t.Parallel()
 
@@ -184,6 +199,7 @@ func TestDaemonThresholds_NewFieldOverrides(t *testing.T) {
 		Daemon: &DaemonThresholds{
 			RecoveryHeartbeatInterval: "5m",
 			BootSpawnCooldown:         "90s",
+			BootTurnBudget:            "20m",
 			DeaconGracePeriod:         "10m",
 		},
 	}
@@ -194,6 +210,9 @@ func TestDaemonThresholds_NewFieldOverrides(t *testing.T) {
 	}
 	if got := daemon.BootSpawnCooldownD(); got != 90*time.Second {
 		t.Errorf("BootSpawnCooldown: got %v, want 90s", got)
+	}
+	if got := daemon.BootTurnBudgetD(); got != 20*time.Minute {
+		t.Errorf("BootTurnBudget: got %v, want 20m", got)
 	}
 	if got := daemon.DeaconGracePeriodD(); got != 10*time.Minute {
 		t.Errorf("DeaconGracePeriod: got %v, want 10m", got)

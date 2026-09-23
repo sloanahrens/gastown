@@ -1529,6 +1529,21 @@ func (d *Daemon) bootSpawnCooldown() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().BootSpawnCooldownD()
 }
 
+// bootRunAge reports how long Boot's current session has been alive. tmux owns
+// the session start, so the age stays correct across a daemon restart; dated is
+// false when the live session cannot be dated (gt-w28o).
+func (d *Daemon) bootRunAge() (time.Duration, bool) {
+	if created, err := d.tmux.SessionCreated(session.BootSessionName()); err == nil && !created.IsZero() {
+		return time.Since(created), true
+	}
+	// Fall back to our own spawn stamp, which dates sessions we started but is
+	// absent after a restart — the case that needs tmux to answer (gt-w28o).
+	if !d.bootLastSpawned.IsZero() {
+		return time.Since(d.bootLastSpawned), true
+	}
+	return 0, false
+}
+
 func (d *Daemon) ensureBootRunning() {
 	// Cooldown gate: skip if Boot was spawned recently (fixes #2084)
 	if !d.bootLastSpawned.IsZero() && time.Since(d.bootLastSpawned) < d.bootSpawnCooldown() {
@@ -1600,6 +1615,28 @@ func (d *Daemon) ensureBootRunning() {
 		} else {
 			// Exit 1 = needs waking, proceed to full Claude Boot
 			d.logger.Printf("Idle check: waking — %s", strings.TrimSpace(string(output)))
+		}
+	}
+
+	// Leave a Boot that is still working alone (gt-w28o). Its turn outlasts a
+	// heartbeat on a slow model, and killing it mid-prefill then spawning a
+	// replacement paid that ~23k-token prefill twice. A session past the turn
+	// budget is wedged rather than slow, and reaping it is how Boot reaches the
+	// Deacon again.
+	if alive, err := d.tmux.HasSession(session.BootSessionName()); err == nil && alive {
+		age, dated := d.bootRunAge()
+		budget := d.loadOperationalConfig().GetDaemonConfig().BootTurnBudgetD()
+		switch {
+		case !dated:
+			d.logger.Printf("Boot session %s alive, age unknown, leaving it to finish", session.BootSessionName())
+			return
+		case age < budget:
+			d.logger.Printf("Boot session %s alive %s, within turn budget (%s), leaving it to finish",
+				session.BootSessionName(), age.Round(time.Second), budget)
+			return
+		default:
+			d.logger.Printf("Boot session %s alive %s, past turn budget (%s), reaping",
+				session.BootSessionName(), age.Round(time.Second), budget)
 		}
 	}
 
