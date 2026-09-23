@@ -130,3 +130,72 @@ func TestDoMergeSquashPassesPostMergeProof(t *testing.T) {
 		t.Errorf("post-merge proof failed after squash merge: %v\n%s", err, engineerOutput(t, e))
 	}
 }
+
+// TestProcessBatchSquashesAutoCheckpointCommit covers the batch half of the
+// same guarantee. Stacking merges each member itself (BuildRebaseStack), so
+// the single-MR squash above never sees a batched branch — which is how a
+// member's checkpoints still rode a stacked merge onto main (gt-gfdl:
+// 80d93e2d, a stacked --no-ff merge carrying two "WIP: checkpoint (auto)"
+// commits beneath the member's real tip). The batch must keep them off
+// target without losing the branch's content.
+func TestProcessBatchSquashesAutoCheckpointCommit(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// The shape that landed: real fix at the tip, checkpoints beneath it.
+	branch := "polecat/test/batch-checkpoint"
+	run(t, workDir, "git", "checkout", "-b", branch, "main")
+	writeFile(t, workDir, "feature.txt", "draft\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", checkpoint.WIPCommitPrefix)
+	writeFile(t, workDir, "feature.txt", "almost done\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", checkpoint.WIPCommitPrefix)
+	writeFile(t, workDir, "feature.txt", "the whole fix\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "fix: finish the feature")
+	run(t, workDir, "git", "checkout", "main")
+
+	// A second member, so the batch takes the stacking path rather than
+	// degrading to the single-MR one.
+	createFeatureBranch(t, workDir, "feature-other", "other.txt", "unrelated\n")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{
+		makeMR("mr-checkpoint", branch, "main"),
+		makeMR("mr-other", "feature-other", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("ProcessBatch failed: %v\n%s", result.Error, engineerOutput(t, e))
+	}
+	if len(result.Merged) != 2 {
+		// result.Merged holds only members that passed HandleMRInfoSuccess, so
+		// this also asserts the squashed member survives the post-merge proof
+		// without the submitted head sitting in target's ancestry.
+		t.Fatalf("expected both MRs merged, got %d\n%s", len(result.Merged), engineerOutput(t, e))
+	}
+
+	subjects := run(t, workDir, "git", "log", "--format=%s", "origin/main")
+	for _, subject := range strings.Split(subjects, "\n") {
+		if checkpoint.IsAutoSaveSubject(strings.TrimSpace(subject)) {
+			t.Errorf("origin/main gained a machine-generated commit %q:\n%s", subject, subjects)
+		}
+	}
+	if !strings.Contains(subjects, "fix: finish the feature") {
+		t.Errorf("the member's own subject was lost from origin/main:\n%s", subjects)
+	}
+
+	content, err := os.ReadFile(filepath.Join(workDir, "feature.txt"))
+	if err != nil {
+		t.Fatalf("feature.txt missing from merged tree: %v", err)
+	}
+	if string(content) != "the whole fix\n" {
+		t.Errorf("feature.txt content = %q, want the branch's payload", content)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "other.txt")); err != nil {
+		t.Errorf("the batched MR's file did not land: %v", err)
+	}
+}

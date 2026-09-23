@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
 )
@@ -172,8 +173,7 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 				if refErr != nil {
 					return nil, nil, refErr
 				}
-				msg := e.getMergeMessage(prev)
-				if mergeErr := e.git.MergeNoFF(prevRef, msg); mergeErr != nil {
+				if mergeErr := e.stackMerge(prev, prevRef, target); mergeErr != nil {
 					return nil, nil, fmt.Errorf("rebuild stack for %s: %w", prev.ID, mergeErr)
 				}
 			}
@@ -187,8 +187,7 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		if headErr != nil {
 			return nil, nil, fmt.Errorf("resolve stack tip before %s: %w", mr.ID, headErr)
 		}
-		msg := e.getMergeMessage(mr)
-		if mergeErr := e.git.MergeNoFF(mergeRef, msg); mergeErr != nil {
+		if mergeErr := e.stackMerge(mr, mergeRef, target); mergeErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: merge failed: %v, removing from batch\n", mr.ID, mergeErr)
 			conflicts = append(conflicts, mr)
 
@@ -201,8 +200,7 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 				if refErr != nil {
 					return nil, nil, refErr
 				}
-				prevMsg := e.getMergeMessage(prev)
-				if rebuildErr := e.git.MergeNoFF(prevRef, prevMsg); rebuildErr != nil {
+				if rebuildErr := e.stackMerge(prev, prevRef, target); rebuildErr != nil {
 					return nil, nil, fmt.Errorf("rebuild stack for %s: %w", prev.ID, rebuildErr)
 				}
 			}
@@ -239,6 +237,53 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 
 	_, _ = fmt.Fprintf(e.output, "[Batch] Stack built: %d MRs stacked, %d conflicts\n", len(stacked), len(conflicts))
 	return stacked, conflicts, nil
+}
+
+// stackMerge merges one batch member onto the stack tip.
+//
+// A branch carrying machine-generated commits (checkpoint_dog, gt-pvx) squashes
+// rather than merging --no-ff, matching the single-MR path so target never
+// gains their generic subjects (gt-rswr, gt-gfdl).
+//
+// A squash with nothing to stage leaves HEAD where it was and returns nil, so
+// the caller's own tree comparison still refuses that member as an empty merge
+// (gt-j5cc). Reporting a conflict instead would requeue content-free work
+// forever.
+func (e *Engineer) stackMerge(mr *MRInfo, mergeRef, target string) error {
+	msg := e.getMergeMessage(mr)
+
+	hasAutoSave, err := checkpoint.HasAutoSaveCommits(e.git.WorkDir(), "origin/"+target, mergeRef)
+	if err != nil {
+		return fmt.Errorf("check %s for auto-save commits: %w", mr.ID, err)
+	}
+	if !hasAutoSave {
+		return e.git.MergeNoFF(mergeRef, msg)
+	}
+
+	// A branch that is nothing but checkpoints has no descriptive subject to
+	// preserve, so name it after its MR rather than landing "WIP: checkpoint
+	// (auto)" as target's own commit message.
+	if checkpoint.IsAutoSaveSubject(strings.TrimSpace(msg)) {
+		msg = fmt.Sprintf("Merge %s into %s", mr.Branch, target)
+		if mr.SourceIssue != "" {
+			msg = fmt.Sprintf("Merge %s into %s (%s)", mr.Branch, target, mr.SourceIssue)
+		}
+	}
+	_, _ = fmt.Fprintf(e.output, "[Batch] MR %s has auto-save/checkpoint commit(s); squashing to keep them off %s: %s\n", mr.ID, target, strings.TrimSpace(msg))
+
+	beforeSHA, err := e.git.Rev("HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve stack tip before %s: %w", mr.ID, err)
+	}
+	if squashErr := e.git.MergeSquash(mergeRef, msg); squashErr != nil {
+		// Identical trees cannot conflict, so a failure against mergeRef's own
+		// tree can only be the commit step of a squash that staged nothing.
+		if same, cmpErr := e.git.TreesIdentical(beforeSHA, mergeRef); cmpErr == nil && same {
+			return nil
+		}
+		return squashErr
+	}
+	return nil
 }
 
 // getMergeMessage returns the commit message for a merged MR.
@@ -834,8 +879,7 @@ func (e *Engineer) resetAndRebuildStack(mrs []*MRInfo, target string) error {
 		if refErr != nil {
 			return refErr
 		}
-		msg := e.getMergeMessage(mr)
-		if err := e.git.MergeNoFF(mergeRef, msg); err != nil {
+		if err := e.stackMerge(mr, mergeRef, target); err != nil {
 			return fmt.Errorf("merge %s: %w", mr.ID, err)
 		}
 	}
