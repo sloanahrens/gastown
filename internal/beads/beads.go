@@ -994,17 +994,24 @@ func (b *Beads) Init(prefix string) error {
 	return err
 }
 
+// testDatabasePrefix is the prefix on the throwaway database names isolated
+// test Init() mints on the shared test Dolt container. Orphan cleanup already
+// recognizes it as test-database cruft (internal/daemon/jsonl_git_backup.go,
+// gt dolt cleanup), and the container retry reads it back off argv to scope the
+// schema-era class to databases whose name cannot pre-exist (bdInitOnTestDatabase,
+// gt-w4sxk).
+const testDatabasePrefix = "testdb_"
+
 // testDatabaseName generates a unique database name for isolated test Init()
-// calls, using the "testdb_" prefix already recognized as test-database
-// cruft by orphan cleanup (internal/daemon/jsonl_git_backup.go, gt dolt cleanup).
+// calls.
 func testDatabaseName() string {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		// crypto/rand failure is effectively unreachable; fall back to a
 		// timestamp so Init() still gets a database name.
-		return fmt.Sprintf("testdb_%x", time.Now().UnixNano())
+		return fmt.Sprintf("%s%x", testDatabasePrefix, time.Now().UnixNano())
 	}
-	return "testdb_" + hex.EncodeToString(buf[:])
+	return testDatabasePrefix + hex.EncodeToString(buf[:])
 }
 
 // bdSubprocessTimeout caps how long a single bd subprocess may run before

@@ -87,6 +87,58 @@ var bdCatalogRaceMarkers = []string{
 	"could not resolve initial root for database",
 }
 
+// bdInitSchemaRaceMarkers are the stderr fragments that mean bd judged the
+// schema era of a database it was not asked to open (gt-w4sxk) — the catalog
+// race one check later than bdCatalogRaceMarkers, where the store open resolved
+// a root and the era read off that root belonged to someone else:
+//
+//	bd init --prefix pt42ed0697 --database testdb_1a13842eb92b6edf --server ...
+//	Error: legacy Dolt workspace detected; explicit migration is required ...
+//
+//	bd init --prefix pkcf3e21b8 --database testdb_f5c50a8ddf8f5ea8 --server ...
+//	refusing to auto-apply 11 pending schema migrations to a server-mode
+//	database (v55 -> v66)
+//
+// The name in each message is Init's own throwaway, minted with crypto/rand
+// microseconds earlier (testDatabaseName), so the era cannot be that
+// database's: a pending-migration count on a database that did not exist yet is
+// a version read off a different one, and an attempt that resolves its root
+// again can land on the right database. Both refusals fire in bd's open path,
+// before the command has any effect, which is what makes the retry safe for
+// writes as well as reads.
+//
+// Unlike the classes above, this one is scoped to the command and the database
+// name it may fire on, not just to the container: bd's era refusal is a real
+// answer anywhere else.
+var bdInitSchemaRaceMarkers = []string{
+	"legacy Dolt workspace detected", // bd refused the era of the workspace it opened
+	"refusing to auto-apply",         // bd refused to migrate a server-mode database
+}
+
+// bdInitOnTestDatabase reports whether args are the one command shape the
+// schema-era class may retry: bd init against a database name Init minted for
+// the shared test Dolt container (testDatabaseName).
+//
+// The gate is the name, because the name is what proves the era foreign. An
+// init against a rig database on a production server can meet the same two
+// messages for a reason an operator has to see, and there the era belongs to
+// the database named; retrying would spend five attempts reporting an answer
+// that had already arrived.
+func bdInitOnTestDatabase(args []string) bool {
+	if len(args) == 0 || args[0] != "init" {
+		return false
+	}
+	for i, arg := range args {
+		switch {
+		case arg == "--database" && i+1 < len(args):
+			return strings.HasPrefix(args[i+1], testDatabasePrefix)
+		case strings.HasPrefix(arg, "--database="):
+			return strings.HasPrefix(arg[len("--database="):], testDatabasePrefix)
+		}
+	}
+	return false
+}
+
 // targetsTestDoltContainer reports whether this wrapper points at testutil's
 // ephemeral Dolt container rather than a production server. Only
 // NewIsolatedWithPort sets both fields, and its only callers are tests.
@@ -127,11 +179,24 @@ func (b *Beads) retryableBdCatalogRace(err error) bool {
 	return b.matchesTransientMarkers(err, bdCatalogRaceMarkers)
 }
 
+// retryableBdInitSchemaRace reports whether err is bd refusing an init of a test
+// Dolt container database on a schema era it read from another database. args
+// are the command's own argv, which is what keeps the class inside the one shape
+// where a foreign era is provable (bdInitOnTestDatabase).
+func (b *Beads) retryableBdInitSchemaRace(args []string, err error) bool {
+	if !bdInitOnTestDatabase(args) {
+		return false
+	}
+	return b.matchesTransientMarkers(err, bdInitSchemaRaceMarkers)
+}
+
 // retryableBdTransientFailure is the class the retry loop rides on: a failure
 // that is worth another attempt against the test container rather than an
 // answer from bd.
-func (b *Beads) retryableBdTransientFailure(err error) bool {
-	return b.retryableBdConnectionFailure(err) || b.retryableBdCatalogRace(err)
+func (b *Beads) retryableBdTransientFailure(args []string, err error) bool {
+	return b.retryableBdConnectionFailure(err) ||
+		b.retryableBdCatalogRace(err) ||
+		b.retryableBdInitSchemaRace(args, err)
 }
 
 // matchesTransientMarkers applies the scoping every retry class shares: only a
@@ -186,9 +251,11 @@ var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 
 // runBdWithRetry runs one bd command (stdinData, args, runEnv as built by the
 // caller's run path) and retries it while the failure looks like infrastructure
-// rather than an answer: a lost connection to the test Dolt container, or its
-// catalog changing under bd's store open. Retries stop at the first of: a
-// failure that is neither, the attempt cap, or the retry window.
+// rather than an answer: a lost connection to the test Dolt container, its
+// catalog changing under bd's store open, or — on an init of a database it just
+// minted — a schema era read off a database it was never asked to open. Retries
+// stop at the first of: a failure that is none of those, the attempt cap, or the
+// retry window.
 //
 // Outside the container case the loop runs exactly once, so this is the same
 // single invocation callers had before it existed. The last attempt's error is
@@ -208,7 +275,7 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 			return out, nil
 		}
 		lastErr = err
-		if !b.retryableBdTransientFailure(err) || attempt >= attempts {
+		if !b.retryableBdTransientFailure(args, err) || attempt >= attempts {
 			break
 		}
 		if time.Now().After(deadline) {

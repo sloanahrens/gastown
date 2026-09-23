@@ -33,6 +33,27 @@ const observedCatalogRaceStderr = `Error: failed to open Dolt store: failed to i
 	`schema_migrations existence: Error 1105 (HY000): could not resolve ` +
 	`initial root for database testdb_e7165de82d57b7dd/`
 
+// observedLegacyWorkspaceStderr and observedAutoApplyRefusalStderr are the two
+// refusals the catalog-race retry missed (gt-w4sxk), verbatim from the gate log
+// that produced the bead. Both name a schema era for a testdb_ database Init
+// had minted microseconds earlier.
+const (
+	observedLegacyWorkspaceStderr = `Error: legacy Dolt workspace detected; explicit migration ` +
+		`is required before this bd version can open or modify the workspace. Preserve ` +
+		`.beads unchanged and follow docs/getting-started/upgrading.md#cross-era-upgrades`
+	observedAutoApplyRefusalStderr = `refusing to auto-apply 11 pending schema migrations to a ` +
+		`server-mode database (v55 -> v66): other bd clients may depend on its current schema ` +
+		`even though no Dolt remote is configured`
+)
+
+// initOnTestDatabaseArgs is the command shape every class above is retried on:
+// the argv is part of the predicate, so a test that passed the stderr without it
+// would not exercise the scoping (gt-w4sxk).
+var initOnTestDatabaseArgs = []string{
+	"init", "--prefix", "pt13dd3b6a", "--quiet",
+	"--database", "testdb_21eb6271a1b36e34", "--server", "--server-port", "55069",
+}
+
 // TestBdContainerRetryRecoversFromConnectionFailure is gt-6uhq: a bd command
 // that loses its Dolt connection to the test container must be retried, and
 // the retry must return the command's result rather than the failure.
@@ -72,6 +93,68 @@ func TestBdInitRetriesTheCatalogRace(t *testing.T) {
 	}
 	if got := stub.calls(t); got != 3 {
 		t.Errorf("bd invocations = %d, want 3 (two races then the success)", got)
+	}
+}
+
+// TestBdInitRetriesTheSchemaEraRace is gt-w4sxk: the catalog race met one check
+// later, where bd got a root, read a schema era off it, and refused. That era
+// cannot belong to the testdb_ database Init minted microseconds before, so the
+// refusal is about the database the session landed on rather than the one it
+// asked for, and another attempt resolves again.
+//
+// The bead's own sequence was attempt 1 lost the catalog race and attempt 2 met
+// this refusal; both gate the same loop, so covering the second covers the pair.
+func TestBdInitRetriesTheSchemaEraRace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyBdStub(t, 2, observedLegacyWorkspaceStderr)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55352)
+	if err := b.Init("pt42ed0697"); err != nil {
+		t.Fatalf("Init after a transient schema-era refusal: %v", err)
+	}
+	if got := stub.calls(t); got != 3 {
+		t.Errorf("bd invocations = %d, want 3 (two refusals then the success)", got)
+	}
+}
+
+// TestBdInitRetriesTheAutoApplyRefusal is the same class's other face: bd
+// refusing to migrate a server-mode database to the current schema, on a
+// database that has no schema of its own yet.
+func TestBdInitRetriesTheAutoApplyRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyBdStub(t, 2, observedAutoApplyRefusalStderr)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55352)
+	if err := b.Init("pkcf3e21b8"); err != nil {
+		t.Fatalf("Init after a transient auto-apply refusal: %v", err)
+	}
+	if got := stub.calls(t); got != 3 {
+		t.Errorf("bd invocations = %d, want 3 (two refusals then the success)", got)
+	}
+}
+
+// TestBdInitSchemaRaceRetryLeavesOtherCommandsAlone: the era class is the only
+// one scoped to the command, so the same stderr from anything but an init of a
+// testdb_ name is an answer and costs one bd process (gt-w4sxk).
+func TestBdInitSchemaRaceRetryLeavesOtherCommandsAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyBdStub(t, 99, observedLegacyWorkspaceStderr)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55352)
+	if _, err := b.run("show", "gt-rqn", "--json"); err == nil {
+		t.Fatal("run() should fail")
+	}
+	if got := stub.calls(t); got != 1 {
+		t.Errorf("bd invocations = %d, want 1 (the era class is init-only)", got)
 	}
 }
 
@@ -212,8 +295,8 @@ func TestRetryableBdConnectionFailure(t *testing.T) {
 
 // TestRetryableBdCatalogRace pins the second class's edges against the first:
 // a store open lost to the test server's catalog is retried, the connection
-// markers that already had a class stay in that one, and neither class reaches
-// a wrapper that is not pointed at the container (gt-unq4l).
+// markers that already had a class stay in that one, and no class reaches a
+// wrapper that is not pointed at the container (gt-unq4l).
 func TestRetryableBdCatalogRace(t *testing.T) {
 	container := NewIsolatedWithPort(t.TempDir(), 55069)
 	noContainer := New(t.TempDir())
@@ -255,8 +338,107 @@ func TestRetryableBdCatalogRace(t *testing.T) {
 			if got := tt.b.retryableBdCatalogRace(tt.err); got != tt.wantCatalogRace {
 				t.Errorf("retryableBdCatalogRace(%v) = %v, want %v", tt.err, got, tt.wantCatalogRace)
 			}
-			if got := tt.b.retryableBdTransientFailure(tt.err); got != tt.wantRetriedAtAll {
+			if got := tt.b.retryableBdTransientFailure(initOnTestDatabaseArgs, tt.err); got != tt.wantRetriedAtAll {
 				t.Errorf("retryableBdTransientFailure(%v) = %v, want %v", tt.err, got, tt.wantRetriedAtAll)
+			}
+		})
+	}
+}
+
+// TestRetryableBdInitSchemaRace pins the third class's edges (gt-w4sxk): the era
+// refusals are retried for an init of a testdb_ name and for nothing else, and
+// neither wider class absorbs them — a suite that reported one as a lost
+// container would skip a run that should stay red.
+func TestRetryableBdInitSchemaRace(t *testing.T) {
+	container := NewIsolatedWithPort(t.TempDir(), 55069)
+	noContainer := New(t.TempDir())
+
+	legacy := fmt.Errorf("bd %s", observedLegacyWorkspaceStderr)
+	autoApply := fmt.Errorf("bd %s", observedAutoApplyRefusalStderr)
+	rigInit := []string{"init", "--prefix", "gt", "--quiet", "--database", "gastown", "--server", "--server-port", "55352"}
+
+	tests := []struct {
+		name             string
+		b                *Beads
+		args             []string
+		err              error
+		wantClass        bool
+		wantRetriedAtAll bool
+	}{
+		{name: "observed legacy workspace refusal", b: container, args: initOnTestDatabaseArgs, err: legacy, wantClass: true, wantRetriedAtAll: true},
+		{name: "observed auto-apply refusal", b: container, args: initOnTestDatabaseArgs, err: autoApply, wantClass: true, wantRetriedAtAll: true},
+		{
+			// The same stderr answers a rig database's real migration state, and
+			// an operator has to see it rather than have it retried away.
+			name: "init against a rig database", b: container, args: rigInit,
+			err: legacy, wantClass: false, wantRetriedAtAll: false,
+		},
+		{
+			name: "another command on a testdb_ database", b: container,
+			args: []string{"show", "--database", "testdb_1a13842eb92b6edf", "gt-rqn"},
+			err:  legacy, wantClass: false, wantRetriedAtAll: false,
+		},
+		{name: "production wrapper", b: noContainer, args: initOnTestDatabaseArgs, err: legacy, wantClass: false, wantRetriedAtAll: false},
+		{name: "nil error", b: container, args: initOnTestDatabaseArgs, err: nil, wantClass: false, wantRetriedAtAll: false},
+		{
+			// Same deadline rule as the classes above: a subprocess killed at its
+			// own budget is wedged, and the era it reported is not the reason.
+			name: "subprocess deadline", b: container, args: initOnTestDatabaseArgs,
+			err:       fmt.Errorf("%s: %w", observedLegacyWorkspaceStderr, context.DeadlineExceeded),
+			wantClass: false, wantRetriedAtAll: false,
+		},
+		{
+			// The earlier classes keep their own verdicts: a lost connection is
+			// not an era refusal, and a run that spends its retries on one skips.
+			name: "connection failure stays its own class", b: container, args: initOnTestDatabaseArgs,
+			err:       fmt.Errorf("bd init: %s", observedOpenFailureStderr),
+			wantClass: false, wantRetriedAtAll: true,
+		},
+		{
+			name: "catalog race stays its own class", b: container, args: initOnTestDatabaseArgs,
+			err:       fmt.Errorf("bd init: %s", observedCatalogRaceStderr),
+			wantClass: false, wantRetriedAtAll: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.b.retryableBdInitSchemaRace(tt.args, tt.err); got != tt.wantClass {
+				t.Errorf("retryableBdInitSchemaRace(%q, %v) = %v, want %v", tt.args, tt.err, got, tt.wantClass)
+			}
+			if got := tt.b.retryableBdTransientFailure(tt.args, tt.err); got != tt.wantRetriedAtAll {
+				t.Errorf("retryableBdTransientFailure(%q, %v) = %v, want %v", tt.args, tt.err, got, tt.wantRetriedAtAll)
+			}
+		})
+	}
+
+	// An era refusal says nothing about the container being gone, so a run that
+	// exhausts its retries on one fails rather than skipping (gt-cbtl).
+	if container.ContainerUnavailable(legacy) {
+		t.Error("a schema-era refusal was reported as the test container being gone")
+	}
+}
+
+// TestBdInitOnTestDatabase pins the argv the class above reads, which is the
+// whole of its blast radius: only Init passes a testdb_ --database, and only
+// against the container (gt-w4sxk).
+func TestBdInitOnTestDatabase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "Init on the container", args: initOnTestDatabaseArgs, want: true},
+		{name: "equals form", args: []string{"init", "--database=testdb_deadbeef"}, want: true},
+		{name: "init against a rig database", args: []string{"init", "--database", "gastown", "--server"}, want: false},
+		{name: "init that lets bd derive the name", args: []string{"init", "--prefix", "gt", "--quiet"}, want: false},
+		{name: "another command on a testdb_ database", args: []string{"show", "--database", "testdb_deadbeef"}, want: false},
+		{name: "database flag with no value", args: []string{"init", "--database"}, want: false},
+		{name: "no args", args: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdInitOnTestDatabase(tt.args); got != tt.want {
+				t.Errorf("bdInitOnTestDatabase(%q) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
 	}
@@ -271,7 +453,7 @@ func TestCatalogRaceIsNotAContainerGoneSkip(t *testing.T) {
 	container := NewIsolatedWithPort(t.TempDir(), 55069)
 	race := fmt.Errorf("bd init: %s", observedCatalogRaceStderr)
 
-	if container.retryableBdTransientFailure(race) != true {
+	if container.retryableBdTransientFailure(initOnTestDatabaseArgs, race) != true {
 		t.Fatal("the catalog race is not retried at all")
 	}
 	if container.ContainerUnavailable(race) {
@@ -364,8 +546,17 @@ func (s *flakyBdStub) calls(t *testing.T) int {
 	return n
 }
 
-func installFlakyConnectionBDStub(t *testing.T, failUntil int) *flakyBdStub {
+// installFlakyBdStub writes a fake bd that fails the first failUntil
+// invocations with failStderr and then succeeds. One script serves every retry
+// class: what separates them is the stderr bd writes, not the shape of the
+// failure, so a class added later is a failStderr argument rather than a fourth
+// copy of this shell.
+func installFlakyBdStub(t *testing.T, failUntil int, failStderr ...string) *flakyBdStub {
 	t.Helper()
+	var failures strings.Builder
+	for _, line := range failStderr {
+		fmt.Fprintf(&failures, "  echo %q >&2\n", line)
+	}
 	return installBdStub(t, fmt.Sprintf(`#!/bin/sh
 if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
   echo "Error: unknown flag: --allow-stale" >&2
@@ -376,34 +567,23 @@ count=0
 count=$((count + 1))
 echo "$count" > __COUNT__
 if [ "$count" -le %d ]; then
-  echo %q >&2
-  echo %q >&2
-  exit 1
+%s  exit 1
 fi
 printf '%%s\n' '[{"id":"gt-rqn","title":"MR","status":"open"}]'
 exit 0
-`, failUntil, observedIoTimeoutStderr, observedOpenFailureStderr))
+`, failUntil, failures.String()))
+}
+
+func installFlakyConnectionBDStub(t *testing.T, failUntil int) *flakyBdStub {
+	t.Helper()
+	return installFlakyBdStub(t, failUntil, observedIoTimeoutStderr, observedOpenFailureStderr)
 }
 
 // installFlakyCatalogRaceBDStub writes a fake bd that fails the first failUntil
 // invocations with gt-unq4l's store-open race and then succeeds.
 func installFlakyCatalogRaceBDStub(t *testing.T, failUntil int) *flakyBdStub {
 	t.Helper()
-	return installBdStub(t, fmt.Sprintf(`#!/bin/sh
-if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
-  echo "Error: unknown flag: --allow-stale" >&2
-  exit 0
-fi
-count=0
-[ -f __COUNT__ ] && count=$(cat __COUNT__)
-count=$((count + 1))
-echo "$count" > __COUNT__
-if [ "$count" -le %d ]; then
-  echo %q >&2
-  exit 1
-fi
-exit 0
-`, failUntil, observedCatalogRaceStderr))
+	return installFlakyBdStub(t, failUntil, observedCatalogRaceStderr)
 }
 
 // installBdStub writes a fake bd whose body is script, substitutes __COUNT__
