@@ -173,6 +173,169 @@ func TestDoMerge_EditorialRequired_ApproveMatchingNote_PushesAndPublishesNote(t 
 	}
 }
 
+// TestDoMerge_EditorialRequired_TargetMovedMaterially_RefusesPush is gt-6bsp's
+// acceptance case: main advanced past the reviewed target tip, on the same
+// file the MR's own diff touches, before this MR reached the push. The MR's
+// own diff is unchanged (patch-id still matches — the existing check this
+// test would otherwise pass), but the combined tree that would actually land
+// was never reviewed as a tree, so the push must refuse rather than land it
+// on an unreviewed note's authority.
+func TestDoMerge_EditorialRequired_TargetMovedMaterially_RefusesPush(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	bdLog, gtLog := fakeBDAndGt(t)
+
+	// feature.txt exists on main before the branch is cut, with room for the
+	// MR and main's own later advance to edit different lines — a clean
+	// 3-way merge, so the refusal below is the drift check and not an
+	// ordinary merge conflict.
+	writeFile(t, workDir, "feature.txt", "line1\nline2\nline3\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "chore: add feature.txt")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	branch := "polecat/test/editorial-drift"
+	run(t, workDir, "git", "checkout", "-b", branch, "main")
+	writeFile(t, workDir, "feature.txt", "line1 EDITED\nline2\nline3\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: edit line1")
+	run(t, workDir, "git", "checkout", "main")
+	head := run(t, workDir, "git", "rev-parse", branch)
+
+	base, err := g.MergeBase("origin/main", head)
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	patchID, err := g.PatchID(base, head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	if err := editorial.WriteNote(g, editorial.Note{
+		OMVersion:         "1.4.0",
+		Rig:               "test-rig",
+		MR:                "mr-editorial-drift",
+		Worker:            "polecats/max",
+		BaseSHA:           base,
+		ReviewedTargetTip: base, // target had not moved yet at review time
+		HeadSHA:           head,
+		PatchID:           patchID,
+		Score:             0.9,
+		Verdict:           "approve",
+		Attempt:           1,
+		ReviewedAt:        time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	// main advances, on the same file the MR touches but a different line
+	// (clean 3-way merge) — the material case.
+	writeFile(t, workDir, "feature.txt", "line1\nline2\nline3 EDITED\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "chore: edit line3 on main")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	mr := &MRInfo{
+		ID:                    "mr-editorial-drift",
+		Branch:                branch,
+		Target:                "main",
+		Worker:                "polecats/max",
+		EditorialReviewedHead: head,
+	}
+	result := e.doMerge(context.Background(), mr, true) // skipGates=true
+
+	if result.Success {
+		t.Fatalf("doMerge succeeded despite material target drift: %+v", result)
+	}
+	if !result.EditorialRefused {
+		t.Fatalf("refusal not classified as editorial: %+v", result)
+	}
+	if result.EditorialReason != editorial.ReasonTargetDriftMaterial {
+		t.Fatalf("EditorialReason = %q, want %q", result.EditorialReason, editorial.ReasonTargetDriftMaterial)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("origin/main advanced despite refused push: before=%s after=%s", before, after)
+	}
+
+	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
+		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
+	}
+	gtCalls := readLog(t, gtLog)
+	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
+		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+	}
+}
+
+// TestDoMerge_EditorialRequired_TargetMovedDisjointFiles_PushesAnyway is the
+// companion to the material-drift test above: main moved since review, but
+// on a file the MR's own diff never touches, so the two changes cannot
+// interact. The push proceeds without a second review — this is the common
+// case the drift check must stay cheap for.
+func TestDoMerge_EditorialRequired_TargetMovedDisjointFiles_PushesAnyway(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/editorial-drift-disjoint"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+
+	base, err := g.MergeBase("origin/main", head)
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	patchID, err := g.PatchID(base, head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	if err := editorial.WriteNote(g, editorial.Note{
+		OMVersion:         "1.4.0",
+		Rig:               "test-rig",
+		MR:                "mr-editorial-drift-disjoint",
+		Worker:            "polecats/max",
+		BaseSHA:           base,
+		ReviewedTargetTip: base,
+		HeadSHA:           head,
+		PatchID:           patchID,
+		Score:             0.9,
+		Verdict:           "approve",
+		Attempt:           1,
+		ReviewedAt:        time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	// main advances, on a file the MR never touches — the disjoint case.
+	writeFile(t, workDir, "unrelated.txt", "unrelated main change\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "chore: edit unrelated.txt on main")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	mr := &MRInfo{
+		ID:                    "mr-editorial-drift-disjoint",
+		Branch:                branch,
+		Target:                "main",
+		Worker:                "polecats/max",
+		EditorialReviewedHead: head,
+	}
+	result := e.doMerge(context.Background(), mr, true) // skipGates=true
+
+	if !result.Success {
+		t.Fatalf("doMerge failed despite disjoint target drift: %s", result.Error)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after == before {
+		t.Fatal("origin/main did not advance despite successful push")
+	}
+}
+
 // TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopied
 // covers the copy-on-differing-head path: the reviewed head (from a rebase
 // that left the diff unchanged) differs from both the submitted branch tip

@@ -30,15 +30,27 @@ type NoteAttempt struct {
 // flattens, wisp GC, and MR bead deletion — the receipt bead (see
 // RecordReceipt) is for aggregation only, never proof.
 type Note struct {
-	OMVersion    string  `json:"om_version"`
-	RubricSHA256 string  `json:"rubric_sha256"`
-	Rig          string  `json:"rig"`
-	MR           string  `json:"mr"`
-	Worker       string  `json:"worker"`
-	BaseSHA      string  `json:"base_sha"`
-	HeadSHA      string  `json:"head_sha"`
-	PatchID      string  `json:"patch_id"`
-	Score        float64 `json:"score"`
+	OMVersion    string `json:"om_version"`
+	RubricSHA256 string `json:"rubric_sha256"`
+	Rig          string `json:"rig"`
+	MR           string `json:"mr"`
+	Worker       string `json:"worker"`
+	BaseSHA      string `json:"base_sha"`
+	HeadSHA      string `json:"head_sha"`
+	// ReviewedTargetTip is origin/<target>'s own tip, resolved at review
+	// time — distinct from BaseSHA, which pins to the branch's own cut
+	// point (the merge-base) and does not move as target advances past it.
+	// A branch cut once and never rebased keeps the same merge-base no
+	// matter how far target moves, so BaseSHA alone cannot answer "has
+	// target moved since this review?" — the push precondition needs this
+	// field to tell (gt-6bsp). Omitted when empty: a landed review has no
+	// "since review" window to measure and leaves it unset, and a note
+	// written before this field existed round-trips unchanged — the
+	// precondition treats either case as unknown and skips the drift check
+	// rather than guessing.
+	ReviewedTargetTip string  `json:"reviewed_target_tip,omitempty"`
+	PatchID           string  `json:"patch_id"`
+	Score             float64 `json:"score"`
 	// Verdict is "approve" or "request_changes".
 	Verdict       string `json:"verdict"`
 	FindingsCount int    `json:"findings_count"`

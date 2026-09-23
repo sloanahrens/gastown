@@ -240,6 +240,17 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("merge-base: %v", err), 0)
 		}
 	}
+	// targetTip is target's own tip at review time — see Note.ReviewedTargetTip
+	// for why this must be resolved separately from mergeBase. A landed review
+	// has no "since review" window to measure (the review IS the after-the-fact
+	// look at what landed), so it leaves this unset.
+	targetTip := ""
+	if req.Landed == nil {
+		targetTip, err = deps.Git.Rev("origin/" + req.Target)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("resolve origin/%s: %v", req.Target, err), 0)
+		}
+	}
 	// The diff's identity, and so the key the verdict is recorded under. A
 	// landed review keys it on the landed diff (ResolveLandedRange.PatchID):
 	// that is what the coverage check recomputes from the commit the note sits
@@ -305,6 +316,26 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	reuseApplies := prior != nil && !req.Reroll &&
 		(!retroReview || prior.Commit == noteCommit) &&
 		recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
+	if reuseApplies {
+		// A recorded approve can be stale the same way CheckPrecondition's own
+		// drift check (targetDriftedMaterially, precondition.go) judges a push
+		// stale: target may have moved onto files this MR's own diff also
+		// touches since prior.Note.ReviewedTargetTip was recorded, even though
+		// the MR's own diff (patchID, just matched above) is unchanged.
+		// Reusing such a note here is what livelocked ReasonTargetDriftMaterial
+		// (gt-6bsp): the precondition refuses the push on drift and queues the
+		// MR on the promise that the next review writes a fresh note, but this
+		// reuse path is the only thing standing between "next review" and
+		// "same stale note again" — every later cycle found the same
+		// ReviewedTargetTip and refused forever. Falling through re-reviews and
+		// writes a note with a current ReviewedTargetTip, same as any other
+		// reuse-disqualifying condition above.
+		drifted, err := targetDriftedMaterially(deps.Git, prior.Note.ReviewedTargetTip, targetTip, mergeBase, head)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("target drift check: %v", err), 0)
+		}
+		reuseApplies = !drifted
+	}
 	if reuseApplies {
 		if prior.Note.Verdict == "approve" {
 			// A landed review has no MR bead to record it on, and no push to
@@ -420,20 +451,21 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 
 	note := Note{
-		OMVersion:     manifest.OMBinary.Version,
-		RubricSHA256:  manifest.Rubric.SHA256,
-		Rig:           req.Rig,
-		MR:            req.MRID,
-		Worker:        req.Worker,
-		BaseSHA:       mergeBase,
-		HeadSHA:       noteCommit,
-		PatchID:       patchID,
-		Score:         v.Score,
-		Verdict:       v.Verdict,
-		FindingsCount: len(v.Findings),
-		Findings:      v.Findings,
-		Attempt:       req.Attempt,
-		ReviewedAt:    time.Now().UTC(),
+		OMVersion:         manifest.OMBinary.Version,
+		RubricSHA256:      manifest.Rubric.SHA256,
+		Rig:               req.Rig,
+		MR:                req.MRID,
+		Worker:            req.Worker,
+		BaseSHA:           mergeBase,
+		ReviewedTargetTip: targetTip,
+		HeadSHA:           noteCommit,
+		PatchID:           patchID,
+		Score:             v.Score,
+		Verdict:           v.Verdict,
+		FindingsCount:     len(v.Findings),
+		Findings:          v.Findings,
+		Attempt:           req.Attempt,
+		ReviewedAt:        time.Now().UTC(),
 		// Recorded only when the review actually ran with an override, so
 		// the note distinguishes "used the rig default" from "was allowed
 		// N seconds" (see Note.TimeoutSeconds).
