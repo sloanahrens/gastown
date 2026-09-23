@@ -1302,3 +1302,28 @@ func renderPolecatForTest(t *testing.T) string {
 	}
 	return output
 }
+
+// TestRoleTemplatesCarryInterruptPolicy guards claude-9a8: the patrol and
+// work-loop roles must be told that a bare "[Request interrupted by user for
+// tool use]" is a nudge-delivery artifact, not an operator stop. Mayor and
+// crew are left out: a human may really be at those panes.
+func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "An interrupt is a delivery artifact"
+	for role, want := range map[string]bool{
+		"witness": true, "deacon": true, "refinery": true, "polecat": true,
+		"mayor": false, "crew": false,
+	} {
+		data := RoleData{Role: role, RigName: "gastown", TownRoot: "/t", TownName: "t", Polecat: "p", DefaultBranch: "main"}
+		out, err := tmpl.RenderRole(role, data)
+		if err != nil {
+			t.Fatalf("RenderRole(%s): %v", role, err)
+		}
+		if got := strings.Contains(out, marker); got != want {
+			t.Errorf("role %s carries interrupt policy = %v, want %v", role, got, want)
+		}
+	}
+}
