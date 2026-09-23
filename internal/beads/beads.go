@@ -1587,16 +1587,76 @@ func stripFirstRunMetricsNotice(stderr string) string {
 	return stderr[:start] + stderr[end:]
 }
 
+// bdDoltAutoStartNotice* are the three lines bd writes to stderr when
+// auto-start brings the Dolt server up on a port other than the one it had
+// recorded (beads internal/storage/dolt/store.go). bd reaches that path only
+// when the recorded port was its own bookkeeping or none was configured, so
+// retargeting refreshes .beads/dolt-server.port instead of writing to another
+// project's database — informational, not a failure (gt-5pjp).
+//
+// Both ports in the first line vary, so only its opening fragment and its
+// " (auto-start)" suffix are stable; the arrow between them is U+2192.
+const (
+	bdDoltAutoStartNoticePrefix = "Warning: Dolt server endpoint changed: port "
+	bdDoltAutoStartNoticeStale  = "  Previous port was unreachable. If other tools expect port "
+	bdDoltAutoStartNoticePin    = "  To pin a port: set dolt.port in .beads/config.yaml"
+)
+
+// stripDoltAutoStartNotice removes bd's Dolt auto-start port-reassignment
+// notice from stderr, if present. Matching each line on its own rather than the
+// block as a unit means a notice truncated mid-write still strips cleanly.
+func stripDoltAutoStartNotice(stderr string) string {
+	if !strings.Contains(stderr, bdDoltAutoStartNoticePrefix) {
+		return stderr
+	}
+	lines := strings.Split(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isDoltAutoStartNoticeLine(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// isDoltAutoStartNoticeLine reports whether a single stderr line is one of the
+// Dolt auto-start notice's three lines.
+func isDoltAutoStartNoticeLine(line string) bool {
+	switch {
+	case strings.HasPrefix(line, bdDoltAutoStartNoticePrefix):
+		// Bound the variable-width first line so a future bd warning that
+		// merely opens the same way is not swallowed with it.
+		return strings.HasSuffix(strings.TrimSpace(line), "(auto-start)")
+	case strings.HasPrefix(line, bdDoltAutoStartNoticeStale):
+		return true
+	case strings.TrimSpace(line) == strings.TrimSpace(bdDoltAutoStartNoticePin):
+		return true
+	}
+	return false
+}
+
 // bdEmptyOutputIsError reports whether an exit-0 bd invocation with empty
 // stdout and non-empty stderr should be treated as an error. This heuristic
 // exists to catch a genuine bd bug where a lookup that finds nothing exits 0
 // with an error message on stderr and nothing on stdout. It must not fire on
-// bd's benign first-run metrics-consent banner (see
-// stripFirstRunMetricsNotice) — a --quiet command like `bd init` legitimately
-// produces empty stdout on success, and in isolated mode the banner alone can
-// fill stderr with no real error present.
+// bd's benign stderr notices — the first-run metrics-consent banner (see
+// stripFirstRunMetricsNotice) and the Dolt auto-start port reassignment notice
+// (see stripDoltAutoStartNotice) — because a --quiet command like `bd init`
+// legitimately produces empty stdout on success, so notices alone can fill
+// stderr with no real error present.
+//
+// The test is fail-closed: anything left on stderr after the notices are
+// stripped is still treated as an error, so an unrecognized bd message keeps
+// the pre-existing behavior rather than being silently accepted.
 func bdEmptyOutputIsError(stderr string) bool {
-	return strings.TrimSpace(stripFirstRunMetricsNotice(stderr)) != ""
+	return strings.TrimSpace(stripBDStderrNotices(stderr)) != ""
+}
+
+// stripBDStderrNotices removes every benign bd stderr notice from stderr,
+// leaving only text that may carry a real failure.
+func stripBDStderrNotices(stderr string) string {
+	return stripDoltAutoStartNotice(stripFirstRunMetricsNotice(stderr))
 }
 
 // stripStdoutWarnings removes warning/diagnostic lines that bd may emit to stdout.

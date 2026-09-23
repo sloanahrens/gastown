@@ -5315,6 +5315,79 @@ const bdFirstRunMetricsNoticeText = "Thanks for using bd! Quick heads-up: bd sha
 	"      Curious what's sent?   bd metrics example\n" +
 	"      Prefer to opt out?     bd metrics off    (one command, no restart needed)\n\n"
 
+// bdDoltAutoStartNoticeText is a verbatim capture of the three lines bd 1.2.2
+// writes to stderr when auto-start brings the Dolt server up on a port other
+// than the one its port file recorded. Regenerate it by initializing a repo
+// with auto-start enabled, killing the server named in .beads/dolt-server.port,
+// then running `bd list --json` against the stale record — exit status 0, with
+// none of this text reflecting a failure.
+const bdDoltAutoStartNoticeText = "Warning: Dolt server endpoint changed: port 57403 → 58444 (auto-start)\n" +
+	"  Previous port was unreachable. If other tools expect port 57403, they may see stale data.\n" +
+	"  To pin a port: set dolt.port in .beads/config.yaml\n"
+
+func TestStripDoltAutoStartNotice(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{
+			name:   "notice only, exactly as bd emits it",
+			stderr: bdDoltAutoStartNoticeText,
+			want:   "",
+		},
+		{
+			name:   "real error after the notice is preserved",
+			stderr: bdDoltAutoStartNoticeText + "Error: could not connect to dolt server\n",
+			want:   "Error: could not connect to dolt server\n",
+		},
+		{
+			name:   "real error before the notice is preserved",
+			stderr: "Error: could not connect to dolt server\n" + bdDoltAutoStartNoticeText,
+			want:   "Error: could not connect to dolt server\n",
+		},
+		{
+			// A truncated write can leave the notice's tail behind; each line
+			// is matched independently so the orphaned continuation still goes.
+			name:   "notice truncated after its first line",
+			stderr: "Warning: Dolt server endpoint changed: port 57403 → 58444 (auto-start)\n  To pin a port: set dolt.port in .beads/config.yaml\n",
+			want:   "",
+		},
+		{
+			name:   "no notice present",
+			stderr: "Error: something else went wrong\n",
+			want:   "Error: something else went wrong\n",
+		},
+		{
+			name:   "empty stderr",
+			stderr: "",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripDoltAutoStartNotice(tt.stderr)
+			if got != tt.want {
+				t.Errorf("stripDoltAutoStartNotice() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoltAutoStartNoticePrefixDoesNotSwallowOtherWarnings pins the bound on
+// the notice's variable-width first line: a different bd warning that opens the
+// same way must keep counting as a failure.
+func TestDoltAutoStartNoticePrefixDoesNotSwallowOtherWarnings(t *testing.T) {
+	const other = "Warning: Dolt server endpoint changed: port 57403 → 58444 (retarget rejected)\n"
+	if got := stripDoltAutoStartNotice(other); got != other {
+		t.Errorf("stripDoltAutoStartNotice(%q) = %q, want it left alone", other, got)
+	}
+	if !bdEmptyOutputIsError(other) {
+		t.Errorf("bdEmptyOutputIsError(%q) = false, want true — an unrecognized warning must fail closed", other)
+	}
+}
+
 func TestStripFirstRunMetricsNotice(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -5376,6 +5449,23 @@ func TestBdEmptyOutputIsError(t *testing.T) {
 			stderr: bdFirstRunMetricsNoticeText + "Error: issue gt-nope not found\n",
 			want:   true,
 		},
+		{
+			// gt-5pjp: the Dolt auto-start port reassignment is a notice, not
+			// a failure, so it must not synthesize an error on its own.
+			name:   "Dolt auto-start notice alone is not an error",
+			stderr: bdDoltAutoStartNoticeText,
+			want:   false,
+		},
+		{
+			name:   "banner plus Dolt auto-start notice is not an error",
+			stderr: bdFirstRunMetricsNoticeText + bdDoltAutoStartNoticeText,
+			want:   false,
+		},
+		{
+			name:   "banner plus Dolt auto-start notice plus a genuine error is still an error",
+			stderr: bdFirstRunMetricsNoticeText + bdDoltAutoStartNoticeText + "Error: issue gt-nope not found\n",
+			want:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -5390,10 +5480,10 @@ func TestBdEmptyOutputIsError(t *testing.T) {
 // TestBdWireLevelBannerOnlyStderrIsSuccess is the end-to-end regression test
 // gt-plj6 asked for. TestBdEmptyOutputIsError above only exercises the
 // bdEmptyOutputIsError helper directly, but the actual gt-iksp bug lived in
-// the '&& bdEmptyOutputIsError(...)' clause wired into TWO call sites —
-// runWithStdin (beads.go:936) and runWithRouting (beads.go:976) — and a
-// helper-only test stays green even if either clause is deleted, because the
-// helper would still exist and behave correctly in isolation. This drives
+// the '&& bdEmptyOutputIsError(...)' clause wired into runBdOnce (beads.go,
+// the single call site both runWithStdin and runWithRouting funnel through) —
+// and a helper-only test stays green even if that clause is deleted, because
+// the helper would still exist and behave correctly in isolation. This drives
 // each real call site through a stubbed bd binary instead.
 func TestBdWireLevelBannerOnlyStderrIsSuccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -5425,6 +5515,19 @@ func TestBdWireLevelBannerOnlyStderrIsSuccess(t *testing.T) {
 		{
 			name:    "genuine error stderr with empty stdout is still an error",
 			stderr:  "Error: could not connect to dolt server\n",
+			wantErr: true,
+		},
+		{
+			// gt-5pjp: a successful --quiet command whose only stderr is bd's
+			// Dolt auto-start notice must not be reported as "command produced
+			// no output".
+			name:    "Dolt auto-start notice with empty stdout is not an error",
+			stderr:  bdDoltAutoStartNoticeText,
+			wantErr: false,
+		},
+		{
+			name:    "notice plus genuine error with empty stdout is still an error",
+			stderr:  bdDoltAutoStartNoticeText + "Error: could not connect to dolt server\n",
 			wantErr: true,
 		},
 	}
