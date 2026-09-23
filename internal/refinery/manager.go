@@ -1073,6 +1073,22 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 	return mr, nil
 }
 
+// RecordRejectionFindings appends mr's MERGE REJECTION note — the marker, its
+// Branch/Target/MR lines, and one parseable line per finding — to the source
+// bead's notes. It is the durable half of a rejection whose redispatch the
+// caller performs itself, so it reopens nothing and sends no mail.
+//
+// Callers that run dead-worker recovery get this note from that path instead:
+// the same note, through the same writer, and a repeat write is skipped.
+func (m *Manager) RecordRejectionFindings(mr *MergeRequest, reason string, findings []RejectionFinding) {
+	if mr == nil {
+		return
+	}
+	recordRejectionFindings(beads.New(m.rig.BeadsPath()), rejectionNoteRequest(mr, m.rig.Name, reason, findings), func(format string, args ...interface{}) {
+		_, _ = fmt.Fprintf(m.output, format, args...)
+	})
+}
+
 // PostMergeResult holds the result of a post-merge cleanup operation.
 type PostMergeResult struct {
 	MR                  *MergeRequest

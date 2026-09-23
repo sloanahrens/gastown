@@ -235,7 +235,7 @@ func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editoria
 		ErrorMsg:      reason,
 		AttemptNumber: attempt,
 		Summary:       fmt.Sprintf("%d findings, score %.2f (%s)", r.Note.FindingsCount, r.Note.Score, r.Note.Verdict),
-		Findings:      rejectionFindingsFromNote(r.Note.Findings),
+		Findings:      RejectionFindingsFromNote(r.Note.Findings),
 		Receipt: &EditorialReceipt{
 			Score:      r.Note.Score,
 			Unresolved: r.Note.PriorFindings.Unresolved,

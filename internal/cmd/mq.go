@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -36,6 +38,7 @@ var (
 	mqRejectNotify    bool
 	mqRejectStdin     bool // Read reason from stdin
 	mqRejectNoRecover bool // Skip dead-worker recovery of the source bead
+	mqRejectFindings  string
 
 	// List command flags
 	mqListReady  bool
@@ -442,6 +445,7 @@ func init() {
 	mqRejectCmd.Flags().BoolVar(&mqRejectNotify, "notify", false, "Send mail notification to worker")
 	mqRejectCmd.Flags().BoolVar(&mqRejectStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
 	mqRejectCmd.Flags().BoolVar(&mqRejectNoRecover, "no-recover", false, "Do not reopen the source bead for redispatch (use for superseded/duplicate/already-merged work)")
+	mqRejectCmd.Flags().StringVar(&mqRejectFindings, "findings-json", "", "Path to a 'gt mq review --json' result (or - for stdin): its findings are recorded on the source bead's notes in the format the next attempt parses, even with --no-recover")
 
 	// Status flags
 	mqStatusCmd.Flags().BoolVar(&mqStatusJSON, "json", false, "Output as JSON")
@@ -571,6 +575,33 @@ func runMQRetry(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// readRejectFindings parses the om verdict named by --findings-json. The file
+// is a `gt mq review --json` result; a verdict that produced no note (an infra
+// failure) contributes no findings, and an empty list is not an error — the
+// rejection is still recorded, just with no finding lines.
+func readRejectFindings(path string) ([]refinery.RejectionFinding, error) {
+	var (
+		raw []byte
+		err error
+	)
+	if path == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading findings: %w", err)
+	}
+	var result editorial.ReviewResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("parsing findings %s (expected a 'gt mq review --json' result): %w", path, err)
+	}
+	if result.Note == nil {
+		return nil, nil
+	}
+	return refinery.RejectionFindingsFromNote(result.Note.Findings), nil
+}
+
 func runMQReject(cmd *cobra.Command, args []string) error {
 	// Handle --stdin: read reason from stdin (avoids shell quoting issues)
 	if mqRejectStdin {
@@ -588,6 +619,9 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 	if mqRejectReason == "" {
 		return fmt.Errorf("required flag \"reason\" not set (use --reason/-r or --stdin)")
 	}
+	if mqRejectStdin && mqRejectFindings == "-" {
+		return fmt.Errorf("cannot read both --stdin and --findings-json - from stdin")
+	}
 
 	rigName := args[0]
 	mrIDOrBranch := args[1]
@@ -600,6 +634,19 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 	result, err := mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover)
 	if err != nil {
 		return fmt.Errorf("rejecting MR: %w", err)
+	}
+
+	// The verdict's findings go onto the source bead's notes as the parseable
+	// lines the next attempt reads back. A caller that runs its own redispatch
+	// passes --no-recover (no note is written on that path) and a caller that
+	// still holds the bead gets no note from recovery either, so this is the
+	// only write either of them gets (gt-s4f6).
+	if mqRejectFindings != "" {
+		findings, ferr := readRejectFindings(mqRejectFindings)
+		if ferr != nil {
+			return ferr
+		}
+		mgr.RecordRejectionFindings(result, mqRejectReason, findings)
 	}
 
 	fmt.Printf("%s Rejected: %s\n", style.Bold.Render("✗"), result.Branch)

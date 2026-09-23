@@ -121,6 +121,36 @@ func TestBuildPriorFindings_ParsesEmptyTitleAndColonInPath(t *testing.T) {
 	}
 }
 
+func TestBuildPriorFindings_ParsesBulletPrefixedLines(t *testing.T) {
+	// The rejection notes are written by a formula an agent executes, and it
+	// has emitted these lines under '•' — matching zero times against the
+	// '-'-only pattern, so the rejection carried no findings at all
+	// (gt-3mp1). Either bullet parses; the prose "FINDING [major] ..." lines
+	// the same notes carry are still not findings, because they hold no om
+	// finding id to classify on.
+	notes := `MERGE REJECTION (attempt 1): om-editorial - findings on MR bead gt-mr-1
+• id:cb332644e4cf sev:major internal/hooks/config.go:432 — boot hook override has no self-filtering path
+- id:cc825768ed16 sev:minor internal/hooks/config_test.go:898 — test rewritten to agree with the regression
+FINDING [major] internal/hooks/config.go boot override (~line 432): removing If is a REGRESSION
+`
+	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{
+		"gt-source": {ID: "gt-source", Notes: notes, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}}
+	bd := beads.NewWithStore(t.TempDir(), store)
+
+	got := BuildPriorFindings(bd, "gt-source", 1)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d findings, want 2 (the bullet line and the dash line): %+v", len(got), got)
+	}
+	if got[0].ID != "cb332644e4cf" || got[0].Path != "internal/hooks/config.go" || got[0].Line != 432 {
+		t.Errorf("finding[0] = %+v, want the bullet-prefixed line parsed", got[0])
+	}
+	if got[1].ID != "cc825768ed16" {
+		t.Errorf("finding[1] = %+v, want the dash-prefixed line", got[1])
+	}
+}
+
 func TestBuildPriorFindings_NoSourceIssueReturnsNil(t *testing.T) {
 	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{}}
 	bd := beads.NewWithStore(t.TempDir(), store)
