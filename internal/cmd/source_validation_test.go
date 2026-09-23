@@ -185,6 +185,47 @@ func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 	assertBDLogNotContains(t, log, currentBeadsDir, "show bd-source --json")
 }
 
+// TestRunDoneAllowRevertsRefusedFromPolecatWorktree pins gt-0wy03 AC1 at the
+// real runDone wiring, not just the isolated helper: --allow-reverts is
+// refused from the polecat worktree this harness builds (townRoot/gastown/
+// polecats/refuge/gastown) with a validated polecat identity — the same
+// identity a real gt done invocation always has, since resolveDonePolecatWorktree
+// refuses to run at all otherwise. requireNonPolecatCloneForRevertOverride's
+// own tests (done_revert_check_test.go) separately pin that no env var,
+// including GT_ROLE=mayor, changes this outcome.
+func TestRunDoneAllowRevertsRefusedFromPolecatWorktree(t *testing.T) {
+	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
+	setupRoutedSubmitCommandTown(t, workDir)
+	setupRoutedSubmitGitRepo(t, workDir, false)
+	installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	resetDoneFlagsForTest(t)
+	townRoot := routedSourceTestTownRoot(workDir)
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Setenv("GT_ROOT", townRoot)
+	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "refuge")
+	t.Setenv("BD_ACTOR", "gastown/polecats/refuge")
+	t.Chdir(workDir)
+
+	doneIssue = "bd-source"
+	doneCleanupStatus = "unpushed"
+	doneSkipVerify = true
+	doneAllowReverts = true
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	err := runDone(nil, nil)
+	if err == nil {
+		t.Fatal("expected runDone --allow-reverts to be refused from a polecat worktree")
+	}
+	if !strings.Contains(err.Error(), "gt-0wy03") {
+		t.Errorf("error should reference the guardrail bead, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "gt mq submit --allow-reverts") {
+		t.Errorf("error should name the mayor-side override path, got: %v", err)
+	}
+}
+
 // TestRunDoneReworkBranchRecordsActualWorkerNotBranchName covers gt-fl0n: a
 // --branch rework reuses the ORIGINAL polecat's branch name (here
 // "malachite"), but the polecat actually running `gt done` is a different
@@ -482,6 +523,7 @@ func resetDoneFlagsForTest(t *testing.T) {
 	oldIssue, oldStatus, oldCleanupStatus, oldTarget := doneIssue, doneStatus, doneCleanupStatus, doneTarget
 	oldPriority := donePriority
 	oldResume, oldPreVerified, oldSkipVerify := doneResume, donePreVerified, doneSkipVerify
+	oldAllowReverts := doneAllowReverts
 	oldUpdateAgentStateOnDoneFn := updateAgentStateOnDoneFn
 	doneIssue = ""
 	donePriority = -1
@@ -491,10 +533,12 @@ func resetDoneFlagsForTest(t *testing.T) {
 	donePreVerified = false
 	doneTarget = ""
 	doneSkipVerify = false
+	doneAllowReverts = false
 	t.Cleanup(func() {
 		doneIssue, doneStatus, doneCleanupStatus, doneTarget = oldIssue, oldStatus, oldCleanupStatus, oldTarget
 		donePriority = oldPriority
 		doneResume, donePreVerified, doneSkipVerify = oldResume, oldPreVerified, oldSkipVerify
+		doneAllowReverts = oldAllowReverts
 		updateAgentStateOnDoneFn = oldUpdateAgentStateOnDoneFn
 	})
 }
