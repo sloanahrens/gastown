@@ -193,7 +193,7 @@ func RekeyNote(g *git.Git, req RekeyRequest) (*RekeyResult, error) {
 		// patch-id(diff X^ X) for every first-parent commit and rejects a
 		// mismatch, so copying it would publish a note that still reads as
 		// uncovered. Refuse before writing anything.
-		source, err = selectSourceNote(mr, landed, landedPatchID, plan, found.forMR)
+		source, err = selectSourceNote(g, mr, landed, landedPatchID, plan, found.forMR)
 		if err != nil {
 			return nil, err
 		}
@@ -415,14 +415,16 @@ func noteOnTarget(byTarget map[string][]Note, target, patchID string) Note {
 // about to stamp is a last resort — rekeyed_from should name the commit the
 // verdict was actually written on, not the target itself — and candidates
 // are ordered by commit sha so a re-run of the same command is reproducible.
-func selectSourceNote(mr, landed, landedPatchID string, plan []rekeyTarget, forMR []rekeySource) (rekeySource, error) {
+func selectSourceNote(g *git.Git, mr, landed, landedPatchID string, plan []rekeyTarget, forMR []rekeySource) (rekeySource, error) {
 	var candidates []rekeySource
 	var carried []string
+	var approvedPatchIDs []string
 	approved := 0
 	for _, s := range forMR {
 		carried = append(carried, fmt.Sprintf("patch-id %s on %s (verdict %q)", s.note.PatchID, s.commit, s.note.Verdict))
 		if s.note.Verdict == "approve" {
 			approved++
+			approvedPatchIDs = append(approvedPatchIDs, s.note.PatchID)
 			if s.note.PatchID == landedPatchID {
 				candidates = append(candidates, s)
 			}
@@ -435,7 +437,8 @@ func selectSourceNote(mr, landed, landedPatchID string, plan []rekeyTarget, forM
 		if approved == 0 {
 			what = "no approve verdict for MR " + mr + " (patch-id of the landed diff is " + landedPatchID + ")"
 		}
-		return rekeySource{}, fmt.Errorf("rekey-note: refusing: %s; notes for this MR: %s", what, strings.Join(carried, ", "))
+		return rekeySource{}, fmt.Errorf("rekey-note: refusing: %s%s; notes for this MR: %s",
+			what, landedRangeHint(g, mr, landed, approvedPatchIDs), strings.Join(carried, ", "))
 	}
 
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].commit < candidates[j].commit })
@@ -445,6 +448,51 @@ func selectSourceNote(mr, landed, landedPatchID string, plan []rekeyTarget, forM
 		}
 	}
 	return candidates[0], nil
+}
+
+// landedRangeHint names the first-parent range whose diff the MR's verdict
+// proves, when that range is longer than the landed commit's own diff.
+//
+// A fast-forward land of a multi-commit branch leaves the target with commits
+// that each carry a fraction of the reviewed diff, so the per-commit patch-id
+// this path matches on can never equal the note's: the remedy is a different
+// landing shape, not a different backfill. Naming the range is what turns the
+// mismatch into that remedy (gt-nhqoa).
+//
+// A hit is proof, not a guess — the equality reported is the one the
+// editorial-coverage check recomputes — and the walk is bounded because it
+// runs only on a refusal.
+func landedRangeHint(g *git.Git, mr, landed string, want []string) string {
+	const maxLookback = 50
+	if len(want) == 0 {
+		return ""
+	}
+	cur := landed
+	for span := 1; span <= maxLookback; span++ {
+		parents, err := g.Parents(cur)
+		if err != nil || len(parents) != 1 {
+			// A merge commit or a root ends the run: whatever precedes it
+			// landed as its own unit, so a longer range would span landings.
+			return ""
+		}
+		cur = parents[0]
+		if span == 1 {
+			// The landed commit's own diff is the range that just failed to
+			// match; recomputing it cannot tell us anything new.
+			continue
+		}
+		patchID, err := g.PatchID(cur, landed)
+		if err != nil {
+			return ""
+		}
+		for _, w := range want {
+			if w == patchID {
+				return fmt.Sprintf("; MR %s's verdict proves the diff %s..%s, so it covers the %d commits that landed as that one range and no single commit's own diff inside it — land a multi-commit branch with an explicit merge commit (`git merge --no-ff`) so the tip's own diff from its first parent is the MR's diff",
+					mr, shortCommit(cur), shortCommit(landed), span)
+			}
+		}
+	}
+	return ""
 }
 
 // isPlannedTarget reports whether commit is one of the commits the backfill

@@ -257,11 +257,17 @@ GATE: Cannot proceed to merge without fix OR bead filed
 ```bash
 ## Resolve <merge-target> per Target Resolution Rule above.
 git checkout <merge-target>
-git merge --ff-only temp
+git merge --no-ff -m "Merge <polecat-branch> into <merge-target>" temp
 git push origin <merge-target>
 git branch -d temp
 git branch -d polecat/<worker>
 ```
+`--no-ff` whatever `temp` carries: a merge commit's own diff from its first
+parent is the MR's diff, and that is the diff the om note's patch-id must match.
+Fast-forwarding a branch carrying more than one commit lands its commits as
+plain first-parent commits whose own diffs are fractions of the MR, leaving main
+with commits no note can ever match and no way to add the proof after the fact
+(gt-nhqoa).
 
 **loop-check**: More branches? Return to process-branch.
 
