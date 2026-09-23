@@ -187,6 +187,18 @@ const (
 
 	// FileQuotaJSON is the quota state file in mayor/.
 	FileQuotaJSON = "quota.json"
+
+	// FileSessionID holds the runtime session ID a SessionStart hook resolved,
+	// so later `gt prime` runs in the same worktree reuse it instead of minting
+	// a new one. Lives in .runtime/.
+	FileSessionID = "session_id"
+
+	// FileSessionStartEmitted holds the session ID whose session_start is
+	// already on the record, so a second emitter for the same session — the
+	// agent's own `gt prime --hook`, which the startup beacon tells it to run —
+	// records nothing. Lives in .runtime/ beside FileSessionID, with the same
+	// lifetime: both answer questions about one session. (gt-da73)
+	FileSessionStartEmitted = "session_start_emitted"
 )
 
 // Beads configuration constants.
