@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -137,6 +138,16 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 		role = fmt.Sprintf("pid-%d", os.Getpid())
 	}
 
+	// Resolve and validate the command before taking the slot: the gate is the
+	// merge path's critical section, and a command that cannot run must not hold
+	// it (gt-f4xe). Leading VAR=value tokens are env(1) assignments, so the
+	// program is looked up under the PATH the child will see (gt-18nx).
+	envAssigns, cmdArgs := splitEnvPrefix(args)
+	program, err := resolveSlotCommand(envAssigns, cmdArgs)
+	if err != nil {
+		return fmt.Errorf("gt slot run: %w", err)
+	}
+
 	fmt.Fprintf(cmd.OutOrStdout(), "Waiting for container-gate slot (role=%s)...\n", role)
 	pool := containerGatePool(townRoot)
 	h, err := slot.AcquirePool(townRoot, role, slotRunTimeout, pool)
@@ -149,25 +160,15 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), slotAcquiredFormat,
 		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
 
-	// env(1) semantics: leading VAR=value tokens set the child's environment.
-	// The polecat formula wraps the rig's test_command verbatim
-	// ("gt slot run -- GOFLAGS=-p=8 make test"), and exec'ing "GOFLAGS=-p=8"
-	// as a program fails with "executable file not found" (gt-18nx).
-	envAssigns, cmdArgs := splitEnvPrefix(args)
-	if len(cmdArgs) == 0 {
-		return fmt.Errorf("gt slot run: no command after environment assignment(s) %v", envAssigns)
-	}
-	// Gate-class holders (refinery, batch gate, main-branch test) are the
-	// merge path's critical section; a polecat's own suite is optional
-	// verification. When both run at once on a CPU-bound host, three
-	// concurrent suites tripled the refinery's gate (gt-93m1), so non-gate
-	// holders run under nice(1) unless --nice says otherwise.
+	// A polecat's own suite is optional verification where a gate-class holder
+	// is the merge path's critical section, and three concurrent suites
+	// tripled the refinery's gate (gt-93m1) — so non-gate holders run under
+	// nice(1) unless --nice says otherwise.
 	niceness := slotRunNiceness(role, slotRunNice)
-	cmdArgs = withNice(cmdArgs, niceness)
 	if niceness > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Running at nice %d (non-gate holder; --nice 0 to disable).\n", niceness)
 	}
-	sub := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
+	sub := slotChildCommand(program, cmdArgs, niceWrapper(niceness))
 	if len(envAssigns) > 0 {
 		sub.Env = append(os.Environ(), envAssigns...)
 	}
@@ -533,6 +534,62 @@ func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
 	return args[:i], args[i:]
 }
 
+// resolveSlotCommand resolves the program gt slot run will exec, rejecting a
+// command it must not take a gate slot for: one naming no program at all (only
+// VAR=value assignments), or one whose program cannot be exec'd. It is called
+// before slot.AcquirePool so the refusal costs nothing (gt-f4xe).
+func resolveSlotCommand(envAssigns, cmdArgs []string) (string, error) {
+	if len(cmdArgs) == 0 {
+		return "", fmt.Errorf("no command after environment assignment(s) %v", envAssigns)
+	}
+	return lookPathForSlot(cmdArgs[0], slotChildPath(envAssigns))
+}
+
+// slotChildPath is the PATH the child is run with, and so the one its program
+// is resolved against: the assigned PATH= when the leading assignments set one,
+// the ambient PATH otherwise. os/exec keeps the last value of a duplicate key
+// and these assignments are appended after os.Environ(), so the last wins here
+// too.
+func slotChildPath(envAssigns []string) string {
+	for i := len(envAssigns) - 1; i >= 0; i-- {
+		if path, ok := strings.CutPrefix(envAssigns[i], "PATH="); ok {
+			return path
+		}
+	}
+	return os.Getenv("PATH")
+}
+
+// lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
+// resolves against the ambient one, including an empty entry meaning the
+// current directory. exec.LookPath offers no way to substitute a PATH but does
+// resolve a name containing a separator directly, so joining each entry and
+// delegating keeps exec.LookPath's own answer to "is this an executable file".
+func lookPathForSlot(name, pathEnv string) (string, error) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		resolved, err := exec.LookPath(name)
+		if err != nil {
+			// Deliberately not exec.LookPath's own error: it reads well for a
+			// bare name and poorly for a path, where it blames a $PATH that was
+			// never consulted.
+			return "", fmt.Errorf("not an executable file: %s", name)
+		}
+		return resolved, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		candidate := filepath.Join(dir, name)
+		if dir == "" {
+			// An empty entry means the current directory. filepath.Join would
+			// clean "./name" to a bare name, which exec.LookPath reads as a
+			// name to search the ambient PATH for (gt-f4xe).
+			candidate = "." + string(os.PathSeparator) + name
+		}
+		if resolved, err := exec.LookPath(candidate); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("executable file not found in $PATH: %s", name)
+}
+
 // defaultNonGateNice is the nice(1) increment for non-gate slot holders.
 const defaultNonGateNice = 10
 
@@ -549,17 +606,32 @@ func slotRunNiceness(role string, flag int) int {
 	return defaultNonGateNice
 }
 
-// withNice prefixes cmdArgs with nice(1) at the given increment when it is
-// positive and a nice binary exists; otherwise returns cmdArgs unchanged.
-func withNice(cmdArgs []string, niceness int) []string {
-	if niceness <= 0 || len(cmdArgs) == 0 {
-		return cmdArgs
+// niceWrapper is the nice(1) prefix for a holder at the given niceness: nil
+// when niceness is 0 or no nice binary exists, in which case the caller runs
+// the command itself.
+func niceWrapper(niceness int) []string {
+	if niceness <= 0 {
+		return nil
 	}
 	nicePath, err := exec.LookPath("nice")
 	if err != nil {
-		return cmdArgs
+		return nil
 	}
-	out := make([]string, 0, len(cmdArgs)+3)
-	out = append(out, nicePath, "-n", strconv.Itoa(niceness))
-	return append(out, cmdArgs...)
+	return []string{nicePath, "-n", strconv.Itoa(niceness)}
+}
+
+// slotChildCommand builds the child process for a command resolveSlotCommand
+// has already validated, wrapping it in nice(1) when wrapper is non-empty.
+// Without a wrapper it execs the resolved program by path: exec.Command would
+// resolve a bare argv[0] against gt's own PATH, where the child's assigned
+// PATH does not apply, so validation and the exec would disagree (gt-f4xe).
+func slotChildCommand(program string, cmdArgs, wrapper []string) *exec.Cmd {
+	argv := append(append([]string(nil), wrapper...), cmdArgs...)
+	if len(wrapper) == 0 {
+		// Args[0] stays the operator's own token; Path is what runs.
+		return &exec.Cmd{Path: program, Args: argv}
+	}
+	// With a wrapper, nice(1) is argv[0] and resolves the program in the
+	// child, under the PATH that resolveSlotCommand validated against.
+	return exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
 }
