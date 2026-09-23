@@ -31,13 +31,13 @@ func TestIsPRCreateCommand(t *testing.T) {
 	}
 }
 
-// gt-cyz8: the refinery exemption must be keyed on isRehearsalCheckout, not
-// the old line-wide isFeatureBranchCommand (now removed). The two matched the
-// same leading-command shapes but differed on the chained case — the
-// exemption's escape was a "git checkout -b" glued after a "gh pr create" on
-// one line, which line-wide containment matches but a leading-command match
-// does not.
-func TestIsRehearsalCheckout(t *testing.T) {
+// gt-cyz8: both pr-workflow exemptions must be keyed on the leading-command
+// branch-creation shape, not the old line-wide isFeatureBranchCommand (now
+// removed). The two matched the same leading-command shapes but differed on
+// the chained case — an exemption's escape was a "git checkout -b" glued
+// after a "gh pr create" on one line, which line-wide containment matches but
+// a leading-command match does not.
+func TestIsLeadingBranchCreation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -45,6 +45,7 @@ func TestIsRehearsalCheckout(t *testing.T) {
 		want    bool
 	}{
 		{"refinery rehearsal checkout", "git checkout -b temp origin/polecat/topaz+abc123", true},
+		{"polecat session branch", "git checkout -b polecat/pearl/gt-da2x+mu6jwe92", true},
 		{"switch -c", "git switch -c temp origin/branch", true},
 		{"checkout -b with extra flag", "git checkout -q -b temp origin/branch", true},
 		{"gh pr create", "gh pr create --title foo", false},
@@ -58,8 +59,8 @@ func TestIsRehearsalCheckout(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isRehearsalCheckout(tt.command); got != tt.want {
-				t.Errorf("isRehearsalCheckout(%q) = %v, want %v", tt.command, got, tt.want)
+			if got := isLeadingBranchCreation(tt.command); got != tt.want {
+				t.Errorf("isLeadingBranchCreation(%q) = %v, want %v", tt.command, got, tt.want)
 			}
 		})
 	}
@@ -298,9 +299,9 @@ func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
 // "gh pr create ... && git checkout -b temp" chain fire the exemption (feature
 // branch found) while the PR-create guard never matched, so the exemption let
 // the chained PR create through. The exemption is now keyed on
-// isRehearsalCheckout — anchored to the command's first word, exactly as the
-// hook "if" glob that routes the command here is anchored — so the escape is
-// closed.
+// isLeadingBranchCreation — anchored to the command's first word, exactly as
+// the hook "if" glob that routes the command here is anchored — so the escape
+// is closed.
 func TestRunTapGuardPRWorkflow_RefineryChainedPRCreateStillBlocks(t *testing.T) {
 	t.Setenv("GT_REFINERY", "1")
 	t.Setenv("GT_ROLE", "gastown/refinery")
