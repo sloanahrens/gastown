@@ -50,21 +50,29 @@ func runCmd(timeout time.Duration, name string, args ...string) (*bytes.Buffer, 
 	return &stdout, nil
 }
 
-// subprocessConcurrency bounds how many bd/gt subprocess children the
-// dashboard process runs at once, across every fetcher goroutine, background
-// refresh, and API-driven command — not per call site. bd/Dolt contention is
-// fsync-bound, not CPU-bound (gt-05vk): concurrent bd children queue behind a
-// single-threaded store and only slow each other down, so a small bound
-// beats a large one. A bound scoped to one call site is also the wrong
-// shape — every site's allowance sums with every other site's, so the
-// process-wide fan-out stays unbounded even though each site looks capped on
-// its own. That is what made an earlier, per-call-site version of this fix
-// insufficient (gt-d5xr): fetchAndRender's 17-way fan-out was bounded to 4,
-// but handleOptions' own 7-way fan-out and the background mergequeue/polecat
-// refreshes each drew from their own separate allowance, so the herd still
-// formed. cmdSem below is that one shared pool; NewDashboardMux hands the
-// same channel to APIHandler so both handlers draw from it.
+// subprocessConcurrency bounds how many bd and gt subprocess children the
+// dashboard process runs at once, across every fetcher, background refresh,
+// and API command — one process-wide pool, not an allowance per call site.
+// bd/Dolt contention is fsync-bound, not CPU-bound (gt-05vk): concurrent bd
+// children queue behind a single-threaded store and only slow each other down.
+// Two shapes that do not bound the process: per-call-site semaphores, whose
+// allowances sum, and a single pool shared with long-running user commands,
+// which can hold every slot and starve the render and hash paths. The pool is
+// therefore shared only among the dashboard's own bd/gt readers — the
+// fetcher's runBdCmd and runGtCmd runners, the merge-queue snapshot's bd list
+// seam, and APIHandler's runGtCommand/runBdCommand, all short bd/gt reads —
+// while APIHandler's user-driven gt runs (up to maxRunTimeout), gh calls
+// (gh network latency, not Dolt), and every tmux call keep their own
+// allowances (gt-d5xr). NewDashboardMux hands the fetcher's channel to
+// APIHandler so both draw from it.
 const subprocessConcurrency = 4
+
+// userCommandConcurrency bounds APIHandler's user-facing command runners that
+// the subprocess pool deliberately does not cover: /api/run gt commands (up
+// to maxRunTimeout), gh calls, and the 90s background `gt polecat list`
+// refresh. They never contend with the dashboard's bd/gt reads for a
+// subprocessConcurrency slot (gt-d5xr).
+const userCommandConcurrency = 4
 
 // acquireCmdSlot blocks until a slot in sem is free or ctx is done,
 // whichever comes first. A nil sem means no bound is configured (e.g. a
