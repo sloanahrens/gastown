@@ -975,6 +975,59 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 	return fmt.Errorf("RegisterMR is deprecated: use beads to create merge-request issues")
 }
 
+// RejectionRecord is what a caller knows about a rejection beyond its reason:
+// the om verdict behind it, if there was one. It is what makes a rejection's
+// findings durable on the source bead (gt-s4f6).
+type RejectionRecord struct {
+	// Findings are the verdict's per-finding rows. They travel onto the
+	// source bead notes as the '- id:' lines editorial.BuildPriorFindings
+	// reads back, and onto the RECOVERED_BEAD mail.
+	Findings []RejectionFinding
+
+	// Receipt is the verdict's score and carried-forward unresolved ids, the
+	// signal `gt deacon redispatch` uses to run its convergence rule. Nil
+	// when the rejection has no measurable verdict behind it.
+	Receipt *EditorialReceipt
+
+	// Attempt is the attempt this rejection IS, as the caller numbers it. The
+	// caller that composes a reason naming an attempt passes its own number
+	// here, so the note header and the reason agree. Zero means the caller has
+	// no attempt of its own and the MR's retry count is used instead.
+	Attempt int
+}
+
+// rejectionRequest is the record of a rejection, in the one shape both its
+// writers take: dead-worker recovery, and the durable note the Manager writes
+// for a caller that redispatches the bead itself. Same fields through the same
+// formatter, so whichever writes first leaves a block the other recognizes and
+// skips — one MERGE REJECTION block per rejection, and the attempt number the
+// note header carries is the one the reason does (gt-s4f6).
+//
+// Receipt is set only from rec, so a manual `gt mq reject` carrying no om
+// verdict leaves it nil and `gt deacon redispatch` keeps falling back to the
+// plain attempt-count Redispatch for that path (gt-j6ez).
+func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRecord) deadWorkerRecoveryRequest {
+	req := deadWorkerRecoveryRequest{
+		MRID:          mr.ID,
+		Branch:        mr.Branch,
+		Target:        mr.TargetBranch,
+		SourceIssue:   mr.IssueID,
+		Worker:        mr.Worker,
+		RigName:       rigName,
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: rejectionAttempt(mr, rec),
+		// The reason doubles as the RECOVERED_BEAD mail's Rejection-Summary
+		// line.
+		Summary: reason,
+	}
+	if rec != nil {
+		req.Findings = rec.Findings
+		req.Receipt = rec.Receipt
+	}
+	return req
+}
+
 // RejectMR manually rejects a merge request.
 // It closes the MR with rejected status and optionally notifies the worker.
 // noRecover skips dead-worker recovery of the source bead entirely — set it
@@ -982,6 +1035,23 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 // reopened regardless of what its close_reason says (gt-pvwy).
 // Returns the rejected MR for display purposes.
 func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noRecover bool) (*MergeRequest, error) {
+	return m.rejectMR(idOrBranch, reason, notify, noRecover, nil)
+}
+
+// RejectMRRecording is RejectMR for a rejection that carries an om verdict:
+// rec's findings are recorded on the source bead's notes whatever happens to
+// dead-worker recovery, so the next attempt reads back what this one was
+// rejected for even when the caller redispatching the bead itself passed
+// noRecover.
+//
+// An error with a non-nil MR means the MR was rejected but the verdict's
+// durable record was not written. An error with a nil MR means nothing was
+// rejected.
+func (m *Manager) RejectMRRecording(idOrBranch string, reason string, notify bool, noRecover bool, rec RejectionRecord) (*MergeRequest, error) {
+	return m.rejectMR(idOrBranch, reason, notify, noRecover, &rec)
+}
+
+func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noRecover bool, rec *RejectionRecord) (*MergeRequest, error) {
 	b := beads.New(m.rig.BeadsPath())
 	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
@@ -1034,23 +1104,7 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 			_, _ = fmt.Fprintf(m.output, "  %s\n", style.Dim.Render("--no-recover: source issue left untouched"))
 		}
 	} else if !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" && m.recoverDeadWorker != nil {
-		m.recoverDeadWorker(deadWorkerRecoveryRequest{
-			MRID:          mr.ID,
-			Branch:        mr.Branch,
-			Target:        mr.TargetBranch,
-			SourceIssue:   mr.IssueID,
-			Worker:        mr.Worker,
-			RigName:       m.rig.Name,
-			FailureType:   "editorial",
-			ErrorMsg:      reason,
-			AttemptNumber: mr.RetryCount + 1,
-			// A manual `gt mq reject` carries no om verdict to build a
-			// Receipt from (Score/Unresolved) — only the human-typed reason,
-			// which doubles as the RECOVERED_BEAD mail's Rejection-Summary
-			// line. Receipt stays nil, so `gt deacon redispatch` falls back
-			// to the plain attempt-count Redispatch for this path.
-			Summary: reason,
-		})
+		m.recoverDeadWorker(rejectionRequest(mr, m.rig.Name, reason, rec))
 		// This CLI path sends mail (RECOVERED_BEAD to the deacon) via
 		// recoverDeadWorker above; every other mail-sending CLI path waits
 		// for in-flight async notifications before returning so a fast exit
@@ -1058,6 +1112,16 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 		if m.router != nil {
 			m.router.WaitPendingNotifications()
 		}
+	}
+
+	// The verdict's durable record. Recovery already wrote it when it ran —
+	// the same note through the same writer, so appendRejectionNote finds it
+	// and stops. When recovery did not run (--no-recover, or the worker still
+	// holds the bead) this is the only writer, and a rejection with no
+	// findings on the bead is one the next attempt re-merges (gt-s4f6).
+	var recordErr error
+	if rec != nil && !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" {
+		recordErr = m.RecordRejectionFindings(mr, reason, *rec)
 	}
 
 	// Read the source issue's actual status back from the bead instead of
@@ -1070,7 +1134,25 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 		}
 	}
 
-	return mr, nil
+	return mr, recordErr
+}
+
+// RecordRejectionFindings appends mr's MERGE REJECTION note — the marker, its
+// Branch/Target/MR lines, and one parseable line per finding — to the source
+// bead's notes. It is the durable half of a rejection whose redispatch the
+// caller performs itself, so it reopens nothing and sends no mail.
+//
+// A path that also ran dead-worker recovery gets this note from that path
+// instead: the same note, through the same writer, so the write here finds an
+// identical block already on the bead and stops. It reports a write it could
+// not make; the durable record is the point of the call, and a caller that
+// swallows the error reports success for a rejection whose findings never
+// reached the next attempt (gt-s4f6).
+func (m *Manager) RecordRejectionFindings(mr *MergeRequest, reason string, rec RejectionRecord) error {
+	if mr == nil {
+		return nil
+	}
+	return recordRejectionFindings(beads.New(m.rig.BeadsPath()), rejectionRequest(mr, m.rig.Name, reason, &rec))
 }
 
 // PostMergeResult holds the result of a post-merge cleanup operation.

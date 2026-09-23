@@ -8,11 +8,19 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// priorFindingLineRE matches the interim MERGE REJECTION finding-line format
-// ("- id:<hex> sev:<severity> <path>:<line> — <title>"); om-gate T10 owns
-// writing these lines and may refine the format. The id identifies the
-// FINDING, not the diff it was found on — see RejectionFinding.ID for what a
-// writer of these lines must not use (gt-2ok0).
+// priorFindingLineRE matches the MERGE REJECTION finding-line format
+// ("- id:<hex> sev:<severity> <path>:<line> — <title>"). The id identifies
+// the FINDING, not the diff it was found on — see RejectionFinding.ID for
+// what a writer of these lines must not use (gt-2ok0).
+//
+// Either bullet matches: the writer is an agent-executed formula, and the rest
+// of the line is format enough that the bullet cannot make a non-finding line
+// match (gt-3mp1).
+//
+// The prose finding lines the same notes carry ("FINDING [major] <path>
+// (~line N): <title>") are deliberately not parsed: they carry no om finding
+// id, and an id invented here would be one om has never issued, so its
+// resolved/unresolved classification cannot key on it.
 //
 // The path group is greedy ((.+), not [^:]+) so a path containing its own
 // colon (e.g. a Windows-style "C:\..." path) still parses: greedy backtracks
@@ -23,7 +31,7 @@ import (
 // ever sees the line, so an empty title leaves nothing after the em dash at
 // all (gt-j6ez: both cases previously failed to match, silently dropping the
 // finding from BuildPriorFindings).
-var priorFindingLineRE = regexp.MustCompile(`^-\s*id:(\S+)\s+sev:(\S+)\s+(.+):(\d+)\s+—\s*(.*)$`)
+var priorFindingLineRE = regexp.MustCompile(`^[-•]\s*id:(\S+)\s+sev:(\S+)\s+(.+):(\d+)\s+—\s*(.*)$`)
 
 // BuildPriorFindings collects prior MERGE REJECTION findings for sourceIssue
 // so the reviewer classifies them resolved/unresolved/regressed instead of

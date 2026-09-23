@@ -705,6 +705,120 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 	}
 }
 
+// TestManager_RejectMRRecording_NoRecoverStillRecords is the hole gt-s4f6 is
+// about: --no-recover is the flag the refinery patrol passes, and it is the one
+// combination that used to leave the source bead carrying a rejection with no
+// findings on it — so the next attempt re-merged the same defect.
+func TestManager_RejectMRRecording_NoRecoverStillRecords(t *testing.T) {
+	t.Parallel()
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	mgr.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool {
+		t.Error("recovery must not run with noRecover")
+		return false
+	}
+
+	rec := RejectionRecord{
+		Findings: []RejectionFinding{
+			{ID: "cb332644e4cf", Severity: "major", Path: "internal/hooks/config.go", Line: 432, Title: "no self-filtering path"},
+		},
+		Attempt: 2,
+	}
+	if _, err := mgr.RejectMRRecording(mrIssue.ID, "EDITORIAL REJECTION (attempt 2): om gate request_changes", false, true, rec); err != nil {
+		t.Fatalf("RejectMRRecording() error: %v", err)
+	}
+
+	issue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", srcIssue.ID, err)
+	}
+	if !strings.Contains(issue.Notes, "- id:cb332644e4cf sev:major internal/hooks/config.go:432") {
+		t.Errorf("source bead notes lost the verdict's finding line:\n%s", issue.Notes)
+	}
+	if !strings.Contains(issue.Notes, MergeRejectionNoteMarker+" (attempt 2)") {
+		t.Errorf("note header does not name the attempt the caller passed:\n%s", issue.Notes)
+	}
+}
+
+// TestManager_RejectMRRecording_OneBlockWhenRecoveryAlsoWrites covers the
+// rejection whose worker is dead while recovery is still enabled: recovery
+// records the note and the caller's own record runs behind it. The bead must
+// end with ONE MERGE REJECTION block, because the formula derives the next
+// attempt number by counting them (gt-s4f6).
+func TestManager_RejectMRRecording_OneBlockWhenRecoveryAlsoWrites(t *testing.T) {
+	t.Parallel()
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	if err := b.CloseWithReason("done", srcIssue.ID); err != nil {
+		t.Fatalf("close source issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/nux/" + srcIssue.ID + "+abc123\nsource_issue: " + srcIssue.ID + "\nworker: nux\ntarget: main",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	// Stand in for dead-worker recovery's note write with the writer it uses.
+	mgr.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		if err := recordRejectionFindings(b, req); err != nil {
+			t.Errorf("recovery note write: %v", err)
+		}
+		return true
+	}
+
+	rec := RejectionRecord{
+		Findings: []RejectionFinding{
+			{ID: "cb332644e4cf", Severity: "major", Path: "internal/hooks/config.go", Line: 432, Title: "no self-filtering path"},
+		},
+		Attempt: 2,
+	}
+	if _, err := mgr.RejectMRRecording(mrIssue.ID, "EDITORIAL REJECTION (attempt 2): om gate request_changes", false, false, rec); err != nil {
+		t.Fatalf("RejectMRRecording() error: %v", err)
+	}
+
+	issue, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", srcIssue.ID, err)
+	}
+	if got := strings.Count(issue.Notes, MergeRejectionNoteMarker+" (attempt"); got != 1 {
+		t.Errorf("expected 1 MERGE REJECTION block for one rejection, got %d:\n%s", got, issue.Notes)
+	}
+	if !strings.Contains(issue.Notes, "- id:cb332644e4cf") {
+		t.Errorf("the single block lost the finding line:\n%s", issue.Notes)
+	}
+}
+
 // TestManager_RejectMR_SupersededSourceBead_NotReopened is the gt-pvwy
 // regression test for the exact gt-wisp-bakv incident: a source bead closed
 // with a deliberate supersede close_reason must survive 'gt mq reject'

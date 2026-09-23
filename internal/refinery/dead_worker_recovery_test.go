@@ -35,7 +35,33 @@ func (f *fakeRejectedBeads) Update(id string, opts beads.UpdateOptions) error {
 
 func (f *fakeRejectedBeads) Run(args ...string) ([]byte, error) {
 	f.runCalls = append(f.runCalls, args)
-	return nil, f.runErr
+	if f.runErr != nil {
+		return nil, f.runErr
+	}
+	// Model `bd update <id> --append-notes <note>`, so a test can assert the
+	// bead's end state rather than one call's argv. The write is an append
+	// because it runs while the owning polecat may still be appending its own
+	// notes, and a replace drops whatever landed between read and write
+	// (gt-nxvg).
+	if note, ok := appendNotesArg(args); ok && f.issue != nil {
+		if existing := strings.TrimSpace(f.issue.Notes); existing != "" {
+			f.issue.Notes = existing + "\n\n" + note
+		} else {
+			f.issue.Notes = note
+		}
+	}
+	return nil, nil
+}
+
+// appendNotesArg returns the note of a `bd update ... --append-notes <note>`
+// argv, and whether the call is one.
+func appendNotesArg(args []string) (string, bool) {
+	for i, a := range args {
+		if a == "--append-notes" && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
 }
 
 func deadWorkerReq() deadWorkerRecoveryRequest {
@@ -80,7 +106,10 @@ func TestRecoverRejectedMRDeadWorker_ReopensAndMailsDeacon(t *testing.T) {
 	if len(bd.runCalls) != 1 {
 		t.Fatalf("expected 1 notes update, got %d", len(bd.runCalls))
 	}
-	notesArg := bd.runCalls[0][len(bd.runCalls[0])-1]
+	if _, ok := appendNotesArg(bd.runCalls[0]); !ok {
+		t.Errorf("notes write is not an append, so a live polecat's own notes can be lost (gt-nxvg): %v", bd.runCalls[0])
+	}
+	notesArg := bd.issue.Notes
 	if !strings.Contains(notesArg, MergeRejectionNoteMarker+" (attempt 1)") {
 		t.Errorf("notes missing rejection marker: %q", notesArg)
 	}
@@ -307,7 +336,7 @@ func TestRecoverRejectedMRDeadWorker_FindingsTravelToNotesAndMail(t *testing.T) 
 	if len(bd.runCalls) != 1 {
 		t.Fatalf("expected 1 notes update, got %d", len(bd.runCalls))
 	}
-	notesArg := bd.runCalls[0][len(bd.runCalls[0])-1]
+	notesArg := bd.issue.Notes
 	if got := strings.Count(notesArg, "- id:"); got != 2 {
 		t.Errorf("expected 2 '- id:' lines in notes, got %d:\n%s", got, notesArg)
 	}
