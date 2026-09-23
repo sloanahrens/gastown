@@ -2,6 +2,7 @@ package refinery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -72,6 +73,12 @@ type BatchResult struct {
 
 	// Error is set if the batch processing encountered an infrastructure error.
 	Error error
+
+	// WorktreeExternallyDirty reports that the batch never ran because the
+	// Refinery's own worktree carried changes it did not create (gt-nnwy).
+	// Callers must not treat this as a verdict about any batch member: none
+	// was examined.
+	WorktreeExternallyDirty bool
 }
 
 // SkippedMR is a batch candidate dequeued by the pre-stack eligibility
@@ -325,6 +332,16 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.processSingleMR(ctx, batch[0], target)
 	}
 
+	// A multi-MR batch stages its rebase stack itself rather than through
+	// doMerge, so it needs the same gt-nnwy guard before its first mutation.
+	cleanupWorktree, err := e.beginWorktreeOwnedMerge("batch merge")
+	if err != nil {
+		result.Error = err
+		result.WorktreeExternallyDirty = errors.Is(err, ErrExternallyDirtyWorktree)
+		return result
+	}
+	defer cleanupWorktree()
+
 	// Realign local target to origin before staging: a prior run may have
 	// exited before restoring it (gt-032w, gt-u093). Every stack build below
 	// discards whatever was there anyway, so this never blocks the batch —
@@ -539,6 +556,13 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 	} else if processResult.NeedsApproval {
 		// PR awaiting human approval — leave in queue for retry on next poll.
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: PR awaiting approval, will retry\n", mr.ID)
+		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.WorktreeExternallyDirty {
+		// No MR was at fault and none was gated: the worktree was already
+		// dirty when the merge began (gt-nnwy). Left in queue and reported
+		// rather than raised as a batch error, exactly as the editorial
+		// refusal is (HandleMRInfoFailure deliberately nudges nobody).
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: merges refused — refinery worktree is not clean, left in queue\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
 	} else if processResult.EditorialRefused {
 		// A gate verdict about this diff, not a build/test failure: left in

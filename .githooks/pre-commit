@@ -1,0 +1,46 @@
+#!/bin/bash
+# Warn when a commit is made in a rig's refinery worktree (<town>/<rig>/refinery/rig).
+#
+# The refinery's worktree is a merge checkout, not a working copy: the Refinery
+# stages each MR on it, runs the gates against that tree, and pushes the result
+# to the default branch. Work committed here lands on the merge checkout's own
+# local branch, one push away from the target — and it is invisible to the MR
+# that is being gated, so a gate can run over someone's scratch work (gt-nnwy,
+# observed 2026-09-18: staged changes on main in ~/gt/gastown/refinery/rig while
+# a merge was in flight).
+#
+# This warns and lets the commit through. It cannot refuse: a local commit here
+# is recoverable (the Refinery realigns the branch to origin before each merge),
+# the operator may be mid-repair, and a refusal with no escape hatch would block
+# exactly the person fixing the checkout. The merge-side guard is the one that
+# fails closed — internal/refinery/worktree_guard.go refuses to gate a worktree
+# carrying changes it did not create.
+#
+# Work in your own worktree instead: `gt crew` for a persistent human workspace,
+# or /tmp for scratch files.
+
+worktree_root=$(git rev-parse --show-toplevel 2>/dev/null)
+case "$worktree_root" in
+  */refinery/rig) ;;
+  *) exit 0 ;;
+esac
+
+cat >&2 <<EOF
+⚠️  Committing in a REFINERY worktree: $worktree_root
+
+    This checkout is the Refinery's merge checkout, not a working copy. The
+    Refinery stages merge requests on this tree, runs the gates against it, and
+    pushes the result to the default branch — so work left here can be gated and
+    landed as if it were part of an MR, and staged changes here make the
+    Refinery refuse to merge at all until a human clears them.
+
+    Move this work somewhere it belongs before committing:
+
+        git stash list            # the stash is shared with the polecat worktrees
+        git switch -c unused/refinery-rig-\$(date +%Y%m%d)
+        git commit -am "wip: moved off the refinery rig worktree"
+
+    Use 'gt crew' for a persistent workspace of your own, or /tmp for scratch.
+EOF
+
+exit 0

@@ -417,6 +417,14 @@ Understanding this hierarchy is essential for proper configuration.
 Note: The per-rig `<rig>/mayor/rig/` directory is NOT a working directory—it's
 a git clone that holds the canonical `.beads/` database for that rig.
 
+`<rig>/refinery/rig/` is the Refinery's, and only the Refinery's: it stages each
+merge request on that tree, runs the gates against it, and pushes the result. An
+edit or a staged file there is read by the next gate as if it were part of the
+MR, and the Refinery refuses to merge at all while tracked changes it did not
+create sit in the tree (`internal/refinery/worktree_guard.go`). Take the work to
+your own clone — `gt crew` — or to `/tmp`; the pre-commit hook in `.githooks/`
+warns if you commit there.
+
 ### Settings File Locations
 
 Settings are installed in gastown-managed parent directories and passed to

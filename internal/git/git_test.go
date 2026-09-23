@@ -472,6 +472,87 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+// A submodule whose checked-out commit differs from the gitlink its
+// superproject records is how a submodule looks most of its life. Callers
+// asking "did anyone change this working tree?" want StatusIgnoringSubmodules;
+// Status still reports the gitlink, because callers preserving a user's work
+// must not miss it.
+func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
+	subRoot := t.TempDir()
+	subBare := filepath.Join(subRoot, "sub.git")
+	subWork := filepath.Join(subRoot, "sub-work")
+	runGit(t, subRoot, "init", "--bare", "--initial-branch=main", subBare)
+	runGit(t, subRoot, "clone", subBare, subWork)
+	runGit(t, subWork, "config", "user.email", "test@test.com")
+	runGit(t, subWork, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(subWork, "README.md"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write submodule file: %v", err)
+	}
+	runGit(t, subWork, "add", ".")
+	runGit(t, subWork, "commit", "-m", "submodule initial")
+	runGit(t, subWork, "push", "-u", "origin", "main")
+
+	dir := initTestRepo(t)
+	runGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", subBare, "libs/sub")
+	runGit(t, dir, "commit", "-m", "add submodule")
+
+	// Move the submodule's own HEAD: the superproject's gitlink now names the
+	// previous commit.
+	subCheckout := filepath.Join(dir, "libs", "sub")
+	runGit(t, subCheckout, "config", "user.email", "test@test.com")
+	runGit(t, subCheckout, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(subCheckout, "v2.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write submodule file: %v", err)
+	}
+	runGit(t, subCheckout, "add", ".")
+	runGit(t, subCheckout, "commit", "-m", "submodule update")
+
+	g := NewGit(dir)
+	plain, err := g.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if plain.Clean {
+		t.Fatal("precondition failed: Status does not report the gitlink drift")
+	}
+
+	ignoring, err := g.StatusIgnoringSubmodules()
+	if err != nil {
+		t.Fatalf("StatusIgnoringSubmodules: %v", err)
+	}
+	if !ignoring.Clean {
+		t.Errorf("gitlink drift must not count as a change to this working tree, got %+v", ignoring)
+	}
+}
+
+func TestGitDirResolvesLinkedWorktreeToItsOwnDirectory(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	gitDir, err := g.GitDir()
+	if err != nil {
+		t.Fatalf("GitDir: %v", err)
+	}
+	if !filepath.IsAbs(gitDir) {
+		t.Errorf("GitDir must be absolute, got %q", gitDir)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil {
+		t.Errorf("GitDir %q has no HEAD: %v", gitDir, err)
+	}
+
+	// A linked worktree gets its own git directory, so a marker written there
+	// belongs to that worktree and not to its neighbours.
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGit(t, dir, "worktree", "add", "-b", "linked-branch", linked)
+	linkedGitDir, err := NewGit(linked).GitDir()
+	if err != nil {
+		t.Fatalf("GitDir on linked worktree: %v", err)
+	}
+	if linkedGitDir == gitDir {
+		t.Errorf("a linked worktree must resolve to its own git directory, both got %q", gitDir)
+	}
+}
+
 func TestStatusOnMissingWorkDirReportsMissingDirectoryNotGitBinary(t *testing.T) {
 	dir := t.TempDir()
 	goneDir := filepath.Join(dir, "gone")

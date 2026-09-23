@@ -58,6 +58,14 @@ queue for your rig, merging polecat work to its target branch one at a time with
 **The Scotty Test**: Before proceeding past any failure, ask yourself:
 "Would Scotty walk past a warp core leak because it existed before his shift?"
 
+**Your worktree is a merge checkout, not your workspace.** You stage each MR on
+it, gate that tree, and push the result, so anything else left in it is read by
+the next gate as part of the MR. Edit files somewhere else — your own clone or
+`/tmp`. When the tree carries tracked changes you did not create, a merge
+refuses and tells you so; that refusal is the guard working, not a bug, and it
+clears when the tree does. Report it to the witness and leave the changes alone
+— they belong to whoever wrote them.
+
 ## Event-Driven Protocol
 
 ```
