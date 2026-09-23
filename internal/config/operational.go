@@ -56,12 +56,6 @@ const (
 	DefaultDoctorMolCooldown              = 5 * time.Minute
 	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
 
-	// DefaultBootSpawnCooldown is only consulted when a heartbeat fires, so a
-	// value below the heartbeat gates nothing: every tick spawned a Boot and
-	// killed the previous one mid-turn, paying its ~23k-token prefill again
-	// (gt-w28o). Two heartbeats is the smallest value that can skip a tick.
-	DefaultBootSpawnCooldown = 2 * DefaultRecoveryHeartbeatInterval
-
 	DefaultBootIdleSuppression = 15 * time.Minute
 
 	// DefaultBootTurnBudget is how long a live Boot session may keep working
@@ -460,12 +454,15 @@ func (d *DaemonThresholds) RecoveryHeartbeatIntervalD() time.Duration {
 	return DefaultRecoveryHeartbeatInterval
 }
 
-// BootSpawnCooldownD returns the configured or default boot spawn cooldown.
+// BootSpawnCooldownD returns the configured Boot spawn cooldown, defaulting to
+// two recovery heartbeats. The gate that reads it fires on a heartbeat, so a
+// cooldown shorter than one heartbeat skips no tick and respawns Boot every
+// tick, paying a fresh prefill each time (gt-w28o).
 func (d *DaemonThresholds) BootSpawnCooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.BootSpawnCooldown, DefaultBootSpawnCooldown)
+	if d == nil {
+		return 2 * DefaultRecoveryHeartbeatInterval
 	}
-	return DefaultBootSpawnCooldown
+	return ParseDurationOrDefault(d.BootSpawnCooldown, 2*d.RecoveryHeartbeatIntervalD())
 }
 
 // Boot triage modes (DaemonThresholds.BootMode).

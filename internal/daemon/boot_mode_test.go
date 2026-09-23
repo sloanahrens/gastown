@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -56,50 +55,49 @@ func TestRunMechanicalBootTriage_InFlightGuardAndCooldownStamp(t *testing.T) {
 	}
 }
 
-// Default (mechanical) mode end to end: ensureBootRunning runs the stub
-// `gt boot triage` instead of opening a tmux session, and stamps the
-// cooldown. The stub records its argv so we know what would have run.
-func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake binaries need bash")
-	}
-	townRoot := t.TempDir()
-	fakeBinDir := t.TempDir()
-	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeFakeTmux(t, fakeBinDir)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", tmuxLog)
-	t.Setenv("GT_DEGRADED", "false")
-	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
+// mechanicalTriageStub points bootTriageExecutable at a `gt` stub that records
+// its argv, and returns the log it writes.
+func mechanicalTriageStub(t *testing.T) string {
+	t.Helper()
+	stub := filepath.Join(t.TempDir(), "gt")
 	argvLog := filepath.Join(t.TempDir(), "argv.log")
-	stub := filepath.Join(fakeBinDir, "gt")
 	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho \"$@\" >> "+argvLog+"\necho 'Triage complete: nothing'\n"), 0o755); err != nil {
-		t.Fatal(err)
+		t.Fatalf("write gt stub: %v", err)
 	}
 	orig := bootTriageExecutable
 	bootTriageExecutable = func() (string, error) { return stub, nil }
 	t.Cleanup(func() { bootTriageExecutable = orig })
+	return argvLog
+}
 
-	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
-	d.ensureBootRunning()
-
+// awaitTriageArgv waits for the async mechanical triage to record itself.
+func awaitTriageArgv(t *testing.T, argvLog string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, _ := os.ReadFile(argvLog); strings.Contains(string(b), "boot triage") {
-			break
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	b, _ := os.ReadFile(argvLog)
-	if !strings.Contains(string(b), "boot triage") {
-		t.Fatalf("mechanical mode did not run `gt boot triage`; argv log: %q", string(b))
+	t.Fatalf("mechanical triage did not run `gt boot triage`; argv log: %q", string(b))
+}
+
+// Default (mechanical) mode end to end: ensureBootRunning runs the stub
+// `gt boot triage` instead of opening a tmux session, and stamps the cooldown.
+// The stub records its argv so we know what would have run.
+func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
+	townRoot, tmuxLog := bootTestTown(t)
+	argvLog := mechanicalTriageStub(t)
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
+	d.ensureBootRunning()
+
+	awaitTriageArgv(t, argvLog)
 	if d.bootLastSpawned.IsZero() {
 		t.Error("cooldown stamp not set by mechanical triage")
 	}
@@ -107,6 +105,25 @@ func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
 	if strings.Contains(string(data), "new-session") {
 		t.Errorf("mechanical mode must not open a Boot tmux session; tmux log: %s", data)
 	}
+}
+
+// Mechanical triage is in-process and pays no prefill, so the agent spawn
+// cooldown must not gate it: gating it halves the default mode's triage
+// cadence, and a Deacon that dies then waits twice as long to be noticed
+// (gt-w28o).
+func TestEnsureBootRunning_MechanicalIgnoresSpawnCooldown(t *testing.T) {
+	townRoot, _ := bootTestTown(t)
+	argvLog := mechanicalTriageStub(t)
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
+	d.bootLastSpawned = time.Now() // a Boot spawn inside the cooldown window
+
+	d.ensureBootRunning()
+
+	awaitTriageArgv(t, argvLog)
 }
 
 // Under go test the executable is the test binary; the mechanical path must

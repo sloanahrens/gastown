@@ -388,8 +388,9 @@ type DaemonThresholds struct {
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
-	// BootSpawnCooldown prevents Boot from spawning on every daemon heartbeat
-	// (default: two recovery heartbeats — see DefaultBootSpawnCooldown).
+	// BootSpawnCooldown is how long a Boot agent spawn suppresses the next one
+	// (default: two recovery heartbeats). It gates no in-process triage, which
+	// pays no prefill.
 	BootSpawnCooldown string `json:"boot_spawn_cooldown,omitempty"`
 
 	// BootTurnBudget is how long a live Boot session may keep working before the

@@ -1519,39 +1519,50 @@ func (d *Daemon) getDeaconSessionName() string {
 	return session.DeaconSessionName()
 }
 
-// ensureBootRunning spawns Boot to triage the Deacon.
-// Boot is a fresh-each-tick watchdog that decides whether to start/wake/nudge
-// the Deacon, centralizing the "when to wake" decision in an agent.
-// In degraded mode (no tmux), falls back to mechanical checks.
 // bootSpawnCooldown returns the config-driven boot spawn cooldown.
-// Boot triage runs are expensive (AI reasoning); if one just ran, skip.
 func (d *Daemon) bootSpawnCooldown() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().BootSpawnCooldownD()
 }
 
-// bootRunAge reports how long Boot's current session has been alive. tmux owns
-// the session start, so the age stays correct across a daemon restart; dated is
-// false when the live session cannot be dated (gt-w28o).
-func (d *Daemon) bootRunAge() (time.Duration, bool) {
-	if created, err := d.tmux.SessionCreated(session.BootSessionName()); err == nil && !created.IsZero() {
-		return time.Since(created), true
+// bootSessionStart returns when Boot's current session started, and whether it
+// could be dated. tmux owns the start, so it survives a daemon restart; the
+// spawn stamp covers a session tmux cannot date (gt-w28o).
+func (d *Daemon) bootSessionStart() (time.Time, bool) {
+	if created, err := d.tmux.GetSessionCreatedTime(session.BootSessionName()); err == nil && !created.IsZero() {
+		return created, true
 	}
-	// Fall back to our own spawn stamp, which dates sessions we started but is
-	// absent after a restart — the case that needs tmux to answer (gt-w28o).
 	if !d.bootLastSpawned.IsZero() {
-		return time.Since(d.bootLastSpawned), true
+		return d.bootLastSpawned, true
 	}
-	return 0, false
+	return time.Time{}, false
 }
 
-func (d *Daemon) ensureBootRunning() {
-	// Cooldown gate: skip if Boot was spawned recently (fixes #2084)
-	if !d.bootLastSpawned.IsZero() && time.Since(d.bootLastSpawned) < d.bootSpawnCooldown() {
-		d.logger.Printf("Boot spawned %s ago, within cooldown (%s), skipping",
-			time.Since(d.bootLastSpawned).Round(time.Second), d.bootSpawnCooldown())
-		return
+// bootSessionWorking reports whether a live Boot session should be left alone,
+// with a phrase naming the reason for the log. Boot idles at its prompt after a
+// triage run, so its age alone cannot tell a working session from a spent one:
+// a session whose triage already completed, or one that cannot be dated, is
+// reaped; only a session with no completion stamp gets the turn budget (gt-w28o).
+func (d *Daemon) bootSessionWorking(b *boot.Boot) (string, bool) {
+	start, dated := d.bootSessionStart()
+	if !dated {
+		return "alive but undated", false
 	}
+	if status, err := b.LoadStatus(); err == nil && status.CompletedAt.After(start) {
+		return fmt.Sprintf("finished its triage run %s ago", time.Since(status.CompletedAt).Round(time.Second)), false
+	}
+	budget := d.loadOperationalConfig().GetDaemonConfig().BootTurnBudgetD()
+	age := time.Since(start)
+	if age >= budget {
+		return fmt.Sprintf("alive %s, past the turn budget (%s)", age.Round(time.Second), budget), false
+	}
+	return fmt.Sprintf("alive %s, within the turn budget (%s)", age.Round(time.Second), budget), true
+}
 
+// ensureBootRunning spawns Boot to triage the Deacon. Boot is a fresh-each-tick
+// watchdog that decides whether to start/wake/nudge the Deacon, centralizing the
+// "when to wake" decision in an agent; with no tmux it falls back to mechanical
+// checks.
+func (d *Daemon) ensureBootRunning() {
 	// Idle guard: skip if Deacon is healthy AND no beads are actively in flight.
 	//
 	// Boot's job is to triage a stuck or unresponsive Deacon and to flag stuck
@@ -1598,6 +1609,16 @@ func (d *Daemon) ensureBootRunning() {
 		return
 	}
 
+	// Cooldown gate: a Boot agent spawn costs a ~23k-token prefill, so one that
+	// just ran skips this heartbeat (fixes #2084). Mechanical, degraded and
+	// idle-check triage are in-process and pay no prefill, which is why they
+	// return above rather than through this gate.
+	if !d.bootLastSpawned.IsZero() && time.Since(d.bootLastSpawned) < d.bootSpawnCooldown() {
+		d.logger.Printf("Boot spawned %s ago, within cooldown (%s), skipping",
+			time.Since(d.bootLastSpawned).Round(time.Second), d.bootSpawnCooldown())
+		return
+	}
+
 	// Idle check: run gt-idle-check to see if the system needs waking.
 	// If idle (all rigs parked, no polecats, deacon alive), skip the expensive
 	// Claude Boot session and use degraded mechanical triage instead.
@@ -1618,26 +1639,18 @@ func (d *Daemon) ensureBootRunning() {
 		}
 	}
 
-	// Leave a Boot that is still working alone (gt-w28o). Its turn outlasts a
-	// heartbeat on a slow model, and killing it mid-prefill then spawning a
-	// replacement paid that ~23k-token prefill twice. A session past the turn
-	// budget is wedged rather than slow, and reaping it is how Boot reaches the
-	// Deacon again.
+	// Leave a Boot that is still working alone (gt-w28o): its turn outlasts a
+	// heartbeat on a slow model, and killing it mid-prefill so its replacement
+	// pays the same prefill again is the tax this guard exists to stop. A
+	// session the guard does not keep falls through to be reaped, which is how
+	// Boot reaches the Deacon again.
 	if alive, err := d.tmux.HasSession(session.BootSessionName()); err == nil && alive {
-		age, dated := d.bootRunAge()
-		budget := d.loadOperationalConfig().GetDaemonConfig().BootTurnBudgetD()
-		switch {
-		case !dated:
-			d.logger.Printf("Boot session %s alive, age unknown, leaving it to finish", session.BootSessionName())
+		reason, working := d.bootSessionWorking(b)
+		if working {
+			d.logger.Printf("Boot session %s %s, leaving it to finish", session.BootSessionName(), reason)
 			return
-		case age < budget:
-			d.logger.Printf("Boot session %s alive %s, within turn budget (%s), leaving it to finish",
-				session.BootSessionName(), age.Round(time.Second), budget)
-			return
-		default:
-			d.logger.Printf("Boot session %s alive %s, past turn budget (%s), reaping",
-				session.BootSessionName(), age.Round(time.Second), budget)
 		}
+		d.logger.Printf("Boot session %s %s, reaping", session.BootSessionName(), reason)
 	}
 
 	// Spawn Boot in a fresh tmux session
@@ -1701,8 +1714,8 @@ func (d *Daemon) runMechanicalBootTriage() {
 		d.logger.Println("Boot: mechanical triage still running, skipping")
 		return
 	}
-	// Count the attempt for the cooldown whether or not it succeeds, so a
-	// failing triage cannot re-run on every heartbeat.
+	// Stamp the attempt at start, so the daemon's record of Boot's last run
+	// does not depend on the triage finishing.
 	d.bootLastSpawned = time.Now()
 	exe, err := bootTriageExecutable()
 	if err != nil {
