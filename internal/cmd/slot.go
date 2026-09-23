@@ -234,9 +234,38 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 }
 
 func printSlotStatusText(cmd *cobra.Command, rep slot.Report) {
+	printPoolStatusText(cmd, rep)
+	printSlotMarkers(cmd, rep)
+}
+
+// printSlotMarkers lists the in-flight markers the pool does not count, with
+// the hold's age: a review in flight is what makes the rebuild plugin defer,
+// and how long it has been running is the first thing its reader asks
+// (gt-97cm).
+func printSlotMarkers(cmd *cobra.Command, rep slot.Report) {
+	for _, st := range rep.Slots {
+		if !st.Marker {
+			continue
+		}
+		if st.Owner != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "In-flight marker %s: held by %s (pid %d, since %s, age %s)\n",
+				st.Name, st.Owner.Role, st.Owner.PID,
+				st.Owner.AcquiredAt.Format(time.RFC3339), time.Since(st.Owner.AcquiredAt).Round(time.Second))
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "In-flight marker %s: held (owner metadata unavailable)\n", st.Name)
+	}
+}
+
+// printPoolStatusText renders the pool's own picture: the slots and what each
+// one is doing, never the marker rows that follow them (see printSlotMarkers).
+func printPoolStatusText(cmd *cobra.Command, rep slot.Report) {
 	if rep.Total > 1 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate pool: %d/%d held (%d reserved for the refinery)\n", rep.HeldCount, rep.Total, rep.Reserved)
 		for _, st := range rep.Slots {
+			if st.Marker {
+				continue
+			}
 			label := "free"
 			if st.Held {
 				if st.Owner != nil {

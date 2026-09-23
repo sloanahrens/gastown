@@ -99,3 +99,36 @@ func TestResolveHolds_LeavesAnEmptyHistoryEmpty(t *testing.T) {
 		t.Errorf("ResolveHolds(nil) = %+v, want nothing", got)
 	}
 }
+
+// TestResolveHolds_IgnoresMarkerRows: a marker's Index continues the pool's
+// numbering rather than naming a real slot, and can coincide with a history
+// entry's slot from a pool that used to be larger. That must read as an
+// ordinary abandoned hold, never as "reclaimed by" the marker's om-review
+// holder (gt-97cm finding 5).
+func TestResolveHolds_IgnoresMarkerRows(t *testing.T) {
+	entry := HistoryEntry{Role: "gastown/refinery-batch", Slot: 1, PID: 4242}
+	rep := Report{
+		Total: 1,
+		Slots: []SlotState{
+			{Index: 0},
+			{
+				Index:  1,
+				Held:   true,
+				Marker: true,
+				Name:   "om-review-gt-mr-1",
+				Owner:  &Owner{Role: "gastown/om-review", PID: 55},
+			},
+		},
+	}
+
+	got := ResolveHolds([]HistoryEntry{entry}, rep)
+	if len(got) != 1 {
+		t.Fatalf("ResolveHolds returned %d holds, want 1", len(got))
+	}
+	if got[0].Resolution != HoldAbandoned {
+		t.Errorf("resolution = %q, want %q", got[0].Resolution, HoldAbandoned)
+	}
+	if got[0].ReclaimedBy != nil {
+		t.Errorf("reclaimed_by = %+v, want none — the marker at the same index is not this entry's slot", got[0].ReclaimedBy)
+	}
+}

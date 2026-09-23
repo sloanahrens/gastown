@@ -39,6 +39,11 @@ const (
 	// grades the diff against the deployed rubric and would approve the
 	// change this class exists to stop.
 	RubricRegression FailureClass = "rubric_regression"
+	// ReviewInFlight means a review of the same work already holds the
+	// in-flight marker: this invocation refused instead of starting, so a
+	// duplicate cannot bill the backend twice or race a second note onto the
+	// diff (gt-97cm).
+	ReviewInFlight FailureClass = "review_in_flight"
 )
 
 // Retryable reports whether gt mq review should retry the review once

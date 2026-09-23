@@ -49,6 +49,14 @@ type ResolvedHold struct {
 func ResolveHolds(entries []HistoryEntry, rep Report) []ResolvedHold {
 	bySlot := make(map[int]SlotState, len(rep.Slots))
 	for _, st := range rep.Slots {
+		if st.Marker {
+			// A marker's Index continues the pool's numbering rather than
+			// naming a real slot (see marker.go), and can coincide with a
+			// history entry's slot from a pool that used to be larger — which
+			// must not read as that entry's hold being "reclaimed by" the
+			// marker's holder (gt-97cm finding 5).
+			continue
+		}
 		bySlot[st.Index] = st
 	}
 

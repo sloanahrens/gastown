@@ -318,6 +318,10 @@ type Owner struct {
 	// Slot is the pool index this owner holds (0 for the original single
 	// slot). Filled in by StatusPool when read back.
 	Slot int `json:"slot"`
+	// Name is the caller-given name of the marker this owner holds, written
+	// only to a marker's owner file (see MarkerLockPath). A slot's owner file
+	// leaves it empty: a slot is identified by its index.
+	Name string `json:"name,omitempty"`
 }
 
 // Handle represents a held slot. Call Release exactly once when the
@@ -455,7 +459,8 @@ type Report struct {
 	// Slots is the per-slot picture when the report came from StatusPool or
 	// StatusPoolLocksOnly (Status fills it with the single slot 0, as does
 	// the locks-only path). HeldCount/Total summarize it; Reserved is how many
-	// low slots only gate roles may take.
+	// low slots only gate roles may take. In-flight markers follow the pool's
+	// own slots as Marker rows, which Total and HeldCount do not count.
 	Slots     []SlotState
 	HeldCount int
 	Total     int

@@ -211,6 +211,55 @@ func TestBuildGateStatus_OMReviewRowAppearsWithMarker(t *testing.T) {
 	}
 }
 
+// TestBuildGateStatus_OMReviewRowAppearsWithAMarkerRow: the holder a review in
+// flight reports is an in-flight marker row, which the pool does not count —
+// the panel still has to show it as the om-review class, at the age its
+// operator asks about, and not as a pool slot (gt-97cm).
+func TestBuildGateStatus_OMReviewRowAppearsWithAMarkerRow(t *testing.T) {
+	pinProcessAlive(t, true)
+	rep := slot.Report{
+		Slots: []slot.SlotState{
+			{Index: 0},
+			{
+				Index:  1,
+				Held:   true,
+				Marker: true,
+				Name:   "om-review-gt-mr-1",
+				Owner: &slot.Owner{
+					Role:       "gastown/om-review",
+					PID:        os.Getpid(),
+					AcquiredAt: time.Now().Add(-12 * time.Minute),
+					Slot:       1,
+					Name:       "om-review-gt-mr-1",
+				},
+			},
+		},
+		Total: 1,
+	}
+
+	gs := buildGateStatus(rep)
+
+	if got := strings.Join(gateRoleClasses(gs), ","); got != "refinery,refinery-batch,main-branch-test,om-review,polecats" {
+		t.Fatalf("role classes = %q, want the om-review row", got)
+	}
+	if gs.Roles[3].State != "held" || gs.Roles[3].Detail != "in flight since 12m" {
+		t.Errorf("om-review row = %+v, want the marker's hold and age with no slot number", gs.Roles[3])
+	}
+	if len(gs.Slots) != 1 {
+		t.Fatalf("gs.Slots = %+v, want only the pool's own slot — a marker is not a pool slot", gs.Slots)
+	}
+	if gs.Slots[0].State != "free" {
+		t.Errorf("slot 0 = %+v, want free: a marker holds no pool slot", gs.Slots[0])
+	}
+	if gs.Busy || gs.HeldCount != 0 {
+		t.Errorf("a review in flight must not read as the pool being held: %+v", gs)
+	}
+	want := "om-review in flight"
+	if len(gs.Summaries) != 2 || gs.Summaries[0] != want {
+		t.Errorf("summaries = %v, want %q first (plus the free-pool line, since HeldCount is 0)", gs.Summaries, want)
+	}
+}
+
 // TestBuildGateStatus_UnownedHoldIsNotAPolecatSuite: a held slot whose owner
 // file is missing or unreadable has an unknown role, and the panel says so
 // instead of filing it under the polecat catch-all.

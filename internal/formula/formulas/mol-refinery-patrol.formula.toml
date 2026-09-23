@@ -887,23 +887,29 @@ per MR for no reason.
 
 **Exit 2 — execution error (never an approval):** `gt mq review` could not
 produce a verdict — binary missing, version mismatch, backend timeout, or
-similar. This is an infra failure, not a judgment on the branch. (Since Step 0
-already skips the call when `editorial_required` is not `"true"`, a
-config_error here means the rig's config changed to required mid-run, or a
-`--force` call happened elsewhere — treat it the same as any other exit 2,
-never as an approval or a skip.)
+similar — with one exception below. This is an infra failure, not a judgment
+on the branch. (Since Step 0 already skips the call when `editorial_required`
+is not `"true"`, a config_error here means the rig's config changed to
+required mid-run, or a `--force` call happened elsewhere — treat it the same
+as any other exit 2, never as an approval or a skip.)
 - Read the failure class from the review JSON:
   ```bash
   jq -r '.Class' "${TMPDIR:-/tmp}/gt-mq-review-$(id -u)/<mr-bead-id>.json"
   ```
-- Leave the MR bead open and the branch intact — do not touch either.
-- Escalate to the witness with the failure class:
-  ```bash
-  gt mail send <rig>/witness -s "HELP: gt mq review failed" -m "MR: <mr-bead-id>
-  Issue: <issue-id>
-  Branch: <branch>
-  failure_class: <class from above>"
-  ```
+- **If the class is `review_in_flight`: not an infra failure.** A review of
+  the same work already holds the marker (gt-97cm) and will write its own
+  verdict shortly. Skip escalation (do NOT mail the witness) and go straight
+  to the cleanup and loop-check below — the next patrol cycle finds either
+  that review's note recorded or the marker still held.
+- For every other class:
+  - Leave the MR bead open and the branch intact — do not touch either.
+  - Escalate to the witness with the failure class:
+    ```bash
+    gt mail send <rig>/witness -s "HELP: gt mq review failed" -m "MR: <mr-bead-id>
+    Issue: <issue-id>
+    Branch: <branch>
+    failure_class: <class from above>"
+    ```
 - Clean up the temp branch and skip to loop-check:
   ```bash
   git checkout {{target_branch}}
@@ -911,7 +917,8 @@ never as an approval or a skip.)
   ```
 - Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
 
-Track: review exit code, failure class (exit 2 only), polecat liveness checked
+Track: review exit code, failure class (exit 2 only) and whether
+review_in_flight was left open with no escalation, polecat liveness checked
 and the dead-polecat case reopened + handed to the deacon, and — exit 1 only —
 the MR closed as rejected with the source bead carrying the MERGE REJECTION
 note and its finding lines."""

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // PriorFinding is one prior MERGE REJECTION finding carried forward into
@@ -183,12 +184,72 @@ type Finding struct {
 	Title    string `json:"title,omitempty"`
 }
 
+// reviewMarkerSuffix is the role tail gt slot status, the dashboard's Gate
+// panel and plugins/rebuild-gt key on to recognize an om review in flight
+// (gt-97cm).
+const reviewMarkerSuffix = "om-review"
+
+// reviewMarkerRole names the role an in-flight review of rig holds, e.g.
+// "gastown/om-review".
+func reviewMarkerRole(rig string) string {
+	return rig + "/" + reviewMarkerSuffix
+}
+
+// reviewMarkerName keys a review's marker on the work being reviewed — its MR,
+// or the commit a landed review is answering for. Two invocations of the same
+// review therefore collide on one name and the second is refused, while the
+// batch's parallel members (ReviewParallelism) each hold their own.
+func reviewMarkerName(req ReviewRequest) string {
+	key := req.MRID
+	if key == "" && req.Landed != nil {
+		key = req.Landed.Commit
+	}
+	if key == "" {
+		key = req.Branch
+	}
+	if key == "" {
+		key = "unkeyed"
+	}
+	return reviewMarkerSuffix + "-" + key
+}
+
+// acquireReviewMarker takes this review's in-flight marker and returns a func
+// that releases it, a no-op when RigDir is empty since there is then no town
+// for the marker to be visible in.
+func acquireReviewMarker(req ReviewRequest) (func(), error) {
+	if req.RigDir == "" {
+		return func() {}, nil
+	}
+	h, err := slot.AcquireMarker(filepath.Dir(req.RigDir), reviewMarkerName(req), reviewMarkerRole(req.Rig))
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Release() }, nil
+}
+
 // Run rehearses (or accepts an already-rehearsed) head, asserts the harness
 // version, invokes the rig's editorial gate script, classifies the outcome,
 // retries once for transient classes, and on a verdict writes the note and
 // receipt (and, on an approve carrying major findings, one follow-up bead
 // per finding — DECISION 8: approval never dissolves a finding).
 func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
+	// Acquired before the manifest load so a version-assert refusal still
+	// shows its hold, and released on every exit path below, panics included
+	// (gt-97cm).
+	release, err := acquireReviewMarker(req)
+	if err != nil {
+		// A duplicate of a running review is refused as such; any other way the
+		// marker could not be taken (an unwritable lock directory) is Tooling,
+		// so the underlying error is not reported as a review in flight.
+		class := Tooling
+		var held *slot.MarkerHeldError
+		if errors.As(err, &held) {
+			class = ReviewInFlight
+		}
+		return failureResult(deps, req, class, err.Error(), 0)
+	}
+	defer release()
+
 	cfg := req.Config.WithDefaults()
 
 	manifest, err := LoadManifest(req.RigDir)

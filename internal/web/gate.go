@@ -54,6 +54,12 @@ type GateSlotRow struct {
 	PID      int
 	Since    string // local time the holder acquired the slot
 	Age      string // short hold age, e.g. "12m"
+	// Marker is set on a row built from an in-flight marker rather than a
+	// pool slot (see slot.SlotState.Marker); such a row is never appended to
+	// GateStatus.Slots, but still carries Name for the om-review role row's
+	// detail text.
+	Marker bool
+	Name   string
 }
 
 // GateRoleRow is one gate role class and what it is doing with the pool.
@@ -109,7 +115,7 @@ func buildGateStatus(rep slot.Report) *GateStatus {
 	var unowned []GateSlotRow
 
 	for _, st := range rep.Slots {
-		row := GateSlotRow{Index: st.Index, Reserved: st.Index < rep.Reserved, State: "free"}
+		row := GateSlotRow{Index: st.Index, Reserved: st.Index < rep.Reserved, State: "free", Marker: st.Marker, Name: st.Name}
 		if st.Held {
 			row.State = "held"
 			if st.Owner != nil {
@@ -129,6 +135,12 @@ func buildGateStatus(rep slot.Report) *GateStatus {
 				class := gateRoleClass(row.Role)
 				holders[class] = append(holders[class], row)
 			}
+		}
+		if st.Marker {
+			// A review in flight holds no pool slot (gt-97cm): it is reported
+			// through the om-review role row above, never as a Gate panel slot,
+			// or the panel would show an extra slot index no pool grant made.
+			continue
 		}
 		gs.Slots = append(gs.Slots, row)
 	}
@@ -197,6 +209,14 @@ func gateRoleRow(class string, rows []GateSlotRow) GateRoleRow {
 
 // gateHoldDetail is the class's own phrasing for one held slot.
 func gateHoldDetail(class string, r GateSlotRow) string {
+	if r.Marker {
+		// A marker's Index is not a real slot number (see slot.SlotState.Marker);
+		// naming one here would describe a pool grant that never happened.
+		if r.State == "stale" {
+			return fmt.Sprintf("stale hold (pid %d is gone)", r.PID)
+		}
+		return fmt.Sprintf("in flight since %s", r.Age)
+	}
 	if r.State == "stale" {
 		return fmt.Sprintf("stale hold on slot %d (pid %d is gone)", r.Index, r.PID)
 	}
@@ -231,6 +251,10 @@ func gateSummaries(holders map[string][]GateSlotRow, unowned []GateSlotRow, rep 
 	for _, class := range []string{gateClassRefinery, gateClassBatch, gateClassMainTest, gateClassOMReview} {
 		for _, r := range holders[class] {
 			switch {
+			case r.Marker && r.State == "stale":
+				lines = append(lines, fmt.Sprintf("%s: stale hold (owner pid %d is gone)", gateSummaryName(class), r.PID))
+			case r.Marker:
+				lines = append(lines, fmt.Sprintf("%s in flight", gateSummaryName(class)))
 			case r.State == "stale":
 				lines = append(lines, fmt.Sprintf("%s: stale hold on slot %d (owner pid %d is gone)",
 					gateSummaryName(class), r.Index, r.PID))
@@ -242,6 +266,10 @@ func gateSummaries(holders map[string][]GateSlotRow, unowned []GateSlotRow, rep 
 		}
 	}
 	for _, r := range unowned {
+		if r.Marker {
+			lines = append(lines, fmt.Sprintf("%s: held with no owner metadata (role unknown)", gateSummaryName(gateClassOMReview)))
+			continue
+		}
 		lines = append(lines, fmt.Sprintf("slot %d: held with no owner metadata (role unknown)", r.Index))
 	}
 	if rows := holders[gateClassPolecats]; len(rows) > 0 {

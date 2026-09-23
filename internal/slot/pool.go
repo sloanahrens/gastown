@@ -422,6 +422,12 @@ type SlotState struct {
 	Index int    `json:"index"`
 	Held  bool   `json:"held"`
 	Owner *Owner `json:"owner,omitempty"`
+	// Marker is set on a row reporting an in-flight marker rather than a pool
+	// slot: held outside the pool's count, identified by Name, and numbered
+	// after the pool so it collides with no slot index (see marker.go).
+	Marker bool `json:"marker,omitempty"`
+	// Name is the marker's caller-given name, empty on a pool slot's row.
+	Name string `json:"name,omitempty"`
 }
 
 // StatusPool is Status over a pool: it reports every slot the pool defines
@@ -525,11 +531,44 @@ func StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	}
 	rep.Total = len(rep.Slots)
 	rep.Reserved = pool.ReservedForGate
+
+	// Markers are appended after the pool's own rows and counted in neither
+	// Total nor HeldCount: a review in flight holds no pool slot, and a pool
+	// reported held — or saturated — on its account would misstate what may
+	// start (gt-97cm). Their index continues the pool's numbering, so a marker
+	// takes no index a pool slot could hold.
+	poolRows := len(rep.Slots)
+	for i, m := range liveMarkers(townRoot) {
+		owner := m.owner
+		if owner != nil {
+			owner.Slot = poolRows + i
+		}
+		rep.Slots = append(rep.Slots, SlotState{
+			Index:  poolRows + i,
+			Held:   true,
+			Marker: true,
+			Name:   m.name,
+			Owner:  owner,
+		})
+	}
 	return rep, nil
 }
 
+// readSlotOwner reads slot i's display-only owner file, tagging it with the
+// index it was read from.
 func readSlotOwner(townRoot string, i int) *Owner {
-	data, err := os.ReadFile(SlotOwnerPath(townRoot, i))
+	o := readOwnerFile(SlotOwnerPath(townRoot, i))
+	if o == nil {
+		return nil
+	}
+	o.Slot = i
+	return o
+}
+
+// readOwnerFile parses one owner metadata file, returning nil when it is
+// missing or unreadable.
+func readOwnerFile(path string) *Owner {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -537,11 +576,10 @@ func readSlotOwner(townRoot string, i int) *Owner {
 	if err := json.Unmarshal(data, &o); err != nil {
 		return nil
 	}
-	o.Slot = i
 	return &o
 }
 
-// HeldBy returns the slots currently held by role, from a report.
+// HeldBy returns the slots and markers currently held by role, from a report.
 func (r Report) HeldBy(role string) []SlotState {
 	var out []SlotState
 	for _, s := range r.Slots {
