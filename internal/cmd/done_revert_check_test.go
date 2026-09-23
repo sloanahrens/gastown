@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -215,6 +216,124 @@ func assertNoRevertedMerges(t *testing.T, repo string) {
 	}
 }
 
+// newShallowBoundaryScenario builds the gt-zeuip shape: origin/main holds
+// victim.txt unchanged since its first commit, and the polecat's clone is cut
+// at a shallow boundary, so git has no parent tree for the boundary commit and
+// prints the boundary's ENTIRE tree as creations — naming victim.txt as content
+// that commit introduced.
+//
+// Real clones of the gastown repo are cut this way, which is what turned the
+// deletion below into a refusal: the fabricated entry's pre-image is the empty
+// blob, so a deletion matched it exactly (gt-zeuip).
+func newShallowBoundaryScenario(t *testing.T) scenarioPaths {
+	t.Helper()
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	polecat := filepath.Join(dir, "polecat")
+
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCmd(t, "", "clone", remote, seed)
+	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
+	runGitCmd(t, seed, "config", "user.name", "Seed")
+	writeTestFile(t, filepath.Join(seed, "victim.txt"), "victim\n")
+	writeTestFile(t, filepath.Join(seed, "other.txt"), "other\n")
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", "add victim and other")
+	// A second commit puts victim.txt's creation one commit below the tip, so
+	// the shallow clone keeps the file without keeping the commit that made it.
+	writeTestFile(t, filepath.Join(seed, "other.txt"), "other\nsecond\n")
+	runGitCmd(t, seed, "commit", "-am", "touch other")
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	// Local clones ignore --depth without a file:// source.
+	runGitCmd(t, "", "clone", "--depth", "1", "file://"+remote, polecat)
+	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
+	runGitCmd(t, polecat, "config", "user.name", "Polecat")
+	runGitCmd(t, polecat, "switch", "-c", "polecat/zircon/gt-test")
+	return scenarioPaths{seed: seed, polecat: polecat}
+}
+
+// requireGraftBoundary asserts the clone is cut the way the incident needs: git
+// reports origin/main as parentless, and still prints that commit's whole tree
+// as additions. Either one failing means this scenario no longer reproduces the
+// fabrication, and the test below would pass without testing anything.
+func requireGraftBoundary(t *testing.T, repo string) {
+	t.Helper()
+	if parents := gitOutput(t, repo, "log", "-1", "--format=%P", "origin/main"); parents != "" {
+		t.Fatalf("scenario precondition: origin/main has parents %q, want a graft boundary", parents)
+	}
+	raw := gitOutput(t, repo, "log", "--raw", "--no-abbrev", "--no-renames", "-1", "origin/main")
+	if !strings.Contains(raw, "A\tvictim.txt") {
+		t.Fatalf("scenario precondition: git no longer reports the boundary's tree as additions:\n%s", raw)
+	}
+}
+
+// TestDetectRevertedMerges_ShallowBoundaryDeletionIsNoRevert is the gt-zeuip
+// false positive in miniature. The polecat deletes a file main has held
+// unchanged since before the clone was cut — a deletion of the polecat's own
+// work, against a path main's history never touched after that. The boundary
+// commit's fabricated creation entry names that file with an empty pre-image,
+// which the deletion matched, so the check refused the submission and named a
+// commit that never created anything.
+func TestDetectRevertedMerges_ShallowBoundaryDeletionIsNoRevert(t *testing.T) {
+	t.Parallel()
+	s := newShallowBoundaryScenario(t)
+	requireGraftBoundary(t, s.polecat)
+
+	runGitCmd(t, s.polecat, "rm", "victim.txt")
+	runGitCmd(t, s.polecat, "commit", "-m", "feat: retire victim.txt (gt-test)")
+
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("detectRevertedMerges refused a deletion of a path main never changed after the clone was cut: %+v", found)
+	}
+}
+
+// TestDetectRevertedMerges_DeletingAFileMainDidAddRefuses is the fail-closed
+// control for the fix: the same grafted clone, but main adds live.txt AFTER the
+// clone was cut, so the creating commit's parent IS in the clone and git
+// reports a creation it actually saw. Deleting that file still refuses.
+func TestDetectRevertedMerges_DeletingAFileMainDidAddRefuses(t *testing.T) {
+	t.Parallel()
+	s := newShallowBoundaryScenario(t)
+	requireGraftBoundary(t, s.polecat)
+
+	writeTestFile(t, filepath.Join(s.seed, "live.txt"), "live\n")
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", "add live.txt")
+	runGitCmd(t, s.seed, "push", "origin", "main")
+
+	// Take main's tip, then delete what main just added.
+	runGitCmd(t, s.polecat, "fetch", "origin")
+	runGitCmd(t, s.polecat, "merge", "--ff-only", "origin/main")
+	runGitCmd(t, s.polecat, "rm", "live.txt")
+	runGitCmd(t, s.polecat, "commit", "-m", "feat: retire live.txt (gt-test)")
+
+	g := git.NewGit(s.polecat)
+	wantCommit, err := g.Rev("origin/main")
+	if err != nil {
+		t.Fatalf("rev origin/main: %v", err)
+	}
+	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want the one that added live.txt: %+v", len(found), found)
+	}
+	if found[0].Commit != wantCommit {
+		t.Errorf("reverted commit = %s, want %s (the commit that added live.txt)", found[0].Commit, wantCommit)
+	}
+	if !containsString(found[0].Paths, "live.txt") {
+		t.Errorf("reverted paths %v missing live.txt", found[0].Paths)
+	}
+}
+
 // TestDetectRevertedMerges_UnresolvableTargetFailsClosed pins the failure mode:
 // when the comparison cannot be made, the caller must get an error, because an
 // empty result and a failed check are indistinguishable to every caller
@@ -275,4 +394,17 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// gitOutput returns git's trimmed stdout, for preconditions that ask git's own
+// view of a repository rather than a git.Git method's.
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v", args, dir, err)
+	}
+	return strings.TrimSpace(string(out))
 }
