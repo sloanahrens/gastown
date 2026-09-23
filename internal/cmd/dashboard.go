@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -19,10 +23,16 @@ import (
 )
 
 var (
-	dashboardPort int
-	dashboardBind string
-	dashboardOpen bool
+	dashboardPort  int
+	dashboardBind  string
+	dashboardOpen  bool
+	dashboardLog   string
 )
+
+// dashboardLogMaxSize caps the log file before it is rotated (see
+// installDashboardLog). 10 MiB is a few days of steady fetch-timeout noise at
+// worst, well under anything a town would accumulate.
+const dashboardLogMaxSize = 10 * 1024 * 1024
 
 var dashboardCmd = &cobra.Command{
 	Use:     "dashboard",
@@ -35,6 +45,11 @@ The dashboard shows real-time convoy status with:
 - Progress tracking for each convoy
 - Last activity indicator (green/yellow/red)
 - Auto-refresh every 30 seconds via htmx
+
+Runtime errors and warnings are written to the town's logs/dashboard.log
+(append, rotated at 10 MiB) in addition to the terminal, so the error
+stream survives the terminal pane and can be inspected after the fact.
+Override the location with --log-file (GT_DASHBOARD_LOG for scripts).
 
 Example:
   gt dashboard                    # Start on default port 8080
@@ -52,6 +67,8 @@ func init() {
 	}
 	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", defaultBind, "Address to bind to (use 0.0.0.0 for all interfaces)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open browser automatically")
+	dashboardCmd.Flags().StringVar(&dashboardLog, "log-file", os.Getenv("GT_DASHBOARD_LOG"),
+		"Log file for runtime errors and warnings (default: logs/dashboard.log under the town root)")
 	rootCmd.AddCommand(dashboardCmd)
 }
 
@@ -59,9 +76,11 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	// Check if we're in a workspace - if not, run in setup mode
 	var handler http.Handler
 	var err error
+	var townRoot string
+	var wsErr error
 	webCfg := config.DefaultWebTimeoutsConfig()
 
-	townRoot, wsErr := workspace.FindFromCwdOrError()
+	townRoot, wsErr = workspace.FindFromCwdOrError()
 	if wsErr != nil {
 		// No workspace - run in setup mode
 		handler, err = web.NewSetupMux()
@@ -95,6 +114,11 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("creating dashboard handler: %w", err)
 		}
 	}
+
+	// Mirror stdlib log output (all "dashboard:" errors and warnings) into
+	// logs/dashboard.log so the error stream outlives the terminal pane.
+	cleanupLog := installDashboardLog(townRoot)
+	defer cleanupLog()
 
 	// Build the listen address and display URL
 	listenAddr := fmt.Sprintf("%s:%d", dashboardBind, dashboardPort)
@@ -181,6 +205,103 @@ func ensureDoltPortEnv(townRoot string) {
 		os.Setenv("BEADS_DOLT_SERVER_HOST", host)
 	} else {
 		os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+	}
+}
+
+// rotatingLog appends to the log file, rotating it to <name>.old when it
+// grows past max. The rename-then-reopen is not atomic, but the log is a
+// best-effort append sink: losing the last few lines in the rotate window is
+// acceptable, and it avoids a hard dependency on os.Rename across filesystems.
+type rotatingLog struct {
+	mu   sync.Mutex
+	path string
+	max  int64
+	f    *os.File
+}
+
+// open (re)opens the log file in append mode, creating it and its directory
+// if needed.
+func (r *rotatingLog) open() error {
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if r.f != nil {
+		r.f.Close()
+	}
+	r.f = f
+	return nil
+}
+
+func (r *rotatingLog) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.f == nil {
+		if err := r.open(); err != nil {
+			return 0, err
+		}
+	}
+	if r.max > 0 {
+		if fi, err := r.f.Stat(); err == nil && fi.Size()+int64(len(p)) > r.max {
+			// Rotate: current log becomes .old, then start a fresh file.
+			r.f.Close()
+			r.f = nil
+			if err := os.Rename(r.path, r.path+".old"); err != nil {
+				// Rotation is best-effort; keep appending to the existing file.
+				if err2 := r.open(); err2 != nil {
+					return 0, err2
+				}
+			} else if err := r.open(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return r.f.Write(p)
+}
+
+func (r *rotatingLog) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.f == nil {
+		return nil
+	}
+	err := r.f.Close()
+	r.f = nil
+	return err
+}
+
+// installDashboardLog redirects the stdlib log package to write to the
+// dashboard log file (append, with rotation) in addition to stderr, so
+// runtime errors and warnings land in a durable file, not just the terminal.
+// In setup mode (no town root) it logs to ./logs/dashboard.log. Errors are
+// non-fatal: the dashboard degrades to stderr-only logging.
+//
+// It returns a cleanup func that restores stderr-only logging; the
+// dashboard process runs until killed so cleanup is only used by tests.
+func installDashboardLog(townRoot string) func() {
+	logPath := dashboardLog
+	if logPath == "" {
+		if townRoot != "" {
+			logPath = filepath.Join(townRoot, "logs", "dashboard.log")
+		} else {
+			logPath = filepath.Join("logs", "dashboard.log")
+		}
+	}
+
+	rl := &rotatingLog{path: logPath, max: dashboardLogMaxSize}
+	if err := rl.open(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: dashboard log file %s unavailable (%v); logging to stderr only\n", logPath, err)
+		return func() {}
+	}
+
+	prev := log.Writer()
+	log.SetOutput(io.MultiWriter(os.Stderr, rl))
+	return func() {
+		log.SetOutput(prev)
+		_ = rl.Close()
 	}
 }
 

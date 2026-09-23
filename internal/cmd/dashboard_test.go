@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -167,5 +169,99 @@ func TestEnsureDoltPortEnv_GTDoltPortOverridesWrongBeadsPort(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "3307" {
 		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "3307")
+	}
+}
+
+// TestInstallDashboardLog_FetchErrorWrittenToFile verifies the core
+// regression from gt-9ed0: a runtime error emitted through the stdlib log
+// package (the fetch-timeout line in internal/web/handler.go) must land in
+// the dashboard log file, not only in the terminal pane.
+func TestInstallDashboardLog_FetchErrorWrittenToFile(t *testing.T) {
+	townRoot := t.TempDir()
+
+	cleanup := installDashboardLog(townRoot)
+	defer cleanup()
+
+	// The exact line the handler logs on a fetch timeout.
+	log.Printf("dashboard: fetch timeout after 8s")
+
+	data, err := os.ReadFile(filepath.Join(townRoot, "logs", "dashboard.log"))
+	if err != nil {
+		t.Fatalf("reading logs/dashboard.log: %v", err)
+	}
+	if !strings.Contains(string(data), "dashboard: fetch timeout after 8s") {
+		t.Errorf("log file missing fetch-timeout line; contents:\n%s", data)
+	}
+}
+
+// TestInstallDashboardLog_Appends verifies repeated errors accumulate rather
+// than truncate the log.
+func TestInstallDashboardLog_Appends(t *testing.T) {
+	townRoot := t.TempDir()
+
+	cleanup := installDashboardLog(townRoot)
+	defer cleanup()
+
+	log.Printf("dashboard: warning one")
+	log.Printf("dashboard: warning two")
+
+	data, err := os.ReadFile(filepath.Join(townRoot, "logs", "dashboard.log"))
+	if err != nil {
+		t.Fatalf("reading logs/dashboard.log: %v", err)
+	}
+	if !strings.Contains(string(data), "warning one") || !strings.Contains(string(data), "warning two") {
+		t.Errorf("log file should contain both entries; contents:\n%s", data)
+	}
+}
+
+// TestInstallDashboardLog_ExplicitPath verifies the --log-file flag value
+// (stashed in the dashboardLog var) overrides the town-root default.
+func TestInstallDashboardLog_ExplicitPath(t *testing.T) {
+	logDir := t.TempDir()
+	explicit := filepath.Join(logDir, "custom.log")
+	prev := dashboardLog
+	dashboardLog = explicit
+	defer func() { dashboardLog = prev }()
+
+	cleanup := installDashboardLog("/nonexistent-town-root")
+	defer cleanup()
+
+	log.Printf("dashboard: explicit path entry")
+
+	data, err := os.ReadFile(explicit)
+	if err != nil {
+		t.Fatalf("reading explicit log path: %v", err)
+	}
+	if !strings.Contains(string(data), "explicit path entry") {
+		t.Errorf("explicit log file missing entry; contents:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join("/nonexistent-town-root", "logs", "dashboard.log")); !os.IsNotExist(err) {
+		t.Errorf("explicit path should not write under the town root")
+	}
+}
+
+// TestRotatingLog_Rotates verifies the file is rotated to <name>.old once it
+// exceeds the size cap and fresh entries land in a new file.
+func TestRotatingLog_Rotates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dashboard.log")
+	rl := &rotatingLog{path: path, max: 64}
+	defer rl.Close()
+
+	// 3 writes of ~30 bytes exceed the 64-byte cap on the third write.
+	for i := 0; i < 3; i++ {
+		if _, err := rl.Write([]byte(strings.Repeat("x", 30) + "\n")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(path + ".old"); err != nil {
+		t.Errorf("expected rotated %s.old: %v", path, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading fresh log after rotation: %v", err)
+	}
+	if len(data) == 61 {
+		t.Errorf("rotation did not truncate: fresh file has all 3 entries (%d bytes)", len(data))
 	}
 }
