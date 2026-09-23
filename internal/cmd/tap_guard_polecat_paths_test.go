@@ -17,6 +17,9 @@ import (
 //	<root>/gt/mayor, deacon, settings        town state a polecat must not touch
 //	<root>/gt/.claude-town/projects          the session scratchpad
 //
+// <root>/gt/.claude-town is also $CLAUDE_CONFIG_DIR, as it is in production,
+// so the config-dir cases below exercise the tree the guard really sees.
+//
 // Every path the guard sees (the payload cwd, GT_POLECAT_PATH, HOME) is under
 // the test's own temp root, so the block cases below hold on a clean machine
 // and never touch the operator's live tree — the previous attempt's tests
@@ -73,8 +76,10 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 	t.Setenv("GT_RIG", rig)
 	t.Setenv("GT_POLECAT", name)
 	t.Setenv("GT_POLECAT_PATH", worktree)
-	// $CLAUDE_CONFIG_DIR is now a scratch root (plans/, projects/, todos/).
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude-config"))
+	// $CLAUDE_CONFIG_DIR is the town's own config tree, exactly as production
+	// sets it — inside the town, which is also what makes the Bash leg judge it
+	// (that leg only polices targets inside the town).
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(town, ".claude-town"))
 
 	return polecatTestTown{
 		root:     root,
@@ -130,6 +135,7 @@ func TestRunTapGuardPolecatPaths_BlocksLiveHookPayload(t *testing.T) {
 // scratchpad are writable.
 func TestPolecatPathGuardFileTargets(t *testing.T) {
 	p := newPolecatTestTown(t)
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
 
 	cases := []struct {
 		name      string
@@ -145,9 +151,21 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 		{"sibling worktree, new file", "Write", fileInput(filepath.Join(p.sibling, "brand", "new.go")), true},
 		{"sibling worktree via tilde", "Write", fileInput("~/gt/" + p.rig + "/polecats/" + p.other + "/" + p.rig + "/x.go"), true},
 		{"sibling worktree via relative escape", "Write", fileInput("../../../" + p.other + "/" + p.rig + "/x.go"), true},
-		{"CLAUDE_CONFIG_DIR root", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "x.md")), false},
-		{"CLAUDE_CONFIG_DIR/todos", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "todos", "x.md")), false},
-		{"CLAUDE_CONFIG_DIR/projects", "Write", fileInput(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "x.md")), false},
+		// The session's own config dir is writable in exactly the subdirectories
+		// Claude Code keeps its own state in — plan mode's plans/, transcription
+		// and memory's projects/, todos/ — never as a whole tree (gt-ovo1).
+		{"CLAUDE_CONFIG_DIR/plans", "Write", fileInput(filepath.Join(configDir, "plans", "x.md")), false},
+		{"CLAUDE_CONFIG_DIR/todos", "Write", fileInput(filepath.Join(configDir, "todos", "x.md")), false},
+		{"CLAUDE_CONFIG_DIR/projects", "Write", fileInput(filepath.Join(configDir, "projects", "x.md")), false},
+		{"CLAUDE_CONFIG_DIR session transcripts", "Write", fileInput(filepath.Join(configDir, "projects", "-Users-sloan-gt", "sess-id", "memory", "note.md")), false},
+		// ...and the rest of it is live harness config: deny (gt-ovo1).
+		{"CLAUDE_CONFIG_DIR/settings.json", "Write", fileInput(filepath.Join(configDir, "settings.json")), true},
+		{"CLAUDE_CONFIG_DIR/settings.json, Edit", "Edit", fileInput(filepath.Join(configDir, "settings.json")), true},
+		{"CLAUDE_CONFIG_DIR/.claude.json", "Write", fileInput(filepath.Join(configDir, ".claude.json")), true},
+		{"CLAUDE_CONFIG_DIR/session-env", "Write", fileInput(filepath.Join(configDir, "session-env", "sess-id", "env.json")), true},
+		{"CLAUDE_CONFIG_DIR/shell-snapshots", "Write", fileInput(filepath.Join(configDir, "shell-snapshots", "snap.sh")), true},
+		{"CLAUDE_CONFIG_DIR/history.jsonl", "Write", fileInput(filepath.Join(configDir, "history.jsonl")), true},
+		{"CLAUDE_CONFIG_DIR/plugins", "Write", fileInput(filepath.Join(configDir, "plugins", "installed.json")), true},
 		{"own rig root", "Write", fileInput(filepath.Join(p.rigRoot, "rig.json")), true},
 		{"town mayor dir", "Write", fileInput(filepath.Join(p.town, "mayor", "proposal.md")), true},
 		{"town deacon dir", "Edit", fileInput(filepath.Join(p.town, "deacon", "state.json")), true},
@@ -191,6 +209,72 @@ func TestPolecatPathGuardFollowsSymlinks(t *testing.T) {
 	}
 	if err := p.run(t, "Write", fileInput(filepath.Join(link, "new.go"))); err == nil {
 		t.Error("expected a new file written through that symlink to be blocked (fail closed)")
+	}
+}
+
+// TestClaudeConfigScratchRoots pins the gt-ovo1 rule for the config dir: those
+// roots are the config dir's three state subdirectories, and never the config
+// dir itself, which is where the live harness config lives (settings.json,
+// .claude.json, session-env/).
+//
+// The bogus values matter. "/" would allowlist the filesystem root's own
+// plans/, projects/ and todos/; $HOME would do the same to the operator's home
+// tree, next to ~/.ssh. A mis-set environment must yield no roots at all rather
+// than a wide one.
+func TestClaudeConfigScratchRoots(t *testing.T) {
+	const home = "/town/home"
+	cases := []struct {
+		name      string
+		configDir string
+		want      []string
+	}{
+		{"unset", "", nil},
+		{"relative", "relative-config", nil},
+		{"filesystem root", "/", nil},
+		{"home directory", home, nil},
+		{"home directory with a trailing slash", home + "/", nil},
+		{"ancestor of the home directory", "/town", nil},
+		{"town config dir", "/town/.claude-town", []string{
+			"/town/.claude-town/plans",
+			"/town/.claude-town/projects",
+			"/town/.claude-town/todos",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claudeConfigScratchRoots(tc.configDir, home)
+			if len(got) != len(tc.want) {
+				t.Fatalf("claudeConfigScratchRoots(%q) = %v, want %v", tc.configDir, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("claudeConfigScratchRoots(%q) = %v, want %v", tc.configDir, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestPolecatPathGuardUnexpectedConfigDirFailsClosed drives the same rule
+// through the guard: with $HOME as the config dir, a write to $HOME/plans/ —
+// which the bare config dir used to allowlist along with everything beside it —
+// must be denied, while the session's ordinary scratch space stays writable.
+func TestPolecatPathGuardUnexpectedConfigDirFailsClosed(t *testing.T) {
+	p := newPolecatTestTown(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", p.root) // the test's $HOME, a config dir shaped wrong
+	err := p.run(t, "Write", fileInput(filepath.Join(p.root, "plans", "x.md")))
+	if err == nil {
+		t.Errorf("expected a write to $HOME/plans/ to be blocked when CLAUDE_CONFIG_DIR=$HOME, got allow")
+	}
+	// Failing closed on the config dir must not wedge the session: the worktree
+	// and the town's own scratch dir are allowed independently of it.
+	for _, target := range []string{
+		filepath.Join(p.worktree, "internal", "cmd", "x.go"),
+		filepath.Join(p.town, ".claude-town", "projects", "p", "notes.md"),
+	} {
+		if err := p.run(t, "Write", fileInput(target)); err != nil {
+			t.Errorf("expected %s to stay writable, got block: %v", target, err)
+		}
 	}
 }
 
@@ -285,6 +369,8 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"write to /tmp", "cp a.go /tmp/polecat-paths-probe/x.go", false},
 		{"write to $TMPDIR", "cp a.go $TMPDIR/polecat-paths-probe/x.go", false},
 		{"write to $CLAUDE_CONFIG_DIR/plans", "cp a.go $CLAUDE_CONFIG_DIR/plans/x.md", false},
+		{"write to $CLAUDE_CONFIG_DIR/settings.json", "cp a.go $CLAUDE_CONFIG_DIR/settings.json", true},
+		{"redirect into $CLAUDE_CONFIG_DIR/.claude.json", "echo x > $CLAUDE_CONFIG_DIR/.claude.json", true},
 		{"write to /dev/null", "make build > /dev/null 2>&1", false},
 		{"file descriptor duplication", "make build 2>&1", false},
 		{"own rig's .repo.git", "git -C " + p.repoGit + " worktree list", false},
