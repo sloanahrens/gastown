@@ -19,7 +19,7 @@ func init() {
 }
 
 // errNoSystemPromptForRole reports a role/agent combination that has no
-// system prompt file (dogs, boot, an unknown role, a polecat without a name).
+// system prompt file (boot, an unknown role, a polecat without a name).
 var errNoSystemPromptForRole = errors.New("role has no system prompt file")
 
 // renderSystemPromptFileForSpawn writes the static role text for role/agentName

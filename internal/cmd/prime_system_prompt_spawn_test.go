@@ -246,4 +246,13 @@ func TestBuildStartupCommand_FirstDogSpawnCarriesSystemPromptFlag(t *testing.T) 
 	if !strings.Contains(string(got), "alpha") {
 		t.Fatalf("rendered dog text does not name the dog:\n%.200s", got)
 	}
+
+	// The file is load-bearing, not decorative (gt-mbuf): prime omits the dog's
+	// role text from the hook only while GT_SYSTEM_PROMPT_FILE points at a
+	// written file, and that text plus the dynamic sections is well over the
+	// hook budget, so losing it hands the dog a 2 KB preview of its own work.
+	t.Setenv(config.EnvSystemPromptFile, path)
+	if !primeStaticTextDelivered() {
+		t.Fatal("prime does not read back the file the first spawn wrote, so it reprints the dog role text into the hook")
+	}
 }
