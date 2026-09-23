@@ -124,6 +124,14 @@ type Note struct {
 	// RekeyedFrom is the commit the source note was attached to — the
 	// reviewed head, or a rehearsal head the merge queue discarded.
 	RekeyedFrom string `json:"rekeyed_from,omitempty"`
+	// RekeyedFromMR is the MR id the source note was written under, when
+	// AllowAnyMR borrowed it from an MR other than the one this note is now
+	// keyed to (MR, above, is overwritten to the requesting MR so lookups
+	// by that MR's id find it). Empty when the source note already belonged
+	// to the requesting MR, so an ordinary rekey round-trips unchanged. An
+	// auditor reading the published note can otherwise not tell which MR's
+	// review the borrowed proof really came from (gt-bagu).
+	RekeyedFromMR string `json:"rekeyed_from_mr,omitempty"`
 	// Backfill marks a note created by the backfill command rather than by
 	// a review of this commit.
 	Backfill bool `json:"backfill,omitempty"`

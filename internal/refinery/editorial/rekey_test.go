@@ -396,14 +396,13 @@ func TestRekeyNote_NoNoteForMRRefuses(t *testing.T) {
 }
 
 // TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR is the gt-bagu case:
-// the requesting MR has no note of its own, but another MR's approve note
-// covers the identical diff by patch-id — exactly what gt mq review's own
-// reuse lookup (FindVerdictForDiff) would have answered from, since that
-// lookup is deliberately not scoped by MR id (MR beads are wisps that are
-// routinely reaped and re-minted for the same diff, gt-qa2p). With
-// AllowAnyMR the backfill accepts that note as proof instead of refusing
-// forever, and re-keys it onto the requesting MR so a later lookup by this
-// MR's own id finds it too.
+// the requesting MR has no note of its own, but SourceHead — normally
+// editorial_reviewed_head, the commit CheckPrecondition already required to
+// carry an approve note before this diff was allowed to land — names a
+// commit whose note belongs to a different MR. With AllowAnyMR the backfill
+// accepts that specific note as proof instead of refusing forever, records
+// which MR it was borrowed from, and re-keys it onto the requesting MR so a
+// later lookup by this MR's own id finds it too.
 func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
@@ -416,7 +415,7 @@ func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
 	f.checkout("main")
 	merged := f.landOnMain("polecat/slate/gt-aivi", "Merge polecat/slate/gt-aivi into main")
 
-	result, err := RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, Reason: "backfill"})
+	result, err := RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, SourceHead: head, Reason: "backfill"})
 	if err != nil {
 		t.Fatalf("RekeyNote with AllowAnyMR refused a note that covers the diff under a different MR: %v", err)
 	}
@@ -437,6 +436,9 @@ func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
 	if got.MR != "gt-wisp-current-mint" {
 		t.Fatalf("backfilled note.MR = %q, want it re-keyed onto the requesting MR gt-wisp-current-mint", got.MR)
 	}
+	if got.RekeyedFromMR != "gt-wisp-earlier-mint" {
+		t.Fatalf("backfilled note.RekeyedFromMR = %q, want the borrowed-from MR preserved for audit (gt-wisp-earlier-mint)", got.RekeyedFromMR)
+	}
 	if got.RekeyedFrom != head {
 		t.Fatalf("RekeyedFrom = %q, want the commit the borrowed note was written on (%s)", got.RekeyedFrom, head)
 	}
@@ -445,10 +447,89 @@ func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
 	}
 }
 
-// TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR: AllowAnyMR only
-// widens the source pool to notes that cover the diff by patch-id — it must
-// not turn into "accept anything for any diff." No note anywhere matches
-// the landed patch-id here, so the backfill still refuses.
+// TestRekeyNote_AllowAnyMR_RequiresSourceHead: AllowAnyMR without a
+// SourceHead must refuse rather than fall back to scanning refs/notes/om for
+// any covering note — that unscoped scan is exactly what gt-bagu's om review
+// 0.55 flagged as accepting proof CheckPrecondition would itself reject.
+func TestRekeyNote_AllowAnyMR_RequiresSourceHead(t *testing.T) {
+	f := newRekeyFixture(t)
+	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-aivi")
+	_ = commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
+	f.checkout("main")
+	merged := f.landOnMain("polecat/slate/gt-aivi", "Merge polecat/slate/gt-aivi into main")
+
+	_, err := RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, Reason: "backfill"})
+	if err == nil {
+		t.Fatal("expected a refusal when AllowAnyMR is set with no SourceHead")
+	}
+	if !strings.Contains(err.Error(), "AllowAnyMR requires SourceHead") {
+		t.Fatalf("error does not explain the missing SourceHead: %v", err)
+	}
+}
+
+// TestRekeyNote_AllowAnyMR_SourceHeadNotApprove_Refuses: a request_changes
+// note at SourceHead is not proof CheckPrecondition would have accepted, so
+// AllowAnyMR must refuse rather than borrow it.
+func TestRekeyNote_AllowAnyMR_SourceHeadNotApprove_Refuses(t *testing.T) {
+	f := newRekeyFixture(t)
+	base, err := f.g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-aivi")
+	head := commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
+	patchID, err := f.g.PatchID(base, head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	n := Note{Rig: "gastown", MR: "gt-wisp-earlier-mint", HeadSHA: head, PatchID: patchID, Verdict: "request_changes"}
+	if err := WriteNote(f.g, n); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+	f.checkout("main")
+	merged := f.landOnMain("polecat/slate/gt-aivi", "Merge polecat/slate/gt-aivi into main")
+
+	_, err = RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, SourceHead: head, Reason: "backfill"})
+	if err == nil {
+		t.Fatal("expected a refusal when the note at SourceHead is not approve")
+	}
+	if !strings.Contains(err.Error(), "not approve") {
+		t.Fatalf("error does not explain the non-approve verdict: %v", err)
+	}
+	if _, err := ReadNote(f.g, merged); !errors.Is(err, git.ErrNoNote) {
+		t.Fatalf("a refused backfill must not write a note; got note with err %v", err)
+	}
+}
+
+// TestRekeyNote_AllowAnyMR_SourceHeadPatchIDMismatch_Refuses: a note at
+// SourceHead whose patch-id does not match the landed diff is not proof of
+// this diff, whatever its verdict.
+func TestRekeyNote_AllowAnyMR_SourceHeadPatchIDMismatch_Refuses(t *testing.T) {
+	f := newRekeyFixture(t)
+	base, err := f.g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-aivi")
+	head := commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
+	// A note at head, but for an unrelated diff (patch-id does not match).
+	writeMRNote(t, f.g, "gt-wisp-earlier-mint", base, head, "not-a-real-patch-id")
+	f.checkout("main")
+	merged := f.landOnMain("polecat/slate/gt-aivi", "Merge polecat/slate/gt-aivi into main")
+
+	_, err = RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, SourceHead: head, Reason: "backfill"})
+	if err == nil {
+		t.Fatal("expected a refusal when the note at SourceHead carries an unrelated patch-id")
+	}
+	if !strings.Contains(err.Error(), "patch-id mismatch") {
+		t.Fatalf("error does not name the patch-id mismatch: %v", err)
+	}
+}
+
+// TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR: when the requesting
+// MR has its own note (however stale), AllowAnyMR/SourceHead never come into
+// play — a note under mr's own id, even one for an unrelated diff, is
+// refused as a patch-id mismatch on mr's own note, not silently bypassed.
 func TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR(t *testing.T) {
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
@@ -456,19 +537,18 @@ func TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR(t *testing.T) {
 		t.Fatalf("rev HEAD: %v", err)
 	}
 	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-aivi")
-	_ = commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
+	head := commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
 	f.checkout("main")
 	merged := f.landOnMain("polecat/slate/gt-aivi", "Merge polecat/slate/gt-aivi into main")
-	// A note for an unrelated diff — must not be borrowed just because
-	// AllowAnyMR is set.
-	writeMRNote(t, f.g, "gt-wisp-unrelated", base, merged, "not-a-real-patch-id")
+	// A note under the requesting MR's own id, but for an unrelated diff.
+	writeMRNote(t, f.g, "gt-wisp-current-mint", base, head, "not-a-real-patch-id")
 
-	_, err = RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, Reason: "backfill"})
+	_, err = RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-current-mint", Landed: merged, Target: "main", AllowAnyMR: true, SourceHead: head, Reason: "backfill"})
 	if err == nil {
-		t.Fatal("expected a refusal when no note anywhere covers this diff by patch-id")
+		t.Fatal("expected a refusal when the MR's own note does not cover this diff")
 	}
-	if !strings.Contains(err.Error(), "no om note for MR gt-wisp-current-mint") {
-		t.Fatalf("error does not name the missing verdict: %v", err)
+	if !strings.Contains(err.Error(), "patch-id mismatch") {
+		t.Fatalf("error does not name the patch-id mismatch: %v", err)
 	}
 }
 

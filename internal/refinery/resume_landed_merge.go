@@ -228,26 +228,16 @@ func (e *Engineer) findLandedCommitByPatchID(target, mergeRef string) (string, e
 // has not set merge_queue.editorial.required, where there is nothing to
 // require), or an error explaining why the proof could not be established.
 //
-// When landedCommit has no matching note, this backfills it from an approve
-// note whose patch-id matches the landed diff, via editorial.RekeyNote (which
-// independently re-verifies the patch-id before writing anything). RekeyNote
-// is asked with AllowAnyMR: true — the source note does not have to belong to
-// mr.ID (gt-bagu).
-//
-// This matters because the review step that produced the note does not scope
-// its reuse lookup by MR either: gt mq review answers a diff from any note in
-// refs/notes/om carrying the same patch-id, whatever MR wrote it
-// (FindVerdictForDiff, gt-qa2p — deliberate, since MR beads are wisps that
-// are routinely reaped and re-minted for the same diff). editorial_reviewed_
-// head can therefore legitimately name a commit whose note carries an older
-// or unrelated MR id. Requiring an exact MR match here — the shape gt-9t0p
-// originally shipped — refuses that landing every cycle with no path to a
-// verdict it will ever accept: the note that proves the diff exists and is
-// readable, but resumeLandedMerge and gt mq review disagree about whether an
-// MR id has to match it. Patch-id equality is what both CheckPrecondition and
-// FindVerdictForDiff already treat as proof; requiring MR-id equality on top
-// of it, only here, is what actually looped this MR (gt-bagu), not any
-// ancestor relationship between the reviewed head and the landing.
+// When landedCommit has no matching note, this backfills it via
+// editorial.RekeyNote with AllowAnyMR and SourceHead: mr.
+// EditorialReviewedHead — the exact note CheckPrecondition already read and
+// required to be approve before this diff was allowed to land, whatever MR
+// id it carries. Requiring an exact MR-id match here instead — the shape
+// gt-9t0p originally shipped — refused that landing every cycle with no
+// verdict it would ever accept, since editorial_reviewed_head can legitimately
+// name a note written under an earlier or unrelated MR id (gt-bagu; see
+// RekeyRequest.SourceHead for why the source is this one named commit rather
+// than a wider patch-id scan).
 func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit string) error {
 	if e.config.Editorial == nil || !e.config.Editorial.Required {
 		return nil
@@ -265,7 +255,8 @@ func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit st
 		Landed:     landedCommit,
 		Target:     target,
 		AllowAnyMR: true,
-		Reason:     "gt-wh66/gt-bagu: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the approve note that covers this diff by patch-id onto the commit that already landed",
+		SourceHead: mr.EditorialReviewedHead,
+		Reason:     "gt-wh66/gt-bagu: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the approve note at editorial_reviewed_head onto the commit that already landed",
 	})
 	if err != nil {
 		return err

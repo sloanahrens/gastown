@@ -505,13 +505,11 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 // (ensureLandedEditorialNote -> RekeyNote) required the note it found to
 // belong to this exact MR id, which an earlier mint's note never does: the
 // landing refused every cycle with EDITORIAL_RESUME_UNPROVEN, and nothing
-// could ever satisfy it — a permanent loop, misdiagnosed at the time as
-// requiring the reviewed head to be an ancestor of the tip (no such check
-// exists; see ensureLandedEditorialNote's doc comment). The fix accepts any
-// approve note whose patch-id matches the landed diff, the same proof
-// CheckPrecondition and FindVerdictForDiff already accept regardless of MR
-// id, and re-keys it onto the current MR so a later lookup by this MR's own
-// id finds it too.
+// could ever satisfy it (gt-bagu). The fix reads the note at
+// editorial_reviewed_head — the same commit CheckPrecondition already
+// required to carry approve before this diff was allowed to land — and
+// re-keys it onto the current MR so a later lookup by this MR's own id
+// finds it too (RekeyRequest.SourceHead).
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDifferentMR_Backfilled(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -536,13 +534,17 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDiffer
 	e.config.Editorial = &config.EditorialConfig{Required: true}
 
 	// The current MR bead is a re-mint: a different id from the one the note
-	// was recorded under, for the same branch and diff.
+	// was recorded under, for the same branch and diff. EditorialReviewedHead
+	// is what gt mq review's reuse path (ensureEditorialReviewedHead) would
+	// have written: the head the note was found on, whatever MR id it
+	// carries — not this MR's own id.
 	mr := &MRInfo{
-		ID:        "mr-nt1l-current-mint",
-		Branch:    branch,
-		Target:    "main",
-		Worker:    "polecats/max",
-		CommitSHA: head,
+		ID:                    "mr-nt1l-current-mint",
+		Branch:                branch,
+		Target:                "main",
+		Worker:                "polecats/max",
+		CommitSHA:             head,
+		EditorialReviewedHead: head,
 	}
 
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
@@ -569,6 +571,9 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDiffer
 	}
 	if note.MR != mr.ID {
 		t.Fatalf("backfilled note.MR = %q, want it re-keyed onto the current MR %q so a later lookup by this MR's id finds it too", note.MR, mr.ID)
+	}
+	if note.RekeyedFromMR != "mr-nt1l-earlier-mint" {
+		t.Fatalf("backfilled note.RekeyedFromMR = %q, want the earlier mint's MR id preserved for audit", note.RekeyedFromMR)
 	}
 }
 

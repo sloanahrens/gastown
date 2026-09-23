@@ -312,23 +312,14 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			// is where the coverage check reads it.
 			if !retroReview {
 				// Record the head the note was found on — the reviewed head
-				// — not this invocation's rehearsal commit. No note exists
-				// on the latter (that is why the lookup had to scan), and
-				// the push precondition (CheckPrecondition) finds the note
-				// by reading editorial_reviewed_head and comparing patch-id;
-				// it never requires the reviewed head to be reachable from
-				// anything (git notes read by sha regardless of ancestry —
-				// see ReadNote), so a found-on head from an earlier
-				// rehearsal, or from an earlier MR for the same diff,
-				// answers just as well as this invocation's own head.
-				//
-				// gt-bagu was diagnosed as "the reviewed head must be an
-				// ancestor of the landing tip" — no such check exists here
-				// or on the push precondition. The actual refusal that MR
-				// hit lives in resumeLandedMerge's rewritten-SHA backfill
-				// (ensureLandedEditorialNote/RekeyNote), which used to
-				// require the backfilled note to belong to this exact MR id;
-				// see that function for the real fix.
+				// — not this invocation's rehearsal commit. The push
+				// precondition (CheckPrecondition) finds the note by reading
+				// editorial_reviewed_head and comparing patch-id; it never
+				// requires the reviewed head to be reachable from anything
+				// (git notes read by sha regardless of ancestry — see
+				// ReadNote), so a found-on head from an earlier rehearsal,
+				// or an earlier MR for the same diff, answers just as well
+				// as this invocation's own head (gt-bagu).
 				if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
 					return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
 				}
