@@ -2110,6 +2110,14 @@
             color: var(--text-muted);
         }
 
+        /* Convoy panel: names the rows whose detail read failed, so the list
+           below does not read as whole. */
+        .convoy-unreadable-note {
+            color: var(--yellow);
+            font-size: 0.75rem;
+            padding: 6px 10px;
+        }
+
         /* Gate panel: the headline lines above the slot table, then the
            role-class detail column. */
         .gate-summary {

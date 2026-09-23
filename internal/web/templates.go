@@ -41,26 +41,30 @@ type LocalPoolData struct {
 
 // ConvoyData represents data passed to the convoy template.
 type ConvoyData struct {
-	Convoys        []ConvoyRow
-	MergeQueue     []MergeQueueRow
-	TownMergeQueue TownMergeQueue
-	Gate           *GateStatus
-	Workers        []WorkerRow
-	Mail           []MailRow
-	Rigs           []RigRow
-	Dogs           []DogRow
-	Escalations    []EscalationRow
-	Health         *HealthRow
-	Queues         []QueueRow
-	Sessions       []SessionRow
-	Hooks          []HookRow
-	Mayor          *MayorStatus
-	Issues         []IssueRow
-	Activity       []ActivityRow
-	LocalPool      *LocalPoolData
-	Summary        *DashboardSummary
-	Expand         string // Panel to show fullscreen (from ?expand=name)
-	CSRFToken      string // Token for CSRF protection on POST requests
+	Convoys []ConvoyRow
+	// UnreadableConvoys counts the rows whose tracked-issue read failed. They
+	// are rendered and counted, so the panel names how many rows are unknown
+	// instead of presenting the list as whole (gt-huzu).
+	UnreadableConvoys int
+	MergeQueue        []MergeQueueRow
+	TownMergeQueue    TownMergeQueue
+	Gate              *GateStatus
+	Workers           []WorkerRow
+	Mail              []MailRow
+	Rigs              []RigRow
+	Dogs              []DogRow
+	Escalations       []EscalationRow
+	Health            *HealthRow
+	Queues            []QueueRow
+	Sessions          []SessionRow
+	Hooks             []HookRow
+	Mayor             *MayorStatus
+	Issues            []IssueRow
+	Activity          []ActivityRow
+	LocalPool         *LocalPoolData
+	Summary           *DashboardSummary
+	Expand            string // Panel to show fullscreen (from ?expand=name)
+	CSRFToken         string // Token for CSRF protection on POST requests
 }
 
 // RigRow represents a registered rig in the dashboard.
@@ -311,7 +315,17 @@ type ConvoyRow struct {
 	Assignees     []string // unique assignees across tracked issues
 	LastActivity  activity.Info
 	TrackedIssues []TrackedIssue
+
+	// DetailErr is set when the convoy's tracked-issue read failed: the row
+	// still renders and still counts, with its progress marked unreadable
+	// rather than zero (gt-huzu).
+	DetailErr string
 }
+
+// convoyDetailUnavailable is the phrase a row carries in place of a progress
+// figure its detail read failed to produce. A fixed string, not the error
+// itself: fetch errors stay in the server log (gt-huzu).
+const convoyDetailUnavailable = "detail unavailable"
 
 // TrackedIssue represents an issue tracked by a convoy.
 type TrackedIssue struct {

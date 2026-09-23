@@ -982,6 +982,86 @@ esac
 	}
 }
 
+// TestFetchConvoys_TimedOutDetailReadKeepsConvoyCounted verifies gt-huzu: a
+// convoy whose tracked-issue read times out must still be counted and rendered,
+// marked unreadable. Dropping the row made a partial read indistinguishable
+// from a complete one — the panel showed a convoy count short by exactly the
+// convoys bd was slowest on, with nothing to say it was short.
+func TestFetchConvoys_TimedOutDetailReadKeepsConvoyCounted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	// hq-cv-slow spins on its dep reads until the fetcher's deadline kills it.
+	// The spin forks nothing, so no child outlives the kill holding a copy of
+	// the stdout pipe open — the call returns at the deadline rather than
+	// waiting out a stray sleep.
+	script := `#!/bin/sh
+case "$1" in
+  list)
+    echo '[{"id":"hq-cv-ok","title":"Readable","status":"open","issue_type":"convoy","labels":[]},{"id":"hq-cv-slow","title":"Unreadable","status":"open","issue_type":"convoy","labels":[]}]'
+    ;;
+  dep)
+    case "$*" in
+      *hq-cv-slow*) while :; do :; done ;;
+    esac
+    echo '[{"depends_on_id":"gt-abc","type":"tracks"}]'
+    ;;
+  show)
+    case "$2" in
+      hq-cv-ok) echo '[{"id":"hq-cv-ok","dependencies":null}]' ;;
+      *) echo '[{"id":"gt-abc","title":"Work","status":"open","assignee":"","updated_at":""}]' ;;
+    esac
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 300 * time.Millisecond, bdBin: bdPath}
+
+	rows, err := f.FetchConvoys()
+	if err != nil {
+		t.Fatalf("FetchConvoys returned error: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 — the timed-out convoy must still be counted: %#v", len(rows), rows)
+	}
+
+	byID := make(map[string]ConvoyRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	ok, found := byID["hq-cv-ok"]
+	if !found {
+		t.Fatal("readable convoy hq-cv-ok missing from the panel")
+	}
+	if ok.DetailErr != "" {
+		t.Fatalf("hq-cv-ok DetailErr = %q, want empty", ok.DetailErr)
+	}
+	if ok.Total != 1 || ok.Progress != "0/1" {
+		t.Fatalf("hq-cv-ok Total = %d, Progress = %q, want 1 and 0/1", ok.Total, ok.Progress)
+	}
+
+	slow, found := byID["hq-cv-slow"]
+	if !found {
+		t.Fatal("timed-out convoy hq-cv-slow was dropped from the panel (gt-huzu)")
+	}
+	if slow.DetailErr != convoyDetailUnavailable {
+		t.Fatalf("hq-cv-slow DetailErr = %q, want %q — an unreadable row must be marked, not rendered as a zero",
+			slow.DetailErr, convoyDetailUnavailable)
+	}
+	if slow.LastActivity.FormattedAge != convoyDetailUnavailable {
+		t.Fatalf("hq-cv-slow activity = %q, want %q", slow.LastActivity.FormattedAge, convoyDetailUnavailable)
+	}
+	if got := countUnreadableConvoys(rows); got != 1 {
+		t.Fatalf("countUnreadableConvoys = %d, want 1", got)
+	}
+}
+
 func TestFetchConvoysBreakerPreventsConcurrentStampede(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based command test")

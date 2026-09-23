@@ -370,26 +370,27 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 	summary := computeSummary(workers, hooks, issues, convoys, escalations, activity)
 
 	data := ConvoyData{
-		Convoys:        convoys,
-		MergeQueue:     mergeQueue,
-		TownMergeQueue: townMergeQueue,
-		Gate:           gate,
-		Workers:        workers,
-		Mail:           mail,
-		Rigs:           rigs,
-		Dogs:           dogs,
-		Escalations:    escalations,
-		Health:         health,
-		Queues:         queues,
-		Sessions:       sessions,
-		Hooks:          hooks,
-		Mayor:          mayor,
-		Issues:         enrichIssuesWithAssignees(issues, hooks),
-		Activity:       activity,
-		LocalPool:      locals,
-		Summary:        summary,
-		Expand:         expandPanel,
-		CSRFToken:      h.csrfToken,
+		Convoys:           convoys,
+		UnreadableConvoys: countUnreadableConvoys(convoys),
+		MergeQueue:        mergeQueue,
+		TownMergeQueue:    townMergeQueue,
+		Gate:              gate,
+		Workers:           workers,
+		Mail:              mail,
+		Rigs:              rigs,
+		Dogs:              dogs,
+		Escalations:       escalations,
+		Health:            health,
+		Queues:            queues,
+		Sessions:          sessions,
+		Hooks:             hooks,
+		Mayor:             mayor,
+		Issues:            enrichIssuesWithAssignees(issues, hooks),
+		Activity:          activity,
+		LocalPool:         locals,
+		Summary:           summary,
+		Expand:            expandPanel,
+		CSRFToken:         h.csrfToken,
 	}
 
 	var buf bytes.Buffer
@@ -399,6 +400,19 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 	}
 
 	return buf.Bytes()
+}
+
+// countUnreadableConvoys counts the rows whose detail read failed, for the
+// panel note that says how many of the convoys it lists are unreadable
+// (gt-huzu).
+func countUnreadableConvoys(convoys []ConvoyRow) int {
+	n := 0
+	for _, c := range convoys {
+		if c.DetailErr != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // computeSummary calculates dashboard stats and alerts from fetched data.

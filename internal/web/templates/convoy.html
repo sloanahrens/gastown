@@ -139,6 +139,11 @@
                 <div class="panel-body">
                     <!-- Convoy List View -->
                     <div id="convoy-list">
+                        {{if .UnreadableConvoys}}
+                        <div class="convoy-unreadable-note" title="Their detail reads failed; they are counted, but their progress is unreadable">
+                            ⚠ {{.UnreadableConvoys}} of {{len .Convoys}} convoys unreadable — progress unknown
+                        </div>
+                        {{end}}
                         {{if .Convoys}}
                         <table>
                             <thead>
@@ -155,7 +160,9 @@
                                 <tr class="convoy-row" data-convoy-id="{{.ID}}">
                                     <td>
                                         <span class="convoy-toggle">▶</span>
-                                        {{if eq .WorkStatus "complete"}}
+                                        {{if .DetailErr}}
+                                        <span class="badge badge-yellow" title="Progress could not be read; the convoy still counts">Unknown</span>
+                                        {{else if eq .WorkStatus "complete"}}
                                         <span class="badge badge-green" title="All issues completed">✓ Done</span>
                                         {{else if eq .WorkStatus "active"}}
                                         <span class="badge badge-green" title="Workers actively progressing">Active</span>
