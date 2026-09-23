@@ -38,7 +38,7 @@ several exit-0 and exit-1 cases differ in what they escalate).
 
 | exit | when | recorded | escalates |
 |------|------|----------|-----------|
-| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only past `REBUILD_GT_STARVE_MINUTES` and only while the binary is due (Starvation below) |
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
 | 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | the same starvation clock |
 | 1 | failed: `make build`/`make safe-install` failed, or the install could not be verified as in force | yes, as failure | yes, under a stable fingerprint |
 
@@ -108,9 +108,9 @@ flight, a refusal to build — records the block in
 `daemon/rebuild-gt-state.json`: when it opened, and how many runs it has
 lasted. Past `REBUILD_GT_STARVE_MINUTES` (default 30, above the longest gate
 hold measured on 2026-09-22) the run escalates at high severity under the
-stable fingerprint `rebuild-gt:starved`. That escalation goes out before the
-block is marked escalated: a call that never reached the town is retried next
-run, not recorded as delivered and lost for the rest of the block.
+stable fingerprint `rebuild-gt:starved`. The escalation goes out before the
+block is marked escalated, so a call that never reached the town is retried
+next run rather than lost for the rest of the block.
 
 When the container-gate slot is what blocks, the run waits for it and then
 builds inside it:
@@ -124,14 +124,14 @@ a pool with more than one slot — it takes a free slot, and the build starts
 beside the load-sensitive suite the yield exists to avoid (gt-htx3). So the
 run polls `gt slot status` until no gate-class role holds a slot, and acquires
 after that. `REBUILD_GT_RESERVE_WAIT` (default 10m) bounds the two together,
-which is why `[execution] timeout` is 25m. The install after the build is a
-temp-file rename — outside the hold, waiting for any merge that is mid-push. A
-wait that gets nothing defers: nothing was built, so nothing failed.
+which is why `[execution] timeout` is 25m. The install is a temp-file rename:
+outside the hold, waiting for any merge that is mid-push. A wait that gets
+nothing defers — nothing was built, so nothing failed.
 
 Reaching force — a fresh binary, or a completed install — closes the block and
 clears the keys this plugin owns, under `gt escalate clear` (gt-vwry). So does
-a run that finds the binary not due: the clock measures starvation, and a
-block must not outlive the condition it measured.
+a run that finds the binary not due: a block must not outlive the condition it
+measured.
 
 ## Detection
 
@@ -201,8 +201,8 @@ record a skip wisp with reason "local main diverged from origin/main" —
 - no MR a refinery is mid-merge on
   (`gt mq list gastown --status=in_progress --json`).
 
-A run under `REBUILD_GT_STARVE_MINUTES` defers on either reading; past it, the
-first is waited out and the build runs inside the slot (Starvation above).
+Under `REBUILD_GT_STARVE_MINUTES` either reading defers the run; past it the
+first is waited out (Starvation above).
 
 The second reading is taken again immediately before the install: a merge that
 was not in flight when the run started can be by the time the build ends, and

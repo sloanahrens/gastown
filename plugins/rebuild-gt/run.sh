@@ -204,7 +204,15 @@ PY
 # recorded as delivered, or the one alarm this file exists for is lost in
 # silence (gt-kox0). Returns without exiting: each caller keeps its own
 # contract.
+#
+# A run can be blocked more than once — the reserve path notes the gate before
+# its wait, then the deferral that ends the run notes what the wait did — and
+# the count is runs, so only the first call counts and escalates. The reason is
+# logged either way: it is the only place the run says which block it hit.
+NOTE_BLOCKED=0
 note_blocked() {
+  # MUTATION: no once-per-run guard
+
   local defers age
   if ! defers=$(starve_bump "$1"); then
     log "WARNING: could not record this blocked run in $STARVE_STATE"
@@ -217,7 +225,9 @@ note_blocked() {
   fi
   if ESCALATE_OUT=$(gt escalate "rebuild-gt: the binary has been due for install and blocked for ${age}m over $defers run(s); last: $1" \
     -s high --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:starved" 2>&1); then
-    starve_mark_escalated >/dev/null
+    if [ "$(starve_mark_escalated)" != "1" ]; then
+      log "WARNING: the escalation went out but could not be recorded in $STARVE_STATE; it may fire again on the next run"
+    fi
   else
     log "WARNING: the starvation escalation did not reach the town; retrying on the next run: $ESCALATE_OUT"
   fi

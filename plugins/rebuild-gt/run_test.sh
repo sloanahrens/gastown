@@ -612,6 +612,15 @@ if grep -q "slot run" "$T/gt.log" 2>/dev/null; then
 else
   pass "starvation: no build started while the gate held the slot"
 fi
+# The wait and the deferral that ends the run are one blocked run, not two: the
+# count is what the log reads out, and a run that noted itself twice would
+# double-count every reserve attempt. age_state seeds 3, so one run reads 4.
+DEFERS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("consecutive_defers"))' "$T/daemon/rebuild-gt-state.json" 2>/dev/null || true)
+if [ "$DEFERS" = "4" ]; then
+  pass "starvation: one blocked run is counted once"
+else
+  fail "starvation: one run counted $DEFERS defers, want 4: $(cat "$T/daemon/rebuild-gt-state.json" 2>/dev/null)"
+fi
 
 # Case 23: a container running outside the gate is not something the gate slot
 # serializes, so past the threshold it escalates but does NOT queue for the slot
