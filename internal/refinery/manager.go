@@ -1002,6 +1002,10 @@ type RejectionRecord struct {
 // formatter, so whichever writes first leaves a block the other recognizes and
 // skips — one MERGE REJECTION block per rejection, and the attempt number the
 // note header carries is the one the reason does (gt-s4f6).
+//
+// Receipt is set only from rec, so a manual `gt mq reject` carrying no om
+// verdict leaves it nil and `gt deacon redispatch` keeps falling back to the
+// plain attempt-count Redispatch for that path (gt-j6ez).
 func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRecord) deadWorkerRecoveryRequest {
 	req := deadWorkerRecoveryRequest{
 		MRID:          mr.ID,
