@@ -414,6 +414,12 @@ func TestHookSessionBeaconLines_SilentForPreCompact(t *testing.T) {
 // TestPrimeRoleFixturesFitHookBudget is the acceptance guard for gt-layt: every
 // role's dynamic payload, rendered against its largest realistic content,
 // stays under primeHookTestBudget and leads with the work.
+//
+// A role whose work formula is attached renders its checklist through the
+// hooked-work section (outputMoleculeWorkflow), so its molecule section stays
+// empty. The dog (gt-mbuf) is the tightest case: its payload only fits because
+// the ~9.3 KB role text rides the kennel's system-prompt file instead of the
+// hook, which TestDogPrimeKeepsStaticTextOutOfTheHook guards.
 func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	t.Setenv(config.EnvSystemPromptFile, "")
 	town := t.TempDir()
@@ -424,17 +430,25 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	memories := strings.Repeat("- some-memory-key: first sentence of the memory preview\n", 120)
 
 	patrol := map[Role]string{RoleWitness: constants.MolWitnessPatrol, RoleRefinery: constants.MolRefineryPatrol, RoleDeacon: constants.MolDeaconPatrol}
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleWitness, RoleRefinery, RoleDeacon, RoleMayor} {
+	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work", RoleDog: "mol-dog-reaper"}
+	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleWitness, RoleRefinery, RoleDeacon, RoleMayor} {
 		role := role
 		t.Run(string(role), func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+			if role == RoleDog {
+				// A dog is town-level (no rig) and runs from its own kennel.
+				ctx = RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}
+				if err := os.MkdirAll(ctx.WorkDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var bead *beads.Issue
-			if role == RolePolecat || role == RoleCrew {
+			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",
-					Description: "attached_molecule: gt-wisp-1\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
+					Description: "attached_molecule: gt-wisp-1\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
 			}
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },
@@ -461,6 +475,56 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 				t.Fatalf("%s payload must include its patrol checklist:\n%s", role, out)
 			}
 		})
+	}
+}
+
+// TestDogPrimeKeepsStaticTextOutOfTheHook guards gt-mbuf: the dog role text
+// (~9.3 KB) must not ride the hook, or Claude Code hands the dog a 2 KB preview
+// and it loses the hooked work and its formula checklist. The text rides the
+// kennel's per-dog system-prompt file instead (gt-h7e5; gt-t30p is the polecat
+// shape of the same fix). Fails if the dog stops getting a file, and if the
+// dog text shrinks past the point where the file is load-bearing — in which
+// case delete this test rather than leave the stale premise.
+func TestDogPrimeKeepsStaticTextOutOfTheHook(t *testing.T) {
+	town := t.TempDir()
+	ctx := RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}
+	if err := os.MkdirAll(ctx.WorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	path := config.SystemPromptFilePath("dog", town, "", "alpha")
+	if path == "" {
+		t.Fatal("dog has no system-prompt file path; restore RoleDog in config.SystemPromptFilePath or the dog prime truncates")
+	}
+
+	static, fromTemplate, err := staticRoleText(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fromTemplate {
+		t.Fatal("dog template did not render; the assertions below would be vacuous")
+	}
+	if len(static) <= primeHookBudget {
+		t.Fatalf("dog static text is now %d chars, inside the %d-char hook budget on its own", len(static), primeHookBudget)
+	}
+
+	// The spawn path renders the file before the session starts, and prime reads
+	// GT_SYSTEM_PROMPT_FILE back to decide the text is already in the model's
+	// system prompt; text the file does not carry is text prime drops.
+	if err := renderSystemPromptFileForSpawn("dog", town, "", "alpha", path); err != nil {
+		t.Fatalf("render dog system prompt: %v", err)
+	}
+	rendered, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("dog system prompt not written: %v", err)
+	}
+	if string(rendered) != static {
+		t.Fatalf("rendered dog system prompt (%d chars) differs from the static text prime omits (%d chars)",
+			len(rendered), len(static))
+	}
+	t.Setenv(config.EnvSystemPromptFile, path)
+	if !primeStaticTextDelivered() {
+		t.Fatal("prime does not see the dog's system prompt as delivered, so it reprints ~9 KB into the hook")
 	}
 }
 
