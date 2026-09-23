@@ -8,8 +8,10 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-// This file guards gt done against a branch whose commit REVERTS work already
-// merged into the target. That is not a hypothetical: two local-coder polecat
+// This file warns gt done's caller about a branch whose commit REVERTS work
+// already merged into the target — advisory only (gt-0wy03 REDESIGN); the
+// refinery's pre-merge gate (internal/refinery/revert_gate.go) is what
+// actually refuses one. That is not a hypothetical: two local-coder polecat
 // MRs in one night (gt-wisp-hrau, gt-wisp-p7nl) each submitted an unrelated fix
 // wrapped around a full revert of everything merged since their worktree was
 // cut — 17 files +972/-1711 and 9 files +106/-472 (gt-63sz).
@@ -40,14 +42,20 @@ const revertReportLimit = 8
 // revertPathsPerCommit caps the paths listed under a single reverted commit.
 const revertPathsPerCommit = 4
 
-// reportRevertedMerges prints the branch's diff against target and refuses the
-// submission when the branch undoes merged work.
+// reportRevertedMerges prints the branch's diff against target and warns when
+// the branch undoes merged work. This is advisory only (gt-0wy03 REDESIGN):
+// the authoritative, fail-closed check is the refinery's pre-merge gate
+// (internal/refinery/revert_gate.go), the single choke point covering gt
+// done's own push, gt mq submit, and both the single-MR and batch merge
+// paths. A client-side refusal here could only ever block the polecat that
+// tripped it, never the branch reaching main by another route, so gt done no
+// longer treats this as a submission blocker.
 //
-// The stat is printed on every call, refusals included, because it is the one
-// view that makes the failure self-evident to the polecat that caused it: a
-// correct branch lists the polecat's own files, and the two branches in gt-63sz
-// listed 9 and 17 files each, nearly none of them the author's.
-func reportRevertedMerges(g *git.Git, target string) error {
+// The stat is printed on every call because it is the one view that makes a
+// real incident self-evident to the polecat that caused it: a correct branch
+// lists the polecat's own files, and the two branches in gt-63sz listed 9 and
+// 17 files each, nearly none of them the author's.
+func reportRevertedMerges(g *git.Git, target string) {
 	if stat, err := g.DiffStatThreeDot(target, "HEAD"); err != nil {
 		style.PrintWarning("could not compute branch diff against %s: %v", target, err)
 	} else if strings.TrimSpace(stat) != "" {
@@ -58,29 +66,25 @@ func reportRevertedMerges(g *git.Git, target string) error {
 		fmt.Println()
 	}
 
-	found, err := git.DetectRevertedMerges(g, target, "HEAD")
+	found, err := git.DetectRevertedMerges(g, target, "HEAD", "HEAD")
 	if err != nil {
-		// Refuse rather than submit: this check exists because a branch that
-		// reverts merged work is silently accepted by everything downstream,
-		// and a check that cannot run must not read as a check that passed.
-		return fmt.Errorf("cannot verify branch against %s: %w\n"+
-			"Refusing to submit rather than risk reverting merged work. "+
-			"Run `git fetch origin && git rebase %s`, then re-run gt done.", target, err, target)
+		style.PrintWarning("could not verify branch against %s for reverted merged work: %v", target, err)
+		return
 	}
 	if len(found) == 0 {
-		return nil
+		return
 	}
-	return revertedMergeRefusal(g, target, found)
+	style.PrintWarning("%s", revertedMergeWarning(g, target, found))
 }
 
-// revertedMergeRefusal builds the refusal error for a branch that undoes merged
-// work. The message deliberately does not name the flag that overrides it:
-// agents read refusal text and self-bypass, so the text says what to do about
-// the branch instead.
-func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) error {
+// revertedMergeWarning builds the advisory text for a branch that appears to
+// undo merged work. It names the mayor escalation path rather than any flag
+// or env var: the only override is a mayor-authored file the refinery's gate
+// reads, and nothing on the polecat's side can grant one.
+func revertedMergeWarning(g *git.Git, target string, found []git.RevertedMerge) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
-	fmt.Fprintf(&b, "These commits on %s are undone by your branch:\n", target)
+	fmt.Fprintf(&b, "this branch appears to undo work already merged to %s\n\n", target)
+	fmt.Fprintf(&b, "These commits on %s look undone by your branch:\n", target)
 	for i, f := range found {
 		if i == revertReportLimit {
 			fmt.Fprintf(&b, "  ... and %d more\n", len(found)-revertReportLimit)
@@ -99,12 +103,13 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 			fmt.Fprintf(&b, "      undoes: %s\n", path)
 		}
 	}
-	b.WriteString("\nYour working tree is older than the base your commit claims to sit on, " +
-		"so the commit records (your tree) - (that base): a revert of every commit merged " +
-		"in between, plus your own change. Submitting it would delete other people's merged work.\n\n")
-	fmt.Fprintf(&b, "Integrate with:\n"+
-		"  git fetch origin && git rebase %s\n\n", target)
-	fmt.Fprintf(&b, "Then confirm the branch lists only YOUR files and re-run gt done:\n"+
-		"  git diff --stat %s...HEAD", target)
-	return fmt.Errorf("%s", b.String())
+	b.WriteString("\nIf your working tree is older than the base your commit claims to sit on, " +
+		"the commit records (your tree) - (that base): a revert of every commit merged " +
+		"in between, plus your own change. Rebase before resubmitting:\n" +
+		fmt.Sprintf("  git fetch origin && git rebase %s\n\n", target) +
+		fmt.Sprintf("Then confirm the branch lists only YOUR files: git diff --stat %s...HEAD\n\n", target) +
+		"The refinery's merge gate makes the authoritative call before landing this branch. " +
+		"If this is a genuine relocation rather than a real revert, escalate to the mayor — " +
+		"only a mayor-authored override can let it through.")
+	return b.String()
 }

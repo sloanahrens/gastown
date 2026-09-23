@@ -173,6 +173,17 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 			continue
 		}
 
+		// Refuse a member that undoes work already merged to target
+		// (gt-0wy03 REDESIGN) — the same authoritative check the single-MR
+		// path runs in doMerge, so a batch cannot land a revert that would
+		// have been refused one MR at a time.
+		if revert := e.checkRevertGate(mr, target, mergeRef); !revert.Success {
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: %s, removing from batch\n", mr.ID, revert.Error)
+			e.HandleMRInfoFailure(mr, revert)
+			conflicts = append(conflicts, mr)
+			continue
+		}
+
 		// Check for conflicts before merging
 		conflictFiles, conflictErr := e.git.CheckConflictsAtHead(mergeRef)
 		if conflictErr != nil || len(conflictFiles) > 0 {

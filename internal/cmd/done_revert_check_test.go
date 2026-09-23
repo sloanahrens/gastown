@@ -133,7 +133,7 @@ func TestDetectRevertedMerges_StaleResetOverFreshBase(t *testing.T) {
 		t.Fatalf("scenario precondition: %d commits ahead of origin/main, want 1", ahead)
 	}
 
-	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
 
 func assertNoRevertedMerges(t *testing.T, repo string) {
 	t.Helper()
-	found, err := git.DetectRevertedMerges(git.NewGit(repo), "origin/main", "HEAD")
+	found, err := git.DetectRevertedMerges(git.NewGit(repo), "origin/main", "HEAD", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
@@ -226,16 +226,17 @@ func TestDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testing.T) {
 	commitPolecat(t, s.polecat, map[string]string{"fix.txt": "the fix\n"}, "feat: work (gt-test)")
 
 	g := git.NewGit(s.polecat)
-	if _, err := git.DetectRevertedMerges(g, "origin/does-not-exist", "HEAD"); err == nil {
+	if _, err := git.DetectRevertedMerges(g, "origin/does-not-exist", "HEAD", "HEAD"); err == nil {
 		t.Fatal("detectRevertedMerges returned no error for an unresolvable target, want failure")
 	}
 }
 
-// TestReportRevertedMerges_RefusesStaleBranch checks the operator-facing half:
-// a refusal, with the undone commit named and the rebase remedy stated, and the
-// branch's diff stat printed so the polecat can see whose files are in its diff.
-func TestReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
-	t.Parallel()
+// TestReportRevertedMerges_WarnsOnStaleBranch checks the operator-facing half.
+// gt done no longer blocks on this check (gt-0wy03 REDESIGN: the refinery's
+// pre-merge gate is the authoritative one) — reportRevertedMerges only warns,
+// naming the undone commit and the rebase remedy, with the branch's diff stat
+// printed so the polecat can see whose files are in its diff.
+func TestReportRevertedMerges_WarnsOnStaleBranch(t *testing.T) {
 	s := newRevertScenario(t)
 	commitPolecat(t, s.polecat, map[string]string{
 		"shared.txt": "base\npolecat line\n",
@@ -245,26 +246,27 @@ func TestReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 	staleResetOntoMain(t, s.polecat)
 
 	g := git.NewGit(s.polecat)
-	err := reportRevertedMerges(g, "origin/main")
-	if err == nil {
-		t.Fatal("reportRevertedMerges accepted a branch that reverts merged work")
-	}
-	msg := err.Error()
-	for _, want := range []string{"refusing to submit", "merged: other work", "git rebase origin/main", "git diff --stat origin/main...HEAD"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("refusal message missing %q:\n%s", want, msg)
+	stderr := captureStderr(t, func() {
+		reportRevertedMerges(g, "origin/main")
+	})
+	for _, want := range []string{"appears to undo", "merged: other work", "git rebase origin/main", "git diff --stat origin/main...HEAD", "escalate to the mayor"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning missing %q:\n%s", want, stderr)
 		}
 	}
-	if strings.Contains(msg, "--allow-reverts") {
-		t.Errorf("refusal message advertises the override flag — agents read refusal text and self-bypass:\n%s", msg)
+	if strings.Contains(stderr, "--allow-reverts") {
+		t.Errorf("warning advertises a nonexistent override flag:\n%s", stderr)
 	}
 
-	// A clean branch must be accepted, so the check cannot be passing by
-	// refusing everything.
+	// A clean branch must not warn, so the check cannot be passing by warning
+	// about everything.
 	clean := newRevertScenario(t)
 	commitPolecat(t, clean.polecat, map[string]string{"fix.txt": "the fix\n"}, "feat: work (gt-test)")
-	if err := reportRevertedMerges(git.NewGit(clean.polecat), "origin/main"); err != nil {
-		t.Errorf("reportRevertedMerges refused a clean branch: %v", err)
+	cleanStderr := captureStderr(t, func() {
+		reportRevertedMerges(git.NewGit(clean.polecat), "origin/main")
+	})
+	if strings.Contains(cleanStderr, "appears to undo") {
+		t.Errorf("reportRevertedMerges warned about a clean branch: %s", cleanStderr)
 	}
 }
 

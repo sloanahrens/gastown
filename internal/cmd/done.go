@@ -75,7 +75,6 @@ var (
 	donePreVerified   bool
 	doneTarget        string
 	doneSkipVerify    bool
-	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
 )
@@ -1102,7 +1101,6 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
-	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
@@ -1638,22 +1636,22 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 
-		// Refuse to submit a branch that reverts work already merged to the
-		// target (gt-63sz). Anything else in this path — the contamination
-		// check above, the MR gate, the refinery — reads the commit graph, and
-		// a `git reset --soft origin/main` over a stale checkout produces a
-		// branch that is one commit ahead of a fresh base while its content
-		// undoes every commit merged in between. Only the branch's file content
-		// shows that, so this is the one place that looks at it.
+		// Warn (advisory only) about a branch that reverts work already merged
+		// to the target (gt-63sz). A `git reset --soft origin/main` over a
+		// stale checkout produces a branch that is one commit ahead of a fresh
+		// base while its content undoes every commit merged in between; only
+		// the branch's file content shows that.
+		//
+		// gt done no longer blocks on this (gt-0wy03 REDESIGN): the
+		// authoritative, fail-closed check is the refinery's pre-merge gate
+		// (internal/refinery/revert_gate.go), the one choke point covering
+		// every path a branch reaches the target by, including gt mq submit
+		// and batch merges that never ran this client-side check at all.
 		//
 		// Runs after the auto-rebase above: a rebase replays the same diff, so
 		// it neither causes nor cures this and the check must see the branch in
 		// the state that would actually be pushed.
-		if doneAllowReverts {
-			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
-		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {
-			return err
-		}
+		reportRevertedMerges(g, contaminationBase)
 
 		// Refuse a branch that would add throwaway files to the target
 		// (gt-ozo4). Checked here, before the commit-message squash below

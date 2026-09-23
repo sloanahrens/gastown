@@ -256,7 +256,7 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 		return true, fmt.Sprintf("could not inspect the pending checkpoint tree (git write-tree failed): %v", err)
 	}
 
-	found, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), checkpointRevertTarget, pendingTree)
+	found, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), checkpointRevertTarget, "HEAD", pendingTree)
 	if err != nil {
 		return true, fmt.Sprintf("could not verify the pending checkpoint against %s: %v", checkpointRevertTarget, err)
 	}

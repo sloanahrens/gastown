@@ -694,6 +694,14 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return refusal.result()
 	}
 
+	// Step 1.5: refuse a branch that undoes work already merged to target
+	// (gt-0wy03 REDESIGN). This is the authoritative check — gt done's own
+	// client-side check is a warning only, and this is the one choke point
+	// every path to target passes through.
+	if revert := e.checkRevertGate(mr, target, mergeRef); !revert.Success {
+		return revert
+	}
+
 	// Step 2: Stage the merge on the target branch.
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Staging the merge on %s...\n", target)
 	if err := e.prepareMergeTarget(target); err != nil {

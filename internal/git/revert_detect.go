@@ -38,6 +38,16 @@ import (
 // history depth.
 const revertScanCommits = 2000
 
+// gt-zeuip (dangling refs reachable only through a merge parent can
+// false-positive a no-op path deletion) is a known, separate gap in this
+// scan. Restricting CommitFileChanges to --first-parent would close it but
+// also hides every commit merged with --no-ff — this town's own merge
+// strategy — since a merge commit itself contributes no diff; excluding a
+// path merely because targetBlobs equals baseBlobs for it is unsound too,
+// since that equality is trivially true whenever the candidate's merge base
+// already sits at target's own tip (the common, healthy case gt-63sz's own
+// regression test pins). Left open rather than risk either regression.
+
 // RevertedMerge is one commit on target whose change the candidate undoes,
 // with the paths on which it was observed.
 type RevertedMerge struct {
@@ -49,12 +59,18 @@ type RevertedMerge struct {
 // headTreeRef undoes. An empty result means headTreeRef's diff against target
 // removes only content headTreeRef itself introduced.
 //
-// headTreeRef names the tree being checked for content, not which commit the
-// candidate descends from — that is always g's actual HEAD, since the merge
-// base of an as-yet-uncommitted change is the merge base of the commit it
-// will be committed onto. Pass "HEAD" when the content in question is already
-// committed there; pass a bare tree object (e.g. from `git write-tree`) to
-// check content still staged in the index before committing it.
+// candidateCommit is the commit the candidate's content descends from — used
+// only to resolve the merge base, since the merge base of an as-yet-uncommitted
+// change is the merge base of the commit it will be committed onto. Pass
+// "HEAD" for a check that runs against the caller's own checkout (gt done, the
+// checkpoint_dog daemon); pass the candidate's actual commit SHA when the
+// caller's checkout is on some other branch entirely, as the refinery's
+// pre-merge gate is while target is staged.
+//
+// headTreeRef names the tree being checked for content, which is normally the
+// same value as candidateCommit — pass a bare tree object (e.g. from
+// `git write-tree`) instead when the content in question is still staged in
+// the index rather than committed to candidateCommit.
 //
 // Two shapes are detected, both anchored on the same fact — that headTreeRef
 // carries a live target content state that target has moved past:
@@ -72,8 +88,8 @@ type RevertedMerge struct {
 // merge base. Without that gate a candidate that simply does not mention a
 // path would be reported for every historical change to it, when in fact
 // merging such a candidate leaves target's copy alone.
-func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, error) {
-	mergeBase, err := g.MergeBase(target, "HEAD")
+func DetectRevertedMerges(g *Git, target, candidateCommit, headTreeRef string) ([]RevertedMerge, error) {
+	mergeBase, err := g.MergeBase(target, candidateCommit)
 	if err != nil {
 		return nil, fmt.Errorf("resolving merge base of HEAD and %s: %w", target, err)
 	}
