@@ -320,11 +320,16 @@ func TestDrainSkipsExpired(t *testing.T) {
 		t.Errorf("got sender %q, want %q", nudges[0].Sender, "new-sender")
 	}
 
-	// After drain, queue dir should be empty (both files removed)
+	// The expired nudge leaves the queue but is preserved as a trace; only the
+	// fresh one is delivered (gt-oexm).
 	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", session)
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Errorf("queue dir should be empty after drain, got %d entries", len(entries))
+	if len(entries) != 1 || entries[0].Name() != expiredDirName {
+		t.Errorf("queue dir after drain = %v, want only %q", entryNames(entries), expiredDirName)
+	}
+	traces, _ := os.ReadDir(filepath.Join(dir, expiredDirName))
+	if len(traces) != 1 {
+		t.Errorf("expired dir holds %d trace(s), want 1", len(traces))
 	}
 }
 
@@ -1012,5 +1017,199 @@ func TestFirstLineExcerpt(t *testing.T) {
 	}
 	if !strings.HasSuffix(multi, "…") {
 		t.Errorf("excerpt = %q, want a trailing ellipsis", multi)
+	}
+}
+
+// entryNames lists directory entry names for failure messages.
+func entryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// observeExpiries installs a collector for the package-level expiry handler and
+// returns it, restoring the previous handler when the test ends. ExpiryObserver
+// is a package global, so the tests that use it must not call t.Parallel.
+func observeExpiries(t *testing.T) *[]ExpiryEvent {
+	t.Helper()
+	got := &[]ExpiryEvent{}
+	prev := ExpiryObserver
+	ExpiryObserver = func(ev ExpiryEvent) { *got = append(*got, ev) }
+	t.Cleanup(func() { ExpiryObserver = prev })
+	return got
+}
+
+// TestDrainReportsExpiredNudge is the reported failure: a nudge sitting in the
+// queue past ExpiresAt used to be deleted with no error anywhere, so the
+// message vanished and nothing said so (gt-oexm).
+func TestDrainReportsExpiredNudge(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-expiry-reported"
+	got := observeExpiries(t)
+
+	expiredAt := time.Now().Add(-time.Minute)
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender:    "witness",
+		Message:   "bead gt-abc is still open\nsecond line",
+		Priority:  PriorityUrgent,
+		Timestamp: expiredAt.Add(-time.Hour),
+		ExpiresAt: expiredAt,
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	nudges, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 0 {
+		t.Fatalf("Drain returned %d nudge(s), want 0 (an expired nudge must not be delivered)", len(nudges))
+	}
+
+	if len(*got) != 1 {
+		t.Fatalf("ExpiryObserver received %d event(s), want 1", len(*got))
+	}
+	ev := (*got)[0]
+	if ev.Session != session {
+		t.Errorf("Session = %q, want %q", ev.Session, session)
+	}
+	if ev.Source != expirySourceDrain {
+		t.Errorf("Source = %q, want %q", ev.Source, expirySourceDrain)
+	}
+	if ev.TownRoot != townRoot {
+		t.Errorf("TownRoot = %q, want %q", ev.TownRoot, townRoot)
+	}
+	if ev.Nudge.Message != "bead gt-abc is still open\nsecond line" {
+		t.Errorf("Nudge.Message = %q, want the original text", ev.Nudge.Message)
+	}
+	if ev.Nudge.ExpiredAt.IsZero() {
+		t.Error("Nudge.ExpiredAt is zero; the expiry is not stamped on the reported nudge")
+	}
+
+	// The trace is the durable half of the report: it must exist and still
+	// carry the message after the queue entry is gone.
+	if ev.Trace == "" {
+		t.Fatal("Trace is empty; the expired nudge was dropped without a record")
+	}
+	data, err := os.ReadFile(ev.Trace)
+	if err != nil {
+		t.Fatalf("reading trace %s: %v", ev.Trace, err)
+	}
+	var traced QueuedNudge
+	if err := json.Unmarshal(data, &traced); err != nil {
+		t.Fatalf("unmarshaling trace %s: %v", ev.Trace, err)
+	}
+	if traced.Message != "bead gt-abc is still open\nsecond line" {
+		t.Errorf("traced Message = %q, want the original text", traced.Message)
+	}
+	if traced.Sender != "witness" {
+		t.Errorf("traced Sender = %q, want %q", traced.Sender, "witness")
+	}
+	if traced.ExpiredAt.IsZero() {
+		t.Error("traced ExpiredAt is zero")
+	}
+	if pending, _ := Pending(townRoot, session); pending != 0 {
+		t.Errorf("Pending = %d, want 0 (the expired entry leaves the deliverable queue)", pending)
+	}
+}
+
+// TestExpiredNudgeKeptWhenNoObserverRegistered covers a delivery plane that
+// runs without the command layer's handler: the trace must still be written, so
+// an expiry is never silent even when nothing can mail it (gt-oexm).
+func TestExpiredNudgeKeptWhenNoObserverRegistered(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-expiry-no-observer"
+
+	prev := ExpiryObserver
+	ExpiryObserver = nil
+	t.Cleanup(func() { ExpiryObserver = prev })
+
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender:    "deacon",
+		Message:   "HEALTH_CHECK from deacon",
+		Timestamp: time.Now().Add(-time.Hour),
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := Drain(townRoot, session); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	traces, err := os.ReadDir(filepath.Join(queueDir(townRoot, session), expiredDirName))
+	if err != nil {
+		t.Fatalf("reading expired dir: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("expired dir holds %d trace(s), want 1", len(traces))
+	}
+}
+
+// TestRequeueReportsExpiredNudge covers the other path that used to drop an
+// expired nudge in silence: a failed injection that requeues past the TTL
+// (gt-oexm).
+func TestRequeueReportsExpiredNudge(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-expired"
+	got := observeExpiries(t)
+
+	if err := Requeue(townRoot, session, []QueuedNudge{{
+		Sender:    "witness",
+		Message:   "gt-abc needs a decision",
+		Timestamp: time.Now().Add(-time.Hour),
+		ExpiresAt: time.Now().Add(-time.Second),
+	}}); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+
+	if pending, _ := Pending(townRoot, session); pending != 0 {
+		t.Errorf("Pending = %d, want 0 (an expired nudge must not be requeued)", pending)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("ExpiryObserver received %d event(s), want 1", len(*got))
+	}
+	ev := (*got)[0]
+	if ev.Source != expirySourceRequeue {
+		t.Errorf("Source = %q, want %q", ev.Source, expirySourceRequeue)
+	}
+	if ev.Trace == "" {
+		t.Fatal("Trace is empty; the expired nudge was dropped without a record")
+	}
+	if _, err := os.Stat(ev.Trace); err != nil {
+		t.Errorf("trace %s not readable: %v", ev.Trace, err)
+	}
+}
+
+// TestExpiredTracesPrunedAfterRetention keeps the expired/ directory from
+// growing for the life of a session.
+func TestExpiredTracesPrunedAfterRetention(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-expiry-prune"
+	dir := filepath.Join(queueDir(townRoot, session), expiredDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	stale := filepath.Join(dir, "1-stale.json")
+	if err := os.WriteFile(stale, []byte("{}"), 0644); err != nil {
+		t.Fatalf("writing stale trace: %v", err)
+	}
+	old := time.Now().Add(-expiredTraceRetention - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("aging stale trace: %v", err)
+	}
+
+	fresh, err := writeExpiredTrace(townRoot, session, QueuedNudge{Sender: "deacon", ExpiredAt: time.Now()})
+	if err != nil {
+		t.Fatalf("writeExpiredTrace: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale trace %s survived pruning (stat err = %v)", stale, err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh trace %s was pruned: %v", fresh, err)
 	}
 }
