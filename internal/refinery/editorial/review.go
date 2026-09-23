@@ -317,6 +317,26 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		(!retroReview || prior.Commit == noteCommit) &&
 		recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
 	if reuseApplies {
+		// A recorded approve can be stale the same way CheckPrecondition's own
+		// drift check (targetDriftedMaterially, precondition.go) judges a push
+		// stale: target may have moved onto files this MR's own diff also
+		// touches since prior.Note.ReviewedTargetTip was recorded, even though
+		// the MR's own diff (patchID, just matched above) is unchanged.
+		// Reusing such a note here is what livelocked ReasonTargetDriftMaterial
+		// (gt-6bsp): the precondition refuses the push on drift and queues the
+		// MR on the promise that the next review writes a fresh note, but this
+		// reuse path is the only thing standing between "next review" and
+		// "same stale note again" — every later cycle found the same
+		// ReviewedTargetTip and refused forever. Falling through re-reviews and
+		// writes a note with a current ReviewedTargetTip, same as any other
+		// reuse-disqualifying condition above.
+		drifted, err := targetDriftedMaterially(deps.Git, prior.Note.ReviewedTargetTip, targetTip, mergeBase, head)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("target drift check: %v", err), 0)
+		}
+		reuseApplies = !drifted
+	}
+	if reuseApplies {
 		if prior.Note.Verdict == "approve" {
 			// A landed review has no MR bead to record it on, and no push to
 			// precondition: the note is already on the landed commit, which

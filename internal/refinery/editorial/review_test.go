@@ -1775,6 +1775,100 @@ func TestRun_ReusesRecordedRejectionOnANewRehearsalHead(t *testing.T) {
 	}
 }
 
+// TestRun_DriftedApproveNoteIsNotReusedAfterRefusal is the gt-6bsp livelock
+// regression: an approve note whose ReviewedTargetTip predates a target move
+// onto a file the MR's own diff also touches must not be reused on the next
+// rehearsal, even though the MR's own diff (patch-id) is byte-identical to
+// what was approved. Before this, the reuse path in Run only checked
+// verdict/patch-id/rubric/version (recordedVerdictApplies) and answered from
+// the stale note every time, so CheckPrecondition's ReasonTargetDriftMaterial
+// refusal never saw a fresh ReviewedTargetTip and refused forever — the queue
+// promise that "the next review writes a fresh note" was never kept.
+func TestRun_DriftedApproveNoteIsNotReusedAfterRefusal(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+
+	note := recordedNoteFor(t, fixture, 0.8, "approve")
+	note.ReviewedTargetTip = fixture.base // target had not moved at review time
+	recordVerdict(t, fixture, note)
+
+	// Move origin/main onto a commit that independently edits feature.txt —
+	// the same file the MR's own diff touches — so the drift overlaps.
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v (dir=%s): %v\n%s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	worktreeDir := t.TempDir()
+	run(fixture.repoDir, "worktree", "add", "--detach", worktreeDir, fixture.base)
+	if err := os.WriteFile(filepath.Join(worktreeDir, "feature.txt"), []byte("hello\nfrom target\n"), 0644); err != nil {
+		t.Fatalf("write feature.txt in target worktree: %v", err)
+	}
+	run(worktreeDir, "add", "feature.txt")
+	run(worktreeDir, "commit", "-m", "target edits feature.txt independently")
+	moved := run(worktreeDir, "rev-parse", "HEAD")
+	run(fixture.repoDir, "worktree", "remove", "--force", worktreeDir)
+	run(fixture.repoDir, "update-ref", "refs/remotes/origin/main", moved)
+
+	head2 := reRehearsedHead(t, fixture, "after drift refusal")
+
+	execCalls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			execCalls++
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.RehearsedHead = head2
+
+	result := Run(context.Background(), req, deps)
+
+	if execCalls != 1 {
+		t.Fatalf("gate invoked %d time(s), want 1: the stale note (reviewed before target drifted onto feature.txt, which this MR also touches) must not be reused", execCalls)
+	}
+	if result.Reused {
+		t.Error("Reused = true, want false: a note whose ReviewedTargetTip predates a material target drift must trigger a fresh review")
+	}
+	if result.Exit != 0 || result.Note == nil {
+		t.Fatalf("Exit/Note = %d/%v, want 0/non-nil (stderr=%q)", result.Exit, result.Note, result.Stderr)
+	}
+	if result.Note.ReviewedTargetTip != moved {
+		t.Errorf("fresh Note.ReviewedTargetTip = %q, want the moved target tip %s", result.Note.ReviewedTargetTip, moved)
+	}
+
+	// The fresh note now clears CheckPrecondition against the moved target —
+	// the recovery the drift refusal promised but the reuse path never let
+	// happen.
+	updated, err := store.GetIssue(context.Background(), "gt-mr-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
+	if fields == nil || fields.EditorialReviewedHead == "" {
+		t.Fatalf("editorial_reviewed_head not recorded, got %+v", fields)
+	}
+	if _, perr := CheckPrecondition(deps.Git, req.Config, []LandedMR{{
+		MRID:         "gt-mr-1",
+		ReviewedHead: fields.EditorialReviewedHead,
+		Base:         fixture.base,
+		Head:         head2,
+		TargetTip:    moved,
+	}}); perr != nil {
+		t.Errorf("CheckPrecondition after the fresh review = %s, want the push authorized", perr.Reason)
+	}
+}
+
 // TestRun_ReusesTheLatestVerdictRecordedForADiff pins which verdict governs
 // when a re-roll has left more than one for the same diff, and that a plain
 // invocation picks up the re-roll rather than the verdict it replaced. The
