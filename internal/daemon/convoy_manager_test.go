@@ -4061,3 +4061,322 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 		t.Errorf("expected one escalation about a failed preserve push, got: %v", escalated)
 	}
 }
+
+// holdTestStorage serves fixed issue records and comments, so the stranded
+// scan's per-bead checks are testable without a Dolt container. The embedded
+// interface panics on anything else the code under test starts calling.
+type holdTestStorage struct {
+	beadsdk.Storage
+	issues   map[string]*beadsdk.Issue
+	comments map[string][]*beadsdk.Comment
+	readErr  error
+}
+
+func (s *holdTestStorage) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	issue, ok := s.issues[id]
+	if !ok {
+		return nil, fmt.Errorf("holdTestStorage: no issue %s", id)
+	}
+	return issue, nil
+}
+
+func (s *holdTestStorage) GetIssueComments(_ context.Context, id string) ([]*beadsdk.Comment, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	return s.comments[id], nil
+}
+
+// assertLogged fails unless some log line names id and contains want.
+func assertLogged(t *testing.T, logged []string, id, want string) {
+	t.Helper()
+	for _, l := range logged {
+		if strings.Contains(l, id) && strings.Contains(l, want) {
+			return
+		}
+	}
+	t.Errorf("expected a log line naming %q for %s, got: %v", want, id, logged)
+}
+
+// TestFeedFirstReady_DispatchHold_Skips pins the per-bead checks the stranded
+// scan makes before re-dispatching: a bead whose own record carries a deferral,
+// a routing label, or an asserted keep-off decision is not dispatched and the
+// reason is logged. A record that only mentions the wording, and one whose
+// comment hold has been released, still feed (gt-tq6l).
+func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
+	t.Parallel()
+
+	held := []struct {
+		id         string
+		issue      *beadsdk.Issue
+		comments   []*beadsdk.Comment
+		wantReason string
+	}{
+		{
+			id:         "gt-holddefer",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusDeferred},
+			wantReason: "status deferred",
+		},
+		{
+			// Frozen in beads' own status model, alongside deferred.
+			id:         "gt-holdpinned",
+			issue:      &beadsdk.Issue{Status: beadsdk.Status("pinned")},
+			wantReason: "status pinned",
+		},
+		{
+			id:         "gt-holdsonnet",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-sonnet"}},
+			wantReason: "label needs-sonnet",
+		},
+		{
+			id:         "gt-holdsonnetcaps",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-SONNET"}},
+			wantReason: "label NEEDS-SONNET",
+		},
+		{
+			id:         "gt-holdmayor",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"bug", "needs-mayor-review"}},
+			wantReason: "label needs-mayor-review",
+		},
+		{
+			id: "gt-holddesign",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "MAYOR DESIGN DECISION: route this through the deacon, not the convoy feeder",
+			},
+			wantReason: "MAYOR DESIGN DECISION in notes",
+		},
+		{
+			// The decision sits on its own line, under prose that explains it.
+			id: "gt-holdnodisp",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "Blocked on gt-nj23.7 landing first.\ndo not redispatch",
+			},
+			wantReason: "do not redispatch in notes",
+		},
+		{
+			// List and emphasis decoration are in front of the decision, not
+			// part of it.
+			id: "gt-holdbullet",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "Notes:\n  - **do-not-redispatch** until the mayor rules",
+			},
+			wantReason: "do not redispatch in notes",
+		},
+		{
+			id: "gt-holdindesign",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Design: "MAYOR DESIGN DECISION: the deacon owns this one",
+			},
+			wantReason: "MAYOR DESIGN DECISION in design",
+		},
+		{
+			id:    "gt-holdcomment",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "do-not-redispatch until gt-nj23.7 is merged"},
+			},
+			wantReason: "do not redispatch in comment",
+		},
+		{
+			// Same decision, hyphen between "re" and "dispatch": the fold has to
+			// reach both spellings.
+			id:    "gt-holdcommenthyphen",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "Do not re-dispatch until gt-nj23.7 is merged"},
+			},
+			wantReason: "do not redispatch in comment",
+		},
+		{
+			// The newest decision wins: a hold written after a release holds
+			// again.
+			id:    "gt-reheld",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "do not redispatch until gt-nj23.7 is merged"},
+				{Author: "mayor", Text: "HOLD RELEASED"},
+				{Author: "mayor", Text: "the dependency reappeared\nMAYOR DESIGN DECISION: hold it"},
+			},
+			wantReason: "MAYOR DESIGN DECISION in comment",
+		},
+	}
+
+	unheld := []struct {
+		id       string
+		issue    *beadsdk.Issue
+		comments []*beadsdk.Comment
+	}{
+		{
+			id:    "gt-plain",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+		},
+		{
+			// A record that only mentions the wording is not held by it.
+			id: "gt-mentionsnotes",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "This is not a MAYOR DESIGN DECISION, so the feeder may take it",
+			},
+		},
+		{
+			// Neither is a comment that quotes it back, as a review note does.
+			id:    "gt-mentionscomment",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "garnet", Text: "The notes used to say \"do not redispatch\" — that line is gone now"},
+			},
+		},
+		{
+			// Comments are the one field that cannot be edited, so a comment
+			// hold needs a later comment to lift it.
+			id:    "gt-released",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "do not redispatch until gt-nj23.7 is merged"},
+				{Author: "mayor", Text: "gt-nj23.7 merged\nHOLD RELEASED"},
+			},
+		},
+	}
+
+	store := &holdTestStorage{
+		issues:   map[string]*beadsdk.Issue{},
+		comments: map[string][]*beadsdk.Comment{},
+	}
+	for _, h := range held {
+		h.issue.ID = h.id
+		store.issues[h.id] = h.issue
+		store.comments[h.id] = h.comments
+	}
+	for _, u := range unheld {
+		u.issue.ID = u.id
+		store.issues[u.id] = u.issue
+		store.comments[u.id] = u.comments
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	// One bead per convoy, so each case is decided on its own record: a convoy
+	// holding several would stop at its first dispatchable member.
+	feed := func(id string) {
+		m.feedFirstReady(strandedConvoyInfo{
+			ID:          "hq-cv-hold",
+			Title:       "Holds and controls",
+			ReadyCount:  1,
+			ReadyIssues: []string{id},
+		})
+	}
+	for _, h := range held {
+		feed(h.id)
+	}
+	for _, u := range unheld {
+		feed(u.id)
+	}
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	slingLog := string(data)
+
+	for _, h := range held {
+		if strings.Contains(slingLog, h.id) {
+			t.Errorf("%s must not be dispatched (held by %q), got sling: %q", h.id, h.wantReason, slingLog)
+		}
+		assertLogged(t, logged, h.id, "not dispatched: "+h.wantReason)
+	}
+	for _, u := range unheld {
+		if !strings.Contains(slingLog, u.id) {
+			t.Errorf("expected %s to feed, got sling log: %q", u.id, slingLog)
+		}
+		for _, l := range logged {
+			if strings.Contains(l, u.id) && strings.Contains(l, "not dispatched") {
+				t.Errorf("expected no hold on %s, got %q", u.id, l)
+			}
+		}
+	}
+}
+
+// TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed pins the other
+// half of the rule: a store that holds a bead but cannot hand back its record
+// leaves the hold unknown, and an unknown hold must not be read as "no hold".
+// The bead is not dispatched, and the read failure is named in the log so the
+// missing dispatch is diagnosable (gt-tq6l).
+func TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv-unreadable",
+		Title:       "Unreadable record",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-unreadable"},
+	})
+
+	if data, err := os.ReadFile(slingLogPath); err == nil {
+		t.Errorf("expected no dispatch when the record cannot be read, got sling: %q", string(data))
+	}
+	assertLogged(t, logged, "gt-unreadable", "not dispatched: record unreadable")
+}
