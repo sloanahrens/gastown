@@ -38,7 +38,7 @@ var templateFS embed.FS
 //   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
 //   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     boot/dog settings-sync path, which must not apply to non-Claude agents.
+//     boot/dog/polecat settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -54,13 +54,21 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, c
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	// Boot and dog kennels are managed through the JSON merge path so their
-	// role overrides (e.g. the dog formula-allowlist guard, gt-9iv) are
-	// applied and kept in sync rather than frozen at first install.
-	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog") && isSettingsFile(hooksFile) {
+	// Boot, dog, and polecat kennels are managed through the JSON merge path
+	// so their role overrides are kept in sync rather than frozen at first
+	// install; the needsUpgrade heuristic below has no way to detect a hook
+	// type added in code (gt-8stz REOPENED).
+	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog" || role == "polecat") && isSettingsFile(hooksFile) {
+		// DefaultOverrides keys the polecat entry "polecats" (plural); role is
+		// singular everywhere else. ComputeExpected resolves Key literally, so
+		// this must be normalized or the merge silently drops the override.
+		key := role
+		if role == "polecat" {
+			key = "polecats"
+		}
 		_, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
-			Key:      role,
+			Key:      key,
 			Role:     role,
 			Provider: "claude",
 		}, false)

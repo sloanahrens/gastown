@@ -10,13 +10,15 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
-	// Claude has autonomous/interactive variants
+	// Claude has autonomous/interactive variants. "polecat" is exercised
+	// separately (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks):
+	// it now routes through the JSON merge path like boot/dog, not the
+	// static template compared here (gt-8stz).
 	tests := []struct {
 		name     string
 		role     string
 		wantFile string // expected template used
 	}{
-		{"autonomous polecat", "polecat", "settings-autonomous.json"},
 		{"autonomous witness", "witness", "settings-autonomous.json"},
 		{"interactive crew", "crew", "settings-interactive.json"},
 		{"interactive mayor", "mayor", "settings-interactive.json"},
@@ -214,6 +216,70 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 			}
 			if !HasClaudePromptDefaults(settings) {
 				t.Fatal("boot managed settings missing Claude prompt defaults")
+			}
+			if tt.existing {
+				if raw, ok := settings.Extra["customSentinel"]; !ok || string(raw) != "true" {
+					t.Fatalf("customSentinel not preserved: %s", raw)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallForRole_PolecatClaudeSettingsUseManagedHooks pins gt-8stz: a
+// polecat's settings.json is produced by the JSON merge path
+// (SyncManagedClaudeSettings), same as boot/dog, so a hook config change
+// (e.g. the PermissionRequest guard) reaches an existing settings file
+// instead of the install being a silent no-op.
+func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing bool
+	}{
+		{name: "creates managed settings"},
+		{name: "updates existing pre-fix settings", existing: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setTestHome(t, dir)
+			settingsPath := filepath.Join(dir, ".claude", "settings.json")
+
+			if tt.existing {
+				// Simulate the exact production drift: a settings.json written
+				// before the PermissionRequest guard existed, carrying no such
+				// entry, plus a customized field that must survive the sync.
+				if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+					t.Fatalf("creating settings dir: %v", err)
+				}
+				stale := `{"customSentinel":true,"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"gt tap guard dangerous-command"}]}]}}`
+				if err := os.WriteFile(settingsPath, []byte(stale), 0600); err != nil {
+					t.Fatalf("writing existing settings: %v", err)
+				}
+			}
+
+			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+				t.Fatalf("InstallForRole: %v", err)
+			}
+
+			settings, err := LoadSettings(settingsPath)
+			if err != nil {
+				t.Fatalf("LoadSettings: %v", err)
+			}
+			foundGuard := false
+			for _, entry := range settings.Hooks.PermissionRequest {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, "tap guard permission-request") {
+						foundGuard = true
+					}
+				}
+			}
+			if !foundGuard {
+				t.Fatalf("polecat install did not carry the PermissionRequest guard, got: %+v", settings.Hooks.PermissionRequest)
+			}
+			if !HasClaudePromptDefaults(settings) {
+				t.Fatal("polecat managed settings missing Claude prompt defaults")
 			}
 			if tt.existing {
 				if raw, ok := settings.Extra["customSentinel"]; !ok || string(raw) != "true" {

@@ -11,7 +11,7 @@ import (
 )
 
 // TestInstallForRole_ConcurrentSpawnsProduceValidJSON covers gh#3500: when
-// multiple polecats spawn at the same time they all call InstallForRole on
+// multiple agents spawn at the same time they all call InstallForRole on
 // the same shared settings file. The previous implementation used
 // os.WriteFile (open with O_TRUNC then write); on the affected platforms an
 // observer between truncate and write saw a partial JSON file that Claude
@@ -19,6 +19,9 @@ import (
 //
 // With atomic writes (temp + rename), the final settings.json is always a
 // well-formed copy of one writer's full output.
+//
+// Uses role "witness": "polecat" no longer takes the writeTemplate path this
+// test targets (gt-8stz).
 //
 // Note: the exact corruption reported in the issue is timing-sensitive and
 // may not reproduce on every filesystem (single-syscall writes ≤ a few KB
@@ -32,7 +35,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 	// Pre-create the target file with content that differs from the template,
 	// so every writer takes the write path (not the "content equal, skip"
 	// early-return). This forces the truncate+write race that gh#3500
-	// describes when N polecats race to install settings.json simultaneously.
+	// describes when N agents race to install settings.json simultaneously.
 	dotClaude := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(dotClaude, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -57,7 +60,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+			if err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", "claude", true); err != nil {
 				errs <- err
 			}
 		}()
@@ -83,7 +86,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 	}
 
 	// And it must match the resolved template byte-for-byte.
-	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "polecat")
+	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "witness")
 	if err != nil {
 		t.Fatalf("resolveAndSubstitute: %v", err)
 	}
@@ -121,7 +124,7 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dotClaude, 0755) })
 
-	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
+	err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", "claude", true)
 	if err == nil {
 		t.Fatal("expected error from read-only directory, got nil")
 	}
