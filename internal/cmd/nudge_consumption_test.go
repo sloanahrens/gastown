@@ -73,6 +73,42 @@ func fakeTmuxPane(t *testing.T, pane string) string {
 	return logPath
 }
 
+// fakeTmuxPaneLostAfterFirstRead answers the probe's baseline capture-pane call
+// with the given pane and fails every later call the way a session that died
+// does, so a test can blind the probe mid-window (gt-7xnv).
+func fakeTmuxPaneLostAfterFirstRead(t *testing.T, pane string) string {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "tmux.log")
+	countPath := filepath.Join(binDir, "capture.count")
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(`printf '%s\n' "$*" >> "` + logPath + `"` + "\n")
+	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
+	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
+	b.WriteString("\tesac; done\n")
+	b.WriteString(`if [ "$sub" = "capture-pane" ]; then` + "\n")
+	b.WriteString(`  n=$(cat "` + countPath + `" 2>/dev/null || echo 0)` + "\n")
+	b.WriteString(`  echo $((n+1)) > "` + countPath + `"` + "\n")
+	b.WriteString(`  if [ "$n" = "0" ]; then printf '%s' '` + pane + `'; exit 0; fi` + "\n")
+	b.WriteString("  printf '%s\\n' 'session not found' >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	b.WriteString("exit 0\n")
+
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(b.String()), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
 // withShortImmediateProbe shrinks the immediate-mode probe window so the test
 // does not wait the production default. Package state, so callers must not run
 // in parallel.
@@ -139,16 +175,50 @@ func TestImmediateConsumptionWarningIsBounded(t *testing.T) {
 	}
 }
 
-// The probe reads the pane it is judging, not the session's exit status: a
-// session that cannot be captured must produce no verdict at all rather than a
-// spurious warning.
-func TestImmediateConsumptionWarningSilentWhenPaneUnreadable(t *testing.T) {
+// The probe reads the pane it is judging, not the session's exit status. When
+// the pane cannot be read, whether the nudge was consumed is unknown — and
+// unknown must not be rendered as silence, because silence is exactly what a
+// consumed nudge looks like (gt-7xnv). The line says so, and does not claim the
+// target is wedged in either direction.
+func TestImmediateConsumptionWarningReportsUnknownWhenPaneUnreadable(t *testing.T) {
 	withShortImmediateProbe(t)
 	// No shim and no tmux server: every tmux call fails.
 	t.Setenv("PATH", t.TempDir())
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption-missing")
 
-	if warning := immediateConsumptionWarning(tm, "gt-beads-refinery"); warning != "" {
-		t.Errorf("unreadable pane produced a warning: %q", warning)
+	warning := immediateConsumptionWarning(tm, "gt-beads-refinery")
+	if warning == "" {
+		t.Fatal("an unreadable pane produced no line — a probe that could not look is indistinguishable from a consumed nudge")
+	}
+	for _, want := range []string{"gt-beads-refinery", "UNKNOWN", "gt session health"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning %q does not mention %q", warning, want)
+		}
+	}
+	// Not knowing is not a stall claim: the wedge wording must not appear, or
+	// the fix trades a fail-open for a false positive.
+	if strings.Contains(warning, "started no turn") {
+		t.Errorf("unreadable pane was reported as a strand: %q", warning)
+	}
+}
+
+// Losing the pane halfway through the window is the same unknown as never
+// reading it: the probe saw the baseline and nothing after, so it has no
+// evidence about the rest of the window and must not fall back to the shape it
+// started with (gt-7xnv).
+func TestImmediateConsumptionWarningReportsUnknownWhenPaneLostMidProbe(t *testing.T) {
+	withShortImmediateProbe(t)
+	fakeTmuxPaneLostAfterFirstRead(t, cmdWedgedPane)
+	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
+
+	warning := immediateConsumptionWarning(tm, "gt-beads-refinery")
+	if warning == "" {
+		t.Fatal("a pane lost mid-probe produced no line")
+	}
+	if !strings.Contains(warning, "UNKNOWN") {
+		t.Errorf("warning %q does not report the unknown", warning)
+	}
+	if strings.Contains(warning, "started no turn") {
+		t.Errorf("a pane that could not be observed for the whole window was reported as a strand: %q", warning)
 	}
 }

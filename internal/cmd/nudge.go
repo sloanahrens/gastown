@@ -238,9 +238,12 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 var immediateTurnProbeWindow = 3 * time.Second
 
 // immediateConsumptionWarning watches a target for a reaction to a nudge that
-// immediate mode has just delivered, and returns a warning line when the target
-// took the input without acting on it. It returns "" when there is nothing to
-// report.
+// immediate mode has just delivered, and returns a report line when there is one
+// to make. It returns "" only when the pane was read and had nothing to say.
+//
+// Two reports, both naming the observation and the re-probe: the target is
+// holding the input with no turn started (gt-eigw), or the pane could not be
+// read, so consumption is unknown (gt-7xnv).
 //
 // This exists because "the pty took the keystrokes" and "the agent acted on
 // them" are different claims, and only the first was ever being verified
@@ -252,24 +255,42 @@ var immediateTurnProbeWindow = 3 * time.Second
 // It reports rather than fails. Delivery genuinely succeeded — the text left
 // the composer — and the target may still act on it later, so a non-zero exit
 // here would make every caller (patrols, slings, operators) treat a delivered
-// nudge as an undelivered one. The warning is the signal; the recovery stays
+// nudge as an undelivered one. The report is the signal; the recovery stays
 // the operator's or the patrol's, per tmux.SubmitPendingInput's contract.
 func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
 	verdict, err := t.WaitForInputConsumed(sessionName, immediateTurnProbeWindow)
 	if err != nil {
-		// An unobservable pane says nothing about the nudge. Stay quiet: a
-		// warning here would fire for every agent without prompt detection.
-		return ""
+		// The pane could not be read, so whether the nudge was consumed is
+		// UNKNOWN. Returning "" here is the fail-open this fixes (gt-7xnv): an
+		// unobservable pane emits exactly what a consumed nudge emits, which is
+		// the failure-serializes-to-success class the probe exists to close.
+		//
+		// Unknown is not a wedge claim in either direction, and nothing
+		// destructive follows from the line — it names the re-probe. It fires
+		// only when tmux itself could not answer, because
+		// readyPromptPrefixForSession always falls back to
+		// DefaultReadyPromptPrefix, so an unclassifiable pane never lands here.
+		return fmt.Sprintf(
+			"immediate: %s accepted the nudge but its pane could not be read (%v), so whether "+
+				"the nudge was consumed is UNKNOWN — not evidence that the session is healthy. "+
+				"Re-probe before acting on it: 'gt session health %s' shows the pane (gt-7xnv).\n",
+			sessionName, err, sessionName)
 	}
 	if verdict != tmux.InputConsumptionNotConsumed {
 		return ""
 	}
+	// Reported as an observation, not a concluded stall: this probe has seconds
+	// of evidence, and a target that is merely slow to start looks identical
+	// over that window. Naming the re-probe keeps the claim inside what the
+	// evidence supports (gt-7xnv).
 	return fmt.Sprintf(
 		"immediate: %s accepted the nudge but started no turn within %s — its input is "+
-			"still stranded in the composer/queue, which is how a wedged session presents "+
-			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
-			"that session ('gt refinery restart <rig>' for a refinery, 'gt witness restart "+
-			"<rig>' for a witness).\n",
+			"still in the composer/queue, which is how a wedged session presents (gt-eigw). "+
+			"A target that is only slow to start looks the same this early, so re-probe "+
+			"before acting destructively: 'gt session health %s' shows the pane, and if it "+
+			"is still holding the input a few minutes from now, restart that session "+
+			"('gt refinery restart <rig>' for a refinery, 'gt witness restart <rig>' for a "+
+			"witness).\n",
 		sessionName, immediateTurnProbeWindow, sessionName)
 }
 

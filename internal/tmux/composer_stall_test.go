@@ -59,6 +59,17 @@ const (
 	// is not input and must not read as pending.
 	dimPlaceholderPane = "\x1b[2m❯ Try \"fix the failing build\"\x1b[0m\n" +
 		"  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+
+	// undatedPendingPane: input held in the composer in a pane with nothing
+	// above the input box to date the session by — the capture is the box and
+	// the status bar and nothing else. Frozen, it is the shape the consumption
+	// probe reads as stranded, but it cannot testify that the session did no
+	// work: there is no transcript region to hash, so PaneProgressSignature is
+	// "" (gt-7xnv).
+	undatedPendingPane = "────────────────────────────────────────────────────────────────────────────────\n" +
+		"❯ [from gastown/sling] MERGE_READY received - check inbox for pending work\n" +
+		"────────────────────────────────────────────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage"
 )
 
 func TestAnalyzeComposerState(t *testing.T) {
@@ -921,6 +932,17 @@ func TestConsumptionVerdict(t *testing.T) {
 			want:     InputConsumptionInconclusive,
 		},
 		{
+			// Frozen and holding the input, but with no content above the input
+			// box to date the session by. "It did no work" is not claimable from
+			// a capture that has nothing to testify with, so this is insufficient
+			// evidence rather than a strand (gt-7xnv).
+			name:     "frozen pane with nothing to date it by is inconclusive",
+			baseline: undatedPendingPane,
+			current:  undatedPendingPane,
+			prefix:   prefix,
+			want:     InputConsumptionInconclusive,
+		},
+		{
 			// Dim placeholder text is not input, so a frozen prompt showing it
 			// is idle, not stranded.
 			name:     "frozen pane showing dim placeholder is inconclusive",
@@ -1078,6 +1100,50 @@ func fakeTmuxCaptures(t *testing.T, captures []string) (logPath, countPath strin
 	return logPath, countPath
 }
 
+// fakeTmuxCapturesThenFail answers the first len(captures) capture-pane calls
+// from captures and fails every call after that, with the same "session not
+// found" text a dead session produces. It lets a test take the probe's baseline
+// and then blind it mid-window (gt-7xnv). Returns the capture-call counter.
+func fakeTmuxCapturesThenFail(t *testing.T, captures []string) (logPath, countPath string) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
+	}
+	if len(captures) == 0 {
+		t.Fatal("fakeTmuxCapturesThenFail needs at least one capture")
+	}
+
+	binDir := t.TempDir()
+	logPath = filepath.Join(binDir, "tmux.log")
+	countPath = filepath.Join(binDir, "capture.count")
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(`printf '%s\n' "$*" >> "` + logPath + `"` + "\n")
+	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
+	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
+	b.WriteString("\tesac; done\n")
+	b.WriteString(`if [ "$sub" = "capture-pane" ]; then` + "\n")
+	b.WriteString(`  n=$(cat "` + countPath + `" 2>/dev/null || echo 0)` + "\n")
+	b.WriteString(`  echo $((n+1)) > "` + countPath + `"` + "\n")
+	b.WriteString("  case \"$n\" in\n")
+	for i, capture := range captures {
+		b.WriteString("\t" + strconv.Itoa(i) + ") printf '%s' '" + capture + "'; exit 0;;\n")
+	}
+	b.WriteString("\t*) printf '%s\\n' 'session not found' >&2; exit 1;;\n")
+	b.WriteString("  esac\n")
+	b.WriteString("fi\n")
+	b.WriteString("exit 0\n")
+
+	scriptPath := filepath.Join(binDir, "tmux")
+	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath, countPath
+}
+
 // withFastConsumptionPolling shrinks the probe's poll interval for the duration
 // of a test. It is package state, so callers must not run in parallel with it.
 func withFastConsumptionPolling(t *testing.T) {
@@ -1187,6 +1253,72 @@ func TestWaitForInputConsumedIdleTargetIsInconclusive(t *testing.T) {
 	}
 	if verdict != InputConsumptionInconclusive {
 		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionInconclusive)
+	}
+}
+
+// A frozen pane that is holding input but has no transcript region to date
+// itself by must not be reported as a strand: the probe would be asserting that
+// the session did no work on the strength of a capture that cannot show it
+// (gt-7xnv). Insufficient evidence reads as Inconclusive, and the caller stays
+// quiet rather than claiming a wedge.
+func TestWaitForInputConsumedUndatedPendingPaneIsInconclusive(t *testing.T) {
+	// The fixture only tests the dating rule while it stays pending-and-undated;
+	// a shape change that made it clean or dated would make this pass for the
+	// wrong reason.
+	if state := analyzeComposerState(undatedPendingPane, DefaultReadyPromptPrefix).State; state != ComposerPending {
+		t.Fatalf("fixture composer state = %s, want pending", state)
+	}
+	if sig := PaneProgressSignature(undatedPendingPane, DefaultReadyPromptPrefix); sig != "" {
+		t.Fatalf("fixture pane signature = %q, want empty", sig)
+	}
+
+	withFastConsumptionPolling(t)
+	fakeTmuxCaptures(t, []string{undatedPendingPane})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict != InputConsumptionInconclusive {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionInconclusive)
+	}
+}
+
+// The pane could not be read at all. Nothing is known about whether the input
+// was consumed, and that must be reported as Unknown with the failure, never as
+// a verdict — "I could not look" is what a consumed nudge looks like on stdout,
+// and it is neither healthy nor wedged (gt-7xnv).
+func TestWaitForInputConsumedPaneReadFailureIsUnknown(t *testing.T) {
+	withFastConsumptionPolling(t)
+	fakeTmuxLogging(t, map[string]string{"capture-pane": "@fail"})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err == nil {
+		t.Fatal("a failed capture-pane produced no error — the probe cannot see the pane")
+	}
+	if verdict != InputConsumptionUnknown {
+		t.Errorf("verdict = %s, want %s", verdict, InputConsumptionUnknown)
+	}
+}
+
+// The pane was readable for the baseline and gone by the time the probe judged.
+// Losing sight of the pane mid-window must not fall back to the shape the
+// baseline captured: the probe knows nothing about the second half of the
+// window, so the verdict fails closed to Unknown rather than reading a frozen
+// baseline as a strand (gt-7xnv).
+func TestWaitForInputConsumedLostPaneMidWindowIsUnknown(t *testing.T) {
+	withFastConsumptionPolling(t)
+	fakeTmuxCapturesThenFail(t, []string{queuedMessagesPane})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err == nil {
+		t.Fatal("losing the pane mid-window produced no error")
+	}
+	if verdict != InputConsumptionUnknown {
+		t.Errorf("verdict = %s, want %s", verdict, InputConsumptionUnknown)
 	}
 }
 

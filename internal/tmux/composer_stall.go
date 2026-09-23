@@ -477,6 +477,25 @@ func (t *Tmux) SubmitPendingInput(target string, queued bool) error {
 // composer or queue at the end of the window. A clean composer that simply
 // produced no output is Inconclusive, never NotConsumed: the turn may have
 // completed before the first observation.
+//
+// A strand also has to be DATED by content, not merely inferred from a pane that
+// did not move (gt-7xnv). NotConsumed claims the session did no work during the
+// window, and a capture is evidence of that only when it has non-volatile
+// content whose recency it can testify to — the gt-xb27 rule that "no output" is
+// defined by content, never by a pane counter. PaneProgressSignature is that
+// evidence: it digests the pane's transcript region with spinner chrome
+// stripped, and returns "" when there is no such region to hash. An undated pane
+// therefore reads Inconclusive, as AssessStall reads an unavailable pane
+// signature: insufficient evidence, not a verdict.
+//
+// What this probe cannot do is separate a slow start from a wedge by time alone:
+// three seconds of a frozen pending pane is identical in both cases. The counter
+// that would answer it, #{window_activity}, is the one the delivery itself
+// resets (gt-afa7, see DetectComposerStallTracked), so requiring it here would
+// silently disable the report rather than sharpen it. The time-based claim stays
+// with the minutes-scale probe above, on the out-of-pane PendingInputClock.
+// Before tightening this further, read gt-oxzf8: it records both the residual
+// and the clock-gated design that closes it.
 
 // InputConsumption classifies whether a session consumed input it was given.
 type InputConsumption int
@@ -497,8 +516,11 @@ const (
 	// there at the baseline. The input was consumed.
 	InputConsumptionPaneChanged
 	// InputConsumptionNotConsumed means the pane produced no output at all
-	// while still holding unsubmitted input. That input will not be acted on
-	// without intervention — this is the wedged state.
+	// while still holding unsubmitted input, over a window the pane's own
+	// content dates (see consumptionVerdict). That input will not be acted on
+	// without intervention — this is the wedged state. It remains an
+	// observation over a seconds-scale window, not a stall verdict: a target
+	// that is merely slow to start looks the same this early.
 	InputConsumptionNotConsumed
 )
 
@@ -559,10 +581,20 @@ func consumptionVerdict(baseline, current, promptPrefix string) InputConsumption
 	// would read as StartedTurn above. That direction is safe — it reports a
 	// healthy session as healthy — but it does mean the probe can be blinded
 	// by a coincidence, never triggered by one.
-	if analyzeComposerState(current, promptPrefix).State == ComposerPending {
-		return InputConsumptionNotConsumed
+	if analyzeComposerState(current, promptPrefix).State != ComposerPending {
+		return InputConsumptionInconclusive
 	}
-	return InputConsumptionInconclusive
+
+	// The input is still held and the pane did not move. Before calling that a
+	// strand, the pane has to be able to date itself: a capture with nothing
+	// non-volatile above the input box cannot testify that the session did no
+	// work, only that nothing it did landed in this capture (gt-7xnv). An
+	// undated pane is insufficient evidence, not a verdict — the same rule
+	// AssessStall applies to an empty pane signature.
+	if PaneProgressSignature(current, promptPrefix) == "" {
+		return InputConsumptionInconclusive
+	}
+	return InputConsumptionNotConsumed
 }
 
 // captureForConsumption takes the pane snapshot the probe reasons about. -e is
@@ -590,6 +622,13 @@ func (t *Tmux) captureForConsumption(session string) (string, error) {
 // session itself. An error means the pane could not be observed at all; a nil
 // error with InputConsumptionInconclusive means the pane was observed and had
 // nothing to say either way.
+//
+// Fail closed on the error (gt-7xnv): a pane that could not be read says nothing
+// about whether the input was consumed, so a caller must not turn this error
+// into silence — silence is what a consumed nudge looks like. It is not a wedge
+// claim in the other direction either. The verdict is Unknown and the error
+// names what failed; the caller's job is to report the unknown and re-probe,
+// never to act on it as if the session were alive.
 func (t *Tmux) WaitForInputConsumed(session string, window time.Duration) (InputConsumption, error) {
 	if strings.TrimSpace(session) == "" {
 		return InputConsumptionUnknown, fmt.Errorf("input-consumption probe: no session given")
