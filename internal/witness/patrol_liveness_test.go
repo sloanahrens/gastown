@@ -291,3 +291,84 @@ func TestLastCompletedPatrol_EmptyOutput_IsUnknown(t *testing.T) {
 		t.Fatalf("expected Unknown on empty bd output, got %s", result)
 	}
 }
+
+// gt-py0zc: every patrol formula opens its cycle with
+// `bd mol wisp gc --closed --force --exclude-type chore`, which deletes every
+// closed patrol molecule town-wide within minutes. A detector that reads only
+// CLOSED patrol wisps therefore finds nothing for healthy roles and reported
+// "never completed a patrol cycle" for all six rig patrol roles at once
+// (2026-09-23 14:00). `gt patrol report` closes a cycle and creates the next
+// wisp in the same call, so the open wisp's created_at marks the last cycle
+// boundary and survives the gc.
+
+func TestLastCompletedPatrol_DoesNotRestrictToClosed(t *testing.T) {
+	var gotArgs []string
+	bd := fakeBdCli(func(workDir string, args ...string) (string, error) {
+		gotArgs = args
+		return `[]`, nil
+	})
+
+	_, _ = LastCompletedPatrol(bd, "/tmp/rig", "gastown/witness", "mol-witness-patrol")
+
+	joined := strings.Join(gotArgs, " ")
+	if strings.Contains(joined, "status=") {
+		t.Fatalf("query must also see the open patrol wisp (closed ones are gc'd each cycle), got %v", gotArgs)
+	}
+}
+
+func TestLastCompletedPatrol_OpenWispCreatedAtCountsAsCycleBoundary(t *testing.T) {
+	bd := fakeBdCli(func(workDir string, args ...string) (string, error) {
+		return `[{"id":"hq-wisp-1","title":"mol-witness-patrol","status":"hooked","created_at":"2026-09-23T18:58:21Z","updated_at":"2026-09-23T19:05:00Z"}]`, nil
+	})
+
+	got, result := LastCompletedPatrol(bd, "/tmp/rig", "hm/witness", "mol-witness-patrol")
+	if !result.IsPass() {
+		t.Fatalf("expected Pass from the open cycle's created_at, got %s", result)
+	}
+	want := time.Date(2026, 9, 23, 18, 58, 21, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want the open wisp's created_at %s (not updated_at)", got, want)
+	}
+}
+
+func TestLastCompletedPatrol_NewestOfClosedAndOpenWins(t *testing.T) {
+	bd := fakeBdCli(func(workDir string, args ...string) (string, error) {
+		return `[
+			{"id":"hq-wisp-1","title":"mol-refinery-patrol","status":"closed","closed_at":"2026-09-23T19:04:42Z"},
+			{"id":"hq-wisp-2","title":"mol-refinery-patrol","status":"hooked","created_at":"2026-09-23T19:04:43Z"},
+			{"id":"hq-wisp-3","title":"mol-refinery-patrol","status":"closed","closed_at":"2026-09-23T17:00:00Z"}
+		]`, nil
+	})
+
+	got, result := LastCompletedPatrol(bd, "/tmp/rig", "hm/refinery", "mol-refinery-patrol")
+	if !result.IsPass() {
+		t.Fatalf("expected Pass, got %s", result)
+	}
+	want := time.Date(2026, 9, 23, 19, 4, 43, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+// A role that stops calling `gt patrol report` (callback starvation, gt-cyyg)
+// never creates a successor wisp, so its open wisp's created_at stays put and
+// ages past the threshold: the detector still catches it.
+func TestLastCompletedPatrol_StuckOpenCycleKeepsItsOldTime(t *testing.T) {
+	bd := fakeBdCli(func(workDir string, args ...string) (string, error) {
+		return `[{"id":"hq-wisp-ojb4b","title":"mol-witness-patrol","status":"hooked","created_at":"2026-09-23T05:33:00Z","updated_at":"2026-09-23T19:00:00Z"}]`, nil
+	})
+
+	got, result := LastCompletedPatrol(bd, "/tmp/rig", "gastown/witness", "mol-witness-patrol")
+	if !result.IsPass() {
+		t.Fatalf("expected Pass (a timestamp was read), got %s", result)
+	}
+	now := time.Date(2026, 9, 23, 19, 5, 0, 0, time.UTC)
+	res := EvaluatePatrolLiveness(PatrolLivenessInput{
+		Role: "witness", Rig: "gastown", SessionAlive: true,
+		LastCompleted: got, LastCompletedResult: result,
+		Cadence: 10 * time.Minute, Multiplier: 3, Now: now,
+	})
+	if !res.IsFail() {
+		t.Fatalf("a cycle open since 05:33 must still be flagged at 19:05, got %s", res)
+	}
+}

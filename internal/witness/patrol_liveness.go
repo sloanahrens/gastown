@@ -148,10 +148,21 @@ func patrolLivenessLabel(role, rig string) string {
 // documented way to reach the wisps table (same pattern as
 // dogHasHookedFormulaWithID, internal/daemon/handler.go).
 //
-// The returned guard.Result is Pass when a closed patrol wisp was found,
-// Fail when bd resolved the query and confirmed none exists (a role that has
-// genuinely never completed one), and Unknown when the read itself could not
-// be trusted — never Pass over a failure to read (gt-udrrw).
+// Closed patrol wisps do not last (gt-py0zc): every patrol formula opens its
+// cycle with `bd mol wisp gc --closed --force --exclude-type chore`, which
+// deletes every closed patrol molecule town-wide within minutes. Reading only
+// closed wisps made every healthy witness and refinery look like it had never
+// completed a cycle. `gt patrol report` closes a cycle and creates the next
+// wisp in one call, so the open wisp's created_at is the most recent cycle
+// boundary and survives the gc. The result is the newest of a closed wisp's
+// ClosedAt and an open wisp's CreatedAt. A role that stops reporting never
+// creates a successor, so its open wisp's created_at ages and still trips the
+// threshold.
+//
+// The returned guard.Result is Pass when a patrol wisp timestamp was found,
+// Fail when bd resolved the query and confirmed no patrol wisp exists at all
+// (the role has no patrol molecule), and Unknown when the read itself could
+// not be trusted — never Pass over a failure to read (gt-udrrw).
 func LastCompletedPatrol(bd *BdCli, workDir, assignee, patrolMolName string) (time.Time, guard.Result) {
 	if bd == nil {
 		return time.Time{}, guard.Unknown(fmt.Errorf("no bd client configured"))
@@ -160,8 +171,9 @@ func LastCompletedPatrol(bd *BdCli, workDir, assignee, patrolMolName string) (ti
 		return time.Time{}, guard.Unknown(fmt.Errorf("assignee and patrol molecule name are required"))
 	}
 
-	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
-		strconv.Quote("closed"), strconv.Quote(assignee))
+	// No status clause: closed patrol wisps do not survive (see the doc
+	// comment), so the open successor wisp must be visible too (gt-py0zc).
+	queryExpr := fmt.Sprintf("ephemeral=true AND assignee=%s", strconv.Quote(assignee))
 	output, err := bd.Exec(workDir, "query", "--json", queryExpr, "--limit=0")
 	if err != nil {
 		return time.Time{}, guard.Unknown(fmt.Errorf("bd query %q: %w", queryExpr, err))
@@ -184,9 +196,18 @@ func LastCompletedPatrol(bd *BdCli, workDir, assignee, patrolMolName string) (ti
 		if !strings.HasPrefix(iss.Title, patrolMolName) {
 			continue
 		}
-		ts := iss.ClosedAt
-		if ts == "" {
-			ts = iss.UpdatedAt
+		var ts string
+		if iss.Status == "closed" {
+			ts = iss.ClosedAt
+			if ts == "" {
+				ts = iss.UpdatedAt
+			}
+		} else {
+			// An open (hooked/in_progress) patrol wisp was created by the
+			// `gt patrol report` that closed its predecessor, so its
+			// created_at is that cycle boundary. Never updated_at: any
+			// activity bumps it, which would hide a stuck cycle.
+			ts = iss.CreatedAt
 		}
 		if ts == "" {
 			continue
@@ -202,7 +223,7 @@ func LastCompletedPatrol(bd *BdCli, workDir, assignee, patrolMolName string) (ti
 	}
 
 	if !found {
-		return time.Time{}, guard.Fail(fmt.Sprintf("no closed %s wisp found for %s", patrolMolName, assignee))
+		return time.Time{}, guard.Fail(fmt.Sprintf("no %s wisp found for %s", patrolMolName, assignee))
 	}
 	return latest, guard.Pass()
 }
