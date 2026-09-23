@@ -504,6 +504,18 @@ func (c *Curator) generateSummary(event *events.Event) string {
 		}
 		return fmt.Sprintf("%s completed patrol", event.Actor)
 
+	case events.TypeDogCycleOutcome:
+		formula, _ := event.Payload["formula"].(string)
+		outcome, _ := event.Payload["outcome"].(string)
+		reason, _ := event.Payload["reason"].(string)
+		if formula == "" || outcome == "" {
+			return fmt.Sprintf("%s dog cycle did not run cleanly", event.Actor)
+		}
+		if reason == "" {
+			return fmt.Sprintf("Dog cycle %s: %s", formula, outcome)
+		}
+		return fmt.Sprintf("Dog cycle %s: %s — %s", formula, outcome, reason)
+
 	case events.TypeMerged:
 		if worker, ok := event.Payload["worker"].(string); ok {
 			return fmt.Sprintf("Merged work from %s", worker)

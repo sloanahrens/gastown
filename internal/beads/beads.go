@@ -1069,11 +1069,13 @@ func subprocessTimeoutFor(args []string) time.Duration {
 	return bdSubprocessTimeout
 }
 
-// subprocessFailureError names the cause of a bd failure that the exec error
+// SubprocessFailureError names the cause of a bd failure that the exec error
 // hides. A subprocess killed at its deadline reports "signal: killed", which
 // reads as a crash, and wrapError prefers bd's stderr over it — together those
-// turned a 60s timeout into an unexplained bd warning (gt-824d).
-func subprocessFailureError(ctx context.Context, timeout time.Duration, err error) error {
+// turned a 60s timeout into an unexplained bd warning (gt-824d). Callers that
+// run bd through their own exec wiring, rather than through this package's run
+// paths, wrap their error with it so a timeout names itself.
+func SubprocessFailureError(ctx context.Context, timeout time.Duration, err error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 	}
@@ -1162,7 +1164,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	}
 
 	if err != nil {
-		return nil, b.wrapError(subprocessFailureError(ctx, timeout, err), stderr.String(), args)
+		return nil, b.wrapError(SubprocessFailureError(ctx, timeout, err), stderr.String(), args)
 	}
 
 	// Handle bd exit code 0 bug: when issue not found,

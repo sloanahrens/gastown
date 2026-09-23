@@ -69,6 +69,7 @@ const (
 	TypeEscalationClosed  = "escalation_closed"
 	TypeEscalationDropped = "escalation_dropped" // gt escalate call itself failed — the alert never reached a bead
 	TypePatrolComplete    = "patrol_complete"
+	TypeDogCycleOutcome   = "dog_cycle_outcome" // A dog patrol cycle that did NOT end as a clean run (skipped/failed), recorded so a skipped cycle is never read as a clean one (gt-i3rpw)
 
 	// Merge queue events (emitted by refinery)
 	TypeMergeStarted = "merge_started"

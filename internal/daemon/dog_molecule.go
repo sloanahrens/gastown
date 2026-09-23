@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 const (
@@ -24,6 +26,43 @@ const (
 	// failure back into a clean close instead of a permanent orphan.
 	dogCloseMaxAttempts = 3
 	dogCloseRetryDelay  = 500 * time.Millisecond
+
+	// dogPourMaxAttempts bounds the retry of a single molecule pour. Only a pour
+	// that never reached Dolt is retried (pourRetryable): the Dolt circuit
+	// breaker being open or the server being briefly unreachable are the
+	// transient states that clear within seconds (gt-i3rpw).
+	dogPourMaxAttempts = 3
+
+	// dogPourRetryDelay is the base backoff before retrying a pour, multiplied by
+	// the attempt number, so retrying a fast-failing pour costs at most a few
+	// seconds of the cycle it is already not accomplishing anything in.
+	dogPourRetryDelay = 2 * time.Second
+
+	// dogPourEscalateAfter is how many consecutive cycles one dog's molecule may
+	// fail to pour before the daemon escalates. At that point the dog has stopped
+	// being supervised, and nothing downstream would otherwise learn it
+	// (gt-i3rpw).
+	dogPourEscalateAfter = 3
+)
+
+// dogCycleOutcome is how a dog's patrol cycle ended. A cycle that was skipped
+// must never read as a cycle that ran and found nothing: a supervisor which can
+// silently skip is not supervising (gt-i3rpw).
+type dogCycleOutcome string
+
+const (
+	// dogCycleRan: the molecule was poured and the cycle's steps are accounted
+	// for. The only outcome that also leaves a receipt of its own — the root wisp
+	// with its closed steps.
+	dogCycleRan dogCycleOutcome = "ran"
+
+	// dogCycleSkipped: the cycle did not run. The reason says why.
+	dogCycleSkipped dogCycleOutcome = "skipped"
+
+	// dogCycleFailed: the cycle had a molecule to run and its receipt is broken —
+	// the wisp is there but cannot be addressed or read back, so the cycle
+	// demonstrates nothing either way.
+	dogCycleFailed dogCycleOutcome = "failed"
 )
 
 // closeWisp runs `bd close <id>` (plus any extra args) with bounded retries so a
@@ -63,21 +102,43 @@ type dogMol struct {
 	townRoot string
 	logger   interface{ Printf(string, ...interface{}) }
 
+	// formula is the dog formula this molecule was poured from, used to name the
+	// dog in the cycle outcome record.
+	formula string
+
+	// outcome and outcomeReason are how this dog's cycle ended. pourDogMolecule
+	// sets them on every path, and close reports them exactly once, so no cycle
+	// can end without saying what it was (gt-i3rpw).
+	outcome       dogCycleOutcome
+	outcomeReason string
+
 	// runBdFn overrides runBd's subprocess call when set. Tests use this to
 	// simulate `bd` responses (including dependency-blocked closes) without a
 	// real bd binary or Dolt server.
 	runBdFn func(args ...string) (string, error)
+
+	// waitFn overrides the pour retry backoff when set, so tests exercise the
+	// retry path without spending wall-clock time.
+	waitFn func(time.Duration)
 }
 
 // pourDogMolecule creates an ephemeral wisp molecule from a formula.
 // Returns a dogMol handle for closing steps. If bd fails, returns a no-op
 // handle so the caller can proceed without error checking.
+//
+// A failed pour is retried with bounded backoff, counted per dog, and escalated
+// once the dog has failed dogPourEscalateAfter cycles in a row: the dog's whole
+// patrol is being skipped, and a non-fatal log line per cycle is not something
+// anyone learns from (gt-i3rpw).
 func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *dogMol {
 	dm := &dogMol{
 		stepIDs:  make(map[string]string),
+		formula:  formulaName,
 		bdPath:   d.bdPath,
 		townRoot: d.config.TownRoot,
 		logger:   d.logger,
+		runBdFn:  d.dogPourBdFn,
+		waitFn:   d.dogPourWaitFn,
 	}
 
 	// Build args: bd mol wisp <formula> --var k=v ...
@@ -86,9 +147,11 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 		args = append(args, "--var", fmt.Sprintf("%s=%s", k, v))
 	}
 
-	out, err := dm.runBd(args...)
+	out, attempts, err := dm.pourWithRetry(args)
 	if err != nil {
-		d.logger.Printf("dog_molecule: pour %s failed (non-fatal): %v", formulaName, err)
+		dm.setOutcome(dogCycleSkipped, fmt.Sprintf("pour failed after %d attempt(s): %v", attempts, err))
+		d.logger.Printf("dog_molecule: pour %s failed after %d attempt(s), cycle skipped: %v", formulaName, attempts, err)
+		d.recordDogPourFailure(formulaName, dogCycleSkipped, dm.outcomeReason)
 		return dm
 	}
 
@@ -96,15 +159,90 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 	// Example output: "✓ Spawned wisp: gt-wisp-abc123 — Reap stale wisps..."
 	dm.rootID = parseWispID(out)
 	if dm.rootID == "" {
+		// The wisp exists but cannot be addressed, so every closeStep and close
+		// below is a no-op and the cycle leaves no receipt. That is a broken
+		// receipt, not a clean run.
+		dm.setOutcome(dogCycleFailed, fmt.Sprintf("poured but no root ID in output: %.200s", out))
 		d.logger.Printf("dog_molecule: pour %s: could not parse root ID from output: %s", formulaName, out)
+		d.recordDogPourFailure(formulaName, dogCycleFailed, dm.outcomeReason)
 		return dm
 	}
 
 	// Discover step IDs by listing children of the root wisp.
-	dm.discoverSteps()
+	if err := dm.discoverSteps(); err != nil {
+		dm.setOutcome(dogCycleFailed, fmt.Sprintf("poured %s but its steps could not be read back: %v", dm.rootID, err))
+		d.recordDogPourFailure(formulaName, dogCycleFailed, dm.outcomeReason)
+		return dm
+	}
 
+	d.recordDogPourSuccess(formulaName)
+
+	dm.setOutcome(dogCycleRan, "")
 	d.logger.Printf("dog_molecule: poured %s → %s (%d steps)", formulaName, dm.rootID, len(dm.stepIDs))
 	return dm
+}
+
+// setOutcome records how the cycle this handle belongs to ended.
+func (dm *dogMol) setOutcome(outcome dogCycleOutcome, reason string) {
+	dm.outcome = outcome
+	dm.outcomeReason = reason
+}
+
+// pourWithRetry runs the pour with bounded backoff and returns the successful
+// output plus the number of attempts it took. It returns the last error
+// unwrapped so the caller's message carries the real cause (a Dolt circuit
+// breaker, an unreachable server, a timeout) rather than "exit status 1".
+func (dm *dogMol) pourWithRetry(args []string) (string, int, error) {
+	var err error
+	var out string
+	attempts := 0
+	for attempt := 1; attempt <= dogPourMaxAttempts; attempt++ {
+		attempts = attempt
+		if out, err = dm.runBd(args...); err == nil {
+			return out, attempt, nil
+		}
+		if !pourRetryable(err) || attempt == dogPourMaxAttempts {
+			break
+		}
+		dm.wait(time.Duration(attempt) * dogPourRetryDelay)
+	}
+	return "", attempts, err
+}
+
+// pourRetryable reports whether a failed pour is safe to repeat.
+//
+// Only failures that provably never reached Dolt are retried. A pour killed by
+// its own deadline is excluded even though timeouts are the most common failure
+// in the log: the client cannot tell "never committed" from "committed, and the
+// answer was lost", and re-pouring the second case strands a root wisp plus its
+// step wisps that nothing will ever close — the flood gt-ye21 built
+// closeRemainingSteps to prevent. That cycle is skipped and counted instead,
+// which the alarm covers.
+func pourRetryable(err error) bool {
+	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"circuit breaker is open", // Dolt refused the request outright
+		"unreachable",
+		"connection refused",
+		"connection reset",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// wait sleeps for the pour retry backoff, unless a test replaced it.
+func (dm *dogMol) wait(d time.Duration) {
+	if dm.waitFn != nil {
+		dm.waitFn(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // closeStep marks a molecule step as closed.
@@ -166,6 +304,10 @@ func (dm *dogMol) failStep(stepSlug, reason string) {
 // This prevents orphan step wisps from accumulating when callers forget to
 // explicitly close individual steps (the root cause of gt-3o59).
 func (dm *dogMol) close() {
+	// Report before the rootID guard: the cycles this matters most for are the
+	// ones with no root at all.
+	dm.reportOutcome()
+
 	if dm.rootID == "" {
 		return
 	}
@@ -175,6 +317,37 @@ func (dm *dogMol) close() {
 
 	if err := dm.closeWisp(dm.rootID); err != nil {
 		dm.logger.Printf("dog_molecule: close root %s failed after %d attempts (non-fatal): %v", dm.rootID, dogCloseMaxAttempts, err)
+	}
+}
+
+// reportOutcome writes the cycle's one outcome record: a machine-readable line
+// in the daemon log, plus a feed event for anything that is not a clean run.
+//
+// Every dog defers close(), so every poured cycle leaves exactly one of these
+// and a skipped cycle can never be read as a cycle that ran and found nothing
+// (gt-i3rpw). The log line covers every outcome so a grep for `outcome=` finds
+// each cycle; the feed gets only the outcomes with no receipt of their own,
+// which is what a reader who never sees the daemon log has to go on.
+func (dm *dogMol) reportOutcome() {
+	if dm.outcome == "" {
+		// A dogMol that never went through pourDogMolecule (tests build one
+		// directly). It has no formula to name and no cycle to report.
+		return
+	}
+
+	dm.logger.Printf("dog_molecule: cycle %s outcome=%s reason=%q", dm.formula, dm.outcome, dm.outcomeReason)
+
+	if dm.outcome == dogCycleRan {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"formula": dm.formula,
+		"outcome": string(dm.outcome),
+		"reason":  dm.outcomeReason,
+	}
+	if err := events.LogFeedTo(dm.townRoot, events.TypeDogCycleOutcome, events.ActorDaemon, payload); err != nil {
+		dm.logger.Printf("dog_molecule: recording cycle outcome for %s failed: %v", dm.formula, err)
 	}
 }
 
@@ -284,11 +457,16 @@ func (dm *dogMol) closeRemainingSteps() {
 }
 
 // discoverSteps lists children of the root wisp and maps step slugs to IDs.
-// Step titles in the formula are like "Scan databases for stale wisps" —
-// we match on the step ID embedded in the wisp title or metadata.
-func (dm *dogMol) discoverSteps() {
+// Step titles in the formula are like "Scan databases for stale wisps" — we
+// match on the step ID embedded in the wisp title or metadata.
+//
+// A failure here is returned, not just logged: the molecule exists but cannot be
+// read back, so every closeStep this cycle makes is a no-op and the cycle has no
+// receipt. The caller records that as dogCycleFailed, because a receipt that was
+// never written is not the same observable as a clean run (gt-i3rpw).
+func (dm *dogMol) discoverSteps() error {
 	if dm.rootID == "" {
-		return
+		return nil
 	}
 
 	// Use bd show to get children. The mol wisp command creates child wisps
@@ -296,13 +474,13 @@ func (dm *dogMol) discoverSteps() {
 	out, err := dm.runBd("show", dm.rootID, "--children", "--json")
 	if err != nil {
 		dm.logger.Printf("dog_molecule: discover steps for %s failed: %v", dm.rootID, err)
-		return
+		return fmt.Errorf("list children of %s: %w", dm.rootID, err)
 	}
 
 	children, parseErr := parseChildrenJSON(out)
 	if parseErr != nil {
 		dm.logger.Printf("dog_molecule: discover steps: parse children JSON for %s failed: %v", dm.rootID, parseErr)
-		return
+		return fmt.Errorf("parse children of %s: %w", dm.rootID, parseErr)
 	}
 
 	// Map known step slugs from each child's title. The wisp title typically starts
@@ -354,6 +532,8 @@ func (dm *dogMol) discoverSteps() {
 			dm.stepIDs["nudge"] = child.ID
 		}
 	}
+
+	return nil
 }
 
 // childInfo holds fields from child wisp JSON used by discoverSteps and
@@ -457,6 +637,10 @@ func (dm *dogMol) runBd(args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		// Name the deadline instead of passing on the "signal: killed" the kill
+		// leaves behind, so the retry policy below can tell a pour that never
+		// reached Dolt from one that was still running when its clock ran out.
+		err = beads.SubprocessFailureError(ctx, bdMolTimeout, err)
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
 			return "", fmt.Errorf("%s: %s", err, errMsg)
@@ -488,6 +672,106 @@ func parseWispID(output string) string {
 		}
 	}
 	return ""
+}
+
+// dogPourHealth is one dog's molecule-pour health across patrol cycles: how
+// many cycles in a row it could not pour, and whether that is currently
+// escalated. The count is consecutive, not cumulative — a single success means
+// the outage is over and the next failure starts a new streak.
+type dogPourHealth struct {
+	consecutiveFailures int
+	escalated           bool
+}
+
+// dogPourAlertKey returns the escalation fingerprint for one dog's pour
+// failures. Per dog rather than per town: each dog owns its own alarm and
+// recovers from it independently, and the fingerprint keeps a persisting outage
+// to one open escalation instead of one per cycle (gt-vwry).
+//
+// The key is the formula, not the call site, so mol-dog-doctor's periodic pour
+// and its anomaly-triggered one share a streak. They are the same dog asking for
+// the same molecule, so a pour from either means the dog was supervised, and a
+// count that sums both is the count of "cycles this dog had no receipt" — which
+// is what the escalation says.
+func dogPourAlertKey(formulaName string) string {
+	return "dog_molecule:pour:" + formulaName
+}
+
+// recordDogPourFailure counts a cycle that could not establish its molecule and
+// escalates once the count reaches dogPourEscalateAfter. Without the alarm, a
+// pour that fails forever costs one non-fatal log line per cycle while the dog
+// skips its whole patrol — how gt-ecqx0's self-probe verdict went unread for a
+// day (gt-i3rpw).
+//
+// One alert per failure streak, not one per cycle: the open escalation is the
+// standing signal until recordDogPourSuccess closes it, so an outage lasting
+// days does not mint a comment every five minutes (gt-vwry). The latch is
+// reserved before the send and released if the send fails, so a dropped
+// escalation is retried on the next failed cycle rather than closing the streak
+// silently.
+//
+// The message leads with the dog's name and carries the same outcome token the
+// cycle record uses, because only the first maxEscalationTitleLen runes of it
+// become the escalation's title; the rest lives in the body.
+func (d *Daemon) recordDogPourFailure(formulaName string, outcome dogCycleOutcome, detail string) {
+	d.dogPourMu.Lock()
+	if d.dogPour == nil {
+		d.dogPour = make(map[string]dogPourHealth)
+	}
+	health := d.dogPour[formulaName]
+	health.consecutiveFailures++
+	shouldEscalate := health.consecutiveFailures >= dogPourEscalateAfter && !health.escalated
+	if shouldEscalate {
+		health.escalated = true
+	}
+	d.dogPour[formulaName] = health
+	consecutive := health.consecutiveFailures
+	d.dogPourMu.Unlock()
+
+	// Escalate outside the lock: escalateAlert shells out to `gt escalate` with
+	// retries, and holding dogPourMu across it would serialize every other dog's
+	// pour bookkeeping behind one slow escalation.
+	if !shouldEscalate {
+		return
+	}
+
+	d.logger.Printf("dog_molecule: ESCALATION: %s has no molecule receipt for %d consecutive cycles (outcome=%s)", formulaName, consecutive, outcome)
+	err := d.escalateAlertErr(dogPourAlertKey(formulaName), "dog_molecule", fmt.Sprintf(
+		"%s: %d consecutive cycles have no molecule receipt (outcome=%s): %s. The dog's whole patrol is being dropped and its verdicts reach nobody, so this is not a clean run. Check bd/Dolt health: gt dolt status",
+		formulaName, consecutive, outcome, detail))
+	if err == nil {
+		return
+	}
+
+	// The latch was reserved above, not earned: gt escalate writes a bead, so it
+	// fails for exactly the Dolt outage that caused this streak. Releasing it lets
+	// the next failing cycle try again — an alarm that never landed is the one
+	// outcome that must not read as done.
+	d.logger.Printf("dog_molecule: escalation for %s did not send (%v); will retry on the next failed cycle", formulaName, err)
+	d.dogPourMu.Lock()
+	if health, ok := d.dogPour[formulaName]; ok && health.escalated {
+		health.escalated = false
+		d.dogPour[formulaName] = health
+	}
+	d.dogPourMu.Unlock()
+}
+
+// recordDogPourSuccess ends a failure streak for one dog and closes the
+// escalation it raised, if any.
+//
+// clearAlerts is skipped when no alert was raised, so the ordinary case — a dog
+// that has been pouring fine all along — costs no subprocess.
+func (d *Daemon) recordDogPourSuccess(formulaName string) {
+	d.dogPourMu.Lock()
+	health, tracked := d.dogPour[formulaName]
+	if tracked {
+		delete(d.dogPour, formulaName)
+	}
+	d.dogPourMu.Unlock()
+
+	if tracked && health.escalated {
+		d.clearAlerts(fmt.Sprintf("%s is pouring again", formulaName), dogPourAlertKey(formulaName))
+	}
 }
 
 // stripANSI removes ANSI escape codes from a string.
