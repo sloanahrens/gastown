@@ -38,7 +38,7 @@ This guard blocks operations that could cause irreversible damage:
   - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
     onto origin/main etc. reverts everything merged since the checkout was cut
     and, for the tree-carrying modes, destroys uncommitted work — see gt-63sz)
-  - git clean -f / git clean -fd
+  - git clean with a force flag: -f, -fd, -fdx
   - drop table/database
   - truncate table
   - find/bfs/fd/rg/grep -r/du/ls -R rooted at /, ~, $HOME, /Users, /System,
@@ -89,7 +89,6 @@ type dangerousPattern struct {
 // fragmentPatterns use simple containment matching (all substrings must appear).
 var fragmentPatterns = []dangerousPattern{
 	{[]string{"git", "reset", "--hard"}, "Hard reset discards all uncommitted changes irreversibly"},
-	{[]string{"git", "clean", "-f"}, "git clean -f deletes untracked files irreversibly"},
 	{[]string{"drop", "table"}, "database table destruction"},
 	{[]string{"drop", "database"}, "database destruction"},
 	{[]string{"truncate", "table"}, "database table truncation"},
@@ -207,6 +206,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
+	}
+	if r := matchesGitClean(tokens); r != "" {
+		return r, ""
 	}
 	if r, alt := matchesGoCleanSharedCache(lowerTokens); r != "" {
 		return r, alt
@@ -1261,6 +1263,42 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 	return "", ""
 }
 
+const gitCleanReason = "git clean -f deletes untracked files irreversibly"
+
+// matchesGitClean blocks a `git clean` invocation that carries a force flag.
+//
+// The words are matched as one invocation — "git" running, "clean" as its
+// subcommand, the flag among that invocation's own arguments — not as three
+// fragments present anywhere in the token list. Containment matched the words
+// wherever they landed, so a refinery merge step whose `test -f .git/MERGE_HEAD`
+// supplied the "-f" and whose `echo "clean"` supplied the "clean" was rejected
+// as a git clean (gt-775d). A mention behind a text-only command (echo, grep,
+// gt mail) is not an invocation; anything else is, the fail-closed reading
+// inCommandPosition states.
+//
+// tokens must be original-case, shell-aware tokens (see shellTokenize): the
+// command and subcommand are compared case-insensitively, while the force flag
+// is matched case-sensitively, so an unrelated "-x" or a long-form flag of
+// another subcommand is not read as one.
+func matchesGitClean(tokens []string) string {
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if !strings.EqualFold(filepath.Base(tok), "git") || !inCommandPosition(segment, i) {
+				continue
+			}
+			rest := segment[i+1:]
+			sub := gitSubcommandIndex(rest)
+			if sub < 0 || !strings.EqualFold(rest[sub], "clean") {
+				continue
+			}
+			if hasShortFlagLetter(rest[sub+1:], 'f') {
+				return gitCleanReason
+			}
+		}
+	}
+	return ""
+}
+
 // goCleanSharedCacheFlags are the 'go clean' flags that wipe caches shared
 // by every agent on the host. Ported from the interim host-hygiene hook
 // (~/gt/.claude/hooks/no-root-scan.sh) — see gt-nqcy follow-up.
@@ -1490,14 +1528,25 @@ var gitOptionsWithValue = map[string]bool{
 // subcommand — skipping global options in both `-C dir` and `--git-dir=x`
 // forms. Returns "" when the tokens end before a subcommand.
 func gitSubcommand(rest []string) string {
+	if i := gitSubcommandIndex(rest); i >= 0 {
+		return rest[i]
+	}
+	return ""
+}
+
+// gitSubcommandIndex returns the position of git's subcommand in rest (the
+// tokens after "git"), or -1 when rest ends before one. Callers that need the
+// subcommand's own arguments — which start after that token, not after the
+// global options in front of it — slice from here.
+func gitSubcommandIndex(rest []string) int {
 	for i := 0; i < len(rest); i++ {
 		t := rest[i]
 		if !strings.HasPrefix(t, "-") {
-			return t
+			return i
 		}
 		if gitOptionsWithValue[t] && !strings.Contains(t, "=") {
 			i++ // skip the option's value
 		}
 	}
-	return ""
+	return -1
 }
