@@ -353,8 +353,11 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 // whole-package deletion leaves on the MR bead (gt-ytjh): when the changed .go
 // files resolve to no buildable package and the whole-module build passes, the
 // gate proceeds and records packages=["."].
+//
+// Serial because stubGoBuildWholeModule swaps a package variable and restores
+// it (gt-k317). Install-once is not available: the sibling tests need a
+// different stub, one that fails the build rather than passing it.
 func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
-	t.Parallel()
 	stubNoContainers(t)
 	stubGoBuildWholeModule(t, nil)
 	stubVerifyGate(t,
