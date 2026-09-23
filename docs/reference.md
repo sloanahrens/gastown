@@ -175,6 +175,28 @@ takes a slot for it. The gate force-set value only wins if the rig's recipe read
 variable rather than hardcoding it — gastown's `make test` defaults it
 (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason.
 
+Run `gt done` **once**, then leave it alone. Its gate waits for the slot before
+it runs the container suites, printing a `still waiting for the container-gate
+slot …` line every couple of minutes while it does; a quiet pane between those
+lines is the ordinary case, not a hang. It gives up with a slot-acquire timeout
+once the cap (`merge_queue.test_verify_slot_timeout`, 60m by default) expires.
+On a slot-cap or run-budget failure the sanctioned move is a bead comment with
+the error and the verify-log path, then `gt escalate -s medium` asking the mayor
+for a one-shot `--skip-verify` ruling — not a second invocation.
+
+Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
+polling loop holds the gate every other agent is queued behind, one pass at a
+time (gt-7dxw). The dangerous-command guard refuses the loop shape — a
+`for`/`while`/`until` block that closes around `gt done` or a read-only
+`gt slot status`, a repeat wrapper whose own payload runs either, or a heredoc
+writing such a script to a file — in every role and every directory. Repeating
+`gt slot run --role <rig>/<you> -- <command>`, which takes and releases the slot,
+is a bounded sequence rather than polling, and the guard allows it. The guard is
+a seat belt, not a cage: it
+does not read a script the command merely executes (`bash /tmp/retry.sh`) and
+cannot see one written through `printf` or `echo`, so this rule, not the guard,
+is what binds.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with

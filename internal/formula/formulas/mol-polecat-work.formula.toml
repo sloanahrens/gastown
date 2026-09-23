@@ -596,6 +596,23 @@ shipped is equivalent. Exit criterion: `bd show {{issue}}` no longer asserts
 anything the work disproved, because the title becomes the merged commit
 subject and the next reader's premise (gt-3t2).
 
+**While gt done runs — do not touch it (gt-7dxw):**
+
+gt done waits for the container-gate slot before it runs the container suites, printing a `still waiting for the container-gate slot …` line every couple of minutes while it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives up with a slot-acquire timeout once the cap expires.
+
+**Never poll the slot, and never script a retry around gt done** — no
+`for`/`while`/`until` loop, no watcher, no generated retry script; the
+dangerous-command guard refuses the loop shape. If it fails on the test-verify
+slot cap or the run budget: do NOT retry; add a bead comment with the error and
+the verify-log path, then `gt escalate -s medium` asking the mayor for a
+one-shot `--skip-verify` ruling, and wait. Do not reach for `--pre-verified`
+instead: that flag is refinery/mayor only and re-runs the same gate set under
+the same slot cap.
+
+**Do not run container suites yourself. Run the non-container packages, then
+gt done** — its own gate runs the container suites for you. Before you run
+`gt slot`, read the container-gate rule in `docs/reference.md`.
+
 **Run gt done:**
 ```bash
 # For code tasks (gt done lints and tests your changed non-container packages,

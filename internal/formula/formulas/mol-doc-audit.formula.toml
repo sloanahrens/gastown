@@ -498,6 +498,10 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 `gt done` will reject zero-commit branches for polecats.
 
+**While gt done runs — do not touch it (gt-7dxw):**
+
+Run `gt done` once and leave it waiting: it takes the container-gate slot itself and is bounded. Never poll the slot or script a retry around it (gt-7dxw). Before you run `gt done` or `gt slot`, read the container-gate rule in `docs/reference.md` — never-retry, the escalation path at the cap, and the wrapped form for a container suite you must run yourself.
+
 **Run gt done:**
 ```bash
 # For code tasks (gt done lints and tests your changed non-container packages,

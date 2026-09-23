@@ -756,6 +756,13 @@ func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration,
 	return release, waited, nil
 }
 
+// testVerifyLogPath is where the default test-verify gate writes its log —
+// inside the worktree, so the artifact survives the session that produced it
+// and a bystander can read the same evidence the failure message cites.
+func testVerifyLogPath(worktree string) string {
+	return filepath.Join(worktree, constants.DirRuntime, "gt-done-verify.log")
+}
+
 // runDefaultTestVerification is gt done's default, non-opt-in test gate
 // (gt-h9kf): polecats were submitting MRs with their own new tests never
 // run — 2 of 4 gate rejections in a 90-minute window, each costing a full
@@ -929,7 +936,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return testVerifyResult{}, fmt.Errorf("creating test-verify log dir %s: %w", logDir, err)
 	}
-	logPath := filepath.Join(logDir, "gt-done-verify.log")
+	logPath := testVerifyLogPath(worktree)
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return testVerifyResult{}, fmt.Errorf("creating test-verify log %s: %w", logPath, err)
@@ -1022,9 +1029,13 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	if needsSlot {
 		release, waited, acquireErr := acquireVerifySlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
 		if acquireErr != nil {
+			// One invocation, then a bead comment and an escalation to the
+			// mayor: the escalation is the sanctioned move at the cap, not a
+			// retry, so the message must not be the thing that suggests one
+			// (gt-7dxw).
 			return testVerifyResult{}, fmt.Errorf(
-				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Re-run gt done once the queue drains, or raise merge_queue.test_verify_slot_timeout for this rig; --skip-verify with justification is the last resort",
-				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr)
+				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Do not retry or loop on it: add a bead comment with this error and the verify log at %s, then run `gt escalate -s medium` asking the mayor for a one-shot --skip-verify ruling, and wait. Raising merge_queue.test_verify_slot_timeout is the rig-level alternative; --skip-verify with justification is the last resort (gt-7dxw)",
+				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr, logPath)
 		}
 		defer release()
 		slotWait = waited

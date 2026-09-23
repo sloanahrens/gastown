@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
 )
@@ -675,7 +674,7 @@ func TestModuleHasMainPackage(t *testing.T) {
 func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 	readScope := func(t *testing.T, worktree string) string {
 		t.Helper()
-		data, err := os.ReadFile(filepath.Join(worktree, constants.DirRuntime, "gt-done-verify.log"))
+		data, err := os.ReadFile(testVerifyLogPath(worktree))
 		if err != nil {
 			t.Fatalf("read verify log: %v", err)
 		}
@@ -737,4 +736,144 @@ func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 			t.Errorf("scope = %q, want %q — the log must say what actually ran", got, "changed")
 		}
 	})
+}
+
+// TestRunDefaultTestVerification_SlotWaitIsBounded covers the bounded-wait
+// path gt-7dxw asks for: `gt done` waits for the container-gate slot on its
+// own, for a wait BOUNDED by the rig's configured cap, printing a progress
+// line while it waits, and fails with a message that tells the polecat what to
+// do instead of looping.
+//
+// This is the shape the incident's improvised retry loop was working around,
+// so the three things a polecat needs are asserted together: the cap the rig
+// configured is the cap the acquire actually gets (not the 60m default), the
+// wait ends when that cap expires rather than re-arming, and both the progress
+// line and the giving-up message reach the polecat.
+func TestRunDefaultTestVerification_SlotWaitIsBounded(t *testing.T) {
+	const slotCap = 80 * time.Millisecond
+	dir, _ := initVerifyTestGoRepo(t)
+	for _, rel := range []string{"pkga/a.go", "pkgb/b.go"} {
+		path := filepath.Join(dir, rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(data, []byte("\n// touched\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch both packages")
+
+	// One progress tick must land inside the cap, or the pane looks hung for
+	// the whole wait — the failure gt-pnkd's victims could not diagnose.
+	stubVerifyProgress(t, slotCap/4)
+
+	var (
+		gotTimeout    time.Duration
+		acquires      int
+		acquireWindow time.Duration
+	)
+	stubVerifyGate(t,
+		func(_ string, _ string, timeout time.Duration) (func(), error) {
+			acquires++
+			gotTimeout = timeout
+			// Stand in for the real slot.AcquirePool: block until the cap
+			// expires, then give up with the slot package's own error text.
+			started := time.Now()
+			time.Sleep(timeout)
+			acquireWindow = time.Since(started)
+			return nil, errors.New("timed out after " + timeout.String() + " waiting for container-gate slot")
+		},
+		nil)
+
+	mq := &config.MergeQueueConfig{
+		TestCommand:           dockerTestsEnv + "=1 go test ./...",
+		TestVerifySlotTimeout: slotCap.String(),
+	}
+	g := git.NewGit(dir)
+	_, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-wait-role")
+
+	if err == nil {
+		t.Fatal("expected a slot-contention error once the cap expired")
+	}
+	if gotTimeout != slotCap {
+		t.Errorf("acquire got a %s cap, want the rig's configured %s", gotTimeout, slotCap)
+	}
+	if acquires != 1 {
+		t.Errorf("the gate acquired the slot %d times, want exactly 1 — the wait is not re-armed", acquires)
+	}
+	// Bounded: the acquire waits its cap out and gives up inside it. The
+	// window is timed from inside the stub, because everything the gate does
+	// before the acquire — the diff, the package list — is subprocess work
+	// whose latency would otherwise land in the bound and make it flaky
+	// (gt-7dxw review). acquires == 1 is what proves the wait is not re-armed.
+	if acquireWindow < slotCap {
+		t.Errorf("gave up after %s, before the %s cap expired", acquireWindow, slotCap)
+	}
+	if acquireWindow > slotCap+10*time.Second {
+		t.Errorf("held the acquire for %s under a %s cap", acquireWindow, slotCap)
+	}
+	logPath := testVerifyLogPath(dir)
+	msg := err.Error()
+	for _, want := range []string{"slot contention", "NOT a test failure", slotCap.String(), "merge_queue.test_verify_slot_timeout", "gt escalate -s medium", logPath} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message is missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(msg, "Re-run gt done") {
+		t.Errorf("failure message still invites a re-run of the command that just failed: %v", err)
+	}
+}
+
+// TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp pins the
+// progress half of the same path: while the wait is inside its cap the verify
+// log — the artifact a bystander reads after the fact — already carries a
+// waiting line, so a polecat's quiet pane is diagnosable without a restart
+// (gt-pnkd's frozen 144-byte log).
+func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *testing.T) {
+	const slotCap = 60 * time.Millisecond
+	dir, _ := initVerifyTestGoRepo(t)
+	for _, rel := range []string{"pkga/a.go", "pkgb/b.go"} {
+		path := filepath.Join(dir, rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(data, []byte("\n// touched\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch both packages")
+
+	stubVerifyProgress(t, slotCap/6)
+	stubVerifyGate(t,
+		func(_ string, _ string, timeout time.Duration) (func(), error) {
+			time.Sleep(timeout)
+			return nil, errors.New("timed out after " + timeout.String() + " waiting for container-gate slot")
+		},
+		nil)
+
+	mq := &config.MergeQueueConfig{
+		TestCommand:           dockerTestsEnv + "=1 go test ./...",
+		TestVerifySlotTimeout: slotCap.String(),
+	}
+	g := git.NewGit(dir)
+	_, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-log-role")
+	if err == nil {
+		t.Fatal("expected a slot-contention error once the cap expired")
+	}
+	logPath := testVerifyLogPath(dir)
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("reading %s: %v", logPath, readErr)
+	}
+	logText := string(data)
+	if !strings.Contains(logText, "still waiting for the container-gate slot") {
+		t.Errorf("verify log has no slot-wait progress line, so a quiet pane is undiagnosable:\n%s", logText)
+	}
+	if !strings.Contains(logText, "slot cap:") {
+		t.Errorf("verify log does not record the cap it was waiting under:\n%s", logText)
+	}
 }

@@ -51,6 +51,12 @@ This guard blocks operations that could cause irreversible damage:
     worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed.
   - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
     cache SHARED by every agent on the host — see gt-nqcy follow-up).
+  - a loop or watcher around 'gt done' or 'gt slot': a for/while/until block
+    whose body invokes either, an xargs/watch/seq beside either, or a heredoc
+    body written to a file that contains either shape. 'gt done' waits for the
+    container-gate slot itself and is bounded; the improvised polling loop it
+    replaces held the gate everyone else was queued behind (gt-7dxw). Every
+    role, every cwd.
 
 This guard also HOLDS (rather than permanently blocks) a full-suite start —
 'make test', 'go test ./...', 'make build', 'go build ./...' — when the host
@@ -162,6 +168,10 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	// removes them from the text scanned below, and they come back in as
 	// nested commands of their own (gt-9g0y).
 	shellFedBodies := shellFedHeredocBodies(command)
+	// Kept for the checks that need the pre-strip text: the done/slot loop
+	// rule reads heredoc bodies the command writes to a FILE, which the
+	// stripping below is exactly what removes from view (gt-7dxw).
+	rawCommand := command
 	command = stripHeredocBodies(command)
 	tokens := shellTokenize(command)
 	lowerTokens := make([]string, len(tokens))
@@ -199,6 +209,12 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 		return r, alt
 	}
 	if r, alt := matchesGoCleanSharedCache(lowerTokens); r != "" {
+		return r, alt
+	}
+	// A loop or watcher around `gt done` / `gt slot` is the improvised retry
+	// the slot ruling forbids (gt-7dxw). Checked against the unstripped
+	// command so a heredoc-written retry script is visible.
+	if r, alt := matchesDoneSlotLoop(rawCommand, tokens, lowerTokens); r != "" {
 		return r, alt
 	}
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and

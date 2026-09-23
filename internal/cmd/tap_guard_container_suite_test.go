@@ -750,3 +750,39 @@ func TestContainerSuiteWrapRole(t *testing.T) {
 		})
 	}
 }
+
+// The refusal a polecat actually receives must name every sanctioned path, not
+// just the hardest one (overseer hq-wisp-32rsm). This is driven through the
+// real hook entry point and asserts on the PreToolUse stderr rather than on
+// the Go source, because the banner text is the whole remediation: six of six
+// local polecats hit this refusal on 2026-09-17 and improvised around it —
+// granite's spiral to a direct main push started here.
+func TestRunTapGuardContainerSuite_RefusalNamesTheSanctionedPaths(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "1")
+	t.Setenv("GT_POLECAT", "granite")
+	t.Setenv("GT_REFINERY", "")
+	t.Setenv("GT_ROLE", "gastown/polecats/granite")
+	// A neutral cwd: the guard also reads the working directory, and a
+	// polecat worktree's path contains "/polecats/" (gt-3008).
+	t.Chdir(t.TempDir())
+
+	command := "go test ./internal/beads/..."
+	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(command) + `}}`
+	var err error
+	stderr := captureStderr(t, func() {
+		withStdin(t, input, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
+	})
+	if err == nil {
+		t.Fatalf("bare container-package run was allowed through the hook: %s", stderr)
+	}
+	for _, want := range []string{
+		"CONTAINER-SUITE COMMAND BLOCKED",
+		"Run it wrapped instead: gt slot run --role gastown/polecats/granite -- go test ./internal/beads/...",
+		"run the non-container packages directly",
+		"let `gt done` gate the",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal is missing %q:\n%s", want, stderr)
+		}
+	}
+}

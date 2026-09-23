@@ -577,6 +577,9 @@ Skip any empty/unconfigured commands silently.
 
 **3. Submit to merge queue** (never `--pre-verified`: it re-runs the full
 gate set under a slot cap and disables the auto-rebase):
+
+Run `gt done` once and leave it waiting: it takes the container-gate slot itself and is bounded. Never poll the slot or script a retry around it (gt-7dxw). Before you run `gt done` or `gt slot`, read the container-gate rule in `docs/reference.md` — never-retry, the escalation path at the cap, and the wrapped form for a container suite you must run yourself.
+
 ```bash
 gt done --target {{base_branch}}
 ```

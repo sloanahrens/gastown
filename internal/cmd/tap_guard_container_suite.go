@@ -573,9 +573,12 @@ func cwdPackagePath(dir string) (pkg string, ok bool) {
 	return rel, true
 }
 
-// printContainerSuiteBlock prints the standard block banner to stderr,
-// naming the wrapped form the guard wants instead (gt-e2rs: "message names
-// the wrapped form").
+// printContainerSuiteBlock prints the standard block banner to stderr, naming
+// the wrapped form the guard wants instead (gt-e2rs: "message names the wrapped
+// form"). It names the two lighter paths as well — the non-container packages
+// directly, or letting `gt done`'s gate run the containers — because a refusal
+// that names only the hardest path is what sends polecats improvising around it
+// (gt-7dxw).
 func printContainerSuiteBlock(reason, originalCommand string, matched []string) {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
@@ -591,6 +594,9 @@ func printContainerSuiteBlock(reason, originalCommand string, matched []string) 
 	fmt.Fprintln(os.Stderr, "║  VM. Running it bare can collide with another rig's suite.      ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintf(os.Stderr, "  Run it wrapped instead: %s\n", containerSuiteWrap(originalCommand))
+	fmt.Fprintln(os.Stderr, "  Or run the non-container packages directly (they need no slot, and they are")
+	fmt.Fprintln(os.Stderr, "  where your change usually lives) — or run neither and let `gt done` gate the")
+	fmt.Fprintln(os.Stderr, "  container suites for you: its default test-verify gate runs them once you submit.")
 	fmt.Fprintln(os.Stderr, "")
 }
 
