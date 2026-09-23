@@ -1215,10 +1215,16 @@ func (g *Git) Push(remote, branch string, force bool) error {
 // default branch from a polecat context is refused by that hook, so a landing
 // path that runs inside a polecat session (a direct-merge convoy's `gt done`,
 // or a Refinery merge) MUST pass one of these to PushWithEnv; a plain Push
-// will be refused.
+// will be refused. As of gt-9tf9, EnvRefineryMerge alone is not enough: the
+// hook also requires a Refinery identity signal (GT_REFINERY=1 or
+// GT_ROLE=*/refinery) in the same environment, and refuses a polecat-shaped
+// GT_ROLE outright regardless of that signal - so a caller running outside an
+// actual Refinery session (a manual `gt mq run`, a non-session engineer path)
+// will be refused even with EnvRefineryMerge set.
 const (
 	// EnvRefineryMerge marks the Refinery's own merge onto the default branch
-	// (internal/refinery/batch.go, internal/refinery/engineer.go).
+	// (internal/refinery/batch.go, internal/refinery/engineer.go). Requires a
+	// Refinery identity signal alongside it (gt-9tf9); see the doc comment above.
 	EnvRefineryMerge = "GT_REFINERY_MERGE=1"
 	// EnvDoneDirectMerge marks `gt done` landing a convoy whose merge_strategy
 	// is "direct" (internal/cmd/done.go).

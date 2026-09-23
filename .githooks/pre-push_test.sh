@@ -6,12 +6,14 @@
 
 set -euo pipefail
 
-# The suite runs from inside a polecat worktree as often as not, and the hook
-# now refuses default-branch pushes from a polecat (gt-ibt8) — so clear the
-# ambient polecat signals first and let each test state its own context
-# explicitly. Without this, every default-branch test below would pass or fail
-# depending on who ran the suite.
-unset GT_ROLE GT_POLECAT GT_POLECAT_PATH 2>/dev/null || true
+# The suite runs from inside a polecat or Refinery session as often as not,
+# and the hook now refuses default-branch pushes from a polecat (gt-ibt8)
+# while trusting GT_REFINERY as a Refinery signal (gt-9tf9) — so clear the
+# ambient role/identity signals first and let each test state its own context
+# explicitly. Without this, a suite run inside a Refinery session (which sets
+# GT_REFINERY=1 at spawn, internal/refinery/manager.go) would leak that var
+# into the Test 28/29/33 self-grant cases and let a spoofed push through.
+unset GT_ROLE GT_POLECAT GT_POLECAT_PATH GT_REFINERY 2>/dev/null || true
 unset GT_REFINERY_MERGE GT_DONE_DIRECT_MERGE 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -541,10 +543,25 @@ local_sha=$(get_sha HEAD)
 assert_block "Both allow flags set is refused" run_hook_env "GT_ROLE=gastown/polecats/flint GT_REFINERY_MERGE=1 GT_DONE_DIRECT_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
-# Test 33: LIVE proof of Test 28 — a real `git push` from a polecat worktree
+# Test 33: a polecat GT_ROLE self-granting BOTH the session-spawn signal
+# (GT_REFINERY=1) and GT_REFINERY_MERGE=1 — still BLOCKED. A positive
+# polecat-shaped GT_ROLE contradicts a Refinery identity outright, so it
+# disqualifies the GT_REFINERY corroboration too, not just the bare-flag case
+# above (gt-9tf9).
+echo "Test 33: Polecat GT_ROLE self-granting GT_REFINERY=1 + GT_REFINERY_MERGE=1 — BLOCKED"
+setup_repos
+cd "$TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+echo "spoofed identity merge" >> file.txt
+git add file.txt && git commit -m "spoofed identity merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Polecat GT_ROLE with self-granted GT_REFINERY=1 blocked" run_hook_env "GT_ROLE=gastown/polecats/flint GT_REFINERY=1 GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 34: LIVE proof of Test 28 — a real `git push` from a polecat worktree
 # with GT_REFINERY_MERGE=1 self-granted is still refused (gt-9tf9 asks
 # specifically for this live proof, not just a matcher/stdin test).
-echo "Test 33: LIVE push HEAD:$DEFAULT_BRANCH from a polecat worktree with GT_REFINERY_MERGE=1 — refused"
+echo "Test 34: LIVE push HEAD:$DEFAULT_BRANCH from a polecat worktree with GT_REFINERY_MERGE=1 — refused"
 setup_repos "town/gastown/polecats/flint/gastown"
 cd "$TMPDIR/town/gastown/polecats/flint/gastown"
 echo "live spoofed merge" >> file.txt
