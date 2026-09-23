@@ -2150,3 +2150,71 @@ func TestRun_RecordedVerdictBelowVersionFloorIsNotReused(t *testing.T) {
 		t.Errorf("Attempts = %+v, want the superseded verdict carried forward", result.Note.Attempts)
 	}
 }
+
+func TestClassOf(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want FailureClass
+	}{
+		{"plain error keeps the fallback", fmt.Errorf("boom"), VersionMismatch},
+		{
+			"a classified error's own class wins",
+			&ClassifiedError{Class: BinaryMissing, Err: fmt.Errorf("no om")},
+			BinaryMissing,
+		},
+		{
+			"a wrapped classified error is still read",
+			fmt.Errorf("assert version: %w", &ClassifiedError{Class: ConfigError, Err: fmt.Errorf("bad rubric")}),
+			ConfigError,
+		},
+		{
+			// The regression this guards: an unconditional `class = ce.Class`
+			// overwrote the fallback with an empty class, which RecordFailure
+			// then refuses — the version_mismatch would be recorded nowhere.
+			"a classless classified error does not erase the fallback",
+			&ClassifiedError{Err: fmt.Errorf("classified but unnamed")},
+			VersionMismatch,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classOf(tc.err, VersionMismatch); got != tc.want {
+				t.Errorf("classOf() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReceiptRefusalNotice(t *testing.T) {
+	// The refusal error comes from the writer itself, so the two halves of the
+	// loud path are proven to fit: a class the writer refuses is exactly what
+	// the notice has to carry out to the caller.
+	_, refusal := RecordFailure(plugin.NewRecorder(t.TempDir()), "gastown", "marble", "gt-wisp-x", "", "boom", 0)
+	if refusal == nil {
+		t.Fatal("expected RecordFailure to refuse an empty failure class")
+	}
+
+	t.Run("a recorded receipt leaves the output alone", func(t *testing.T) {
+		if got := receiptRefusalNotice("gate said no", nil); got != "gate said no" {
+			t.Errorf("receiptRefusalNotice() = %q, want the output unchanged", got)
+		}
+	})
+
+	t.Run("a refused receipt is carried on the output", func(t *testing.T) {
+		got := receiptRefusalNotice("gate said no", refusal)
+		if !strings.HasPrefix(got, "gate said no") {
+			t.Errorf("the captured output was dropped: %q", got)
+		}
+		if !strings.Contains(got, refusal.Error()) {
+			t.Errorf("the refusal is not in the output, so the failure is recorded nowhere: %q", got)
+		}
+	})
+
+	t.Run("a refusal with no output is still visible", func(t *testing.T) {
+		got := receiptRefusalNotice("", refusal)
+		if !strings.Contains(got, refusal.Error()) {
+			t.Errorf("an empty capture swallowed the refusal: %q", got)
+		}
+	})
+}

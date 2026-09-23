@@ -25,6 +25,20 @@ type NoteAttempt struct {
 	ReviewedAt    time.Time `json:"reviewed_at"`
 }
 
+// The gate's verdict schema is exactly these two, and every reader that
+// validates a verdict routes through ValidVerdict rather than re-listing
+// them: a verdict one reader admits and another does not is how a rejection
+// gets recorded as a scored approval (gt-47nf).
+const (
+	VerdictApprove        = "approve"
+	VerdictRequestChanges = "request_changes"
+)
+
+// ValidVerdict reports whether v is a verdict the gate can produce.
+func ValidVerdict(v string) bool {
+	return v == VerdictApprove || v == VerdictRequestChanges
+}
+
 // Note is the durable proof that om produced a verdict for a review. It is
 // written to refs/notes/om on the reviewed head commit and survives DB
 // flattens, wisp GC, and MR bead deletion — the receipt bead (see

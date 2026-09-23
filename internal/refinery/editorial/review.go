@@ -331,12 +331,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("read pre-change rubric %s:%s: %v", preChangeDesc, rubricRel, err), 0)
 		}
 		if err := AssertVersionWithRubric(manifest, cfg, req.RigDir, targetRubric); err != nil {
-			var ce *ClassifiedError
-			class := VersionMismatch
-			if errors.As(err, &ce) {
-				class = ce.Class
-			}
-			return failureResult(deps, req, class, err.Error(), 0)
+			return failureResult(deps, req, classOf(err, VersionMismatch), err.Error(), 0)
 		}
 		// The gate script must never read the rubric off a checkout of the
 		// reviewed head: om-gate.sh runs `om review` at its cwd, so a diff
@@ -357,12 +352,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		}()
 		reviewDir = rehearsal.dir
 	} else if err := AssertVersion(manifest, cfg, req.RigDir, req.RepoDir); err != nil {
-		var ce *ClassifiedError
-		class := VersionMismatch
-		if errors.As(err, &ce) {
-			class = ce.Class
-		}
-		return failureResult(deps, req, class, err.Error(), 0)
+		return failureResult(deps, req, classOf(err, VersionMismatch), err.Error(), 0)
 	}
 
 	// targetTip is target's own tip at review time — see Note.ReviewedTargetTip
@@ -700,8 +690,22 @@ func captureRawOutput(tmpDir, stderr string) string {
 	return output
 }
 
+// classOf returns the FailureClass err was classified with, falling back when
+// it carries none. A classless ClassifiedError keeps the caller's fallback
+// instead of overwriting it with an empty class: RecordFailure refuses an
+// empty class, so letting one through would leave the failure recorded
+// nowhere at all (gt-47nf).
+func classOf(err error, fallback FailureClass) FailureClass {
+	var ce *ClassifiedError
+	if errors.As(err, &ce) && ce.Class != "" {
+		return ce.Class
+	}
+	return fallback
+}
+
 func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr string, _ int) ReviewResult {
-	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, 0)
+	_, recErr := RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, stderr, 0)
+	stderr = receiptRefusalNotice(stderr, recErr)
 	return ReviewResult{Exit: 2, Class: class, Retries: 0, Stderr: stderr}
 }
 
@@ -709,8 +713,30 @@ func failureResult(deps Deps, req ReviewRequest, class FailureClass, stderr stri
 // output (stderr + verdict.json) before the temp dir is cleaned.
 func failureResultWithRawOutput(deps Deps, req ReviewRequest, class FailureClass, stderr string, retries int, tmpDir string) ReviewResult {
 	rawOutput := captureRawOutput(tmpDir, stderr)
-	_, _ = RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, rawOutput, retries)
+	_, recErr := RecordFailure(deps.Recorder, req.Rig, req.Worker, req.MRID, class, rawOutput, retries)
+	rawOutput = receiptRefusalNotice(rawOutput, recErr)
 	return ReviewResult{Exit: 2, Class: class, Retries: retries, Stderr: rawOutput}
+}
+
+// receiptRefusalNotice appends a refused-receipt notice to the failure's
+// captured output and echoes it to stderr, returning output unchanged when
+// the receipt was recorded.
+//
+// A refused receipt leaves this failure with no durable record at all, so
+// the refusal has to travel with the result rather than be dropped on the
+// floor by a discarded error return. The exit code stays 2 either way: the
+// review is still fail-closed, and escalating the missing receipt through
+// exit 2's own witness path is what the notice is for (gt-47nf).
+func receiptRefusalNotice(output string, recErr error) string {
+	if recErr == nil {
+		return output
+	}
+	msg := fmt.Sprintf("[editorial] warning: failure receipt refused: %v", recErr)
+	_, _ = fmt.Fprintln(os.Stderr, msg)
+	if output == "" {
+		return msg
+	}
+	return output + "\n\n" + msg
 }
 
 // gateUsageErrorMarker is what the rig's gate script writes to stderr when its
@@ -758,8 +784,8 @@ func classifyOutcome(execErr error, exitCode int, stderr, verdictPath string) (*
 	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, MalformedVerdict, fmt.Errorf("parsing verdict JSON: %w", err)
 	}
-	if v.Verdict != "approve" && v.Verdict != "request_changes" {
-		return nil, MalformedVerdict, fmt.Errorf("verdict field is %q, want approve or request_changes", v.Verdict)
+	if !ValidVerdict(v.Verdict) {
+		return nil, MalformedVerdict, fmt.Errorf("verdict field is %q, want %s or %s", v.Verdict, VerdictApprove, VerdictRequestChanges)
 	}
 	if exitCode != 0 && exitCode != 1 {
 		return nil, Tooling, fmt.Errorf("gate script exited %d unexpectedly (stderr: %s)", exitCode, stderr)
@@ -915,7 +941,7 @@ func recordedVerdictApplies(prev *Note, patchID, rubricSHA, minVersion string) b
 	if prev == nil {
 		return false
 	}
-	if prev.Verdict != "approve" && prev.Verdict != "request_changes" {
+	if !ValidVerdict(prev.Verdict) {
 		return false
 	}
 	if prev.PatchID != patchID || prev.RubricSHA256 != rubricSHA {

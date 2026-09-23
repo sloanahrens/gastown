@@ -52,3 +52,23 @@ const (
 func (f FailureClass) Retryable() bool {
 	return f == BackendTimeout || f == MalformedVerdict
 }
+
+// Valid reports whether f is a class this binary knows. RecordFailure
+// refuses to write a receipt for anything else, because the class is the
+// entire quality signal a failure receipt carries: an unregistered class
+// lands as a label nobody can route on, which is the scoreless failure
+// these receipts exist to make impossible (gt-47nf).
+//
+// The switch is the registry. Adding a class to the block above without a
+// case here fails loud at the writer — a refused receipt and an echoing
+// warning — rather than silently, as an unreadable label on the wisp.
+func (f FailureClass) Valid() bool {
+	switch f {
+	case BinaryMissing, VersionMismatch, ConfigError, BackendTimeout,
+		MalformedVerdict, Tooling, RecordFailed, Precondition,
+		RubricRegression, ReviewInFlight:
+		return true
+	default:
+		return false
+	}
+}
