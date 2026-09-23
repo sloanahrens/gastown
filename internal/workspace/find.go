@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -23,10 +24,20 @@ var ErrNotFound = errors.New("not in a Gas Town workspace")
 // unaffected.
 const EnvForbiddenTownRoot = "GT_TEST_FORBIDDEN_TOWN_ROOT"
 
-// isForbiddenRoot reports whether dir is the harness-forbidden town root or a
+// ErrForbiddenTownRoot reports that a resolver landed on the live town root the
+// hermetic test harness forbids.
+var ErrForbiddenTownRoot = errors.New("resolved the live town root the hermetic test harness forbids")
+
+// ForbiddenTownRoot returns the live town root the hermetic test harness
+// forbids, or "" when no harness is active.
+func ForbiddenTownRoot() string {
+	return os.Getenv(EnvForbiddenTownRoot)
+}
+
+// IsForbiddenRoot reports whether dir is the harness-forbidden town root or a
 // directory inside it.
-func isForbiddenRoot(dir string) bool {
-	forbidden := os.Getenv(EnvForbiddenTownRoot)
+func IsForbiddenRoot(dir string) bool {
+	forbidden := ForbiddenTownRoot()
 	if forbidden == "" || dir == "" {
 		return false
 	}
@@ -34,6 +45,38 @@ func isForbiddenRoot(dir string) bool {
 		return true
 	}
 	return strings.HasPrefix(dir, forbidden+string(filepath.Separator))
+}
+
+// GuardForbiddenRoot returns ErrForbiddenTownRoot wrapped with the refusing
+// call site and path when dir is (inside) the harness-forbidden live town root,
+// and nil otherwise.
+func GuardForbiddenRoot(what, dir string) error {
+	if !IsForbiddenRoot(dir) {
+		return nil
+	}
+	return fmt.Errorf("%s refused %q: %w (use the sandbox town testutil.Hermetic.TownRoot instead)", what, dir, ErrForbiddenTownRoot)
+}
+
+// RefuseForbiddenRoot is GuardForbiddenRoot plus the harness refusal policy:
+// under a `go test` binary it panics so an in-process resolver that reaches the
+// live town fails loudly at its call site rather than mutating production, and
+// everywhere else it returns the error so gt/bd subprocesses degrade to "no
+// town root" instead of crashing (gt-dr664).
+//
+// Every in-process town-root resolver must route its refusal through here: a
+// resolver that returns the live root by some other path is exactly the leak
+// this guards (beads.FindTownRoot walked up independently of workspace.Find,
+// so the harness's forbidden-root env reached the workspace resolver and
+// nothing else).
+func RefuseForbiddenRoot(what, dir string) error {
+	err := GuardForbiddenRoot(what, dir)
+	if err == nil {
+		return nil
+	}
+	if testing.Testing() {
+		panic("HERMETIC VIOLATION: " + err.Error())
+	}
+	return err
 }
 
 // Markers used to detect a Gas Town workspace.
@@ -77,7 +120,7 @@ func Find(startDir string) (string, error) {
 
 		parent := filepath.Dir(current)
 		if parent == current {
-			if isForbiddenRoot(primaryMatch) || isForbiddenRoot(secondaryMatch) {
+			if IsForbiddenRoot(primaryMatch) || IsForbiddenRoot(secondaryMatch) {
 				// Hermetic test harness: the resolved root is (or is inside)
 				// the operator's live town — pretend no workspace was found
 				// rather than let test code mutate production state.
@@ -175,7 +218,7 @@ func IsWorkspace(dir string) (bool, error) {
 	}
 
 	// Hermetic test harness: never acknowledge the operator's live town.
-	if isForbiddenRoot(absDir) {
+	if IsForbiddenRoot(absDir) {
 		return false, nil
 	}
 
