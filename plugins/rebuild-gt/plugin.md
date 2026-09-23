@@ -13,7 +13,7 @@ digest = true
 
 [execution]
 type = "script"
-timeout = "5m"
+timeout = "25m"
 notify_on_failure = true
 severity = "medium"
 allow_deferred_exit = true
@@ -38,8 +38,8 @@ several exit-0 and exit-1 cases differ in what they escalate).
 
 | exit | when | recorded | escalates |
 |------|------|----------|-----------|
-| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | no |
-| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | no |
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
+| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | the same starvation clock |
 | 1 | failed: `make build`/`make safe-install` failed, or the install could not be verified as in force | yes, as failure | yes, under a stable fingerprint |
 
 Exit 3 means deferral only because this plugin's `[execution]` block sets
@@ -47,11 +47,12 @@ Exit 3 means deferral only because this plugin's `[execution]` block sets
 read as an ordinary failure (`internal/daemon/plugin_script.go`), so a real
 failure elsewhere can never be silently swallowed as "nothing to see here".
 
-A refusal (exit 0, recorded as skipped) is not the same as a failure (exit 1,
-recorded as failure and escalated): waiting cannot fix a failure, but most
-refusals clear on their own (a human commits the dirty checkout, main catches
-up), so they do not escalate on their own — the unconditional drift check
-below is what alarms if a refusal persists long enough to matter.
+A refusal (exit 0, recorded as skipped) is not a failure (exit 1, recorded as
+failure and escalated): waiting cannot fix a failure, but most refusals clear
+on their own — a human commits the dirty checkout, main catches up. The run
+that first hits one therefore escalates nothing; a due binary it leaves out of
+force escalates on the starvation clock below, and the drift check alarms on
+the states that never became a block at all.
 
 A run record is what satisfies the cooldown gate, so exit 3 writing none is
 what holds the retry to one heartbeat (3 min) instead of one cooldown (1 h).
@@ -67,8 +68,9 @@ The Deacon evaluates this before dispatch. If gate closed, skip.
 Every skip path below (dirty repo, wrong branch, diverged local main, an
 unreadable staleness check, "not safe to rebuild") is a normal, expected
 outcome on its own — but any one of them can persist for hours while the
-binary quietly falls behind `origin/main`, and none of the individual skip
-checks would ever notice that on their own.
+binary quietly falls behind `origin/main`. The starvation clock catches the
+skips that leave a *due* binary out of force; this check catches the rest,
+including the runs where no staleness reading was possible at all.
 
 Before any pre-flight check runs, check drift directly and escalate on the
 outcome that matters — commits behind `origin/main` — rather than on which
@@ -96,6 +98,41 @@ gt escalate "rebuild-gt: binary is $N commits behind origin/main and has not bee
 unknown count as 0 is what silently retired this alarm the one time it
 mattered (gt-oqbw).
 
+## Starvation
+
+A deferral writes no run record, so a block that repeats is invisible to the
+rest of the town (gt-kox0).
+
+Every path that leaves a *due* binary out of force — a busy gate, a merge in
+flight, a refusal to build — records the block in
+`daemon/rebuild-gt-state.json`: when it opened, and how many runs it has
+lasted. Past `REBUILD_GT_STARVE_MINUTES` (default 30, above the longest gate
+hold measured on 2026-09-22) the run escalates at high severity under the
+stable fingerprint `rebuild-gt:starved`. The escalation goes out before the
+block is marked escalated, so a call that never reached the town is retried
+next run rather than lost for the rest of the block.
+
+When the container-gate slot is what blocks, the run waits for it and then
+builds inside it:
+
+```bash
+gt slot run --role gastown/rebuild-gt --timeout "$REBUILD_GT_RESERVE_WAIT" -- make build
+```
+
+The waiting is the point: `gt slot run` alone does not queue behind a gate on
+a pool with more than one slot — it takes a free slot, and the build starts
+beside the load-sensitive suite the yield exists to avoid (gt-htx3). So the
+run polls `gt slot status` until no gate-class role holds a slot, and acquires
+after that. `REBUILD_GT_RESERVE_WAIT` (default 10m) bounds the two together,
+which is why `[execution] timeout` is 25m. The install is a temp-file rename:
+outside the hold, waiting for any merge that is mid-push. A wait that gets
+nothing defers — nothing was built, so nothing failed.
+
+Reaching force — a fresh binary, or a completed install — closes the block and
+clears the keys this plugin owns, under `gt escalate clear` (gt-vwry). So does
+a run that finds the binary not due: a block must not outlive the condition it
+measured.
+
 ## Detection
 
 Check binary staleness:
@@ -113,10 +150,7 @@ Parse the JSON output and check these fields:
 
 At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install
 at the first quiet moment: a merged commit that is not in force is a live
-defect, not a rounding error — gt-ww20 (a batch path that bypassed the
-editorial gate, so 4 MRs landed unreviewed) and gt-rbfj (composer-stall
-recovery typing the literal text `C-x C-s` into the composer) were each merged
-while the town kept running a binary without them. Under the threshold
+defect, not a rounding error (gt-oqbw, gt-ww20, gt-rbfj). Under the threshold
 (strictly fewer commits behind than it), defer.
 
 An unknown `commits_behind` here is treated as *at* the threshold, not under
@@ -160,12 +194,19 @@ record a skip wisp with reason "local main diverged from origin/main" —
 ## Quiet gate
 
 `make build` competes for CPU with a gate suite whose tests are load-sensitive
-(gt-htx3), so the install waits for a town with nothing in flight:
+(gt-htx3), so the build waits for a town with nothing in flight:
 
 - no gate-class role holding a container-gate slot, no container running
   outside the gate, and no saturated pool (`gt slot status --json`), and
 - no MR a refinery is mid-merge on
   (`gt mq list gastown --status=in_progress --json`).
+
+Under `REBUILD_GT_STARVE_MINUTES` either reading defers the run; past it the
+first is waited out (Starvation above).
+
+The second reading is taken again immediately before the install: a merge that
+was not in flight when the run started can be by the time the build ends, and
+the install waits for the next heartbeat rather than landing under it.
 
 Two readings that are deliberately not deferrals. An MR merely ready in the
 queue consumes nothing, and at this town's merge rate the queue is never
@@ -218,6 +259,7 @@ answered by the record instead of reconstructed from merge timestamps.
 
 Failures escalate under a stable fingerprint each (`rebuild-gt:build-failed`,
 `:not-in-force`, `:unverified`, `:restart-failed`), so a persisting state
-alarms once. Refusals do not escalate on their own (see Exit codes above) —
-a persisting refusal is what the drift check's `rebuild-gt:drift` /
-`:drift-unknown` fingerprints are for.
+alarms once. A refusal escalates only through the starvation check's
+`rebuild-gt:starved` (Exit codes above), and reaching force — or a run that
+finds the binary not due — clears `:starved`, `:drift` and `:drift-unknown`
+together.
