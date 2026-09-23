@@ -220,6 +220,9 @@ func TestAcquireMainPushSlot_DoesNotReclaimForeignLease(t *testing.T) {
 }
 
 func TestHandleMRInfoSuccess_ReleasesConflictLease(t *testing.T) {
+	// A successful merge nudges mayor (gt-i0ld) — fake gt on PATH so the
+	// test never shells out to the real binary.
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	installNoPRGH(t)

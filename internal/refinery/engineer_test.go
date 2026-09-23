@@ -1281,6 +1281,9 @@ func TestHandleMRInfoSuccess_ProofFailurePreservesRemoteBranch(t *testing.T) {
 }
 
 func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) {
+	// A successful merge nudges mayor (gt-i0ld) — fake gt on PATH so the
+	// test never shells out to the real binary.
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	installNoPRGH(t)
@@ -1309,6 +1312,9 @@ func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) 
 }
 
 func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
+	// HandleMRInfoSuccess below nudges mayor (gt-i0ld) — fake gt on PATH so
+	// the test never shells out to the real binary.
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	installNoPRGH(t)
