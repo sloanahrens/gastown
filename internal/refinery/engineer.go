@@ -329,6 +329,12 @@ type Engineer struct {
 	testAllowSyntheticMRs bool               // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
 	editorialExec         editorial.ExecFunc // Gate-script invoker for batch editorial reviews; production: editorial.RunGateScript, tests override with a stub.
 
+	// dirtyWorktreeReportedAt is the Unix-nano time of the last
+	// external-dirty-worktree escalation to the witness (gt-nnwy). The
+	// worktree stays dirty until a human clears it, so without this the
+	// identical refusal would re-escalate on every poll cycle.
+	dirtyWorktreeReportedAt atomic.Int64
+
 	// currentGateSetSHAFn resolves the rig's current gate-set hash
 	// (config.GateSetSHA over the same binding gt sling/gt done use) for the
 	// pre-verification fast-path staleness check (om-gate T8). Overridable
@@ -340,6 +346,11 @@ type Engineer struct {
 	// contention with a leaked server isn't silently attributed to the diff
 	// under test (gt-twil). Overridable in tests.
 	findOrphanDoltServersFn func() ([]util.DoltOrphanServer, error)
+
+	// escalateFn replaces the witness nudge (escalateToWitness) in tests. Nil
+	// in production, where the nudge is the real one; a test that leaves it
+	// nil would reach a live witness.
+	escalateFn func(string)
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -608,6 +619,13 @@ type ProcessResult struct {
 	// than on Error's message text.
 	EditorialRefused bool
 	EditorialReason  editorial.PreconditionReason
+	// WorktreeExternallyDirty marks a merge refused because the Refinery's own
+	// rig worktree carried uncommitted or staged changes this process did not
+	// create (gt-nnwy). Nothing about the MR is wrong, so like EditorialRefused
+	// it leaves the MR queued and the worker unnudged — but the cause is
+	// environmental, so the refusal goes to the witness for a human to clear
+	// rather than being retried silently forever (HandleMRInfoFailure).
+	WorktreeExternallyDirty bool
 }
 
 // doMerge performs the actual git merge operation.
@@ -616,6 +634,19 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		return ProcessResult{Success: false, Error: "merge request is missing"}
 	}
 	branch, target := mr.Branch, mr.Target
+
+	// Step 0: refuse to gate a tree an external writer has staged or edited
+	// (gt-nnwy). This must precede restoreTargetToOrigin below — its reset is
+	// the first mutation of the merge and would discard that work silently.
+	cleanupWorktree, err := e.beginWorktreeOwnedMerge("merge")
+	if err != nil {
+		return ProcessResult{
+			Success:                false,
+			WorktreeExternallyDirty: errors.Is(err, ErrExternallyDirtyWorktree),
+			Error:                  err.Error(),
+		}
+	}
+	defer cleanupWorktree()
 
 	// Realign local target to origin before staging: a prior run may have
 	// exited before restoring it (gt-032w, gt-u093). prepareMergeTarget below
@@ -2154,6 +2185,17 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// every cycle the same unchanged refusal stands.
 	if result.EditorialRefused {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: editorial precondition refused (%s), will retry next poll\n", mr.ID, result.EditorialReason)
+		return
+	}
+
+	// WorktreeExternallyDirty: the merge never started, so nothing here is a
+	// verdict about the MR. Nudging the worker would send it to fix work that
+	// is not broken, and dead-worker recovery would re-dispatch it; the MR
+	// stays queued and the blockage goes to the witness until a human clears
+	// the worktree.
+	if result.WorktreeExternallyDirty {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MERGES REFUSED: %s\n", result.Error)
+		e.reportExternallyDirtyWorktree(result.Error)
 		return
 	}
 

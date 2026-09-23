@@ -95,6 +95,14 @@ func (g *Git) IsRepo() bool {
 	return err == nil
 }
 
+// GitDir returns the absolute path of the git directory backing workDir. For a
+// linked worktree that is the per-worktree directory
+// (…/.repo.git/worktrees/<name>), not the shared git dir, so a file written
+// there belongs to this worktree alone.
+func (g *Git) GitDir() (string, error) {
+	return g.run("rev-parse", "--absolute-git-dir")
+}
+
 // TopLevel returns the root of the git worktree containing the working
 // directory, or an error when there is none.
 //
@@ -1689,11 +1697,27 @@ type porcelainStatusEntry struct {
 
 // Status returns the current git status.
 func (g *Git) Status() (*GitStatus, error) {
+	return g.status("--porcelain", "-uall")
+}
+
+// StatusIgnoringSubmodules is Status() with submodule entries dropped entirely
+// from every column.
+//
+// A superproject reports a submodule as modified whenever the commit checked
+// out inside it differs from the gitlink it records — which is how a submodule
+// looks for most of its life, including after any merge that moves its pointer.
+// A caller asking "has anyone changed this working tree?" wants the trees it
+// reads, not that bookkeeping.
+func (g *Git) StatusIgnoringSubmodules() (*GitStatus, error) {
+	return g.status("--porcelain", "-uall", "--ignore-submodules=all")
+}
+
+func (g *Git) status(args ...string) (*GitStatus, error) {
 	// Raw output, not run()'s trimmed contract: the porcelain format's first
 	// column can be a meaningful leading space (see runOutput's doc comment),
 	// and TrimSpace on the whole blob corrupts the first line when it starts
 	// with one.
-	out, err := g.runOutput("status", "--porcelain", "-uall")
+	out, err := g.runOutput(append([]string{"status"}, args...)...)
 	if err != nil {
 		return nil, err
 	}

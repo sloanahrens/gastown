@@ -279,8 +279,13 @@ func (e *Engineer) recordEditorialRecordFailed(mr *MRInfo, reason string) {
 
 // escalateToWitness nudges the rig's witness — routine process signals use
 // nudge (no permanent record), not mail, per the town's Dolt-health
-// communication guidance.
+// communication guidance. escalateFn replaces the nudge in tests, which must
+// not reach a live witness.
 func (e *Engineer) escalateToWitness(msg string) {
+	if e.escalateFn != nil {
+		e.escalateFn(msg)
+		return
+	}
 	target := fmt.Sprintf("%s/witness", e.rig.Name)
 	cmd := exec.Command("gt", "nudge", target, msg)
 	util.SetDetachedProcessGroup(cmd)
