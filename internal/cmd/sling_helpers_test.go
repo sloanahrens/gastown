@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -475,5 +476,19 @@ func TestLoadRigCommandVarsPrecedence(t *testing.T) {
 		if gotVal, ok := got[key]; !ok || gotVal != wantVal {
 			t.Errorf("loadRigCommandVars() var %q = %q, want %q (vars: %v)", key, gotVal, wantVal, vars)
 		}
+	}
+}
+
+func TestShouldAcceptPermissionWarning_ResolvedPreset(t *testing.T) {
+	t.Parallel()
+	claude := config.GetAgentPresetByName("claude")
+	if !shouldAcceptPermissionWarning("deepseek-flash", claude, true) {
+		t.Error("custom agent resolved to claude must accept the bypass-permissions warning")
+	}
+	if shouldAcceptPermissionWarning("mystery", nil, false) {
+		t.Error("unresolved agent must not accept")
+	}
+	if !shouldAcceptPermissionWarning("", nil, false) {
+		t.Error("session without GT_AGENT is Claude by default")
 	}
 }
