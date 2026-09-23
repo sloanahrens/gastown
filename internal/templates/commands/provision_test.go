@@ -139,28 +139,30 @@ func TestNames(t *testing.T) {
 	}
 }
 
-// The /done command body is the third text the gt-7dxw ruling names: the
+// The /done command body is the second text the gt-7dxw ruling names: the
 // guidance a polecat reads when it deliberately reaches for `gt done`. It has
-// to carry both the verbatim slot-wait sentence and the rule that a gate
-// failure is escalated rather than retried, because the /done body is short
-// enough to be read in full at exactly the moment the polecat is deciding
-// whether to wait or to improvise.
+// to carry both the calm-wait sentence and the rule that a gate failure is
+// escalated rather than retried, because the /done body is short enough to be
+// read in full at exactly the moment the polecat is deciding whether to wait
+// or to improvise.
 func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 	body, err := bodiesFS.ReadFile("bodies/done.md")
 	if err != nil {
 		t.Fatalf("reading the embedded done body: %v", err)
 	}
 	text := string(body)
-	const verbatim = "gt done may sit silently for up to 20-30 minutes waiting for the container-gate slot. " +
-		"That is normal. Do not interrupt it, do not close the bead, do not retry. " +
-		"It will print a slot-acquire timeout if it gives up."
-	if !strings.Contains(text, verbatim) {
-		t.Error("the /done body lacks the verbatim slot-wait sentence")
+	const calmWait = "`gt done` waits for the container-gate slot before it runs the container suites, " +
+		"printing a `still waiting for the container-gate slot …` line every couple of minutes while " +
+		"it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives " +
+		"up with a slot-acquire timeout once the cap expires."
+	if !strings.Contains(text, calmWait) {
+		t.Error("the /done body lacks the slot-wait sentence")
 	}
 	for _, want := range []string{
 		"Never poll the slot, and never script a retry around `gt done`",
 		"`gt escalate -s medium`",
 		"--skip-verify",
+		"read the container-gate rule in `docs/reference.md`",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the /done body lacks %q", want)

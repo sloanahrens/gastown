@@ -5,25 +5,33 @@ import (
 	"testing"
 )
 
-// polecatFormulaSlotLoopGuidance is the instruction gt-7dxw requires the
+// polecatFormulaSlotLoopVerbatim is the instruction gt-7dxw requires the
 // polecat workflow to carry: `gt done` waits for the container-gate slot on
 // its own, a polecat never polls the slot or scripts a retry around it, and a
 // gate failure goes to the mayor as a one-shot --skip-verify ruling rather
 // than into an improvised loop.
 //
-// The verbatim sentence is the one the ruling fixed (overseer hq-wisp-6q5ib: a
-// third polecat misread the slot wait as a hang and bd-closed its bead
-// mid-`gt done`), so it is asserted character-for-character rather than
-// loosely.
-const polecatFormulaSlotLoopVerbatim = "gt done may sit silently for up to 20-30 minutes waiting for the " +
-	"container-gate slot. That is normal. Do not interrupt it, do not close the bead, do not retry. " +
-	"It will print a slot-acquire timeout if it gives up."
+// It is asserted character-for-character because a polecat misreads the wait
+// as a hang and bd-closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
+// The calm-wait sentence replaced an earlier "may sit silently for up to 20-30
+// minutes": that claim came from the same ruling that asked for the 2-minute
+// progress line, so the pane is not silent and the wait is bounded by the cap
+// (gt-7dxw review).
+const polecatFormulaSlotLoopVerbatim = "gt done waits for the container-gate slot before it runs the " +
+	"container suites, printing a `still waiting for the container-gate slot …` line every couple of " +
+	"minutes while it does. That is normal. Do not interrupt it, do not close the bead, do not retry. " +
+	"It gives up with a slot-acquire timeout once the cap expires."
 
 // TestPolecatFormulasCarryTheSlotLoopRule guards the three polecat workflows
 // that run `gt done`: the default, the monorepo/fork variant, and the doc
 // audit (a hand-maintained copy of the default's step text). A polecat under
 // any of them hits the same slot and the same temptation, so all three must
 // carry the rule — the copy that drifts is the one an agent reads.
+//
+// Only the default carries it in full. The two variants carry the rule's
+// trigger and a pointer to the one home, because three hand-maintained copies
+// of the same paragraph is the drift this test would otherwise be pinning
+// (gt-7dxw review, R2).
 func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 	for _, name := range []string{
 		"mol-polecat-work",
@@ -36,15 +44,19 @@ func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 				t.Fatalf("GetEmbeddedFormulaContent(%q): %v", name, err)
 			}
 			text := string(raw)
-			if !strings.Contains(text, polecatFormulaSlotLoopVerbatim) {
-				t.Errorf("%s lacks the verbatim slot-wait sentence", name)
+			wants := []string{
+				"Never poll the slot",
+				"docs/reference.md",
 			}
-			for _, want := range []string{
-				"Never poll the slot, and never script a retry around gt done",
-				"gt escalate -s medium",
-				"--skip-verify",
-				"Do not run container suites yourself. Run the non-container packages, then",
-			} {
+			if name == "mol-polecat-work" {
+				wants = append(wants,
+					polecatFormulaSlotLoopVerbatim,
+					"gt escalate -s medium",
+					"--skip-verify",
+					"Do not run container suites yourself. Run the non-container packages, then",
+				)
+			}
+			for _, want := range wants {
 				if !strings.Contains(text, want) {
 					t.Errorf("%s lacks %q", name, want)
 				}

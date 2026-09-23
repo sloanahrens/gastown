@@ -1257,14 +1257,16 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 // mol-polecat-work formula, and the /done body; the dangerous-command guard is
 // what enforces it.
 func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
-	// The wording the ruling fixed verbatim.
-	const verbatim = "gt done may sit silently for up to 20-30 minutes waiting for the container-gate slot. " +
-		"That is normal. Do not interrupt it, do not close the bead, do not retry. " +
-		"It will print a slot-acquire timeout if it gives up."
+	// The calm-wait sentence, character-for-character: a polecat that reads
+	// the wait as a hang closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
+	const calmWait = "`gt done` waits for the container-gate slot before it runs the container suites, " +
+		"printing a `still waiting for the container-gate slot …` line every couple of minutes while " +
+		"it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives " +
+		"up with a slot-acquire timeout once the cap expires."
 
 	rendered := renderPolecatForTest(t)
-	if !strings.Contains(rendered, verbatim) {
-		t.Errorf("rendered polecat prime output lacks the verbatim slot-wait sentence")
+	if !strings.Contains(rendered, calmWait) {
+		t.Errorf("rendered polecat prime output lacks the slot-wait sentence")
 	}
 
 	for _, want := range []string{
@@ -1272,7 +1274,8 @@ func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 		"`gt escalate -s medium`",
 		"--skip-verify",
 		"Do not run container suites yourself. Run the non-container packages, then",
-		"merge_queue.test_verify_slot_timeout",
+		// The explanation lives once, in the home the prime points at (R2).
+		"read the container-gate rule in `docs/reference.md`",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered polecat prime output lacks %q", want)

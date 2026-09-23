@@ -29,9 +29,13 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		// Repeat wrappers, whose payload tokenizes as one quoted token.
 		{"xargs gt done", "seq 1 300 | xargs -I{} bash -c 'gt done'", true},
 		{"xargs gt slot", "seq 1 300 | xargs -I{} gt slot status", true},
+		{"xargs with a separate-value flag", "seq 1 300 | xargs -n 1 gt done", true},
+		{"xargs with two flags before the payload", "seq 1 300 | xargs -0 -I{} gt slot status", true},
 		{"watch the slot", "watch gt slot status", true},
 		{"watch with an interval", "watch -n 5 gt slot status", true},
 		{"watch gt done", "watch gt done", true},
+		{"watch a shell payload", "watch -n 5 bash -c 'gt done'", true},
+		{"xargs a shell payload", "seq 1 300 | xargs -I{} sh -c 'gt done'", true},
 
 		// A heredoc written to a file: how the incident's script was authored.
 		{"heredoc-written retry script", "cat > /tmp/retry.sh <<'EOF'\nfor i in $(seq 1 300); do gt done; done\nEOF", true},
@@ -53,11 +57,30 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"seq with no gate command", "seq 1 5", false},
 		{"xargs with no gate command", "seq 1 5 | xargs -I{} echo {}", false},
 
+		// A repeat wrapper is judged on its OWN payload. The gate after the
+		// pipeline runs once, and a pipeline that merely names the gate in an
+		// argument is a search pattern, not an invocation (gt-7dxw review).
+		{"xargs pipeline followed by the sanctioned gt done", `git diff --name-only | xargs gofmt -w && gt done`, false},
+		{"xargs reading code that names the gate", `rg -l Foo | xargs grep -n "gt slot"`, false},
+		{"xargs pipeline before a commit message naming the gate", `seq 1 5 | xargs gofmt -l; git commit -m "fix gt done retry message"`, false},
+		{"xargs beside a mail body naming the gate", "seq 1 5 | xargs echo; gt mail send gastown/witness -s HELP --stdin <<'BODY'\ngt done failed, do not retry\nBODY", false},
+		{"a closed loop followed by the sanctioned gt done", "while true; do echo hi; done && gt done", false},
+
+		// Taking and releasing the slot is bounded work, so repeating those
+		// subcommands is not a busy-wait (gt-7dxw review).
+		{"sequential slot runs over packages", "for p in ./internal/a ./internal/b; do gt slot run --role gastown/pearl -- go test $p; done", false},
+		{"slot reap over stale holders", "for h in a b; do gt slot reap --dry-run; done", false},
+
 		// Prose must stay readable: a mail body or a notes file that merely
 		// discusses the rule is not itself a retry loop.
 		{"mail body mentioning gt done", "gt mail send gastown/witness -s \"HELP\" --stdin <<'BODY'\ngt done failed; do not retry\nBODY", false},
 		{"notes file with prose", "cat > /tmp/notes.md <<'EOF'\nNever poll the slot. Run gt done once. For instance, the incident.\nEOF", false},
 		{"notes file with prose starting a clause", "cat > /tmp/notes.md <<'EOF'\nDo not loop. while the gate is busy, wait; gt done is bounded.\nEOF", false},
+		{"notes file with line-initial prose", "cat > /tmp/notes.md <<'EOF'\nWhile gt done waits for the slot, do not retry.\nEOF", false},
+		{"notes file with a line-initial For", "cat > /tmp/notes.md <<'EOF'\nFor gt slot to free, wait; do not poll.\nEOF", false},
+		{"a stderr redirect does not make the body a script", "gt mail send gastown/witness -s HELP --stdin <<'BODY' 2>/dev/null\ngt done failed; do not retry\nBODY", false},
+		{"a commit-message heredoc is data", "cat <<'EOF' | git commit -F -\ngt done failed; do not retry\nEOF", false},
+		{"a notes file whose prose names a loop", "cat > /tmp/notes.md <<'EOF'\nNever run a loop around gt done; the gate is what stalls.\nEOF", false},
 	}
 	blocked := 0
 	for _, tt := range tests {
@@ -73,8 +96,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 16 {
-		t.Errorf("blocked %d of %d cases, want exactly 16", blocked, len(tests))
+	if blocked != 20 {
+		t.Errorf("blocked %d of %d cases, want exactly 20", blocked, len(tests))
 	}
 }
 
