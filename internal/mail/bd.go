@@ -3,7 +3,7 @@ package mail
 import (
 	"bytes"
 	"context"
-	"os/exec"
+	"os"
 	"strings"
 	"time"
 
@@ -69,11 +69,9 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	// own injection. (GH#2746)
 	args = beads.InjectFlatForListJSON(args)
 
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Dir = workDir
+	env := bdSubprocessEnv(os.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
+	cmd := beads.CommandContextWithEnv(ctx, workDir, env, args...)
 	util.SetDetachedProcessGroup(cmd)
-
-	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -92,10 +90,8 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 		}
 		stdout.Reset()
 		stderr.Reset()
-		retryCmd := exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-		retryCmd.Dir = workDir
+		retryCmd := beads.CommandContextWithEnv(ctx, workDir, cmd.Env, retryArgs...)
 		util.SetDetachedProcessGroup(retryCmd)
-		retryCmd.Env = cmd.Env
 		retryCmd.Stdout = &stdout
 		retryCmd.Stderr = &stderr
 		runErr = retryCmd.Run()

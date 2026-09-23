@@ -833,9 +833,7 @@ func (d *Daemon) getAgentBeadState(agentBeadID string) (string, error) {
 // kills mid-work after 3x threshold (hq-3kri). Pin the lookup to the town
 // .beads so the reaper sees the truth.
 func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
-	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "show", agentBeadID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -894,9 +892,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 // Used for TOCTOU re-verification before taking destructive action on agents.
 // Returns empty string on error or if no hook_bead is set.
 func (d *Daemon) getAgentHookBead(agentBeadID string) string {
-	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "show", agentBeadID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -986,17 +982,13 @@ const GUPPViolationTimeout = constants.GUPPViolationTimeout
 // The wisps query is best-effort (gracefully ignored if table doesn't exist).
 func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	// Query issues table (backward compat during migration)
-	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "list", "--label=gt:agent", "--json", "--flat")
 	util.SetDetachedProcessGroup(cmd)
 
 	issuesOutput, issuesErr := cmd.Output()
 
 	// Query wisps table (primary source after agent bead migration)
-	wispCmd := exec.Command(d.bdPath, "mol", "wisp", "list", "--json") //nolint:gosec // G204: bd is a trusted internal tool
-	wispCmd.Dir = d.config.TownRoot
-	wispCmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
+	wispCmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "mol", "wisp", "list", "--json")
 	util.SetDetachedProcessGroup(wispCmd)
 
 	wispOutput, _ := wispCmd.Output() // Best-effort: wisps table may not exist

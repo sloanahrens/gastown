@@ -3326,10 +3326,8 @@ func (d *Daemon) emitMassDeathEvent() {
 // On any error (bead not found, bd failure), returns false to err on the side
 // of crash detection rather than silently suppressing alerts.
 func (d *Daemon) isBeadClosed(beadID string) bool {
-	cmd := exec.Command(d.bdPath, "show", beadID, "--json") //nolint:gosec // G204: args are constructed internally
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
 	setSysProcAttr(cmd)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -3357,13 +3355,11 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 
 	for _, status := range []string{"hooked", "in_progress", "open"} {
 		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
-		cmd := exec.Command(d.bdPath, args...) //nolint:gosec // G204: args are constructed internally
-		cmd.Dir = d.config.TownRoot
+		env := bdReadOnlyRoutingEnv(d.config.TownRoot)
 		if rigDir != "" {
-			cmd.Env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
-		} else {
-			cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
+			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		}
+		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
 		output, err := cmd.Output()
 		if err != nil {
 			continue
