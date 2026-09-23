@@ -32,6 +32,8 @@ This is infrastructure work. You:
 | Variable | Source | Description |
 |----------|--------|-------------|
 | latency_threshold | config | Latency warning threshold (default 1s) |
+| findings | daemon precheck | Why this molecule was poured — start here |
+| latency, conn_count, conn_max, orphan_count | daemon precheck | Measurements taken with the findings |
 
 ## Safety
 
@@ -49,7 +51,8 @@ include_metrics = true
 id = "probe"
 title = "Probe Dolt server connectivity"
 description = """
-Check basic server health and measure latency.
+Check basic server health and measure latency. The daemon already measured
+{{latency}}; re-probe to confirm whether the findings still hold.
 
 **1. Connectivity check:**
 ```bash
@@ -167,6 +170,8 @@ Generate health report and signal completion.
 **1. Generate report:**
 ```markdown
 ## Doctor Dog Report
+
+**Daemon findings**: {{findings}}
 
 **Server**: {{server_status}} (latency: {{latency}})
 **Connections**: {{conn_count}}/{{conn_max}} ({{conn_pct}}%)

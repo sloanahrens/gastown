@@ -307,6 +307,26 @@ func TestDoctorDogFindings_UnreachableSkipsServerChecks(t *testing.T) {
 	}
 }
 
+// A server-side probe that errors must not serialize as all clear (om review).
+func TestDoctorDogFindings_ProbeErrorIsAFinding(t *testing.T) {
+	boom := errors.New("i/o timeout")
+	cases := map[string]func(*doctorProbes){
+		"conns":     func(p *doctorProbes) { p.conns = func() (int, int, error) { return 0, 0, boom } },
+		"orphans":   func(p *doctorProbes) { p.orphans = func() (int, error) { return 0, boom } },
+		"databases": func(p *doctorProbes) { p.databases = func() ([]string, error) { return nil, boom } },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := healthyDoctorProbes()
+			mut(&p)
+			r := doctorDogFindings(p, defaultDoctorLimits())
+			if len(r.findings) != 1 || !strings.Contains(r.findings[0], "unavailable") {
+				t.Errorf("want one 'unavailable' finding, got %v", r.findings)
+			}
+		})
+	}
+}
+
 // A docker that cannot be listed (not installed, Docker Desktop stopped) is
 // nothing an agent can fix from a dog session; it is logged, not poured. A
 // removal that failed on a container classified as debris is.

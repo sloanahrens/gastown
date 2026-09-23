@@ -153,8 +153,11 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 		r.findings = append(r.findings, fmt.Sprintf("query latency %v exceeds %v", latency.Round(time.Millisecond), lim.latency))
 	}
 
+	// A probe that errors on a reachable server is a finding, not a note: a
+	// measurement that cannot be taken must not read as a healthy one. The
+	// worst case is a pour every run, which is where this started.
 	if n, limit, err := p.conns(); err != nil {
-		r.notes = append(r.notes, fmt.Sprintf("connection count unavailable: %v", err))
+		r.findings = append(r.findings, fmt.Sprintf("connection count unavailable: %v", err))
 	} else {
 		r.conns, r.connMax = n, limit
 		if limit > 0 && n*100 >= limit*doctorConnAlertPct {
@@ -163,7 +166,7 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 	}
 
 	if n, err := p.orphans(); err != nil {
-		r.notes = append(r.notes, fmt.Sprintf("orphan scan unavailable: %v", err))
+		r.findings = append(r.findings, fmt.Sprintf("orphan scan unavailable: %v", err))
 	} else {
 		r.orphans = n
 		if n > lim.orphans {
@@ -174,7 +177,7 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 	// Only served databases: .dolt-backup keeps directories for databases
 	// long since dropped, and judging those would trip on every run.
 	if dbs, err := p.databases(); err != nil {
-		r.notes = append(r.notes, fmt.Sprintf("database list unavailable: %v", err))
+		r.findings = append(r.findings, fmt.Sprintf("database list unavailable: %v", err))
 	} else {
 		for _, db := range dbs {
 			if age, ok := p.backupAge(db); ok && age > lim.backupStale {
