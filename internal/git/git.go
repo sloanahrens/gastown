@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,8 +115,25 @@ func (g *Git) TopLevel() (string, error) {
 	return filepath.Clean(top), nil
 }
 
-// run executes a git command and returns stdout.
+// run executes a git command and returns trimmed stdout.
 func (g *Git) run(args ...string) (string, error) {
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// runOutput executes a git command and returns RAW, untrimmed stdout.
+//
+// Most callers want run()'s trimmed contract. This exists for output formats
+// where a leading or trailing character is meaningful, not incidental
+// whitespace — `git status --porcelain`'s first column can be a literal
+// space (index clean, worktree dirty), and TrimSpace on the whole blob eats
+// exactly that space when it starts the first line, shifting every column
+// and truncating the path by one character (" M README.md" -> "M README.md"
+// -> parsed as code "M " path "EADME.md"). Status() uses this instead of run().
+func (g *Git) runOutput(args ...string) (string, error) {
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {
 		return "", err
 	}
@@ -158,7 +176,7 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return stdout.String(), nil
 }
 
 // pushTimeout is the maximum time a git push is allowed to run before being
@@ -1641,6 +1659,12 @@ type GitStatus struct {
 	Deleted   []string
 	Untracked []string
 	Unmerged  []string
+	// StagedOnly lists paths whose index differs from HEAD but whose working
+	// tree matches the index exactly (porcelain worktree column is clean).
+	// These are index-skew candidates (see CheckUncommittedWork): content
+	// staged in the index with nothing further pending in the editor.
+	// Renames/copies and untracked/unmerged entries are never included.
+	StagedOnly []string
 }
 
 type porcelainStatusEntry struct {
@@ -1652,7 +1676,11 @@ type porcelainStatusEntry struct {
 
 // Status returns the current git status.
 func (g *Git) Status() (*GitStatus, error) {
-	out, err := g.run("status", "--porcelain", "-uall")
+	// Raw output, not run()'s trimmed contract: the porcelain format's first
+	// column can be a meaningful leading space (see runOutput's doc comment),
+	// and TrimSpace on the whole blob corrupts the first line when it starts
+	// with one.
+	out, err := g.runOutput("status", "--porcelain", "-uall")
 	if err != nil {
 		return nil, err
 	}
@@ -1677,6 +1705,7 @@ func (g *Git) Status() (*GitStatus, error) {
 		code := entry.Code
 		file := entry.Path
 
+		var appended []string
 		switch {
 		case entry.Unmerged:
 			status.Unmerged = append(status.Unmerged, entry.paths()...)
@@ -1684,19 +1713,28 @@ func (g *Git) Status() (*GitStatus, error) {
 			status.Untracked = append(status.Untracked, file)
 		case strings.ContainsAny(code, "RC"):
 			status.Modified = append(status.Modified, entry.paths()...)
+			appended = entry.paths()
 		case strings.Contains(code, "M"):
 			status.Modified = append(status.Modified, file)
+			appended = []string{file}
 		case strings.Contains(code, "A"):
 			status.Added = append(status.Added, file)
+			appended = []string{file}
 		case strings.Contains(code, "D"):
 			// Skip files hidden by sparse-checkout (skip-worktree bit set).
 			if !skipWorktree[file] {
 				status.Deleted = append(status.Deleted, file)
+				appended = []string{file}
 			}
 		default:
 			// Unknown porcelain statuses still represent local work. Returning the
 			// path is safer than letting cleanup/recovery treat the worktree as clean.
 			status.Modified = append(status.Modified, file)
+			appended = []string{file}
+		}
+
+		if len(appended) > 0 && isStagedOnlyCode(code) {
+			status.StagedOnly = append(status.StagedOnly, appended...)
 		}
 	}
 
@@ -1707,6 +1745,21 @@ func (g *Git) Status() (*GitStatus, error) {
 	}
 
 	return status, nil
+}
+
+// isStagedOnlyCode reports whether a 2-character porcelain status code is an
+// index-skew candidate: something is staged (index column differs from HEAD)
+// but the working tree exactly matches the index (worktree column is clean).
+// Renames/copies, untracked ("?") and unmerged ("U") codes are excluded to
+// keep the classifier conservative — see GitStatus.StagedOnly.
+func isStagedOnlyCode(code string) bool {
+	if len(code) != 2 {
+		return false
+	}
+	if strings.ContainsAny(code, "RC?U") {
+		return false
+	}
+	return code[0] != ' ' && code[1] == ' '
 }
 
 func parsePorcelainStatusEntry(line string) (porcelainStatusEntry, bool) {
@@ -1721,8 +1774,32 @@ func parsePorcelainStatusEntry(line string) (porcelainStatusEntry, bool) {
 	}
 	if strings.ContainsAny(entry.Code, "RC") {
 		entry.SourcePath, entry.Path = porcelainRenameCopyPaths(entry.Path)
+		entry.SourcePath = unquoteGitPath(entry.SourcePath)
 	}
+	entry.Path = unquoteGitPath(entry.Path)
 	return entry, true
+}
+
+// unquoteGitPath reverses git's C-style quoting of a porcelain path. Git
+// wraps a path in double quotes and escapes it (backslash, double-quote,
+// control characters as \a \b \f \n \r \t \v, and — unless
+// core.quotepath=false — any non-ASCII byte as \NNN octal) whenever it
+// contains a character quotepath decides is unsafe to print raw. Left
+// quoted, the string is not the real filename: passing it back to git as a
+// pathspec (as classifyIndexSkew does) looks for a literal file whose name
+// contains quote and backslash characters, which matches nothing (gt-ui2x).
+// Go's octal/backslash escape set is the same as git's, so strconv.Unquote
+// round-trips it; a string that fails to unquote is returned unchanged
+// rather than dropped, since the paths list must stay 1:1 with git's output.
+func unquoteGitPath(path string) string {
+	if len(path) < 2 || path[0] != '"' || path[len(path)-1] != '"' {
+		return path
+	}
+	unquoted, err := strconv.Unquote(path)
+	if err != nil {
+		return path
+	}
+	return unquoted
 }
 
 func (e porcelainStatusEntry) paths() []string {
@@ -3719,6 +3796,15 @@ type UncommittedWorkStatus struct {
 	ModifiedFiles  []string
 	UntrackedFiles []string
 	UnmergedFiles  []string
+	// IndexSkewFiles is the subset of ModifiedFiles that are staged-only
+	// (GitStatus.StagedOnly) AND whose content already matches origin's
+	// default branch or the local default branch. This is the shared-.repo.git
+	// checkout-skew pattern from gt-ui2x: a dormant checkout's index describes
+	// a commit that moved out from under it, not real unsaved work. Only
+	// CleanExcludingRuntimeAndIndexSkew treats these as non-blocking — every
+	// other consumer (HasUncommittedChanges, Clean, gt done) is unaffected, so
+	// real staged-but-uncommitted work still blocks everywhere it always has.
+	IndexSkewFiles []string
 }
 
 // Clean returns true if there is no uncommitted work.
@@ -3831,6 +3917,24 @@ func (s *UncommittedWorkStatus) NonRuntimePaths() []string {
 	return paths
 }
 
+// NonRuntimeNonSkewPaths is NonRuntimePaths with index-skew files (see
+// IndexSkewFiles) also removed. Used to size the diagnostic message when
+// CleanExcludingRuntimeAndIndexSkew reports dirt, so the reported count
+// reflects only the files actually blocking reuse.
+func (s *UncommittedWorkStatus) NonRuntimeNonSkewPaths() []string {
+	skew := make(map[string]bool, len(s.IndexSkewFiles))
+	for _, f := range s.IndexSkewFiles {
+		skew[f] = true
+	}
+	var paths []string
+	for _, f := range s.NonRuntimePaths() {
+		if !skew[f] {
+			paths = append(paths, f)
+		}
+	}
+	return paths
+}
+
 // CleanExcludingRuntime returns true if the only uncommitted changes are
 // runtime artifacts covered by the centralized exclusion policy.
 // Used by gt done to avoid blocking completion on toolchain-managed files.
@@ -3847,6 +3951,39 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 
 	for _, f := range s.ModifiedFiles {
 		if !isGasTownRuntimePath(f) {
+			return false
+		}
+	}
+
+	for _, f := range s.UntrackedFiles {
+		if !isGasTownRuntimePath(f) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// CleanExcludingRuntimeAndIndexSkew is CleanExcludingRuntime plus one more
+// exclusion: staged-only files whose content already matches origin's default
+// branch or the local default branch (IndexSkewFiles). Used by polecat
+// seat-reuse dirt checks, where a shared-.repo.git checkout's index can
+// describe a commit that moved out from under it — content already known
+// elsewhere, not real unsaved work (gt-ui2x). gt done and every other
+// uncommitted-work consumer keep using CleanExcludingRuntime unchanged, so
+// this relaxation is scoped to reuse eligibility only.
+func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew() bool {
+	if len(s.UnmergedFiles) > 0 {
+		return false
+	}
+
+	skew := make(map[string]bool, len(s.IndexSkewFiles))
+	for _, f := range s.IndexSkewFiles {
+		skew[f] = true
+	}
+
+	for _, f := range s.ModifiedFiles {
+		if !isGasTownRuntimePath(f) && !skew[f] {
 			return false
 		}
 	}
@@ -3881,6 +4018,157 @@ func (s *UncommittedWorkStatus) String() string {
 	return strings.Join(issues, ", ")
 }
 
+// indexSkewComparisonRefs returns the locally-resolvable refs to compare
+// staged-only paths against when classifying index skew: origin's default
+// branch tracking ref, then the local branch of the same name. It makes no
+// network calls (no fetch) — only refs already known to this clone count, so
+// a polecat that has never fetched fails closed with no candidates rather
+// than reaching out over the network on every dirt check.
+func (g *Git) indexSkewComparisonRefs() []string {
+	branch := g.RemoteDefaultBranch()
+	if branch == "" {
+		return nil
+	}
+	var refs []string
+	for _, ref := range []string{"origin/" + branch, branch} {
+		if _, err := g.run("rev-parse", "--verify", "--quiet", ref); err == nil {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+// classifyIndexSkew narrows paths down to the ones whose staged index blob
+// is affirmatively confirmed identical to the same path's blob on origin's
+// default branch or the local default branch.
+//
+// This compares blob shas directly (git ls-files -s for the index side, git
+// ls-tree <ref> for the ref side) instead of inferring identity from a
+// path's *absence* in `git diff --name-only` output. That absence-based
+// check failed open: a pathspec that matched nothing at all — because the
+// filename carries glob/magic characters, or because Status() had left it
+// still C-quoted — produced empty diff output too, so a real staged edit
+// with such a name was silently classified as skew (gt-ui2x). Every
+// pathspec here is prefixed with the `:(literal)` magic so glob characters
+// in a real filename are never reinterpreted.
+//
+// It never errors: a ref or path that fails to resolve is simply skipped,
+// and a path whose match cannot be affirmatively confirmed against any ref —
+// including a staged deletion, which has no index blob to confirm at all —
+// is left out of the result entirely. Fail closed: the same file stays a
+// blocker.
+func (g *Git) classifyIndexSkew(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	refs := g.indexSkewComparisonRefs()
+	if len(refs) == 0 {
+		return nil
+	}
+
+	indexBlobs := g.lsFilesStagedBlobs(paths)
+
+	unresolved := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if indexBlobs[p] != "" {
+			unresolved = append(unresolved, p)
+		}
+	}
+
+	confirmed := make(map[string]bool, len(unresolved))
+	for _, ref := range refs {
+		if len(unresolved) == 0 {
+			break
+		}
+		refBlobs := g.lsTreeBlobs(ref, unresolved)
+		var stillUnresolved []string
+		for _, p := range unresolved {
+			if sha := refBlobs[p]; sha != "" && sha == indexBlobs[p] {
+				confirmed[p] = true
+			} else {
+				stillUnresolved = append(stillUnresolved, p)
+			}
+		}
+		unresolved = stillUnresolved
+	}
+
+	var skew []string
+	for _, p := range paths {
+		if confirmed[p] {
+			skew = append(skew, p)
+		}
+	}
+	return skew
+}
+
+// literalPathspecs wraps each path in the `:(literal)` pathspec magic so
+// glob/magic characters in a real filename (`?`, `*`, `[`, a leading `:`)
+// are matched as literal bytes rather than reinterpreted by git.
+func literalPathspecs(paths []string) []string {
+	specs := make([]string, len(paths))
+	for i, p := range paths {
+		specs[i] = ":(literal)" + p
+	}
+	return specs
+}
+
+// lsFilesStagedBlobs returns each path's staged (index) blob sha, keyed by
+// path (git ls-files -s -z). A path this cannot resolve — including a
+// staged deletion, which is in the index status but not the index tree — is
+// simply absent from the result.
+func (g *Git) lsFilesStagedBlobs(paths []string) map[string]string {
+	args := append([]string{"ls-files", "-s", "-z", "--"}, literalPathspecs(paths)...)
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return nil
+	}
+	blobs := make(map[string]string, len(paths))
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		meta, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		// Format: "<mode> <sha> <stage>".
+		fields := strings.Fields(meta)
+		if len(fields) < 2 {
+			continue
+		}
+		blobs[path] = fields[1]
+	}
+	return blobs
+}
+
+// lsTreeBlobs returns each path's blob sha on ref, keyed by path (git
+// ls-tree -z <ref>). A path absent from ref is simply absent from the
+// result.
+func (g *Git) lsTreeBlobs(ref string, paths []string) map[string]string {
+	args := append([]string{"ls-tree", "-z", ref, "--"}, literalPathspecs(paths)...)
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return nil
+	}
+	blobs := make(map[string]string, len(paths))
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		meta, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		// Format: "<mode> <type> <sha>".
+		fields := strings.Fields(meta)
+		if len(fields) < 3 {
+			continue
+		}
+		blobs[path] = fields[2]
+	}
+	return blobs
+}
+
 // CheckUncommittedWork performs a comprehensive check for uncommitted work.
 func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 	return g.checkUncommittedWork(g.UnpushedCommits)
@@ -3911,6 +4199,7 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.ModifiedFiles = append(status.ModifiedFiles, gitStatus.Deleted...)
 	status.UntrackedFiles = gitStatus.Untracked
 	status.UnmergedFiles = gitStatus.Unmerged
+	status.IndexSkewFiles = g.classifyIndexSkew(gitStatus.StagedOnly)
 
 	// Check stashes
 	stashCount, err := g.StashCount()

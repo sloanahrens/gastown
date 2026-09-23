@@ -75,6 +75,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		wantReason       string
 		wantGitStateSrc  string
 		wantGitReasonHas string
+		wantBlockerHas   string
 	}{
 		{
 			// The 2026-09-10 01:14 incident: the self-report said has_stash ten
@@ -122,6 +123,37 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			wantReason:      "cleanup-has_stash",
 			wantGitStateSrc: polecat.GitStateSourceRecorded,
 		},
+		{
+			// gt-ui2x acceptance case: a seat whose cleanup_status was never
+			// self-reported (gt done crashed before writing it, or the seat
+			// predates the field) must become reusable once the agent bead was
+			// actually read (buildPolecatInventoryItem sets AgentBeadRead from
+			// fields != nil) and a live probe confirms the worktree clean —
+			// not stay blocked forever with no path out.
+			name:            "missing cleanup_status with a clean live worktree is reusable",
+			worktreePath:    cleanWorktree,
+			cleanupStatus:   "",
+			wantReusable:    true,
+			wantVerdict:     polecat.WorkstateVerdictSafeToNuke,
+			wantReason:      "reusable",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+		},
+		{
+			// The companion negative case: missing cleanup_status must not
+			// become a blanket clearance — a live probe that finds real dirt
+			// still blocks, exactly like every other status. gitSafe is false
+			// here, so ResolveIgnoreCleanupStatus's agentBeadRead branch never
+			// fires and the missing-status blocker (checked first in
+			// decideWorkstate) sets the reported reason; the dirty git fact is
+			// still a second, independent blocker (see item.Disposition.Blockers).
+			name:            "missing cleanup_status with a dirty live worktree still blocks",
+			worktreePath:    dirtyWorktree,
+			cleanupStatus:   "",
+			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:      "cleanup-unknown",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+			wantBlockerHas:  "git_state=has_uncommitted",
+		},
 	}
 
 	for _, tt := range tests {
@@ -152,6 +184,17 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			}
 			if item.GitStateSource == polecat.GitStateSourceLive && item.Branch != "polecat/topaz" {
 				t.Fatalf("Branch = %q, want the live branch polecat/topaz", item.Branch)
+			}
+			if tt.wantBlockerHas != "" {
+				found := false
+				for _, b := range item.Disposition.Blockers {
+					if strings.Contains(b, tt.wantBlockerHas) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("Blockers = %v, want one containing %q", item.Disposition.Blockers, tt.wantBlockerHas)
+				}
 			}
 		})
 	}

@@ -1002,6 +1002,11 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	input := polecat.SlotReuseInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, HookBeadSafe: true, GitCheckFailed: err != nil || fields == nil}
 	issueID := ""
 	if fields != nil {
+		// gt-ui2x: the bead was actually read here — hook_bead, push_failed,
+		// mr_failed and active_mr below are verified facts, not the unread
+		// defaults a not-found/error result leaves in place. See
+		// ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch.
+		input.AgentBeadRead = true
 		issueID = fields.LastSourceIssue
 		if issueID == "" {
 			issueID = fields.HookBead
@@ -1033,7 +1038,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 			input.MQLookupFailed = true
 		}
 		if status, err := g.CheckUncommittedWork(); err == nil {
-			input.GitDirty = !status.CleanExcludingRuntime()
+			input.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew()
 			input.StashCount = status.StashCount
 			input.UnpushedCommits = status.UnpushedCommits
 		} else {

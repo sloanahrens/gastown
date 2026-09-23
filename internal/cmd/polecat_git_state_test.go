@@ -202,6 +202,40 @@ func TestGetGitStateIgnoresOpenCodeRuntimeArtifacts(t *testing.T) {
 	}
 }
 
+// TestGetGitStateDoesNotRelaxIndexSkewForNukeSafety is the gt-ui2x scope-fix
+// regression test. getGitStateWithTargets feeds check-recovery, the pre-nuke
+// safety gate (checkPolecatSafety), and `gt polecat git-state`'s "safe to
+// kill" verdict — destructive/near-destructive consumers, not the reuse
+// gate. The index-skew relaxation that lets the reuse gate ignore a
+// shared-.repo.git checkout's stale staged index (see
+// git.UncommittedWorkStatus.CleanExcludingRuntimeAndIndexSkew) must stay
+// scoped to reuse only: this path must still call staged-only content dirty,
+// even when that content is already known on origin's default branch.
+func TestGetGitStateDoesNotRelaxIndexSkewForNukeSafety(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "-c", "polecat/skew")
+
+	writeTestFile(t, filepath.Join(repo, "README.md"), "base\nv2\n")
+	runGitCmd(t, repo, "commit", "-am", "v2")
+	runGitCmd(t, repo, "push", "-u", "origin", "polecat/skew")
+	// Move the branch ref back one commit WITHOUT touching the index or
+	// worktree — the checkout-skew shape: HEAD regresses while the index and
+	// working tree still hold content origin already has.
+	runGitCmd(t, repo, "reset", "--soft", "HEAD~1")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.Clean {
+		t.Fatalf("index skew must still be reported dirty for nuke/check-recovery safety: %+v", state)
+	}
+	if len(state.UncommittedFiles) != 1 || state.UncommittedFiles[0] != "README.md" {
+		t.Fatalf("UncommittedFiles = %v, want [README.md]", state.UncommittedFiles)
+	}
+}
+
 func setupGitStateRemoteRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

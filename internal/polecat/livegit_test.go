@@ -228,8 +228,21 @@ func TestRecordedCleanupBlocks(t *testing.T) {
 		{name: "no probe keeps recorded has_stash blocking", status: CleanupStash, source: GitStateSourceRecorded, want: true},
 		{name: "failed probe keeps recorded has_stash blocking", status: CleanupStash, source: GitStateSourceUnknown, want: true},
 		{name: "unset source keeps recorded has_uncommitted blocking", status: CleanupUncommitted, source: "", want: true},
-		{name: "missing status always blocks", status: "", source: GitStateSourceLive, want: true},
-		{name: "unknown status always blocks", status: CleanupUnknown, source: GitStateSourceLive, want: true},
+		// gt-14a/gt-ui2x: unlike the git-derived statuses above, a live probe
+		// alone must NOT clear missing/unknown — RecordedCleanupBlocks cannot
+		// tell whether the agent bead behind the missing self-report was ever
+		// read (hook_bead/push_failed/mr_failed/active_mr may be completely
+		// unverified). That narrower, agent-bead-read-gated escape lives in
+		// ResolveIgnoreCleanupStatus instead (see
+		// TestNewWorkstateInputMissingCleanupStatusClearsOnLiveCleanProbe and
+		// TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutAgentBeadRead).
+		{name: "live probe alone does not clear missing status", status: "", source: GitStateSourceLive, want: true},
+		{name: "live probe alone does not clear unknown status", status: CleanupUnknown, source: GitStateSourceLive, want: true},
+		{name: "no probe keeps missing status blocking", status: "", source: GitStateSourceRecorded, want: true},
+		{name: "no probe keeps unknown status blocking", status: CleanupUnknown, source: GitStateSourceRecorded, want: true},
+		{name: "failed probe keeps missing status blocking", status: "", source: GitStateSourceUnknown, want: true},
+		{name: "failed probe keeps unknown status blocking", status: CleanupUnknown, source: GitStateSourceUnknown, want: true},
+		{name: "unset source keeps missing status blocking", status: "", source: "", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

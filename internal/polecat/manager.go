@@ -2354,6 +2354,11 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		facts.GitCheckFailed = true
 	}
 	if err == nil && fields != nil {
+		// gt-ui2x: the bead was actually read here — hook_bead, push_failed,
+		// mr_failed and active_mr below are verified facts, not the unread
+		// defaults a not-found/error GetAgentBead result leaves in place. See
+		// ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch.
+		facts.AgentBeadRead = true
 		facts.HookBeadSafe, facts.HookBeadTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
 		facts.HookBead = fields.HookBead
 		facts.PushFailed = fields.PushFailed
@@ -2415,7 +2420,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// a *different* blocker and strand the slot. The detailed reason belongs to
 	// the list path (ProbeLiveGitState), which has no such gate.
 	if status, err := g.CheckUncommittedWork(); err == nil {
-		facts.GitDirty = !status.CleanExcludingRuntime()
+		facts.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew()
 		facts.StashCount = status.StashCount
 		facts.UnpushedCommits = status.UnpushedCommits
 	} else {
