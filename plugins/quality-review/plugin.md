@@ -1,7 +1,7 @@
 +++
 name = "quality-review"
-description = "Review merge quality and track per-worker trends"
-version = 1
+description = "Per-worker om editorial quality trends from refs/notes/om"
+version = 2
 
 [gate]
 type = "cooldown"
@@ -12,177 +12,93 @@ labels = ["plugin:quality-review", "category:quality"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"
 +++
 
-# Quality Review — Trend Analysis
+# Quality Review
 
-This plugin runs every 6h during Deacon patrol. It analyzes quality-review result
-wisps recorded by the Refinery during merges, computes per-worker trends, and
-alerts on quality breaches.
+Run `run.sh` exactly; its exit code and its stdout are the result. Read the rest
+of this file only to interpret a failure, or before editing the script.
 
-## Step 1: Query recent quality-review results
+Per-worker trends from the om editorial gate's own verdicts, read from the notes
+it publishes on `refs/notes/om`.
 
-Fetch all quality-review result wisps from the last 24 hours.
+The notes rather than the `quality-review-result` receipt wisps, because the note
+is the gate's durable proof: it survives wisp GC, DB flattens and MR-bead
+deletion, and it carries the whole verdict — score, findings, attempts,
+follow-ups — rather than a summary of it. A prose plugin had to re-derive the
+numbers from the receipt stream on every dispatch, and the numbers drifted
+between dispatches of the same window (gt-gs7g).
 
-**`--include-infra` is required.** These receipts are ephemeral wisps (recorded
-via `gt plugin record-run`, see the reference section below), and `bd list`
-hides ephemeral beads by design. Omitting the flag makes this query silently
-return `[]` even when recent results exist — which is exactly what made every
-run report "No results in last 24h" for days while breaches went unalerted.
-The canonical recorder uses the same flag (`internal/plugin/recording.go`).
+## What it reports
 
-```bash
-bd list --json --all --include-infra -l type:plugin-run,plugin:quality-review-result --created-after=-24h
-```
+Per worker, over a rolling window (24h by default,
+`GT_QUALITY_REVIEW_WINDOW_HOURS`): reviews, first-attempt approve rate, mean
+score, mean findings count, major findings, request-changes verdicts, and a
+trend from the window's first half against its second.
 
-If no results are found, do NOT immediately record a clean success. An empty
-result is ambiguous: it can be a genuine "nothing in the window" OR a broken
-query. Disambiguate with the independent history path:
+A review is one reviewed diff, not one note. The gate copies its note onto the
+landed commit on every stacked or rebased merge, and a re-roll leaves the note it
+replaced beside the new one, so the notes on the ref outnumber the verdicts
+they record by about a third. The count is keyed on the gate's `patch_id`.
 
-```bash
-gt plugin history quality-review-result --json
-```
+Status bands on the mean score: OK at 0.60 and above, WARN from 0.45, BREACH
+below it. A first-attempt approve rate under 50% caps an OK worker at WARN —
+the score band measures the reviewer's number, not the rework the gate absorbed
+before the diff landed.
 
-- **Both empty** — the window genuinely has no results. Record a run wisp and stop:
+Past the table, one JSON object per worker goes to stdout, so the model-trial
+scoring reads the same numbers this run reported.
 
-```bash
-gt plugin record-run --plugin quality-review --result success \
-  --title "quality-review: No results in last 24h" \
-  --description "No quality-review results in last 24h. Nothing to analyze." >/dev/null 2>&1 || true
-```
+Only operational rigs are read, and only ones that have recorded a verdict: a
+parked rig and a rig with no editorial gate contribute nothing and say so.
 
-- **History non-empty, query empty** — the Step 1 query is broken. A failed
-  measurement must NOT serialize as success. Record a failure and escalate; do
-  not record a clean "success":
+## Alerts
 
-```bash
-gt plugin record-run --plugin quality-review --result failure \
-  --title "quality-review: Step 1 query returned [] but history is non-empty" \
-  --description "Step 1 query returned empty while 'gt plugin history quality-review-result' shows recent runs. The query is broken." >/dev/null 2>&1 || true
+A BREACH mails the deacon and escalates under the stable per-worker key
+`quality-review:breach:<rig>/<worker>`. It mails the deacon rather than the
+prose plugin's `mayor/` because the deacon dispatches this plugin and the keyed
+escalation already routes to the mayor, and two addresses for one condition get
+acknowledged twice and acted on once.
 
-gt escalate "quality-review: empty-result anomaly" \
-  --severity medium \
-  --reason "Step 1 query returned [] for window <start>..<end>, but 'gt plugin history quality-review-result' returned <n> runs (latest <wisp-id>); the query is broken."
-```
+A later run closes the key for any worker not in breach, including one with no
+reviews in the window at all: the sweep covers every worker seen in the last
+seven windows. A run that reports also closes `quality-review:failed`.
 
-## Step 2: Compute per-worker trends
+## Exit codes
 
-Parse the wisp labels to extract per-worker data. Each result wisp has labels:
-- `worker:<polecat-name>`
-- `rig:<rig-name>`
-- `score:<0.0-1.0>`
-- `recommendation:<approve|request_changes>`
+| exit | when |
+|------|------|
+| 0 | measured, or the window is genuinely empty — either way a receipt is recorded |
+| 1 | the run could not measure: `jq` or `git` missing, the town root or rig registry unusable, a checkout missing, a `git fetch`/`notes list`/`cat-file` call erroring, or notes were read and none of them could be placed in the window or attributed to a worker |
 
-For each worker, compute:
-- **Average score** across all results in window
-- **Rejection rate**: count of `recommendation:request_changes` / total
-- **Trend direction**: Compare first-half avg vs second-half avg of the window
-  - Difference > 0.05: `improving`
-  - Difference < -0.05: `declining`
-  - Otherwise: `stable`
+Exit 2 is never used. An empty window is a result and cannot be mistaken for a
+failure; a window that could not be read is never reported as empty. Half a
+window of unattributable notes is a schema that moved, not a quiet week, and it
+exits 1 so the failure surfaces where the numbers used to.
 
-## Step 3: Classify worker status
+A run with no operational rig to read prints `[plugin-result skipped]` and
+records a `skipped` receipt rather than a success: it measured nothing, and a
+no-op that records success green-checks the plugin's history and spends its
+cooldown. An empty window keeps its success receipt, because an empty window is
+a measurement — of a window that holds no verdicts.
 
-Apply thresholds to each worker's average score:
-- **OK**: avg >= 0.60
-- **WARN**: 0.45 <= avg < 0.60
-- **BREACH**: avg < 0.45
+## The gate's ref is read, never written
 
-## Step 4: Alert on breaches
+Rig clones are worktrees of one `.repo.git` and a notes ref is not per-worktree,
+so `refs/notes/om` in a rig clone is the ref the refinery writes and publishes
+from. A read-only report that fetched into it would overwrite the proof, and
+could discard a verdict the gate has written but not yet pushed.
 
-For each worker in BREACH status, send an alert:
+The script fetches origin's `refs/notes/om` into `refs/notes/quality-review-om`
+and reads that.
 
-```bash
-gt mail send mayor/ -s "Quality BREACH: <worker>" -m "Worker: <worker>
-Rig: <rig>
-Avg Score: <avg>
-Reviews: <count>
-Rejection Rate: <rate>%
-Trend: <improving|stable|declining>
-
-Action: Review recent merges from this worker for quality issues."
-```
-
-Also escalate:
+## Run
 
 ```bash
-gt escalate "Quality BREACH: <worker> (avg: <avg>)" \
-  --severity medium \
-  --reason "Worker <worker> in rig <rig> has avg quality score <avg> over <count> reviews (threshold 0.45), window <start>..<end>, wisps: <wisp-id>,<wisp-id>"
+./run.sh        # measure, report, alert
+./run_test.sh   # fixture and failure-path tests
 ```
-
-## Step 5: Record run result
-
-Record a summary wisp for this plugin run:
-
-```bash
-gt plugin record-run --plugin quality-review --result success \
-  --title "quality-review: Analyzed <N> workers over <M> reviews" \
-  --description "Analyzed <N> workers over <M> reviews. <B> breaches, <W> warnings." >/dev/null 2>&1 || true
-```
-
-If any step fails unexpectedly, record a failure wisp and escalate:
-
-```bash
-gt plugin record-run --plugin quality-review --result failure \
-  --title "quality-review: FAILED" \
-  --description "<error description>" >/dev/null 2>&1 || true
-
-gt escalate "Plugin FAILED: quality-review" \
-  --severity medium \
-  --reason "Failed at <step> over window <start>..<end>, run wisp <wisp-id>: $ERROR"
-```
-
-## Escalation evidence requirements (REQUIRED)
-
-This plugin files three escalations: `quality-review: empty-result anomaly`
-(Step 1), `Quality BREACH: <worker>` (Step 4), and `Plugin FAILED:
-quality-review` (Step 5). Each one must carry the evidence needed to falsify it
-without re-running anything. Put in `--reason`:
-
-- **Wisp IDs** you actually read — the result wisps and/or the run wisp, as IDs,
-  not a summary of them.
-- **Measurement window** — the concrete start and end timestamps scanned, not
-  "last 24h".
-- **The numbers the verdict rests on** — for a breach: worker, rig, avg score,
-  review count, and the Step 3 threshold it crossed; for the empty-result
-  anomaly: what the Step 1 query returned against what
-  `gt plugin history quality-review-result` returned.
-
-Rationale: a body that says only "suggests the harness is out of sync"
-(hq-wisp-0g6094) makes the reader re-derive what the reporter already held. IDs,
-a window, and the numbers make the claim checkable in one step, and separate a
-non-reproducible transient from a live defect.
-
-**Re-measure before re-filing.** The Step 1 window is a rolling 24 hours and the
-Refinery writes new result wisps continuously, so a verdict computed earlier may
-no longer hold. Before re-filing a breach or an empty-result anomaly for the same
-worker or condition, re-run the Step 1 query over the CURRENT window. A finding
-that reproduces in the current window is new evidence; the same finding quoted
-from a window that has since moved on is not, and re-filing it unchanged is noise.
-
-Done when the `--reason` names the wisps, the window, and the numbers.
-
-Escalations about the pre-merge om gate itself (a `backend_timeout` or
-`version_mismatch` from the refinery's review) are not this plugin's to file.
-Those carry their own evidence requirements — see
-`contrib/gastown/directives/refinery.md`.
-
----
-
-## How scores get recorded (reference)
-
-This plugin does NOT record scores itself. The Refinery records result wisps during
-merges via the `quality-review` formula step. Each merge produces a wisp like:
-
-```bash
-gt plugin record-run --plugin quality-review-result --result success --rig <rig-name> \
-  --label worker:<polecat-name> --label score:0.85 --label recommendation:approve \
-  --title "quality-review: Score 0.85, approve" \
-  --description "Score: 0.85, approve. Issues: 1 minor (style)" >/dev/null 2>&1 || true
-```
-
-This creates the data that Step 1 queries.

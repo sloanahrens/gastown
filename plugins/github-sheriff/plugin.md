@@ -4,8 +4,7 @@ description = "Monitor GitHub CI checks on open PRs and create beads for failure
 version = 1
 
 [gate]
-type = "cooldown"
-duration = "2h"
+type = "manual"
 
 [tracking]
 labels = ["plugin:github-sheriff", "category:ci-monitoring"]
@@ -18,6 +17,15 @@ severity = "low"
 +++
 
 # GitHub Sheriff
+
+Ships behind a manual gate. This plugin polls GitHub for open pull requests, so
+a town whose merges land through the Refinery gives it nothing to classify — and
+an auto-dispatched gate then spends a dog session every two hours finding none
+(gt-gs7g). A manual gate is never auto-dispatched, which keeps the plugin
+discoverable in `gt plugin list` and off the patrol.
+
+A town that merges through GitHub pull requests restores the cooldown gate — two
+hours — in this file's front matter.
 
 Polls GitHub for open pull requests, categorizes them by readiness, and creates
 `ci-failure` beads for new failures. Implements the PR Sheriff pattern from the
