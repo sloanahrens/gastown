@@ -487,6 +487,12 @@ const (
 	// turn may simply have finished before the first observation. Callers must
 	// not treat this as a healthy verdict or as a wedged one.
 	InputConsumptionInconclusive InputConsumption = iota
+	// InputConsumptionUndated means a frozen pane held unsubmitted input, but
+	// had no content above the input box to compare the window against: the
+	// capture is byte-identical, which already proves nothing moved, but it
+	// cannot prove the nudge is what is stranded (the box may hold any older
+	// text). Callers must not read this as a wedge.
+	InputConsumptionUndated
 	// InputConsumptionUnknown means the pane could not be observed at all —
 	// the capture failed, or the agent has no prompt prefix to reason about.
 	InputConsumptionUnknown
@@ -518,6 +524,8 @@ func (c InputConsumption) String() string {
 		return "pane-changed"
 	case InputConsumptionNotConsumed:
 		return "not-consumed"
+	case InputConsumptionUndated:
+		return "undated"
 	case InputConsumptionUnknown:
 		return "unknown"
 	default:
@@ -559,10 +567,19 @@ func consumptionVerdict(baseline, current, promptPrefix string) InputConsumption
 	// would read as StartedTurn above. That direction is safe — it reports a
 	// healthy session as healthy — but it does mean the probe can be blinded
 	// by a coincidence, never triggered by one.
-	if analyzeComposerState(current, promptPrefix).State == ComposerPending {
-		return InputConsumptionNotConsumed
+	if analyzeComposerState(current, promptPrefix).State != ComposerPending {
+		return InputConsumptionInconclusive
 	}
-	return InputConsumptionInconclusive
+
+	// A byte-identical capture already proves nothing in the window moved, so
+	// the strand claim rests on the held input alone. The one hole left: with
+	// nothing above the input box the capture cannot date the session at all —
+	// a freshly cleared pane holds the same shape while wedged, slow to start,
+	// or healthy (gt-7xnv). That reads Undated, never NotConsumed.
+	if PaneProgressSignature(current, promptPrefix) == "" {
+		return InputConsumptionUndated
+	}
+	return InputConsumptionNotConsumed
 }
 
 // captureForConsumption takes the pane snapshot the probe reasons about. -e is
@@ -589,7 +606,9 @@ func (t *Tmux) captureForConsumption(session string) (string, error) {
 // This cannot hang a caller: window bounds it, and it never blocks on the
 // session itself. An error means the pane could not be observed at all; a nil
 // error with InputConsumptionInconclusive means the pane was observed and had
-// nothing to say either way.
+// nothing to say either way. The three non-consumed verdicts (Inconclusive,
+// Undated, Unknown) must never be read by a caller as "the input was taken and
+// is fine" — only Consumed() is positive (gt-7xnv).
 func (t *Tmux) WaitForInputConsumed(session string, window time.Duration) (InputConsumption, error) {
 	if strings.TrimSpace(session) == "" {
 		return InputConsumptionUnknown, fmt.Errorf("input-consumption probe: no session given")

@@ -972,6 +972,23 @@ func TestConsumptionVerdict(t *testing.T) {
 			want:     InputConsumptionPaneChanged,
 		},
 		{
+			// The gt-7xnv case: a freshly cleared pane holds the same shape
+			// while wedged, slow to start, or healthy — with nothing above the
+			// input box there is nothing to date the session by, so the held
+			// input is undated, not a strand.
+			name: "frozen pane with held input but nothing above the box is undated",
+			baseline: "────────────────────────────────────────\n" +
+				"❯ MERGE_RECEIVED - check inbox for pending work\n" +
+				"────────────────────────────────────────\n" +
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage",
+			current: "────────────────────────────────────────\n" +
+				"❯ MERGE_RECEIVED - check inbox for pending work\n" +
+				"────────────────────────────────────────\n" +
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage",
+			prefix: prefix,
+			want:   InputConsumptionUndated,
+		},
+		{
 			name:     "agent without a prompt prefix is unknown",
 			baseline: queuedMessagesPane,
 			current:  queuedMessagesPane,
@@ -1001,6 +1018,7 @@ func TestInputConsumptionString(t *testing.T) {
 	t.Parallel()
 	for verdict, want := range map[InputConsumption]string{
 		InputConsumptionInconclusive: "inconclusive",
+		InputConsumptionUndated:      "undated",
 		InputConsumptionUnknown:      "unknown",
 		InputConsumptionStartedTurn:  "turn-started",
 		InputConsumptionPaneChanged:  "pane-changed",
@@ -1019,6 +1037,7 @@ func TestInputConsumptionConsumed(t *testing.T) {
 	t.Parallel()
 	tests := map[InputConsumption]bool{
 		InputConsumptionInconclusive: false,
+		InputConsumptionUndated:      false,
 		InputConsumptionUnknown:      false,
 		InputConsumptionStartedTurn:  true,
 		InputConsumptionPaneChanged:  true,
@@ -1187,6 +1206,35 @@ func TestWaitForInputConsumedIdleTargetIsInconclusive(t *testing.T) {
 	}
 	if verdict != InputConsumptionInconclusive {
 		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionInconclusive)
+	}
+}
+
+// A freshly cleared pane holds the same shape while wedged, slow to start, or
+// healthy: nothing sits above the input box to date the session by, so the
+// probe must return Undated and must not claim a strand (gt-7xnv).
+func TestWaitForInputConsumedUndatedPendingPaneIsUndated(t *testing.T) {
+	withFastConsumptionPolling(t)
+	const undated = "────────────────────────────────────────\n" +
+		"❯ MERGE_RECEIVED - check inbox for pending work\n" +
+		"────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage"
+	// The fixture must actually be pending and actually undated; if it ever
+	// grows a transcript line this test should fail for the right reason.
+	if state := analyzeComposerState(undated, DefaultReadyPromptPrefix).State; state != ComposerPending {
+		t.Fatalf("fixture is %s, want pending", state)
+	}
+	if sig := PaneProgressSignature(undated, DefaultReadyPromptPrefix); sig != "" {
+		t.Fatalf("fixture has content above the input box (sig %q), want undated", sig)
+	}
+	fakeTmuxCaptures(t, []string{undated})
+	tm := NewTmuxWithSocket("gt-test-consumption")
+
+	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForInputConsumed: %v", err)
+	}
+	if verdict != InputConsumptionUndated {
+		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionUndated)
 	}
 }
 

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,9 +46,12 @@ const (
 )
 
 // fakeTmuxPane installs a tmux shim on PATH that answers capture-pane with the
-// given pane, so the probe can be exercised without a tmux server. It returns
-// the path of the shim's invocation log.
-func fakeTmuxPane(t *testing.T, pane string) string {
+// given pane, so the probe can be exercised without a tmux server. With
+// failAfter > 0 the shim exits nonzero on the capture-pane invocation number
+// that exceeds failAfter (a pane that is readable at first and then lost, or
+// unreadable from the start with failAfter=0). It returns the path of the
+// shim's invocation log.
+func fakeTmuxPane(t *testing.T, pane string, failAfter int) string {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -56,6 +60,7 @@ func fakeTmuxPane(t *testing.T, pane string) string {
 
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "tmux.log")
+	countPath := filepath.Join(binDir, "tmux.capture-count")
 
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -63,6 +68,12 @@ func fakeTmuxPane(t *testing.T, pane string) string {
 	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
 	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
 	b.WriteString("\tesac; done\n")
+	if failAfter >= 0 {
+		b.WriteString("if [ \"$sub\" = \"capture-pane\" ]; then\n")
+		b.WriteString("  n=$(cat '" + countPath + "' 2>/dev/null || echo 0); n=$((n+1)); printf '%s' \"$n\" > '" + countPath + "'\n")
+		b.WriteString("  if [ \"$n\" -gt " + fmt.Sprint(failAfter) + ` ]; then echo "tmux: no such pane" >&2; exit 1; fi\n`)
+		b.WriteString(`fi\n`)
+	}
 	b.WriteString(`if [ "$sub" = "capture-pane" ]; then printf '%s' '` + pane + `'; exit 0; fi` + "\n")
 	b.WriteString("exit 0\n")
 
@@ -88,7 +99,7 @@ func withShortImmediateProbe(t *testing.T) {
 // bug was that every delivery reported success while nothing happened.
 func TestImmediateConsumptionWarningOnWedgedTarget(t *testing.T) {
 	withShortImmediateProbe(t)
-	fakeTmuxPane(t, cmdWedgedPane)
+	fakeTmuxPane(t, cmdWedgedPane, -1)
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
 
 	warning := immediateConsumptionWarning(tm, "gt-beads-refinery")
@@ -106,7 +117,7 @@ func TestImmediateConsumptionWarningOnWedgedTarget(t *testing.T) {
 // it. It must stay silent.
 func TestImmediateConsumptionWarningSilentOnIdleTarget(t *testing.T) {
 	withShortImmediateProbe(t)
-	fakeTmuxPane(t, cmdCleanIdlePane)
+	fakeTmuxPane(t, cmdCleanIdlePane, -1)
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
 
 	if warning := immediateConsumptionWarning(tm, "gt-beads-refinery"); warning != "" {
@@ -117,7 +128,7 @@ func TestImmediateConsumptionWarningSilentOnIdleTarget(t *testing.T) {
 // A busy target consumed the nudge by definition. No warning.
 func TestImmediateConsumptionWarningSilentOnBusyTarget(t *testing.T) {
 	withShortImmediateProbe(t)
-	fakeTmuxPane(t, cmdBusyPane)
+	fakeTmuxPane(t, cmdBusyPane, -1)
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
 
 	if warning := immediateConsumptionWarning(tm, "gt-beads-refinery"); warning != "" {
@@ -129,7 +140,7 @@ func TestImmediateConsumptionWarningSilentOnBusyTarget(t *testing.T) {
 // than the silence it replaces.
 func TestImmediateConsumptionWarningIsBounded(t *testing.T) {
 	withShortImmediateProbe(t)
-	fakeTmuxPane(t, cmdWedgedPane)
+	fakeTmuxPane(t, cmdWedgedPane, -1)
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
 
 	start := time.Now()
@@ -139,16 +150,42 @@ func TestImmediateConsumptionWarningIsBounded(t *testing.T) {
 	}
 }
 
-// The probe reads the pane it is judging, not the session's exit status: a
-// session that cannot be captured must produce no verdict at all rather than a
-// spurious warning.
-func TestImmediateConsumptionWarningSilentWhenPaneUnreadable(t *testing.T) {
+// An unreadable pane is an undelivered verdict, not a delivered one: the
+// warning must say consumption is UNKNOWN, not read as a wedge and not as
+// silence (gt-7xnv).
+func TestImmediateConsumptionWarningReportsUnknownWhenPaneUnreadable(t *testing.T) {
 	withShortImmediateProbe(t)
-	// No shim and no tmux server: every tmux call fails.
-	t.Setenv("PATH", t.TempDir())
+	// Shim exists but capture-pane fails on every invocation.
+	fakeTmuxPane(t, cmdWedgedPane, 0)
 	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption-missing")
 
-	if warning := immediateConsumptionWarning(tm, "gt-beads-refinery"); warning != "" {
-		t.Errorf("unreadable pane produced a warning: %q", warning)
+	warning := immediateConsumptionWarning(tm, "gt-beads-refinery")
+	if warning == "" {
+		t.Fatal("unreadable pane produced no output — the probe is fail-open (gt-7xnv)")
+	}
+	for _, want := range []string{"UNKNOWN", "gt session health gt-beads-refinery"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning %q does not mention %q", warning, want)
+		}
+	}
+	if strings.Contains(warning, "started no turn") {
+		t.Errorf("unreadable pane must not claim a wedge: %q", warning)
+	}
+}
+
+// A pane that is readable at baseline but gone before the final judgment is the
+// same fail-open in a rarer shape (session vanishing mid-probe, gt-7xnv).
+func TestImmediateConsumptionWarningReportsUnknownWhenPaneLostMidProbe(t *testing.T) {
+	withShortImmediateProbe(t)
+	// First capture-pane succeeds, the pane is gone after.
+	fakeTmuxPane(t, cmdWedgedPane, 1)
+	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption-lost")
+
+	warning := immediateConsumptionWarning(tm, "gt-beads-refinery")
+	if !strings.Contains(warning, "UNKNOWN") {
+		t.Fatalf("pane lost mid-probe must report UNKNOWN, got %q", warning)
+	}
+	if strings.Contains(warning, "started no turn") {
+		t.Errorf("pane lost mid-probe must not claim a wedge: %q", warning)
 	}
 }
