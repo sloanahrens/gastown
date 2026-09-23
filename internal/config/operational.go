@@ -55,9 +55,13 @@ const (
 	DefaultSyncFailureEscalationThreshold = 3
 	DefaultDoctorMolCooldown              = 5 * time.Minute
 	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
-	DefaultBootSpawnCooldown              = 2 * time.Minute
-	DefaultBootIdleSuppression            = 15 * time.Minute
-	DefaultDeaconGracePeriod              = 5 * time.Minute
+
+	DefaultBootIdleSuppression = 15 * time.Minute
+
+	// DefaultBootTurnBudget is how long a live Boot session may keep working
+	// before the daemon treats it as wedged and reaps it (gt-w28o).
+	DefaultBootTurnBudget    = 10 * time.Minute
+	DefaultDeaconGracePeriod = 5 * time.Minute
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
@@ -450,12 +454,15 @@ func (d *DaemonThresholds) RecoveryHeartbeatIntervalD() time.Duration {
 	return DefaultRecoveryHeartbeatInterval
 }
 
-// BootSpawnCooldownD returns the configured or default boot spawn cooldown.
+// BootSpawnCooldownD returns the configured Boot spawn cooldown, defaulting to
+// two recovery heartbeats. The gate that reads it fires on a heartbeat, so a
+// cooldown shorter than one heartbeat skips no tick and respawns Boot every
+// tick, paying a fresh prefill each time (gt-w28o).
 func (d *DaemonThresholds) BootSpawnCooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.BootSpawnCooldown, DefaultBootSpawnCooldown)
+	if d == nil {
+		return 2 * DefaultRecoveryHeartbeatInterval
 	}
-	return DefaultBootSpawnCooldown
+	return ParseDurationOrDefault(d.BootSpawnCooldown, 2*d.RecoveryHeartbeatIntervalD())
 }
 
 // Boot triage modes (DaemonThresholds.BootMode).
@@ -472,6 +479,14 @@ func (d *DaemonThresholds) BootModeValue() string {
 		return BootModeAgent
 	}
 	return BootModeMechanical
+}
+
+// BootTurnBudgetD returns the configured or default Boot turn budget.
+func (d *DaemonThresholds) BootTurnBudgetD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.BootTurnBudget, DefaultBootTurnBudget)
+	}
+	return DefaultBootTurnBudget
 }
 
 // BootIdleSuppressionD returns the configured or default boot idle suppression duration.
