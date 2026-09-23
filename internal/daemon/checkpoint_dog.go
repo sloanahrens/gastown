@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
@@ -157,6 +158,29 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 			d.logger.Printf("checkpoint_dog: git reset runtime artifact %q failed in %s/%s: %v", pathspec, rigName, polecatName, err)
 			return false
 		}
+	}
+
+	// Unstage throwaway files the polecat left in the worktree (gt-ozo4). The
+	// `git add -A` above sweeps them in, and gt done submits HEAD's tree, so a
+	// scratch file that existed between two dog cycles lands on main even if
+	// the polecat deletes it afterwards.
+	//
+	// Only paths this checkpoint would ADD are excluded — a modification to a
+	// file git already tracks is real work whatever its name. Excluded files
+	// are left untracked where the polecat left them and named in the log: a
+	// polecat that meant to keep one now has no checkpoint for it, and only the
+	// log says why.
+	addedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "--diff-filter=A", "-z")
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: git diff --cached --diff-filter=A failed in %s/%s: %v", rigName, polecatName, err)
+		return false
+	}
+	for _, path := range checkpoint.ThrowawayPaths(splitNullSeparatedPaths(addedOut)) {
+		if _, err := runGitCmd(workDir, "reset", "HEAD", "--", path); err != nil {
+			d.logger.Printf("checkpoint_dog: git reset throwaway path %q failed in %s/%s: %v", path, rigName, polecatName, err)
+			return false
+		}
+		d.logger.Printf("checkpoint_dog: skipping throwaway path %q in %s/%s (left untracked)", path, rigName, polecatName)
 	}
 
 	// Unstage deletions of tracked files. A checkpoint should preserve work
