@@ -13,6 +13,45 @@ var rejectionWriteRE = regexp.MustCompile(`bd update[^\n]*?(--append-notes|--not
 // findingsWriteRE matches the polecat's own progress write on a resumed bead.
 var findingsWriteRE = regexp.MustCompile(`bd update[^\n]*?(--append-notes|--notes)\s+"Findings so far`)
 
+// rejectFindingsRE matches the reject call that records an om verdict's
+// findings onto the source bead.
+var rejectFindingsRE = regexp.MustCompile(`gt mq reject[^\n]*--findings-json`)
+
+// findingLineRE matches a finding line written out in a formula: an id, then
+// a severity. Both bullets, so a hand-write under either one is caught.
+var findingLineRE = regexp.MustCompile(`[-•]\s*id:[0-9a-f]{6,}\s+sev:`)
+
+// gt-s4f6: the '- id:<hex> sev:<sev> <path>:<line> — <title>' lines are the
+// contract editorial.BuildPriorFindings parses, and the refinery that writes
+// them is a formula an agent executes — which has already got the format
+// wrong once, emitting the rows under '•' so they matched nothing and the
+// rejection reached the next attempt with no findings at all (gt-3mp1).
+// `gt mq reject --findings-json` formats them from the om verdict instead.
+func TestRefineryRejectionRecordsFindingsViaReject(t *testing.T) {
+	const patrol = "formulas/mol-refinery-patrol.formula.toml"
+	raw, err := formulasFS.ReadFile(patrol)
+	if err != nil {
+		t.Fatalf("reading %s: %v", patrol, err)
+	}
+	if !rejectFindingsRE.MatchString(string(raw)) {
+		t.Fatalf("%s: no `gt mq reject ... --findings-json` — an editorial rejection then reaches the next attempt with no durable findings", patrol)
+	}
+
+	files, err := fs.Glob(formulasFS, "formulas/*.formula.toml")
+	if err != nil {
+		t.Fatalf("globbing embedded formulas: %v", err)
+	}
+	for _, file := range files {
+		raw, err := formulasFS.ReadFile(file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", file, err)
+		}
+		if m := findingLineRE.FindString(string(raw)); m != "" {
+			t.Errorf("%s: hand-formatted finding line %q — compose it with `gt mq reject --findings-json` instead, so the writer and the parser cannot disagree", file, m)
+		}
+	}
+}
+
 // gt-nxvg: `--notes` REPLACES a bead's notes. A rejection write through it
 // wiped the polecat's implementation notes, and the resume path
 // (mol-polecat-work's load-context) greps notes for the MERGE REJECTION
@@ -31,7 +70,7 @@ func TestFormulaNotesWritesAppend(t *testing.T) {
 		re       *regexp.Regexp
 		minMatch int
 	}{
-		{"formulas/mol-refinery-patrol.formula.toml", rejectionWriteRE, 2},
+		{"formulas/mol-refinery-patrol.formula.toml", rejectionWriteRE, 1},
 		{"formulas/mol-polecat-work.formula.toml", findingsWriteRE, 1},
 		{"formulas/mol-polecat-work-monorepo.formula.toml", findingsWriteRE, 1},
 	}

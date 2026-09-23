@@ -100,11 +100,11 @@ func rejectionFindingIDs(findings []RejectionFinding) []string {
 	return ids
 }
 
-// rejectionFindingsFromNote converts an om verdict's raw findings into the
+// RejectionFindingsFromNote converts an om verdict's raw findings into the
 // RejectionFinding shape a deadWorkerRecoveryRequest carries forward. The
 // two types track the same fields (om's own verdict finding shape) so this
 // is a straight field-for-field copy.
-func rejectionFindingsFromNote(findings []editorial.Finding) []RejectionFinding {
+func RejectionFindingsFromNote(findings []editorial.Finding) []RejectionFinding {
 	if len(findings) == 0 {
 		return nil
 	}
@@ -158,6 +158,69 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 		}
 	}
 	return note
+}
+
+// appendRejectionNote adds note to a source bead's notes unless an identical
+// block is already there, so a refinery re-gating an unchanged branch on every
+// poll does not pile up copies of one rejection. `bd update --notes` replaces
+// rather than appends, so the existing text is carried through in the same
+// write (gt-nxvg).
+//
+// Dead-worker recovery and the Manager's rejection record both write through
+// here so their blocks are byte-identical: the notes are read back by
+// editorial.BuildPriorFindings, and a rejection recorded in a second format is
+// one the next attempt never sees (gt-s4f6).
+func appendRejectionNote(bd rejectedSourceBeads, issue *beads.Issue, note string, logf func(string, ...interface{})) {
+	if issue == nil || strings.TrimSpace(note) == "" {
+		return
+	}
+	if strings.Contains(issue.Notes, note) {
+		return
+	}
+	combined := note
+	if existing := strings.TrimSpace(issue.Notes); existing != "" {
+		combined = existing + "\n\n" + note
+	}
+	if _, err := bd.Run("update", issue.ID, "--notes", combined); err != nil {
+		logf("[Engineer] Warning: failed to record rejection note on %s: %v\n", issue.ID, err)
+	}
+}
+
+// rejectionNoteRequest is the rejection-record shape of a rejected MR: the
+// same fields dead-worker recovery writes for the same rejection, so the note
+// text is identical whichever path writes it first. Attempt is the attempt
+// this rejection IS, not the one that failed before it (mr.RetryCount + 1),
+// matching how the reviewer and the RECOVERED_BEAD redispatch number it.
+func rejectionNoteRequest(mr *MergeRequest, rigName, reason string, findings []RejectionFinding) deadWorkerRecoveryRequest {
+	return deadWorkerRecoveryRequest{
+		MRID:          mr.ID,
+		Branch:        mr.Branch,
+		Target:        mr.TargetBranch,
+		SourceIssue:   mr.IssueID,
+		Worker:        mr.Worker,
+		RigName:       rigName,
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: mr.RetryCount + 1,
+		Findings:      findings,
+	}
+}
+
+// recordRejectionFindings appends the MERGE REJECTION note for req onto its
+// source bead's notes, read through an injected client so the write is
+// testable without a live beads store (the seam newDeadWorkerRecoverer exists
+// for). The bead is neither reopened nor mailed: the caller's own redispatch
+// path owns that, and this is the record it leaves behind.
+func recordRejectionFindings(bd rejectedSourceBeads, req deadWorkerRecoveryRequest, warn func(string, ...interface{})) {
+	if strings.TrimSpace(req.SourceIssue) == "" {
+		return
+	}
+	issue, err := bd.Show(req.SourceIssue)
+	if err != nil || issue == nil {
+		warn("Warning: could not read source bead %s to record rejection findings: %v\n", req.SourceIssue, err)
+		return
+	}
+	appendRejectionNote(bd, issue, formatMergeRejectionNote(req), warn)
 }
 
 // deliberateTerminalCloseReasonMarkers are substrings of a bead's close_reason
@@ -292,20 +355,8 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 
 	// Persist the rejection so it survives into the next session. Notes are
 	// the resume-path contract: mol-polecat-work greps for the marker and the
-	// Branch: line. Append to any existing notes rather than clobbering them,
-	// and skip the write when the same note is already there (the refinery
-	// re-gates an unchanged branch on every poll until redispatch lands, so
-	// this path can repeat with an identical rejection).
-	note := formatMergeRejectionNote(req)
-	if !strings.Contains(issue.Notes, note) {
-		combined := note
-		if existing := strings.TrimSpace(issue.Notes); existing != "" {
-			combined = existing + "\n\n" + note
-		}
-		if _, err := bd.Run("update", req.SourceIssue, "--notes", combined); err != nil {
-			logf("[Engineer] Warning: failed to record rejection note on %s: %v\n", req.SourceIssue, err)
-		}
-	}
+	// Branch: line.
+	appendRejectionNote(bd, issue, formatMergeRejectionNote(req), logf)
 
 	// Reopen with no assignee so the deacon's Redispatch (which requires
 	// status=open) can re-sling it.
