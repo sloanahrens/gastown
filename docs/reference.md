@@ -621,8 +621,22 @@ export OPENCODE_PERMISSION='{"*":"allow"}'
 ```bash
 gt rig add <name> <url>
 gt rig list
+gt rig list --json
 gt rig remove <name>
 ```
+
+`gt rig list --json` emits one object per rig. Fields relevant to plugin
+consumers:
+
+| Field       | Type   | Source |
+|-------------|--------|--------|
+| `name`      | string | rig name |
+| `status`    | string | operational / stopped / … |
+| `repo_path` | string or null | `Rig.RepoPath()` — the first of the rig root, `<rig>/mayor/rig`, `<rig>/refinery/rig` that is a git worktree root; `null` if none |
+
+`repo_path` is the field that plugins (gitignore-reconcile, git-hygiene,
+submodule-commit) consume. When it is `null` or missing, those plugins must
+fail loudly rather than no-op (gt-chqi, gt-xxwx).
 
 ### Convoy Management (Primary Dashboard)
 

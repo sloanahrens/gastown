@@ -264,6 +264,11 @@ test-makefile:
 	bash -n plugins/rebuild-gt/run.sh
 	bash -n plugins/rebuild-gt/run_test.sh
 	bash plugins/rebuild-gt/run_test.sh
+	bash -n plugins/gitignore-reconcile/run.sh
+	bash -n plugins/git-hygiene/run.sh
+	bash -n plugins/submodule-commit/run.sh
+	bash -n plugins/rig-list-consumers/run_test.sh
+	bash plugins/rig-list-consumers/run_test.sh
 	bash -n scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
 

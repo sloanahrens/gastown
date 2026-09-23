@@ -36,17 +36,28 @@ Current enabled rigs: `lilypad_chat` (3 Bitbucket submodules).
 
 ## Step 1: Find opt-in rigs with submodules
 
-```bash
-RIG_JSON=$(gt rig list --json 2>/dev/null || true)
-if [ -z "$RIG_JSON" ]; then
-  echo "SKIP: could not get rig list"
-  exit 0
-fi
+A broken or empty rig list is the condition this plugin guards against
+(gt-chqi): exit 0 here serializes as a success receipt on top of nothing, so
+the failure is invisible. FAIL LOUD instead — nonzero exit, a failure
+record, and a dog dispatched by the daemon.
 
+```bash
+RIG_JSON=$(gt rig list --json 2>/dev/null) || {
+  echo "FAIL: could not get rig list (gt rig list --json)"
+  gt plugin record-run --plugin submodule-commit --result failure \
+    --title "submodule-commit: FAILED (rig list unavailable)" \
+    --description "gt rig list --json failed; run aborted (gt-chqi, gt-xxwx)" >/dev/null 2>&1 || true
+  exit 1
+}
+
+# repo_path comes from Rig.RepoPath(): the first of the rig root,
+# <rig>/mayor/rig, <rig>/refinery/rig that is a git worktree root.
 # Find rigs that have .gitmodules
 ENABLED_RIGS=()
+RESOLVED=()
 while IFS= read -r REPO_PATH; do
   [ -z "$REPO_PATH" ] && continue
+  RESOLVED+=("$REPO_PATH")
   [ ! -f "$REPO_PATH/.gitmodules" ] && continue
   # Check rig plugin config for opt-in
   RIG_NAME=$(basename "$REPO_PATH")
@@ -54,10 +65,26 @@ while IFS= read -r REPO_PATH; do
   if [ "$PLUGIN_CONFIG" = "true" ]; then
     ENABLED_RIGS+=("$REPO_PATH")
   fi
-done < <(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null) | .repo_path // empty' 2>/dev/null)
+done < <(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | .repo_path' 2>/dev/null)
 
+# repo_path missing on every rig means the opt-in check reads everything as
+# unenabled — the 2026-09-18 no-op (gt-xxwx). FAIL LOUD (gt-chqi).
+if [ ${#RESOLVED[@]} -eq 0 ]; then
+  echo "FAIL: no rigs with repo paths (gt rig list --json emitted no repo_path field — gt-chqi)"
+  gt plugin record-run --plugin submodule-commit --result failure \
+    --title "submodule-commit: FAILED (no rig repo paths)" \
+    --description "gt rig list --json returned rigs without repo_path; run aborted (gt-chqi, gt-xxwx)" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+# Rigs enumerate fine but none opted in: a legitimate no-op. The skip marker
+# (scriptSkippedMarker) makes the receipt say skipped, not success (gt-chqi).
 if [ ${#ENABLED_RIGS[@]} -eq 0 ]; then
   echo "SKIP: no opt-in rigs with submodules found"
+  echo "[plugin-result skipped]"
+  gt plugin record-run --plugin submodule-commit --result skipped \
+    --title "submodule-commit: no opt-in rigs" \
+    --description "gt rig list --json returned ${#RESOLVED[@]} rig(s) with repo paths; none opt in to submodule-commit" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -179,9 +206,17 @@ echo ""
 echo "=== Submodule Commit Summary ==="
 echo "$SUMMARY"
 
-RESULT="success"
-[ -n "$ERRORS" ] && RESULT="warning"
+# A run that committed nothing accomplished nothing: print the daemon skip
+# marker (scriptSkippedMarker) so the receipt says skipped instead of success
+# (gt-chqi). A real no-op must not green-check the history.
+if [ "$TOTAL_COMMITTED" -eq 0 ] && [ "$TOTAL_PARENT_UPDATED" -eq 0 ]; then
+  echo "Nothing to do — all submodules were clean"
+  echo "[plugin-result skipped]"
+  gt plugin record-run --plugin submodule-commit --result skipped \
+    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  exit 0
+fi
 
-gt plugin record-run --plugin submodule-commit --result "$RESULT" \
+gt plugin record-run --plugin submodule-commit --result success \
   --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```

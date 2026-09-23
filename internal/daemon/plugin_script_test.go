@@ -174,6 +174,38 @@ func TestCompleteScriptRun(t *testing.T) {
 	}
 }
 
+// A run that exits 0 but prints the skip marker records a skipped receipt:
+// the plugin ran, found nothing to do, and the history should say so instead
+// of a green check (gt-chqi is the bug class where these no-ops serialized
+// as success). Skipped is not a failure: no dog is dispatched, but a record
+// IS written — that is what satisfies the cooldown gate.
+func TestCompleteScriptRun_SkippedRecordsSkippedNoDog(t *testing.T) {
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
+	var recs []plugin.PluginRunRecord
+	dispatched := 0
+	hooks := scriptRunHooks{
+		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		logf:      func(string, ...any) {},
+	}
+	completeScriptRun(p, scriptResult{exitCode: 0, output: "nothing to do\n[plugin-result skipped]\n"}, hooks)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultSkipped || dispatched != 0 {
+		t.Fatalf("skipped: recs=%+v dispatched=%d", recs, dispatched)
+	}
+	// A plain exit 0 with no marker is a success: the marker is the only
+	// thing that makes the receipt say "did nothing".
+	completeScriptRun(p, scriptResult{exitCode: 0, output: "did the work"}, hooks)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultSuccess || dispatched != 0 {
+		t.Fatalf("unmarked exit 0 must be success: recs=%+v dispatched=%d", recs, dispatched)
+	}
+	// A marker on a FAILED run says nothing — exit code 2 is a failure
+	// either way, and the marker must not demote it.
+	completeScriptRun(p, scriptResult{exitCode: 2, output: "boom [plugin-result skipped]"}, hooks)
+	if len(recs) != 3 || recs[2].Result != plugin.ResultFailure || dispatched != 1 {
+		t.Fatalf("marker on a failed run must still be a failure: recs=%+v dispatched=%d", recs, dispatched)
+	}
+}
+
 // A deferral (exit 3) writes no record and touches no dog. The record is what
 // satisfies a cooldown gate, so writing one for a run that accomplished
 // nothing is what starves a plugin whose window opens and closes on its own
