@@ -12,6 +12,10 @@
 # clear by themselves, and the unconditional drift check is what alarms if
 # one persists. Only failures (build failed, install did not take, installed
 # commit unverifiable, daemon restart failed) exit 1 and escalate.
+# gt-kox0: a block that repeats must not stay silent. The defer path counts the
+# block and escalates past the threshold, and past it a build blocked BY the
+# gate queues for the slot instead of racing it — while an install still waits
+# for any merge that is mid-push.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -44,7 +48,32 @@ case "$1 $2" in
   "town root") echo "$GT_TEST_TOWN" ;;
   "stale --json") cat "$GT_TEST_TOWN/stale.json" ;;
   "slot status") cat "$GT_TEST_TOWN/slot.json" ;;
-  "mq list") cat "$GT_TEST_TOWN/mq.json" ;;
+  # mq.flip: the first read is quiet and every read after it is busy, so a merge
+  # that goes in flight between the pre-build check and the pre-install one is
+  # observable without racing the test against the plugin.
+  "mq list")
+    if [ -e "$GT_TEST_TOWN/mq.flip" ]; then
+      if [ -e "$GT_TEST_TOWN/mq.flip.seen" ]; then cat "$GT_TEST_TOWN/mq.busy.json"
+      else touch "$GT_TEST_TOWN/mq.flip.seen"; cat "$GT_TEST_TOWN/mq.json"
+      fi
+    else
+      cat "$GT_TEST_TOWN/mq.json"
+    fi ;;
+  # The real 'gt slot run' waits for the container-gate slot and then runs the
+  # command under it; slot_refuse makes the acquire fail the way contention or a
+  # timed-out wait does.
+  "slot run")
+    echo "slot run $*" >> "$GT_TEST_TOWN/gt.log"
+    shift 2
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+    [ "${1:-}" = "--" ] && shift
+    if [ -e "$GT_TEST_TOWN/slot_refuse" ]; then
+      echo "acquiring container-gate slot: timed out waiting for slot 0 (contention)" >&2
+      exit 1
+    fi
+    echo "Waiting for container-gate slot (role=gastown/rebuild-gt)..."
+    echo "Container-gate slot acquired (role=gastown/rebuild-gt, waited 2s, slot 0/2)."
+    exec "$@" ;;
   "daemon restart") echo "daemon restart $*" >> "$GT_TEST_TOWN/gt.log"; echo "Daemon restarted" ;;
   "plugin record-run") echo "record-run $*" >> "$GT_TEST_TOWN/gt.log" ;;
   "plugin sync"|"formula sync") echo "synced" ;;
@@ -113,6 +142,22 @@ run_plugin() {
 # holder_json ROLE -> slot.json with that role holding slot 0
 holder_json() {
   printf '{"held": true, "busy": false, "slots": [{"index": 0, "held": true, "owner": {"role": "%s", "pid": 1, "slot": 0}}, {"index": 1, "held": false}]}' "$1"
+}
+
+# age_state TOWN MINUTES -> a block that opened MINUTES ago, written where the
+# plugin reads it. Aging the clock is how a test reaches the starvation
+# threshold without waiting 30 minutes.
+age_state() {
+  mkdir -p "$1/daemon"
+  python3 -c '
+import json, sys, time
+path, minutes = sys.argv[1], int(sys.argv[2])
+d = {"blocked_since_epoch": int(time.time()) - minutes * 60,
+     "blocked_since": "aged by the test",
+     "consecutive_defers": 3,
+     "last_reason": "aged by the test"}
+json.dump(d, open(path, "w"))
+' "$1/daemon/rebuild-gt-state.json" "$2"
 }
 
 # --- Case 1: a gate-class role holds a slot -> DEFERRED (exit 3), no build,
@@ -426,6 +471,132 @@ if [ "$rc" = "1" ] && grep -q -- "--result failure" "$T/gt.log" 2>/dev/null && g
   pass "contract exit 1 (failed): rc=1, recorded as failure, escalated"
 else
   fail "contract exit 1 (failed): rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# --- gt-kox0: a rebuild that cannot win must not starve silently ---
+
+# Case 20: a block that repeats is counted and named in the log, so the town can
+# see starvation without reading the state file.
+T=$(make_town)
+holder_json "gastown/refinery-batch" > "$T/slot.json"
+run_plugin "$T" >/dev/null
+rc=$(run_plugin "$T")
+if grep -q "blocked 0m over 2 run(s)" "$T/run.out"; then
+  pass "starvation: the second blocked run is counted in the log"
+else
+  fail "starvation: the block was not counted: $(cat "$T/run.out")"
+fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("consecutive_defers")==2 and d.get("blocked_since_epoch") else 1)' "$T/daemon/rebuild-gt-state.json" 2>/dev/null; then
+  pass "starvation: the state file carries the count and the block's start"
+else
+  fail "starvation: state file wrong or missing: $(cat "$T/daemon/rebuild-gt-state.json" 2>/dev/null)"
+fi
+if [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ]; then
+  pass "starvation: still a deferral under the threshold, no build"
+else
+  fail "starvation: rc=$rc under the threshold"
+fi
+
+# Case 21: past the threshold the run escalates loudly AND the build queues for
+# the container-gate slot instead of racing it — the two things that make an
+# inert fix loud and let it win (gt-kox0).
+T=$(make_town)
+holder_json "gastown/refinery-batch" > "$T/slot.json"
+age_state "$T" 40
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then
+  pass "starvation: past the threshold the rebuild reaches the build"
+else
+  fail "starvation: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"
+fi
+if grep -q "slot run --role gastown/rebuild-gt" "$T/gt.log" 2>/dev/null; then
+  pass "starvation: the build ran inside the container-gate slot"
+else
+  fail "starvation: the reservation path did not run: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -q "escalate .* --fingerprint rebuild-gt:starved" "$T/gt.log" 2>/dev/null && grep -q -- "-s high" "$T/gt.log"; then
+  pass "starvation: escalated loudly (high) under rebuild-gt:starved"
+else
+  fail "starvation: no loud escalation: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -q -- "--result success" "$T/gt.log" 2>/dev/null && grep -q "daemon restart" "$T/gt.log"; then
+  pass "starvation: the reserved rebuild installed and restarted the daemon"
+else
+  fail "starvation: nothing installed: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -q "escalate clear .*--fingerprint rebuild-gt:starved" "$T/gt.log" 2>/dev/null; then
+  pass "starvation: the alarm closes once the binary is in force"
+else
+  fail "starvation: the alarm was left open after a successful install: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# Case 22: a wait that never gets the slot is a deferral, not a failure — the
+# build never started, so nothing is broken and nothing is escalated as one.
+T=$(make_town)
+holder_json "gastown/refinery-batch" > "$T/slot.json"
+age_state "$T" 40
+touch "$T/slot_refuse"
+rc=$(run_plugin "$T")
+if [ "$rc" = "3" ] && grep -q "did not get it" "$T/run.out"; then
+  pass "starvation: a slot it never got defers on the heartbeat"
+else
+  fail "starvation: rc=$rc out=$(cat "$T/run.out")"
+fi
+if grep -q -- "--result failure" "$T/gt.log" 2>/dev/null; then
+  fail "starvation: reported a build failure for a build that never started"
+else
+  pass "starvation: no failure recorded for a wait"
+fi
+
+# Case 23: a container running outside the gate is not something the gate slot
+# serializes, so past the threshold it escalates but does NOT queue for the slot
+# (gt-kox0).
+T=$(make_town)
+echo '{"held": false, "busy": true, "docker_unknown": false, "unwrapped_containers": ["gt-gate-abc"], "slots": [{"index": 0, "held": false}]}' > "$T/slot.json"
+age_state "$T" 40
+rc=$(run_plugin "$T")
+if [ "$rc" = "3" ] && ! grep -q "slot run" "$T/gt.log" 2>/dev/null; then
+  pass "unwrapped container: escalated without taking the slot"
+else
+  fail "unwrapped container: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -q -- "-s high" "$T/gt.log" 2>/dev/null; then
+  pass "unwrapped container: still escalates loudly"
+else
+  fail "unwrapped container: no escalation: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# Case 24: a block past the threshold escalates once, not once per heartbeat. A
+# firing per retry would be a Dolt commit every few minutes for the same
+# condition; the town re-escalates an unacked escalation on its own cadence.
+T=$(make_town)
+echo '{"held": false, "busy": true, "docker_unknown": false, "unwrapped_containers": ["gt-gate-abc"], "slots": [{"index": 0, "held": false}]}' > "$T/slot.json"
+age_state "$T" 40
+run_plugin "$T" >/dev/null
+run_plugin "$T" >/dev/null
+FIRINGS=$(grep -c -- "-s high" "$T/gt.log" 2>/dev/null || true)
+if [ "$FIRINGS" = "1" ]; then
+  pass "starvation: escalated once for two blocked runs past the threshold"
+else
+  fail "starvation: $FIRINGS escalations for one block: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# Case 25: an install never lands under a merge that is mid-push — a merge that
+# goes in flight while the build runs holds the install back to the next
+# heartbeat even though the build itself was fine (gt-kox0).
+T=$(make_town)
+echo '[{"id": "gt-wisp-z", "status": "in_progress", "title": "Merge: gt-z"}]' > "$T/mq.busy.json"
+touch "$T/mq.flip"
+rc=$(run_plugin "$T")
+if [ "$rc" = "3" ] && [ -e "$T/build.marker" ]; then
+  pass "merge mid-push: the build ran, the install waited"
+else
+  fail "merge mid-push: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"
+fi
+if grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
+  fail "merge mid-push: installed under a merge that was mid-push"
+else
+  pass "merge mid-push: recorded no install"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi

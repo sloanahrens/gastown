@@ -22,6 +22,13 @@
 # be verified as in force (recorded as failure and escalated under a stable
 # fingerprint). Before changing that contract, read plugins/rebuild-gt/plugin.md
 # and internal/daemon/plugin_script.go.
+#
+# Exit 3 is also why this script keeps its own state: writing no run record is
+# what keeps the retry on the heartbeat, and it is also what leaves a defer
+# that repeats all night invisible to everything else (gt-kox0). The state
+# file under daemon/ carries the block across runs, the alarm fires once it
+# outlasts the starvation threshold, and past that threshold the build queues
+# for the container-gate slot instead of racing it.
 
 set -euo pipefail
 
@@ -36,6 +43,162 @@ log() { echo "[rebuild-gt] $*"; }
 defer() {
   log "Deferred: $*"
   exit "$DEFERRED"
+}
+
+# --- Blocked-install state ----------------------------------------------------
+#
+# A run that installs nothing records nothing (see the header), so the fact
+# that matters here — a due binary that the town has kept out of force for
+# an hour — exists only in this file. It lives in daemon/ beside the rest of
+# the daemon's runtime state (gt-kox0).
+STARVE_STATE="${TOWN_ROOT}/daemon/rebuild-gt-state.json"
+# Under this, a block is the town working as designed: gate holds measured
+# 2m-20m20s on 2026-09-22, so a single busy gate is not an alarm. Past it the
+# run escalates loudly and, when the gate is what is blocking, the build
+# queues for the slot rather than racing it (gt-kox0).
+STARVE_MINUTES=${REBUILD_GT_STARVE_MINUTES:-30}
+# How long a queued build waits for the slot. plugin.md's [execution] timeout
+# has to cover this wait plus the build and the install that follow it.
+RESERVE_WAIT=${REBUILD_GT_RESERVE_WAIT:-10m}
+
+# starve_age — minutes since the current block opened; 0 when none is open.
+starve_age() {
+  python3 - "$STARVE_STATE" <<'PY' 2>/dev/null || echo 0
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+# A cleared block stores epoch 0, which is not "started in 1970" — reading it
+# as a start time would make the next block arrive pre-aged and escalate and
+# reserve on its first run (gt-kox0).
+try:
+    since = int(d.get("blocked_since_epoch") or 0)
+except Exception:
+    since = 0
+print(max(0, (int(time.time()) - since) // 60) if since else 0)
+PY
+}
+
+# starve_bump REASON — count one more blocked run and print the total. An open
+# block keeps its start time: the age is what the alarm reads.
+starve_bump() {
+  python3 - "$STARVE_STATE" "$1" <<'PY' 2>/dev/null || echo 0
+import datetime, json, os, sys, time
+
+def stamp(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+path, reason = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+now = time.time()
+if not d.get("blocked_since_epoch"):
+    d["blocked_since_epoch"] = int(now)
+    d["blocked_since"] = stamp(now)
+d["consecutive_defers"] = int(d.get("consecutive_defers") or 0) + 1
+d["last_reason"] = reason
+d["last_blocked_at"] = stamp(now)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".tmp", "w") as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+os.replace(path + ".tmp", path)
+print(d["consecutive_defers"])
+PY
+}
+
+# starve_clear REASON — close the block. Prints 1 when one was open, so a
+# caller that should also close the alarm can tell the difference.
+starve_clear() {
+  python3 - "$STARVE_STATE" "$1" <<'PY' 2>/dev/null || echo 0
+import datetime, json, os, sys, time
+path, reason = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+if not d.get("blocked_since_epoch"):
+    print(0)
+    raise SystemExit(0)
+d["blocked_since"] = None
+d["blocked_since_epoch"] = 0
+d["consecutive_defers"] = 0
+# The next block is a new one and gets its own escalation.
+d["escalated_epoch"] = 0
+d["escalated_at"] = None
+d["cleared_at"] = datetime.datetime.fromtimestamp(time.time(), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+d["cleared_reason"] = reason
+with open(path + ".tmp", "w") as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+os.replace(path + ".tmp", path)
+print(1)
+PY
+}
+
+# starve_mark_escalated — prints 1 the first time this block is escalated, 0
+# after that. One firing per block: the escalation is what makes the block
+# visible, an unacked one is re-escalated by the town's own cadence
+# (settings/escalation.json), and a firing per heartbeat would be Dolt commits
+# that buy nothing (gt-kox0, gt-vwry).
+starve_mark_escalated() {
+  python3 - "$STARVE_STATE" <<'PY' 2>/dev/null || echo 0
+import datetime, json, os, sys, time
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+if d.get("escalated_epoch"):
+    print(0)
+    raise SystemExit(0)
+now = time.time()
+d["escalated_epoch"] = int(now)
+d["escalated_at"] = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".tmp", "w") as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+os.replace(path + ".tmp", path)
+print(1)
+PY
+}
+
+# note_blocked REASON — the binary was due and this run did not install it:
+# count it, and escalate once the block outlasts $STARVE_MINUTES. One stable
+# fingerprint, so a night-long block reads as one live escalation instead of
+# one per heartbeat (gt-vwry). Returns without exiting: each caller keeps its
+# own contract.
+note_blocked() {
+  local defers age
+  defers=$(starve_bump "$1")
+  age=$(starve_age)
+  log "Not installed (due, blocked ${age}m over $defers run(s)): $1"
+  if [ "$age" -ge "$STARVE_MINUTES" ] && [ "$(starve_mark_escalated)" = "1" ]; then
+    gt escalate "rebuild-gt: the binary has been due for install and blocked for ${age}m over $defers run(s); last: $1" \
+      -s high --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:starved" 2>/dev/null || true
+  fi
+}
+
+# blocked_defer REASON — note_blocked, then the deferral exit: nothing
+# accomplished, so no run record, and the cooldown is not spent.
+blocked_defer() {
+  note_blocked "$1"
+  exit "$DEFERRED"
+}
+
+# clear_alarms — every fingerprint this plugin owns asserts the binary is out
+# of force somewhere; once it is in force those assertions are false and the
+# producer closes them (gt-vwry). Clearing a key that is not open writes
+# nothing.
+clear_alarms() {
+  gt escalate clear --fingerprint "rebuild-gt:starved" \
+    --fingerprint "rebuild-gt:drift" --fingerprint "rebuild-gt:drift-unknown" \
+    --reason "rebuild-gt: the binary is in force" >/dev/null 2>&1 || true
 }
 
 # --- Pre-flight checks -------------------------------------------------------
@@ -65,6 +228,23 @@ fi
 # meaningful here even though the checks below may bail on that same
 # worktree being dirty or on the wrong branch.
 MAX_COMMITS_BEHIND=${REBUILD_GT_MAX_COMMITS_BEHIND:-20}
+# A merged commit that is not in force is a live defect, not a rounding error:
+# gt-ww20 (a batch path that bypassed the editorial gate, so 4 MRs landed
+# unreviewed) and gt-rbfj (composer-stall recovery typing the literal text
+# 'C-x C-s' into the composer, the cause of both refinery stalls that day)
+# were each merged while the town kept running a binary without them
+# (gt-oqbw). So the install does not wait for a large delta: past this many
+# commits, install at the first quiet moment. Raise it to trade inert fixes
+# for fewer daemon restarts.
+THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
+
+# DUE is read from this same unconditional staleness call, before any bail
+# below can leave the binary out of force. Every path that then declines to
+# install calls note_blocked, so a due binary has one clock running against it
+# no matter which reason kept it out of force (gt-kox0).
+DRIFT_STALE=""
+DRIFT_BEHIND=""
+DUE=""
 if DRIFT_JSON=$(gt stale --json 2>/dev/null); then
   DRIFT_STALE=$(echo "$DRIFT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('stale', False))" 2>/dev/null || echo "False")
   # commits_behind is only meaningful when present: 'or 0' would read a
@@ -94,6 +274,14 @@ print(v if v is not None else 'unknown')
   fi
 fi
 
+if [ "$DRIFT_STALE" = "True" ]; then
+  # An unknown count is due, matching the threshold gate below: it cannot be
+  # ruled under a threshold it does not have (gt-oqbw).
+  if [ "$DRIFT_BEHIND" = "unknown" ] || [ "$DRIFT_BEHIND" -ge "$THRESHOLD" ]; then
+    DUE=1
+  fi
+fi
+
 # Only TRACKED modifications outside .beads/ can change what 'make build'
 # produces. Untracked entries (.agents/, .codex/, .worktrees/) and bd's own
 # rewriting of .beads/config.yaml must not trip this guard: a plain
@@ -101,6 +289,7 @@ fi
 DIRTY=$(git -C "$RIG_ROOT" status --porcelain --untracked-files=no -- . ':(exclude).beads' 2>/dev/null)
 if [ -n "$DIRTY" ]; then
   log "Repo is dirty, skipping rebuild."
+  if [ -n "$DUE" ]; then note_blocked "repo has uncommitted changes"; fi
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: repo has uncommitted changes" >/dev/null 2>&1 || true
@@ -110,6 +299,7 @@ fi
 BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 if [ "$BRANCH" != "main" ]; then
   log "Not on main branch (on $BRANCH), skipping rebuild."
+  if [ -n "$DUE" ]; then note_blocked "not on main branch (on $BRANCH)"; fi
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: not on main branch (on $BRANCH)" >/dev/null 2>&1 || true
@@ -131,6 +321,7 @@ log "Syncing $RIG_ROOT with origin/main..."
 git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
 if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
   log "Local main diverged from origin/main, skipping rebuild."
+  if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
@@ -162,6 +353,8 @@ BINARY_COMMIT=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.loa
 
 if [ "$IS_STALE" != "True" ]; then
   log "Binary is fresh. Nothing to do."
+  starve_clear "binary is fresh" >/dev/null
+  clear_alarms
   gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
     --title "rebuild-gt: binary is fresh" >/dev/null 2>&1 || true
   exit 0
@@ -169,21 +362,13 @@ fi
 
 if [ "$SAFE" != "True" ]; then
   log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
+  if [ -n "$DUE" ]; then note_blocked "not safe to rebuild"; fi
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: not safe to rebuild" >/dev/null 2>&1 || true
   exit 0
 fi
 
-# A merged commit that is not in force is a live defect, not a rounding error:
-# gt-ww20 (a batch path that bypassed the editorial gate, so 4 MRs landed
-# unreviewed) and gt-rbfj (composer-stall recovery typing the literal text
-# 'C-x C-s' into the composer, the cause of both refinery stalls that day)
-# were each merged while the town kept running a binary without them
-# (gt-oqbw). So the install does not wait for a large delta: past this many
-# commits, install at the first quiet moment. Raise it to trade inert fixes
-# for fewer daemon restarts.
-THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
 # An unknown count must not read as "0 behind, safely under threshold" —
 # that reading is exactly what let a stale, quiet, safe-to-rebuild binary
 # sit deferred every heartbeat with the install threshold never satisfied
@@ -194,10 +379,48 @@ THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
 if [ "$BEHIND" = "unknown" ]; then
   log "commits_behind is unknown; proceeding with install rather than parking it on an unmeasurable threshold"
 elif [ "$BEHIND" -lt "$THRESHOLD" ]; then
+  # Not due, so any block from an earlier run is over. The alarm follows the
+  # state: closed here only when it was open, so an ordinary sub-threshold run
+  # costs one read and no write (gt-vwry).
+  if [ "$(starve_clear "binary is under the install threshold")" = "1" ]; then
+    gt escalate clear --fingerprint "rebuild-gt:starved" \
+      --reason "rebuild-gt: the binary is under the install threshold" >/dev/null 2>&1 || true
+  fi
   defer "binary is $BEHIND behind (under the install threshold $THRESHOLD)"
 fi
 
 # --- Build -------------------------------------------------------------------
+
+# in_flight_count — MRs a refinery is mid-merge on, or "" when the list could
+# not be read at all. Both readings fail open, but only one is worth a warning,
+# so the caller decides (gt-oqbw).
+in_flight_count() {
+  gt mq list gastown --status=in_progress --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(len(json.load(sys.stdin)))
+except Exception:
+    pass
+' 2>/dev/null | tail -1
+}
+
+# install_requires_quiet [WARN] — return when no merge is in flight, defer when
+# one is. Called twice: before the build, and again immediately before the
+# install, because the build takes minutes and a merge that was not in flight
+# when the run started can be in flight by the time it finishes (gt-kox0).
+install_requires_quiet() {
+  local n
+  n=$(in_flight_count)
+  if [ -z "$n" ] || ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    if [ "${1:-}" = "warn" ]; then
+      log "WARNING: could not read in-flight MR count from 'gt mq list'; failing open (treating as quiet) rather than parking the rebuild"
+    fi
+    return 0
+  fi
+  if [ "$n" -gt 0 ]; then
+    blocked_defer "not quiet: $n merge(s) in flight in gastown"
+  fi
+}
 
 # Yield to a running gate (gt-htx3): make build competes for CPU with a gate
 # suite whose tests are load-sensitive, so a rebuild while a refinery, batch,
@@ -213,7 +436,11 @@ fi
 # install waiting forever. An unreadable Docker status is not a reason either:
 # it means the cross-check could not tell, and a VM that is down runs no suite
 # for a build to compete with.
-GATE_BUSY=$(gt slot status --json 2>/dev/null | python3 -c '
+#
+# The second line of that output says whether the block is one the gate slot
+# itself serializes. A container outside the gate is not: queuing for the slot
+# does not queue behind it, so that reading only ever defers (gt-kox0).
+GATE_RAW=$(gt slot status --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -226,36 +453,28 @@ for s in d.get("slots") or []:
         held.append(role)
 if held:
     print("a gate suite holds a slot (%s)" % ", ".join(held))
+    print("reservable")
 elif d.get("unwrapped_containers"):
     print("container(s) are running outside the gate: %s" % ", ".join(d["unwrapped_containers"]))
+    print("")
 elif d.get("saturated"):
     print("every container-gate slot is held")
+    print("reservable")
 ' 2>/dev/null || true)
+GATE_BUSY=$(printf '%s\n' "$GATE_RAW" | sed -n 1p)
+GATE_RESERVABLE=$(printf '%s\n' "$GATE_RAW" | sed -n 2p)
+RESERVE=0
 if [ -n "$GATE_BUSY" ]; then
-  defer "not quiet: $GATE_BUSY"
+  if [ "$GATE_RESERVABLE" = "reservable" ] && [ "$(starve_age)" -ge "$STARVE_MINUTES" ]; then
+    # Past the threshold with the slot as the blocker: take the lock instead of
+    # racing it, so this build queues like any other gate consumer (gt-kox0).
+    RESERVE=1
+  else
+    blocked_defer "not quiet: $GATE_BUSY"
+  fi
 fi
 
-# Fails open like the gate check above (a broken 'gt mq list' must not park
-# rebuilds forever), but unlike that check, unreadable and empty look
-# identical here (both print nothing usable) — so a silent 'or 0' would hide
-# a broken mq command behind the same reading as a genuinely quiet queue.
-# Log it instead, the same way the gate check's own comment demands.
-IN_FLIGHT=$(gt mq list gastown --status=in_progress --json 2>/dev/null | python3 -c '
-import json, sys
-try:
-    print(len(json.load(sys.stdin)))
-except Exception:
-    print("unreadable")
-' 2>/dev/null | tail -1)
-if [ -z "$IN_FLIGHT" ] || [ "$IN_FLIGHT" = "unreadable" ]; then
-  log "WARNING: could not read in-flight MR count from 'gt mq list'; failing open (treating as quiet) rather than parking the rebuild"
-  IN_FLIGHT=0
-elif ! [[ "$IN_FLIGHT" =~ ^[0-9]+$ ]]; then
-  IN_FLIGHT=0
-fi
-if [ "$IN_FLIGHT" -gt 0 ]; then
-  defer "not quiet: $IN_FLIGHT merge(s) in flight in gastown"
-fi
+install_requires_quiet warn
 
 log "Rebuilding gt from $RIG_ROOT ($BEHIND commits behind)..."
 
@@ -268,7 +487,31 @@ log "Rebuilding gt from $RIG_ROOT ($BEHIND commits behind)..."
 # compiled.
 EXPECTED_COMMIT=$(git -C "$RIG_ROOT" rev-parse HEAD)
 
-if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
+# build_gt — the CPU-heavy half, run inside the container-gate slot when a held
+# slot is what has been blocking this rebuild (gt-kox0). Non-zero means the
+# build failed; a wait that never got the slot is a deferral, not a failure.
+build_gt() {
+  if [ "$RESERVE" != "1" ]; then
+    (cd "$RIG_ROOT" && make build) 2>&1 || return $?
+    return 0
+  fi
+  note_blocked "not quiet: $GATE_BUSY"
+  log "Blocked $(starve_age)m: queueing for the container-gate slot (up to $RESERVE_WAIT) and building inside it."
+  local out rc=0
+  out=$(cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$RESERVE_WAIT" -- make build 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  # 'gt slot run' prints this the moment it holds the slot (internal/cmd/slot.go);
+  # without it the build never started, so nothing was built and the retry
+  # belongs on the next heartbeat rather than in an escalation.
+  if ! printf '%s\n' "$out" | grep -q "Container-gate slot acquired"; then
+    blocked_defer "queued for the container-gate slot for $RESERVE_WAIT and did not get it"
+  fi
+  return "$rc"
+}
+
+# The install stays outside the slot hold: it is a temp-file rename, not a CPU
+# consumer, so releasing the slot when the build ends costs the gate nothing.
+if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make safe-install) 2>&1; then
   # What came into force is read from the gt the town will execute — resolved
   # through PATH, which is how the daemon and every session resolve it — not
   # from the build's stdout. An install that does not take (a shadowing gt
@@ -341,6 +584,12 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
     --title "rebuild-gt: in force $BINARY_COMMIT -> $GOT_COMMIT ($BEHIND commits)" \
     --description "Brought into force $BINARY_COMMIT..$GOT_COMMIT ($BEHIND commits):
 $SUBJECTS" >/dev/null 2>&1 || true
+
+  # Nothing is blocked any more: the same fact that makes the receipt above a
+  # success is what closes the block this file was counting and every alarm
+  # keyed to the binary being out of force (gt-kox0).
+  starve_clear "installed $GOT_COMMIT" >/dev/null
+  clear_alarms
 
   # The restart is last because it terminates the process running this script;
   # the receipt above is already written. 'gt daemon restart' is launchctl

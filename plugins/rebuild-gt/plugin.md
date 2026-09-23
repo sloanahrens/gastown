@@ -13,7 +13,7 @@ digest = true
 
 [execution]
 type = "script"
-timeout = "5m"
+timeout = "25m"
 notify_on_failure = true
 severity = "medium"
 allow_deferred_exit = true
@@ -96,6 +96,33 @@ gt escalate "rebuild-gt: binary is $N commits behind origin/main and has not bee
 unknown count as 0 is what silently retired this alarm the one time it
 mattered (gt-oqbw).
 
+## Starvation
+
+A deferral writes no run record, so a block that repeats is invisible to the
+rest of the town: on 2026-09-22 this plugin deferred four times across an hour,
+11 commits behind, with no alarm anywhere (gt-kox0).
+
+Every path that leaves a *due* binary out of force — a busy gate, a merge in
+flight, a refusal to build — records the block in
+`daemon/rebuild-gt-state.json`: when it opened, and how many runs it has
+lasted. Past `REBUILD_GT_STARVE_MINUTES` (default 30, above the longest gate
+hold measured on 2026-09-22) the run escalates at high severity under the
+stable fingerprint `rebuild-gt:starved`, and when the container-gate slot is
+what is blocking, the build queues for that slot instead of racing it:
+
+```bash
+gt slot run --role gastown/rebuild-gt --timeout "$REBUILD_GT_RESERVE_WAIT" -- make build
+```
+
+The wait is why this plugin's `[execution] timeout` is 25m. The yield it
+replaces exists because `make build` competes for CPU with load-sensitive gate
+suites, so the build is the part that needs the slot — the install after it is
+a temp-file rename and runs outside the hold. A wait that never gets the slot
+defers: nothing was built, so nothing failed.
+
+Reaching force — a fresh binary, or a completed install — closes the block and
+clears the keys this plugin owns, under `gt escalate clear` (gt-vwry).
+
 ## Detection
 
 Check binary staleness:
@@ -113,10 +140,7 @@ Parse the JSON output and check these fields:
 
 At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install
 at the first quiet moment: a merged commit that is not in force is a live
-defect, not a rounding error — gt-ww20 (a batch path that bypassed the
-editorial gate, so 4 MRs landed unreviewed) and gt-rbfj (composer-stall
-recovery typing the literal text `C-x C-s` into the composer) were each merged
-while the town kept running a binary without them. Under the threshold
+defect, not a rounding error (gt-oqbw, gt-ww20, gt-rbfj). Under the threshold
 (strictly fewer commits behind than it), defer.
 
 An unknown `commits_behind` here is treated as *at* the threshold, not under
@@ -160,12 +184,16 @@ record a skip wisp with reason "local main diverged from origin/main" —
 ## Quiet gate
 
 `make build` competes for CPU with a gate suite whose tests are load-sensitive
-(gt-htx3), so the install waits for a town with nothing in flight:
+(gt-htx3), so the build waits for a town with nothing in flight:
 
 - no gate-class role holding a container-gate slot, no container running
   outside the gate, and no saturated pool (`gt slot status --json`), and
 - no MR a refinery is mid-merge on
   (`gt mq list gastown --status=in_progress --json`).
+
+The second reading is taken again immediately before the install: a merge that
+was not in flight when the run started can be by the time the build ends, and
+the install waits for the next heartbeat rather than landing under it.
 
 Two readings that are deliberately not deferrals. An MR merely ready in the
 queue consumes nothing, and at this town's merge rate the queue is never
@@ -219,5 +247,7 @@ answered by the record instead of reconstructed from merge timestamps.
 Failures escalate under a stable fingerprint each (`rebuild-gt:build-failed`,
 `:not-in-force`, `:unverified`, `:restart-failed`), so a persisting state
 alarms once. Refusals do not escalate on their own (see Exit codes above) —
-a persisting refusal is what the drift check's `rebuild-gt:drift` /
-`:drift-unknown` fingerprints are for.
+a due binary a refusal leaves out of force is what the drift check's
+`rebuild-gt:drift` / `:drift-unknown` and the starvation check's
+`rebuild-gt:starved` fingerprints are for, and reaching force clears all
+three.
