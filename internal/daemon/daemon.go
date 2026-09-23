@@ -227,6 +227,15 @@ type Daemon struct {
 	// cycle is still running is skipped rather than piling up concurrently.
 	mainBranchTestRunning atomic.Bool
 
+	// gateBusySince records, per rig, when its current unbroken run of
+	// main_branch_test gate-busy skips began — the clock
+	// patrols.main_branch_test.gate_busy_starve_after is measured on. Guarded
+	// by gateBusyMu rather than relying on mainBranchTestRunning's single
+	// flight above: a caller that stops going through triggerMainBranchTests
+	// must not have to know that (gt-lf2r).
+	gateBusyMu    sync.Mutex
+	gateBusySince map[string]time.Time
+
 	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
 	// patrol, on its own goroutine like mainBranchTest so a slow sling never
 	// blocks the select loop (gt-nj23).
