@@ -209,9 +209,10 @@ A rebase that required conflict resolution legitimately changes patch-ids, so
 that proof cannot hold even though the content landed correctly. For that
 case, pass --landed-commit with the SHA that was actually pushed to the
 target; it is still verified as reachable from the target (so a wrong or
-stale SHA is rejected) and bound to the submitted MR by file (every file the
-submitted branch touched must also appear in the attested commit's own
-diff), so an unrelated on-target commit is rejected too.
+stale SHA is rejected) and bound to the submitted MR — by the commits ending
+at the SHA it names, matched by patch-id, or by the files the submitted
+branch touched appearing in its own diff — so an unrelated on-target commit
+is rejected too.
 
 Examples:
   gt mq post-merge gastown gt-mr-abc123
@@ -243,6 +244,8 @@ type mqPostMergeGit interface {
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
 	DiffNameOnly(base, head string) ([]string, error)
+	PatchID(base, head string) (string, error)
+	PatchIDs(base, head string) ([]string, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	DeleteBranch(branch string, force bool) error
 }
@@ -944,20 +947,30 @@ func liveMQPostMergeBranchHead(rigGit mqPostMergeGit, branch, commit string) str
 // any other commit that merely happens to already be reachable from target.
 //
 // Reachability alone proves nothing about content: essentially every commit
-// in target's history is "reachable from target". The refinery's sequential
-// rebase protocol squash-merges each MR (git.MergeSquash), so landedCommit is
-// a single commit whose sole parent is target's tip at merge time — its own
-// diff against that parent is exactly the change-set that landed. This
-// requires every file the submitted branch touched (relative to where it
-// diverged from target) to also appear changed in landedCommit's diff.
+// in target's history is "reachable from target". Two bindings, either of
+// which suffices:
 //
-// This is a file-level binding, not a byte-exact one: a conflict-resolved
-// rebase legitimately changes hunks within those files (that's the entire
-// reason --landed-commit exists — see verifyMQPostMergeProof), so exact
-// patch-id equality would reject every real conflict resolution along with
-// the forgeries. Requiring the submitted file set to survive into the landed
-// diff still rejects an unrelated on-target commit, whose changed files are
-// essentially never a superset of the submitted branch's.
+//   - The run of commits ending at landedCommit carries every commit of the
+//     submitted range, matched by patch-id. A landing can reproduce the MR as
+//     one commit (squash, merge) or as the MR's own commits replayed by the
+//     rebase (a fast-forward of the branch — gt done's direct-merge convoy
+//     pushes one, which leaves landedCommit carrying only the last of the MR's
+//     commits against target's tip); patch-id sees the same work in both and
+//     survives the sha rewrite a rebase performs.
+//   - Every file the submitted branch touched (relative to where it diverged
+//     from target) also appears changed in landedCommit's diff, against its
+//     parent.
+//
+// The second is a file-level fallback, not a byte-exact one: a
+// conflict-resolved rebase legitimately changes hunks within those files
+// (that's the entire reason --landed-commit exists — see
+// verifyMQPostMergeProof), so requiring patch-ids would reject every real
+// conflict resolution along with the forgeries. It also cannot see a change
+// that landed without any of its files appearing in landedCommit's own diff,
+// which is what the first binding is for. Both still reject an unrelated
+// on-target commit, and a partially-landed MR: the commits that did not land
+// end the run or have no patch-id there, and their files are absent from the
+// landed diff.
 //
 // It returns the commit to record as the MR's merge_commit. That is normally
 // landedCommit, but when the submitted head is already reachable from target
@@ -986,6 +999,9 @@ func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submitted
 	if len(submittedFiles) == 0 {
 		return "", fmt.Errorf("submitted head %s has no changed files to bind the attestation to", submittedCommit)
 	}
+	if submittedRangeLandedByPatchID(rigGit, submittedBase, submittedCommit, landedCommit) {
+		return landedCommit, nil
+	}
 	landedParent, err := rigGit.Rev(landedCommit + "^")
 	if err != nil {
 		return "", fmt.Errorf("resolve parent of attested commit %s: %w", landedCommit, err)
@@ -1004,6 +1020,61 @@ func verifyLandedCommitMatchesSubmitted(rigGit mqPostMergeGit, target, submitted
 		}
 	}
 	return landedCommit, nil
+}
+
+// submittedRangeLandedByPatchID reports whether the attested commit is itself
+// the landing of the submitted range: whether the run of commits ending at it
+// carries every one of the MR's commits, identified by patch-id.
+//
+// The walk back from the attested commit stops at the first commit whose
+// change is not one of the MR's, so the run is bounded by the MR and cannot
+// wander into target history. That bound is the whole point: an MR that landed
+// leaves its patches on target, so a check that only asked "are these patches
+// somewhere on target" would accept any later on-target commit — including one
+// landed by an unrelated MR, which is what --landed-commit must never admit
+// (gt-7dnx). Anchoring at the attested commit answers the question the flag
+// actually asks: did *this* commit carry the MR?
+//
+// A missing id is not proof the MR did not land (conflict resolution rewrites
+// the patch, and the run is the last landings of a rebase, so an interrupted
+// run stops the walk), so a false return falls through to the file-level
+// binding rather than rejecting. The reads are best-effort for that same
+// reason: an unreadable commit is not evidence either way.
+func submittedRangeLandedByPatchID(rigGit mqPostMergeGit, submittedBase, submittedCommit, landedCommit string) bool {
+	submittedIDs, err := rigGit.PatchIDs(submittedBase, submittedCommit)
+	if err != nil || len(submittedIDs) == 0 {
+		// No ids to check: an empty set must never read as "all present".
+		return false
+	}
+	owned := make(map[string]int, len(submittedIDs))
+	for _, id := range submittedIDs {
+		owned[id]++
+	}
+
+	var landedIDs []string
+	commit := strings.TrimSpace(landedCommit)
+	for {
+		parent, err := rigGit.Rev(commit + "^")
+		if err != nil {
+			break
+		}
+		parent = strings.TrimSpace(parent)
+		id, err := rigGit.PatchID(parent, commit)
+		id = strings.TrimSpace(id)
+		if err != nil || owned[id] == 0 {
+			// The run of this MR's commits ends here.
+			break
+		}
+		// Consuming the id bounds the walk by the MR's own commit count: a
+		// repeat of one already matched stops it.
+		owned[id]--
+		landedIDs = append(landedIDs, id)
+		commit = parent
+	}
+	if len(landedIDs) == 0 {
+		return false
+	}
+	return len(patchIDsMissingFrom(submittedIDs, landedIDs)) == 0
 }
 
 func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refinery.MergeRequest, skipBranchDelete bool) (mqPostMergeBranchCleanup, error) {

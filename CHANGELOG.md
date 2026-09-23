@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt mq post-merge`'s merge proof now passes for a multi-commit MR that
+  landed as its own commits** (gt-fq4e) — the `--landed-commit` binding only
+  asked what files the attested commit changed by itself, so an MR whose diff
+  spans several commits was refused whenever no single commit touched every
+  file: main holds only the landing branch's last commit against the old
+  target tip, and the proof could not see the rest of the MR in it. The
+  binding now first asks whether the run of commits ending at the attested
+  commit carries every commit of the submitted range by patch-id, which sees
+  the same work whether the landing reproduced the MR as one commit (squash,
+  merge) or as a fast-forward of the rebased branch. It stays anchored at the
+  attested commit, so a later unrelated commit that merely sits on target
+  after the MR still cannot attest for it, and a partially-landed MR is still
+  refused: the commits that did not land end the run.
 - **`gt mq post-merge` now asks for the conflict attestation itself, and
   accepts it when the submitted head already landed** (gt-mlla) — the
   `--landed-commit` flag existed for conflict-resolved merges but only the
