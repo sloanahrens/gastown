@@ -68,6 +68,24 @@ type fakeMQPostMergeGit struct {
 	resolvedCommit string
 	resolveErr     error
 
+	// targetPriorTip is what Rev returns for the target ref's parent (e.g.
+	// "origin/main^"), the inferred-head vacuous-proof guard's read of
+	// target's state before its most recent commit (gt-6o1u).
+	targetPriorTip    string
+	targetPriorTipErr error
+
+	// liveTip is what PushRemoteBranchTip returns: the branch's live remote
+	// tip. Unset, it falls back to remoteTip (a static tip).
+	liveTip string
+
+	// tipSequence, when set, returns one value per successive
+	// PushRemoteBranchTip call instead of a single static one, so a test can
+	// model the remote tip moving between an inferred-head proof's own read
+	// and the branch-delete cleanup's later read of the same branch
+	// (gt-6o1u). The last entry repeats for any call past the end.
+	tipSequence []string
+	tipSeqCalls int
+
 	// Orphan-branch cleanup fixtures (runOrphanMQPostMerge).
 	defaultBranch string
 	targetRef     string
@@ -77,6 +95,7 @@ type fakeMQPostMergeGit struct {
 	preserveErr   error
 
 	verifiedCommits  []string
+	branchTipReads   int
 	deletedBranches  []string
 	deletedHeads     []string
 	localDeleted     []string
@@ -131,6 +150,18 @@ func (g *fakeMQPostMergeGit) HasOpenPullRequest(git.PullRequestRef) bool {
 }
 
 func (g *fakeMQPostMergeGit) PushRemoteBranchTip(_, _ string) (string, error) {
+	g.branchTipReads++
+	if len(g.tipSequence) > 0 {
+		idx := g.tipSeqCalls
+		if idx >= len(g.tipSequence) {
+			idx = len(g.tipSequence) - 1
+		}
+		g.tipSeqCalls++
+		return g.tipSequence[idx], g.tipErr
+	}
+	if g.liveTip != "" {
+		return g.liveTip, g.tipErr
+	}
 	return g.remoteTip, g.tipErr
 }
 
@@ -152,7 +183,15 @@ func (g *fakeMQPostMergeGit) Rev(ref string) (string, error) {
 		}
 		return resolved, nil
 	}
-	if strings.HasSuffix(ref, "^") {
+	if base, ok := strings.CutSuffix(ref, "^"); ok {
+		// A qualified ref (e.g. "origin/main^") resolves target's state before
+		// its most recent commit, for the inferred-head vacuous-proof guard
+		// (gt-6o1u); a bare SHA is an attested commit's parent
+		// (verifyLandedCommitMatchesSubmitted). Real refs always carry a "/",
+		// a landed-commit SHA never does.
+		if strings.Contains(base, "/") {
+			return g.targetPriorTip, g.targetPriorTipErr
+		}
 		return g.landedParent, g.landedParentErr
 	}
 	return g.localHead, nil
@@ -665,6 +704,45 @@ func TestRunVerifiedMQPostMerge_MovedBranchTipRefusedWhenNotPreserved(t *testing
 	}
 }
 
+// TestRunVerifiedMQPostMerge_InferredHeadMovedTipRefusedWhenNotPreserved is
+// the regression for the branch-delete safety check being skipped on the
+// inferred-head path (gt-6o1u): resolveMovedMQPostMergeBranchTip used to
+// return an unmerged branch's live tip unchecked whenever the snapshot's head
+// was inferred, so a push after the proof but before cleanup got force-
+// deleted out from under the branch with no preservation check at all. The
+// branch's own tip moves between inference's read (the head the proof
+// verifies) and the cleanup step's later read of the same branch — modelled
+// here with tipSequence — and that later tip is not preserved on target, so
+// the delete must be refused exactly as it already is for a recorded head
+// (TestRunVerifiedMQPostMerge_MovedBranchTipRefusedWhenNotPreserved).
+func TestRunVerifiedMQPostMerge_InferredHeadMovedTipRefusedWhenNotPreserved(t *testing.T) {
+	t.Parallel()
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	const inferredHead = "abc123def456abc123def456abc123def456abcd"
+	const movedTip = "1089ca701089ca701089ca701089ca701089ca70"
+	rigGit := &fakeMQPostMergeGit{
+		tipSequence: []string{inferredHead, movedTip},
+		preserved:   false,
+		unpreserved: 3,
+	}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "not preserved on origin/main") || !strings.Contains(err.Error(), "3 patch-unique commits") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want unpreserved-moved-tip refusal", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called after successful proof")
+	}
+	if len(rigGit.deletedBranches) != 0 || len(rigGit.localDeleted) != 0 {
+		t.Fatalf("branch deleted despite an unpreserved moved tip on an inferred head: remote=%v local=%v", rigGit.deletedBranches, rigGit.localDeleted)
+	}
+	if cleanup.RemoteDeleted || cleanup.LocalDeleted {
+		t.Fatalf("cleanup claims a delete it did not do: %+v", cleanup)
+	}
+}
+
 func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T) {
 	t.Parallel()
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
@@ -759,6 +837,9 @@ func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
 	mr := testMQPostMergeMR()
 	mr.CommitSHA = ""
 	mgr := &fakeMQPostMergeManager{mr: mr}
+	// The branch the MR records has no remote tip either, so there is nothing
+	// left to resolve the submitted head from (gt-6o1u): refusing is the only
+	// honest answer, and the branch must survive it.
 	rigGit := &fakeMQPostMergeGit{}
 
 	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
@@ -770,6 +851,274 @@ func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
 	}
 	if len(rigGit.deletedBranches) != 0 {
 		t.Fatalf("branch deleted with missing submitted head: %v", rigGit.deletedBranches)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InfersSubmittedHeadFromBranch is the recovery the
+// bead asks for: a directly-created MR (no commit_sha) whose recorded branch
+// still exists is completed rather than refused, with the inferred head proven
+// against the target and used for the branch-delete lease.
+func TestRunVerifiedMQPostMerge_InfersSubmittedHeadFromBranch(t *testing.T) {
+	t.Parallel()
+	const tip = "9c1327d59c1327d59c1327d59c1327d59c1327d5"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	rigGit := &fakeMQPostMergeGit{remoteTip: tip, localHead: tip}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called for a directly-created MR")
+	}
+	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != tip {
+		t.Fatalf("verified commits = %v, want the inferred branch tip %s", rigGit.verifiedCommits, tip)
+	}
+	// The snapshot handed on keeps the bead's own (empty) commit_sha so the
+	// close-time CAS compares against what the bead actually recorded, and
+	// carries the recovered head in the fields that distinguish evidence
+	// from submission (gt-6o1u). The branch delete's lease is pinned to the
+	// same head, in cleanup.SubmittedHead below.
+	if mgr.postMergeMR.CommitSHA != "" {
+		t.Fatalf("MR snapshot commit_sha = %q, want empty (the bead records no commit_sha; inference must not rewrite the snapshot)", mgr.postMergeMR.CommitSHA)
+	}
+	if !mgr.postMergeMR.CommitSHAInferred {
+		t.Fatalf("MR snapshot CommitSHAInferred = false, want true for a head read off the branch")
+	}
+	if mgr.postMergeMR.VerifiedHead != tip {
+		t.Fatalf("MR snapshot VerifiedHead = %q, want the inferred tip %s", mgr.postMergeMR.VerifiedHead, tip)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != tip {
+		t.Fatalf("delete lease heads = %v, want [%s]", rigGit.deletedHeads, tip)
+	}
+	if cleanup.SubmittedHead != tip || !cleanup.SubmittedHeadInferred {
+		t.Fatalf("cleanup = %+v, want the inferred head %s reported as inferred", cleanup, tip)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InferredHeadAlreadyOnTargetRefuses is the
+// vacuous-proof guard: an inferred head that is already an ancestor of the
+// target carries no commits of the branch's own, so reachability would pass
+// for the wrong reason — the branch was replaced, nothing of its own work
+// landed. Refuse with the re-record recovery named.
+func TestRunVerifiedMQPostMerge_InferredHeadAlreadyOnTargetRefuses(t *testing.T) {
+	t.Parallel()
+	const tip = "9c1327d59c1327d59c1327d59c1327d59c1327d5"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	// targetPriorTip gives target a parent to compare against (a real repo
+	// has one); mergeBase == the inferred tip says the tip is already an
+	// ancestor of it (an empty range: base..tip carries no commits of its
+	// own).
+	rigGit := &fakeMQPostMergeGit{remoteTip: tip, localHead: tip, targetPriorTip: "oldmain000oldmain000oldmain000oldmain000", mergeBase: tip}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "already an ancestor of") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want vacuous-range refusal", err)
+	}
+	if !strings.Contains(err.Error(), "re-record commit_sha") {
+		t.Fatalf("proof error %q does not name the recovery (re-record commit_sha)", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called for an inferred head that is already on the target")
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted for a vacuous proof: %v", rigGit.deletedBranches)
+	}
+	// The merge-base check is inference-specific and runs before the
+	// reachability proof: the tip must never have reached the verifier.
+	if len(rigGit.verifiedCommits) != 0 {
+		t.Fatalf("verified commits = %v, want none (refused at the merge-base check)", rigGit.verifiedCommits)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InferredHeadAlreadyOnTargetRefusesEvenIfVerified
+// proves the guard cannot be waved through with a permissive reachability
+// fake: the same refusal holds when the verifier reports success.
+func TestRunVerifiedMQPostMerge_InferredHeadAlreadyOnTargetRefusesEvenIfVerified(t *testing.T) {
+	t.Parallel()
+	const tip = "9c1327d59c1327d59c1327d59c1327d59c1327d5"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	rigGit := &fakeMQPostMergeGit{remoteTip: tip, localHead: tip, targetPriorTip: "oldmain000oldmain000oldmain000oldmain000", mergeBase: tip}
+	// The fake verifier has no verifyErr, i.e. it "succeeds": the refusal must
+	// come from the merge-base check alone, not from reachability.
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "already an ancestor of") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want vacuous-range refusal even with a permissive verifier", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called despite a permissive verifier for an ancestor head")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_MissingTargetRefusesBeforeInference pins the
+// ordering the rework requires: the verifier's structural checks run before
+// any inference touches the branch. A directly-created MR that records no
+// target is refused without a single branch-tip read.
+func TestRunVerifiedMQPostMerge_MissingTargetRefusesBeforeInference(t *testing.T) {
+	t.Parallel()
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mr.TargetBranch = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	// A live tip exists, so a premature inference would succeed and mask the
+	// structural refusal.
+	rigGit := &fakeMQPostMergeGit{remoteTip: "9c1327d59c1327d59c1327d59c1327d59c1327d5"}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "missing target branch") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want missing target refusal", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called for an MR with no target branch")
+	}
+	if rigGit.branchTipReads != 0 {
+		t.Fatalf("branch tip reads = %d, want 0 (target check refuses before inference)", rigGit.branchTipReads)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RecordedInferredHeadIsNotReInferred covers
+// post-close idempotency: once the close path has recorded the recovered head
+// on the bead (commit_sha plus commit_sha_inferred), the bead is the record
+// and the head is trusted as submitted — re-reading the branch tip would
+// re-verify against a tip the branch may have moved since.
+func TestRunVerifiedMQPostMerge_RecordedInferredHeadIsNotReInferred(t *testing.T) {
+	t.Parallel()
+	const recorded = "abc123def456"
+	const movedTip = "beef1234beef1234beef1234beef1234beef1234"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = recorded
+	mr.CommitSHAInferred = true
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	// liveTip pins the tip the lease's own read sees; remoteTip (the moved
+	// tip) is what inference would have read, which must not happen.
+	rigGit := &fakeMQPostMergeGit{remoteTip: movedTip, localHead: movedTip, liveTip: recorded, preserved: true}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != recorded {
+		t.Fatalf("verified commits = %v, want the recorded head %q (the moved tip must not replace it)", rigGit.verifiedCommits, recorded)
+	}
+	if cleanup.SubmittedHeadInferred {
+		t.Fatalf("cleanup = %+v, want no inference for a head the bead already records", cleanup)
+	}
+	// No inference, so exactly the one branch-tip read the lease itself makes.
+	if rigGit.branchTipReads != 1 {
+		t.Fatalf("branch tip reads = %d, want 1 (no re-inference of a recorded head; only the lease's own read)", rigGit.branchTipReads)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != recorded {
+		t.Fatalf("deleted heads = %v, want the recorded head %q", rigGit.deletedHeads, recorded)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InferredHeadNotOnTargetFailsClosed is the other
+// half of the contract: inference chooses which commit is proven, never whether
+// it has to be on the target. An MR with no commit_sha whose branch never
+// landed must not close, delete its branch, or record anything.
+func TestRunVerifiedMQPostMerge_InferredHeadNotOnTargetFailsClosed(t *testing.T) {
+	t.Parallel()
+	const tip = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	rigGit := &fakeMQPostMergeGit{remoteTip: tip, verifyErr: errors.New("not reachable")}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "merge proof failed") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want merge proof failure", err)
+	}
+	if !strings.Contains(err.Error(), tip) {
+		t.Fatalf("proof error %q does not name the head it refused (%s)", err, tip)
+	}
+	// The bead's third request: the refusal has to read as "this head is not on
+	// the target", not as the rebase fight it is easy to mistake it for.
+	if !strings.Contains(err.Error(), "inferred from branch") {
+		t.Fatalf("proof error %q does not say the head was inferred", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called after failed proof")
+	}
+	if len(rigGit.deletedBranches) != 0 || len(rigGit.localDeleted) != 0 {
+		t.Fatalf("branch deleted after failed proof: remote=%v local=%v", rigGit.deletedBranches, rigGit.localDeleted)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InferUnavailableNamesTheRecovery covers the one
+// remaining dead end: no commit_sha and no branch to read one from. That is a
+// metadata problem, so the refusal names the metadata recovery rather than
+// leaving an operator to assume the merge or the rebase is at fault.
+func TestRunVerifiedMQPostMerge_InferUnavailableNamesTheRecovery(t *testing.T) {
+	t.Parallel()
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mr.Branch = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	rigGit := &fakeMQPostMergeGit{}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "missing submitted commit_sha") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want missing submitted head", err)
+	}
+	if !strings.Contains(err.Error(), "re-record commit_sha") {
+		t.Fatalf("proof error %q does not name the recovery (re-record commit_sha)", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called without a provable head")
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("branch deleted without a provable head: %v", rigGit.deletedBranches)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RecordedHeadIsNotInferred pins the direction of
+// the inference. A recorded commit_sha is a claim about what was submitted and
+// outranks the branch's current tip, which a conflict-resolution push may
+// legitimately have moved past it (gt-lk6g). Inference fills an absent field;
+// it never overrides a present one.
+func TestRunVerifiedMQPostMerge_RecordedHeadIsNotInferred(t *testing.T) {
+	t.Parallel()
+	const movedTip = "beef1234beef1234beef1234beef1234beef1234"
+	const targetTip = "aaaa5678aaaa5678aaaa5678aaaa5678aaaa5678"
+	mr := testMQPostMergeMR()
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	// The branch tip has moved since submission, so the live head (remote or
+	// local) differs from the recorded head. The move is content-preserved
+	// (preserved: true), which is the one advance the move-past resolution is
+	// designed to absorb (gt-lk6g) — the lease pin moves with the preserved
+	// tip, it does not refuse.
+	rigGit := &fakeMQPostMergeGit{remoteTip: movedTip, localHead: movedTip, liveTip: targetTip, preserved: true}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != mr.CommitSHA {
+		t.Fatalf("verified commits = %v, want the recorded %q", rigGit.verifiedCommits, mr.CommitSHA)
+	}
+	if mgr.postMergeMR.CommitSHA != mr.CommitSHA {
+		t.Fatalf("snapshot commit_sha = %q, want the recorded %q (the branch tip must not replace it)",
+			mgr.postMergeMR.CommitSHA, mr.CommitSHA)
+	}
+	if cleanup.SubmittedHead != mr.CommitSHA {
+		t.Fatalf("cleanup = %+v, want the recorded head for an MR that records its head", cleanup)
+	}
+	// A recorded head is verified as-is: no inference, so exactly the one
+	// branch-tip read the lease itself makes. The move-past resolution sees
+	// the preserved move and pins the lease to the live tip — the recorded
+	// head stays the snapshot's commit_sha and the submission identity.
+	if rigGit.branchTipReads != 1 {
+		t.Fatalf("branch tip reads = %d, want 1 (only the lease's own read)", rigGit.branchTipReads)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != targetTip {
+		t.Fatalf("deleted heads = %v, want the preserved live tip %q (the recorded pin moves with a preserved advance)",
+			rigGit.deletedHeads, targetTip)
 	}
 }
 
@@ -790,6 +1139,11 @@ func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
 	}
 	if len(rigGit.deletedBranches) != 0 {
 		t.Fatalf("branch deleted when source matched target: %v", rigGit.deletedBranches)
+	}
+	// The structural refusal must happen before inference: no branch-tip
+	// read at all, even though this MR also records no commit_sha.
+	if rigGit.branchTipReads != 0 {
+		t.Fatalf("branch tip reads = %d, want 0 (source/target refused before inference)", rigGit.branchTipReads)
 	}
 }
 
@@ -1275,12 +1629,12 @@ func TestVerifyMQPostMergeProof_RealConflictResolvedRebase(t *testing.T) {
 	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "main", submittedHead); err == nil {
 		t.Fatal("test premise broken: the stale submitted head satisfied the default proof")
 	}
-	if _, err := verifyMQPostMergeProof(g, mr, ""); err == nil {
+	if _, err := verifyMQPostMergeProof(g, mr, mr.CommitSHA, ""); err == nil {
 		t.Fatal("verifyMQPostMergeProof accepted the stale submitted head with no attestation")
 	}
 
 	// The attested landed commit is the one the refinery actually pushed.
-	recorded, err := verifyMQPostMergeProof(g, mr, landedCommit)
+	recorded, err := verifyMQPostMergeProof(g, mr, mr.CommitSHA, landedCommit)
 	if err != nil {
 		t.Fatalf("verifyMQPostMergeProof with the real landed commit: %v", err)
 	}
@@ -1289,7 +1643,7 @@ func TestVerifyMQPostMergeProof_RealConflictResolvedRebase(t *testing.T) {
 	}
 
 	// An abbreviated attestation must persist as the full SHA.
-	recorded, err = verifyMQPostMergeProof(g, mr, landedCommit[:7])
+	recorded, err = verifyMQPostMergeProof(g, mr, mr.CommitSHA, landedCommit[:7])
 	if err != nil {
 		t.Fatalf("verifyMQPostMergeProof with an abbreviated attestation: %v", err)
 	}
@@ -1309,7 +1663,7 @@ func TestVerifyMQPostMergeProof_RealConflictResolvedRebase(t *testing.T) {
 	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "main", unrelatedOnTarget); err != nil {
 		t.Fatalf("test premise broken: the unrelated commit is not on target: %v", err)
 	}
-	if _, err := verifyMQPostMergeProof(g, mr, unrelatedOnTarget); err == nil {
+	if _, err := verifyMQPostMergeProof(g, mr, mr.CommitSHA, unrelatedOnTarget); err == nil {
 		t.Fatal("verifyMQPostMergeProof accepted an unrelated on-target commit as attestation")
 	}
 }
@@ -1615,7 +1969,7 @@ func TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranch(t *testing.T)
 
 	mr := mrCleanupRequest(repo)
 	mr.CommitSHA = repo.submittedHead
-	recorded, err := verifyMQPostMergeProof(g, mr, repo.landedCommit)
+	recorded, err := verifyMQPostMergeProof(g, mr, mr.CommitSHA, repo.landedCommit)
 	if err != nil {
 		t.Fatalf("verifyMQPostMergeProof: %v", err)
 	}
@@ -1643,12 +1997,219 @@ func TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranchRefusesPartial
 
 	mr := mrCleanupRequest(repo)
 	mr.CommitSHA = repo.submittedHead
-	_, err := verifyMQPostMergeProof(g, mr, repo.landedCommit)
+	_, err := verifyMQPostMergeProof(g, mr, mr.CommitSHA, repo.landedCommit)
 	if err == nil {
 		t.Fatal("merge proof accepted a landing that carried only half the submitted commits")
 	}
 	if !strings.Contains(err.Error(), "attestation does not match MR") {
 		t.Fatalf("verifyMQPostMergeProof error = %v, want attestation-does-not-match-MR refusal", err)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteDirectlyCreatedMR is the incident the
+// bead reports (gt-d7ir, gt-93m1), composed against real git: an MR created
+// directly rather than through 'gt mq submit' records a branch but no
+// commit_sha, and its work is nonetheless on main. Post-merge has to finish —
+// the merge is already pushed at this point, so refusing leaves the MR open,
+// the source issue open, and the branch undeleted around landed work.
+func TestRunVerifiedMQPostMerge_RealRemoteDirectlyCreatedMR(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, true)
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+	branchTip := runOrphanCleanupGit(t, clone, "rev-parse", "origin/"+branch)
+
+	mgr := &fakeMQPostMergeManager{mr: &refinery.MergeRequest{
+		ID:           "gt-mr-direct",
+		Branch:       branch,
+		Worker:       "polecats/operator",
+		IssueID:      "gt-6o1u",
+		TargetBranch: "main",
+		// No commit_sha: the shape a directly-created MR bead has.
+	}}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge for a directly-created MR: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called for a directly-created MR")
+	}
+	// The snapshot handed on keeps the bead's own (empty) commit_sha so the
+	// close-time CAS compares against what the bead recorded; the tip the
+	// proof bound against rides in VerifiedHead (gt-6o1u).
+	if mgr.postMergeMR.CommitSHA != "" {
+		t.Fatalf("snapshot commit_sha = %q, want empty (the bead records no commit_sha)", mgr.postMergeMR.CommitSHA)
+	}
+	if !mgr.postMergeMR.CommitSHAInferred {
+		t.Fatalf("snapshot CommitSHAInferred = false, want true for a directly-created MR")
+	}
+	if mgr.postMergeMR.VerifiedHead != branchTip {
+		t.Fatalf("snapshot VerifiedHead = %q, want the branch tip %q the proof bound against",
+			mgr.postMergeMR.VerifiedHead, branchTip)
+	}
+	if cleanup.SubmittedHead != branchTip || !cleanup.SubmittedHeadInferred {
+		t.Fatalf("cleanup = %+v, want the inferred branch tip %s recorded", cleanup, branchTip)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote != "" {
+		t.Fatalf("remote branch survived cleanup: %s", remote)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteFastForwardedDirectlyCreatedMR is the
+// regression for the vacuous-proof guard refusing every real fast-forward
+// landing (om review, attempt 3): after a fast-forward, an inferred head is
+// always an ancestor of target — that is what a fast-forward landing is — so
+// a guard scoped to target's whole history would refuse this MR exactly as it
+// refuses a branch that was never touched. Scoping the guard to target's
+// state one commit before its current tip must still close this MR, since
+// the branch's own commit is what advanced target past that point.
+func TestRunVerifiedMQPostMerge_RealRemoteFastForwardedDirectlyCreatedMR(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, false)
+	branchTip := runOrphanCleanupGit(t, clone, "rev-parse", "origin/"+branch)
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--ff-only", branch)
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+
+	mgr := &fakeMQPostMergeManager{mr: &refinery.MergeRequest{
+		ID:           "gt-mr-ff-direct",
+		Branch:       branch,
+		Worker:       "polecats/operator",
+		IssueID:      "gt-6o1u",
+		TargetBranch: "main",
+		// No commit_sha: the shape a directly-created MR bead has.
+	}}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge for a fast-forwarded directly-created MR: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called for a fast-forwarded directly-created MR")
+	}
+	if mgr.postMergeMR.VerifiedHead != branchTip {
+		t.Fatalf("snapshot VerifiedHead = %q, want the branch tip %q the proof bound against",
+			mgr.postMergeMR.VerifiedHead, branchTip)
+	}
+	if cleanup.SubmittedHead != branchTip || !cleanup.SubmittedHeadInferred {
+		t.Fatalf("cleanup = %+v, want the inferred branch tip %s recorded", cleanup, branchTip)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted", cleanup)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealRemoteMergeCommitDirectlyCreatedMR is the
+// merge-commit half of the same regression: after landing by a merge commit
+// (not a fast-forward), the branch's own tip is a parent of target's new tip,
+// not the tip itself, but it is still an ancestor of target's whole history —
+// the same shape a vacuous branch has. The guard must tell them apart by
+// target's state one commit before its current tip too.
+func TestRunVerifiedMQPostMerge_RealRemoteMergeCommitDirectlyCreatedMR(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, false)
+	branchTip := runOrphanCleanupGit(t, clone, "rev-parse", "origin/"+branch)
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--no-ff", "-m", "merge branch", branch)
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+
+	mgr := &fakeMQPostMergeManager{mr: &refinery.MergeRequest{
+		ID:           "gt-mr-merge-direct",
+		Branch:       branch,
+		Worker:       "polecats/operator",
+		IssueID:      "gt-6o1u",
+		TargetBranch: "main",
+		// No commit_sha: the shape a directly-created MR bead has.
+	}}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge for a merge-commit directly-created MR: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called for a merge-commit directly-created MR")
+	}
+	if mgr.postMergeMR.VerifiedHead != branchTip {
+		t.Fatalf("snapshot VerifiedHead = %q, want the branch tip %q the proof bound against",
+			mgr.postMergeMR.VerifiedHead, branchTip)
+	}
+	if cleanup.SubmittedHead != branchTip || !cleanup.SubmittedHeadInferred {
+		t.Fatalf("cleanup = %+v, want the inferred branch tip %s recorded", cleanup, branchTip)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup = %+v, want the remote branch deleted", cleanup)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_InferredHeadWithLandedCommitAttestation is the
+// intersection the bead's report calls out by hand: '--landed-commit could not
+// substitute because that flag only overrides the LANDED sha, not the SUBMITTED
+// one'. Once the head is resolved from the branch, the attestation has
+// something to bind against and the directly-created MR closes.
+func TestRunVerifiedMQPostMerge_InferredHeadWithLandedCommitAttestation(t *testing.T) {
+	t.Parallel()
+	const tip = "b1668c652c0073be141070ef5228c2edc4357825"
+	mr := testMQPostMergeMR()
+	mr.CommitSHA = ""
+	mgr := &fakeMQPostMergeManager{mr: mr}
+	rigGit := &fakeMQPostMergeGit{
+		remoteTip:      tip,
+		localHead:      tip,
+		targetPriorTip: "oldmain000oldmain000oldmain000oldmain000",
+		mergeBase:      "oldbase000",
+		landedParent:   "oldmain111",
+		submittedFiles: []string{"internal/cmd/mq.go"},
+		landedFiles:    []string{"internal/cmd/mq.go"},
+	}
+	const landedCommit = "e23984a7e23984a7e23984a7e23984a7e23984a7"
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge with --landed-commit on a directly-created MR: %v", err)
+	}
+	// mergeBaseSubmits[0] is the vacuous-proof guard's merge-base (always for
+	// an inferred head); [1] is the attestation binding itself.
+	if len(rigGit.mergeBaseSubmits) != 2 || rigGit.mergeBaseSubmits[1] != tip {
+		t.Fatalf("attestation bound against %v, want the inferred head %s as the second merge-base", rigGit.mergeBaseSubmits, tip)
+	}
+	if mgr.postMergeMR.MergeCommit != landedCommit {
+		t.Fatalf("MR MergeCommit = %q, want the attested landed commit %q", mgr.postMergeMR.MergeCommit, landedCommit)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_RealInferredHeadRefusesUnmergedBranch is the
+// fail-closed control for inference, against real git: the branch exists, so a
+// head is resolvable, but its work is not on main. Inference decides which
+// commit is proven, not whether it has to be there — if it could close an MR
+// whose content never landed it would be a hole, not a recovery.
+func TestRunVerifiedMQPostMerge_RealInferredHeadRefusesUnmergedBranch(t *testing.T) {
+	t.Parallel()
+	clone, branch := initOrphanCleanupRepo(t, false)
+	g := orphanCleanupRealGit{git.NewGit(clone)}
+
+	mgr := &fakeMQPostMergeManager{mr: &refinery.MergeRequest{
+		ID:           "gt-mr-never-landed",
+		Branch:       branch,
+		TargetBranch: "main",
+		// No commit_sha, as a directly-created MR has none.
+	}}
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false, "")
+	if err == nil || !strings.Contains(err.Error(), "does not contain submitted head") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want the target-does-not-contain refusal", err)
+	}
+	if !strings.Contains(err.Error(), "inferred from branch") {
+		t.Fatalf("proof error %q does not say the head was inferred", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called for an inferred head that is not on the target")
+	}
+	if cleanup.RemoteDeleted || cleanup.LocalDeleted {
+		t.Fatalf("cleanup claims a delete it did not do: %+v", cleanup)
+	}
+	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote == "" {
+		t.Fatal("remote branch deleted despite carrying work that never landed")
 	}
 }
 

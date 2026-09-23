@@ -36,6 +36,21 @@ type MergeRequest struct {
 	// CommitSHA is the source branch tip submitted to the queue.
 	CommitSHA string `json:"commit_sha,omitempty"`
 
+	// CommitSHAInferred is true when the MR bead recorded no commit_sha at
+	// submission and the close path recovered the head from the branch and
+	// proved it against the target (gt-6o1u). The bead is the record of
+	// which value was proven; this flag distinguishes evidence recovered at
+	// close time from a head recorded at submission.
+	CommitSHAInferred bool `json:"commit_sha_inferred,omitempty"`
+
+	// VerifiedHead is the recovered head the merge proof verified when
+	// CommitSHAInferred is true, and empty otherwise — a submitted MR never
+	// sets it, since CommitSHA already names the head that was proven. It is
+	// transient (json:"-"): it drives close-time persistence of the inferred
+	// head and the inferred-head CAS, but it is never the submission identity
+	// itself.
+	VerifiedHead string `json:"-"`
+
 	// PRURL/PRNumber record the authoritative PR identity when available.
 	PRURL    string `json:"pr_url,omitempty"`
 	PRNumber int    `json:"pr_number,omitempty"`

@@ -632,11 +632,14 @@ type MRFields struct {
 	Worker      string // Who did the work
 	Rig         string // Which rig
 	CommitSHA   string // HEAD commit SHA at submission time (GH#3032: dedup key)
-	PRURL       string // Recorded pull request URL, if one exists for this MR
-	PRNumber    int    // Recorded pull request number, scoped to the target repo
-	MergeCommit string // SHA of merge commit (set on close)
-	CloseReason string // Reason for closing: merged, rejected, conflict, superseded
-	AgentBead   string // Agent bead ID that created this MR (for traceability)
+	// CommitSHAInferred marks commit_sha as recovered at close time rather than
+	// recorded at submission (gt-6o1u).
+	CommitSHAInferred bool
+	PRURL             string // Recorded pull request URL, if one exists for this MR
+	PRNumber          int    // Recorded pull request number, scoped to the target repo
+	MergeCommit       string // SHA of merge commit (set on close)
+	CloseReason       string // Reason for closing: merged, rejected, conflict, superseded
+	AgentBead         string // Agent bead ID that created this MR (for traceability)
 
 	// Conflict resolution fields (for priority scoring)
 	RetryCount      int    // Number of conflict-resolution cycles
@@ -717,6 +720,9 @@ func ParseMRFields(issue *Issue) *MRFields {
 			hasFields = true
 		case "commit_sha", "commit-sha", "commitsha":
 			fields.CommitSHA = value
+			hasFields = true
+		case "commit_sha_inferred", "commit-sha-inferred", "commitshainferred":
+			fields.CommitSHAInferred = strings.ToLower(value) == "true"
 			hasFields = true
 		case "pr_url", "pr-url", "prurl":
 			fields.PRURL = value
@@ -818,6 +824,9 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.CommitSHA != "" {
 		lines = append(lines, "commit_sha: "+fields.CommitSHA)
 	}
+	if fields.CommitSHAInferred {
+		lines = append(lines, "commit_sha_inferred: true")
+	}
 	if fields.PRURL != "" {
 		lines = append(lines, "pr_url: "+fields.PRURL)
 	}
@@ -891,6 +900,9 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 		"commit_sha":              true,
 		"commit-sha":              true,
 		"commitsha":               true,
+		"commit_sha_inferred":     true,
+		"commit-sha-inferred":     true,
+		"commitshainferred":       true,
 		"pr_url":                  true,
 		"pr-url":                  true,
 		"prurl":                   true,

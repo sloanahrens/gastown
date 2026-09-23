@@ -214,6 +214,16 @@ at the SHA it names, matched by patch-id, or by the files the submitted
 branch touched appearing in its own diff — so an unrelated on-target commit
 is rejected too.
 
+An MR bead that records no commit_sha — the shape of one created directly
+rather than by 'gt mq submit' or 'gt done', both of which write the field —
+is recovered by reading the head off its recorded branch and proving it
+against the target exactly like a submitted head, and the output says the
+head was inferred. The recovered head is recorded on the MR bead when it
+closes (commit_sha plus a commit_sha_inferred marker) so the record
+distinguishes evidence recovered at close time from a head recorded at
+submission. When the branch is already gone there is nothing left to
+recover from, and the command refuses with the recovery step named.
+
 Examples:
   gt mq post-merge gastown gt-mr-abc123
   gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete
@@ -251,8 +261,16 @@ type mqPostMergeGit interface {
 }
 
 type mqPostMergeBranchCleanup struct {
-	Branch        string
-	Target        string // orphan cleanup: ref the branch's work had to be preserved on
+	Branch string
+	Target string // orphan cleanup: ref the branch's work had to be preserved on
+
+	// SubmittedHead is the head the merge proof bound against, and
+	// SubmittedHeadInferred reports that it was read from the recorded branch
+	// rather than submitted on the MR bead. Report-only: the output has to say
+	// which evidence closed the merge (gt-6o1u).
+	SubmittedHead         string
+	SubmittedHeadInferred bool
+
 	NoBranch      bool
 	Skipped       bool
 	Disabled      bool
@@ -680,6 +698,10 @@ func printMQPostMergeResult(result *refinery.PostMergeResult, branchCleanup mqPo
 	fmt.Printf("%s Post-merge: %s\n", style.Bold.Render("✓"), mr.ID)
 	fmt.Printf("  Branch: %s\n", mr.Branch)
 	fmt.Printf("  Worker: %s\n", mr.Worker)
+	if branchCleanup.SubmittedHeadInferred {
+		fmt.Printf("  %s Submitted head %s inferred from the branch (the MR bead records no commit_sha); proven against %s like a submitted head\n",
+			style.Dim.Render("○"), branchCleanup.SubmittedHead, mr.TargetBranch)
+	}
 
 	if result.MRClosed {
 		fmt.Printf("  %s MR closed (merged)\n", style.Success.Render("✓"))
@@ -826,16 +848,95 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	mergeCommit, err := verifyMQPostMergeProof(rigGit, mr, landedCommit)
+	if mr == nil {
+		return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed: merge request is missing")
+	}
+	// The structural checks run before any inference touches the snapshot.
+	// A directly-created MR can be missing its target or, worse, record its
+	// target as its own source branch; an inference against such an MR would
+	// read a live tip and feed it into a comparison the refusal was meant to
+	// prevent.
+	target := strings.TrimSpace(mr.TargetBranch)
+	if target == "" {
+		return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: missing target branch", mr.ID)
+	}
+	if source := strings.TrimSpace(mr.Branch); source != "" && source == target {
+		return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
+	}
+	// head is the commit the proof will verify. When the MR bead recorded one,
+	// it is that record; when it recorded none, it is the head read off the
+	// branch the MR names. The snapshot's CommitSHA is never set from the
+	// inference: the close-time CAS compares it against the bead's own record
+	// (empty), so the snapshot stays what the bead says and the recovered head
+	// travels in VerifiedHead/CommitSHAInferred instead, where the close path
+	// persists it to the bead (gt-6o1u).
+	head := strings.TrimSpace(mr.CommitSHA)
+	var inferredHead string
+	if head == "" {
+		inferredHead, err = inferMQPostMergeSubmittedHead(rigGit, mr)
+		if err != nil {
+			return nil, mqPostMergeBranchCleanup{}, err
+		}
+		head = inferredHead
+		if head == "" {
+			return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
+		}
+		// An inferred head that is already an ancestor of the target carries no
+		// commits of the branch's own — the proof would pass vacuously against
+		// whatever the branch did before it was replaced. Refuse it: something
+		// of this branch's own work has to be what landed.
+		//
+		// The check cannot compare against target's whole history: after any
+		// real landing, head IS an ancestor of target's current tip (that is
+		// what the reachability proof below establishes), so a fast-forward or
+		// merge-commit landing would look identical to a vacuous branch and be
+		// refused every time (om review, attempt 3). Comparing against
+		// target's own state one commit before its current tip narrows this to
+		// the case that actually distinguishes them: a fast-forward's head is
+		// target's own current tip (not yet an ancestor of target minus its
+		// last commit), and a merge commit's head is that merge's other
+		// parent (also not an ancestor of the commit before it); a genuinely
+		// vacuous head was already an ancestor of target before whatever
+		// landed most recently, and stays refused. resolvedTarget is fetched
+		// fresh so a stale local target ref cannot change the outcome.
+		defaultBranch := rigGit.RemoteDefaultBranch()
+		resolvedTarget := rigGit.CleanBaseRef("origin", defaultBranch, target)
+		if targetRemote := git.RemoteForRef(resolvedTarget); targetRemote != "" {
+			if err := rigGit.FetchPrune(targetRemote); err != nil {
+				return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: refreshing %s to check inferred head %s: %w", mr.ID, targetRemote, head, err)
+			}
+		}
+		// A resolve failure here means target's current tip has no parent —
+		// possible only when the whole repository is that one commit. There is
+		// no earlier state for a vacuous head to have already been an ancestor
+		// of, so there is nothing this guard could catch; leave it to the
+		// reachability proof below.
+		if priorTarget, err := rigGit.Rev(resolvedTarget + "^"); err == nil && priorTarget != "" {
+			base, err := rigGit.MergeBase(priorTarget, head)
+			if err != nil {
+				return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: merge-base of %s and inferred head %s: %w", mr.ID, priorTarget, head, err)
+			}
+			if base == head {
+				return nil, mqPostMergeBranchCleanup{}, fmt.Errorf("merge proof failed for MR %s: inferred head %s is already an ancestor of %s: the branch carries no commits of its own, so nothing of it landed; re-record commit_sha on the MR bead if the branch has been replaced", mr.ID, head, target)
+			}
+		}
+	}
+	mergeCommit, err := verifyMQPostMergeProof(rigGit, mr, head, landedCommit)
 	if err != nil {
+		if inferredHead != "" {
+			// The head this refused was never submitted, and that is invisible in
+			// the proof's own wording: without this the refusal reads as the
+			// rebase fight it is easy to mistake it for.
+			err = fmt.Errorf("%w (head inferred from branch %s: the MR bead records no commit_sha)", err, strings.TrimSpace(mr.Branch))
+		}
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	// Recorded here rather than inside the verifier: the proof itself must stay
-	// a pure read of the repository, and only the caller that actually goes on
-	// to close the MR should mutate the snapshot it hands to PostMergeMR
-	// (gt-mlla).
 	if mergeCommit != "" {
 		mr.MergeCommit = mergeCommit
+	}
+	if inferredHead != "" {
+		mr.CommitSHAInferred = true
+		mr.VerifiedHead = inferredHead
 	}
 
 	result, err := mgr.PostMergeMR(mr)
@@ -844,6 +945,8 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 	}
 
 	branchCleanup, err := cleanupMQPostMergeBranch(rigPath, rigGit, result.MR, skipBranchDelete)
+	branchCleanup.SubmittedHead = head
+	branchCleanup.SubmittedHeadInferred = inferredHead != ""
 	return result, branchCleanup, err
 }
 
@@ -866,7 +969,14 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 // rather than assigned onto mr so this stays a read-only check: mutating the
 // caller's snapshot as a side effect of verifying it made the proof both
 // harder to test and impossible to call twice (gt-mlla).
-func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, landedCommit string) (string, error) {
+//
+// head is the commit the proof verifies, passed in by the caller so this
+// stays pure. runVerifiedMQPostMerge resolves it: the MR bead's recorded
+// commit_sha when the bead has one, the head read off the recorded branch
+// when it has none (inferMQPostMergeSubmittedHead, gt-6o1u). This function
+// itself never guesses a head — an empty one is a refusal, not an
+// inference — and everything it checks is fail-closed against the target.
+func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, head string, landedCommit string) (string, error) {
 	if mr == nil {
 		return "", fmt.Errorf("merge proof failed: merge request is missing")
 	}
@@ -877,7 +987,7 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, la
 	if source := strings.TrimSpace(mr.Branch); source != "" && source == target {
 		return "", fmt.Errorf("merge proof failed for MR %s: source branch %s matches target branch", mr.ID, source)
 	}
-	commit := strings.TrimSpace(mr.CommitSHA)
+	commit := strings.TrimSpace(head)
 	if commit == "" {
 		return "", fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
@@ -902,6 +1012,32 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest, la
 		return "", fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
 	}
 	return "", nil
+}
+
+// inferMQPostMergeSubmittedHead completes an MR bead that records no
+// commit_sha (a directly-created MR — neither 'gt mq submit' nor 'gt done'
+// wrote it), returning the head read off the branch the MR names and "" for
+// an MR that already carries one. The returned head still goes through the
+// same reachability proof as a submitted one; inference only picks which
+// commit is proven, never whether it has to be (gt-6o1u). A branch that is
+// already gone leaves nothing to infer, and the recovery is named in the
+// error.
+func inferMQPostMergeSubmittedHead(rigGit mqPostMergeGit, mr *refinery.MergeRequest) (string, error) {
+	if mr == nil || strings.TrimSpace(mr.CommitSHA) != "" {
+		return "", nil
+	}
+	branch := strings.TrimSpace(mr.Branch)
+	if branch == "" {
+		return "", fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha and no branch on the MR to resolve it from: re-record commit_sha on the MR bead (a directly-created MR records neither)", mr.ID)
+	}
+	tip, err := rigGit.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		return "", fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha and branch %s could not be read: %w", mr.ID, branch, err)
+	}
+	if tip = strings.TrimSpace(tip); tip == "" {
+		return "", fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha and branch %s has no remote tip (already deleted?): re-record commit_sha on the MR bead; --landed-commit cannot substitute because the attestation is bound to the submitted head", mr.ID, branch)
+	}
+	return tip, nil
 }
 
 // resolveMQPostMergeCommit normalizes an attested landed commit to its full
@@ -1097,7 +1233,13 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		return cleanup, nil
 	}
 
+	// The lease pins to the head the proof verified. For a recovered head the
+	// snapshot's CommitSHA is still the bead's own record (empty) and the
+	// verified head rides in VerifiedHead (gt-6o1u).
 	expectedHead := strings.TrimSpace(mr.CommitSHA)
+	if expectedHead == "" && mr.CommitSHAInferred {
+		expectedHead = strings.TrimSpace(mr.VerifiedHead)
+	}
 	if expectedHead == "" {
 		return cleanup, fmt.Errorf("remote branch delete %s: missing submitted commit_sha", cleanup.Branch)
 	}
@@ -1152,6 +1294,12 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 // authorize deleting a branch with no MR bead at all: a branch that moved for
 // any other reason is still refused rather than deleted out from under it.
 func resolveMovedMQPostMergeBranchTip(rigGit mqPostMergeGit, mr *refinery.MergeRequest, branch, expectedHead, remoteTip string) (string, error) {
+	// This runs identically whether expectedHead was submitted or inferred
+	// (gt-6o1u): an inferred head still only proved the tip the proof read,
+	// not whatever the branch points at now, so a moved tip needs the same
+	// content-preservation check before the delete is allowed to follow it —
+	// skipping it here was a fail-open branch-delete on exactly the MRs with
+	// the least provenance.
 	defaultBranch := rigGit.RemoteDefaultBranch()
 	target := rigGit.CleanBaseRef("origin", defaultBranch, mr.TargetBranch)
 	if targetRemote := git.RemoteForRef(target); targetRemote != "" {

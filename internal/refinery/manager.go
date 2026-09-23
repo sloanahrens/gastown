@@ -834,20 +834,21 @@ func (m *Manager) issueToMR(issue *beads.Issue) *MergeRequest {
 	}
 
 	return &MergeRequest{
-		ID:           issue.ID,
-		Branch:       fields.Branch,
-		Worker:       fields.Worker,
-		AgentBead:    fields.AgentBead,
-		IssueID:      fields.SourceIssue,
-		TargetBranch: target,
-		CommitSHA:    fields.CommitSHA,
-		PRURL:        fields.PRURL,
-		PRNumber:     fields.PRNumber,
-		MergeCommit:  fields.MergeCommit,
-		Status:       mrStatusFromIssue(issue),
-		CloseReason:  CloseReason(fields.CloseReason),
-		CreatedAt:    parseTime(issue.CreatedAt),
-		RetryCount:   fields.RetryCount,
+		ID:                issue.ID,
+		Branch:            fields.Branch,
+		Worker:            fields.Worker,
+		AgentBead:         fields.AgentBead,
+		IssueID:           fields.SourceIssue,
+		TargetBranch:      target,
+		CommitSHA:         fields.CommitSHA,
+		CommitSHAInferred: fields.CommitSHAInferred,
+		PRURL:             fields.PRURL,
+		PRNumber:          fields.PRNumber,
+		MergeCommit:       fields.MergeCommit,
+		Status:            mrStatusFromIssue(issue),
+		CloseReason:       CloseReason(fields.CloseReason),
+		CreatedAt:         parseTime(issue.CreatedAt),
+		RetryCount:        fields.RetryCount,
 	}
 }
 
@@ -1116,12 +1117,20 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResul
 		SourceIssueID: workBeadID,
 	}
 
-	// Close the MR bead
+	// Close the MR bead. For a recovered (inferred) head the snapshot's
+	// CommitSHA is still empty — that is what let the regular CAS pass against
+	// the bead's empty record — so the verified head is passed separately and
+	// persisted to the bead here (gt-6o1u).
+	inferredHead := ""
+	if mr.CommitSHAInferred {
+		inferredHead = strings.TrimSpace(mr.VerifiedHead)
+	}
 	closeResult, err := closeTerminalMR(b, mr.ID, terminalMRCloseOptions{
-		Reason:        string(CloseReasonMerged),
-		MergeCommit:   mr.MergeCommit,
-		AgentBeadHint: mr.AgentBead,
-		ExpectedMR:    mr,
+		Reason:            string(CloseReasonMerged),
+		MergeCommit:       mr.MergeCommit,
+		AgentBeadHint:     mr.AgentBead,
+		ExpectedMR:        mr,
+		InferredCommitSHA: inferredHead,
 	})
 	if err != nil {
 		return result, fmt.Errorf("closing MR bead: %w", err)
