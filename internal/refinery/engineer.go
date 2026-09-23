@@ -646,9 +646,9 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	cleanupWorktree, err := e.beginWorktreeOwnedMerge("merge")
 	if err != nil {
 		return ProcessResult{
-			Success:                false,
+			Success:                 false,
 			WorktreeExternallyDirty: errors.Is(err, ErrExternallyDirtyWorktree),
-			Error:                  err.Error(),
+			Error:                   err.Error(),
 		}
 	}
 	defer cleanupWorktree()
@@ -1937,19 +1937,14 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 // checkAndEscalateRubricChange detects whether the merge just landed by mr
 // touched the rig's deployed rubric (.om.json), and if so escalates to the
 // operator rather than restamping the harness manifest — the batch path's
-// half of the mayor's gt-7bvf design decision: a rubric change never
-// self-deploys, on the CLI post-merge path (mq.go's
-// detectRubricChangeAfterMerge/escalateRubricChange) or here. Before this,
-// a rubric change landed through the batch path left the manifest stale
-// with no escalation at all, so every later review failed version_mismatch
-// until someone noticed by hand.
-//
-// Best-effort: a detection failure is logged, not fatal — the merge already
-// landed and closed, and a missed escalation is recoverable by hand.
+// half of the CLI post-merge protection (mq.go's
+// detectRubricChangeAfterMerge/escalateRubricChange) (gt-7bvf).
 func (e *Engineer) checkAndEscalateRubricChange(mr *MRInfo, result ProcessResult) {
 	manifest, err := editorial.LoadManifest(e.rig.Path)
 	if err != nil {
-		// No manifest deployed: nothing to check.
+		if !errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: loading harness manifest for %s: %v\n", mr.ID, err)
+		}
 		return
 	}
 	landedArg := strings.TrimSpace(result.MergeCommit)
@@ -1959,8 +1954,9 @@ func (e *Engineer) checkAndEscalateRubricChange(mr *MRInfo, result ProcessResult
 	touched, rel, sha, err := editorial.RubricChangeAfterMerge(e.git, e.workDir, manifest, landedArg, mr.Target)
 	if err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: rubric change check for %s: %v\n", mr.ID, err)
-		return
 	}
+	// touched can be true alongside a non-nil err: an unresolvable rubric
+	// path fails closed rather than being read as untouched (gt-7bvf).
 	if !touched {
 		return
 	}

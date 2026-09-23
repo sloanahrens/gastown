@@ -242,6 +242,63 @@ func TestParseRubricCriteria_EmptyAndMalformed(t *testing.T) {
 	}
 }
 
+// TestRubricRelPath_ResolvesUnderSiblingClone is the gt-7bvf path-resolution
+// fix: an absolute rubric path under a sibling clone of the same rig (mayor/rig,
+// when repoDir is refinery/rig) resolves to the same repo-relative path as if
+// it had been declared relative.
+func TestRubricRelPath_ResolvesUnderSiblingClone(t *testing.T) {
+	rigRoot := filepath.FromSlash("/gt/gastown")
+	repoDir := filepath.Join(rigRoot, "refinery", "rig")
+
+	cases := []struct {
+		name         string
+		rubricPath   string
+		wantRel      string
+		wantOK       bool
+		wantResolved bool
+	}{
+		{"relative", ".om.json", ".om.json", true, true},
+		{"absolute under repoDir itself", filepath.Join(repoDir, ".om.json"), ".om.json", true, true},
+		{"absolute under sibling clone (mayor/rig)", filepath.Join(rigRoot, "mayor", "rig", ".om.json"), ".om.json", true, true},
+		{"absolute under nested repo-relative dir of a sibling clone", filepath.Join(rigRoot, "mayor", "rig", "config", ".om.json"), "config/.om.json", true, true},
+		{"unset", "", "", false, true},
+		{"absolute outside every rig clone", filepath.FromSlash("/etc/other/.om.json"), "", true, false},
+		{"absolute under a different rig entirely", filepath.FromSlash("/gt/otherrig/refinery/rig/.om.json"), "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rel, ok, resolved := rubricRelPath(repoDir, tc.rubricPath)
+			if ok != tc.wantOK || resolved != tc.wantResolved {
+				t.Fatalf("rubricRelPath(%q) = rel=%q ok=%v resolved=%v, want ok=%v resolved=%v", tc.rubricPath, rel, ok, resolved, tc.wantOK, tc.wantResolved)
+			}
+			if resolved && rel != tc.wantRel {
+				t.Errorf("rubricRelPath(%q) rel = %q, want %q", tc.rubricPath, rel, tc.wantRel)
+			}
+		})
+	}
+}
+
+// TestRubricTouched_FailsClosedOnUnresolvablePath is the gt-7bvf fail-closed
+// requirement: a rubric path this cannot resolve to a repo-relative form must
+// be reported as touched — never silently read as "untouched", which would
+// disable every rubric protection built on RubricTouched.
+func TestRubricTouched_FailsClosedOnUnresolvablePath(t *testing.T) {
+	fixture := newRubricFixture(t, rubricBaseJSON)
+	g := git.NewGit(fixture.repoDir)
+	unresolvable := filepath.FromSlash("/etc/other/.om.json")
+
+	touched, rel, err := RubricTouched(g, fixture.repoDir, unresolvable, fixture.base, fixture.head)
+	if err == nil {
+		t.Fatal("RubricTouched with an unresolvable rubric path returned nil error, want a fail-closed error")
+	}
+	if !touched {
+		t.Error("RubricTouched with an unresolvable rubric path = false, want true (fail closed)")
+	}
+	if rel != "" {
+		t.Errorf("RubricTouched rel = %q, want empty for an unresolvable path", rel)
+	}
+}
+
 func TestHasRetirementLabel(t *testing.T) {
 	if HasRetirementLabel(nil) {
 		t.Error("HasRetirementLabel(nil) = true, want false")

@@ -793,10 +793,8 @@ func BeginRehearsal(g *git.Git, target string) (*Rehearsal, error) {
 // BeginRehearsalAt is BeginRehearsal for a caller whose seed ref is not
 // origin/<target> itself — a landed/retro review of a diff that touched the
 // rubric, whose pre-change state has already been folded into origin/<target>
-// by the very commit under review (gt-7bvf; see Run's rubricTouched branch).
-// target is kept only as Rehearsal.target's record of what a later Branch
-// call would merge onto; callers that never call Branch on the result (the
-// rubric-touched path) pass it for consistency, not because this seeds from it.
+// by the very commit under review (gt-7bvf). target only records what a
+// later Branch call would merge onto; it does not affect the seed.
 func BeginRehearsalAt(g *git.Git, ref, target string) (*Rehearsal, error) {
 	dir, err := os.MkdirTemp("", "gt-mq-rehearse-*")
 	if err != nil {

@@ -194,25 +194,16 @@ func TestDetectRubricChangeAfterMerge_NoManifestIsNoOp(t *testing.T) {
 
 // TestDetectRubricChangeAfterMerge_AbsoluteRubricPathIsResolved is the
 // path-resolution fix: deploy.sh's documented absolute usage
-// (--rubric <rig>/refinery/rig/.om.json) must still be detected. rigDir
-// here plays the rig root, with the git working tree at rigDir/refinery/rig
-// (a copy of the landed clone) so the absolute manifest path actually
-// resolves inside it.
+// (--rubric <rig>/refinery/rig/.om.json) must still be detected.
+// detectRubricChangeAfterMerge resolves the manifest path purely as a
+// string against rigDir/refinery/rig, so no repo needs to exist there.
 func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathIsResolved(t *testing.T) {
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
-	repoRoot := filepath.Join(rigDir, "refinery", "rig")
-	// detectRubricChangeAfterMerge reads git history via rigGit (pointed at
-	// clone below), and resolves the absolute rubric path against
-	// rigDir/refinery/rig purely as a path, independent of that directory's
-	// own content — so a stand-in directory is enough.
-	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
-		t.Fatalf("mkdir repo root: %v", err)
-	}
 
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
 	manifest := &editorial.Manifest{}
-	manifest.Rubric.Path = filepath.Join(repoRoot, ".om.json")
+	manifest.Rubric.Path = filepath.Join(rigDir, "refinery", "rig", ".om.json")
 	manifest.Rubric.SHA256 = hex.EncodeToString(baseSum[:])
 	if err := editorial.SaveManifest(rigDir, manifest); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
@@ -234,11 +225,108 @@ func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathIsResolved(t *testing.T)
 	}
 }
 
-// TestRunMQPostMerge_RubricChangeEscalatesInsteadOfRestamping is the
-// mayor's gt-7bvf acceptance test: a merge that lowers the rubric threshold
-// escalates to the operator via `gt escalate`, and the harness manifest is
-// left untouched — never restamped automatically.
-func TestRunMQPostMerge_RubricChangeEscalatesInsteadOfRestamping(t *testing.T) {
+// TestDetectRubricChangeAfterMerge_AbsoluteRubricPathUnderSiblingCloneIsResolved
+// is the om-review finding this attempt fixes: the gastown rig deploys with
+// --rubric under mayor/rig, but detectRubricChangeAfterMerge always resolves
+// against rigDir/refinery/rig. Both clones of the same rig track the same
+// files at the same paths, so the manifest path must still resolve even
+// though it names the OTHER clone (gt-7bvf).
+func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathUnderSiblingCloneIsResolved(t *testing.T) {
+	clone, head := initRubricRestampRepo(t, true)
+	rigDir := t.TempDir()
+
+	baseSum := sha256.Sum256([]byte(restampBaseRubric))
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = filepath.Join(rigDir, "mayor", "rig", ".om.json")
+	manifest.Rubric.SHA256 = hex.EncodeToString(baseSum[:])
+	if err := editorial.SaveManifest(rigDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	mr := &refinery.MergeRequest{ID: "gt-mr-1", TargetBranch: "main"}
+	touched, rel, sha, err := detectRubricChangeAfterMerge(rigDir, git.NewGit(clone), mr, head)
+	if err != nil {
+		t.Fatalf("detectRubricChangeAfterMerge: %v", err)
+	}
+	if !touched {
+		t.Fatal("touched = false, want true: an absolute rubric path under mayor/rig must still be detected even though this resolves against refinery/rig")
+	}
+	if rel != ".om.json" {
+		t.Errorf("rel = %q, want .om.json", rel)
+	}
+	if sha == "" {
+		t.Error("sha is empty, want the landed rubric's hash")
+	}
+}
+
+// TestDetectRubricChangeAfterMerge_UnresolvableRubricPathFailsClosed: a
+// manifest whose rubric path resolves under neither rigDir/refinery/rig nor
+// a sibling rig clone must be reported as touched, never as untouched — an
+// unresolvable path can silently disable every rubric protection (gt-7bvf).
+func TestDetectRubricChangeAfterMerge_UnresolvableRubricPathFailsClosed(t *testing.T) {
+	clone, head := initRubricRestampRepo(t, true)
+	rigDir := t.TempDir()
+
+	baseSum := sha256.Sum256([]byte(restampBaseRubric))
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = filepath.FromSlash("/etc/somewhere/.om.json")
+	manifest.Rubric.SHA256 = hex.EncodeToString(baseSum[:])
+	if err := editorial.SaveManifest(rigDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	mr := &refinery.MergeRequest{ID: "gt-mr-1", TargetBranch: "main"}
+	touched, _, _, err := detectRubricChangeAfterMerge(rigDir, git.NewGit(clone), mr, head)
+	if err == nil {
+		t.Fatal("detectRubricChangeAfterMerge returned nil error for an unresolvable rubric path, want a fail-closed error")
+	}
+	if !touched {
+		t.Error("touched = false, want true: an unresolvable rubric path must fail closed")
+	}
+}
+
+// TestDetectRubricChangeAfterMerge_CorruptManifestReturnsError: a manifest
+// file that exists but fails to parse must be reported as an error, not
+// silently treated the same as no manifest deployed at all.
+func TestDetectRubricChangeAfterMerge_CorruptManifestReturnsError(t *testing.T) {
+	clone, head := initRubricRestampRepo(t, true)
+	rigDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rigDir, ".gastown-harness-manifest.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt manifest: %v", err)
+	}
+
+	mr := &refinery.MergeRequest{ID: "gt-mr-1", TargetBranch: "main"}
+	touched, _, _, err := detectRubricChangeAfterMerge(rigDir, git.NewGit(clone), mr, head)
+	if err == nil {
+		t.Fatal("detectRubricChangeAfterMerge returned nil error for a corrupt manifest, want an error")
+	}
+	if touched {
+		t.Error("touched = true, want false: a corrupt manifest carries no rubric path to check")
+	}
+}
+
+// fakeExecutable writes a shell script at binDir/name that appends its args
+// to logPath, one call per line, and exits 0.
+func fakeExecutable(t *testing.T, binDir, name, logPath string) {
+	t.Helper()
+	script := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping is the
+// runMQPostMerge wiring this attempt adds a test for: a merge that lowers
+// the rubric threshold escalates to the operator via `gt escalate`, records
+// rubric_changed_escalated on the MR bead via `bd`, and never restamps the
+// harness manifest.
+func TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
@@ -255,24 +343,13 @@ func TestRunMQPostMerge_RubricChangeEscalatesInsteadOfRestamping(t *testing.T) {
 
 	binDir := t.TempDir()
 	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
-	gtScript := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" >> \"$GT_ARGS_LOG\"\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0o755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	fakeExecutable(t, binDir, "gt", gtLog)
+	fakeExecutable(t, binDir, "bd", bdLog)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_ARGS_LOG", gtLog)
 
 	mr := &refinery.MergeRequest{ID: "gt-mr-threshold", TargetBranch: "main"}
-	touched, rel, sha, err := detectRubricChangeAfterMerge(rigDir, git.NewGit(clone), mr, head)
-	if err != nil {
-		t.Fatalf("detectRubricChangeAfterMerge: %v", err)
-	}
-	if !touched {
-		t.Fatal("touched = false, want true: this MR lowered the threshold and added a criterion")
-	}
-	escalateRubricChange("test-rig", mr.TargetBranch, rel, sha, mr.ID)
+	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
 
 	gtCalls := readFile(t, gtLog)
 	if !strings.Contains(gtCalls, "escalate") {
@@ -280,6 +357,10 @@ func TestRunMQPostMerge_RubricChangeEscalatesInsteadOfRestamping(t *testing.T) {
 	}
 	if !strings.Contains(gtCalls, "rubric changed on main") {
 		t.Fatalf("escalation message missing rubric-change context, gt log:\n%s", gtCalls)
+	}
+	bdCalls := readFile(t, bdLog)
+	if !strings.Contains(bdCalls, "rubric_changed_escalated") {
+		t.Fatalf("bd comments add did not record rubric_changed_escalated, bd log:\n%s", bdCalls)
 	}
 
 	// The manifest must still carry the OLD (pre-merge) sha: no restamp.
@@ -289,6 +370,70 @@ func TestRunMQPostMerge_RubricChangeEscalatesInsteadOfRestamping(t *testing.T) {
 	}
 	if reloaded.Rubric.SHA256 != baseSHA {
 		t.Errorf("manifest rubric sha = %s, want unchanged %s (no auto-restamp)", reloaded.Rubric.SHA256, baseSHA)
+	}
+}
+
+// TestHandlePostMergeRubricChange_UnresolvablePathStillEscalates is the
+// fail-closed wiring: a detection error from an unresolvable rubric path
+// must still trigger the operator escalation, not just a warning — the
+// warning alone is what silently disabled every rubric protection before
+// this attempt (gt-7bvf).
+func TestHandlePostMergeRubricChange_UnresolvablePathStillEscalates(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	clone, head := initRubricRestampRepo(t, true)
+	rigDir := t.TempDir()
+	baseSum := sha256.Sum256([]byte(restampBaseRubric))
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = filepath.FromSlash("/etc/somewhere/.om.json")
+	manifest.Rubric.SHA256 = hex.EncodeToString(baseSum[:])
+	if err := editorial.SaveManifest(rigDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	fakeExecutable(t, binDir, "gt", gtLog)
+	fakeExecutable(t, binDir, "bd", bdLog)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mr := &refinery.MergeRequest{ID: "gt-mr-unresolvable", TargetBranch: "main"}
+	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
+
+	gtCalls := readFile(t, gtLog)
+	if !strings.Contains(gtCalls, "escalate") {
+		t.Fatalf("gt escalate was not invoked for an unresolvable rubric path, gt log:\n%s", gtCalls)
+	}
+}
+
+// TestHandlePostMergeRubricChange_UntouchedDoesNotEscalate: a merge that
+// never touched the rubric must not invoke `gt escalate` at all.
+func TestHandlePostMergeRubricChange_UntouchedDoesNotEscalate(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	clone, head := initRubricRestampRepo(t, false)
+	rigDir := t.TempDir()
+	baseSum := sha256.Sum256([]byte(restampBaseRubric))
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = ".om.json"
+	manifest.Rubric.SHA256 = hex.EncodeToString(baseSum[:])
+	if err := editorial.SaveManifest(rigDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
+	fakeExecutable(t, binDir, "gt", gtLog)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mr := &refinery.MergeRequest{ID: "gt-mr-untouched", TargetBranch: "main"}
+	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
+
+	if gtCalls := readFile(t, gtLog); strings.Contains(gtCalls, "escalate") {
+		t.Fatalf("gt escalate was invoked for a merge that never touched the rubric, gt log:\n%s", gtCalls)
 	}
 }
 

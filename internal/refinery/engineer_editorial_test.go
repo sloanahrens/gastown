@@ -907,13 +907,8 @@ func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *tes
 }
 
 // TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator is the batch
-// path's half of the mayor's gt-7bvf design decision: before this, only the
-// CLI's `gt mq post-merge` re-stamped the manifest after a rubric-touching
-// merge, so a rubric change that landed through the batch path (this
-// function) left the manifest stale with no escalation at all — the exact
-// outage gt-7bvf exists to fix, on the one path nothing caught it. Now
-// both paths detect the touch and escalate to the operator; neither
-// restamps the manifest automatically (a rubric change never self-deploys).
+// path's half of the CLI post-merge protection: a rubric-touching merge
+// escalates to the operator and never restamps the manifest (gt-7bvf).
 func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
 	_, gtLog := fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
@@ -985,5 +980,55 @@ func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
 	}
 	if reloaded.Rubric.SHA256 != baseSHA {
 		t.Errorf("manifest rubric sha = %s, want unchanged %s (no auto-restamp)", reloaded.Rubric.SHA256, baseSHA)
+	}
+}
+
+// TestHandleMRInfoSuccess_UnresolvableRubricPathStillEscalates is the
+// batch path's fail-closed requirement: an unresolvable rubric path must
+// still escalate to the operator, not just log a warning — the warning
+// alone is what silently disabled every rubric protection before this
+// attempt (gt-7bvf).
+func TestHandleMRInfoSuccess_UnresolvableRubricPathStillEscalates(t *testing.T) {
+	_, gtLog := fakeBDAndGt(t)
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	writeFile(t, workDir, "feature.txt", "hello\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add feature")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	branch := "polecat/test/unresolvable-rubric-path"
+	run(t, workDir, "git", "checkout", "-b", branch, "main")
+	writeFile(t, workDir, "feature.txt", "hello again\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "touch feature")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+
+	manifest := &editorial.Manifest{}
+	manifest.Rubric.Path = filepath.FromSlash("/etc/somewhere/.om.json")
+	manifest.Rubric.SHA256 = "deadbeef"
+	if err := editorial.SaveManifest(workDir, manifest); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+
+	e := newTestEngineer(t, workDir, g)
+	if !e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-unresolvable-rubric-path",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit}) {
+		t.Fatalf("HandleMRInfoSuccess failed:\n%s", e.output.(interface{ String() string }).String())
+	}
+
+	if gtCalls := readLog(t, gtLog); !strings.Contains(gtCalls, "escalate") {
+		t.Fatalf("gt escalate was not invoked for an unresolvable rubric path, gt log:\n%s", gtCalls)
 	}
 }
