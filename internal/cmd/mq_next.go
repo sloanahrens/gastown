@@ -100,25 +100,15 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 			return ti.Before(tj)
 		})
 	} else {
-		// Priority: highest score first
-		type scoredIssue struct {
-			issue *beads.Issue
-			score float64
-		}
-		scored := make([]scoredIssue, len(ready))
+		// Priority: highest score first, the same ranking gt mq review's
+		// order check uses (rankReadyMRs, gt-tgey7).
+		scored := make([]rankedMR, len(ready))
 		for i, issue := range ready {
-			fields := beads.ParseMRFields(issue)
-			score := calculateMRScore(issue, fields, now)
-			scored[i] = scoredIssue{issue: issue, score: score}
+			scored[i] = rankedMR{Issue: issue, Score: calculateMRScore(issue, beads.ParseMRFields(issue), now)}
 		}
-
-		sort.Slice(scored, func(i, j int) bool {
-			return scored[i].score > scored[j].score
-		})
-
-		// Rebuild ready slice in sorted order
+		sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 		for i, s := range scored {
-			ready[i] = s.issue
+			ready[i] = s.Issue
 		}
 	}
 

@@ -77,13 +77,18 @@ target to the rig's remote default branch (--rig, --target). The positional MR
 id is optional, and only routes the verdict to that bead in addition to the
 note.
 
-Exit code: 0 approve, 1 request_changes, 2 infra failure (never an approval).
+An MR review is refused (exit 2) while a ready MR that gt mq next ranks higher
+is waiting, naming that MR; --out-of-order "<reason>" overrides for a real
+exception such as a stack that depends on this MR (gt-tgey7).
+Exit code: 0 approve, 1 request_changes, 2 infra failure or out-of-order
+refusal (never an approval).
 
 Examples:
   gt mq review gt-mr-abc123
   gt mq review gt-mr-abc123 --rehearsed temp-branch
   gt mq review gt-mr-abc123 --timeout 900
   gt mq review gt-mr-abc123 --json
+  gt mq review gt-mr-abc123 --out-of-order "stacked on gt-mr-xyz"
   gt mq review --landed 3107a0d
   gt mq review --landed 3107a0d --target main --rig gastown`,
 	Args: cobra.RangeArgs(0, 2),
@@ -105,6 +110,7 @@ func init() {
 	mqReviewCmd.Flags().BoolVar(&mqReviewReroll, "reroll", false, "Re-review a head that already carries a recorded verdict for the same diff and rubric, replacing it (recorded in the note's attempt history)")
 	mqReviewCmd.Flags().StringVar(&mqReviewLanded, "landed", "", "Review a commit that already landed on the target branch instead of a submitted MR: no rehearsal, no MR bead — the verdict is stamped on the landed commit itself (positional MR id optional)")
 	mqReviewCmd.Flags().StringVar(&mqReviewTarget, "target", "", "Target branch a --landed commit landed on (default: the rig's remote default branch)")
+	mqReviewCmd.Flags().StringVar(&mqReviewOutOfOrder, "out-of-order", "", "Review this MR even though a ready, higher-priority MR outranks it; the value is the reason (e.g. a stack that depends on it)")
 	mqReviewCmd.Flags().StringVar(&mqReviewRigFlag, "rig", "", "Rig to review a --landed commit in (default: the current rig)")
 	mqCmd.AddCommand(mqReviewCmd)
 }
@@ -187,6 +193,13 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 	townRoot, r, err := getRig(fields.Rig)
 	if err != nil {
 		return editorial.ReviewResult{}, err
+	}
+
+	if refusal := mqReviewOrderRefusal(issue, fields, fields.Rig, r.BeadsPath()); refusal != "" {
+		return editorial.ReviewResult{Exit: 2, Class: editorial.ConfigError, Stderr: refusal}, nil
+	}
+	if mqReviewOutOfOrder != "" {
+		fmt.Fprintf(os.Stderr, "Reviewing %s out of priority order: %s\n", mrID, mqReviewOutOfOrder)
 	}
 
 	var editorialCfg config.EditorialConfig

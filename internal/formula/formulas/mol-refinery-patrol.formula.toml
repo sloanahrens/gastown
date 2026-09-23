@@ -317,7 +317,9 @@ If branch doesn't exist for a queued MR:
 - If `PR_STATE=CLOSED`: do NOT send MERGED; leave the MR for manual rejection/supersede review.
 - If `PR_STATE=NOT_FOUND`: fail closed; leave the MR open rather than risking owner-merged/deleted-head misclassification.
 
-Track verified MR list for this cycle."""
+Track verified MR list for this cycle. That list is for verification only: it
+is a snapshot, so it is NOT the order you process MRs in. process-branch takes
+each next MR from `gt mq next` (gt-tgey7)."""
 
 [[steps]]
 id = "merged-pr-sweep"
@@ -539,7 +541,21 @@ id = "process-branch"
 title = "Merge rehearsal"
 needs = ["batch-scan"]
 description = """
-Pick next branch from queue. Rehearse an ancestry-preserving merge against the MR's effective target branch.
+Pick the next MR with `gt mq next`, then rehearse an ancestry-preserving merge against the MR's effective target branch.
+
+**Step -1: Pick the MR (priority order, gt-tgey7)**
+
+Immediately before each pick, re-read the queue and take exactly the MR it names:
+```bash
+MR=$(gt mq next <rig> --quiet)   # empty = no ready MR: go to loop-check
+```
+Never pick from the list you noted at queue-scan: it is a snapshot, and an MR
+queued since (a P0 fix, say) must be taken at the next pick, not next cycle. On
+2026-09-23 a P0 waited behind a P2 exactly that way. `gt mq review` enforces
+this: it exits 2 with "out of priority order: <mr> ... outranks" while a ready,
+higher-scored MR waits. Treat that as "switch to the named MR", not as an infra
+failure. For a real exception (a stack that depends on this MR) pass
+`--out-of-order "<reason>"` to `gt mq review` and say why in your notes.
 
 **Config: integration_branch_refinery_enabled = {{integration_branch_refinery_enabled}}**
 **Config: target_branch = {{target_branch}}**
