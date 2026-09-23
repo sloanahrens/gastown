@@ -1088,6 +1088,29 @@ func (e fakeSeatDirEntry) Info() (os.FileInfo, error) {
 	return nil, fmt.Errorf("fakeSeatFS entry %s carries no file info", e.name)
 }
 
+// The same requirement against a claim path that really cannot be read — a
+// regular file where the directory belongs, the shape an interrupted write or a
+// bad copy leaves behind — so the fail-closed behavior does not rest on the
+// injected filesystem alone. On the fail-open code this test routes the sling
+// to the local seat.
+func TestPoolSeatClaimReadFailureFailsClosedWhenThePathIsNotADirectory(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 3, "", 0)
+	if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poolSeatClaimDir(townRoot), []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent, reason := slingFromAnotherProcess(t, townRoot, "gt-a")
+	if agent != claimOverflow {
+		t.Errorf("the local seat must not be taken while its claims are unreadable: got %q (%s)", agent, reason)
+	}
+	if !strings.Contains(reason, "cannot read seat claims") {
+		t.Errorf("the reason names the failure rather than a clean count: %q", reason)
+	}
+}
+
 // A claim set that could not be read is not a claim set that is empty: the
 // seats it holds are unknown, and the local seat is the seat the claims exist
 // to hold the cap on, so it is not taken on a count that cannot see them.
