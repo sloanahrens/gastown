@@ -3,8 +3,10 @@ package polecat
 import (
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatGeneratedBranchName_ActionCompatible(t *testing.T) {
@@ -99,6 +101,59 @@ func TestParseBranchName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBranchNameMetaGeneratedAt(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	suffix := strconv.FormatInt(now.UnixMilli(), 36)
+
+	t.Run("decodes a generated timestamp suffix", func(t *testing.T) {
+		meta, ok := ParseGeneratedBranchName(FormatGeneratedBranchName("alpha", "gt-abc", suffix))
+		if !ok {
+			t.Fatalf("ParseGeneratedBranchName did not parse a branch it generated")
+		}
+		got, ok := meta.GeneratedAt()
+		if !ok {
+			t.Fatalf("GeneratedAt() ok = false, want true")
+		}
+		if !got.Equal(now) {
+			t.Fatalf("GeneratedAt() = %v, want %v", got, now)
+		}
+	})
+
+	t.Run("decodes the no-issue dash form", func(t *testing.T) {
+		meta, ok := ParseGeneratedBranchName(FormatGeneratedBranchName("alpha", "", suffix))
+		if !ok {
+			t.Fatalf("ParseGeneratedBranchName did not parse a branch it generated")
+		}
+		got, ok := meta.GeneratedAt()
+		if !ok {
+			t.Fatalf("GeneratedAt() ok = false, want true")
+		}
+		if !got.Equal(now) {
+			t.Fatalf("GeneratedAt() = %v, want %v", got, now)
+		}
+	})
+
+	t.Run("rejects the preserve-then-nuke backup-<sha> suffix", func(t *testing.T) {
+		meta, ok := ParseGeneratedBranchName(FormatGeneratedBranchName("alpha", "gt-abc", "backup-deadbeef"))
+		if !ok {
+			t.Fatalf("ParseGeneratedBranchName did not parse a branch it generated")
+		}
+		if _, ok := meta.GeneratedAt(); ok {
+			t.Fatalf("GeneratedAt() ok = true for a backup-<sha> suffix, want false")
+		}
+	})
+
+	t.Run("rejects a non-generated branch", func(t *testing.T) {
+		meta, ok := ParseBranchName("polecat/alpha/gt-pin-bd-metadata")
+		if !ok {
+			t.Fatalf("ParseBranchName did not parse")
+		}
+		if _, ok := meta.GeneratedAt(); ok {
+			t.Fatalf("GeneratedAt() ok = true for a non-generated branch, want false")
+		}
+	})
 }
 
 func TestParseGeneratedBranchNameRejectsRawDashedIssues(t *testing.T) {

@@ -2959,7 +2959,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 func runPolecatPrune(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
-	_, r, err := getPolecatManager(rigName)
+	mgr, r, err := getPolecatManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -3007,7 +3007,7 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Println("Pruning remote polecat branches...")
 
-		remotePruned, remoteErr := pruneRemotePolecatBranches(repoGit, polecatPruneDryRun)
+		remotePruned, remoteErr := pruneRemotePolecatBranches(managerStateLookup(mgr), repoGit, polecatPruneDryRun)
 		if remoteErr != nil {
 			return remoteErr
 		}
@@ -3026,7 +3026,75 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func pruneRemotePolecatBranches(repoGit *git.Git, dryRun bool) (int, error) {
+// minRemoteBranchPruneAge is the minimum time a generated polecat branch must
+// have existed before --remote pruning will even consider deleting it,
+// regardless of what beads/tmux report about its owning polecat. Ancestry
+// alone cannot tell a truly stale, abandoned branch apart from one that
+// belongs to a polecat still mid-spawn in the very dispatch burst that
+// triggered this prune run: a brand-new branch with zero commits ahead of
+// the base is trivially "merged" into it, exactly like a merged-and-abandoned
+// one (gt-527j). This grace window is a backstop for state that has not
+// propagated yet, independent of the liveness lookup below.
+const minRemoteBranchPruneAge = 15 * time.Minute
+
+// polecatStateLookup resolves a polecat's current lifecycle state by name.
+// The production implementation wraps a *polecat.Manager's Get; tests
+// substitute a deterministic fake so a remote-prune decision never depends
+// on a live beads/tmux backend to be exercised.
+type polecatStateLookup func(name string) (polecat.State, error)
+
+// managerStateLookup adapts a polecat.Manager (nil-safe) to a
+// polecatStateLookup. A nil manager yields a nil lookup, which
+// remotePolecatBranchEligibleForPrune treats as "cannot verify" and fails
+// closed.
+func managerStateLookup(mgr *polecat.Manager) polecatStateLookup {
+	if mgr == nil {
+		return nil
+	}
+	return func(name string) (polecat.State, error) {
+		p, err := mgr.Get(name)
+		if err != nil {
+			return "", err
+		}
+		return p.State, nil
+	}
+}
+
+// remotePolecatBranchEligibleForPrune reports whether branch may even be
+// considered for remote pruning, before the ancestry/merge-preservation
+// check runs. It fails closed — returns false — on every case it cannot
+// positively clear: an unparseable branch name, an undecodable or too-young
+// generated timestamp, a missing state lookup, or a polecat whose live state
+// could not be read. Only a branch that is old enough AND whose owning
+// polecat is demonstrably not live (idle/done, or no such identity exists
+// any more) is eligible; the caller still has to prove it is actually
+// preserved on the target branch on top of that (git branch -d semantics —
+// unmerged work is never deleted).
+func remotePolecatBranchEligibleForPrune(lookup polecatStateLookup, branch string, now time.Time) bool {
+	meta, ok := polecat.ParseGeneratedBranchName(branch)
+	if !ok || meta.Polecat == "" {
+		return false
+	}
+
+	generatedAt, ok := meta.GeneratedAt()
+	if !ok || now.Sub(generatedAt) < minRemoteBranchPruneAge {
+		return false
+	}
+
+	if lookup == nil {
+		return false
+	}
+	state, err := lookup(meta.Polecat)
+	if err != nil {
+		// A definitive "no such polecat identity" means nothing can be live
+		// under this name any more. Any other error (beads/tmux unreadable,
+		// timeout, ...) is an unknown state, which fails closed.
+		return errors.Is(err, polecat.ErrPolecatNotFound)
+	}
+	return state.IsReuseEligible()
+}
+
+func pruneRemotePolecatBranches(lookup polecatStateLookup, repoGit *git.Git, dryRun bool) (int, error) {
 	defaultBranch := repoGit.RemoteDefaultBranch()
 	target := repoGit.CleanDefaultBranchBaseRef("origin", defaultBranch)
 	if targetRemote := git.RemoteForRef(target); targetRemote != "" && targetRemote != "origin" {
@@ -3039,12 +3107,17 @@ func pruneRemotePolecatBranches(repoGit *git.Git, dryRun bool) (int, error) {
 		return 0, fmt.Errorf("listing remote refs: %w", lsErr)
 	}
 
+	now := time.Now()
 	remotePruned := 0
 	for _, ref := range remoteRefs {
 		if !strings.HasPrefix(ref.Name, "refs/heads/") {
 			continue
 		}
 		branch := strings.TrimPrefix(ref.Name, "refs/heads/")
+		if !remotePolecatBranchEligibleForPrune(lookup, branch, now) {
+			continue
+		}
+
 		status, statusErr := repoGit.PushRemoteRefTargetStatus("origin", ref, target)
 		if statusErr != nil || !status.Preserved {
 			continue
