@@ -30,17 +30,16 @@ func TestSlotRunNiceness(t *testing.T) {
 	}
 }
 
-func TestWithNice(t *testing.T) {
+func TestNiceWrapper(t *testing.T) {
 	t.Parallel()
-	base := []string{"make", "test"}
-	if got := withNice(base, 0); strings.Join(got, " ") != "make test" {
-		t.Errorf("nice 0 must leave the command alone: %v", got)
+	if got := niceWrapper(0); got != nil {
+		t.Errorf("nice 0 must not wrap the command: %v", got)
 	}
-	got := withNice(base, 10)
-	if len(got) != 5 || !strings.HasSuffix(got[0], "nice") || got[1] != "-n" || got[2] != "10" || got[3] != "make" || got[4] != "test" {
-		t.Errorf("withNice(10) = %v, want <nice> -n 10 make test", got)
+	if got := niceWrapper(-1); got != nil {
+		t.Errorf("a negative niceness must not wrap the command: %v", got)
 	}
-	if got := withNice(nil, 10); got != nil {
-		t.Errorf("empty command must stay empty: %v", got)
+	got := niceWrapper(10)
+	if len(got) != 3 || !strings.HasSuffix(got[0], "nice") || got[1] != "-n" || got[2] != "10" {
+		t.Errorf("niceWrapper(10) = %v, want <nice> -n 10", got)
 	}
 }

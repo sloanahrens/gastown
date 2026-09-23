@@ -32,10 +32,11 @@ func writePlainFile(t *testing.T, dir, name string) string {
 	return path
 }
 
-// TestValidateSlotCommand covers the rule gt-f4xe adds: the command has to be
+// TestResolveSlotCommand covers the rule gt-f4xe adds: the command has to be
 // resolvable before gt slot run takes the gate, so a mistyped binary or a bare
-// list of assignments is refused rather than holding a slot to fail in.
-func TestValidateSlotCommand(t *testing.T) {
+// list of assignments is refused rather than holding a slot to fail in. A case
+// with wantProgram set also pins which file the resolution names.
+func TestResolveSlotCommand(t *testing.T) {
 	t.Parallel()
 
 	emptyDir := t.TempDir()
@@ -43,18 +44,17 @@ func TestValidateSlotCommand(t *testing.T) {
 	stub := writeExecutable(t, binDir, "probe-gt-f4xe")
 
 	cases := []struct {
-		name       string
-		envAssigns []string
-		cmdArgs    []string
-		wantErr    string
+		name        string
+		envAssigns  []string
+		cmdArgs     []string
+		wantProgram string
+		wantErr     string
 	}{
 		{
 			name:    "plain command on PATH",
 			cmdArgs: []string{"sh"},
 		},
 		{
-			// The exact shape that burned four slot turns: the wrapper execs
-			// the assignment instead of the program.
 			name:    "unknown program",
 			cmdArgs: []string{"definitely-not-a-real-binary-xyz"},
 			wantErr: "executable file not found in $PATH: definitely-not-a-real-binary-xyz",
@@ -71,20 +71,25 @@ func TestValidateSlotCommand(t *testing.T) {
 		},
 		{
 			// A PATH= among the leading assignments decides what the child
-			// resolves, so it has to decide the validation too.
-			name:       "program reachable only via an assigned PATH",
-			envAssigns: []string{"PATH=" + binDir},
-			cmdArgs:    []string{"probe-gt-f4xe"},
+			// resolves, so it decides the validation and the exec alike.
+			name:        "program reachable only via an assigned PATH",
+			envAssigns:  []string{"PATH=" + binDir},
+			cmdArgs:     []string{"probe-gt-f4xe"},
+			wantProgram: stub,
 		},
 		{
-			name:       "assigned PATH hides an otherwise reachable program",
+			// The assigned PATH governs rather than being searched after the
+			// ambient one, so naming a PATH without the program is refused
+			// before the gate instead of running a different binary.
+			name:       "ambient program is not found under an assigned PATH",
 			envAssigns: []string{"PATH=" + emptyDir},
 			cmdArgs:    []string{"sh"},
 			wantErr:    "executable file not found in $PATH: sh",
 		},
 		{
-			name:    "program named by path",
-			cmdArgs: []string{stub},
+			name:        "program named by path",
+			cmdArgs:     []string{stub},
+			wantProgram: stub,
 		},
 		{
 			name:    "missing program named by path",
@@ -101,20 +106,52 @@ func TestValidateSlotCommand(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateSlotCommand(c.envAssigns, c.cmdArgs)
-			if c.wantErr == "" {
-				if err != nil {
-					t.Fatalf("validateSlotCommand(%v, %v) = %v, want nil", c.envAssigns, c.cmdArgs, err)
+			program, err := resolveSlotCommand(c.envAssigns, c.cmdArgs)
+			if c.wantErr != "" {
+				if err == nil {
+					t.Fatalf("resolveSlotCommand(%v, %v) = nil, want error containing %q", c.envAssigns, c.cmdArgs, c.wantErr)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("resolveSlotCommand(%v, %v) = %q, want it to contain %q", c.envAssigns, c.cmdArgs, err, c.wantErr)
 				}
 				return
 			}
-			if err == nil {
-				t.Fatalf("validateSlotCommand(%v, %v) = nil, want error containing %q", c.envAssigns, c.cmdArgs, c.wantErr)
+			if err != nil {
+				t.Fatalf("resolveSlotCommand(%v, %v) = %v, want nil", c.envAssigns, c.cmdArgs, err)
 			}
-			if !strings.Contains(err.Error(), c.wantErr) {
-				t.Fatalf("validateSlotCommand(%v, %v) = %q, want it to contain %q", c.envAssigns, c.cmdArgs, err, c.wantErr)
+			if c.wantProgram != "" && program != c.wantProgram {
+				t.Errorf("resolveSlotCommand(%v, %v) resolved %q, want %q", c.envAssigns, c.cmdArgs, program, c.wantProgram)
 			}
 		})
+	}
+}
+
+// TestSlotChildCommandRunsResolvedProgram covers the gate-role case, where no
+// nice(1) wrapper intervenes — the case validation and exec disagreed on. Two
+// programs share a name; the one the child runs has to be the assigned PATH's,
+// not the ambient one exec.Command would find (gt-f4xe).
+func TestSlotChildCommandRunsResolvedProgram(t *testing.T) {
+	ambientDir := t.TempDir()
+	binDir := t.TempDir()
+	writeScript(t, ambientDir, "probe-gt-f4xe", "#!/bin/sh\necho ambient\n")
+	writeScript(t, binDir, "probe-gt-f4xe", "#!/bin/sh\necho assigned\n")
+	t.Setenv("PATH", ambientDir)
+
+	// A gate-class role takes the unwrapped branch.
+	if w := niceWrapper(slotRunNiceness("gastown/refinery", -1)); len(w) != 0 {
+		t.Fatalf("gate role wrapped in %v, want no wrapper", w)
+	}
+
+	program, err := resolveSlotCommand([]string{"PATH=" + binDir}, []string{"probe-gt-f4xe"})
+	if err != nil {
+		t.Fatalf("resolveSlotCommand: %v", err)
+	}
+	out, err := slotChildCommand(program, []string{"probe-gt-f4xe"}, nil).Output()
+	if err != nil {
+		t.Fatalf("running the resolved program: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "assigned" {
+		t.Errorf("child ran %q, want the program the assigned PATH resolved", got)
 	}
 }
 
@@ -163,12 +200,22 @@ func TestLookPathForSlot(t *testing.T) {
 	}
 
 	// An empty *entry* means the current directory, as it does in exec.LookPath
-	// and in a shell's PATH. (An empty PATH is not one empty entry — it is no
-	// entries at all, so nothing resolves; filepath.SplitList agrees.)
+	// and in a shell's PATH. The stub is reachable through that entry alone:
+	// the other entry is an empty directory and the ambient PATH holds another
+	// directory, so a resolution that fell through to the ambient PATH finds
+	// nothing where the empty entry should have found the stub.
 	t.Chdir(binDir)
-	emptyEntry := string(os.PathListSeparator) + binDir
-	if _, err := lookPathForSlot("probe-gt-f4xe", emptyEntry); err != nil {
+	ambientDir := t.TempDir()
+	writeExecutable(t, ambientDir, "sh")
+	t.Setenv("PATH", ambientDir)
+	onlyCwd := string(os.PathListSeparator) + t.TempDir()
+	if _, err := lookPathForSlot("probe-gt-f4xe", onlyCwd); err != nil {
 		t.Errorf("empty PATH entry should mean the current directory: %v", err)
+	}
+	// The same shape on the negative side: sh is on the ambient PATH and in
+	// neither entry here, so the empty entry must not resolve through it.
+	if _, err := lookPathForSlot("sh", onlyCwd); err == nil {
+		t.Error("an empty PATH entry resolved through the ambient PATH")
 	}
 	if _, err := lookPathForSlot("probe-gt-f4xe", ""); err == nil {
 		t.Error("an empty PATH has no entries, so nothing should resolve")
