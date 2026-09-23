@@ -75,8 +75,7 @@ var (
 	donePreVerified              bool
 	doneTarget                   string
 	doneSkipVerify               bool
-	doneAllowReverts             bool
-	doneAllowRevertsAuthorizedBy string
+	doneAllowReverts bool
 
 	doneAllowThrowawayPaths bool
 )
@@ -1103,8 +1102,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
-	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
-	doneCmd.Flags().StringVar(&doneAllowRevertsAuthorizedBy, "allow-reverts-authorized-by", "", "Bead ID recording the mayor ruling authorizing --allow-reverts (required for --allow-reverts when run by an agent)")
+	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (always refused from a polecat worktree; see 'gt mq submit --allow-reverts')")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
@@ -1651,17 +1649,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Runs after the auto-rebase above: a rebase replays the same diff, so
 		// it neither causes nor cures this and the check must see the branch in
 		// the state that would actually be pushed.
+		//
+		// gt done always runs from the assigned polecat worktree (enforced
+		// above by resolveDonePolecatWorktree), so --allow-reverts here is
+		// always refused (gt-0wy03 AC1); the check is still a real filesystem
+		// check, not a stub, so it holds even if that enforcement changes.
 		if doneAllowReverts {
-			if err := requireRevertOverrideAuthorization(actor, doneAllowRevertsAuthorizedBy); err != nil {
+			if err := requireNonPolecatCloneForRevertOverride(cwd); err != nil {
 				return err
-			}
-			if doneAllowRevertsAuthorizedBy != "" {
-				if err := verifyRevertOverrideBead(beads.New(cwd), g, contaminationBase, doneAllowRevertsAuthorizedBy, branch); err != nil {
-					return err
-				}
-				if err := recordRevertOverride(g, beads.New(cwd).AddComment, actor, doneAllowRevertsAuthorizedBy, contaminationBase); err != nil {
-					return err
-				}
 			}
 			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
 		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {

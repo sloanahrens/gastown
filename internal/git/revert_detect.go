@@ -79,10 +79,14 @@ type RevertedMerge struct {
 // commit added reads as a match whether or not that is what actually
 // happened (gt-0wy03). Before reporting a contained match, one escape hatch
 // asks whether the removal is really a relocation: see packageAddedLines for
-// what counts as relocated — content gained in a path this branch itself
-// changed, never a path it left untouched. Only checked for a contained
-// match: an exact match already requires the whole path back at its literal
-// pre-commit blob, leaving no partial shape for relocation to find.
+// what counts as relocated — a line gained anywhere in the package strictly
+// by the CANDIDATE'S OWN diff, merge-base to branch-tip, never content that
+// merely predates the merge base (gt-0wy03 AC2: any earlier baseline lets a
+// target commit's own addition, or a later target commit's, stand in for the
+// candidate's, so a real revert of it reads as rescued). Only checked for a
+// contained match: an exact match already requires the whole path back at
+// its literal pre-commit blob, leaving no partial shape for relocation to
+// find.
 //
 // There is no escape hatch keyed off commit-message text — an author's own
 // words must never bypass a landing check. The one sanctioned override is
@@ -111,33 +115,20 @@ func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, 
 		return nil, fmt.Errorf("reading history of %s: %w", target, err)
 	}
 
-	// parentTreeCache and packageAddedCache memoize, respectively, a flagged
-	// commit's own parent tree and the per-package added-lines multiset
-	// derived from it: several flagged paths sharing a commit, or a package
-	// with several flagged paths, would otherwise re-read or re-diff the same
-	// trees once per contained match.
-	parentTreeCache := map[string]map[string]string{}
+	// packageAddedCache memoizes the per-package added-lines multiset: it
+	// depends only on the merge base and HEAD, not on which flagged commit is
+	// being checked, so every contained match in a package shares one entry.
 	packageAddedCache := map[string]map[string]int{}
-	relocated := func(commit, path string, want map[string]int) (bool, error) {
+	relocated := func(path string, want map[string]int) (bool, error) {
 		pkg := packageDir(path)
-		cacheKey := commit + "\x00" + pkg
-		have, cached := packageAddedCache[cacheKey]
+		have, cached := packageAddedCache[pkg]
 		if !cached {
-			parentBlobs, ok := parentTreeCache[commit]
-			if !ok {
-				var err error
-				parentBlobs, err = g.TreeFileBlobs(commit + "^")
-				if err != nil {
-					return false, fmt.Errorf("reading parent tree of %s: %w", commit, err)
-				}
-				parentTreeCache[commit] = parentBlobs
-			}
 			var err error
-			have, err = packageAddedLines(g, parentBlobs, headBlobs, baseBlobs, pkg)
+			have, err = packageAddedLines(g, baseBlobs, headBlobs, pkg)
 			if err != nil {
 				return false, err
 			}
-			packageAddedCache[cacheKey] = have
+			packageAddedCache[pkg] = have
 		}
 		return multisetContains(have, want), nil
 	}
@@ -179,7 +170,7 @@ func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, 
 		// whole path back at its literal pre-commit blob, so there is no
 		// partial, still-present-elsewhere shape for relocation to find.
 		if changeAdded != nil {
-			ok, err := relocated(ch.Commit, ch.Path, changeAdded)
+			ok, err := relocated(ch.Path, changeAdded)
 			if err != nil {
 				return nil, err
 			}
@@ -249,24 +240,23 @@ func packageDir(path string) string {
 	return "."
 }
 
-// packageAddedLines returns the multiset of lines gained anywhere in pkg
-// between beforeBlobs and afterBlobs — across every file in the directory,
-// not just the one path a flagged commit touched — restricted to paths this
-// BRANCH's own commits actually changed: branchBefore[p] must differ from
-// afterBlobs[p]. branchBefore is the merge base's tree, so a path where it
-// equals afterBlobs is a path the branch never touched, and any content
-// gained there between beforeBlobs (the flagged commit's own parent) and
-// afterBlobs can only be a LATER TARGET COMMIT's addition, merged in after
-// the flagged one and before the merge base — never something this branch
-// did (gt-0wy03 attempt 3: an untouched sibling file gaining a matching line
-// from such a commit used to rescue a real revert of it).
+// packageAddedLines returns the multiset of lines the CANDIDATE BRANCH ITSELF
+// added anywhere in pkg — every line gained, across every file in the
+// directory, by the branch's own diff from the merge base to HEAD
+// (beforeBlobs to afterBlobs). beforeBlobs is always the merge base's tree,
+// never a flagged commit's parent: any content already present at the merge
+// base — whether added by the flagged commit itself or by a later target
+// commit merged before the merge base — contributes nothing here, however
+// identical it reads to the flagged commit's own line, because the branch
+// did not add it (gt-0wy03 AC2; attempt 3 left a hole where a later target
+// commit's own addition, in a path the branch changed, could still rescue a
+// revert of the flagged commit's line in that same path).
 //
-// This still catches the two shapes relocation is meant to: a repeated line
-// the flagged commit added in one spot while the candidate independently
-// touched another spot with the same text (gt-0wy03's own t.Parallel()
-// case), and a block of code moved whole into a new helper in the same file
-// (gt-x748o) — both are paths the branch itself changed.
-func packageAddedLines(g *Git, beforeBlobs, afterBlobs, branchBefore map[string]string, pkg string) (map[string]int, error) {
+// This still catches relocation the branch performs itself: a line moved
+// whole from one spot to another within the branch's own commits reads as
+// removed in one place and added in another of this same multiset
+// (gt-x748o).
+func packageAddedLines(g *Git, beforeBlobs, afterBlobs map[string]string, pkg string) (map[string]int, error) {
 	paths := make(map[string]struct{}, len(afterBlobs))
 	for p := range beforeBlobs {
 		paths[p] = struct{}{}
@@ -279,7 +269,7 @@ func packageAddedLines(g *Git, beforeBlobs, afterBlobs, branchBefore map[string]
 		if packageDir(p) != pkg {
 			continue
 		}
-		if branchBefore[p] == afterBlobs[p] {
+		if beforeBlobs[p] == afterBlobs[p] {
 			continue
 		}
 		a, _, err := g.BlobDiffLines(beforeBlobs[p], afterBlobs[p])

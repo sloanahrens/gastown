@@ -1,13 +1,11 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -512,173 +510,40 @@ func TestDetectRevertedMerges_RefusesUndocumentedFullRemoval(t *testing.T) {
 	}
 }
 
-// TestRequireRevertOverrideAuthorization pins the gt-61x-style guardrail: an
-// agent invoking --allow-reverts must name the bead that authorized it, since
-// commit-message text can no longer excuse a revert on its own. An empty
-// actor must refuse rather than pass — gt-0wy03 attempt 3: it means role
-// detection failed, not that a human is running the command, since gt done
-// already refuses to start unless BD_ACTOR names a validated polecat.
-func TestRequireRevertOverrideAuthorization(t *testing.T) {
-	t.Parallel()
-	t.Run("refuses an agent without an authorization bead", func(t *testing.T) {
-		err := requireRevertOverrideAuthorization("gastown/polecats/onyx", "")
+// TestRequireNonPolecatCloneForRevertOverride pins gt-0wy03 AC1: --allow-reverts
+// is refused whenever cwd resolves under a "*/polecats/*" path component, no
+// matter what identity env vars claim. GT_ROLE=mayor is set here specifically
+// because a bead field or env var is always caller-controlled — only the
+// actual worktree path, which the caller cannot fake without really running
+// the command from a non-polecat clone, may authorize the override.
+func TestRequireNonPolecatCloneForRevertOverride(t *testing.T) {
+	t.Run("refuses a polecat worktree even with GT_ROLE=mayor", func(t *testing.T) {
+		t.Setenv("GT_ROLE", "mayor")
+		dir := t.TempDir()
+		polecatWorktree := filepath.Join(dir, "gastown", "polecats", "onyx", "gastown")
+		if err := os.MkdirAll(polecatWorktree, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		err := requireNonPolecatCloneForRevertOverride(polecatWorktree)
 		if err == nil {
-			t.Fatal("expected refusal for an agent using --allow-reverts without --allow-reverts-authorized-by")
+			t.Fatal("expected refusal for --allow-reverts from a polecat worktree")
 		}
 		if !strings.Contains(err.Error(), "gt-0wy03") {
 			t.Errorf("error should reference the guardrail bead, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "--allow-reverts-authorized-by") {
-			t.Errorf("error should explain the remedy, got: %v", err)
+		if !strings.Contains(err.Error(), "gt mq submit --allow-reverts") {
+			t.Errorf("error should name the mayor-side override path, got: %v", err)
 		}
 	})
 
-	t.Run("allows an agent with an authorization bead", func(t *testing.T) {
-		if err := requireRevertOverrideAuthorization("gastown/polecats/onyx", "hq-abc"); err != nil {
-			t.Errorf("expected authorization to pass, got: %v", err)
+	t.Run("allows a non-polecat clone", func(t *testing.T) {
+		dir := t.TempDir()
+		mayorClone := filepath.Join(dir, "gastown", "mayor", "rig")
+		if err := os.MkdirAll(mayorClone, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
 		}
-	})
-
-	t.Run("fails closed when role detection failed, even with a bead named", func(t *testing.T) {
-		err := requireRevertOverrideAuthorization("", "hq-abc")
-		if err == nil {
-			t.Fatal("expected refusal when actor identity could not be verified, regardless of --allow-reverts-authorized-by")
-		}
-		if !strings.Contains(err.Error(), "gt-0wy03") {
-			t.Errorf("error should reference the guardrail bead, got: %v", err)
-		}
-	})
-}
-
-// TestRecordRevertOverride pins the audit trail --allow-reverts must leave:
-// the authorizing bead gets a permanent comment naming the actor and the
-// commits the override let through, and a failure to write that comment
-// refuses the override rather than proceeding silently (gt-0wy03 attempt 2).
-func TestRecordRevertOverride(t *testing.T) {
-	t.Parallel()
-	s := newRevertScenario(t)
-	commitPolecat(t, s.polecat, map[string]string{
-		"shared.txt": "base\npolecat line\n",
-		"fix.txt":    "the fix\n",
-	}, "wip: start")
-	advanceMain(t, s.seed)
-	staleResetOntoMain(t, s.polecat)
-	g := git.NewGit(s.polecat)
-
-	t.Run("writes the reverted commits to the authorizing bead", func(t *testing.T) {
-		var comments []string
-		addComment := func(id, text string) error {
-			comments = append(comments, id+": "+text)
-			return nil
-		}
-		if err := recordRevertOverride(g, addComment, "gastown/polecats/onyx", "hq-abc", "origin/main"); err != nil {
-			t.Fatalf("recordRevertOverride: %v", err)
-		}
-		if len(comments) != 1 {
-			t.Fatalf("expected 1 audit comment, got %d: %v", len(comments), comments)
-		}
-		for _, want := range []string{"hq-abc:", "gastown/polecats/onyx", "origin/main"} {
-			if !strings.Contains(comments[0], want) {
-				t.Errorf("audit comment missing %q: %s", want, comments[0])
-			}
-		}
-	})
-
-	t.Run("fails closed when the bead comment cannot be written", func(t *testing.T) {
-		addComment := func(id, text string) error { return fmt.Errorf("bead not found") }
-		if err := recordRevertOverride(g, addComment, "gastown/polecats/onyx", "hq-missing", "origin/main"); err == nil {
-			t.Fatal("expected recordRevertOverride to fail when the audit comment cannot be written")
-		}
-	})
-}
-
-// TestVerifyRevertOverrideBead pins the gt-2oy-style guardrail closing
-// gt-0wy03 attempt 3's second hole: requireRevertOverrideAuthorization only
-// checked that SOME bead ID was supplied, so nothing stopped a polecat
-// pointing --allow-reverts-authorized-by at its own hooked issue and
-// approving its own override. The bead must be a genuine mayor ruling: it
-// must exist, be created by the mayor, and name both this branch and every
-// commit the override is about to let through.
-func TestVerifyRevertOverrideBead(t *testing.T) {
-	t.Parallel()
-	s := newRevertScenario(t)
-	commitPolecat(t, s.polecat, map[string]string{
-		"shared.txt": "base\npolecat line\n",
-		"fix.txt":    "the fix\n",
-	}, "wip: start")
-	advanceMain(t, s.seed)
-	staleResetOntoMain(t, s.polecat)
-	g := git.NewGit(s.polecat)
-	const branch = "polecat/zircon/gt-test"
-
-	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
-	if err != nil {
-		t.Fatalf("detectRevertedMerges: %v", err)
-	}
-	if len(found) == 0 {
-		t.Fatal("expected the scenario to reproduce a reverted commit")
-	}
-
-	t.Run("refuses a missing authorization bead", func(t *testing.T) {
-		shower := fakeIssueShower{err: fmt.Errorf("not found")}
-		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-missing", branch); err == nil {
-			t.Fatal("expected refusal for a missing authorization bead")
-		}
-	})
-
-	t.Run("refuses a bead the polecat created itself", func(t *testing.T) {
-		shower := fakeIssueShower{issue: &beads.Issue{
-			ID:          "gt-0wy03",
-			CreatedBy:   "gastown/polecats/onyx",
-			Description: branch + " " + found[0].Commit,
-		}}
-		err := verifyRevertOverrideBead(shower, g, "origin/main", "gt-0wy03", branch)
-		if err == nil {
-			t.Fatal("expected refusal for a bead not created by the mayor")
-		}
-		if !strings.Contains(err.Error(), "mayor") {
-			t.Errorf("error should explain the bead must come from the mayor, got: %v", err)
-		}
-	})
-
-	t.Run("refuses a mayor bead that does not name this branch", func(t *testing.T) {
-		shower := fakeIssueShower{issue: &beads.Issue{
-			ID:          "hq-ruling",
-			CreatedBy:   "mayor",
-			Description: "reverting " + found[0].Commit,
-		}}
-		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err == nil {
-			t.Fatal("expected refusal for a ruling that does not name this branch")
-		}
-	})
-
-	t.Run("refuses a mayor bead that does not name the reverted commits", func(t *testing.T) {
-		shower := fakeIssueShower{issue: &beads.Issue{
-			ID:          "hq-ruling",
-			CreatedBy:   "mayor",
-			Description: "authorizing --allow-reverts on " + branch,
-		}}
-		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err == nil {
-			t.Fatal("expected refusal for a ruling that does not name the reverted commits")
-		}
-	})
-
-	t.Run("allows a mayor ruling naming the branch and every reverted commit", func(t *testing.T) {
-		var b strings.Builder
-		b.WriteString("authorizing --allow-reverts on ")
-		b.WriteString(branch)
-		b.WriteByte('\n')
-		for _, f := range found {
-			b.WriteString(f.Commit)
-			b.WriteByte('\n')
-		}
-		shower := fakeIssueShower{issue: &beads.Issue{
-			ID:          "hq-ruling",
-			CreatedBy:   "mayor",
-			Description: b.String(),
-		}}
-		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err != nil {
-			t.Errorf("expected a genuine mayor ruling to pass, got: %v", err)
+		if err := requireNonPolecatCloneForRevertOverride(mayorClone); err != nil {
+			t.Errorf("expected a non-polecat clone to pass, got: %v", err)
 		}
 	})
 }

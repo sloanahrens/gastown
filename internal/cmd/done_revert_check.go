@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -113,120 +113,33 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 	return fmt.Errorf("%s", b.String())
 }
 
-// requireRevertOverrideAuthorization enforces that an agent invoking
-// --allow-reverts names the bead recording the mayor ruling that authorized
-// it (gt-0wy03 attempt 2): commit-message text can no longer excuse a
-// revert, so the one remaining override must be traceable to an explicit
-// ruling the same way gt-61x requires for a forced Dolt cleanup.
+// requireNonPolecatCloneForRevertOverride refuses --allow-reverts whenever
+// cwd resolves under a "*/polecats/*" path component (gt-0wy03 AC1). A bead
+// field or an env var (GT_ROLE, BD_ACTOR, CreatedBy) is written by the same
+// agent the override would let bypass its own review, so none of them can
+// authorize anything — three straight rounds of review found a new way to
+// spoof each one. The worktree path is not spoofable the same way: reaching
+// a non-polecat clone means actually running the command from one, such as
+// mayor/rig, not merely setting a variable. This is a pure filesystem check
+// with no identity dependency, so it holds even if gt done's own
+// polecat-worktree enforcement (resolveDonePolecatWorktree) ever changes.
 //
-// actor is never a genuine human at a plain terminal: resolveDonePolecatWorktree
-// already refuses to let gt done run at all unless BD_ACTOR names a validated
-// polecat identity, so by the time this gate runs the caller is proven to be
-// an agent. An empty actor here means only that resolveDoneAgentIdentity's own
-// role detection failed (gt-0wy03 attempt 3) — GetRoleWithContext errored, or
-// returned RoleUnknown — not that a human is running the command. Treating
-// that failure as the human exemption let the override through exactly as
-// success would; it must fail closed instead.
-func requireRevertOverrideAuthorization(actor, authorizedBy string) error {
-	if actor == "" {
-		return fmt.Errorf(`gt done --allow-reverts cannot verify the requesting agent's identity (role detection failed) (gt-0wy03)
+// The one sanctioned override path is a mayor-side action from a non-polecat
+// clone: gt mq submit --allow-reverts --branch <branch> --reason <why>.
+func requireNonPolecatCloneForRevertOverride(cwd string) error {
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(cwd)), "/") {
+		if part == "polecats" {
+			return fmt.Errorf(`--allow-reverts is refused from a polecat worktree (gt-0wy03)
 
-This is the agent path — gt done already refused to run unless BD_ACTOR names a
-validated polecat, so a failure here is a detection problem, not a human
-running the command, and must refuse rather than proceed as if unattended.
-Re-run gt done; if this persists, escalate to the mayor.`)
-	}
-	if authorizedBy != "" {
-		return nil
-	}
-	return fmt.Errorf(`agent actor %q may not run 'gt done --allow-reverts' without recorded authorization (gt-0wy03)
+No env var or bead can authorize reverting merged work: both are written by
+the same agent the override would let bypass its own review. The override
+exists only as a mayor-side action, run from a non-polecat clone:
 
-Reverting merged work requires an authorization bead:
-  1. Escalate to the mayor and get an explicit ruling
-  2. Reference the bead that records the decision:
-       gt done --allow-reverts --allow-reverts-authorized-by <bead-id>
+  gt mq submit --allow-reverts --branch <branch> --reason <why>
 
-The override will be logged as a comment on that bead`, actor)
-}
-
-// recordRevertOverride writes the audit trail --allow-reverts must leave
-// (gt-0wy03 attempt 2): the ruling bead gets a permanent comment naming who
-// invoked the override and which commits it let through. addComment is
-// injected so this is testable without a live beads store; it fails closed —
-// if the record cannot be written, the override must not proceed, mirroring
-// cleanupAuditor.recordIntent (gt-87a).
-func recordRevertOverride(g *git.Git, addComment func(id, text string) error, actor, authorizedBy, target string) error {
-	found, detectErr := git.DetectRevertedMerges(g, target, "HEAD")
-	var detail string
-	switch {
-	case detectErr != nil:
-		detail = fmt.Sprintf("could not determine (error: %v)", detectErr)
-	case len(found) == 0:
-		detail = "none detected"
-	default:
-		commits := make([]string, 0, len(found))
-		for _, f := range found {
-			commits = append(commits, shortSHA(f.Commit))
-		}
-		detail = strings.Join(commits, ", ")
-	}
-	comment := fmt.Sprintf("gt done --allow-reverts by %s: bypassing merged-work revert check against %s; reverted commit(s): %s",
-		actor, target, detail)
-	if err := addComment(authorizedBy, comment); err != nil {
-		return fmt.Errorf("cannot write --allow-reverts audit record to %s — refusing to submit (gt-0wy03): %w", authorizedBy, err)
-	}
-	return nil
-}
-
-// verifyRevertOverrideBead checks that the --allow-reverts-authorized-by bead
-// is a genuine mayor ruling for THIS override, not merely some bead ID the
-// requesting agent typed (gt-0wy03 attempt 3): requireRevertOverrideAuthorization
-// only checks that a bead ID was supplied, so nothing previously stopped a
-// polecat pointing it at its own hooked issue and approving itself, the same
-// self-authorization hole gt-2oy closed for a forced Dolt cleanup. The bead
-// must exist, must have been created by the mayor, and must name both this
-// branch and every commit the override is about to let through — so one
-// ruling bead cannot be reused to cover a different branch or a different
-// revert than the one it was written for.
-func verifyRevertOverrideBead(shower beads.IssueShower, g *git.Git, target, id, branch string) error {
-	issue, err := shower.Show(id)
-	if err != nil {
-		return fmt.Errorf("authorization bead %s not found — gt done --allow-reverts requires a real mayor ruling bead (gt-0wy03): %w", id, err)
-	}
-	if issue == nil {
-		return fmt.Errorf("authorization bead %s not found — gt done --allow-reverts requires a real mayor ruling bead (gt-0wy03)", id)
-	}
-	if normalizeAddress(issue.CreatedBy) != "mayor" {
-		return fmt.Errorf("authorization bead %s was created by %q, not the mayor — an agent may not approve its own --allow-reverts override (gt-0wy03)", id, issue.CreatedBy)
-	}
-	text := revertOverrideBeadText(issue)
-	if !strings.Contains(text, branch) {
-		return fmt.Errorf("authorization bead %s does not name branch %q — the mayor ruling must name the branch it authorizes (gt-0wy03)", id, branch)
-	}
-	found, err := git.DetectRevertedMerges(g, target, "HEAD")
-	if err != nil {
-		return fmt.Errorf("cannot verify authorization bead %s against the branch's reverted commits: %w", id, err)
-	}
-	for _, f := range found {
-		if !strings.Contains(text, f.Commit) && !strings.Contains(text, shortSHA(f.Commit)) {
-			return fmt.Errorf("authorization bead %s does not name reverted commit %s — the mayor ruling must name every commit it authorizes reverting (gt-0wy03)", id, shortSHA(f.Commit))
+Escalate to the mayor for a ruling if you believe this branch's removal is
+intentional and not a rebase artifact.`)
 		}
 	}
 	return nil
-}
-
-// revertOverrideBeadText concatenates the fields an authorization bead might
-// name its branch and commits in: description and notes cover a bead written
-// up front, comments cover one a mayor annotates after the fact.
-func revertOverrideBeadText(issue *beads.Issue) string {
-	var b strings.Builder
-	b.WriteString(issue.Description)
-	b.WriteByte('\n')
-	b.WriteString(issue.Notes)
-	b.WriteByte('\n')
-	for _, c := range issue.Comments {
-		b.WriteString(c.Text)
-		b.WriteByte('\n')
-	}
-	return b.String()
 }
