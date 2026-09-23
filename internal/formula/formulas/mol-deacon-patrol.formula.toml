@@ -202,6 +202,13 @@ The `redispatch` command handles:
 - Failure tracking (after 3 failures, escalates to Mayor instead of re-slinging)
 - Auto-detection of target rig from bead prefix
 - Skipping beads that were already claimed by another polecat
+- Skipping a bead its own record holds off the dispatch path, under the same
+  rule the convoy feeders apply (gt-tq6l) — a hold outranks the cooldown and
+  the attempt count, and reporting exit 3 for a held bead is the held outcome,
+  not a failure to retry
+- Sending a merge rejection that carries an om review receipt through the
+  editorial convergence gate instead of the attempt count: when the resubmit
+  stops converging it stops, gets `needs_human`, and escalates to the Mayor
 
 Exit codes: 0=dispatched, 2=cooldown, 3=skipped. Non-zero non-error codes are
 informational - archive the message regardless.

@@ -1,0 +1,268 @@
+package deacon
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// The deacon's RECOVERED_BEAD handling is the one dispatcher that overrides a
+// dispatch hold by design: it re-slings with --force. These tests pin the two
+// decisions it makes on a recovered bead with the hold stubbed out — the rule
+// itself is convoy.DispatchHoldReason's, tested in internal/convoy, and what
+// the deacon owes it is honoring whatever reason comes back.
+
+// stubDispatchTools puts a `bd` and a `gt` on PATH that log every invocation
+// to a file, so a test can see which dispatch the handler chose — a sling, an
+// escalation mail, a needs_human label, or none of the three — without a live
+// town. The returned function reads the log back as one line per invocation.
+func stubDispatchTools(t *testing.T) func() []string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "calls.log")
+
+	// One line per invocation, with any newline in an argument folded to a
+	// space: `gt mail send` bodies are multi-line, and a raw log would split
+	// one call across several lines and invite a substring match to pass on
+	// the wrong one.
+	script := `#!/bin/sh
+TOOL="$(basename "$0")"
+printf '%s\t' "$TOOL" >> "` + logPath + `"
+printf '%s ' "$@" | tr '\n' ' ' >> "` + logPath + `"
+printf '\n' >> "` + logPath + `"
+if [ "$TOOL" = "bd" ] && [ "$1" = "show" ]; then
+  printf '%s\n' '[{"id":"gt-stubbed","status":"open"}]'
+fi
+exit 0
+`
+	for _, tool := range []string{"bd", "gt"} {
+		path := filepath.Join(binDir, tool)
+		if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+			t.Fatalf("write %s stub: %v", tool, err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	return func() []string {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			t.Fatalf("read call log: %v", err)
+		}
+		var lines []string
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+}
+
+// callResembling returns the first logged invocation containing every
+// fragment, or "".
+func callResembling(calls []string, fragments ...string) string {
+	for _, call := range calls {
+		matched := true
+		for _, fragment := range fragments {
+			if !strings.Contains(call, fragment) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return call
+		}
+	}
+	return ""
+}
+
+// callInvoking returns the first logged invocation whose argv starts with
+// argvPrefix — the tab the stub writes after the tool name keeps this off a
+// phrase another invocation merely mentions. The escalation mail's body says
+// "re-sling manually", so a substring search for "sling" would find the mail
+// that is the proof no sling happened.
+func callInvoking(calls []string, tool, argvPrefix string) string {
+	prefix := tool + "\t" + argvPrefix
+	for _, call := range calls {
+		if strings.HasPrefix(call, prefix) {
+			return call
+		}
+	}
+	return ""
+}
+
+// editorialRejectionNotes is a source bead's notes for a rejection that came
+// from an actual om review, as refinery.formatMergeRejectionNote writes them
+// (om-gate T10): the MERGE REJECTION block an editorial resubmit leaves, with
+// the machine-readable receipt `gt deacon redispatch` reads back.
+func editorialRejectionNotes(score float64, unresolved string) string {
+	notes := "MERGE REJECTION (attempt 2): editorial - review found 1 major\n" +
+		"Branch: polecat/garnet/gt-thing\n" +
+		"Target: main\n" +
+		"MR: gt-mr-abc\n" +
+		"- id:abc123def456 sev:major internal/deacon/redispatch.go:1 — a finding"
+	notes += fmt.Sprintf("\nScore: %.4f", score)
+	if unresolved != "" {
+		notes += "\nUnresolved: " + unresolved
+	}
+	return notes
+}
+
+// TestRedispatchRecoveredBead_HeldBeadIsSkipped covers the routing rules
+// gt-tq6l centralised in convoy, as the deacon sees them: whatever reason the
+// bead's own record gives, the RECOVERED_BEAD handler skips the bead and
+// touches nothing. A held bead is not slung, not escalated about, and does
+// not accumulate a re-dispatch attempt against a decision a human already
+// made.
+func TestRedispatchRecoveredBead_HeldBeadIsSkipped(t *testing.T) {
+	holds := []string{
+		"status deferred",
+		"status pinned",
+		"label needs-sonnet",
+		"label needs-mayor-review",
+		"MAYOR DESIGN DECISION in notes",
+		"do not redispatch in comment",
+		"record unreadable (connection refused)",
+		"no record for gt-held",
+	}
+
+	for _, hold := range holds {
+		t.Run(hold, func(t *testing.T) {
+			calls := stubDispatchTools(t)
+			townRoot := t.TempDir()
+
+			// An editorial rejection whose resubmit is not converging: the
+			// editorial route would stop and escalate on these notes. The
+			// hold is answered first, so not even that runs.
+			state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+				"gt-held": {
+					BeadID:       "gt-held",
+					AttemptCount: 1,
+					LastReceipt:  &ReceiptSummary{Score: 0.6},
+				},
+			}}
+			if err := SaveRedispatchState(townRoot, state); err != nil {
+				t.Fatalf("SaveRedispatchState: %v", err)
+			}
+
+			rec := RecoveredBeadRecord{
+				Notes: editorialRejectionNotes(0.6, "abc123def456"),
+				Hold:  hold,
+			}
+			result := RedispatchRecoveredBead(rec, townRoot, "gt-held", "gastown", 0, 0)
+
+			if result.Action != "skipped" {
+				t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "skipped", result.Message)
+			}
+			if !strings.Contains(result.Message, hold) {
+				t.Errorf("Message = %q, want it to name the hold %q", result.Message, hold)
+			}
+			if got := calls(); len(got) != 0 {
+				t.Errorf("a held bead was acted on: %v", got)
+			}
+
+			after, err := LoadRedispatchState(townRoot)
+			if err != nil {
+				t.Fatalf("LoadRedispatchState: %v", err)
+			}
+			before := state.Beads["gt-held"]
+			if got := after.Beads["gt-held"]; got.AttemptCount != before.AttemptCount {
+				t.Errorf("AttemptCount = %d, want %d — a held bead recorded an attempt",
+					got.AttemptCount, before.AttemptCount)
+			}
+		})
+	}
+}
+
+// TestRedispatchRecoveredBead_EditorialRejectionRoutesThroughConvergence is
+// the wiring gt-wuqn is about: an editorial rejection reaches
+// RedispatchEditorial's convergence gate, so a resubmit that keeps failing
+// the same finding stops and is labeled needs_human instead of being
+// re-slung on attempt count alone.
+func TestRedispatchRecoveredBead_EditorialRejectionRoutesThroughConvergence(t *testing.T) {
+	calls := stubDispatchTools(t)
+	townRoot := t.TempDir()
+
+	// One resubmit in, whose prior attempt scored 0.6.
+	state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+		"gt-editalpha": {
+			BeadID:       "gt-editalpha",
+			AttemptCount: 1,
+			LastReceipt:  &ReceiptSummary{Score: 0.6},
+		},
+	}}
+	if err := SaveRedispatchState(townRoot, state); err != nil {
+		t.Fatalf("SaveRedispatchState: %v", err)
+	}
+
+	rec := RecoveredBeadRecord{Notes: editorialRejectionNotes(0.6, "abc123def456")}
+	result := RedispatchRecoveredBead(rec, townRoot, "gt-editalpha", "gastown", 0, 0)
+
+	if result.Action != "escalated" {
+		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "escalated", result.Message)
+	}
+	wantReason := "not converging: unresolved abc123def456 — escalating"
+	if !strings.Contains(result.Message, wantReason) {
+		t.Errorf("Message = %q, want it to carry %q", result.Message, wantReason)
+	}
+
+	logged := calls()
+	if call := callInvoking(logged, "gt", "sling "); call != "" {
+		t.Errorf("a non-converging editorial resubmit was re-slung: %s", call)
+	}
+	if call := callResembling(logged, "mail send mayor/", "needs_human"); call == "" {
+		t.Errorf("no needs_human escalation to the mayor; calls: %v", logged)
+	}
+	if call := callResembling(logged, "update gt-editalpha", "--add-label needs_human"); call == "" {
+		t.Errorf("the bead was not labeled needs_human; calls: %v", logged)
+	}
+}
+
+// TestRedispatchRecoveredBead_NonEditorialRejectionTakesPlainPath is the
+// other half of the fork: a rejection with no om verdict behind it — a
+// build/test failure, a manual `gt mq reject` — leaves no Score: line, so it
+// takes the plain attempt-count path and is re-slung.
+func TestRedispatchRecoveredBead_NonEditorialRejectionTakesPlainPath(t *testing.T) {
+	calls := stubDispatchTools(t)
+	townRoot := t.TempDir()
+
+	// The same state as the editorial case, so the only thing that differs
+	// is the receipt on the notes.
+	state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+		"gt-buildfail": {
+			BeadID:       "gt-buildfail",
+			AttemptCount: 1,
+			LastReceipt:  &ReceiptSummary{Score: 0.6},
+		},
+	}}
+	if err := SaveRedispatchState(townRoot, state); err != nil {
+		t.Fatalf("SaveRedispatchState: %v", err)
+	}
+
+	rec := RecoveredBeadRecord{
+		Notes: "MERGE REJECTION (attempt 2): build - go build failed\nBranch: polecat/garnet/gt-thing\nTarget: main\nMR: gt-mr-abc",
+	}
+	result := RedispatchRecoveredBead(rec, townRoot, "gt-buildfail", "gastown", 0, 0)
+
+	if result.Action != "redispatched" {
+		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "redispatched", result.Message)
+	}
+
+	logged := calls()
+	if call := callInvoking(logged, "gt", "sling gt-buildfail gastown"); call == "" {
+		t.Errorf("a build-failure rejection was not re-slung; calls: %v", logged)
+	}
+	if call := callResembling(logged, "needs_human"); call != "" {
+		t.Errorf("a non-editorial rejection was handled as editorial: %s", call)
+	}
+}
