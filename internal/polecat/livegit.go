@@ -30,6 +30,12 @@ type LiveGitState struct {
 	// by branch preservation (git.UnpushedCommits, which compares against the
 	// pushed branch and its upstream). It is therefore stricter than the
 	// Manager's count, which also credits MR target refs.
+	//
+	// Which probe produced it decides where the "pushed branch" tip was read
+	// from: ProbeLiveGitState asks the remote, ProbeLiveGitStateLocal reads the
+	// local remote-tracking ref. The local count is never the lower of the two,
+	// so a caller that swaps probes can only ever see more work reported as
+	// unpreserved, never less.
 	UnpushedCommits int
 	// Source is GitStateSourceLive when the probe answered, or
 	// GitStateSourceUnknown when it failed — never GitStateSourceRecorded,
@@ -42,7 +48,43 @@ type LiveGitState struct {
 // ProbeLiveGitState measures one worktree path. It never returns an error:
 // a failed check is itself a fact, and callers must fail closed on it rather
 // than silently falling back to a recorded value (see RecordedCleanupBlocks).
+//
+// It reads the branch's preservation from the remote (one network round trip).
+// A caller measuring one worktree should use it; a caller measuring every seat
+// in the town should use ProbeLiveGitStateLocal.
 func ProbeLiveGitState(worktreePath string) LiveGitState {
+	return probeLiveGitState(worktreePath, (*git.Git).CheckUncommittedWork)
+}
+
+// ProbeLiveGitStateLocal is ProbeLiveGitState without the network round trip:
+// the branch-preservation fact is read from this clone's local remote-tracking
+// refs instead of an ls-remote against the remote.
+//
+// The distinction is cost, and it is the difference between a listing that
+// works and one that does not. `gt polecat list --all --json` probes one
+// worktree per seat; with the networked probe that is an ls-remote — plus the
+// remote-https helper it spawns — per seat, which measured 14.4s of a 15.0s
+// run across 15 seats and is what put the command over 90s at the dashboard's
+// 47 seats (gt-8q0s). Making those probes concurrent shrank that to 1.9s but
+// left the round trips in place; the local probe removes them, and the pool
+// then has only local subprocesses left to overlap. It keeps every other fact
+// identical.
+//
+// The local unpushed count is the live one's answer or more conservative,
+// never less: a tracking ref this clone never fetched reads as "no evidence of
+// preservation" and reports the work as unpreserved, which flags a seat for
+// recovery rather than clearing it. Enumerating seats is a read-only
+// inventory, so the one-sided error is the right side to fail on.
+func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
+	return probeLiveGitState(worktreePath, (*git.Git).CheckUncommittedWorkLocal)
+}
+
+// probeLiveGitState is the shared body of the two probes. The worktree check,
+// the branch read, and the unknown/answered classification are identical; only
+// how the unpushed-commit count is derived differs, and that is the single
+// parameter, so the two fidelity levels cannot drift into disagreeing about
+// what a probe measures.
+func probeLiveGitState(worktreePath string, checkUncommittedWork func(*git.Git) (*git.UncommittedWorkStatus, error)) LiveGitState {
 	if !IsWorktreeRoot(worktreePath) {
 		// See IsWorktreeRoot: without this the upward resolution below would
 		// measure the enclosing repository (the rig root, for a leftover
@@ -59,7 +101,7 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 		return liveGitUnknown(worktreePath, "reading branch", err)
 	}
 
-	status, err := g.CheckUncommittedWork()
+	status, err := checkUncommittedWork(g)
 	if err != nil {
 		return liveGitUnknown(worktreePath, "checking worktree state", err)
 	}

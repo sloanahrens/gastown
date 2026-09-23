@@ -634,9 +634,28 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
 	spawnWindow := polecatSpawnGraceWindow(townRoot)
 	now := time.Now()
-	allPolecats := make([]PolecatListItem, 0)
+	// Every row of the output, in output order, with the inputs its build
+	// needs. Assembled serially (the per-rig queries below are one per rig, not
+	// one per seat) and resolved concurrently at the end.
+	var seats []polecatSeat
 
 	for _, r := range rigs {
+		// The filesystem read and the session filter are the two cheap facts
+		// that decide whether this rig has anything to report. Both are local
+		// (a directory listing, an in-memory lookup), so they come first: the
+		// queries below are the expensive part — five Dolt CLI round trips per
+		// rig — and a rig with no polecat directory and no tmux session has no
+		// row to build out of any of them (gt-8q0s).
+		polecatNames, err := listPolecatDirectoryNames(r.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
+			continue
+		}
+		rigSessions := sessions.namesForRig(r.Name)
+		if len(polecatNames) == 0 && len(rigSessions) == 0 {
+			continue
+		}
+
 		bd := beads.New(r.Path)
 
 		// ONE merge-request query per rig, joined per polecat below — never a
@@ -650,11 +669,6 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
 		}
 
-		polecatNames, err := listPolecatDirectoryNames(r.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
-			continue
-		}
 		agents, agentErr := bd.ListAgentBeads()
 		agentLookupFailed := agentErr != nil
 		if agentLookupFailed {
@@ -667,8 +681,15 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			activeWork = nil
 		}
 
-		// Track known polecat names from filesystem for zombie detection
-		knownNames := make(map[string]bool)
+		// Track known polecat names from filesystem for zombie detection. This
+		// is exactly the set of worktree directories, so it is built here rather
+		// than accumulated by the seat loop below — which now runs later, on the
+		// probe pool.
+		knownNames := make(map[string]bool, len(polecatNames))
+		for _, name := range polecatNames {
+			knownNames[name] = true
+		}
+
 		for _, name := range polecatNames {
 			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
 			agentBead := agents[agentBeadID]
@@ -676,62 +697,22 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			// Grace is dated by the agent bead's own last write: a bead that
 			// still says spawning and was touched inside the window is a
 			// dispatch in flight, not a stall.
-			env := polecatInventoryEnv{
-				MRs: mrIndex,
-				// The active_mr policy resolves MR ids through the index it
-				// already has and source issues through the rig's database; the
-				// counts-only capacity path passes neither.
-				ActiveMRSource: polecatActiveMRReader{index: mrIndex, bd: bd},
-				Spawn: polecatSpawnFacts{
+			env := polecatListInventoryEnv(r.Path, r.Name, name, mrIndex,
+				polecatActiveMRReader{index: mrIndex, bd: bd},
+				polecatSpawnFacts{
 					UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
 					Grace:     spawnWindow,
 					Now:       now,
-				},
-				// claude-41j.1 D9: probe the worktree so the listed verdict
-				// re-derives from live git rather than the recorded hint. An
-				// unresolvable path (no worktree behind the directory) leaves
-				// the probe off, and the verdict stays on the recorded hint.
-				WorktreePath: resolvePolecatWorktree(filepath.Join(r.Path, "polecats"), name, r.Name),
-			}
-			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions, env)
-			if activeWorkErr != nil {
-				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions, env)
-			}
-			disposition := item.Disposition
-			state := effectivePolecatState(PolecatListItem{
-				State:                item.State,
-				Issue:                item.Issue,
-				SessionRunning:       item.SessionRunning,
-				CountsTowardCapacity: disposition.CountsTowardCapacity,
-			}, item.Spawning)
-			allPolecats = append(allPolecats, PolecatListItem{
-				Rig:                  r.Name,
-				Name:                 name,
-				Agent:                item.Agent,
-				State:                state,
-				Issue:                item.Issue,
-				MRID:                 item.MRID,
-				MRStatus:             item.MRStatus,
-				CleanupStatus:        item.CleanupStatus,
-				ActiveMR:             item.ActiveMR,
-				CleanupStatusSource:  item.CleanupStatusSource,
-				GitStateSource:       item.GitStateSource,
-				GitStateReason:       item.GitStateReason,
-				Branch:               item.Branch,
-				Verdict:              disposition.Verdict,
-				Reason:               disposition.Reason,
-				Reusable:             disposition.Reusable,
-				SafeToNuke:           disposition.SafeToNuke,
-				NeedsRecovery:        disposition.NeedsRecovery,
-				NeedsMQSubmit:        disposition.NeedsMQSubmit,
-				MQStatus:             disposition.MQStatus,
-				CountsTowardCapacity: disposition.CountsTowardCapacity,
-				ReuseStatus:          disposition.ReuseStatus,
-				Blockers:             disposition.Blockers,
-				SessionRunning:       item.SessionRunning,
-				SessionName:          item.SessionName,
+				})
+			seats = append(seats, polecatSeat{
+				rigName:       r.Name,
+				name:          name,
+				fields:        fields,
+				activeWork:    activeWork[name],
+				activeWorkErr: activeWorkErr,
+				sessions:      sessions,
+				env:           env,
 			})
-			knownNames[name] = true
 		}
 
 		// Discover zombie (and foreign) tmux sessions: sessions without matching
@@ -742,8 +723,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		// hermetic test's session escaping onto the wrong socket, gt-yav3);
 		// report it as foreign, not zombie, so it never counts toward capacity
 		// or gets restart/nuke treatment aimed at real polecats.
-		zombieSessions := sessions.namesForRig(r.Name)
-		for _, sessionName := range zombieSessions {
+		for _, sessionName := range rigSessions {
 			_, polecatName, ok := parsePolecatSessionName(sessionName)
 			if !ok {
 				continue
@@ -761,9 +741,17 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 					presence = beadPresent
 				}
 			}
-			allPolecats = append(allPolecats, classifyOrphanSession(r.Name, polecatName, sessionName, presence))
+			// Classified here, not on the pool: an orphan session is decided
+			// from session and bead presence alone, so it needs no probe. It
+			// still takes its place in `seats` to keep the output order.
+			orphan := classifyOrphanSession(r.Name, polecatName, sessionName, presence)
+			seats = append(seats, polecatSeat{decided: &orphan})
 		}
 	}
+
+	// One probe per seat, fanned out across a bounded pool. Order is preserved,
+	// so this is the serial listing with its measuring overlapped.
+	allPolecats := resolvePolecatSeats(seats)
 
 	// Output
 	if polecatListJSON {

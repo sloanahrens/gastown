@@ -3312,13 +3312,33 @@ func (g *Git) StashPop(ref string) error {
 // It prefers the exact remote branch when one exists, because polecat branches may
 // track origin/main while pushing work to origin/<current-branch>.
 // Returns 0 if there is no upstream or exact remote branch configured.
+//
+// The exact-branch evidence is read from the remote itself (ls-remote). Use
+// UnpushedCommitsLocal when measuring many worktrees in one run — see
+// BranchPreservationStatusLocal.
 func (g *Git) UnpushedCommits() (int, error) {
+	return g.unpushedCommits(g.BranchPreservationStatus)
+}
+
+// UnpushedCommitsLocal is UnpushedCommits without the network round trip: the
+// exact-branch evidence comes from this clone's remote-tracking refs. It is
+// the counterpart a caller needs when it measures one worktree per seat
+// (gt-8q0s); the answer is UnpushedCommits' or more conservative, never less.
+func (g *Git) UnpushedCommitsLocal() (int, error) {
+	return g.unpushedCommits(g.BranchPreservationStatusLocal)
+}
+
+// unpushedCommits is the shared body: read the current branch, then count the
+// patches branchPreservation would not find preserved. Taking the status
+// lookup as a parameter is what keeps the local and live variants from
+// drifting — they differ only in where the branch tip is read from.
+func (g *Git) unpushedCommits(branchPreservation func(localBranch, remote string, targets []string) (BranchPreservationStatus, error)) (int, error) {
 	branch, branchErr := g.CurrentBranch()
 	if branchErr != nil || branch == "" || branch == "HEAD" {
 		branch = ""
 	}
 
-	status, err := g.BranchPreservationStatus(branch, "origin", nil)
+	status, err := branchPreservation(branch, "origin", nil)
 	if err != nil {
 		if errors.Is(err, errNoComparisonRefs) {
 			return 0, nil
@@ -3378,6 +3398,49 @@ func (g *Git) BranchTargetStatus(localBranch, remote string, targets []string) (
 	return g.branchPreservationStatus(localBranch, remote, targets, false)
 }
 
+// BranchPreservationStatusLocal is BranchPreservationStatus with the
+// exact-branch evidence read from this clone's remote-tracking refs instead of
+// the remote. Everything after that first lookup — the integration-branch
+// candidates, the ancestry / merge-tree / cherry judging — is the same code,
+// so a local verdict and a live verdict agree about what "preserved" means;
+// they can differ only in whether they saw a branch this clone never fetched.
+//
+// That difference is one-directional and deliberate. A tracking ref that is
+// missing (never fetched, pruned by a fetch --prune, or the branch deleted
+// after merge) resolves to no evidence, which drops the comparison to the
+// integration branch and reports whatever patches are not in it — i.e. it errs
+// toward "work not preserved", the answer that blocks reuse and asks for
+// recovery. It can never claim preservation it did not see. The cost of that
+// one-sidedness is a stale tracking ref can flag a seat whose work already
+// landed; the benefit is that measuring N seats costs N local ref reads rather
+// than N network round trips.
+//
+// Use it for bulk enumeration (gt polecat list, the dashboard's inventory
+// poll). Use BranchPreservationStatus where the answer gates a single
+// irreversible action and a network round trip is affordable.
+func (g *Git) BranchPreservationStatusLocal(localBranch, remote string, targets []string) (BranchPreservationStatus, error) {
+	return g.branchPreservationStatusWith(localBranch, remote, targets, true, g.localRemoteBranchTip)
+}
+
+// localRemoteBranchTip resolves a branch's tip from refs this clone already
+// holds, spawning no network round trip. A missing tracking ref yields "" with
+// no error, which the caller reads exactly as the live probe reads a remote
+// that has no such branch.
+//
+// The local branch ref (refs/heads/<branch>) is deliberately NOT consulted as
+// a fallback. git push creates the tracking ref, so the two agree whenever the
+// branch was ever pushed; when it was not, refs/heads/<branch> would resolve
+// to HEAD itself, report every seat's work as preserved on a branch that only
+// exists locally, and clear the unpushed-work blocker this check exists to
+// raise.
+func (g *Git) localRemoteBranchTip(remote, branch string) (string, error) {
+	sha, err := g.Rev("refs/remotes/" + remote + "/" + branch)
+	if err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(sha), nil
+}
+
 // RefPreservedByRef reports whether the work on head is already contained in
 // the given ref, judged the way BranchPreservationStatus judges HEAD against a
 // custody ref: ancestry, then a merge-tree no-op, then per-patch (cherry)
@@ -3392,7 +3455,25 @@ func (g *Git) RefPreservedByRef(head, ref string) (BranchPreservationStatus, err
 	return g.preservationOfRefAgainstRef(head, ref)
 }
 
+// remoteBranchTipFunc reads the tip of a branch on a remote. The live
+// implementation is PushRemoteBranchTip (an ls-remote: one network round trip
+// per call); the local one reads the remote-tracking ref this clone already
+// has. Which one a caller passes is a cost decision, made once, at the top:
+// a caller that measures every seat in the town cannot afford a round trip
+// per seat (gt-8q0s), while a caller that gates a single spawn wants the
+// remote's actual current tip.
+type remoteBranchTipFunc func(remote, branch string) (string, error)
+
 func (g *Git) branchPreservationStatus(localBranch, remote string, targets []string, includeExactBranch bool) (BranchPreservationStatus, error) {
+	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip)
+}
+
+// branchPreservationStatusWith is the shared implementation behind every
+// preservation verdict — live and local alike. Only the exact-branch tip
+// lookup is parameterized; the candidate set, the ancestry/merge-tree/cherry
+// judging, and the fail-closed ordering are identical, so the two fidelity
+// levels cannot disagree about what "preserved" means.
+func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets []string, includeExactBranch bool, branchTip remoteBranchTipFunc) (BranchPreservationStatus, error) {
 	if remote == "" {
 		remote = "origin"
 	}
@@ -3401,7 +3482,7 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 	hasEvidence := len(nonEmptyUnique(targets)) > 0
 
 	if includeExactBranch && localBranch != "" && localBranch != "HEAD" {
-		if remoteSHA, err := g.PushRemoteBranchTip(remote, localBranch); err == nil && remoteSHA != "" {
+		if remoteSHA, err := branchTip(remote, localBranch); err == nil && remoteSHA != "" {
 			hasEvidence = true
 			result.ComparisonBase = remote + "/" + localBranch
 			if contains, containsErr := g.refContainsHead(remoteSHA); containsErr == nil && contains {
@@ -3802,6 +3883,22 @@ func (s *UncommittedWorkStatus) String() string {
 
 // CheckUncommittedWork performs a comprehensive check for uncommitted work.
 func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
+	return g.checkUncommittedWork(g.UnpushedCommits)
+}
+
+// CheckUncommittedWorkLocal is CheckUncommittedWork without the network: the
+// status and stash facts are identical, and the unpushed-commit count is
+// derived from local remote-tracking refs rather than an ls-remote against the
+// remote (see BranchPreservationStatusLocal). It is the probe a caller uses
+// when it does this once per seat in the town.
+func (g *Git) CheckUncommittedWorkLocal() (*UncommittedWorkStatus, error) {
+	return g.checkUncommittedWork(g.UnpushedCommitsLocal)
+}
+
+// checkUncommittedWork is the shared body. The unpushed-commit count is the
+// only fact whose source differs between the live and local probes, so it is
+// the only thing passed in — the other three checks cannot drift apart.
+func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*UncommittedWorkStatus, error) {
 	status := &UncommittedWorkStatus{}
 
 	// Check git status
@@ -3823,7 +3920,7 @@ func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 	status.StashCount = stashCount
 
 	// Check unpushed commits
-	unpushed, err := g.UnpushedCommits()
+	unpushed, err := unpushedCommits()
 	if err != nil {
 		return nil, fmt.Errorf("checking unpushed commits: %w", err)
 	}
