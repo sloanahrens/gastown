@@ -36,11 +36,10 @@ make_town() {
   git -C "$seed" push -q origin main
   mkdir -p "$town/gastown/mayor"
   git clone -q "$origin" "$town/gastown/mayor/rig"
-  # Fake make targets: real (empty) recipes. build drops a marker so the test
-  # can see the branch taken; safe-install no-ops the way the real one's
-  # atomic replace would inside a stub world. Empty recipes (not `true`) keep
-  # the marker the sole observable of a build, and leave SKIP_UPDATE_CHECK a
-  # no-op the way the real Makefile makes it one.
+  # Fake make targets: build drops a marker so the test can see the branch
+  # taken; safe-install no-ops the way the real one's atomic replace would
+  # inside a stub world. '@' suppresses Make's echo of the recipe line, so
+  # build.marker stays the sole observable of a build.
   printf 'build:\n\t@touch "$(GT_TEST_TOWN)/build.marker"\nsafe-install:\n\t@true\n' > "$town/gastown/mayor/rig/Makefile"
   git -C "$town/gastown/mayor/rig" add Makefile
   git -C "$town/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -m makefile
@@ -177,18 +176,21 @@ write_stale() {
   echo "gt version $tip_short (dev: main@$tip_short)" > "$town/built_version.txt"
   # Post-install staleness: the build replaces the in-force binary, so the
   # binary's own commit — the one 'gt stale --json' reads back as
-  # binary_commit — becomes the tip the run built. The stub flips to this
-  # fixture on the first 'stale --json' read after build.marker exists
-  # (stale.switch, mirroring the built/installed version-file switch); every
-  # read before the build still gets stale.json, which is what the pre-build
-  # due/threshold check reads (gt-b5mpe).
+  # binary_commit — becomes the tip the run built. binary_commit stays SHORT
+  # here too: it is the same Makefile-embedded 'git rev-parse --short HEAD'
+  # value whether read before or after the install, never resolved to full by
+  # 'gt stale --json' itself (that resolution is the plugin's job, gt-b5mpe).
+  # The stub flips to this fixture on the first 'stale --json' read after
+  # build.marker exists (stale.switch, mirroring the built/installed
+  # version-file switch); every read before the build still gets stale.json,
+  # which is what the pre-build due/threshold check reads (gt-b5mpe).
   printf '{"stale": true, "forward": true, "on_main_branch": true, "safe_to_rebuild": %s, "binary_commit": "%s", "repo_commit": "%s", "compare_ref": "origin/main", "commits_behind": %s}\n' \
-    "$safe_json" "$tip" "$tip" "$behind" > "$town/installed_stale.json"
+    "$safe_json" "$tip_short" "$tip" "$behind" > "$town/installed_stale.json"
   # The not-due variant for the flip: a binary at the tip reads back as
   # fresh, so the pre-build due check of a second run sees that (used only by
   # the no-'@' case below; every other case's flip lands on installed).
   printf '{"stale": false, "forward": true, "on_main_branch": true, "safe_to_rebuild": true, "binary_commit": "%s", "repo_commit": "%s", "compare_ref": "origin/main", "commits_behind": 0}\n' \
-    "$tip" "$tip" > "$town/fresh_stale.json"
+    "$tip_short" "$tip" > "$town/fresh_stale.json"
 }
 
 run_plugin() {
@@ -383,6 +385,35 @@ if [ "$rc" = "0" ] && ! grep -q "daemon restart" "$T/gt.log" && grep -q "diverge
   pass "diverged main: refused, skip recorded, no install"
 else
   fail "diverged main: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
+fi
+
+# --- Case 10b: gt-9jax — the divergence count check must be able to read as
+# "not diverged" (0), not just "diverged" (>0, Case 10 above): the buggy form
+# ('[ -n "$(... --count)" ]', always true since --count prints "0") could
+# never take the retry branch below it. An untracked file the fast-forward
+# would overwrite is the one way 'merge --ff-only' fails with zero local-only
+# commits — a real divergence always has at least one (Case 10); the
+# dirty-checkout guard above excludes untracked files on purpose (gt-50k), so
+# this state reaches the sync step unblocked. ---
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+OTHER=$(mktemp -d)
+git clone -q "$T/origin.git" "$OTHER"
+echo "origin content" > "$OTHER/newfile.txt"
+git -C "$OTHER" add newfile.txt
+git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q -m "adds newfile.txt"
+git -C "$OTHER" push -q origin main
+echo "untracked, collides with the incoming commit" > "$RIG/newfile.txt"
+rc=$(run_plugin "$T")
+if grep -q "origin/main moved during sync; re-fetching and re-merging once" "$T/run.out"; then
+  pass "divergence retry: an untracked-file conflict (0 local-only commits) takes the retry path, not an immediate bail"
+else
+  fail "divergence retry: no retry attempted (count check regressed to always-true): $(cat "$T/run.out")"
+fi
+if [ "$rc" = "0" ] && ! grep -q "daemon restart" "$T/gt.log" 2>/dev/null && grep -q "diverged from origin/main" "$T/gt.log" 2>/dev/null; then
+  pass "divergence retry: still refused after the retry (the untracked file persists), not reset"
+else
+  fail "divergence retry: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
 fi
 
 # --- Case 11: not safe to rebuild (binary not an ancestor of main) is
@@ -833,17 +864,19 @@ d = json.load(open(sys.argv[1]))
 d["binary_commit"] = ""
 json.dump(d, open(sys.argv[1], "w"))
 ' "$T/stale.json"
-# The post-install flip must name the tip in FULL: 'gt stale --json' reports
-# binary_commit in full (resolveCommitHash, internal/version/stale.go), and the
-# plugin compares it to EXPECTED_COMMIT, a full hash too, with no resolution in
-# between. A short hash here would mismatch and turn a correct install red.
-TIP=$(git -C "$T/gastown/mayor/rig" rev-parse HEAD)
+# The post-install flip must name the tip in the SHORT form 'gt stale --json'
+# actually reports (the Makefile-embedded 'git rev-parse --short HEAD',
+# internal/cmd.Commit) — not full. The plugin resolves it to a full hash
+# inside RIG_ROOT before comparing to EXPECTED_COMMIT; a fixture that used the
+# full hash here would hide a regression back to the un-resolved comparison
+# (gt-b5mpe).
+TIP_SHORT=$(git -C "$T/gastown/mayor/rig" rev-parse --short HEAD)
 python3 -c '
 import json, sys
 d = json.load(open(sys.argv[2]))
 d["binary_commit"] = sys.argv[1]
 json.dump(d, open(sys.argv[2], "w"))
-' "$TIP" "$T/installed_stale.json"
+' "$TIP_SHORT" "$T/installed_stale.json"
 rc=$(run_plugin "$T")
 if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
   pass "no-@ version + no stale commit: verified install succeeds via binary_commit"
@@ -861,82 +894,67 @@ else
   pass "no-@ version + no stale commit: no false-positive unverified escalation"
 fi
 
-# --- gt-9jax: a merge lands on origin/main while the build is in flight.
-# The run fetched and synced before building, so its expected SHA is the tip
-# it saw at sync time; the check and the verification must stay pinned to
-# that SHA, and a check that re-reads the LIVE origin/main must not fail the
-# run.
+# --- gt-9jax: a merge lands on origin/main while 'make ... build' is
+# running. The run already fast-forwarded RIG_ROOT to origin/main before the
+# build started, so the build compiles the right tree either way; what fails
+# is 'make safe-install', whose real check-up-to-date target does its OWN
+# fetch-and-compare against the now-moved origin/main. SKIP_UPDATE_CHECK=1
+# (passed to both 'make build' and 'make safe-install') is what makes
+# check-up-to-date a no-op, which is the actual fix — not a Makefile change.
 #
-# Deterministic stand-in for "lands mid-build": the merge is in origin BEFORE
-# the run starts. The plugin's sync ff-merges it, and the build's check (the
-# production check-up-to-date's fetch-then-compare shape) sees a ref that
-# matches HEAD. Under the pinned check the build's expected SHA IS the
-# synced tip (EXPECTED_COMMIT is read after the sync), so the pinned
-# comparison and the receipt both name it and the run is green. Under the
-# old check shape — compare the build's expected SHA to a freshly-fetched
-# origin/main — the same fixture is the red case this bug is for, because
-# the expected SHA is read before the sync and the origin it names has moved
-# by the time the check fetches.
+# The fake Makefile below reproduces check-up-to-date's real shape (an
+# ifndef SKIP_UPDATE_CHECK-gated fetch-and-compare on safe-install), and its
+# 'build' recipe pushes a second commit to origin from another clone before
+# touching build.marker — a deterministic stand-in for a merge landing
+# during the (in production, minutes-long) build. RIG_ROOT's own checkout
+# never sees that push (only a fetch would advance it), so EXPECTED_COMMIT
+# stays pinned to what was actually built; only a live check-up-to-date can
+# be fooled by it.
 T=$(make_town)
 RIG="$T/gastown/mayor/rig"
-# The fake Makefile stands in for the production check-up-to-date: fetch
-# then compare, the exact shape that a moving origin turns red. It must be in
-# the tree the build runs from, so it goes into the Makefile commit and the
-# move lands on top of it.
 cat > "$RIG/Makefile" <<'MK'
-build:
-	@git fetch origin main
-	@LOCAL=$$(git rev-parse HEAD); \
+check-up-to-date:
+ifndef SKIP_UPDATE_CHECK
+	@git fetch origin main --quiet; \
+	LOCAL=$$(git rev-parse HEAD); \
 	REMOTE=$$(git rev-parse origin/main); \
 	if [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then \
 	  echo "ERROR: Local branch is not up to date with origin/main"; \
 	  exit 1; \
 	fi
+endif
+build:
+	@bash "$(GT_TEST_TOWN)/land-merge.sh"
 	@touch "$(GT_TEST_TOWN)/build.marker"
-safe-install:
+safe-install: check-up-to-date
 	@true
 MK
 git -C "$RIG" -c user.email=t@t -c user.name=t add Makefile
 git -C "$RIG" -c user.email=t@t -c user.name=t commit -q -m "makefile"
 git -C "$RIG" push -q origin main
-# The mid-build merge, authored from a second clone (ff'd past the Makefile
-# commit) and pushed to origin before the run: the plugin's sync ff-merges
-# both commits and builds from the tip.
+# Cloned AFTER the Makefile commit lands on origin, so its own push during
+# the build (below) is a clean fast-forward rather than a rejected non-ff.
 OTHER=$(mktemp -d)
 git clone -q "$T/origin.git" "$OTHER"
+cat > "$T/land-merge.sh" <<EOF
+#!/usr/bin/env bash
+set -e
 git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "lands mid-build"
 git -C "$OTHER" push -q origin main
-# write_stale AFTER the moves: its repo_commit is RIG_ROOT's tip, which the
-# plugin's sync has ff-merged to the move — the post-move tip. The binary in
-# force is the pre-move tip the run was about to build, so it is one commit
-# behind repo_commit, like every other fixture: the plugin rebuilds it onto
-# the tip and the post-build flip verifies the tip in force (post.json).
+EOF
 write_stale "$T" 5
-# post.json stands in for installed_stale.json, whose binary_commit
-# write_stale shaped before the moves. stale.switch names it, so the stub's
-# flip reads post.json on the first 'stale --json' read after build.marker
-# exists. binary_commit is the post-move tip in full, matching 'gt stale
-# --json' in production (resolveCommitHash), which is what the plugin
-# compares to EXPECTED_COMMIT.
-# Read from the bare origin: the RIG clone's own push does NOT advance its
-# local origin/main ref (only a fetch does), so RIG's origin/main still names
-# the pre-move tip while refs/heads/main in origin.git is the post-move tip —
-# the one the plugin's sync ff-merges to and EXPECTED_COMMIT resolves.
-MOVETIP=$(git -C "$T/origin.git" rev-parse refs/heads/main)
-python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-d["binary_commit"] = sys.argv[2]
-d["repo_commit"] = sys.argv[2]
-json.dump(d, open(sys.argv[3], "w"))
-' "$T/installed_stale.json" "$MOVETIP" "$T/post.json"
-echo "post" > "$T/stale.switch"
 rc=$(run_plugin "$T")
 if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
-  pass "merge lands before the check's fetch: pinned check is green (sync ff-merges it, check compares HEAD to the synced ref)"
+  pass "merge lands mid-build: SKIP_UPDATE_CHECK skips the live re-check, install succeeds"
 else
-  fail "merge lands before the check's fetch: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
+  fail "merge lands mid-build: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
 fi
+# The same fixture against run.sh as it stood before this fix (no
+# SKIP_UPDATE_CHECK passed to safe-install) is the regression this guards:
+# check-up-to-date's live fetch sees the moved origin/main and fails a build
+# that was otherwise correct. Confirmed by hand against origin/main's run.sh
+# (see the commit message for both runs) rather than re-run here, so this
+# file tests one version of run.sh, not two.
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all rebuild-gt tests passed"

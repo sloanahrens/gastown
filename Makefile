@@ -45,7 +45,6 @@ ifeq ($(shell uname),Darwin)
 endif
 
 build:
-	@$(MAKE) --no-print-directory check-up-to-date-pinned
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-server ./cmd/gt-proxy-server
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
@@ -97,28 +96,6 @@ ifndef SKIP_UPDATE_CHECK
 		exit 1; \
 	fi
 endif
-
-# check-up-to-date-pinned: the same check with the fetch removed. For a caller
-# that has itself just synced HEAD to origin (the rebuild-gt plugin runs
-# 'git fetch' + 'merge --ff-only origin/main' before building, and then passes
-# SKIP_UPDATE_CHECK=1): re-fetching reopens the window a merge mid-build can
-# land in and turn a clean build red (gt-9jax), so the check runs against the
-# already-synced local ref instead. A real human `make build` that lands stale
-# is caught by `check-up-to-date` above, and by `check-forward-only`, on the
-# next install — neither of which this bypasses.
-check-up-to-date-pinned:
-	@UPSTREAM=$$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null); \
-	if [ -n "$$UPSTREAM" ]; then \
-		LOCAL=$$(git rev-parse HEAD 2>/dev/null); \
-		REMOTE=$$(git rev-parse "$$UPSTREAM" 2>/dev/null); \
-		if [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then \
-			echo "ERROR: Local branch is not up to date with $$UPSTREAM"; \
-			echo "  Local:  $$(git rev-parse --short HEAD)"; \
-			echo "  Remote: $$(git rev-parse --short $$UPSTREAM)"; \
-			echo "Re-sync with 'git merge --ff-only $$UPSTREAM' (a merge landed since your last sync)"; \
-			exit 1; \
-		fi; \
-	fi
 
 # check-forward-only: Ensure HEAD is a descendant of the currently installed binary's commit.
 # Prevents rebuilding to an older or diverged commit, which caused a crash loop where

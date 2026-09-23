@@ -397,9 +397,15 @@ fi
 log "Syncing $RIG_ROOT with origin/main..."
 git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
 if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
-  # A real divergence, not the sync/build-window race below (gt-9jax): ff-only
-  # can fail either way, but after a merge it is the local side that moved.
-  if [ -n "$(git -C "$RIG_ROOT" rev-list origin/main..HEAD --count 2>/dev/null)" ]; then
+  # rev-list --count always prints a number, including "0", so testing it
+  # with -n is always true; that bug let this branch treat every ff-only
+  # failure as a real divergence and skipped the retry below unconditionally
+  # (gt-9jax). COUNT is local-only commits: >0 means HEAD has something
+  # origin/main lacks (a real divergence); 0 means the ff-only failed for
+  # some other reason (e.g. an untracked file the merge would overwrite),
+  # which a re-fetch+re-merge can still resolve if that reason has cleared.
+  COUNT=$(git -C "$RIG_ROOT" rev-list origin/main..HEAD --count 2>/dev/null || echo 0)
+  if [ "$COUNT" -gt 0 ]; then
     log "Local main diverged from origin/main, skipping rebuild."
     if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
@@ -407,9 +413,10 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
       --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
     exit 0
   fi
-  # Local main is an ancestor of origin/main: a merge landed between the fetch
-  # and this call. Re-fetch and re-merge exactly once (gt-9jax); if it still
-  # fails the town is on a real divergence and the original bail stands.
+  # COUNT is 0: local HEAD has nothing origin/main lacks, so the ff-only
+  # failure is not a divergence (e.g. an untracked file the fast-forward
+  # would overwrite). Re-fetch and re-merge exactly once; if it still fails
+  # the retry didn't clear whatever blocked it and the original bail stands.
   log "origin/main moved during sync; re-fetching and re-merging once..."
   git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
   if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
@@ -644,14 +651,14 @@ EXPECTED_COMMIT=$(git -C "$RIG_ROOT" rev-parse HEAD)
 # slot is what has been blocking this rebuild (gt-kox0). Non-zero means the
 # build failed; a wait that never got the slot is a deferral, not a failure.
 #
-# It builds the pinned SHA, and SKIP_UPDATE_CHECK=1 is load-bearing for the
-# same reason: check-up-to-date does its own fetch and compares HEAD against
-# the LIVE origin/main, so a merge that lands mid-build fails the run even
-# though the pinned tree compiled fine (gt-9jax). Skipping it is safe because
-# the ff-only sync above already verified HEAD is on origin/main; the
-# fetch-less check-up-to-date-pinned that 'make build' runs in its place still
-# catches a stale tree against the synced ref, and the forward-only check plus
-# the post-install verification below are the guards that remain (gt-9jax).
+# It builds the pinned SHA, and SKIP_UPDATE_CHECK=1 is load-bearing: passed to
+# 'make safe-install', it disables check-up-to-date's own live fetch-and-
+# compare against origin/main (Makefile's check-up-to-date is a no-op under
+# SKIP_UPDATE_CHECK), so a merge that lands on origin/main after the ff-only
+# sync above but before safe-install runs cannot fail the check against a ref
+# that has since moved (gt-9jax). This is safe because the sync already
+# fast-forwarded HEAD to what origin/main was at sync time; check-forward-only
+# and the post-install verification below are the guards that remain.
 build_gt() {
   if [ "$RESERVE" != "1" ]; then
     (cd "$RIG_ROOT" && make SKIP_UPDATE_CHECK=1 build) 2>&1 || return $?
@@ -688,45 +695,44 @@ if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make SKIP_UPDATE_CHE
   # while the town runs old code, and recording the wrong commit is worse than
   # recording none (gt-oqbw).
   GT_PATH=$(command -v gt 2>/dev/null || true)
-  # The pinned SHA, not the moving origin/main: a merge that lands between
-  # this point and the re-read leaves the installed binary correct and the
-  # check red. 'gt stale --json' reports binary_commit in full
-  # (resolveCommitHash, internal/version/stale.go); RIG_ROOT's HEAD moves only
-  # when a ref moves over it, which the plugin never does.
+  # binary_commit from 'gt stale --json' is the SHORT hash the Makefile bakes
+  # in (COMMIT := git rev-parse --short HEAD, internal/cmd.Commit) — NOT full,
+  # despite what an earlier version of this comment claimed. EXPECTED_COMMIT
+  # is always full. Comparing them directly would fail every real install
+  # (gt-b5mpe), so both this reading and the fallback below are resolved to a
+  # full hash inside RIG_ROOT before the comparison, regardless of length.
   GOT_COMMIT=$(gt stale --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || true)
   # A binary with no commit at all (a dev build installed by some other path)
   # cannot be verified this way, and the fallback mirrors the production
   # failure this replaced: 'gt version' prints no '@' from a cwd that is not a
   # repo, which is where this plugin always runs (gt-b5mpe).
   if [ -z "$GOT_COMMIT" ]; then
-    GOT_COMMIT_SHORT=$(gt version 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@' || true)
-    if [ -z "$GOT_COMMIT_SHORT" ]; then
-      log "FAILED: cannot read the installed binary's commit ($GT_PATH)"
-      gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-        --title "Plugin: rebuild-gt [unverified]" \
-        --description "Installed but the commit in force could not be read from $GT_PATH" >/dev/null 2>&1 || true
-      gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
-        --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
-      exit 1
-    fi
+    GOT_COMMIT=$(gt version 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@' || true)
   fi
-  # Only the fallback form is abbreviated: 'gt stale --json' is already a full
-  # hash, and EXPECTED_COMMIT is one too. Resolve the abbreviated form inside
-  # RIG_ROOT (the one repo it's guaranteed unambiguous in) before comparing
-  # like with like (gt-oqbw).
-  if [ -z "$GOT_COMMIT" ] && [ -n "${GOT_COMMIT_SHORT:-}" ]; then
-    RESOLVED=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT_SHORT" 2>/dev/null || true)
-    if [ -z "$RESOLVED" ]; then
-      log "FAILED: installed commit $GOT_COMMIT_SHORT does not resolve inside $RIG_ROOT"
-      gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-        --title "Plugin: rebuild-gt [unverified]" \
-        --description "Installed but $GOT_COMMIT_SHORT (from $GT_PATH) does not resolve to a commit in $RIG_ROOT" >/dev/null 2>&1 || true
-      gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
-        --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
-      exit 1
-    fi
-    GOT_COMMIT="$RESOLVED"
+  if [ -z "$GOT_COMMIT" ]; then
+    log "FAILED: cannot read the installed binary's commit ($GT_PATH)"
+    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
+      --title "Plugin: rebuild-gt [unverified]" \
+      --description "Installed but the commit in force could not be read from $GT_PATH" >/dev/null 2>&1 || true
+    gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
+      --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
+    exit 1
   fi
+  # Resolve inside RIG_ROOT (the one repo it's guaranteed unambiguous in)
+  # before comparing like with like (gt-oqbw, gt-b5mpe). rev-parse --verify
+  # accepts a hash of any length, so this is a no-op when GOT_COMMIT is
+  # already full.
+  RESOLVED=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT" 2>/dev/null || true)
+  if [ -z "$RESOLVED" ]; then
+    log "FAILED: installed commit $GOT_COMMIT does not resolve inside $RIG_ROOT"
+    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
+      --title "Plugin: rebuild-gt [unverified]" \
+      --description "Installed but $GOT_COMMIT (from $GT_PATH) does not resolve to a commit in $RIG_ROOT" >/dev/null 2>&1 || true
+    gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
+      --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
+    exit 1
+  fi
+  GOT_COMMIT="$RESOLVED"
   if [ "$GOT_COMMIT" != "$EXPECTED_COMMIT" ]; then
     log "FAILED: in force is $GOT_COMMIT, built $EXPECTED_COMMIT"
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
