@@ -156,6 +156,89 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 	}
 }
 
+// TestMatchesGitClean pins the gt-775d fix: the block fires on a git clean
+// invocation carrying a force flag, matched as an invocation, and never on the
+// words merely appearing somewhere in a compound line.
+func TestMatchesGitClean(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Blocked — a real force clean.
+		{"git clean -f", "git clean -f", true},
+		{"git clean -fd", "git clean -fd", true},
+		{"git clean -fdx", "git clean -fdx", true},
+		{"git clean -df", "git clean -df", true},
+		{"git clean -xdf", "git clean -xdf", true},
+		{"force flag before a dry-run flag", "git clean -f -n", true},
+		{"git clean -n -f", "git clean -n -f", true},
+		{"glued to a shell operator", "cd /tmp && git clean -fdx", true},
+		{"behind a leading env assignment", "GIT_DIR=.git git clean -fd", true},
+		{"behind git's -C option", "git -C /tmp/repo clean -fd", true},
+		{"absolute path to git", "/usr/bin/git clean -fd", true},
+		{"invoked through a launcher", "time git clean -fd", true},
+		{"handed to xargs", "find . -name '*.tmp' -print | xargs git clean -f", true},
+
+		// Allowed — git clean without a force flag.
+		{"dry run", "git clean -n", false},
+		{"dry run of a directory clean", "git clean -nd", false},
+		{"ignored files only", "git clean -X", false},
+		{"bare git clean", "git clean", false},
+
+		// Allowed — the words are present but no git clean runs.
+		{"clean spelled in an echo argument", `echo "clean"`, false},
+		{"git clean named inside a quoted echo argument", `echo "git clean -f"`, false},
+		{"git clean named as an unquoted echo argument", "echo git clean -f", false},
+		{"git clean named in an unquoted gt mail argument", "gt mail send x -s note -m never run git clean -f", false},
+		{"git clean named inside a quoted grep pattern", `grep -rn "git clean -f" docs/`, false},
+		{"force flag from a probe on another command", `test -f .git/MERGE_HEAD && echo "clean"`, false},
+		{"git subcommand other than clean", "git status -f", false},
+		{"force flag owned by a later command in the same segment", "git clean -n; git push -f origin main", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesGitClean(shellTokenize(tt.command))
+			if blocked := got != ""; blocked != tt.blocked {
+				t.Errorf("matchesGitClean(%q) blocked=%v (%q), want %v", tt.command, blocked, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestGitCleanMentionOnACompoundLineIsAllowed pins gt-775d end to end: the
+// three refinery merge commands the guard rejected are ordinary git work, and
+// each must pass the whole dangerous-command evaluation. Their fail-closed
+// cost was a wasted round trip on the merge hot path, four times in one night.
+func TestGitCleanMentionOnACompoundLineIsAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			"merge with a conflict probe",
+			`git merge --no-ff -m "Merge origin/main into main" origin/main 2>&1|tail -12; test -f .git/MERGE_HEAD && echo "CONFLICT" || echo "clean"`,
+		},
+		{
+			"merge preceded by a branch and log read",
+			`git rev-parse --abbrev-ref HEAD; git log --oneline -1; echo "=== merge origin/main in ==="; git merge --no-ff -m "Merge origin/main into main" origin/main 2>&1|tail -25; echo "=== conflict? ==="; test -f .git/MERGE_HEAD && echo "CONFLICT STATE" || echo "clean"`,
+		},
+		{
+			"rehearsal merge in a scratch branch",
+			`git ls-remote origin refs/heads/polecat/garnet/gt-2wqt+mu7h1he7 2>&1; echo "declared: 3fd09db..."; echo "=== rehearse ==="; git branch -D temp 2>/dev/null; git checkout -b temp origin/polecat/garnet/gt-2wqt+mu7h1he7 2>&1|tail -2; git merge --no-ff --no-edit origin/main 2>&1|tail -8; test -f .git/MERGE_HEAD && echo "CONFLICT" || echo "clean"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (%q), want allowed", tt.command, reason)
+			}
+		})
+	}
+}
+
 func TestMatchesSudo(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -926,6 +1009,8 @@ func TestDangerousGuard_Integration(t *testing.T) {
 			} else if matchesDangerousGitPush(lower) != "" {
 				blocked = true
 			} else if r, _ := matchesDangerousGitReset(lower); r != "" {
+				blocked = true
+			} else if matchesGitClean(shellTokenize(tt.command)) != "" {
 				blocked = true
 			} else {
 				for _, p := range fragmentPatterns {
