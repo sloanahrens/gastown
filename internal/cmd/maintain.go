@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,6 +60,11 @@ database that has diverged from its remote makes the two histories disagree
 and any later force-push drops the remote-only commits. Pass --force-diverged
 to skip the check and flatten regardless.
 
+Each database is also probed for a configured backup remote. When a probe fails
+the run stops before touching anything: a probe that did not answer is not
+evidence that a database is unbacked, and flattening one without a backup
+destroys the history the backup existed to keep.
+
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
 
@@ -87,6 +94,10 @@ type maintainDBInfo struct {
 	countKnown bool
 	countErr   error
 	hasBackup  bool
+	// backupKnown is false when maintainHasBackup failed. hasBackup is then
+	// meaningless — not a "no" — and must not be read as one (gt-ij15).
+	backupKnown bool
+	backupErr   error
 	// preflight is the remote-divergence check for this database. It is only
 	// populated for databases the plan means to flatten; a database that is
 	// below threshold is never fetched.
@@ -182,6 +193,39 @@ func (db maintainDBInfo) countLabel() string {
 	return strconv.Itoa(db.commitCount)
 }
 
+// backupText renders the backup state for the plan line. A failed probe prints
+// the failure, never the silence that reads as "no backup configured" (gt-ij15).
+func (db maintainDBInfo) backupText() string {
+	if db.backupKnown {
+		return ""
+	}
+	return fmt.Sprintf("backup unknown (%v)", db.backupErr)
+}
+
+// maintainBackupRefusal returns the error that stops a run whose plan rests on
+// a failed backup probe, or nil when every probe answered.
+//
+// The cost of the two readings of an unanswered probe is asymmetric: skipping a
+// backed-up database's sync is invisible, while flattening an unbacked one
+// destroys the history the backup existed to keep. An unanswered probe
+// therefore refuses the run, naming each database whose probe failed (gt-ij15).
+func maintainBackupRefusal(dbInfos []maintainDBInfo) error {
+	var errs []error
+	var names []string
+	for _, db := range dbInfos {
+		if db.backupKnown {
+			continue
+		}
+		names = append(names, db.name)
+		errs = append(errs, fmt.Errorf("%s: %w", db.name, db.backupErr))
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("backup probe failed for %s — refusing to run maintenance: %w",
+		strings.Join(names, ", "), errors.Join(errs...))
+}
+
 func runMaintain(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -223,7 +267,16 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			info.commitCount = count
 			info.countKnown = true
 		}
-		info.hasBackup = maintainHasBackup(config.DataDir, dbName)
+		hasBackup, err := maintainHasBackup(config.DataDir, dbName)
+		if err != nil {
+			// Keep the error instead of discarding it: a bare false would read
+			// as "no backup configured" and silently skip the database's
+			// backup while the run still reported success (gt-ij15).
+			info.backupErr = err
+		} else {
+			info.hasBackup = hasBackup
+			info.backupKnown = true
+		}
 		// Pre-flight only what the plan would flatten: the check costs a
 		// network fetch, and a database below threshold is never touched.
 		if info.needsFlatten(maintainThreshold) && !maintainForceDiverged {
@@ -237,6 +290,7 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	refusedCount := 0
 	backupCount := 0
 	unknownCount := 0
+	unknownBackupCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
 	for _, db := range dbInfos {
 		tags := ""
@@ -260,7 +314,14 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 				flattenCount++
 			}
 		}
-		if db.hasBackup {
+		switch {
+		case !db.backupKnown:
+			// Neither a backed-up database nor an unbacked one: the probe did
+			// not answer, and the line says so rather than leaving the gap that
+			// reads as "no backup configured" (gt-ij15).
+			tags += fmt.Sprintf(" %s", style.Warning.Render("→ "+db.backupText()))
+			unknownBackupCount++
+		case db.hasBackup:
 			tags += fmt.Sprintf(" %s", style.Dim.Render("[backup]"))
 			backupCount++
 		}
@@ -276,6 +337,16 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	if refusedCount > 0 {
 		fmt.Printf("  Refused: %d (remote diverged or unverifiable — see reasons above)\n", refusedCount)
 		fmt.Printf("  Re-run with --force-diverged to flatten anyway\n")
+	}
+	if unknownBackupCount > 0 {
+		fmt.Printf("  Backup state unknown: %d (probe failed — see reasons above)\n", unknownBackupCount)
+	}
+
+	// Stop before every phase that touches a database, preview included: an
+	// operator asking for a plan of a broken environment needs the failure, not
+	// a plan that reads as success.
+	if err := maintainBackupRefusal(dbInfos); err != nil {
+		return err
 	}
 
 	if maintainDryRun {
@@ -419,8 +490,11 @@ func maintainCountCommits(config *doltserver.Config, dbName string) (int, error)
 	return count, nil
 }
 
-// maintainHasBackup checks if a database has a <name>-backup remote configured.
-func maintainHasBackup(dataDir, dbName string) bool {
+// maintainHasBackup reports whether a database has a <name>-backup remote
+// configured. A non-nil error means the probe itself failed, which is not the
+// absence of a backup: `dolt backup` exits 0 with an empty list when none are
+// configured, so a non-zero exit is a real fault (gt-ij15).
+func maintainHasBackup(dataDir, dbName string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -428,18 +502,26 @@ func maintainHasBackup(dataDir, dbName string) bool {
 	cmd := exec.CommandContext(ctx, "dolt", "backup")
 	cmd.Dir = dbDir
 
+	// stderr is captured for the error path only; the backup list is read from
+	// stdout so a diagnostic line cannot be mistaken for a configured backup.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	output, err := cmd.Output()
 	if err != nil {
-		return false
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return false, fmt.Errorf("dolt backup in %s: %w: %s", dbDir, err, detail)
+		}
+		return false, fmt.Errorf("dolt backup in %s: %w", dbDir, err)
 	}
 
 	backupName := dbName + "-backup"
 	for _, line := range strings.Split(string(output), "\n") {
 		if strings.TrimSpace(line) == backupName {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // maintainBackupSync runs dolt backup sync for a single database.

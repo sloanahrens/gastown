@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +130,170 @@ func TestMaintainDBInfo(t *testing.T) {
 	}
 	if !info.hasBackup {
 		t.Error("expected hasBackup true")
+	}
+}
+
+// fakeDoltOnPath writes a `dolt` stub into a temp dir and puts that dir first
+// on PATH for the test.
+func fakeDoltOnPath(t *testing.T, script string) {
+	t.Helper()
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write dolt stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestMaintainHasBackupConfigurations drives the probe's two answering cases:
+// the backup is configured, and it is genuinely absent. Both leave the error
+// nil — the caller is entitled to read false as "no backup configured" only
+// when the command actually answered (gt-ij15).
+func TestMaintainHasBackupConfigurations(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub is a shell script")
+	}
+
+	tests := []struct {
+		name string
+		// listed is what the stubbed `dolt backup` prints, one name per line.
+		listed []string
+		want   bool
+	}{
+		{name: "present", listed: []string{"backup_export", "gastown-backup"}, want: true},
+		{name: "absent", listed: []string{"backup_export"}, want: false},
+		{name: "empty list", listed: nil, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			script := "#!/bin/sh\n"
+			for _, line := range tc.listed {
+				script += "echo '" + line + "'\n"
+			}
+			fakeDoltOnPath(t, script)
+
+			dataDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dataDir, "gastown"), 0o755); err != nil {
+				t.Fatalf("mkdir db dir: %v", err)
+			}
+
+			got, err := maintainHasBackup(dataDir, "gastown")
+			if err != nil {
+				t.Fatalf("maintainHasBackup: unexpected error %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("maintainHasBackup = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaintainHasBackupProbeFailure covers the defect: every failure mode of the
+// probe used to return a bare false, which the plan read as "no backup
+// configured" and the run read as success.
+func TestMaintainHasBackupProbeFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub is a shell script")
+	}
+
+	t.Run("command exits non-zero", func(t *testing.T) {
+		fakeDoltOnPath(t, "#!/bin/sh\necho 'cannot read data dir' >&2\nexit 1\n")
+
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "gastown"), 0o755); err != nil {
+			t.Fatalf("mkdir db dir: %v", err)
+		}
+
+		hasBackup, err := maintainHasBackup(dataDir, "gastown")
+		if err == nil {
+			t.Fatal("a failed probe reported success — the run would skip this database's backup")
+		}
+		if !strings.Contains(err.Error(), "cannot read data dir") {
+			t.Errorf("error drops the command's output: %v", err)
+		}
+		if hasBackup {
+			t.Error("a failed probe must not report a backup either")
+		}
+	})
+
+	t.Run("dolt not on PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+
+		hasBackup, err := maintainHasBackup(t.TempDir(), "gastown")
+		if err == nil {
+			t.Fatal("a missing dolt binary reported success — the run would skip this database's backup")
+		}
+		if hasBackup {
+			t.Error("a failed probe must not report a backup either")
+		}
+	})
+
+	t.Run("data dir unreadable", func(t *testing.T) {
+		fakeDoltOnPath(t, "#!/bin/sh\nexit 0\n")
+
+		hasBackup, err := maintainHasBackup(t.TempDir(), "gastown")
+		if err == nil {
+			t.Fatal("an unreadable data dir reported success — the run would skip this database's backup")
+		}
+		if hasBackup {
+			t.Error("a failed probe must not report a backup either")
+		}
+	})
+}
+
+// TestMaintainBackupRendering pins the plan line: a failed probe and a genuinely
+// unbacked database must not render identically, because the operator's next
+// action differs — fix the probe versus nothing to fix.
+func TestMaintainBackupRendering(t *testing.T) {
+	t.Parallel()
+
+	backedUp := maintainDBInfo{name: "gastown", hasBackup: true, backupKnown: true}
+	unbacked := maintainDBInfo{name: "gastown", backupKnown: true}
+	unknown := maintainDBInfo{name: "gastown", backupErr: errors.New("dolt backup: executable file not found in $PATH")}
+
+	if got := backedUp.backupText(); got != "" {
+		t.Errorf("backed-up backupText: got %q, want empty", got)
+	}
+	if got := unbacked.backupText(); got != "" {
+		t.Errorf("unbacked backupText: got %q, want empty", got)
+	}
+
+	want := "backup unknown (dolt backup: executable file not found in $PATH)"
+	if got := unknown.backupText(); got != want {
+		t.Errorf("unknown backupText: got %q, want %q", got, want)
+	}
+	if unknown.backupText() == unbacked.backupText() {
+		t.Errorf("a failed probe and a genuine absence render identically: %q", unknown.backupText())
+	}
+}
+
+// TestMaintainBackupRefusal pins the fail-closed gate: one unanswered probe
+// stops the run, and the error names the database and carries the probe's own
+// error. Every answering plan proceeds untouched.
+func TestMaintainBackupRefusal(t *testing.T) {
+	t.Parallel()
+
+	probeErr := errors.New("dolt backup: signal: killed")
+
+	if err := maintainBackupRefusal([]maintainDBInfo{
+		{name: "be", hasBackup: true, backupKnown: true},
+		{name: "gastown", backupKnown: true},
+	}); err != nil {
+		t.Fatalf("an answered plan was refused: %v", err)
+	}
+
+	err := maintainBackupRefusal([]maintainDBInfo{
+		{name: "be", hasBackup: true, backupKnown: true},
+		{name: "gastown", backupErr: probeErr},
+	})
+	if err == nil {
+		t.Fatal("an unanswered backup probe did not refuse the run")
+	}
+	if !strings.Contains(err.Error(), "gastown") {
+		t.Errorf("refusal does not name the database whose probe failed: %v", err)
+	}
+	if !errors.Is(err, probeErr) {
+		t.Errorf("refusal drops the probe's error: %v", err)
 	}
 }
 
