@@ -1022,9 +1022,15 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	if needsSlot {
 		release, waited, acquireErr := acquireVerifySlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
 		if acquireErr != nil {
+			// The giving-up message has to name the sanctioned next move. It
+			// used to invite a re-run ("once the queue drains"), which is what
+			// the improvised retry loop of gt-pnkd was built around; the
+			// ruling is one invocation, then a bead comment and an escalation
+			// to the mayor (gt-7dxw). The guard refuses the scripted loop, so
+			// the message must not be the thing that re-suggests it.
 			return testVerifyResult{}, fmt.Errorf(
-				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Re-run gt done once the queue drains, or raise merge_queue.test_verify_slot_timeout for this rig; --skip-verify with justification is the last resort",
-				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr)
+				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Do not retry or loop on it: add a bead comment with this error and the verify log at %s, then run `gt escalate -s medium` asking the mayor for a one-shot --skip-verify ruling, and wait. Raising merge_queue.test_verify_slot_timeout is the rig-level alternative; --skip-verify with justification is the last resort (gt-7dxw)",
+				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr, logPath)
 		}
 		defer release()
 		slotWait = waited

@@ -175,6 +175,17 @@ takes a slot for it. The gate force-set value only wins if the rig's recipe read
 variable rather than hardcoding it — gastown's `make test` defaults it
 (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason.
 
+Run `gt done` **once**. While its gate waits on the slot it prints a
+`still waiting for the container-gate slot …` line every couple of minutes and
+gives up with a slot-acquire timeout when the cap expires; the waiting is the
+ordinary case, not a hang. Do not poll the slot or script a retry around
+`gt done` or `gt slot` — a polling loop holds the gate every other agent is
+queued behind, one pass at a time. The dangerous-command guard refuses the loop
+shape (a `for`/`while`/`until` block, an `xargs`/`watch`/`seq`, or a heredoc
+writing such a script to a file) in every role and every directory (gt-7dxw).
+On a slot-cap or run-budget failure the sanctioned move is a bead comment plus
+`gt escalate -s medium` asking the mayor for a one-shot `--skip-verify` ruling.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with

@@ -1242,3 +1242,60 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 		t.Fatalf("rendered CLAUDE.md lacks the writing-for-agents pointer %q", want)
 	}
 }
+
+// TestPolecatGuidanceForbidsSlotPollingLoops covers gt-7dxw: a polecat hit the
+// test-verify slot cap inside `gt done` and improvised a polling loop around
+// it. The instruction that forbids the loop reaches the polecat through the
+// prime output — asserted on the RENDERED text rather than the template
+// source, because what matters is what the agent reads. The three other homes
+// for the same wording are covered where they live: the formulas in
+// internal/formula, the /done body in internal/templates/commands.
+//
+// The provisioned polecat CLAUDE.md deliberately does NOT carry this text:
+// docs-lint holds that file to a 2,000-word ceiling and it sits at 1,983, so a
+// second copy would break the gate. The rule lives in the prime output, the
+// mol-polecat-work formula, and the /done body; the dangerous-command guard is
+// what enforces it.
+func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
+	// The wording the ruling fixed verbatim.
+	const verbatim = "gt done may sit silently for up to 20-30 minutes waiting for the container-gate slot. " +
+		"That is normal. Do not interrupt it, do not close the bead, do not retry. " +
+		"It will print a slot-acquire timeout if it gives up."
+
+	rendered := renderPolecatForTest(t)
+	if !strings.Contains(rendered, verbatim) {
+		t.Errorf("rendered polecat prime output lacks the verbatim slot-wait sentence")
+	}
+
+	for _, want := range []string{
+		"Never poll the slot, and never script a retry around `gt done`",
+		"`gt escalate -s medium`",
+		"--skip-verify",
+		"Do not run container suites yourself. Run the non-container packages, then",
+		"merge_queue.test_verify_slot_timeout",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered polecat prime output lacks %q", want)
+		}
+	}
+}
+
+// renderPolecatForTest renders the role template the way `gt prime` does, with
+// a non-fork rig (the only branch that runs `gt done`'s merge-queue workflow).
+func renderPolecatForTest(t *testing.T) string {
+	t.Helper()
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	output, err := tmpl.RenderRole("polecat", RoleData{
+		Role: "polecat", RigName: "myrig", Polecat: "TestCat",
+		TownRoot: "/test/town", TownName: "town",
+		WorkDir:  "/test/town/myrig/polecats/TestCat",
+		MayorSession: "gt-town-mayor", DeaconSession: "gt-town-deacon",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+	return output
+}
