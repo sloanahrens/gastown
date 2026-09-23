@@ -191,3 +191,113 @@ func TestDoMerge_SucceedsWhenAnotherWorktreeHoldsTarget(t *testing.T) {
 		t.Errorf("the holding worktree was moved off main, now on %q", got)
 	}
 }
+
+// TestDoMerge_RealignsWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b) on
+// the single-MR path: a stray commit left on the shared local main by another
+// agent (gt-032w) or a run that exited before restoreTargetToOrigin must not
+// permanently block merging. doMerge realigns target to origin up front and
+// proceeds — prepareMergeTarget was going to discard the stray commit anyway.
+func TestDoMerge_RealignsWhenLocalTargetAheadOfOrigin(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+
+	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "leftover.txt", "leftover\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "Merge rejected-branch into main (gt-xxxx)")
+	leftoverSHA := run(t, workDir, "git", "rev-parse", "main")
+
+	mr := makeMR("mr-a", "feature-a", "main")
+	result := e.doMerge(context.Background(), mr)
+	if !result.Success {
+		t.Fatalf("expected doMerge to realign and proceed when local main is ahead of origin/main: %s", result.Error)
+	}
+
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", leftoverSHA, "origin/main").Run(); err == nil {
+		t.Errorf("leftover commit %s is still reachable from origin/main — it should have been discarded by realignment", leftoverSHA)
+	}
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", originMain, "origin/main").Run(); err != nil {
+		t.Errorf("origin/main's prior tip %s is not an ancestor of the landed merge", originMain)
+	}
+}
+
+// TestRestoreTargetToOrigin_Attached covers gt-u093 fix (a) when this
+// worktree has target checked out: restoreTargetToOrigin must hard-reset it.
+func TestRestoreTargetToOrigin_Attached(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "extra.txt", "extra\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "ahead of origin")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin: %v", err)
+	}
+
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != originMain {
+		t.Errorf("expected main reset to origin/main %s, got %s", originMain, got)
+	}
+}
+
+// TestRestoreTargetToOrigin_DetachedMovesBranchPointer covers gt-u093 fix (a)
+// in the case its bug report names explicitly: a run staged on a detached
+// HEAD (because this worktree moved off target after advancing it) must reset
+// its own HEAD and working tree, not just target's ref — a plain `branch -f`
+// only moves the latter.
+func TestRestoreTargetToOrigin_DetachedMovesBranchPointer(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "extra.txt", "extra\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "ahead of origin")
+	run(t, workDir, "git", "checkout", "--detach")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin: %v", err)
+	}
+
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != originMain {
+		t.Errorf("expected main force-updated to origin/main %s, got %s", originMain, got)
+	}
+	if got := run(t, workDir, "git", "rev-parse", "HEAD"); got != originMain {
+		t.Errorf("expected this worktree's detached HEAD reset to origin/main %s, got %s", originMain, got)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "extra.txt")); statErr == nil {
+		t.Error("expected extra.txt from the ahead commit gone from the working tree after restore")
+	}
+}
+
+// TestRestoreTargetToOrigin_HeldElsewhere_NoOp covers gt-u093 fix (a) when
+// another worktree holds target: this run never advanced refs/heads/target,
+// so there is nothing to restore and it must not error.
+func TestRestoreTargetToOrigin_HeldElsewhere_NoOp(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	run(t, workDir, "git", "checkout", "-b", "refinery/scratch")
+	addWorktreeHolding(t, workDir, "main")
+	expectCheckoutRefused(t, workDir, "main")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin with main held elsewhere: %v", err)
+	}
+}

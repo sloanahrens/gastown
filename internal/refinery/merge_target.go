@@ -73,6 +73,45 @@ func (e *Engineer) worktreeHolding(target string) (string, bool) {
 	return "", false
 }
 
+// restoreTargetToOrigin resets local <target> to exactly match origin/<target>,
+// including this worktree's own HEAD and working tree whenever it is staged
+// there — attached to target, or detached on it because another worktree
+// holds target (gt-u093).
+func (e *Engineer) restoreTargetToOrigin(target string) error {
+	current, err := e.git.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("resolve current branch before restoring %s: %w", target, err)
+	}
+
+	// This worktree is staged on target — attached to it, or detached at
+	// origin/target per stageOnMergeTarget — so its own HEAD, index, and
+	// working tree need cleaning regardless of how staging left them.
+	// Attached to an unrelated branch is left untouched: resetting it would
+	// rewrite work this restore has nothing to do with.
+	if current == target || current == "HEAD" {
+		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			return fmt.Errorf("reset worktree to origin/%s: %w", target, resetErr)
+		}
+		if current == target {
+			return nil // ResetHard already moved refs/heads/target.
+		}
+	}
+
+	// Detached, or on an unrelated branch: refs/heads/target itself may
+	// still be ahead of origin, unless another worktree owns it.
+	if _, held := e.worktreeHolding(target); held {
+		return nil
+	}
+	exists, existsErr := e.git.BranchExists(target)
+	if existsErr != nil {
+		return fmt.Errorf("check %s exists: %w", target, existsErr)
+	}
+	if !exists {
+		return nil
+	}
+	return e.git.ResetBranch(target, "origin/"+target)
+}
+
 // mergePushRef is the refspec that lands a merge staged on target. HEAD holds
 // the merge tip whether the staging tree is attached to target or detached at
 // origin/target, and naming it keeps the landing push independent of a local
