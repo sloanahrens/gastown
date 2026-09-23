@@ -21,6 +21,10 @@ import (
 func TestRunDefaultTestVerification_Lint(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
+	// The ambient opt-in is an input the gate must not silently depend on
+	// (gt-0hbm): a developer shell with GT_TEST_DOCKER=1 exported must not
+	// flip these subtests' slot-free expectations.
+	t.Setenv(dockerTestsEnv, "0")
 
 	t.Run("lint passes, then tests run; recorded on the result", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)

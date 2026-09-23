@@ -228,13 +228,16 @@ test: test-makefile
 	# tightened against an idle host is not a hang detector.
 	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
 	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
-	# Defaulted rather than hardcoded, so an *ambient* GT_TEST_DOCKER=0 wins:
+	# Defaulted rather than hardcoded, so a *forced* GT_TEST_DOCKER=0 wins:
 	# gt done's default gate runs this same recipe with the opt-in forced off
-	# and therefore needs no container-gate slot (gt-wx53), while the refinery
-	# gate and the daemon's main-branch patrol pass no value and still get the
-	# container suite. A hardcoded =1 here is invisible to every caller that
-	# tries to turn containers off (a recipe assignment beats the child env),
-	# so the gate stayed welded to the town-wide slot.
+	# and takes no container-gate slot while the switch is off everywhere (gt-wx53);
+	# the gate's own read of the switch includes the session's exported value,
+	# so an ambient GT_TEST_DOCKER=1 makes it hold the slot and pass this value
+	# through (gt-0hbm). The refinery gate and the daemon's main-branch patrol
+	# pass no value and still get the container suite. A hardcoded =1 here is
+	# invisible to every caller that tries to turn containers off (a recipe
+	# assignment beats the child env), so the gate stayed welded to the
+	# town-wide slot.
 	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m ./...
 
 # test-changed runs the same hermetic suite as `test` over a caller-supplied

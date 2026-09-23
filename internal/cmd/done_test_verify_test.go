@@ -880,3 +880,67 @@ func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *test
 		t.Errorf("verify log does not record the cap it was waiting under:\n%s", logText)
 	}
 }
+
+// TestRunDefaultTestVerification_AmbientOptInTakesTheSlot pins gt-0hbm's fix
+// at the unit level: the gate's slot decision reads the effective environment
+// — an exported GT_TEST_DOCKER=1 makes the run slot-taking and un-opted-out
+// even when the rig's own command names no switch, and an ambient =0 keeps a
+// command that also names no switch slot-free (the no-op-in-the-command shape
+// where only the ambient value decides).
+func TestRunDefaultTestVerification_AmbientOptInTakesTheSlot(t *testing.T) {
+	dir, _ := initVerifyTestGoRepo(t)
+	changePkga(t, dir)
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+
+	acquired := false
+	var env []string
+	stubVerifyGate(t, func(_ string, _ string, _ time.Duration) (func(), error) {
+		acquired = true
+		return func() {}, nil
+	}, func(_ context.Context, _ string, _ string, e []string, _ *os.File) error {
+		env = e
+		return nil
+	})
+
+	g := git.NewGit(dir)
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+
+	t.Run("ambient =1: slot held, no opt-out", func(t *testing.T) {
+		t.Setenv(dockerTestsEnv, "1")
+		env = nil
+		acquired = false
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/ambient-on-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if !result.slotUsed || !acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want true/true: the environment the child inherits turns the opt-in on (gt-0hbm)", result.slotUsed, acquired)
+		}
+		if result.containersOptedOut {
+			t.Error("containersOptedOut = true: with the ambient opt-in on, no opt-out may happen")
+		}
+		if !containsEnv(env, dockerTestsEnv+"=1") || containsEnv(env, dockerTestsEnv+"=0") {
+			t.Errorf("child env = %v, want %s=1 and no %s=0", env, dockerTestsEnv, dockerTestsEnv)
+		}
+	})
+
+	t.Run("ambient =0 with an unmarked command: slot-free, opt-out forced", func(t *testing.T) {
+		t.Setenv(dockerTestsEnv, "0")
+		env = nil
+		acquired = false
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/ambient-off-role")
+		if err != nil {
+			t.Fatalf("runDefaultTestVerification: %v", err)
+		}
+		if result.slotUsed || acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want false/false: nothing turns the opt-in on", result.slotUsed, acquired)
+		}
+		if !result.containersOptedOut {
+			t.Error("containersOptedOut = false, want true: the run must keep the container suite from starting outside a slot")
+		}
+		if !containsEnv(env, dockerTestsEnv+"=0") {
+			t.Errorf("child env is missing %s=0:\n%v", dockerTestsEnv, env)
+		}
+	})
+}

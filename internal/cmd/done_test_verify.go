@@ -548,53 +548,81 @@ func isEnvVarName(s string) bool {
 	return true
 }
 
-// containerOptInRequested reports whether any of the given command texts turns
-// the container opt-in (testutil.DockerTestsEnv) on inline — "GT_TEST_DOCKER=1
-// make test", "env GT_TEST_DOCKER=1 go test ...", "export GT_TEST_DOCKER=1;
-// ...". It reuses the container-suite guard's tokenizer (same package), so the
-// gate and the tap guard agree on what "this command wants containers" means.
-func containerOptInRequested(commands ...string) bool {
+// dockerRequested reports whether the gate's child can actually start a
+// container-backed suite — the test process's own view of the switch: the
+// ambient value (this process's environment), the rig's test_command env
+// prefix, and the inline text of the gate's commands, in that order (gt-0hbm:
+// a scan of command text alone judged the slot decision while the
+// environment said otherwise, so the guarantee that no container starts
+// outside the container-gate slot became a property of the scan). An inline
+// assignment of any value shadows both inherited sources; only an inline 0
+// keeps the switch off, so the ambient value counts whenever nothing inline
+// turns the switch on.
+func dockerRequested(envPrefix []string, commands ...string) bool {
+	// Inline assignments shadow both inherited sources for the run they are
+	// written into; an inline 0 therefore holds the switch off even when the
+	// rig or the ambient environment would turn it on.
+	// Whether any inline assignment exists and whether one turns the switch on:
+	// an inline 0 holds the switch off even when a later inline 1 appears (the
+	// child's environment is the value that shadows the inherited sources, and
+	// the reader that resolves duplicates last wins), so presence alone decides.
+	inlineSeen, inlineOn := false, false
 	for _, c := range commands {
 		if strings.TrimSpace(c) == "" {
 			continue
 		}
-		if commandEnablesDockerTests(shellTokenize(c)) {
-			return true
+		toks := shellTokenize(c)
+		for _, tok := range toks {
+			name, value, ok := strings.Cut(tok, "=")
+			if ok && name == dockerTestsEnv {
+				inlineSeen = true
+				inlineOn = inlineOn || value == "1"
+			}
+		}
+		// The guard's exact-token scan (gt-0hbm: it deliberately does not
+		// parse the whole command into an environment) also catches a
+		// tokenized assignment the first pass can miss — a quoted value —
+		// as a bare token; only `env GT_TEST_DOCKER=1 ...` is the one shape
+		// the raw-token scan still sees, so ORing keeps both views agreeing.
+		if commandEnablesDockerTests(toks) {
+			inlineSeen, inlineOn = true, true
 		}
 	}
-	return false
+	if inlineSeen {
+		return inlineOn
+	}
+	rigOn := false
+	for _, kv := range envPrefix {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == dockerTestsEnv {
+			rigOn = value == "1"
+		}
+	}
+	return rigOn || os.Getenv(dockerTestsEnv) == "1"
 }
 
 // gateNeedsSlot reports whether the default test-verify gate must hold a
 // container-gate slot for the run it is about to make (gt-wx53).
 //
 // The slot is town-wide and one suite wide, so taking it for a run that cannot
-// start a container makes every `gt done` in the town queue behind the daemon's
-// main-branch patrol and the refinery's batch gate — mica's gt done on gt-jqif
-// waited out the full 20m cap for a gate that never ran a test (gt-pnkd). The
-// gate therefore takes the slot only when its run can actually start a
-// container-backed suite: a non-Go rig (whose test_command is opaque), or a Go
-// rig whose command turns the opt-in on. Everything else runs the rig's whole
-// suite with the opt-in off: the container-backed tests skip, and the
-// refinery's gate (which does hold a slot) runs them once per submission
-// (gt-yihz, operator decision 14:44 2026-09-17).
-//
-// The *ambient* opt-in is deliberately not consulted, even though the
-// container-suite guard reads it that way. The guard can only inspect the
-// command it is shown; this gate builds its child's environment, so the same
-// input would otherwise decide differently depending on who invoked `gt done`
-// (a polecat spawned by a suite inherits GT_TEST_DOCKER=1 and would take the
-// town-wide slot back; the integration harness sets it too, so the same gate
-// would behave two ways in one test binary). Reading the rig's own command
-// keeps the answer a property of the rig's configuration, which is what an
-// operator can reason about — and overriding an inherited opt-in is safe in
-// the only direction that matters: the run cannot start a container it did not
-// take a slot for.
-func gateNeedsSlot(isGoRig bool, commands ...string) bool {
+// start a container makes every `gt done` in the town queue behind the
+// daemon's main-branch patrol and the refinery's batch gate — mica's gt done
+// on gt-jqif waited out the full 20m cap for a gate that never ran a test
+// (gt-pnkd). The gate therefore takes the slot only when its run can actually
+// start a container-backed suite: a non-Go rig (whose test_command is opaque),
+// or a Go rig whose child environment turns the opt-in on (dockerRequested —
+// the same effective value the container-suite tap guard reads, so the slot
+// decision and the child's environment can never disagree; gt-0hbm).
+// Everything else runs the rig's whole suite with the opt-in forced off: the
+// container-backed tests skip, and the refinery's gate (which does hold a
+// slot) runs them once per submission (gt-yihz 14:44 2026-09-17) — so a
+// `gt done` invoked from a session with the opt-in exported instead holds the
+// slot and passes the value through, the slot decision and the environment
+// never disagreeing (gt-0hbm).
+func gateNeedsSlot(isGoRig bool, envPrefix []string, commands ...string) bool {
 	if !isGoRig {
 		return true
 	}
-	return containerOptInRequested(commands...)
+	return dockerRequested(envPrefix, commands...)
 }
 
 // verifyGateEnv builds the child environment for the gate's lint and suite
@@ -608,8 +636,9 @@ func gateNeedsSlot(isGoRig bool, commands ...string) bool {
 // first, a shell's assignment takes the last), and this value is what decides
 // whether a container starts outside the container-gate slot.
 //
-// A rig whose command turns the opt-in on is never opted out here: the rig
-// wins (see gateNeedsSlot), and the gate takes a slot for it.
+// When the rig turns the opt-in on the gate takes a slot and does NOT opt
+// out: the rig wins, and an ambient opt-in inherits the slot rather than the
+// opt-out (gt-0hbm, see dockerRequested).
 func verifyGateEnv(envPrefix []string, optOutContainers bool) []string {
 	env := make([]string, 0, len(os.Environ())+len(envPrefix)+1)
 	keep := func(kv string) bool {
@@ -905,8 +934,12 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// resource, sometimes for longer than the suite it was queueing behind.
 	// So the gate either runs the rig's whole suite with the container opt-in
 	// forced off (container-backed tests skip, no slot needed) or, when the
-	// rig's own command asks for containers, runs it unchanged inside a slot.
-	needsSlot := gateNeedsSlot(isGoRig, mq.TestCommand, mq.TestVerifyCommand)
+	// run's child environment turns the switch on (the rig's test_command
+	// environment, an inline assignment, or the session's exported value —
+	// gt-0hbm: the tap guard reads the same effective value, so the slot
+	// decision and the environment cannot disagree), runs it unchanged inside
+	// a slot.
+	needsSlot := gateNeedsSlot(isGoRig, envPrefix, mq.TestCommand, mq.TestVerifyCommand)
 	containersOptedOut := !needsSlot
 
 	budgets := resolveTestVerifyBudgets(mq)
@@ -969,8 +1002,14 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// answer used to be an unconditional yes, stated nowhere).
 	if containersOptedOut {
 		fmt.Fprintf(logFile, "containers: opted out (%s=0) — container-backed tests skip here and run once per submission in the refinery's gate, so this gate takes no container-gate slot\n", dockerTestsEnv)
+	} else if commandEnablesDockerTests(shellTokenize(testCmd)) {
+		// The command's own text turns the switch on: the slot covers that.
+		fmt.Fprintf(logFile, "containers: enabled (the command turns %s=1 on) — this run may start container-backed suites, so it takes a container-gate slot\n", dockerTestsEnv)
 	} else {
-		fmt.Fprintf(logFile, "containers: enabled — this run may start container-backed suites, so it takes a container-gate slot\n")
+		// The rig's env prefix or the session's exported value turns the
+		// switch on: the slot is held so the value the child inherits is the
+		// one the run is allowed to act on (gt-0hbm).
+		fmt.Fprintf(logFile, "containers: enabled (the %s=1 opt-in is on in the rig's test_command environment or this session's) — this run may start container-backed suites, so it takes a container-gate slot\n", dockerTestsEnv)
 	}
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))

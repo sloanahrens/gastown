@@ -581,6 +581,31 @@ func TestEvaluateContainerSuiteCommand_EnvOptIn(t *testing.T) {
 	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason != "" {
 		t.Errorf("bare go test with the opt-in unset was blocked: %s", reason)
 	}
+	t.Setenv(dockerTestsEnv, "0")
+	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason != "" {
+		t.Errorf("bare go test with the opt-in explicitly 0 was blocked: %s", reason)
+	}
+}
+
+// gt-0hbm: the default test-verify gate and this guard must judge the same
+// effective environment, so a `gt done` invoked in a context the guard would
+// block (switch on in the environment, unmarked command) takes a slot rather
+// than running the container suite beside one. The one shape this does NOT
+// agree on is an explicit inline 0, where the child's environment wins for the
+// gate and the command text wins for the guard (blocked but opted out) — safe
+// in either reading because an inline 0 means no container starts.
+func TestGateAndGuardAgreeOnAmbientOptIn(t *testing.T) {
+	t.Setenv(dockerTestsEnv, "1")
+	_, _ = initVerifyTestGoRepo(t)
+	if reason, _ := evaluateContainerSuiteCommand("go test ./..."); reason == "" {
+		t.Fatal("precondition: guard should block an unmarked bare go test under an ambient opt-in")
+	}
+	if !gateNeedsSlot(true, nil, "go test ./...") {
+		t.Error("gateNeedsSlot = false for an unmarked command with the ambient opt-in on: the gate and the guard disagree (gt-0hbm)")
+	}
+	if gateNeedsSlot(true, nil, "GT_TEST_DOCKER=0 go test ./...") {
+		t.Error("gateNeedsSlot = true for an explicit inline 0: the child environment wins, so the slot must be released")
+	}
 }
 
 // containerSuiteBlockCommand extracts the "Run it wrapped instead:" line from

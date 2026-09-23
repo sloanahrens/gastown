@@ -353,6 +353,9 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	}
 
 	t.Run("the gate runs the rig's full hermetic test_command, slot-free, when the rig does not ask for containers", func(t *testing.T) {
+		// Pin the ambient opt-in off: this subtest expects a slot-free run, and
+		// a developer shell with GT_TEST_DOCKER=1 exported would flip that (gt-0hbm).
+		t.Setenv(dockerTestsEnv, "0")
 		dir := newRepoWithTwoChangedPackages(t)
 
 		var calls []runCall
@@ -440,6 +443,11 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("a rig whose command asks for containers runs it inside a slot, unchanged", func(t *testing.T) {
+		// Pin the ambient opt-in on: the rig's command asks for containers and
+		// the gate must hold a slot; an ambient =0 in os.Environ() would leak
+		// into the child env (os.Environ is copied verbatim) and trip the
+		// "no =0 in the child env" assertion below.
+		t.Setenv(dockerTestsEnv, "1")
 		dir := newRepoWithTwoChangedPackages(t)
 
 		var calls []runCall
@@ -489,6 +497,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("test_verify_command replaces the full test_command and fills {packages}", func(t *testing.T) {
+		// Pin the ambient opt-in off: this subtest expects a slot-free run.
+		t.Setenv(dockerTestsEnv, "0")
 		dir := newRepoWithTwoChangedPackages(t)
 		var script string
 		stubVerifyGate(t,
@@ -567,6 +577,8 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("a slot-free timing-out suite says no slot was taken", func(t *testing.T) {
+		// Pin the ambient opt-in off: this subtest expects a slot-free run.
+		t.Setenv(dockerTestsEnv, "0")
 		dir := newRepoWithTwoChangedPackages(t)
 		acquired := false
 		stubVerifyGate(t,
@@ -815,18 +827,23 @@ func TestChangedGoPackages(t *testing.T) {
 
 // TestRunDefaultTestVerification_SlotOnlyForContainerRuns covers gt-wx53: gt
 // done runs the rig's full hermetic test_command (gt-btw1), but it takes the
-// town-wide container-gate slot only when that command can actually start a
-// container-backed suite. Everything else — including a change to a
-// container-backed package, since this rig's command does not ask for
-// containers — runs slot-free with the container opt-in forced off, so a
-// polecat's submission no longer queues behind the daemon's main-branch patrol
-// and the refinery's batch gate. There is no deferral to the refinery either
-// way (gt-btw1): the command is the rig's full one, run whole.
+// town-wide container-gate slot only when the run it is about to make can
+// actually start a container-backed suite (gt-0hbm: that judgment is the
+// effective environment — the rig's test_command env prefix, an inline
+// assignment, or the session's exported value — the same value the container-
+// suite tap guard reads, so the slot decision and the child's environment can
+// never disagree). Everything else — including a change to a container-backed
+// package, since this rig's command does not ask for containers — runs
+// slot-free with the container opt-in forced off, so a polecat's submission no
+// longer queues behind the daemon's main-branch patrol and the refinery's
+// batch gate. There is no deferral to the refinery either way (gt-btw1): the
+// command is the rig's full one, run whole.
 func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
 	t.Run("container-backed package changed, rig does not ask for containers: slot-free", func(t *testing.T) {
+		t.Setenv(dockerTestsEnv, "0")
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		changePkga(t, dir)
@@ -870,6 +887,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	})
 
 	t.Run("only container-backed packages changed: still slot-free, and the whole suite still runs", func(t *testing.T) {
+		t.Setenv(dockerTestsEnv, "0")
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -902,7 +920,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		}
 	})
 
-	t.Run("an inherited container opt-in is filtered out, and the slot with it", func(t *testing.T) {
+	t.Run("an inherited container opt-in takes the slot with it, and the run gets the value that justifies the slot", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -925,24 +943,23 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/inherited-optin-role")
+		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/ambient-optin-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
-		if result.slotUsed || acquired {
-			t.Errorf("slotUsed=%v acquired=%v, want false/false: the rig's command never asked for containers", result.slotUsed, acquired)
+		if !result.slotUsed || !acquired {
+			t.Errorf("slotUsed=%v acquired=%v, want true/true: the environment the child inherits turns the opt-in on, so the run may start a container and must hold the slot (gt-0hbm)", result.slotUsed, acquired)
 		}
-		if !containsEnv(env, dockerTestsEnv+"=0") {
-			t.Errorf("child env is missing %s=0:\n%v", dockerTestsEnv, env)
+		if result.containersOptedOut {
+			t.Error("containersOptedOut = true: the ambient opt-in is on, so no opt-out may happen")
 		}
-		seen := 0
-		for _, kv := range env {
-			if strings.HasPrefix(kv, dockerTestsEnv+"=") {
-				seen++
-			}
+		// With the slot held there is nothing to filter: the child carries the
+		// ambient =1 exactly as the parent had it.
+		if !containsEnv(env, dockerTestsEnv+"=1") {
+			t.Errorf("child env is missing %s=1:\n%v", dockerTestsEnv, env)
 		}
-		if seen != 1 {
-			t.Errorf("child env carries %s %d times, want exactly once (a duplicate resolves differently per reader)", dockerTestsEnv, seen)
+		if containsEnv(env, dockerTestsEnv+"=0") {
+			t.Errorf("child env must not carry %s=0 when the slot is held:\n%v", dockerTestsEnv, env)
 		}
 	})
 

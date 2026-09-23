@@ -167,14 +167,12 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 	tokens := shellTokenize(strings.TrimSpace(command))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
 	// `go test` of a container-bearing package cannot start a container
-	// unless the command turns the switch on somewhere — as an env prefix,
-	// via env(1), or an earlier `export` on the same line — so only then is
-	// the slot required. `make test` sets it in the Makefile and is judged
-	// unconditionally. The switch is looked for across the WHOLE command,
-	// not per segment, because `export X=1; go test ...` enables it for the
-	// later segment. An opt-in already exported in the hook's environment
-	// counts too: the test process inherits it without it being typed.
-	dockerOn := commandEnablesDockerTests(tokens) || os.Getenv(dockerTestsEnv) == "1"
+	// unless the switch is on somewhere the test process will inherit it —
+	// as an env prefix, via env(1), an earlier `export` on the same line, or
+	// already in this hook's environment. The switch is looked for across
+	// the WHOLE command, not per segment, because `export X=1; go test ...`
+	// enables it for the later segment.
+	dockerOn := commandEnablesDockerTests(tokens) || dockerTestsSwitchOn()
 
 	var segment []string
 	for _, tok := range tokens {
@@ -196,11 +194,21 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 // TestDockerTestsEnvMatchesTestutil keeps the two in step.
 const dockerTestsEnv = "GT_TEST_DOCKER"
 
+// dockerTestsSwitchOn reports whether the container opt-in is already on in
+// this process's environment: an exported GT_TEST_DOCKER=1 reaches `go test`
+// without appearing in the command text, so it counts as a container request
+// even on a command that names no switch. It is the same read the default
+// test-verify gate makes (gt-0hbm), so the tap guard and the gate agree on
+// what "this run can start a container" means.
+func dockerTestsSwitchOn() bool {
+	return os.Getenv(dockerTestsEnv) == "1"
+}
+
 // commandEnablesDockerTests reports whether any token sets the container
 // opt-in switch to 1 (GT_TEST_DOCKER=1, bare, quoted, or as an export/env
-// value). The hook's own environment is checked by the caller: an exported
-// GT_TEST_DOCKER=1 in the session reaches `go test` without appearing in
-// the command text.
+// value). The hook's own environment is checked separately via
+// dockerTestsSwitchOn: an exported value reaches the test process without
+// appearing in the command text.
 func commandEnablesDockerTests(tokens []string) bool {
 	prefix := dockerTestsEnv + "="
 	for _, t := range tokens {
