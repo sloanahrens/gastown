@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -79,15 +78,13 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 	// session, garbling the composer and failing submit verification — which
 	// requeues the nudge and re-injects it (gt-tmlu).
 	nudgeOpts := tmux.NudgeOpts{TownRoot: townRoot}
-	agentName := ""
 	hasPromptDetection := false
-	if name, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && name != "" {
-		agentName = name
-		if preset := config.GetAgentPresetByName(agentName); preset != nil {
+	if name, preset, ok := t.SessionAgentPreset(sessionName, townRoot); name != "" {
+		if ok {
 			hasPromptDetection = preset.ReadyPromptPrefix != ""
-			if preset.EscapeCancelsRequest {
-				nudgeOpts.SkipEscape = true
-			}
+			nudgeOpts.SkipEscape = preset.EscapeCancelsRequest
+		} else {
+			nudgeOpts.SkipEscape = true // unidentified harness: fail safe (claude-9a8)
 		}
 	}
 

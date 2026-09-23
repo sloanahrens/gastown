@@ -1,3 +1,5 @@
+> Status: in progress (2026-09-23). Implemented across three MRs (resolver + nudge path, remaining callers, role templates). Tracked in claude-9a8.
+
 # Agent preset resolver — design
 
 Date: 2026-09-23. Tracking: claude-9a8 (handoff bead), gastown parent bead TBD at filing.
