@@ -393,14 +393,18 @@ func TestParsePluginMD_GitHubSheriff(t *testing.T) {
 	if plugin.Name != "github-sheriff" {
 		t.Errorf("expected name 'github-sheriff', got %q", plugin.Name)
 	}
+	// The plugin ships parked: a manual gate is never auto-dispatched, which
+	// is how this town is spared a dog every two hours looking for GitHub PRs
+	// it has no merge path to act on (gt-gs7g). An accidental return to
+	// "cooldown" is the regression this catches.
 	if plugin.Gate == nil {
 		t.Fatal("expected gate to be non-nil")
 	}
-	if plugin.Gate.Type != GateCooldown {
-		t.Errorf("expected gate type 'cooldown', got %q", plugin.Gate.Type)
+	if plugin.Gate.Type != GateManual {
+		t.Errorf("expected gate type 'manual', got %q", plugin.Gate.Type)
 	}
-	if plugin.Gate.Duration != "2h" {
-		t.Errorf("expected gate duration '2h', got %q", plugin.Gate.Duration)
+	if plugin.Gate.Duration != "" {
+		t.Errorf("expected no gate duration on a manual gate, got %q", plugin.Gate.Duration)
 	}
 	if plugin.Tracking == nil {
 		t.Fatal("expected tracking to be non-nil")

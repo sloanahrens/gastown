@@ -4,8 +4,7 @@ description = "Monitor GitHub CI checks on open PRs and create beads for failure
 version = 1
 
 [gate]
-type = "cooldown"
-duration = "2h"
+type = "manual"
 
 [tracking]
 labels = ["plugin:github-sheriff", "category:ci-monitoring"]
@@ -17,7 +16,18 @@ notify_on_failure = true
 severity = "low"
 +++
 
-# GitHub Sheriff
+# GitHub Sheriff — DISABLED
+
+**Stays disabled: `type = "manual"`.** A manual gate is never auto-dispatched
+(the daemon logs the skip at each heartbeat), so this plugin stays discoverable
+and off the patrol. This town has no GitHub-PR merge path — merges land through
+the Refinery — so the plugin has no PRs to classify and every dispatch is a dog
+session spent finding none (gt-gs7g).
+
+Restore `type = "cooldown"` with `duration = "2h"` only alongside a
+re-introduced PR workflow.
+
+---
 
 Polls GitHub for open pull requests, categorizes them by readiness, and creates
 `ci-failure` beads for new failures. Implements the PR Sheriff pattern from the
