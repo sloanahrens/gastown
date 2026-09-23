@@ -61,6 +61,8 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (blocks, printing nothing, if another lint holds the module lock)"
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
+	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
 # Deterministic docs and comments checks (docs/writing-for-agents.md).
 # Also the tier lists the weekly doc audit slices from.

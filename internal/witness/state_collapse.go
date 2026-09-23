@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
@@ -121,17 +122,17 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 		}
 		result.Checked++
 
-		record, found, err := getBeadRecord(bd, workDir, mr.SourceIssue)
-		if err != nil {
+		record, verdict := getBeadRecord(bd, workDir, mr.SourceIssue)
+		if verdict.IsUnknown() {
 			// Unreadable is not open: without a status the scan cannot tell a
 			// closed source issue from a live one, so it drops the MR. Counted
 			// so the summary withholds the all-clear (gt-n899).
 			result.RecordsUnreadable++
-			result.Errors = append(result.Errors, fmt.Errorf("reading source issue %s of MR %s: %w", mr.SourceIssue, mr.ID, err))
+			result.Errors = append(result.Errors, fmt.Errorf("reading source issue %s of MR %s: %w", mr.SourceIssue, mr.ID, verdict.Err()))
 			continue
 		}
-		if !found {
-			continue // source issue not found/unreachable — can't assert collapse
+		if verdict.IsFail() {
+			continue // source issue confirmed not found — can't assert collapse
 		}
 		if record.Status != string(beads.StatusClosed) {
 			continue // still open, or a non-close terminal state (e.g. tombstone) — no collapse
@@ -551,18 +552,18 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			continue // no issue encoded in the branch name — nothing to check
 		}
 
-		record, found, err := getBeadRecord(bd, workDir, meta.Issue)
-		if err != nil {
+		record, verdict := getBeadRecord(bd, workDir, meta.Issue)
+		if verdict.IsUnknown() {
 			// The close-reason filters below read through this record, so a
 			// branch whose record is unreadable was neither reported nor
 			// suppressed — dropped. Counted so the summary withholds the
 			// all-clear (gt-n899).
 			result.RecordsUnreadable++
-			result.Errors = append(result.Errors, fmt.Errorf("reading issue %s of branch %s: %w", meta.Issue, branch, err))
+			result.Errors = append(result.Errors, fmt.Errorf("reading issue %s of branch %s: %w", meta.Issue, branch, verdict.Err()))
 			continue
 		}
-		if !found || record.Status != string(beads.StatusClosed) {
-			continue // bead unreachable, or not closed — no collapse to report
+		if verdict.IsFail() || record.Status != string(beads.StatusClosed) {
+			continue // bead confirmed not found, or not closed — no collapse to report
 		}
 		result.Checked++
 
@@ -657,22 +658,42 @@ type beadRecord struct {
 	Notes       string
 }
 
-// getBeadRecord returns a bead's status, close reason, and notes, and whether
-// the lookup found it. The close reason separates a genuine strand from a
-// deliberate discard (gt-3ii); the notes carry the refinery's merge-rejection
-// record, which adjudicates rejected branches (gt-hsum).
+// getBeadRecord returns a bead's status, close reason, and notes, paired with
+// a guard.Result: Pass with the record populated, Fail when bd resolved the
+// id and confirmed no such bead exists, or Unknown when the read itself
+// failed and whether the bead exists could not be determined. The close
+// reason separates a genuine strand from a deliberate discard (gt-3ii); the
+// notes carry the refinery's merge-rejection record, which adjudicates
+// rejected branches (gt-hsum).
 //
-// An unreadable response is an error rather than an empty record: see
-// decodeBeadRecord for why that distinction is load-bearing (gt-n899).
-func getBeadRecord(bd *BdCli, workDir, beadID string) (beadRecord, bool, error) {
+// Fail and Unknown must stay distinct: collapsing a failed read into "not
+// found" is the exact defect gt-udrrw catalogs, and gt-n899 caught a live
+// instance of it here — bd.Exec erroring (a stuck Dolt connection, a killed
+// subprocess) used to return the same (false, nil) as bd cleanly resolving
+// the id to nothing, so an outage mid-scan silently looked identical to the
+// bead never having existed. See decodeBeadRecord for the same split applied
+// to a response bd.Exec did return.
+func getBeadRecord(bd *BdCli, workDir, beadID string) (beadRecord, guard.Result) {
 	if beadID == "" {
-		return beadRecord{}, false, nil
+		return beadRecord{}, guard.Fail("empty bead id")
 	}
 	output, err := bd.Exec(workDir, "show", beadID, "--json")
-	if err != nil || output == "" {
-		// bd exits non-zero for an id it cannot resolve, so an unreachable or
-		// purged bead lands here, not in the decode.
-		return beadRecord{}, false, nil
+	if err != nil {
+		if isBdNotFoundError(err) {
+			// bd resolved the id and confirmed no such bead — a genuine
+			// negative, not an unreadable record. beadCLIShower.Show
+			// (handlers.go) classifies the same bd exit the same way; keeping
+			// them in step avoids two readers of `bd show` disagreeing about
+			// what a not-found id means (gt-udrrw).
+			return beadRecord{}, guard.Fail("bd show " + beadID + ": not found")
+		}
+		return beadRecord{}, guard.Unknown(fmt.Errorf("bd show %s: %w", beadID, err))
+	}
+	if output == "" {
+		// bd exited zero but printed nothing — not the well-formed empty
+		// array decodeBeadRecord treats as a confirmed "no such bead" below,
+		// so this shape is unexplained rather than a resolved negative.
+		return beadRecord{}, guard.Unknown(fmt.Errorf("bd show %s: no output", beadID))
 	}
 	return decodeBeadRecord(output)
 }
@@ -693,40 +714,42 @@ var errBeadRecordShape = errors.New("bd JSON response is not a readable bead rec
 // returns close_reason and notes from the same call (gt-n899).
 //
 // A response in a shape this cannot read — not JSON, not an array of objects,
-// no status, or a read field that is not a string — is instead an error. The
-// close reason is the channel every suppression filter in this file reads
-// through, so a shape change would leave the filters matching nothing while
-// the scan kept reporting findings it could no longer qualify, and callers
-// treat a decode failure as "not closed" and drop the candidate. Both halves
-// fail silently, which is the failure gt-n899 cataloged; the callers count
-// these and the summary refuses an all-clear.
-func decodeBeadRecord(output string) (beadRecord, bool, error) {
+// no status, or a read field that is not a string — is Unknown rather than
+// Fail: the close reason is the channel every suppression filter in this file
+// reads through, so a shape change would leave the filters matching nothing
+// while the scan kept reporting findings it could no longer qualify, and a
+// caller that read this as Fail would drop the candidate exactly as if bd had
+// confirmed it gone. The callers count Unknown and the summary refuses an
+// all-clear (gt-n899).
+func decodeBeadRecord(output string) (beadRecord, guard.Result) {
 	var raw []map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &raw); err != nil {
-		return beadRecord{}, false, fmt.Errorf("%w: %v", errBeadRecordShape, err)
+		return beadRecord{}, guard.Unknown(fmt.Errorf("%w: %v", errBeadRecordShape, err))
 	}
 	if len(raw) == 0 {
 		// Well-formed response naming no bead: the id was reaped or purged
-		// between the branch listing and this lookup.
-		return beadRecord{}, false, nil
+		// between the branch listing and this lookup. bd resolved the
+		// question and answered "no such bead" — a confirmed Fail, not an
+		// Unknown.
+		return beadRecord{}, guard.Fail("bd resolved the id to no bead")
 	}
 
 	status, err := beadStringField(raw[0], "status")
 	if err != nil {
-		return beadRecord{}, false, err
+		return beadRecord{}, guard.Unknown(err)
 	}
 	if status == "" {
-		return beadRecord{}, false, fmt.Errorf("%w: element carries no status", errBeadRecordShape)
+		return beadRecord{}, guard.Unknown(fmt.Errorf("%w: element carries no status", errBeadRecordShape))
 	}
 	closeReason, err := beadStringField(raw[0], "close_reason")
 	if err != nil {
-		return beadRecord{}, false, err
+		return beadRecord{}, guard.Unknown(err)
 	}
 	notes, err := beadStringField(raw[0], "notes")
 	if err != nil {
-		return beadRecord{}, false, err
+		return beadRecord{}, guard.Unknown(err)
 	}
-	return beadRecord{Status: status, CloseReason: closeReason, Notes: notes}, true, nil
+	return beadRecord{Status: status, CloseReason: closeReason, Notes: notes}, guard.Pass()
 }
 
 // beadStringField reads one string field out of a decoded bead object. A field

@@ -1,0 +1,43 @@
+# Fail-open guard functions found in internal/ when this check was
+# introduced (gt-udrrw). Each one already returns a bare ok/true or swallows
+# an error to nil from inside a branch that observed a non-nil error — the
+# class gt-udrrw catalogs, migrated one instance of onto guard.Result
+# (internal/witness/state_collapse.go's getBeadRecord) as the worked example.
+#
+# Grandfathered here so make lint passes today; each is a candidate for its
+# own small migration MR onto guard.Result (internal/guard). Do not add new
+# entries for code you are writing now — fix it instead, or if the flag is a
+# false positive (the specific error is deliberately narrowed, e.g.
+# os.IsNotExist), add a one-line comment above the entry saying so.
+internal/beads/beads.go:*Beads.CreateIfNoDuplicate
+internal/beads/beads_agent.go:*Beads.ClearAgentActiveMRIfMatches
+internal/cmd/prime.go:checkSlungWork
+internal/cmd/prime.go:ralphLoopPluginInstalledIn
+internal/cmd/prime_payload.go:staticRoleText
+internal/cmd/sling_schedule.go:shouldDeferDispatch
+internal/cmd/up.go:disableCurrentAgentDND
+internal/connection/local.go:*LocalConnection.Exists
+internal/daemon/notification.go:*NotificationManager.SendIfReady
+internal/daemon/notification.go:*NotificationManager.shouldSendLocked
+internal/daemon/patrol_last_run.go:loadPatrolLastRun
+internal/daemon/pidfile.go:verifyPIDOwnership
+internal/doctor/editorial_coverage_check.go:*coverageNoteIndex.parked
+internal/doltserver/doltserver.go:CheckReadOnly
+internal/doltserver/doltserver.go:InitRig
+internal/doltserver/doltserver.go:VerifyServerDataDir
+internal/git/git.go:*Git.BranchExists
+internal/git/git.go:*Git.HasUpstreamRemote
+internal/git/git.go:*Git.IsAncestor
+internal/git/git.go:*Git.IsEmpty
+internal/git/git.go:*Git.RefExists
+internal/git/git.go:*Git.RemoteTrackingBranchExists
+internal/krc/autoprune.go:AutoPrune
+internal/lock/flock_unix.go:FlockTryAcquire
+internal/polecat/target_clean.go:cleanTargetDir
+internal/refinery/resume_landed_merge.go:*Engineer.landedCommitHasApproveNote
+internal/templates/supervisor_state.go:SupervisorFileIsFor
+internal/tmux/socket_guard_unix.go:unixSocketStale
+internal/tmux/tmux.go:*Tmux.HasSession
+internal/tmux/tmux.go:processMatchesNamesChecked
+internal/witness/handlers.go:_verifyCommitOnMain
+internal/witness/patrol_state.go:NormalizePatrolCounter

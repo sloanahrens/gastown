@@ -1428,12 +1428,12 @@ func TestDecodeBeadRecord_LiveBdShowPayloads(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			record, found, err := decodeBeadRecord(tt.output)
-			if err != nil {
-				t.Fatalf("decodeBeadRecord() error = %v, want nil", err)
+			record, verdict := decodeBeadRecord(tt.output)
+			if verdict.IsUnknown() {
+				t.Fatalf("decodeBeadRecord() = %v, want not Unknown", verdict)
 			}
-			if !found {
-				t.Fatal("found = false, want true for a payload naming a bead")
+			if !verdict.IsPass() {
+				t.Fatal("verdict = Fail, want Pass for a payload naming a bead")
 			}
 			if record.Status != tt.wantStatus {
 				t.Errorf("Status = %q, want %q", record.Status, tt.wantStatus)
@@ -1457,71 +1457,72 @@ func TestDecodeBeadRecord_RejectsUnreadableShapes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		output    string
-		wantFound bool
-		wantErr   bool
+		name   string
+		output string
+		want   string // "pass", "fail", or "unknown"
 	}{
 		{
-			name:      "well-formed response naming no bead is not an error",
-			output:    `[]`,
-			wantFound: false,
+			name:   "well-formed response naming no bead is a confirmed Fail, not Unknown",
+			output: `[]`,
+			want:   "fail",
 		},
 		{
-			name:    "prose instead of JSON",
-			output:  "bead gt-md4z not found",
-			wantErr: true,
+			name:   "prose instead of JSON",
+			output: "bead gt-md4z not found",
+			want:   "unknown",
 		},
 		{
-			name:    "JSON object instead of the array bd returns",
-			output:  `{"id":"gt-md4z","status":"closed"}`,
-			wantErr: true,
+			name:   "JSON object instead of the array bd returns",
+			output: `{"id":"gt-md4z","status":"closed"}`,
+			want:   "unknown",
 		},
 		{
-			name:    "element carrying no status",
-			output:  `[{"id":"gt-md4z","close_reason":"no-changes: x"}]`,
-			wantErr: true,
+			name:   "element carrying no status",
+			output: `[{"id":"gt-md4z","close_reason":"no-changes: x"}]`,
+			want:   "unknown",
 		},
 		{
-			name:    "close_reason moved to a nested object",
-			output:  `[{"id":"gt-md4z","status":"closed","close_reason":{"reason":"no-changes: x"}}]`,
-			wantErr: true,
+			name:   "close_reason moved to a nested object",
+			output: `[{"id":"gt-md4z","status":"closed","close_reason":{"reason":"no-changes: x"}}]`,
+			want:   "unknown",
 		},
 		{
-			name:    "close_reason emitted as a non-string",
-			output:  `[{"id":"gt-md4z","status":"closed","close_reason":42}]`,
-			wantErr: true,
+			name:   "close_reason emitted as a non-string",
+			output: `[{"id":"gt-md4z","status":"closed","close_reason":42}]`,
+			want:   "unknown",
 		},
 		{
-			name:    "notes emitted as an array",
-			output:  `[{"id":"gt-md4z","status":"closed","notes":["a"]}]`,
-			wantErr: true,
+			name:   "notes emitted as an array",
+			output: `[{"id":"gt-md4z","status":"closed","notes":["a"]}]`,
+			want:   "unknown",
 		},
 		{
-			name:      "explicit null fields read as absent",
-			output:    `[{"id":"gt-md4z","status":"closed","close_reason":null,"notes":null}]`,
-			wantFound: true,
+			name:   "explicit null fields read as absent",
+			output: `[{"id":"gt-md4z","status":"closed","close_reason":null,"notes":null}]`,
+			want:   "pass",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, found, err := decodeBeadRecord(tt.output)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("decodeBeadRecord(%s) error = nil, want a shape error", tt.output)
+			_, verdict := decodeBeadRecord(tt.output)
+			switch tt.want {
+			case "unknown":
+				if !verdict.IsUnknown() {
+					t.Fatalf("decodeBeadRecord(%s) = %v, want Unknown", tt.output, verdict)
 				}
-				if !errors.Is(err, errBeadRecordShape) {
-					t.Errorf("error = %v, want it to wrap errBeadRecordShape", err)
+				if !errors.Is(verdict.Err(), errBeadRecordShape) {
+					t.Errorf("error = %v, want it to wrap errBeadRecordShape", verdict.Err())
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("decodeBeadRecord(%s) error = %v, want nil", tt.output, err)
-			}
-			if found != tt.wantFound {
-				t.Errorf("found = %v, want %v", found, tt.wantFound)
+			case "fail":
+				if !verdict.IsFail() {
+					t.Fatalf("decodeBeadRecord(%s) = %v, want Fail", tt.output, verdict)
+				}
+			case "pass":
+				if !verdict.IsPass() {
+					t.Fatalf("decodeBeadRecord(%s) = %v, want Pass", tt.output, verdict)
+				}
 			}
 		})
 	}
@@ -1602,6 +1603,100 @@ func TestDetectStateCollapse_UnreadableRecordIsNotAnAllClear(t *testing.T) {
 	summary, allClear := StateCollapseSummary(result, &DetectStrandedBranchesResult{MRLookupRan: true}, "gastown")
 	if allClear {
 		t.Errorf("allClear = true with %d unreadable record(s); summary = %q", result.RecordsUnreadable, summary)
+	}
+}
+
+// TestGetBeadRecord_ExecFailureIsUnknownNotFail pins the gt-n899 instance that
+// gt-udrrw catalogs as its worked example: bd.Exec erroring (a stuck Dolt
+// connection, a killed subprocess) used to collapse into the same (false,
+// nil) as bd cleanly resolving the id to nothing, so a read failure and a
+// confirmed "no such bead" were indistinguishable at every call site. This
+// pins them apart at the source.
+func TestGetBeadRecord_ExecFailureIsUnknownNotFail(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			return "", errors.New("dolt: connection refused")
+		},
+		func(args []string) error { return nil },
+	)
+
+	record, verdict := getBeadRecord(bd, "/work", "gt-md4z")
+	if !verdict.IsUnknown() {
+		t.Fatalf("getBeadRecord() = %v, want Unknown for an exec failure", verdict)
+	}
+	if verdict.IsFail() {
+		t.Error("getBeadRecord() reports IsFail for an exec failure — indistinguishable from a confirmed not-found, the exact collapse gt-udrrw closes")
+	}
+	if verdict.Err() == nil || !strings.Contains(verdict.Err().Error(), "connection refused") {
+		t.Errorf("verdict.Err() = %v, want it to carry the exec failure", verdict.Err())
+	}
+	if record != (beadRecord{}) {
+		t.Errorf("record = %+v, want zero value on Unknown", record)
+	}
+}
+
+// TestGetBeadRecord_NotFoundExecErrorIsFail pins the other half of gt-udrrw
+// finding 65756e6751bd: bd show exits non-zero with a "not found" message for
+// an id it cannot resolve — a confirmed negative, not a read failure. Before
+// this, getBeadRecord mapped every non-nil bd.Exec error to Unknown,
+// including this one, so a purged or reaped bead permanently withheld the
+// all-clear on every scan that named it.
+func TestGetBeadRecord_NotFoundExecErrorIsFail(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			return "", errors.New("Error: issue gt-md4z not found")
+		},
+		func(args []string) error { return nil },
+	)
+
+	record, verdict := getBeadRecord(bd, "/work", "gt-md4z")
+	if !verdict.IsFail() {
+		t.Fatalf("getBeadRecord() = %v, want Fail for a not-found exec error", verdict)
+	}
+	if verdict.IsUnknown() {
+		t.Error("getBeadRecord() reports IsUnknown for a confirmed not-found — indistinguishable from an actual read failure")
+	}
+	if record != (beadRecord{}) {
+		t.Errorf("record = %+v, want zero value on Fail", record)
+	}
+}
+
+// TestDetectStrandedBranches_NotFoundSourceBeadIsAllClear is the end-to-end
+// half of finding 65756e6751bd: a branch whose source bead was purged or
+// reaped must not count as an unreadable record, or the scan withholds the
+// all-clear forever for a state that is permanent and expected, not an
+// outage.
+func TestDetectStrandedBranches_NotFoundSourceBeadIsAllClear(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/basalt/gt-md4z+abc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			return "", errors.New("Error: issue gt-md4z not found")
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.RecordsUnreadable != 0 {
+		t.Errorf("RecordsUnreadable = %d, want 0 for a confirmed not-found source bead", result.RecordsUnreadable)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Errors = %v, want none for a confirmed not-found source bead", result.Errors)
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings for a purged source bead, got %+v", result.Findings)
+	}
+
+	summary, allClear := StateCollapseSummary(
+		&DetectStateCollapseResult{MRLookupRan: true},
+		result, "gastown",
+	)
+	if !allClear {
+		t.Errorf("allClear = false for a purged source bead; summary = %q", summary)
 	}
 }
 
