@@ -3,7 +3,9 @@
 package testutil
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +23,72 @@ import (
 // DOLT_ROOT_HOST=% tells the entrypoint to create root@'%' (available
 // since Dolt 1.46.0), which lets testcontainers connect via TCP.
 const DoltDockerImage = "dolthub/dolt-sql-server:2.0.7"
+
+// doltContainerPort is the port the image serves on, and the container port
+// every lookup in this file asks Docker to map.
+const doltContainerPort = "3306/tcp"
+
+const (
+	// startupAttempts is how many containers one startup may burn before its
+	// failure is reported. A failed attempt is replaced rather than waited on:
+	// dolt.Run's initialize (database and user creation) runs after the port
+	// lookup, so a container whose lookup failed was never initialized.
+	startupAttempts = 3
+	// startupRetryDelay is the backoff before the second startup attempt; it
+	// doubles per attempt.
+	startupRetryDelay = 2 * time.Second
+	// mappedPortPollInterval is the gap between mapped-port lookups.
+	mappedPortPollInterval = 500 * time.Millisecond
+	// mappedPortPolls is how many lookups a container that testcontainers
+	// reports as running gets before its startup is called failed. Sixty at
+	// 500ms is a 30s budget, counted in polls rather than read off the clock
+	// so the wait is testable without real time passing.
+	mappedPortPolls = 60
+	// startupLogTailLines is how much container output a startup failure
+	// carries into its error message.
+	startupLogTailLines = 40
+)
+
+// portLookup returns the host port Docker published for a container port.
+type portLookup func(ctx context.Context, containerPort string) (string, error)
+
+// doltPortLookup returns ctr's published Dolt port.
+func doltPortLookup(ctr *dolt.DoltContainer) portLookup {
+	return func(ctx context.Context, containerPort string) (string, error) {
+		p, err := ctr.MappedPort(ctx, containerPort)
+		if err != nil {
+			return "", err
+		}
+		return p.Port(), nil
+	}
+}
+
+// portWaitSleep is time.Sleep behind a variable so the wait's tests do not
+// spend its budget in real time.
+var portWaitSleep = time.Sleep
+
+// waitForMappedPort polls lookup until Docker answers with a host port for the
+// container's Dolt port, returning the last lookup error once the polls run out.
+//
+// The lookup inspects the container's published bindings, and Docker can answer
+// it with no binding for a container it reports as running and serving: the
+// gates saw three tests in two packages die on `port "3306/tcp" not found`
+// while a concurrent container-backed suite held the Docker VM (gt-jvve). The
+// wait turns that window into a delay instead of a failed suite.
+func waitForMappedPort(ctx context.Context, lookup portLookup) (string, error) {
+	var lastErr error
+	for poll := range mappedPortPolls {
+		port, err := lookup(ctx, doltContainerPort)
+		if err == nil {
+			return port, nil
+		}
+		lastErr = err
+		if poll < mappedPortPolls-1 {
+			portWaitSleep(mappedPortPollInterval)
+		}
+	}
+	return "", lastErr
+}
 
 var (
 	doltCtr     *dolt.DoltContainer
@@ -91,27 +159,146 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 	)
 }
 
-// runDoltContainerWithRetry calls dolt.Run, retrying on transient reaper
-// "removing" errors up to 3 times with exponential backoff.
-func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
-	const maxRetries = 3
-	delay := 2 * time.Second
+// isPortNotMappedErr reports whether err is the inspect-backed port lookup
+// answering that Docker has no binding for the container's Dolt port.
+func isPortNotMappedErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found") &&
+		strings.Contains(err.Error(), doltContainerPort)
+}
+
+// isRetriableContainerStartErr reports whether a failed container start is one
+// a replacement attempt clears: the reaper still removing the previous
+// container's status, or a port binding Docker had not published yet
+// (gt-jvve).
+func isRetriableContainerStartErr(err error) bool {
+	return isReaperRemovingErr(err) || isPortNotMappedErr(err)
+}
+
+// settleDoltContainer waits for ctr's published port so the daemon that
+// answers the lookup is the one that starts the replacement.
+func settleDoltContainer(ctx context.Context, ctr *dolt.DoltContainer) {
+	if ctr == nil {
+		return
+	}
+	_, _ = waitForMappedPort(ctx, doltPortLookup(ctr))
+}
+
+// reapFailedContainer stops a container whose startup failed, so it does not
+// hold a host port and its share of the shared Docker VM while the next
+// attempt runs. The termination error is dropped because the startup failure
+// is the one worth reporting, and the reaper collects what this misses
+// (gt-p98h).
+func reapFailedContainer(ctr *dolt.DoltContainer) {
+	if ctr == nil {
+		return
+	}
+	_ = testcontainers.TerminateContainer(ctr)
+}
+
+// containerLogTail returns the last startupLogTailLines of ctr's output, which
+// is what a startup failure is missing when it reports only the port lookup
+// that raced the container (gt-jvve).
+func containerLogTail(ctx context.Context, ctr *dolt.DoltContainer) (string, error) {
+	if ctr == nil {
+		return "", errors.New("the failed start left no container to read")
+	}
+	logs, err := ctr.Logs(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = logs.Close() }()
+
+	var lines []string
+	scanner := bufio.NewScanner(logs)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if len(lines) > startupLogTailLines {
+		lines = lines[len(lines)-startupLogTailLines:]
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// withContainerLogs appends a container log tail to a startup failure. A tail
+// that could not be read is named rather than dropped, so a failure that has
+// no logs says so instead of looking like a failure that had none to give.
+func withContainerLogs(err error, tail string, logErr error) error {
+	switch {
+	case logErr != nil:
+		return fmt.Errorf("%w (container logs unavailable: %v)", err, logErr)
+	case strings.TrimSpace(tail) == "":
+		return fmt.Errorf("%w (container logs empty)", err)
+	}
+	return fmt.Errorf("%w\n--- container logs (last %d lines) ---\n%s", err, startupLogTailLines, tail)
+}
+
+// containerStartError attaches ctr's log tail to a startup failure whose
+// container outlived it.
+func containerStartError(ctx context.Context, ctr *dolt.DoltContainer, err error) error {
+	tail, logErr := containerLogTail(ctx, ctr)
+	return withContainerLogs(err, tail, logErr)
+}
+
+// containerStartHooks is one container start plus what the retry does with a
+// failed one. Fields rather than direct calls so the wait and retry path is
+// testable with a fake (gt-jvve); the production set is in
+// runDoltContainerWithRetry.
+type containerStartHooks struct {
+	start  func(ctx context.Context) (*dolt.DoltContainer, error)
+	settle func(ctx context.Context, ctr *dolt.DoltContainer)
+	reap   func(ctr *dolt.DoltContainer)
+	logs   func(ctx context.Context, ctr *dolt.DoltContainer) (string, error)
+	sleep  func(time.Duration)
+}
+
+// retryContainerStart starts one Dolt container, retrying the failures
+// isRetriableContainerStartErr names, and reports the last failure with that
+// container's logs attached.
+func retryContainerStart(ctx context.Context, hooks containerStartHooks) (*dolt.DoltContainer, error) {
+	delay := startupRetryDelay
+	var lastCtr *dolt.DoltContainer
 	var lastErr error
-	for attempt := range maxRetries {
-		ctr, err := runDoltContainer(ctx)
+
+	for attempt := range startupAttempts {
+		ctr, err := hooks.start(ctx)
 		if err == nil {
 			return ctr, nil
 		}
-		lastErr = err
-		if !isReaperRemovingErr(err) {
-			return nil, err
+		lastCtr, lastErr = ctr, err
+		if !isRetriableContainerStartErr(err) {
+			break
 		}
-		if attempt < maxRetries-1 {
-			time.Sleep(delay)
+		if isPortNotMappedErr(err) {
+			hooks.settle(ctx, ctr)
+		}
+		hooks.reap(ctr)
+		if attempt < startupAttempts-1 {
+			hooks.sleep(delay)
 			delay *= 2
 		}
 	}
-	return nil, lastErr
+
+	if lastCtr == nil {
+		return nil, lastErr
+	}
+	tail, logErr := hooks.logs(ctx, lastCtr)
+	return nil, withContainerLogs(lastErr, tail, logErr)
+}
+
+// runDoltContainerWithRetry starts a Dolt container, retrying the transient
+// startup failures up to startupAttempts times.
+func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
+	return retryContainerStart(ctx, containerStartHooks{
+		start:  runDoltContainer,
+		settle: settleDoltContainer,
+		reap:   reapFailedContainer,
+		logs:   containerLogTail,
+		sleep:  time.Sleep,
+	})
 }
 
 // startSharedDoltContainer starts the shared Dolt container and sets
@@ -124,15 +311,15 @@ func startSharedDoltContainer() {
 		return
 	}
 
-	p, err := ctr.MappedPort(ctx, "3306/tcp")
+	p, err := waitForMappedPort(ctx, doltPortLookup(ctr))
 	if err != nil {
-		doltCtrErr = fmt.Errorf("getting mapped port: %w", err)
+		doltCtrErr = containerStartError(ctx, ctr, fmt.Errorf("getting mapped port: %w", err))
 		_ = testcontainers.TerminateContainer(ctr)
 		return
 	}
 
 	doltCtr = ctr
-	doltCtrPort = p.Port()
+	doltCtrPort = p
 	os.Setenv("GT_DOLT_PORT", doltCtrPort)    //nolint:tenv // intentional process-wide env
 	os.Setenv("BEADS_DOLT_PORT", doltCtrPort) //nolint:tenv // intentional process-wide env
 	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1")   //nolint:tenv // integration tests reuse this container
@@ -175,12 +362,12 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		}
 	})
 
-	port, err := ctr.MappedPort(ctx, "3306/tcp")
+	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
 	if err != nil {
-		t.Fatalf("getting mapped port: %v", err)
+		t.Fatalf("getting mapped port: %v", containerStartError(ctx, ctr, err))
 	}
 
-	portStr := port.Port()
+	portStr := port
 	t.Setenv("GT_DOLT_PORT", portStr)
 	t.Setenv("BEADS_TEST_SERVER", "1")
 	return portStr
