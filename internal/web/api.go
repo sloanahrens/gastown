@@ -61,15 +61,23 @@ type APIHandler struct {
 	optionsCache     *OptionsResponse
 	optionsCacheTime time.Time
 	optionsCacheMu   sync.RWMutex
-	// cmdSem bounds this handler's short internal bd/gt reads (runBdCommand,
-	// the options fan-out, the dashboard-hash probe) to maxConcurrentCommands,
-	// so a burst of API requests cannot flood the dashboard process with
-	// subprocesses (gt-d5xr).
+	// cmdSem bounds this handler's short internal bd/gt reads to
+	// maxConcurrentCommands: runBdCommand, the options fan-out, the
+	// dashboard-hash probe, and every other runGtCommand caller (mail
+	// send/read, crew list, ready, setup) — so a burst of API requests cannot
+	// flood the dashboard process with subprocesses (gt-d5xr). Not every one
+	// of these is fast (mail send waits up to 30s on delivery), but none is
+	// the open-ended, user-driven kind userCmdSem exists for.
 	cmdSem chan struct{}
-	// userCmdSem bounds the user-driven gt runs (runGtCommand, /api/run, up to
-	// maxRunTimeout) to userCommandConcurrency — long-running children the
-	// short-read pool must not be able to starve (gt-d5xr).
+	// userCmdSem bounds the long-running children — runUserGtCommand
+	// (/api/run up to maxRunTimeout, rig add) and runGhCommand — to
+	// userCommandConcurrency, on a pool cmdSem's short reads never draw from
+	// (gt-d5xr).
 	userCmdSem chan struct{}
+	// slotWaitBudget overrides waitBudget's default for every cmdSem/userCmdSem
+	// acquire this handler makes. Zero (the default) means "use the call's own
+	// exec timeout"; tests set it short so a full-pool case resolves fast.
+	slotWaitBudget time.Duration
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
 
@@ -143,14 +151,13 @@ type APIHandler struct {
 const optionsCacheTTL = 30 * time.Second
 
 // optionsFetchTimeout bounds each individual gt/bd subprocess fetch inside
-// handleOptions (and the rig list it shares with loadRigOptions). It bounds
-// both the cmdSem wait and the command execution (see runGtCommand), so
-// under host contention a short per-fetch timeout can trip well before the
-// subprocess itself is slow. Previously these were ad hoc 3s/5s literals;
-// the 5s "status --json" fetch in particular was observed exceeding its
-// budget under full-town load (gt-axh, same bdReadTimeout-centralization
-// pattern as gt-911). One generous, centrally-defined timeout for all of
-// them removes that per-call guesswork.
+// handleOptions (and the rig list it shares with loadRigOptions): the cmdSem
+// wait and the command execution each get this long, as separate budgets
+// (see waitBudget), so queuing behind other short reads cannot eat into the
+// time the command itself gets to run (gt-d5xr). Previously these were ad
+// hoc 3s/5s literals; the 5s "status --json" fetch in particular was
+// observed exceeding its budget under full-town load (gt-axh, same
+// bdReadTimeout-centralization pattern as gt-911).
 const optionsFetchTimeout = 10 * time.Second
 
 // dashboardPollIntervalDefault is the production cadence for
@@ -345,12 +352,27 @@ func (h *APIHandler) acquireUserCmdSlot(ctx context.Context) error {
 	return acquireCmdSlot(ctx, h.userCmdSem)
 }
 
+// waitBudget bounds how long a call queues for a subprocess slot, kept
+// separate from execTimeout so a queued call still gets the full timeout
+// once it starts running. Defaults to execTimeout: a fixed budget shorter
+// than that turned slow-but-successful reads into hard failures under
+// exactly the contention this bound exists for (gt-d5xr rework 2).
+// slotWaitBudget overrides the default so a test's pool-full case can
+// resolve in milliseconds instead of waiting out a realistic timeout.
+func (h *APIHandler) waitBudget(execTimeout time.Duration) time.Duration {
+	if h.slotWaitBudget > 0 {
+		return h.slotWaitBudget
+	}
+	return execTimeout
+}
+
 // runUserGtCommand executes a user-driven gt command under the long-command
-// pool (userCommandConcurrency), so /api/run children cannot hold slots the
-// dashboard's short bd/gt reads draw from (gt-d5xr).
+// pool (userCommandConcurrency) only. It calls runGtCommandExec directly
+// rather than runGtCommand, which also acquires cmdSem: wrapping that
+// function held a short-read slot for a long command's whole lifetime,
+// undoing the pool split (gt-d5xr rework 2).
 func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	// The slot wait has its own budget, so timeout bounds only execution.
-	waitCtx, cancelWait := context.WithTimeout(ctx, slotWaitBudget)
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
 	err := h.acquireUserCmdSlot(waitCtx)
 	cancelWait()
 	if err != nil {
@@ -358,22 +380,29 @@ func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration
 	}
 	defer releaseCmdSlot(h.userCmdSem)
 
-	return h.runGtCommand(ctx, timeout, args)
+	return h.runGtCommandExec(ctx, timeout, args)
 }
 
 // runGtCommand executes a short internal gt command under cmdSem.
 func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	// Apply timeout first so it bounds both semaphore wait and command execution.
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	err := acquireCmdSlot(waitCtx, h.cmdSem)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.cmdSem)
+
+	return h.runGtCommandExec(ctx, timeout, args)
+}
+
+// runGtCommandExec runs a gt subcommand without acquiring any subprocess
+// slot. Callers that already hold one — cmdSem via runGtCommand, or
+// userCmdSem via runUserGtCommand — call this directly so a command never
+// draws a slot from both pools at once (gt-d5xr rework 2).
+func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration, args []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire semaphore slot to limit concurrent subprocess spawns.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, h.gtPath, args...)
 	if h.workDir != "" {
@@ -1510,16 +1539,16 @@ func (h *APIHandler) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 
 // runBdCommand executes a bd command with the given args.
 func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
+	err := acquireCmdSlot(waitCtx, h.cmdSem)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.cmdSem)
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire a cmdSem slot, bounding the handler's short bd reads.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	if h.workDir != "" {
@@ -1531,7 +1560,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	output := stdout.String()
 	if stderr.Len() > 0 {
@@ -1790,7 +1819,7 @@ func (h *APIHandler) handlePRShow(w http.ResponseWriter, r *http.Request) {
 // network-bound, not Dolt-bound, so it rides the long-command pool with the
 // user-driven gt runs (gt-d5xr).
 func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, slotWaitBudget)
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
 	if err := h.acquireUserCmdSlot(waitCtx); err != nil {
 		cancelWait()
 		return "", fmt.Errorf("command slot unavailable: %w", err)

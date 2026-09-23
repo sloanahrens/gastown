@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -63,9 +64,15 @@ func TestNewDashboardMux_PartitionsSubprocessPools(t *testing.T) {
 }
 
 // TestUserCommandPoolDoesNotStarveFetcherBD is the behavioral proof of the
-// partition: with the APIHandler's userCmdSem full of long-running children,
-// the fetcher's bd-read pool still services its full herd of short reads
-// (all complete, none time out) and the bd children stay bounded.
+// partition, driving both handlers it claims are independent: with the
+// APIHandler's cmdSem completely full — as a burst of options/mail/ready
+// fetches would leave it — a user-driven command must still run, because it
+// draws from userCmdSem only (see runUserGtCommand); meanwhile the
+// fetcher's own bd-read pool, a separate object entirely, keeps servicing
+// its full herd of short reads. An earlier version of this test filled
+// userCmdSem but only ever called the fetcher, so it never connected the
+// two objects and could not fail regardless of whether the partition
+// existed (gt-d5xr rework 2).
 func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	const numCalls = 17
 	const sleep = 50 * time.Millisecond
@@ -75,13 +82,19 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	bdPath := filepath.Join(binDir, "bd")
 	writeConcurrencyProbeScript(t, bdPath, runsDir, sleep)
 
-	// Fill the user-command pool exactly as four concurrent /api/runs would.
+	gtPath := filepath.Join(binDir, "gt")
+	if err := os.WriteFile(gtPath, []byte("#!/bin/sh\nprintf 'ok'\n"), 0o755); err != nil {
+		t.Fatalf("write fake gt binary: %v", err)
+	}
+
 	h := &APIHandler{
+		gtPath:     gtPath,
 		cmdSem:     make(chan struct{}, maxConcurrentCommands),
 		userCmdSem: make(chan struct{}, userCommandConcurrency),
 	}
-	for i := 0; i < userCommandConcurrency; i++ {
-		h.userCmdSem <- struct{}{}
+	// Fill the short-read pool completely, as a burst of API reads would.
+	for i := 0; i < maxConcurrentCommands; i++ {
+		h.cmdSem <- struct{}{}
 	}
 
 	f := &LiveConvoyFetcher{
@@ -100,24 +113,103 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			if _, err := f.runBdCmd(t.TempDir(), "show", "gt-d5xr"); err != nil {
-				t.Errorf("runBdCmd with full user pool: %v", err)
+				t.Errorf("runBdCmd with cmdSem full: %v", err)
 				return
 			}
 			atomic.AddInt64(&callCount, 1)
 		}()
 	}
+
+	// A user-driven command must succeed concurrently with the bd herd
+	// above, even though every cmdSem slot is taken — it never touches
+	// cmdSem (gt-d5xr rework 2).
+	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+
 	wg.Wait()
 	close(stop)
 	<-watcherDone
 
+	if err != nil {
+		t.Fatalf("runUserGtCommand with cmdSem full: %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("runUserGtCommand output = %q, want %q", out, "ok")
+	}
+
 	peak, calls := atomic.LoadInt64(peakPtr), int(atomic.LoadInt64(&callCount))
 	if calls != numCalls {
-		t.Fatalf("got %d bd calls with the user pool full, want %d — the bd reads starved", calls, numCalls)
+		t.Fatalf("got %d bd calls with cmdSem full, want %d — the bd reads starved", calls, numCalls)
 	}
 	if peak > subprocessConcurrency {
 		t.Fatalf("peak concurrent bd children = %d, want at most %d", peak, subprocessConcurrency)
 	}
-	t.Logf("user pool full: %d bd calls completed, peak %d (bound %d)", calls, peak, subprocessConcurrency)
+	t.Logf("cmdSem full: %d bd calls completed, peak %d (bound %d); runUserGtCommand succeeded", calls, peak, subprocessConcurrency)
+}
+
+// TestRunUserGtCommand_DoesNotDrawCmdSemSlot is the minimal regression for
+// the major rework-2 finding: runUserGtCommand used to call runGtCommand,
+// which also acquired cmdSem, so a long user run held a short-read slot for
+// its whole lifetime. With cmdSem's only slot held, and never released, the
+// call must still succeed.
+func TestRunUserGtCommand_DoesNotDrawCmdSemSlot(t *testing.T) {
+	binDir := t.TempDir()
+	gtPath := filepath.Join(binDir, "gt")
+	if err := os.WriteFile(gtPath, []byte("#!/bin/sh\nprintf 'ok'\n"), 0o755); err != nil {
+		t.Fatalf("write fake gt binary: %v", err)
+	}
+
+	h := &APIHandler{
+		gtPath:     gtPath,
+		cmdSem:     make(chan struct{}, 1),
+		userCmdSem: make(chan struct{}, 1),
+	}
+	h.cmdSem <- struct{}{} // held for the whole test; never released
+
+	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+	if err != nil {
+		t.Fatalf("runUserGtCommand with cmdSem's only slot held: %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("output = %q, want %q", out, "ok")
+	}
+}
+
+// TestRunGhCommand_UsesUserPoolNotCmdSem proves runGhCommand draws from
+// userCmdSem, not cmdSem — untested since gh joined the long-command pool
+// (gt-d5xr rework 2).
+func TestRunGhCommand_UsesUserPoolNotCmdSem(t *testing.T) {
+	binDir := t.TempDir()
+	ghPath := filepath.Join(binDir, "gh")
+	if err := os.WriteFile(ghPath, []byte("#!/bin/sh\nprintf 'ok'\n"), 0o755); err != nil {
+		t.Fatalf("write fake gh binary: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
+
+	h := &APIHandler{
+		cmdSem:         make(chan struct{}, 1),
+		userCmdSem:     make(chan struct{}, 1),
+		slotWaitBudget: 20 * time.Millisecond,
+	}
+	h.cmdSem <- struct{}{} // full short-read pool must not block gh
+
+	out, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"})
+	if err != nil {
+		t.Fatalf("runGhCommand with cmdSem full: %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("output = %q, want %q", out, "ok")
+	}
+
+	// But the user pool does bound it: with userCmdSem also full, it must
+	// fail waiting for a slot rather than run unbounded.
+	h.userCmdSem <- struct{}{}
+	if _, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"}); err == nil {
+		t.Fatal("runGhCommand succeeded with userCmdSem full, want a slot-wait error")
+	}
 }
 
 // writeConcurrencyProbeScript writes a fake bd/gt binary that drops a marker
@@ -131,6 +223,41 @@ func writeConcurrencyProbeScript(t *testing.T, binPath, runsDir string, sleep ti
 f="` + runsDir + `/run.$$"
 touch "$f"
 sleep ` + strconv.FormatFloat(sleep.Seconds(), 'f', -1, 64) + `
+rm -f "$f"
+printf '[]'
+`
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+}
+
+// writeBarrierProbeScript writes a fake bd binary that spins until n
+// invocations are simultaneously alive (tracked via marker files in
+// runsDir, same convention as writeConcurrencyProbeScript) before any of
+// them proceeds. Unlike a fixed sleep, this makes a full n-way overlap
+// deterministic rather than a race with process scheduling — the flake the
+// unbounded control was asserting an exact peak invited (gt-d5xr rework 2).
+// The spin uses only shell builtins (glob expansion via `set --`, not `ls`
+// piped through `wc`): an external-command polling loop forks two
+// processes per tick, and with 17 of these loops running at once that
+// fork churn starved the Go side of spawning its remaining top-level
+// processes, so the barrier itself never closed. Only fit for a caller
+// that will actually run n concurrently (an unbounded pool): a bounded
+// pool of fewer than n slots would never reach the barrier and would spin
+// until the iteration cap below trips.
+func writeBarrierProbeScript(t *testing.T, binPath, runsDir string, n int) {
+	t.Helper()
+	script := `#!/bin/sh
+f="` + runsDir + `/run.$$"
+touch "$f"
+i=0
+while [ "$i" -lt 2000000 ]; do
+  set -- "` + runsDir + `"/run.*
+  if [ "$#" -ge ` + strconv.Itoa(n) + ` ]; then
+    break
+  fi
+  i=$((i+1))
+done
 rm -f "$f"
 printf '[]'
 `
@@ -220,15 +347,43 @@ func TestRunBdCmd_BoundsConcurrentSubprocesses(t *testing.T) {
 	}
 
 	t.Run("unbounded (pre-fix control)", func(t *testing.T) {
-		const bound = 4
-		peak, calls := run(t, nil)
+		// A barrier script, not the shared sleep-based run() helper: every
+		// one of numCalls invocations must be alive at once before any
+		// proceeds, so the peak is guaranteed rather than a race with
+		// process scheduling (gt-d5xr rework 2).
+		binDir := t.TempDir()
+		runsDir := t.TempDir()
+		bdPath := filepath.Join(binDir, "bd")
+		writeBarrierProbeScript(t, bdPath, runsDir, numCalls)
+
+		f := &LiveConvoyFetcher{cmdTimeout: 10 * time.Second, bdBin: bdPath}
+
+		stop := make(chan struct{})
+		peakPtr, watcherDone := watchPeakConcurrency(runsDir, stop)
+
+		var wg sync.WaitGroup
+		var callCount int64
+		wg.Add(numCalls)
+		for i := 0; i < numCalls; i++ {
+			go func() {
+				defer wg.Done()
+				if _, err := f.runBdCmd(t.TempDir(), "show", "gt-d5xr"); err != nil {
+					t.Errorf("runBdCmd: %v", err)
+					return
+				}
+				atomic.AddInt64(&callCount, 1)
+			}()
+		}
+		wg.Wait()
+		close(stop)
+		<-watcherDone
+
+		peak, calls := atomic.LoadInt64(peakPtr), int(atomic.LoadInt64(&callCount))
 		if calls != numCalls {
 			t.Fatalf("vacuous-pass guard: got %d calls, want %d — probe did not run", calls, numCalls)
 		}
-		// Unbounded: the probe should let well more than the bound through
-		// (asserting the exact peak would be flakey on a loaded machine).
-		if peak <= 2*bound {
-			t.Fatalf("unbounded: peak concurrent bd children = %d, want more than %d (2x bound) — the herd did not form", peak, 2*bound)
+		if peak != int64(numCalls) {
+			t.Fatalf("unbounded: peak concurrent bd children = %d, want exactly %d (barrier-guaranteed)", peak, numCalls)
 		}
 		t.Logf("unbounded: peak concurrent bd children = %d over %d calls", peak, calls)
 	})
@@ -326,6 +481,10 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 		townRoot:   town,
 		cmdTimeout: 10 * time.Second,
 		cmdSem:     make(chan struct{}, 1),
+		// The pool-full case below only needs to prove the seam waits on
+		// this pool, not that it waits realistically long — a short
+		// override keeps the case fast (gt-d5xr rework 2).
+		slotWaitBudget: 20 * time.Millisecond,
 	}
 
 	// A failing lister: no bd subprocess to observe, but it proves whether
@@ -353,4 +512,95 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 	if got := atomic.LoadInt64(&listCalls); got != 1 {
 		t.Fatalf("pool full: list ran %d times total, want still 1 — the seam escaped the pool", got)
 	}
+}
+
+// TestWaitBudget_DefaultsToExecTimeout is the unit-level proof behind the
+// major rework-2 finding: a slot wait fixed at 5s regardless of cmdTimeout
+// turned slow-but-successful bd reads into hard failures under exactly the
+// contention gt-d5xr is about. Both LiveConvoyFetcher and APIHandler tie the
+// default wait to the call's own exec timeout instead, and both still
+// accept an override for tests.
+func TestWaitBudget_DefaultsToExecTimeout(t *testing.T) {
+	f := &LiveConvoyFetcher{}
+	if got := f.waitBudget(20 * time.Second); got != 20*time.Second {
+		t.Fatalf("fetcher waitBudget(20s) = %v, want 20s (tied to the call's own timeout)", got)
+	}
+	f.slotWaitBudget = 2 * time.Second
+	if got := f.waitBudget(20 * time.Second); got != 2*time.Second {
+		t.Fatalf("fetcher waitBudget with override = %v, want 2s", got)
+	}
+
+	h := &APIHandler{}
+	if got := h.waitBudget(20 * time.Second); got != 20*time.Second {
+		t.Fatalf("APIHandler waitBudget(20s) = %v, want 20s (tied to the call's own timeout)", got)
+	}
+	h.slotWaitBudget = 2 * time.Second
+	if got := h.waitBudget(20 * time.Second); got != 2*time.Second {
+		t.Fatalf("APIHandler waitBudget with override = %v, want 2s", got)
+	}
+}
+
+// TestRunBdCmd_SlotWaitScalesWithCmdTimeout is the saturated-pool regression
+// for the major rework-2 finding: with cmdSem's single slot serializing
+// numCalls reads, the last one queues for roughly (numCalls-1)*sleep. A
+// cmdTimeout generously above that must let every call through — the wait
+// is no longer capped by a fixed constant independent of the configured
+// timeout (gt-d5xr rework 2).
+func TestRunBdCmd_SlotWaitScalesWithCmdTimeout(t *testing.T) {
+	const numCalls = 8
+	const sleep = 50 * time.Millisecond // worst-case queue ~= 7*50ms = 350ms
+
+	newFetcher := func(t *testing.T, cmdTimeout, slotWaitBudget time.Duration) *LiveConvoyFetcher {
+		t.Helper()
+		binDir := t.TempDir()
+		bdPath := filepath.Join(binDir, "bd")
+		script := "#!/bin/sh\nsleep " + strconv.FormatFloat(sleep.Seconds(), 'f', -1, 64) + "\nprintf '[]'\n"
+		if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake binary: %v", err)
+		}
+		return &LiveConvoyFetcher{
+			cmdTimeout:     cmdTimeout,
+			slotWaitBudget: slotWaitBudget,
+			bdBin:          bdPath,
+			cmdSem:         make(chan struct{}, 1),
+		}
+	}
+
+	run := func(f *LiveConvoyFetcher) (successes, failures int64) {
+		var wg sync.WaitGroup
+		wg.Add(numCalls)
+		for i := 0; i < numCalls; i++ {
+			go func() {
+				defer wg.Done()
+				if _, err := f.runBdCmd(t.TempDir(), "show", "gt-d5xr"); err != nil {
+					atomic.AddInt64(&failures, 1)
+					return
+				}
+				atomic.AddInt64(&successes, 1)
+			}()
+		}
+		wg.Wait()
+		return
+	}
+
+	t.Run("wait tied to a generous cmdTimeout: every queued call succeeds", func(t *testing.T) {
+		f := newFetcher(t, 2*time.Second, 0)
+		successes, failures := run(f)
+		if failures != 0 {
+			t.Fatalf("%d of %d queued calls failed, want 0", failures, numCalls)
+		}
+		if successes != numCalls {
+			t.Fatalf("vacuous-pass guard: got %d successes, want %d", successes, numCalls)
+		}
+	})
+
+	t.Run("an explicit override still bounds the wait", func(t *testing.T) {
+		// Proves the budget is a real, enforced bound and not a no-op: it
+		// just is not hardcoded at a value independent of cmdTimeout.
+		f := newFetcher(t, 2*time.Second, 10*time.Millisecond)
+		_, failures := run(f)
+		if failures == 0 {
+			t.Fatal("expected some calls to fail waiting for a slot with a 10ms budget behind a full pool")
+		}
+	})
 }
