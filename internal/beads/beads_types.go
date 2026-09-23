@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // typesSentinel is a marker file indicating custom types have been configured.
@@ -37,7 +38,8 @@ var (
 // Returns the outermost town root found, so that rig repos which were
 // originally standalone towns (and still contain mayor/town.json) don't
 // shadow the real town root above them.
-// Returns empty string if not found (reached filesystem root).
+// Returns empty string if not found (reached filesystem root), and refuses the
+// live town root while the hermetic test harness is active (gt-dr664).
 func FindTownRoot(startDir string) string {
 	dir := startDir
 	candidate := ""
@@ -48,10 +50,16 @@ func FindTownRoot(startDir string) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return candidate // Reached filesystem root — return outermost found
+			break // Reached filesystem root — candidate is the outermost found
 		}
 		dir = parent
 	}
+	if workspace.RefuseForbiddenRoot("beads.FindTownRoot", candidate) != nil {
+		// Subprocess (gt/bd): the live town is refused, so routing falls back
+		// to the caller's own beads dir instead of production.
+		return ""
+	}
+	return candidate
 }
 
 // ResolveRoutingTarget determines which beads directory a bead ID will route to.

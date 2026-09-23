@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Common errors
@@ -684,6 +685,8 @@ type beadsFields struct {
 
 // newBeads is the single composite-literal construction point for *Beads.
 func newBeads(f beadsFields) *Beads {
+	refuseLiveTownPath("beads client workDir", f.workDir)
+	refuseLiveTownPath("beads client beadsDir", f.beadsDir)
 	return &Beads{
 		workDir:    f.workDir,
 		beadsDir:   f.beadsDir,
@@ -883,13 +886,28 @@ func (b *Beads) getTownRoot() string {
 	return b.townRoot
 }
 
+// refuseLiveTownPath refuses a path inside the live town the hermetic harness
+// forbids, so an in-process test cannot open production beads — and the
+// production Dolt server behind them — through the beads client (gt-dr664).
+// Under a test binary this panics at the call site; a gt/bd subprocess keeps
+// going, since refusing to crash is the only thing it can do with the error.
+func refuseLiveTownPath(what, dir string) {
+	if err := workspace.RefuseForbiddenRoot(what, dir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+}
+
 // getResolvedBeadsDir returns the beads directory this wrapper is operating on.
 // This follows any redirects and returns the actual beads directory path.
 func (b *Beads) getResolvedBeadsDir() string {
 	if b.beadsDir != "" {
-		return ResolveBeadsDir(b.beadsDir)
+		dir := ResolveBeadsDir(b.beadsDir)
+		refuseLiveTownPath("beads client beadsDir", dir)
+		return dir
 	}
-	return ResolveBeadsDir(b.workDir)
+	dir := ResolveBeadsDir(b.workDir)
+	refuseLiveTownPath("beads client workDir", dir)
+	return dir
 }
 
 // targetBeadsDirForCreate returns the database a create operation should use.

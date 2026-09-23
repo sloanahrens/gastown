@@ -43,9 +43,64 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// liveTownResolver is one in-process town-root resolver the harness probes at
+// setup.
+type liveTownResolver struct {
+	name    string
+	resolve func(dir string) string
+}
+
+// liveTownResolvers are the in-process town-root resolvers the harness probes
+// at setup. A resolver reachable from a test binary that is NOT listed here
+// still has to route its refusal through workspace.RefuseForbiddenRoot
+// (gt-dr664).
+var liveTownResolvers = []liveTownResolver{
+	{"workspace.Find", func(dir string) string {
+		root, _ := workspace.Find(dir)
+		return root
+	}},
+	{"beads.FindTownRoot", beads.FindTownRoot},
+}
+
+// assertLiveTownRefused fails harness setup when an in-process resolver still
+// reaches the live town after the scrub and redirect. Refusing loudly (a panic
+// from workspace.RefuseForbiddenRoot) is the pass condition here — it is the
+// guard working — so anything that returns a root inside the live town is a
+// leak and fails the whole run at TestMain, before a test body can write
+// (gt-dr664).
+func assertLiveTownRefused(dir string) error {
+	var leaks []string
+	for _, r := range liveTownResolvers {
+		root, refusedLoudly := probeResolver(r.resolve, dir)
+		if refusedLoudly || root == "" || !workspace.IsForbiddenRoot(root) {
+			continue
+		}
+		leaks = append(leaks, fmt.Sprintf("  - %s resolved %s", r.name, root))
+	}
+	if len(leaks) == 0 {
+		return nil
+	}
+	return fmt.Errorf("in-process town-root resolvers reached the live town at %s:\n%s\n\n"+
+		"Route the resolver's refusal through workspace.RefuseForbiddenRoot so tests fail\n"+
+		"loudly instead of opening production beads and its Dolt server (gt-dr664)",
+		workspace.ForbiddenTownRoot(), strings.Join(leaks, "\n"))
+}
+
+// probeResolver calls a resolver that may refuse loudly; refusedLoudly reports
+// that it panicked instead of returning a root.
+func probeResolver(resolve func(dir string) string, dir string) (root string, refusedLoudly bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			refusedLoudly = true
+		}
+	}()
+	return resolve(dir), false
+}
 
 // AllowLiveTmuxEnv opts a test process out of the tmux socket isolation
 // StartHermetic applies below, for the rare case that deliberately needs the
@@ -89,6 +144,9 @@ type Hermetic struct {
 	// RealTownRoot is the live town the test process is running inside, or
 	// "" when not inside one. The tripwire watches it.
 	RealTownRoot string
+	// StartDir is the working directory when the harness started, which is
+	// inside RealTownRoot when a test binary runs from a worktree in it.
+	StartDir string
 	// TmuxSocket is the isolated per-process tmux socket (-L flag) this
 	// harness bound via tmux.SetDefaultSocket, or "" when tmux isn't
 	// installed or isolation was bypassed via AllowLiveTmuxEnv.
@@ -149,6 +207,7 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// An outer harness (nested `go test` runs) may have set the forbidden
 	// root already, which blinds FindFromCwd to it — inherit it in that case
 	// so the guard and tripwire survive nesting.
+	h.StartDir, _ = os.Getwd() //nolint:errcheck // "" just disables the startup probe
 	if root, err := workspace.FindFromCwd(); err == nil && root != "" {
 		h.RealTownRoot = root
 	} else if root := os.Getenv(workspace.EnvForbiddenTownRoot); root != "" {
@@ -259,6 +318,16 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 
 	h.TmuxSocket = isolateTmuxSocket()
+
+	// The env scrub above only reaches resolvers that consult it. Probe them
+	// from the package's own directory — the one cwd guaranteed to sit inside
+	// the live worktree — so a resolver that ignores the guard fails here
+	// rather than mid-test.
+	if h.RealTownRoot != "" {
+		if err := assertLiveTownRefused(h.StartDir); err != nil {
+			return nil, err
+		}
+	}
 
 	return h, nil
 }
@@ -650,8 +719,11 @@ func HermeticTest(t testing.TB) string {
 		"BEADS_DOLT_AUTO_START": "0",
 		BeadsCircuitDirEnv:      sandboxCircuitDir(home),
 	}
-	if realRoot, err := workspace.FindFromCwd(); err == nil && realRoot != "" {
-		testEnvs[workspace.EnvForbiddenTownRoot] = realRoot
+	startDir, _ := os.Getwd() //nolint:errcheck // "" just disables the startup probe
+	realRoot := ""
+	if root, err := workspace.FindFromCwd(); err == nil && root != "" {
+		realRoot = root
+		testEnvs[workspace.EnvForbiddenTownRoot] = root
 	}
 	for k, v := range testEnvs {
 		if err := os.Setenv(k, v); err != nil {
@@ -661,6 +733,11 @@ func HermeticTest(t testing.TB) string {
 	if os.Getenv("GT_TEST_EXTERNAL_DOLT") != "1" {
 		_ = os.Setenv("GT_DOLT_PORT", poisonDoltPort)
 		_ = os.Setenv("BEADS_DOLT_PORT", poisonDoltPort)
+	}
+	if realRoot != "" {
+		if err := assertLiveTownRefused(startDir); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	return town

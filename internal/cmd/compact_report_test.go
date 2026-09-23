@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestWispTypeToCategory(t *testing.T) {
@@ -752,6 +753,11 @@ func TestRunDailyDigestStopsBeforeMailWhenAuditCloseFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script command stubs not supported on Windows")
 	}
+	// runDailyDigest builds its beads client from the working directory, so
+	// this test needs a sandbox cwd: from the live worktree the harness
+	// refuses that path loudly rather than let the test open production
+	// beads behind a PATH stub (gt-dr664).
+	testutil.ScratchTown(t)
 	mailLog := setupCompactReportCommandStubs(t)
 	resetCompactReportFlags(t)
 	compactReportDate = "2026-05-15"
