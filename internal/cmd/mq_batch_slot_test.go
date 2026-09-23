@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,19 +14,35 @@ import (
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
-// stubNoContainers overrides package slot's docker-ps lookup for the
-// duration of t so these tests never shell out to the real docker CLI. This
-// is the CRITICAL fix for gt-tuiy attempt 4: acquireBatchGateSlot drives
-// slot.Acquire, whose runningGateContainers var was previously unreachable
-// from this package, so these tests ran the REAL docker ps and would poll
-// for the full batchSlotTimeout (60m) — hanging the whole package's test
-// run — whenever any dolt/testcontainers/ryuk container was up on the host
-// (deterministic under the integration build's shared Dolt TestMain
-// container, and a real risk on any shared Gas Town host per this bead's
-// own premise). See slot.SetContainerListerForTest.
+// stubNoContainersOnce installs the stub below exactly once per test binary.
+// Installed from a t.Parallel test, the seam's own runningGateContainers var
+// would otherwise be written concurrently — the writes race even though every
+// caller installs the same value.
+var stubNoContainersOnce sync.Once
+
+// stubNoContainers overrides package slot's docker-ps lookup so these tests
+// never shell out to the real docker CLI. This is the CRITICAL fix for gt-tuiy
+// attempt 4: acquireBatchGateSlot drives slot.Acquire, whose
+// runningGateContainers var was previously unreachable from this package, so
+// these tests ran the REAL docker ps and would poll for the full
+// batchSlotTimeout (60m) — hanging the whole package's test run — whenever any
+// dolt/testcontainers/ryuk container was up on the host (deterministic under
+// the integration build's shared Dolt TestMain container, and a real risk on
+// any shared Gas Town host per this bead's own premise). See
+// slot.SetContainerListerForTest.
+//
+// It installs once and never restores (gt-k317). Every caller wants the same
+// lister, and a per-test restore made the helper unusable from t.Parallel: two
+// parallel callers saved each other's value and the last cleanup to run put
+// back a lister that was already stale, so a peer could start consulting the
+// real docker CLI. A test that needs a different lister calls
+// slot.SetContainerListerForTest directly, as
+// TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI does.
 func stubNoContainers(t *testing.T) {
 	t.Helper()
-	t.Cleanup(slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil }))
+	stubNoContainersOnce.Do(func() {
+		slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
+	})
 }
 
 // TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI proves stubNoContainers

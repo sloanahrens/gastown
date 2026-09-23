@@ -126,8 +126,11 @@ func TestPolecatStopPendingWork(t *testing.T) {
 // gt-couv: the Stop hook must not treat "my own slot-wrapped suite is still
 // running" as abandonment, but a slot held by an unrelated polecat/rig must
 // not falsely suppress the auto-done either.
+//
+// Serial because the first subtest counts lister calls: a counting stub is a
+// value no peer test can share, so it cannot be installed once and left
+// (gt-k317).
 func TestPolecatStopVerificationRunning(t *testing.T) {
-	t.Parallel()
 	t.Run("no slot held", func(t *testing.T) {
 		townRoot := t.TempDir()
 
@@ -150,8 +153,7 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 
 	t.Run("slot held by this polecat", func(t *testing.T) {
-		restore := slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
-		defer restore()
+		stubNoContainers(t)
 		townRoot := t.TempDir()
 
 		handle, err := slot.Acquire(townRoot, "gastown/coral", time.Second)
@@ -170,8 +172,7 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 
 	t.Run("slot held by a different polecat does not suppress", func(t *testing.T) {
-		restore := slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
-		defer restore()
+		stubNoContainers(t)
 		townRoot := t.TempDir()
 
 		handle, err := slot.Acquire(townRoot, "gastown/citrine", time.Second)

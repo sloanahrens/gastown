@@ -193,8 +193,11 @@ func TestWriteSystemPromptFile_WritesOnlyOnChange(t *testing.T) {
 	}
 }
 
+// Serial: staticRoleText reaches captureOutput, which reassigns os.Stdout on
+// the hardcoded-fallback path, so a parallel peer's own stdout would land in
+// this test's capture. The template path this test takes does not hit it, but
+// the seam is one branch away and a lint cannot see branches (gt-k317).
 func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
@@ -480,7 +483,6 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 }
 
 func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("ctx"), 0o644); err != nil {
 		t.Fatal(err)
@@ -518,8 +520,10 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 	}
 }
 
+// Serial: an unknown role has no template, so this one really does take
+// staticRoleText's hardcoded-fallback branch and have captureOutput reassign
+// os.Stdout process-wide (gt-k317).
 func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
