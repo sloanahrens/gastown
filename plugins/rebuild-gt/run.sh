@@ -15,20 +15,17 @@
 # [execution] allow_deferred_exit = true, without which the daemon reads exit
 # 3 as an ordinary failure): 0 did the work OR refused safely — dirty
 # checkout, wrong branch, diverged main, not safe to rebuild, no rig root
-# (recorded as success or skipped, never escalated on its own); 3 DEFERRED —
-# nothing accomplished, so deliberately no run record, because a record
-# satisfies the cooldown gate and a run that accomplished nothing must not buy
-# an hour before the retry; 1 FAILED — build failed, or the install could not
-# be verified as in force (recorded as failure and escalated under a stable
-# fingerprint). Before changing that contract, read plugins/rebuild-gt/plugin.md
-# and internal/daemon/plugin_script.go.
+# (recorded as success or skipped); 3 DEFERRED — nothing accomplished, so
+# deliberately no run record, because a record satisfies the cooldown gate and
+# a run that accomplished nothing must not buy an hour before the retry;
+# 1 FAILED — build failed, or the install could not be verified as in force
+# (recorded as failure and escalated under a stable fingerprint). Before
+# changing that contract, read plugins/rebuild-gt/plugin.md and
+# internal/daemon/plugin_script.go.
 #
-# Exit 3 is also why this script keeps its own state: writing no run record is
-# what keeps the retry on the heartbeat, and it is also what leaves a defer
-# that repeats all night invisible to everything else (gt-kox0). The state
-# file under daemon/ carries the block across runs, the alarm fires once it
-# outlasts the starvation threshold, and past that threshold the build queues
-# for the container-gate slot instead of racing it.
+# Before changing the block counting, the starvation alarm, or the reserve
+# path, read plugins/rebuild-gt/plugin.md (Starvation): the design lives there,
+# and this file carries the code.
 
 set -euo pipefail
 
@@ -54,12 +51,27 @@ defer() {
 STARVE_STATE="${TOWN_ROOT}/daemon/rebuild-gt-state.json"
 # Under this, a block is the town working as designed: gate holds measured
 # 2m-20m20s on 2026-09-22, so a single busy gate is not an alarm. Past it the
-# run escalates loudly and, when the gate is what is blocking, the build
-# queues for the slot rather than racing it (gt-kox0).
+# run escalates loudly and, when the gate is what is blocking, waits for the
+# gate to release the slot and builds inside it rather than racing it
+# (gt-kox0).
 STARVE_MINUTES=${REBUILD_GT_STARVE_MINUTES:-30}
-# How long a queued build waits for the slot. plugin.md's [execution] timeout
-# has to cover this wait plus the build and the install that follow it.
+# The whole reserve budget — the wait for the gate to release the slot and the
+# acquire that follows it share this one clock. plugin.md's [execution] timeout
+# has to cover it plus the build and the install that follow.
 RESERVE_WAIT=${REBUILD_GT_RESERVE_WAIT:-10m}
+
+# seconds DURATION — a Go-style duration (90s, 10m, 1h30m) as whole seconds.
+seconds() {
+  python3 - "$1" <<'PY' 2>/dev/null || echo 0
+import re, sys
+s = sys.argv[1].strip()
+if re.fullmatch(r"(\d+(?:\.\d+)?[hms])+", s):
+    print(int(sum(float(v) * {"h": 3600, "m": 60, "s": 1}[u]
+                  for v, u in re.findall(r"(\d+(?:\.\d+)?)([hms])", s))))
+else:
+    print(0)
+PY
+}
 
 # starve_age — minutes since the current block opened; 0 when none is open.
 starve_age() {
@@ -82,9 +94,13 @@ PY
 }
 
 # starve_bump REASON — count one more blocked run and print the total. An open
-# block keeps its start time: the age is what the alarm reads.
+# block keeps its start time: the age is what the alarm reads. It prints
+# nothing and exits non-zero when the state file cannot be written, so the
+# caller can say so: a write that fails and then reads back as "no block, age
+# 0" is indistinguishable from a healthy run, which is the silence gt-kox0 is
+# about.
 starve_bump() {
-  python3 - "$STARVE_STATE" "$1" <<'PY' 2>/dev/null || echo 0
+  python3 - "$STARVE_STATE" "$1" <<'PY'
 import datetime, json, os, sys, time
 
 def stamp(t):
@@ -140,11 +156,26 @@ print(1)
 PY
 }
 
-# starve_mark_escalated — prints 1 the first time this block is escalated, 0
-# after that. One firing per block: the escalation is what makes the block
-# visible, an unacked one is re-escalated by the town's own cadence
+# starve_escalated — prints 1 when this block has already been escalated.
+# One firing per block: the escalation is what makes the block visible, an
+# unacked one is re-escalated by the town's own cadence
 # (settings/escalation.json), and a firing per heartbeat would be Dolt commits
 # that buy nothing (gt-kox0, gt-vwry).
+starve_escalated() {
+  python3 - "$STARVE_STATE" <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+print(1 if d.get("escalated_epoch") else 0)
+PY
+}
+
+# starve_mark_escalated — record that this block's escalation went out. Read
+# back by starve_escalated; kept separate from starve_escalated so the caller
+# can run the escalation first and mark only what actually reached the town.
 starve_mark_escalated() {
   python3 - "$STARVE_STATE" <<'PY' 2>/dev/null || echo 0
 import datetime, json, os, sys, time
@@ -154,9 +185,6 @@ try:
         d = json.load(f)
 except Exception:
     d = {}
-if d.get("escalated_epoch"):
-    print(0)
-    raise SystemExit(0)
 now = time.time()
 d["escalated_epoch"] = int(now)
 d["escalated_at"] = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -171,16 +199,27 @@ PY
 # note_blocked REASON — the binary was due and this run did not install it:
 # count it, and escalate once the block outlasts $STARVE_MINUTES. One stable
 # fingerprint, so a night-long block reads as one live escalation instead of
-# one per heartbeat (gt-vwry). Returns without exiting: each caller keeps its
-# own contract.
+# one per heartbeat (gt-vwry). The escalation runs before the block is marked:
+# a call that never reached the town must be retried on the next run, not
+# recorded as delivered, or the one alarm this file exists for is lost in
+# silence (gt-kox0). Returns without exiting: each caller keeps its own
+# contract.
 note_blocked() {
   local defers age
-  defers=$(starve_bump "$1")
+  if ! defers=$(starve_bump "$1"); then
+    log "WARNING: could not record this blocked run in $STARVE_STATE"
+    defers=0
+  fi
   age=$(starve_age)
   log "Not installed (due, blocked ${age}m over $defers run(s)): $1"
-  if [ "$age" -ge "$STARVE_MINUTES" ] && [ "$(starve_mark_escalated)" = "1" ]; then
-    gt escalate "rebuild-gt: the binary has been due for install and blocked for ${age}m over $defers run(s); last: $1" \
-      -s high --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:starved" 2>/dev/null || true
+  if [ "$age" -lt "$STARVE_MINUTES" ] || [ "$(starve_escalated)" = "1" ]; then
+    return 0
+  fi
+  if ESCALATE_OUT=$(gt escalate "rebuild-gt: the binary has been due for install and blocked for ${age}m over $defers run(s); last: $1" \
+    -s high --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:starved" 2>&1); then
+    starve_mark_escalated >/dev/null
+  else
+    log "WARNING: the starvation escalation did not reach the town; retrying on the next run: $ESCALATE_OUT"
   fi
 }
 
@@ -214,14 +253,14 @@ fi
 #
 # Every bail below (dirty repo, wrong branch, diverged local main, an
 # unreadable staleness check, "not safe to rebuild") exits 0 and records a
-# healthy-looking "skipped" receipt. None of them escalate, so any one of
-# them can persist for hours — or indefinitely — with nothing in the system
-# ever raising an alarm (gt-bce). This check runs unconditionally, before any
-# of those bails, and is keyed to the OUTCOME THAT MATTERS — the binary
-# drifting from origin/main — rather than to an enumeration of bail reasons.
-# Enumerating failure modes is the same brittleness this town has hit
-# repeatedly (gt-r8o, gt-50k); this catches every bail path above, including
-# ones not yet written, because it doesn't ask why the rebuild didn't happen.
+# healthy-looking "skipped" receipt. A bail that leaves a DUE binary out of
+# force is counted by the starvation clock below, but that clock only runs on
+# paths where DUE was read; this check runs unconditionally, before any of
+# them, and is keyed to the OUTCOME THAT MATTERS — the binary drifting from
+# origin/main — rather than to an enumeration of bail reasons. Enumerating
+# failure modes is the same brittleness this town has hit repeatedly (gt-r8o,
+# gt-50k); this catches every bail path above, including ones not yet written,
+# because it doesn't ask why the rebuild didn't happen (gt-bce).
 #
 # 'gt stale --json' refreshes its own origin/main remote-tracking ref and
 # only inspects git history, never RIG_ROOT's working-tree state, so it is
@@ -244,8 +283,10 @@ THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
 # no matter which reason kept it out of force (gt-kox0).
 DRIFT_STALE=""
 DRIFT_BEHIND=""
+DRIFT_READ=0
 DUE=""
 if DRIFT_JSON=$(gt stale --json 2>/dev/null); then
+  DRIFT_READ=1
   DRIFT_STALE=$(echo "$DRIFT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('stale', False))" 2>/dev/null || echo "False")
   # commits_behind is only meaningful when present: 'or 0' would read a
   # missing/null count the same as "0 behind" and silently retire the alarm
@@ -279,6 +320,21 @@ if [ "$DRIFT_STALE" = "True" ]; then
   # ruled under a threshold it does not have (gt-oqbw).
   if [ "$DRIFT_BEHIND" = "unknown" ] || [ "$DRIFT_BEHIND" -ge "$THRESHOLD" ]; then
     DUE=1
+  fi
+fi
+
+# A reading that says the binary is NOT due ends any block on the books (DUE is
+# this same reading taken the other way round). Nothing starves a binary that
+# needs no installing, and a block left open past the condition it measured
+# outlives it: a hand-install during a dirty checkout, say, then main moving
+# past the threshold again — the next block inherits the old start time and
+# escalates and reserves on its very first run (gt-kox0). Only a reading that
+# succeeded clears, because an unreadable staleness check has not shown
+# anything about the binary.
+if [ "$DRIFT_READ" = "1" ] && [ -z "$DUE" ]; then
+  if [ "$(starve_clear "binary is not due")" = "1" ]; then
+    gt escalate clear --fingerprint "rebuild-gt:starved" \
+      --reason "rebuild-gt: the binary is not due for install" >/dev/null 2>&1 || true
   fi
 fi
 
@@ -424,11 +480,71 @@ install_requires_quiet() {
 
 # Yield to a running gate (gt-htx3): make build competes for CPU with a gate
 # suite whose tests are load-sensitive, so a rebuild while a refinery, batch,
-# main-branch-test or om-review role holds a container-gate slot is deferred to
-# the next cooldown. A stub or missing gt slot status reads as "free": the
-# guard fails open on purpose so a broken status command cannot park rebuilds
-# forever (the drift escalation above still fires if that happens).
+# main-branch-test or om-review role holds a container-gate slot is deferred,
+# and past the starvation threshold it waits for that slot instead.
 #
+# slot_status_lines — the container-gate reading, three lines: the gate-class
+# roles holding a slot right now (comma-joined, empty when none hold one), the
+# reason the town is not quiet that no slot serializes (empty when there is
+# none), and "reservable" when the blocker is one the slot does serialize. A
+# stub or missing gt slot status prints nothing, and the guard fails open on
+# purpose so a broken status command cannot park rebuilds forever (the drift
+# escalation above still fires if that happens).
+slot_status_lines() {
+  gt slot status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+roles = []
+for s in d.get("slots") or []:
+    role = ((s.get("owner") or {}).get("role") or "")
+    if role.endswith(("/refinery", "/refinery-batch", "/main-branch-test", "/om-review")):
+        roles.append(role)
+print(", ".join(roles))
+c = d.get("unwrapped_containers") or []
+if c:
+    print("container(s) are running outside the gate: %s" % ", ".join(c))
+elif d.get("saturated"):
+    print("every container-gate slot is held")
+else:
+    print("")
+print("reservable" if roles or d.get("saturated") else "")
+' 2>/dev/null || true
+}
+
+# gate_holders — just the roles from that reading, one line.
+gate_holders() { slot_status_lines | sed -n 1p; }
+
+# wait_for_gate_free — block until no gate-class role holds a container-gate
+# slot, or the reserve budget runs out; false on the budget. The poll is what
+# the acquire alone cannot do: the pool hands a free slot to a non-gate role
+# immediately, so on a town whose pool has more than one slot the build would
+# start beside the very suite the yield exists to stay out of — the contention
+# gt-htx3 added the yield for (gt-kox0).
+wait_for_gate_free() {
+  local interval=${REBUILD_GT_POLL_SECONDS:-15}
+  while :; do
+    if [ -z "$(gate_holders)" ]; then
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$RESERVE_DEADLINE" ]; then
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+# reserve_remaining — seconds left of the shared reserve budget, with a floor
+# so a gate that takes the slot the moment the wait ends still gets one honest
+# acquire.
+reserve_remaining() {
+  local left=$(( RESERVE_DEADLINE - $(date +%s) ))
+  if [ "$left" -lt 60 ]; then left=60; fi
+  printf '%s' "$left"
+}
+
 # The town must also have nothing in flight (gt-oqbw): an MR a refinery is
 # mid-merge on is work this restart would interrupt. An MR merely ready in the
 # queue is NOT a reason to wait — it consumes nothing, and at this town's
@@ -436,37 +552,21 @@ install_requires_quiet() {
 # install waiting forever. An unreadable Docker status is not a reason either:
 # it means the cross-check could not tell, and a VM that is down runs no suite
 # for a build to compete with.
-#
-# The second line of that output says whether the block is one the gate slot
-# itself serializes. A container outside the gate is not: queuing for the slot
-# does not queue behind it, so that reading only ever defers (gt-kox0).
-GATE_RAW=$(gt slot status --json 2>/dev/null | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-held = []
-for s in d.get("slots") or []:
-    role = ((s.get("owner") or {}).get("role") or "")
-    if role.endswith(("/refinery", "/refinery-batch", "/main-branch-test", "/om-review")):
-        held.append(role)
-if held:
-    print("a gate suite holds a slot (%s)" % ", ".join(held))
-    print("reservable")
-elif d.get("unwrapped_containers"):
-    print("container(s) are running outside the gate: %s" % ", ".join(d["unwrapped_containers"]))
-    print("")
-elif d.get("saturated"):
-    print("every container-gate slot is held")
-    print("reservable")
-' 2>/dev/null || true)
-GATE_BUSY=$(printf '%s\n' "$GATE_RAW" | sed -n 1p)
-GATE_RESERVABLE=$(printf '%s\n' "$GATE_RAW" | sed -n 2p)
+GATE_READING=$(slot_status_lines)
+GATE_HOLDERS=$(printf '%s\n' "$GATE_READING" | sed -n 1p)
+GATE_OTHER=$(printf '%s\n' "$GATE_READING" | sed -n 2p)
+GATE_RESERVABLE=$(printf '%s\n' "$GATE_READING" | sed -n 3p)
 RESERVE=0
+RESERVE_DEADLINE=0
+GATE_BUSY=""
+if [ -n "$GATE_HOLDERS" ]; then
+  GATE_BUSY="a gate suite holds a slot ($GATE_HOLDERS)"
+elif [ -n "$GATE_OTHER" ]; then
+  GATE_BUSY="$GATE_OTHER"
+fi
 if [ -n "$GATE_BUSY" ]; then
   if [ "$GATE_RESERVABLE" = "reservable" ] && [ "$(starve_age)" -ge "$STARVE_MINUTES" ]; then
-    # Past the threshold with the slot as the blocker: take the lock instead of
+    # Past the threshold with the slot as the blocker: wait for it instead of
     # racing it, so this build queues like any other gate consumer (gt-kox0).
     RESERVE=1
   else
@@ -475,6 +575,21 @@ if [ -n "$GATE_BUSY" ]; then
 fi
 
 install_requires_quiet warn
+
+if [ "$RESERVE" = "1" ]; then
+  # Counted before the wait, not after: the run is blocked from the moment it
+  # starts waiting, and the alarm should not be hostage to the wait finishing.
+  note_blocked "not quiet: $GATE_BUSY"
+  RESERVE_SECONDS=$(seconds "$RESERVE_WAIT")
+  if [ "$RESERVE_SECONDS" -le 0 ]; then
+    log "WARNING: REBUILD_GT_RESERVE_WAIT='$RESERVE_WAIT' is not a duration; using 10m"
+    RESERVE_WAIT=10m
+    RESERVE_SECONDS=600
+  fi
+  RESERVE_DEADLINE=$(( $(date +%s) + RESERVE_SECONDS ))
+  log "Blocked $(starve_age)m: waiting up to $RESERVE_WAIT for the gate to release the slot, then building inside it."
+  wait_for_gate_free || blocked_defer "waited $RESERVE_WAIT for the container-gate slot and did not get it"
+fi
 
 log "Rebuilding gt from $RIG_ROOT ($BEHIND commits behind)..."
 
@@ -495,17 +610,23 @@ build_gt() {
     (cd "$RIG_ROOT" && make build) 2>&1 || return $?
     return 0
   fi
-  note_blocked "not quiet: $GATE_BUSY"
-  log "Blocked $(starve_age)m: queueing for the container-gate slot (up to $RESERVE_WAIT) and building inside it."
-  local out rc=0
-  out=$(cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$RESERVE_WAIT" -- make build 2>&1) || rc=$?
-  printf '%s\n' "$out"
-  # 'gt slot run' prints this the moment it holds the slot (internal/cmd/slot.go);
-  # without it the build never started, so nothing was built and the retry
-  # belongs on the next heartbeat rather than in an escalation.
-  if ! printf '%s\n' "$out" | grep -q "Container-gate slot acquired"; then
-    blocked_defer "queued for the container-gate slot for $RESERVE_WAIT and did not get it"
+  local logf rc=0
+  logf=$(mktemp) || return 1
+  log "Building inside the container-gate slot (acquire budget $(reserve_remaining)s)."
+  # Teed rather than captured: a build that spends the acquire budget waiting
+  # would otherwise print nothing to the plugin log until it finished, and read
+  # as hung (gt-kox0).
+  (cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$(reserve_remaining)s" -- make build) 2>&1 \
+    | tee "$logf" || rc=$?
+  # 'gt slot run' prints this the moment it holds the slot — the literal is
+  # slotAcquiredFormat in internal/cmd/slot.go, pinned by
+  # TestSlotAcquiredFormat. Without it the build never started, so nothing was
+  # built: the retry belongs on the next heartbeat, not in an escalation.
+  if ! grep -q "Container-gate slot acquired" "$logf"; then
+    rm -f "$logf"
+    blocked_defer "waited for the container-gate slot and did not get it"
   fi
+  rm -f "$logf"
   return "$rc"
 }
 

@@ -1,11 +1,29 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestSlotAcquiredFormat pins the acquire line. Callers outside Go detect a
+// successful acquire by that string — the rebuild plugin greps for it to tell
+// a command that never ran (defer, retry next heartbeat) from one that ran and
+// failed (record a failure, escalate) — so rewording it breaks that plugin
+// silently, on every heartbeat, with this suite still green (gt-kox0).
+func TestSlotAcquiredFormat(t *testing.T) {
+	t.Parallel()
+	line := fmt.Sprintf(slotAcquiredFormat, "gastown/rebuild-gt", 2*time.Second, 0, 2)
+	if !strings.HasPrefix(line, "Container-gate slot acquired ") {
+		t.Fatalf("the acquire line no longer starts with the marker script plugins grep for: %q", line)
+	}
+	if !strings.Contains(line, "role=gastown/rebuild-gt") {
+		t.Errorf("the acquire line lost the role: %q", line)
+	}
+}
 
 // TestSplitEnvPrefix covers gt-18nx: gt slot run must treat leading VAR=value
 // tokens as environment (env(1) semantics) so the polecat formula's verbatim

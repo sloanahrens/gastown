@@ -53,6 +53,13 @@ The containers a dead suite leaves behind are a separate matter — run
 'gt slot status' to see which containers it is judging.`,
 }
 
+// slotAcquiredFormat is the line every holder gets the moment it holds the
+// slot. Script plugins outside Go read it to tell a command that never ran
+// from one that ran and failed — the rebuild plugin greps for it to decide
+// between deferring (nothing was built) and escalating a failure — so it is a
+// string to keep stable; TestSlotAcquiredFormat pins it (gt-kox0).
+const slotAcquiredFormat = "Container-gate slot acquired (role=%s, waited %s, slot %d/%d).\n"
+
 var slotRunCmd = &cobra.Command{
 	Use:   "run -- <command> [args...]",
 	Short: "Acquire the container-gate slot, run a command, then release it",
@@ -139,7 +146,7 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	defer func() { _ = h.Release() }()
 	// The wait is reported even when it was negligible: a queued invocation and
 	// the one it queued behind only read as a pair (gt-dc81).
-	fmt.Fprintf(cmd.OutOrStdout(), "Container-gate slot acquired (role=%s, waited %s, slot %d/%d).\n",
+	fmt.Fprintf(cmd.OutOrStdout(), slotAcquiredFormat,
 		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
 
 	// env(1) semantics: leading VAR=value tokens set the child's environment.
