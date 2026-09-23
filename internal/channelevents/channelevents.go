@@ -48,6 +48,27 @@ func IsPerRig(channel string) bool {
 	return perRigChannels[channel]
 }
 
+// sessionConsumers lists channels whose events reach their consumer only
+// through that consumer's agent session, because no process polls the event
+// directory for them. The value is the rig role whose session consumes the
+// channel.
+//
+// The witness patrol waits on await-signal, which tails the activity feed, so
+// nothing reads events/witness/<rig>/ and an emitted file wakes nobody
+// (gt-wpf0). Emitters must therefore deliver to the session. The refinery
+// channel is deliberately absent: its await-event subscriber polls the
+// directory, so there the file is the delivery.
+var sessionConsumers = map[string]string{
+	"witness": "witness",
+}
+
+// SessionConsumer returns the rig role whose agent session consumes the
+// channel, or "" when the channel is consumed by an await-event subscriber
+// polling its directory.
+func SessionConsumer(channel string) string {
+	return sessionConsumers[channel]
+}
+
 // Dir returns the directory holding pending events for a channel. Per-rig
 // channels resolve to events/<channel>/<rig>/; town-global channels ignore
 // rig and resolve to events/<channel>/.

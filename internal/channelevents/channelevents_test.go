@@ -199,3 +199,33 @@ func TestEmitToTown_CreatesDirectory(t *testing.T) {
 		t.Errorf("channel dir should exist after emit: %v", err)
 	}
 }
+
+// TestSessionConsumerIsPerRig pins the invariant the emit path depends on: a
+// channel consumed by an agent session must be per-rig, or one rig's session
+// would be waking on another rig's events.
+func TestSessionConsumerIsPerRig(t *testing.T) {
+	t.Parallel()
+	for channel, role := range sessionConsumers {
+		if role == "" {
+			t.Errorf("channel %q lists an empty consumer role", channel)
+		}
+		if !IsPerRig(channel) {
+			t.Errorf("channel %q has a session consumer but is not per-rig", channel)
+		}
+	}
+}
+
+// TestSessionConsumerExcludesPolledChannels pins the other half: a channel
+// whose await-event subscriber polls it must report no session consumer, or the
+// emitter would nudge a session that is already woken by the file.
+func TestSessionConsumerExcludesPolledChannels(t *testing.T) {
+	t.Parallel()
+	for channel := range perRigChannels {
+		if channel == "refinery" && SessionConsumer(channel) != "" {
+			t.Errorf("refinery is polled by await-event, so it must have no session consumer; got %q", SessionConsumer(channel))
+		}
+	}
+	if got := SessionConsumer("mayor"); got != "" {
+		t.Errorf("town-global channel mayor: SessionConsumer = %q, want empty", got)
+	}
+}

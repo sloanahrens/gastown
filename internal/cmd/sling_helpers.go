@@ -941,12 +941,16 @@ func wakeRigAgents(rigName string) {
 
 // nudgeWitness wakes the witness after polecat completion (gt-a6gp).
 // Replaces POLECAT_DONE mail — nudges are free (no Dolt commit).
-// Uses immediate delivery: sends directly to the tmux pane.
+//
+// The nudge is the half that does the waking: the witness patrol waits on
+// await-signal, which tails the activity feed, so nothing reads the
+// POLECAT_DONE event file this also emits (gt-wpf0). Delivery failure is
+// reported and not fatal — gt done has already submitted the work, and the
+// witness rediscovers the completion by surveying agent beads.
 func nudgeWitness(rigName, message string) {
-	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-
 	// Test hook: log nudge for test observability
 	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
+		witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
 		entry := fmt.Sprintf("nudge:%s:%s\n", witnessSession, message)
 		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
@@ -956,18 +960,17 @@ func nudgeWitness(rigName, message string) {
 		return // Don't actually nudge tmux in tests
 	}
 
-	// Emit a file event so the witness's await-event unblocks instantly.
 	townRoot, _ := workspace.FindFromCwd()
+	var eventPath string
 	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "witness", rigName, "POLECAT_DONE", []string{
+		eventPath, _ = channelevents.EmitToTown(townRoot, "witness", rigName, "POLECAT_DONE", []string{
 			"source=polecat",
 			"message=" + message,
 		})
 	}
 
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, message); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
+	if err := wakeChannelSession(townRoot, "witness", rigName, message); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: POLECAT_DONE wake not delivered: %v (event: %s)\n", err, eventPath)
 	}
 }
 
