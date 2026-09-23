@@ -78,6 +78,12 @@ type RoleHealthConfig struct {
 	// considered hung. Overrides constants.HungSessionThreshold per role.
 	// Zero means use the default from constants.
 	HungSessionThreshold Duration `toml:"hung_session_threshold"`
+
+	// SelfProbeBudget is how long the deacon patrol has to acknowledge a
+	// DEACON_SELF_PROBE mail before it's judged late. Sized for an agent
+	// patrol loop (minutes), deliberately separate from PingTimeout, which
+	// is a network health-check value (seconds) — see daemon.deaconSelfProbeBudget.
+	SelfProbeBudget Duration `toml:"self_probe_budget"`
 }
 
 // Duration is a wrapper for time.Duration that supports TOML marshaling.
@@ -261,6 +267,9 @@ func mergeRoleDefinition(base, override *RoleDefinition) {
 	}
 	if override.Health.HungSessionThreshold.Duration != 0 {
 		base.Health.HungSessionThreshold = override.Health.HungSessionThreshold
+	}
+	if override.Health.SelfProbeBudget.Duration != 0 {
+		base.Health.SelfProbeBudget = override.Health.SelfProbeBudget
 	}
 
 	// Prompts

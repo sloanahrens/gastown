@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -284,14 +285,24 @@ func (d *Daemon) runDoctorDog() {
 	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
 }
 
-// runDeaconSelfProbe sends one probe mail into the deacon's own inbox on
-// the doctor-dog cadence (glossary "Self-probe"): a known event through
-// the deacon's real mail path, later verified by the deacon-self-probe
-// doctor check (internal/doctor.DeaconSelfProbeCheck). Code-driven, like
-// cleanupOrphanedDoltServers — sending exactly one mechanical probe per
-// cycle needs no agent judgment.
+// runDeaconSelfProbe runs one evaluate-then-send cycle of the deacon
+// self-probe on the doctor-dog cadence (glossary "Self-probe"): judge
+// whether the previous probe was acked within budget, advance the
+// consecutive-error counter and escalate to the mayor after
+// deaconSelfProbeErrorThreshold in a row, then send the next probe into the
+// deacon's real inbox. Code-driven, like cleanupOrphanedDoltServers — the
+// judgment itself needs no agent, only the escalation on repeated failure
+// does, and that's handled by `gt escalate` under the hood.
+//
+// Gated on deacon.IsPaused first (fail closed on an unreadable pause state):
+// a paused deacon legitimately will not ack, and evaluating anyway would
+// raise a false alarm on the first operator pause.
 func (d *Daemon) runDeaconSelfProbe() {
-	if err := SendDeaconSelfProbe(d.config.TownRoot); err != nil {
+	townRoot := d.config.TownRoot
+	mailbox := mail.NewMailboxFromAddress(constants.RoleDeacon, townRoot)
+	sender := mail.NewRouterWithTownRoot(townRoot, townRoot)
+
+	if err := runDeaconSelfProbeCycle(townRoot, mailbox, sender, d.escalateAlert, d.clearAlerts); err != nil {
 		d.logger.Printf("doctor_dog: deacon self-probe send failed (non-fatal): %v", err)
 	}
 }
