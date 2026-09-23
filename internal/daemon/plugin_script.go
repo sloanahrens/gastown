@@ -62,6 +62,15 @@ const scriptOutputTail = 16 * 1024
 // and dispatched to a dog like every other nonzero exit (gt-oqbw).
 const scriptExitDeferred = 3
 
+// scriptSkippedMarker is the line a run.sh prints on an exit-0 path that
+// accomplished nothing, so the daemon records the run as skipped instead of
+// success. A silent no-op serializing as a success receipt is the bug class
+// the plugins had on 2026-09-18 (gt-chqi): the wrapper records whatever the
+// script's exit code says, and exit 0 meant "all fine" even when the script
+// had nothing to do. A skipped run is not a failure: it records a receipt,
+// satisfies the cooldown gate, and dispatches no dog.
+const scriptSkippedMarker = "[plugin-result skipped]"
+
 // scriptRunner tracks plugins whose run.sh is executing in-process so a
 // heartbeat that fires mid-run neither starts a second copy nor waits on the
 // first. It is the in-flight half of the cooldown gate: the run record that
@@ -105,6 +114,13 @@ type scriptResult struct {
 
 // ok reports whether the script succeeded (exit 0 within its budget).
 func (r scriptResult) ok() bool { return r.err == nil && !r.timedOut && r.exitCode == 0 }
+
+// skipped reports whether the script exited 0 and printed the skip marker
+// (see scriptSkippedMarker): it ran, found nothing to do, and wants the
+// receipt to say so.
+func (r scriptResult) skipped() bool {
+	return r.ok() && strings.Contains(r.output, scriptSkippedMarker)
+}
 
 // deferred reports whether the script asked to be retried on the next
 // heartbeat (see scriptExitDeferred). Only a plugin that declares
@@ -230,8 +246,11 @@ func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
 		return
 	}
 	result := plugin.ResultSuccess
-	if !res.ok() {
+	switch {
+	case !res.ok():
 		result = plugin.ResultFailure
+	case res.skipped():
+		result = plugin.ResultSkipped
 	}
 	body := fmt.Sprintf("Direct run by the daemon (execution type script): %s\n\n%s", res.status(), res.output)
 	if err := h.record(plugin.PluginRunRecord{
@@ -244,7 +263,11 @@ func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
 		h.logf("Handler: failed to record script run for plugin %s: %v", p.Name, err)
 	}
 	if res.ok() {
-		h.logf("Handler: script plugin %s ok (%s)", p.Name, res.status())
+		if res.skipped() {
+			h.logf("Handler: script plugin %s skipped (%s); nothing to do this run", p.Name, res.status())
+		} else {
+			h.logf("Handler: script plugin %s ok (%s)", p.Name, res.status())
+		}
 		return
 	}
 	h.logf("Handler: script plugin %s FAILED (%s); dispatching a dog with the output", p.Name, res.status())

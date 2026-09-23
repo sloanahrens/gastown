@@ -30,18 +30,29 @@ Requires: `gh` CLI installed and authenticated (`gh auth status`).
 
 Iterate all undocked rigs to find their repo paths:
 
-```bash
-RIG_JSON=$(gt rig list --json 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$RIG_JSON" ]; then
-  echo "SKIP: could not get rig list"
-  exit 0
-fi
+A broken or empty rig list is the condition this plugin guards against
+(gt-chqi): exit 0 here serializes as a success receipt on top of nothing, so
+the failure is invisible. FAIL LOUD instead — nonzero exit, a failure
+record, and a dog dispatched by the daemon.
 
-# Extract repo paths for rigs that have them
+```bash
+RIG_JSON=$(gt rig list --json 2>/dev/null) || {
+  echo "FAIL: could not get rig list (gt rig list --json)"
+  gt plugin record-run --plugin git-hygiene --result failure \
+    --title "git-hygiene: FAILED (rig list unavailable)" \
+    --description "gt rig list --json failed; run aborted (gt-chqi, gt-xxwx)" >/dev/null 2>&1 || true
+  exit 1
+}
+
+# repo_path comes from Rig.RepoPath(): the first of the rig root,
+# <rig>/mayor/rig, <rig>/refinery/rig that is a git worktree root.
 RIG_PATHS=$(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | .repo_path // empty' 2>/dev/null)
 if [ -z "$RIG_PATHS" ]; then
-  echo "SKIP: no rigs with repo paths found"
-  exit 0
+  echo "FAIL: no rigs with repo paths (gt rig list --json emitted no repo_path field — gt-chqi)"
+  gt plugin record-run --plugin git-hygiene --result failure \
+    --title "git-hygiene: FAILED (no rig repo paths)" \
+    --description "gt rig list --json returned rigs without repo_path; run aborted (gt-chqi, gt-xxwx)" >/dev/null 2>&1 || true
+  exit 1
 fi
 
 RIG_COUNT=$(echo "$RIG_PATHS" | wc -l | tr -d ' ')
@@ -72,9 +83,10 @@ while IFS= read -r REPO_PATH; do
   echo ""
   echo "=== Cleaning: $REPO_PATH ==="
 
-  # Detect default branch (main or master)
+  # Detect default branch (main or master). Survive a repo with no origin under
+  # set -e + pipefail: the pipeline exits 128 on the missing ref.
   DEFAULT_BRANCH=$(git -C "$REPO_PATH" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
-    | sed 's|refs/remotes/origin/||')
+    | sed 's|refs/remotes/origin/||' || true)
   if [ -z "$DEFAULT_BRANCH" ]; then
     DEFAULT_BRANCH="main"
   fi
@@ -204,6 +216,25 @@ SUMMARY="$RIG_COUNT rig(s): $TOTAL_LOCAL_MERGED merged branch(es), $TOTAL_LOCAL_
 echo ""
 echo "=== Git Hygiene Summary ==="
 echo "$SUMMARY"
+```
+
+A run that deleted nothing and cleared nothing accomplished nothing: print
+the daemon skip marker (scriptSkippedMarker) so the receipt says skipped
+instead of success (gt-chqi). A real no-op must not green-check the history.
+
+TOTAL_GC is deliberately excluded from the condition: git gc --prune=now
+exits 0 on an already-clean repo, so counting it as work would defeat the
+skip for every clean rig.
+
+```bash
+if [ "$TOTAL_LOCAL_MERGED" -eq 0 ] && [ "$TOTAL_LOCAL_ORPHAN" -eq 0 ] &&
+   [ "$TOTAL_REMOTE" -eq 0 ] && [ "$TOTAL_STASHES" -eq 0 ]; then
+  echo "Nothing to do — all rig repos were already clean"
+  echo "[plugin-result skipped]"
+  gt plugin record-run --plugin git-hygiene --result skipped \
+    --title "git-hygiene: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  exit 0
+fi
 ```
 
 On success:

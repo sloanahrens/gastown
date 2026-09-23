@@ -11,16 +11,28 @@ log() { echo "[gitignore-reconcile] $*"; }
 
 # --- Step 1: Enumerate rig repos ---------------------------------------------
 
-RIG_JSON=$(gt rig list --json 2>/dev/null || true)
-if [ -z "$RIG_JSON" ]; then
-  log "SKIP: could not get rig list"
-  exit 0
-fi
+# A broken or empty rig list is the exact condition the plugin is meant to
+# guard against (gt-chqi): exiting 0 here serializes as a success receipt and
+# a 12-hour cooldown on top of nothing, so the failure is invisible. Exit
+# nonzero instead — the daemon records it and dispatches a dog.
+RIG_JSON=$(gt rig list --json 2>/dev/null) || {
+  log "FAIL: could not get rig list (gt rig list --json)"
+  gt plugin record-run --plugin gitignore-reconcile --result failure \
+    --title "gitignore-reconcile: FAILED (rig list unavailable)" \
+    --description "gt rig list --json failed; run aborted (gt-chqi)" >/dev/null 2>&1 || true
+  exit 1
+}
 
-RIG_ENTRIES=$(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | [(.name // "unknown"), .repo_path] | @tsv' 2>/dev/null || true)
+# repo_path comes from Rig.RepoPath(): the first of the rig root, <rig>/mayor/rig,
+# <rig>/refinery/rig that is a git worktree root. An all-empty list means no rig
+# has a resolvable repo — loud failure, same as above (gt-chqi, gt-xxwx).
+RIG_ENTRIES=$(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | [(.name // "unknown"), .repo_path] | @tsv' 2>/dev/null)
 if [ -z "$RIG_ENTRIES" ]; then
-  log "SKIP: no rigs with repo paths"
-  exit 0
+  log "FAIL: no rigs with repo paths (gt rig list --json emitted no repo_path field — gt-chqi)"
+  gt plugin record-run --plugin gitignore-reconcile --result failure \
+    --title "gitignore-reconcile: FAILED (no rig repo paths)" \
+    --description "gt rig list --json returned rigs without repo_path; run aborted (gt-chqi, gt-xxwx)" >/dev/null 2>&1 || true
+  exit 1
 fi
 
 RIG_COUNT=$(echo "$RIG_ENTRIES" | wc -l | tr -d ' ')
@@ -111,6 +123,18 @@ log ""
 log "=== Summary ==="
 SUMMARY="gitignore-reconcile: $TOTAL_UNTRACKED file(s) untracked, $TOTAL_BEADS chore bead(s) created"
 log "$SUMMARY"
+
+# A run that untracked nothing and filed no bead accomplished nothing: print
+# the daemon skip marker (scriptSkippedMarker) so the receipt says skipped
+# instead of success (gt-chqi). A real no-op must not green-check the history.
+if [ "$TOTAL_UNTRACKED" -eq 0 ] && [ "$TOTAL_BEADS" -eq 0 ]; then
+  log "Nothing to do — no tracked+ignored files found in any rig repo"
+  echo "[plugin-result skipped]"
+  gt plugin record-run --plugin gitignore-reconcile --result skipped \
+    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  log "Done."
+  exit 0
+fi
 
 gt plugin record-run --plugin gitignore-reconcile --result success \
   --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
