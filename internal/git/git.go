@@ -3526,7 +3526,10 @@ type BranchPreservationStatus struct {
 // BranchPreservationStatus checks whether HEAD is safe relative to the actual
 // custody target for the branch. It prefers proof from the exact pushed source
 // branch, then explicit target branches, then upstream. It only falls back to the
-// remote default branch when no target/custody/upstream evidence exists.
+// remote default branch when no target/custody/upstream evidence exists — a
+// worktree with no branch at all (detached HEAD) is first judged against every
+// remote-tracking branch, since a default-branch comparison would report its
+// pushed work as unpreserved.
 func (g *Git) BranchPreservationStatus(localBranch, remote string, targets []string) (BranchPreservationStatus, error) {
 	return g.branchPreservationStatus(localBranch, remote, targets, true)
 }
@@ -3560,7 +3563,7 @@ func (g *Git) BranchTargetStatus(localBranch, remote string, targets []string) (
 // poll). Use BranchPreservationStatus where the answer gates a single
 // irreversible action and a network round trip is affordable.
 func (g *Git) BranchPreservationStatusLocal(localBranch, remote string, targets []string) (BranchPreservationStatus, error) {
-	return g.branchPreservationStatusWith(localBranch, remote, targets, true, g.localRemoteBranchTip)
+	return g.branchPreservationStatusWith(localBranch, remote, targets, true, g.localRemoteBranchTip, g.detachedHeadCustodyLocal)
 }
 
 // localRemoteBranchTip resolves a branch's tip from refs this clone already
@@ -3605,16 +3608,23 @@ func (g *Git) RefPreservedByRef(head, ref string) (BranchPreservationStatus, err
 // remote's actual current tip.
 type remoteBranchTipFunc func(remote, branch string) (string, error)
 
+// detachedHeadCustodyFunc answers "is this worktree's branch-less HEAD already
+// on the remote, and on which ref" — the question a preservation verdict must
+// ask when there is no branch name to ask it about. It reads no branch name,
+// so it cannot reuse remoteBranchTipFunc.
+type detachedHeadCustodyFunc func(remote, head string) (string, bool)
+
 func (g *Git) branchPreservationStatus(localBranch, remote string, targets []string, includeExactBranch bool) (BranchPreservationStatus, error) {
-	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip)
+	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip, g.detachedHeadCustodyRemote)
 }
 
 // branchPreservationStatusWith is the shared implementation behind every
-// preservation verdict — live and local alike. Only the exact-branch tip
-// lookup is parameterized; the candidate set, the ancestry/merge-tree/cherry
-// judging, and the fail-closed ordering are identical, so the two fidelity
-// levels cannot disagree about what "preserved" means.
-func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets []string, includeExactBranch bool, branchTip remoteBranchTipFunc) (BranchPreservationStatus, error) {
+// preservation verdict — live and local alike. Only the two custody lookups
+// (the exact branch's tip, and a branch-less HEAD's) are parameterized; the
+// candidate set, the ancestry/merge-tree/cherry judging, and the fail-closed
+// ordering are identical, so the two fidelity levels cannot disagree about
+// what "preserved" means.
+func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets []string, includeExactBranch bool, branchTip remoteBranchTipFunc, detachedCustody detachedHeadCustodyFunc) (BranchPreservationStatus, error) {
 	if remote == "" {
 		remote = "origin"
 	}
@@ -3633,6 +3643,30 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 				return result, nil
 			}
 			candidates = append(candidates, remoteSHA)
+		}
+	}
+
+	// A detached worktree names no branch, so the exact-branch arm above has
+	// nothing to ask the remote about and the fallback below answers "has this
+	// landed on main" instead of "does this survive anywhere". A finished
+	// polecat is left detached at its branch tip, so that fallback reported
+	// has_unpushed, as a seat's only blocker, for work already sitting on an
+	// origin branch tip with nothing at risk (gt-1bpgm). Custody of a pushed
+	// branch is the evidence the exact-branch arm already accepts for a named
+	// branch, so this matches the standard rather than lowering it.
+	//
+	// Target status (includeExactBranch false) excludes exactly this evidence
+	// by design — pushed-but-unsubmitted work still needs merge-queue recovery
+	// (see BranchTargetStatus).
+	if includeExactBranch && (localBranch == "" || localBranch == "HEAD") {
+		if head, err := g.Rev("HEAD"); err == nil {
+			if ref, ok := detachedCustody(remote, strings.TrimSpace(head)); ok {
+				result.Preserved = true
+				result.ComparisonBase = ref
+				result.UnpreservedPatchCount = 0
+				result.Evidence = "detached_head_on_remote_branch"
+				return result, nil
+			}
 		}
 	}
 
@@ -3705,6 +3739,42 @@ func (g *Git) refContainsHead(ref string) (bool, error) {
 		return true, nil
 	}
 	return g.IsAncestor("HEAD", ref)
+}
+
+// detachedHeadCustodyLocal names a remote-tracking branch that holds head:
+// the polecat branch it was pushed to, or any branch the work was merged into.
+// Free, and blind to branches this clone never fetched — the same one-sided
+// error the rest of the local level has.
+func (g *Git) detachedHeadCustodyLocal(remote, head string) (string, bool) {
+	refs, err := g.RemoteRefsContaining(head)
+	if err != nil || len(refs) == 0 {
+		return "", false
+	}
+	return refs[0], true
+}
+
+// detachedHeadCustodyRemote is detachedHeadCustodyLocal plus a match against
+// the remote's own branch tips, which is the case a detached seat actually
+// lands in: by the time the worktree is left branch-less, the local branch and
+// its tracking ref are gone too, so only the remote can still name the work.
+//
+// Tip membership, not reachability: reachability against the remote would cost
+// a round trip per branch. A match proves the commit is on the remote now; a
+// miss proves nothing, which is the direction a preservation claim needs.
+func (g *Git) detachedHeadCustodyRemote(remote, head string) (string, bool) {
+	if ref, ok := g.detachedHeadCustodyLocal(remote, head); ok {
+		return ref, true
+	}
+	refs, err := g.ListRemoteRefsWithHashes(g.pushTarget(remote), "refs/heads/")
+	if err != nil {
+		return "", false
+	}
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Hash) == head {
+			return remote + "/" + strings.TrimPrefix(ref.Name, "refs/heads/"), true
+		}
+	}
+	return "", false
 }
 
 func (g *Git) resolveComparisonRef(ref, remote string) (string, bool) {

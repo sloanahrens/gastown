@@ -4478,6 +4478,171 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 }
 
+// detachAtPushedBranchTip builds the gt-1bpgm state: a branch pushed to
+// origin, then checked out detached at its own tip, which is how a finished
+// polecat's worktree is left. Returns the tip's sha.
+func detachAtPushedBranchTip(t *testing.T, localDir, branch string) string {
+	t.Helper()
+	g := NewGit(localDir)
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "work.go"), []byte("package work\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("work.go"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("polecat work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	tip, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev(HEAD): %v", err)
+	}
+	tip = strings.TrimSpace(tip)
+	runGit(t, localDir, "checkout", "--detach", tip)
+	return tip
+}
+
+// TestUnpushedCommitsDetachedHeadOnRemoteBranch pins the gt-1bpgm fix: a
+// detached worktree at a branch tip origin already holds was measured against
+// origin/main alone, so its work read as unpushed and its seat stayed blocked
+// for the whole review cycle. Reachability from any remote-tracking branch is
+// the preservation evidence a named branch already gets from the exact-branch
+// arm, so the count must be 0 here without the seat's branch being named.
+func TestUnpushedCommitsDetachedHeadOnRemoteBranch(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/topaz/gt-glfh+mudjlvex"
+	tip := detachAtPushedBranchTip(t, localDir, branch)
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0: detached HEAD %s is the tip of origin/%s", unpushed, tip, branch)
+	}
+
+	unpushedLocal, err := g.UnpushedCommitsLocal()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocal: %v", err)
+	}
+	if unpushedLocal != 0 {
+		t.Fatalf("UnpushedCommitsLocal = %d, want 0: detached HEAD %s is the tip of origin/%s", unpushedLocal, tip, branch)
+	}
+
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWork: %v", err)
+	}
+	if !status.Clean() {
+		t.Fatalf("CheckUncommittedWork = %s, want clean for a detached worktree whose tip is on origin", status)
+	}
+
+	preservation, err := g.BranchPreservationStatus("HEAD", "origin", nil)
+	if err != nil {
+		t.Fatalf("BranchPreservationStatus: %v", err)
+	}
+	if !preservation.Preserved {
+		t.Fatalf("BranchPreservationStatus = %+v, want preserved via a remote-tracking branch", preservation)
+	}
+	if preservation.Evidence != "detached_head_on_remote_branch" {
+		t.Fatalf("Evidence = %q, want detached_head_on_remote_branch", preservation.Evidence)
+	}
+
+	// The target gate asks a different question — is this in the integration
+	// branch — and a pushed branch tip is not, so the reuse-gate evidence must
+	// not leak into it.
+	target, err := g.BranchTargetStatus("HEAD", "origin", []string{"origin/" + mainBranch})
+	if err != nil {
+		t.Fatalf("BranchTargetStatus: %v", err)
+	}
+	if target.Preserved || target.UnpreservedPatchCount == 0 {
+		t.Fatalf("BranchTargetStatus = %+v, want the detached tip unpreserved against origin/%s", target, mainBranch)
+	}
+}
+
+// TestUnpushedCommitsDetachedHeadUnfetchedRemoteBranch pins the live level's
+// extra reach: by the time a seat is left detached, its local branch and the
+// tracking ref the push created are usually gone too, so only the remote can
+// still name the work. The local level cannot see it and says so, which is its
+// documented one-sided error; the live level asks.
+func TestUnpushedCommitsDetachedHeadUnfetchedRemoteBranch(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/granite/gt-7dxw+mudlcgyf"
+	tip := detachAtPushedBranchTip(t, localDir, branch)
+	runGit(t, localDir, "update-ref", "-d", "refs/remotes/origin/"+branch)
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0: %s is the tip of origin/%s", unpushed, tip, branch)
+	}
+
+	unpushedLocal, err := g.UnpushedCommitsLocal()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocal: %v", err)
+	}
+	if unpushedLocal == 0 {
+		t.Fatal("UnpushedCommitsLocal = 0, want > 0: with the tracking ref gone the local level has no evidence, and must not claim preservation it did not see")
+	}
+}
+
+// TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks is the fail-closed half:
+// a detached worktree whose commits exist nowhere on the remote must keep
+// reporting unpreserved work. Without it, widening the detached-head evidence
+// could clear a seat holding the only copy of a commit.
+func TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	detachAtPushedBranchTip(t, localDir, "polecat/opal/gt-glfh+mudjlvex")
+
+	if err := os.WriteFile(filepath.Join(localDir, "local-only.go"), []byte("package localonly\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("local-only.go"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("never pushed"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed == 0 {
+		t.Fatal("UnpushedCommits = 0, want > 0: a detached commit on no remote ref is not preserved")
+	}
+
+	unpushedLocal, err := g.UnpushedCommitsLocal()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocal: %v", err)
+	}
+	if unpushedLocal == 0 {
+		t.Fatal("UnpushedCommitsLocal = 0, want > 0: a detached commit on no remote ref is not preserved")
+	}
+
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWork: %v", err)
+	}
+	if status.Clean() {
+		t.Fatal("CheckUncommittedWork = clean, want the local-only commit to block reuse")
+	}
+}
+
 // TestUnpushedCommitsLocalFailClosed_NoComparisonRefs pins the gt-utt4 fix:
 // UnpushedCommitsLocal reads "no comparison ref resolved" as "0 unpushed" —
 // correct for a caller that only reports a count, wrong for one about to
