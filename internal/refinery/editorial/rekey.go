@@ -39,6 +39,26 @@ type RekeyRequest struct {
 	// SecondParent also stamps the note on Landed's second parent, the
 	// polecat head a merge commit brought in.
 	SecondParent bool
+	// AllowAnyMR accepts, when mr has no note of its own, the note at
+	// SourceHead even though its "mr" field names a different MR. Without
+	// this, a resume whose editorial_reviewed_head names a note written
+	// under an earlier or unrelated MR id can never find proof for its own
+	// MR id and refuses forever (gt-bagu). The manual `gt mq rekey-note`
+	// command leaves both false: an operator naming an MR deliberately
+	// wants proof that MR's own note covers what landed.
+	AllowAnyMR bool
+	// SourceHead is the commit AllowAnyMR reads its borrowed note from.
+	// Required whenever AllowAnyMR is set. It is deliberately a single named
+	// commit, not a patch-id scan of refs/notes/om: a scan admits any
+	// approve note anywhere with a matching patch-id, which is more than
+	// CheckPrecondition or FindVerdictForDiff would accept — it ignores the
+	// rubric sha, the om version floor, and a later request_changes verdict
+	// on the same diff (gt-bagu, om review 0.55). Passing SourceHead as
+	// editorial_reviewed_head — the exact head CheckPrecondition already
+	// read and required to carry approve before this diff was allowed to
+	// land — means the backfill can never accept proof the push itself
+	// would not have.
+	SourceHead string
 	// Reason is the operator's justification for the copy, required. The
 	// command records it verbatim next to the patch-id verification it
 	// performs itself, so the note says both who claims the copy was
@@ -163,7 +183,38 @@ func RekeyNote(g *git.Git, req RekeyRequest) (*RekeyResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(found.forMR) == 0 {
+
+	var source rekeySource
+	borrowedMR := ""
+	switch {
+	case len(found.forMR) > 0:
+		// A note whose patch-id does not match the diff it would be stamped
+		// on is not proof: the editorial-coverage check recomputes
+		// patch-id(diff X^ X) for every first-parent commit and rejects a
+		// mismatch, so copying it would publish a note that still reads as
+		// uncovered. Refuse before writing anything.
+		source, err = selectSourceNote(mr, landed, landedPatchID, plan, found.forMR)
+		if err != nil {
+			return nil, err
+		}
+	case req.AllowAnyMR:
+		sourceHead := strings.TrimSpace(req.SourceHead)
+		if sourceHead == "" {
+			return nil, fmt.Errorf("rekey-note: AllowAnyMR requires SourceHead — the commit whose note is trusted as proof (normally editorial_reviewed_head)")
+		}
+		note, err := ReadNote(g, sourceHead)
+		if err != nil {
+			return nil, fmt.Errorf("rekey-note: refusing: AllowAnyMR could not read a note at source head %s: %w", shortCommit(sourceHead), err)
+		}
+		if note.Verdict != "approve" {
+			return nil, fmt.Errorf("rekey-note: refusing: the note at source head %s is verdict %q, not approve — AllowAnyMR only borrows proof the push precondition would itself accept", shortCommit(sourceHead), note.Verdict)
+		}
+		if note.PatchID != landedPatchID {
+			return nil, fmt.Errorf("rekey-note: refusing: patch-id mismatch — the note at source head %s carries patch-id %s, but the landed diff of %s has patch-id %s", shortCommit(sourceHead), note.PatchID, landed, landedPatchID)
+		}
+		source = rekeySource{commit: sourceHead, note: *note}
+		borrowedMR = note.MR
+	default:
 		// Nothing to copy. The hint is the useful part: an operator who has
 		// the landed sha but guessed the MR id is told which MRs actually
 		// own this diff, and a clone whose notes ref has not caught up is
@@ -175,15 +226,12 @@ func RekeyNote(g *git.Git, req RekeyRequest) (*RekeyResult, error) {
 		return nil, fmt.Errorf("rekey-note: no om note for MR %s in refs/notes/%s — a backfill copies an existing verdict, it never invents one%s (if the note was written in another clone, fetch it first: git fetch origin '+refs/notes/%s:refs/notes/%s')",
 			mr, NotesRef, hint, NotesRef, NotesRef)
 	}
-
-	// A note whose patch-id does not match the diff it would be stamped on
-	// is not proof: the editorial-coverage check recomputes
-	// patch-id(diff X^ X) for every first-parent commit and rejects a
-	// mismatch, so copying it would publish a note that still reads as
-	// uncovered. Refuse before writing anything.
-	source, err := selectSourceNote(mr, landed, landedPatchID, plan, found.forMR)
-	if err != nil {
-		return nil, err
+	if borrowedMR != "" && borrowedMR != mr {
+		// The note now proves mr's landing, not the MR it was originally
+		// written under — record which MR it came from (gt-bagu) and re-key
+		// it so a later lookup by mr.ID finds it too.
+		source.note.RekeyedFromMR = borrowedMR
+		source.note.MR = mr
 	}
 	for _, t := range plan {
 		if t.patchID != source.note.PatchID {
@@ -279,7 +327,8 @@ type notesForMR struct {
 	byTarget map[string][]Note
 	// covering names the other MRs with an approve note whose patch-id
 	// equals the landed diff — the hints a "no note for that MR" refusal
-	// hands back.
+	// hands back. AllowAnyMR does not use this: it reads RekeyRequest.
+	// SourceHead directly rather than picking from this set (gt-bagu).
 	covering []string
 }
 

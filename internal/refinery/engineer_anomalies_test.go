@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -94,5 +95,42 @@ worker: nux`,
 	// ZFC: no severity field — agent classifies from type + context.
 	if anomalies[0].ID != "gt-orphan" {
 		t.Fatalf("anomaly ID = %q, want gt-orphan", anomalies[0].ID)
+	}
+}
+
+// TestSafeBranchExistenceCheck_ErrorReportsPresentNotAbsent is the gt-bagu
+// regression: git.BranchExists/RemoteBranchExists already fold a genuinely
+// missing branch into (false, nil), so a non-nil error means the ls-remote
+// or show-ref call itself failed (a transient network hiccup, say) — not
+// that the branch is gone. ListAllOpenMRs used to discard that error and
+// record false either way, which is indistinguishable from a real
+// no-branch and mislabeled a live MR's branch as missing while a plain
+// `git ls-remote` run by hand found it fine.
+func TestSafeBranchExistenceCheck_ErrorReportsPresentNotAbsent(t *testing.T) {
+	t.Parallel()
+	exists, warn := safeBranchExistenceCheck(func() (bool, error) {
+		return false, errors.New("ls-remote: connection timed out")
+	})
+	if !exists {
+		t.Fatal("exists = false on a query error, want true: an error is not proof of absence")
+	}
+	if warn == "" {
+		t.Fatal("warn is empty on a query error, want the underlying error surfaced")
+	}
+}
+
+// TestSafeBranchExistenceCheck_NoErrorPassesThroughTheResult is the
+// companion case: once the check actually ran, its (false, nil) — a real
+// "branch is gone" — must be reported as-is, not upgraded to true.
+func TestSafeBranchExistenceCheck_NoErrorPassesThroughTheResult(t *testing.T) {
+	t.Parallel()
+	for _, want := range []bool{true, false} {
+		got, warn := safeBranchExistenceCheck(func() (bool, error) { return want, nil })
+		if got != want {
+			t.Errorf("exists = %v, want %v (no error, result should pass through unchanged)", got, want)
+		}
+		if warn != "" {
+			t.Errorf("warn = %q, want empty when the check succeeded", warn)
+		}
 	}
 }

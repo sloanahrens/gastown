@@ -228,17 +228,16 @@ func (e *Engineer) findLandedCommitByPatchID(target, mergeRef string) (string, e
 // has not set merge_queue.editorial.required, where there is nothing to
 // require), or an error explaining why the proof could not be established.
 //
-// When landedCommit has no matching note, this backfills it from the
-// pre-push approve note this MR must have carried (the same one
-// editorialPrecondition required before the original push) via
-// editorial.RekeyNote, which independently verifies the patch-id still
-// matches before writing anything — the note is located by MR id, so a
-// rewritten sha does not hide it, and a note whose patch-id no longer matches
-// the landed diff is refused rather than copied. When no matching note can be
-// found, or the landed diff's patch-id no longer matches the note that
-// exists, the caller decides: the ancestor branch records and escalates it
-// while still completing (acceptance criterion 5), the rebase branch refuses
-// outright (gt-9t0p).
+// When landedCommit has no matching note, this backfills it via
+// editorial.RekeyNote with AllowAnyMR and SourceHead: mr.
+// EditorialReviewedHead — the exact note CheckPrecondition already read and
+// required to be approve before this diff was allowed to land, whatever MR
+// id it carries. Requiring an exact MR-id match here instead — the shape
+// gt-9t0p originally shipped — refused that landing every cycle with no
+// verdict it would ever accept, since editorial_reviewed_head can legitimately
+// name a note written under an earlier or unrelated MR id (gt-bagu; see
+// RekeyRequest.SourceHead for why the source is this one named commit rather
+// than a wider patch-id scan).
 func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit string) error {
 	if e.config.Editorial == nil || !e.config.Editorial.Required {
 		return nil
@@ -252,10 +251,12 @@ func (e *Engineer) ensureLandedEditorialNote(mr *MRInfo, target, landedCommit st
 	}
 
 	result, err := editorial.RekeyNote(e.git, editorial.RekeyRequest{
-		MR:     mr.ID,
-		Landed: landedCommit,
-		Target: target,
-		Reason: "gt-wh66: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the pre-push approve note onto the commit that already landed",
+		MR:         mr.ID,
+		Landed:     landedCommit,
+		Target:     target,
+		AllowAnyMR: true,
+		SourceHead: mr.EditorialReviewedHead,
+		Reason:     "gt-wh66/gt-bagu: automatic resume after an interrupted merge — refinery died between push and bookkeeping; backfilling the approve note at editorial_reviewed_head onto the commit that already landed",
 	})
 	if err != nil {
 		return err

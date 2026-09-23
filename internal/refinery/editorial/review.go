@@ -307,17 +307,19 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 		recordedVerdictApplies(&prior.Note, patchID, manifest.Rubric.SHA256, cfg.MinVersion)
 	if reuseApplies {
 		if prior.Note.Verdict == "approve" {
-			// Record the head the note was found on — the reviewed head —
-			// not this invocation's rehearsal commit. No note exists on the
-			// latter (that is why the lookup had to scan), and the push
-			// precondition finds the note by reading editorial_reviewed_head
-			// (CheckPrecondition), so pointing it at a commit with no note
-			// would refuse the push on a review that had just approved.
-			//
 			// A landed review has no MR bead to record it on, and no push to
 			// precondition: the note is already on the landed commit, which
 			// is where the coverage check reads it.
 			if !retroReview {
+				// Record the head the note was found on — the reviewed head
+				// — not this invocation's rehearsal commit. The push
+				// precondition (CheckPrecondition) finds the note by reading
+				// editorial_reviewed_head and comparing patch-id; it never
+				// requires the reviewed head to be reachable from anything
+				// (git notes read by sha regardless of ancestry — see
+				// ReadNote), so a found-on head from an earlier rehearsal,
+				// or an earlier MR for the same diff, answers just as well
+				// as this invocation's own head (gt-bagu).
 				if err := ensureEditorialReviewedHead(deps.Beads, req.MRID, prior.Commit); err != nil {
 					return failureResult(deps, req, RecordFailed, fmt.Sprintf("update MR bead: %v", err), 0)
 				}

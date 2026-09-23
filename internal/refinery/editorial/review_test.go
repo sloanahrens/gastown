@@ -1547,7 +1547,13 @@ func reRehearsedHead(t *testing.T, fixture *reviewFixture, label string) string 
 //
 // The head recorded for the push precondition is asserted too: it must name
 // the commit the note is on, not this invocation's rehearsal commit, or the
-// precondition would refuse to push an MR the gate just approved.
+// precondition would refuse to push an MR the gate just approved. That
+// recorded head can be a commit that is not an ancestor of the branch tip
+// (head2, the rehearsal commit this invocation produced, is a sibling of
+// fixture.head): CheckPrecondition reads the note by sha and compares
+// patch-id, never ancestry, so that relationship does not matter here. Which
+// MR a note belongs to is a separate concern this reuse path does not
+// enforce — see resume_landed_merge.go's ensureLandedEditorialNote (gt-bagu).
 func TestRun_ReusesRecordedVerdictOnANewRehearsalHead(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)

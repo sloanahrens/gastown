@@ -276,6 +276,15 @@ type MRInfo struct {
 	Assignee           string    // Who claimed this MR (empty = unclaimed)
 	BranchExistsLocal  bool      // Whether the MR branch exists locally (this repo's refs/heads)
 	BranchExistsRemote bool      // Whether the MR branch exists on origin (live ls-remote, not cached tracking refs)
+	// BranchExistsLocalUnknown/Remote are true when the corresponding
+	// existence check's query itself failed (network hiccup, timeout, a repo
+	// in a bad state) rather than confirming absence — safeBranchExistenceCheck
+	// then reports the paired BranchExists* as true (the fail-open direction
+	// ListQueueAnomalies' both-false orphan rule needs), so this is the only
+	// way a JSON reader of `gt refinery ready --all --json` can distinguish
+	// "confirmed present" from "could not tell" (gt-bagu).
+	BranchExistsLocalUnknown  bool
+	BranchExistsRemoteUnknown bool
 }
 
 // MRAnomaly represents an MR queue health problem that can stall processing.
@@ -2906,14 +2915,46 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 		// live ls-remote query, not the local refs/remotes/origin/* cache,
 		// which goes stale whenever nothing has fetched since the branch was
 		// pushed (gt-7v66).
-		mr.BranchExistsLocal, _ = e.git.BranchExists(fields.Branch)
-		mr.BranchExistsRemote, _ = e.git.RemoteBranchExists("origin", fields.Branch)
+		// Warnings here go to os.Stderr, never e.output: `gt refinery ready
+		// --all --json` builds this Engineer on the default e.output
+		// (os.Stdout) and encodes its JSON result straight to os.Stdout, so
+		// a warning on e.output would land before the JSON and corrupt the
+		// stream the witness patrol parses for BranchExistsLocal/Remote
+		// (gt-bagu).
+		var localWarn, remoteWarn string
+		mr.BranchExistsLocal, localWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.BranchExists(fields.Branch) })
+		mr.BranchExistsLocalUnknown = localWarn != ""
+		if localWarn != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check local branch existence for %s: %s\n", fields.Branch, localWarn)
+		}
+		mr.BranchExistsRemote, remoteWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.RemoteBranchExists("origin", fields.Branch) })
+		mr.BranchExistsRemoteUnknown = remoteWarn != ""
+		if remoteWarn != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check remote branch existence for %s: %s\n", fields.Branch, remoteWarn)
+		}
 		mr.BlockedBy = e.firstOpenBlocker(issue)
 
 		mrs = append(mrs, mr)
 	}
 
 	return mrs, nil
+}
+
+// safeBranchExistenceCheck runs a branch-existence check and treats a query
+// error as "could not tell" rather than "false": git.BranchExists and
+// RemoteBranchExists already fold a genuinely missing branch into (false,
+// nil), so check returning an error means the check itself failed to run
+// (network hiccup, timeout, a repo in a bad state), not that the branch is
+// gone. Reporting false in that case is indistinguishable from a real
+// no-branch and silently mislabels a live MR's branch as missing (gt-bagu)
+// — so an error reports true (assume present) instead, paired with a
+// message the caller can log.
+func safeBranchExistenceCheck(check func() (bool, error)) (exists bool, warn string) {
+	exists, err := check()
+	if err != nil {
+		return true, err.Error()
+	}
+	return exists, ""
 }
 
 // ListQueueAnomalies finds stale claims and orphaned branches in open MRs.
