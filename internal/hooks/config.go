@@ -44,14 +44,15 @@ type Hook struct {
 
 // HooksConfig represents the hooks section of a Claude Code settings.json.
 type HooksConfig struct {
-	PreToolUse       []HookEntry `json:"PreToolUse,omitempty"`
-	PostToolUse      []HookEntry `json:"PostToolUse,omitempty"`
-	SessionStart     []HookEntry `json:"SessionStart,omitempty"`
-	Stop             []HookEntry `json:"Stop,omitempty"`
-	PreCompact       []HookEntry `json:"PreCompact,omitempty"`
-	UserPromptSubmit []HookEntry `json:"UserPromptSubmit,omitempty"`
-	WorktreeCreate   []HookEntry `json:"WorktreeCreate,omitempty"`
-	WorktreeRemove   []HookEntry `json:"WorktreeRemove,omitempty"`
+	PreToolUse        []HookEntry `json:"PreToolUse,omitempty"`
+	PostToolUse       []HookEntry `json:"PostToolUse,omitempty"`
+	PermissionRequest []HookEntry `json:"PermissionRequest,omitempty"`
+	SessionStart      []HookEntry `json:"SessionStart,omitempty"`
+	Stop              []HookEntry `json:"Stop,omitempty"`
+	PreCompact        []HookEntry `json:"PreCompact,omitempty"`
+	UserPromptSubmit  []HookEntry `json:"UserPromptSubmit,omitempty"`
+	WorktreeCreate    []HookEntry `json:"WorktreeCreate,omitempty"`
+	WorktreeRemove    []HookEntry `json:"WorktreeRemove,omitempty"`
 }
 
 // SettingsJSON represents the full Claude Code settings.json structure.
@@ -388,6 +389,27 @@ func DefaultOverrides() map[string]*HooksConfig {
 					}},
 				},
 			},
+			// An ask raised for a polecat has nobody to answer it, so the
+			// session parks while still reading as running (gt-8stz). The
+			// guard turns the ask into a denial that names a retry that will
+			// not ask. Interactive roles carry no PermissionRequest entry, so
+			// their prompts keep reaching a person.
+			PermissionRequest: []HookEntry{
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard permission-request"),
+					}},
+				},
+				{
+					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard permission-request"),
+					}},
+				},
+			},
 		},
 		// Crew workers: auto-cycle session on context compaction (gt-op78).
 		// Instead of compacting (lossy), replace with fresh session that
@@ -466,6 +488,24 @@ func DefaultOverrides() map[string]*HooksConfig {
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard formula-allowlist"),
+					}},
+				},
+			},
+			// A dog also runs with nobody at the pane; see the polecats
+			// override for why the ask is denied rather than raised (gt-8stz).
+			PermissionRequest: []HookEntry{
+				{
+					Matcher: "Bash",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard permission-request"),
+					}},
+				},
+				{
+					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard permission-request"),
 					}},
 				},
 			},
@@ -814,7 +854,7 @@ func isRig(path string) bool {
 }
 
 // EventTypes returns the known hook event type names in display order.
-var EventTypes = []string{"PreToolUse", "PostToolUse", "SessionStart", "Stop", "PreCompact", "UserPromptSubmit", "WorktreeCreate", "WorktreeRemove"}
+var EventTypes = []string{"PreToolUse", "PostToolUse", "PermissionRequest", "SessionStart", "Stop", "PreCompact", "UserPromptSubmit", "WorktreeCreate", "WorktreeRemove"}
 
 // GetEntries returns the hook entries for a given event type.
 func (c *HooksConfig) GetEntries(eventType string) []HookEntry {
@@ -823,6 +863,8 @@ func (c *HooksConfig) GetEntries(eventType string) []HookEntry {
 		return c.PreToolUse
 	case "PostToolUse":
 		return c.PostToolUse
+	case "PermissionRequest":
+		return c.PermissionRequest
 	case "SessionStart":
 		return c.SessionStart
 	case "Stop":
@@ -847,6 +889,8 @@ func (c *HooksConfig) SetEntries(eventType string, entries []HookEntry) {
 		c.PreToolUse = entries
 	case "PostToolUse":
 		c.PostToolUse = entries
+	case "PermissionRequest":
+		c.PermissionRequest = entries
 	case "SessionStart":
 		c.SessionStart = entries
 	case "Stop":

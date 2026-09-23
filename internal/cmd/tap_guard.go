@@ -29,6 +29,7 @@ Available guards:
   container-suite    - Block unwrapped go test/make test on testcontainers-backed packages
   polecat-paths      - Block Edit/Write/Bash targets outside the polecat's own worktree
   bd-close-invariant - Block raw bd close of a bead whose branch carries unmerged work
+  permission-request - Deny a permission prompt an unattended session cannot answer (PermissionRequest hook, exit 0)
 
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
