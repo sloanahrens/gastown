@@ -2215,10 +2215,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Get source issue for priority inheritance
 		var priority int
+		carriedFrom := ""
 		if donePriority >= 0 {
+			// An explicit --priority is the submitter's own intent; nothing
+			// carries over it.
 			priority = donePriority
 		} else {
-			priority = sourceIssueForNoMerge.Priority
+			// A superseded MR for this issue may hold a manual bump the source
+			// issue never saw (gt-m7fm; see carriedMRPriority).
+			priority, carriedFrom = carriedMRPriority(bd, issueID, sourceIssueForNoMerge.Priority)
 		}
 
 		// Pre-declare for checkpoint goto (gt-aufru)
@@ -2461,6 +2466,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if sup.AgentCleared {
 					fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
 				}
+			}
+			if carriedFrom != "" {
+				fmt.Printf("  %s Inherited priority P%d from %s\n", style.Dim.Render("○"), priority, carriedFrom)
 			}
 
 			// Update agent bead with active_mr reference (for traceability).

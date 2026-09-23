@@ -84,6 +84,39 @@ func supersedeOpenMRsForIssue(store mrSupersedeStore, agents agentActiveMRCleare
 	return superseded
 }
 
+// carriedMRPriority returns the priority a replacement MR should carry for
+// issueID, and the superseded MR it came from ("" when the derived priority
+// stands).
+//
+// An MR's priority is derived from its source issue at submit time, so a bump
+// applied to the MR itself exists only on that bead. Re-deriving on resubmit
+// would drop it — or5's bumped P0 returned as its replacement's P2 (gt-m7fm),
+// costing a P0 its place in the queue. Only a strictly better priority carries:
+// a superseded MR left lower than its source issue cannot pull the replacement
+// down.
+//
+// An unreadable queue returns the derived priority: inheritance is queue
+// hygiene and must not fail a submission that already succeeded.
+func carriedMRPriority(store mrSupersedeStore, issueID string, derived int) (int, string) {
+	if issueID == "" || store == nil {
+		return derived, ""
+	}
+	oldMRs, err := store.FindOpenMRsForIssue(issueID)
+	if err != nil {
+		return derived, ""
+	}
+
+	from := ""
+	for _, old := range oldMRs {
+		// P0 is the highest priority, so the lowest number wins. A negative
+		// priority is bd's "unset", not a bump.
+		if old != nil && old.Priority >= 0 && old.ID != "" && old.Priority < derived {
+			derived, from = old.Priority, old.ID
+		}
+	}
+	return derived, from
+}
+
 // supersededMRAgentBead resolves the agent bead of the worker that submitted a
 // now-superseded MR, from the MR's own description: the agent_bead field
 // `gt done` writes, else the polecat agent bead implied by the branch's worker
