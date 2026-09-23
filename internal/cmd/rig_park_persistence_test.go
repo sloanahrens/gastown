@@ -43,11 +43,7 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init(prefix); err != nil {
-		// Environmental, not a regression — see the twin comment in
-		// setupPatrolTestDB (gt-fhkg). The first-run metrics notice that used
-		// to trip this is gone under the harness (gt-wcq2 switches bd
-		// telemetry off); a skip here now means bd itself is missing or broken.
-		t.Skipf("bd init unavailable in this test environment: %v", err)
+		testutil.SkipOrFailContainerInit(t, b, err)
 	}
 
 	// Keep the test container clean.

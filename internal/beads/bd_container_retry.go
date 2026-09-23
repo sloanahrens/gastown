@@ -76,6 +76,16 @@ func (b *Beads) targetsTestDoltContainer() bool {
 	return b.isolated && b.serverPort > 0
 }
 
+// ContainerUnavailable reports whether err is a lost connection to the
+// ephemeral test Dolt container rather than an answer from bd, so that a
+// container-backed suite can skip a container that is gone without excusing a
+// real failure (gt-cbtl). Only a wrapper built by NewIsolatedWithPort can
+// answer true, and the container retry loop has already spent its attempts by
+// the time a caller sees the error.
+func (b *Beads) ContainerUnavailable(err error) bool {
+	return b.retryableBdConnectionFailure(err)
+}
+
 // retryableBdConnectionFailure reports whether err is a connection-stage
 // failure worth retrying against a test Dolt container.
 func (b *Beads) retryableBdConnectionFailure(err error) bool {
