@@ -61,8 +61,15 @@ type APIHandler struct {
 	optionsCache     *OptionsResponse
 	optionsCacheTime time.Time
 	optionsCacheMu   sync.RWMutex
-	// cmdSem limits concurrent command executions to prevent resource exhaustion.
+	// cmdSem bounds this handler's short internal bd/gt reads (runBdCommand,
+	// the options fan-out, the dashboard-hash probe) to maxConcurrentCommands,
+	// so a burst of API requests cannot flood the dashboard process with
+	// subprocesses (gt-d5xr).
 	cmdSem chan struct{}
+	// userCmdSem bounds the user-driven gt runs (runGtCommand, /api/run, up to
+	// maxRunTimeout) to userCommandConcurrency — long-running children the
+	// short-read pool must not be able to starve (gt-d5xr).
+	userCmdSem chan struct{}
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
 
@@ -156,8 +163,9 @@ const dashboardPollIntervalDefault = 2 * time.Second
 // underlying model is assembled at most this often (gt-978i).
 const dashboardComputeCacheTTLDefault = 30 * time.Second
 
-// maxConcurrentCommands limits how many gt subprocesses can run at once.
-// handleOptions alone spawns 7; allow headroom for other concurrent handlers.
+// maxConcurrentCommands bounds the handler's short internal bd/gt reads
+// (cmdSem). handleOptions alone spawns 7; allow headroom for the other
+// concurrent readers (mail, ready, the dashboard-hash probe).
 const maxConcurrentCommands = 12
 
 // readyFetchTimeoutDefault bounds the `gt ready --json` subprocess behind
