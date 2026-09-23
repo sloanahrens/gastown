@@ -39,7 +39,7 @@ var pluginCmd = &cobra.Command{
 	Use:     "plugin",
 	GroupID: GroupConfig,
 	Short:   "Plugin management",
-	Long: `Manage plugins that run during Deacon patrol cycles.
+	Long: `Manage plugins, which the daemon heartbeat dispatches on a gate.
 
 Plugins are periodic automation tasks defined by plugin.md files with TOML frontmatter.
 

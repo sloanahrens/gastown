@@ -1,7 +1,7 @@
 // Package plugin provides plugin discovery and management for Gas Town.
 //
-// Plugins are periodic automation tasks that run during Deacon patrol cycles.
-// Each plugin is defined by a plugin.md file with TOML frontmatter.
+// Plugins are periodic automation tasks that the daemon heartbeat dispatches;
+// each plugin is defined by a plugin.md file with TOML frontmatter.
 //
 // Plugin locations:
 //   - Town-level: ~/gt/plugins/ (universal, apply everywhere)

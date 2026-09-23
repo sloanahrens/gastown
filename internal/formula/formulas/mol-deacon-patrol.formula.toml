@@ -860,29 +860,34 @@ investigate why the Witness isn't cleaning up properly."""
 
 [[steps]]
 id = "plugin-run"
-title = "Execute registered plugins"
+title = "Run manual-gate plugins"
 needs = ["zombie-scan"]
 description = """
-Execute registered plugins.
+Plugin scheduling belongs to the daemon heartbeat, not to this patrol:
+`dispatchPlugins` (internal/daemon/handler.go) reads every plugin's gate on each
+heartbeat and runs the ones whose gate is open — a script-type plugin
+in-process, an agent-type one as a dog. Nothing here evaluates a gate, and there
+is no run-state file to compare against: run history lives in ephemeral
+receipts (gt-o1z7).
 
-Scan $GT_ROOT/plugins/ for plugin directories. Each plugin has a plugin.md with TOML frontmatter defining its gate (when to run) and instructions (what to do).
+```bash
+gt plugin history <name> --json   # gate, run count, recent receipts
+```
 
-See docs/deacon-plugins.md for full documentation.
+Your part is the trigger the daemon never gives a parked plugin. A
+`[gate] type = "manual"` plugin stays off the automatic path by design, and
+`gt plugin run <name>` is its only entry point.
 
-Gate types:
-- cooldown: Time since last run (e.g., 24h)
-- cron: Schedule-based (e.g., "0 9 * * *")
-- condition: Metric threshold (e.g., wisp count > 50)
-- event: Trigger-based (e.g., startup, heartbeat)
+```bash
+gt plugin run <name>   # a cooldown gate still applies; --force bypasses it
+```
 
-For each plugin:
-1. Read plugin.md frontmatter to check gate
-2. Compare against state.json (last run, etc.)
-3. If gate is open, execute the plugin
+Running a plugin the daemon already dispatches gives it two runs in the same
+cycle.
 
-Plugins marked parallel: true can run concurrently using Task tool subagents. Sequential plugins run one at a time in directory order.
-
-Skip this step if $GT_ROOT/plugins/ does not exist or is empty."""
+**Exit criteria:** every plugin you ran here is a manual-gate one, and each
+appears in `gt plugin history <name>` for this cycle. If `$GT_ROOT/plugins/` is
+empty or missing, this step is done."""
 
 [[steps]]
 id = "dog-pool-maintenance"

@@ -1,6 +1,7 @@
 # Gas Town Plugins
 
-This directory contains town-level plugins that run during Deacon patrol cycles.
+This directory contains town-level plugins. The daemon heartbeat dispatches
+them; see Scheduling below.
 
 ## Plugin Structure
 
@@ -13,6 +14,22 @@ Each plugin is a directory containing:
 - cron: Schedule-based (e.g., "0 9 * * *")
 - condition: Metric threshold
 - event: Trigger-based (startup, heartbeat)
+
+## Scheduling
+
+The daemon heartbeat is the only scheduler: `dispatchPlugins` in
+`internal/daemon/handler.go` reads every plugin's gate on each heartbeat and
+runs the ones whose gate is open — a script-type plugin in-process (no dog
+session below the failure path, gt-fo2k), an agent-type one as a dog. The
+Deacon does not schedule plugins: one the daemon dispatches runs twice if a
+patrol step also runs it (gt-o1z7).
+
+A `manual` gate is never auto-dispatched, by design — `gt plugin run <name>` is
+its trigger, and the daemon prints one skip line per heartbeat while it stays
+parked. Read that line as "parked", not as the plugin running.
+
+`cron`, `condition` and `event` are parsed but nothing dispatches them
+(gt-qehkn); a plugin on one of these gates has no automatic path today.
 
 ## Agent routing
 
@@ -47,12 +64,15 @@ record it as a clean "no results" success.
 ## Deployed copy
 
 This `plugins/` directory (checked out at `<town_root>/gastown/mayor/rig/plugins`)
-is the source of truth. Deacon and `gt doctor` patrols run plugins out of
+is the source of truth. The daemon runs plugins out of
 `<town_root>/plugins` (e.g. `~/gt/plugins`) — a separate runtime copy that a
 `git pull` alone does not update.
 
 An edit made directly under `<town_root>/plugins` is a draft, not a change: the
-next `gt plugin sync` overwrites it. Land the edit here first.
+next `gt plugin sync` overwrites it. Land the edit here first. A gate edited
+there is a silent park — that is how rebuild-gt's gate read `manual` in the
+runtime town for a day while the repo said `cooldown 1h`, leaving the daemon log
+as the only trace (gt-o1z7).
 
 Two paths push this directory to the runtime copy, and neither is a guarantee
 that the runtime copy is current:
