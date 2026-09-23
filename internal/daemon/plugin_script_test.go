@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func scriptPlugin(t *testing.T, name, script string) *plugin.Plugin {
@@ -87,6 +88,28 @@ func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.status(), "exit 0") {
 		t.Errorf("status = %q", res.status())
+	}
+}
+
+// A script runs outside any tmux session, so a bare `tmux` in it asks the
+// default server. The daemon hands over the town socket it resolved at start;
+// without it stuck-agent-dog reads a live Deacon as crashed (claude-l5w).
+func TestRunPluginScript_ExportsTownTmuxSocket(t *testing.T) {
+	prev := tmux.GetDefaultSocket()
+	t.Cleanup(func() { tmux.SetDefaultSocket(prev) })
+	t.Setenv("GT_TMUX_SOCKET", "stale-ambient")
+
+	tmux.SetDefaultSocket("gt-town")
+	p := scriptPlugin(t, "sock", "echo socket=$GT_TMUX_SOCKET\n")
+	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
+	if !strings.Contains(res.output, "socket=gt-town") {
+		t.Errorf("GT_TMUX_SOCKET not the town socket:\n%s", res.output)
+	}
+
+	tmux.SetDefaultSocket("")
+	res = runPluginScript(context.Background(), p, "/town", 5*time.Second)
+	if !strings.Contains(res.output, "socket=stale-ambient") {
+		t.Errorf("no resolved socket should leave the ambient value alone:\n%s", res.output)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -186,6 +187,12 @@ func runPluginScript(ctx context.Context, p *plugin.Plugin, townRoot string, tim
 		"GT_ROLE=daemon/plugin",
 		"BD_ACTOR=daemon",
 	)
+	// A dog runs inside the town's tmux server and reaches it through $TMUX;
+	// the daemon is outside any session, so a bare `tmux` in the script would
+	// ask the default server. Hand over the socket the daemon resolved.
+	if sock := tmux.GetDefaultSocket(); sock != "" {
+		cmd.Env = append(cmd.Env, "GT_TMUX_SOCKET="+sock)
+	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

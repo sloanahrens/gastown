@@ -12,6 +12,7 @@ labels = ["plugin:stuck-agent-dog", "category:health"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "high"
@@ -28,6 +29,16 @@ This plugin makes polecat restart decisions from central health plus active hook
 state, and escalates deacon issues without restarting the deacon itself.
 
 Reference: WAR-ROOM-SERIAL-KILLER.md, commit f3d47a96.
+
+## How this runs
+
+The daemon runs `run.sh` directly (`[execution] type = "script"`, claude-l5w):
+the decision framework in Step 4 is encoded in `hook_restartable` and the
+mass-death re-check, so the common all-clear run costs no agent session. A dog
+reads these steps only when `run.sh` exits nonzero — including when an
+escalation or restart mail it sent failed (`ACTION FAILED` in the output).
+Outside a tmux session the script reaches the town server through
+`GT_TMUX_SOCKET`, which the daemon exports.
 
 ## Scope — What You May and May NOT Touch
 

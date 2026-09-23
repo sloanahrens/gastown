@@ -12,6 +12,7 @@ labels = ["plugin:compactor-dog", "category:maintenance"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"
@@ -31,6 +32,16 @@ to decide if maintenance is needed.** Consider:
 - Time since last flatten or compaction
 - Current swarm activity (more polecats = faster growth)
 - Whether growth is "normal busy" or "runaway"
+
+## How this runs
+
+The daemon runs `run.sh` directly in its default monitor-only mode
+(`[execution] type = "script"`, claude-l5w). It records per-DB commit counts
+and a `check-only` receipt when any DB exceeds the threshold. Escalation is
+owned by the daemon's `compactor_dog` patrol (`internal/daemon/compactor_dog.go`,
+threshold 2000, chosen to stay clear of the escalation-commit loop described
+there), so this plugin raises nothing itself. A dog reads the judgment steps
+below only when `run.sh` exits nonzero (Dolt unreachable, no databases).
 
 ## Config
 

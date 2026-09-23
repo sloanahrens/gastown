@@ -263,6 +263,9 @@ test-makefile:
 	bash -n plugins/compactor-dog/run.sh
 	bash -n plugins/compactor-dog/run_test.sh
 	bash plugins/compactor-dog/run_test.sh
+	bash -n plugins/stuck-work-dog/run.sh
+	bash -n plugins/stuck-work-dog/run_test.sh
+	bash plugins/stuck-work-dog/run_test.sh
 	bash -n plugins/rebuild-gt/run.sh
 	bash -n plugins/rebuild-gt/run_test.sh
 	bash plugins/rebuild-gt/run_test.sh

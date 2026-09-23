@@ -201,6 +201,10 @@ case "${1:-}" in
     ;;
   escalate)
     printf '%s\n' "$*" >> "$TEST_STATE/escalate.log"
+    if [ -f "$TEST_STATE/escalate_fail" ]; then
+      printf 'escalate: dolt unreachable\n' >&2
+      exit 1
+    fi
     exit 0
     ;;
 esac
@@ -224,6 +228,13 @@ arg_after_t() {
   done
   return 1
 }
+
+socket="default"
+if [ "${1:-}" = "-L" ]; then
+  socket="${2:-}"
+  shift 2
+fi
+printf '%s %s\n' "$socket" "${1:-}" >> "$TEST_STATE/tmux-socket.log"
 
 case "${1:-}" in
   has-session)
@@ -323,12 +334,14 @@ setup_case() {
   : > "$TEST_STATE/hook_calls.log"
   : > "$TEST_STATE/identity_calls.log"
   : > "$TEST_STATE/bd.log"
+  : > "$TEST_STATE/tmux-socket.log"
   touch "$TEST_STATE/sessions/hq-deacon"
 
   ensure_fake_commands
   export PATH="$FAKE_BIN_DIR:$ORIGINAL_PATH"
   export GT_STUCK_AGENT_DOG_MAX_INACTIVITY=0s
   unset GT_STUCK_AGENT_DOG_MASS_DEATH_THRESHOLD
+  unset GT_TMUX_SOCKET
 }
 
 add_polecat() {
@@ -803,6 +816,51 @@ test_invalid_mass_death_threshold_defaults() {
   assert_file_not_contains "$TEST_STATE/output.log" "MASS DEATH" "zero threshold: no mass death"
 }
 
+# The daemon runs this script outside any tmux session and exports the town
+# socket; every tmux call must use it, or a live Deacon reads as crashed.
+test_town_tmux_socket_used() {
+  setup_case
+  export GT_TMUX_SOCKET=gt-town
+  add_polecat alpha agent-dead
+  run_script
+
+  assert_file_contains "$TEST_STATE/tmux-socket.log" "gt-town has-session" "socket: deacon probe uses town socket"
+  assert_file_contains "$TEST_STATE/tmux-socket.log" "gt-town kill-session" "socket: zombie kill uses town socket"
+  assert_file_not_contains "$TEST_STATE/tmux-socket.log" "default " "socket: no call on the default server"
+  assert_file_not_contains "$TEST_STATE/output.log" "Deacon session is dead" "socket: live deacon not reported crashed"
+}
+
+test_no_socket_uses_ambient_tmux() {
+  setup_case
+  run_script
+
+  assert_file_contains "$TEST_STATE/tmux-socket.log" "default has-session" "no socket: bare tmux (dog inside the town server)"
+}
+
+# A failed escalation must not serialize as success: the daemon hands a
+# nonzero exit to a dog, so the script exits 1 and keeps the error text.
+test_failed_escalation_exits_nonzero() {
+  local rc=0
+
+  setup_case
+  add_polecat alpha agent-dead
+  add_polecat beta agent-dead
+  add_polecat gamma agent-dead
+  touch "$TEST_STATE/escalate_fail"
+  run_script_once || rc=$?
+
+  if [ "$rc" -eq 1 ]; then
+    record_pass "failed escalation: exit 1"
+  else
+    record_fail "failed escalation: exit 1 (got $rc)"
+  fi
+  assert_file_contains "$TEST_STATE/output.log" "ACTION FAILED: mass-death escalation" "failed escalation: named in output"
+  assert_file_contains "$TEST_STATE/output.log" "dolt unreachable" "failed escalation: stderr kept for the dog"
+}
+
+test_town_tmux_socket_used
+test_no_socket_uses_ambient_tmux
+test_failed_escalation_exits_nonzero
 test_healthy_runtime opencode
 test_healthy_runtime bun
 test_healthy_runtime node

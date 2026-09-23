@@ -12,6 +12,7 @@ labels = ["plugin:stuck-work-dog", "category:health"]
 digest = true
 
 [execution]
+type = "script"
 timeout = "5m"
 notify_on_failure = true
 severity = "medium"
@@ -23,6 +24,14 @@ Detects stuck **WORK**, as distinct from stuck **workers**. `stuck-agent-dog`
 watches for crashed or zombie polecats; nothing watched for the other
 failure mode. This plugin is read-only: it only escalates. It never
 assigns, restarts, or dispatches anything.
+
+## How this runs
+
+The daemon runs `run.sh` directly (`[execution] type = "script"`, claude-l5w):
+both detectors are exact joins with fixed thresholds, so an agent adds nothing
+to the all-clear case. A dog reads these steps only when `run.sh` exits
+nonzero, including when an escalation it raised failed to send
+(`ESCALATION FAILED` in the output).
 
 ## Origin
 

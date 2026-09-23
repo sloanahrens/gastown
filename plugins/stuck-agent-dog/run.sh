@@ -8,6 +8,28 @@ set -euo pipefail
 
 log() { echo "[stuck-agent-dog] $*"; }
 
+# town_tmux targets the town's tmux server. A dog session runs inside that
+# server, so a bare `tmux` finds it through $TMUX; the daemon runs this script
+# outside any session, where a bare `tmux` asks the default server, finds no
+# hq-deacon, and reports a live Deacon as crashed (claude-l5w). The daemon
+# exports GT_TMUX_SOCKET for exactly this.
+town_tmux() {
+  if [ -n "${GT_TMUX_SOCKET:-}" ]; then
+    tmux -L "$GT_TMUX_SOCKET" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
+# action_failed counts an escalation or restart request that did not go out.
+# The script is the only actor when the daemon runs it, so a swallowed failure
+# would reach nobody; a nonzero exit hands this output to a dog instead.
+ACTION_FAILURES=0
+action_failed() {
+  log "  ACTION FAILED: $*"
+  ACTION_FAILURES=$((ACTION_FAILURES + 1))
+}
+
 TOWN_ROOT="${GT_TOWN_ROOT:-}"
 if [ -z "$TOWN_ROOT" ]; then
   if ! TOWN_ROOT=$(gt town root 2>/dev/null); then
@@ -381,11 +403,11 @@ DEACON_ISSUE=""
 DEACON_DIVERGENCE=""
 DEACON_PROCESS_ALIVE=0
 
-if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
+if ! town_tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   log "  CRASHED: Deacon session is dead"
   DEACON_ISSUE="crashed"
 else
-  DEACON_PID=$(tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  DEACON_PID=$(town_tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
   DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null || true)
   if [ -z "$DEACON_COMM" ]; then
     log "  ZOMBIE: Deacon process dead (pid=$DEACON_PID), session alive"
@@ -407,7 +429,7 @@ else
       # recent activity means the file-write path diverged (e.g. a long
       # turn, or the agent refreshing a different store) — not a stuck
       # Deacon. Escalating that as stuck caused a false-positive storm.
-      ACTIVITY_TIME=$(tmux display-message -t "$DEACON_SESSION" -p '#{window_activity}' 2>/dev/null || true)
+      ACTIVITY_TIME=$(town_tmux display-message -t "$DEACON_SESSION" -p '#{window_activity}' 2>/dev/null || true)
       case "$ACTIVITY_TIME" in
         ''|*[!0-9]*) ACTIVITY_AGE="" ;;
         *) ACTIVITY_AGE=$(( NOW - ACTIVITY_TIME )) ;;
@@ -447,7 +469,7 @@ if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
     gt escalate "Mass agent death: $CONFIRMED_TOTAL agents down" \
       -s CRITICAL \
       --source "plugin:stuck-agent-dog" \
-      --fingerprint "stuck-agent-dog:mass-death" 2>/dev/null || true
+      --fingerprint "stuck-agent-dog:mass-death" || action_failed "mass-death escalation"
   else
     log "NOTICE: mass-death candidates dropped to $CONFIRMED_TOTAL after live re-check; no CRITICAL escalation"
   fi
@@ -465,7 +487,7 @@ else
   for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
     IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
     log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
-    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
+    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY || action_failed "restart mail for $RIG/$PCAT"
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
 hook_bead: $HOOK
 action: restart requested
@@ -476,8 +498,8 @@ BODY
   for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
     IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
     log "Killing zombie session $SESSION and requesting restart"
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
-    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
+    town_tmux kill-session -t "$SESSION" 2>/dev/null || true
+    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY || action_failed "restart mail for $RIG/$PCAT"
 Polecat $PCAT zombie session cleared by stuck-agent-dog plugin.
 hook_bead: $HOOK
 reason: $REASON
@@ -500,7 +522,7 @@ if [ -n "$DEACON_ISSUE" ]; then
 	gt escalate "Deacon $DEACON_ISSUE detected by stuck-agent-dog" \
 		-s "$DEACON_SEVERITY" \
 		--source "plugin:stuck-agent-dog" \
-		--fingerprint "$DEACON_FINGERPRINT" 2>/dev/null || true
+		--fingerprint "$DEACON_FINGERPRINT" || action_failed "deacon escalation ($DEACON_ISSUE)"
 fi
 
 # --- Report -------------------------------------------------------------------
@@ -510,6 +532,13 @@ SUMMARY="Agent health: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, $HEALTHY heal
 [ -n "$DEACON_DIVERGENCE" ] && SUMMARY="$SUMMARY, deacon=$DEACON_DIVERGENCE (not escalated)"
 log ""
 log "=== $SUMMARY ==="
+
+if [ "$ACTION_FAILURES" -gt 0 ]; then
+  SUMMARY="$SUMMARY, $ACTION_FAILURES action(s) FAILED"
+  gt plugin record-run --plugin stuck-agent-dog --result failure \
+    --title "stuck-agent-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  exit 1
+fi
 
 gt plugin record-run --plugin stuck-agent-dog --result success \
   --title "stuck-agent-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true

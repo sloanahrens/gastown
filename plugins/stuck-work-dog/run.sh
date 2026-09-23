@@ -14,6 +14,15 @@ set -euo pipefail
 
 log() { echo "[stuck-work-dog] $*"; }
 
+# An escalation is this plugin's only action. The daemon runs it directly with
+# no agent reading along, so a failed one must not serialize as success: count
+# it, keep gt's error text, and exit 1 so the daemon hands the output to a dog.
+ESCALATE_FAILURES=0
+escalate_failed() {
+  log "  ESCALATION FAILED: $*"
+  ESCALATE_FAILURES=$((ESCALATE_FAILURES + 1))
+}
+
 TOWN_ROOT="${GT_TOWN_ROOT:-}"
 if [ -z "$TOWN_ROOT" ]; then
   if ! TOWN_ROOT=$(gt town root 2>/dev/null); then
@@ -184,7 +193,7 @@ while IFS= read -r RIG; do
           --fingerprint "stuck-work-dog:blocked-mr:$RIG:$BLOCKER_ID" \
           --related "$BLOCKER_ID" \
           --reason "Merge request $MR_ID cannot progress because its dependency $BLOCKER_ID is open with no assignee. Nothing dispatches an unassigned bead on its own; assign or close $BLOCKER_ID to unblock the queue." \
-          2>/dev/null || log "  WARNING: gt escalate failed for $RIG/$BLOCKER_ID"
+          || escalate_failed "$RIG/$BLOCKER_ID"
       done <<< "$BLOCKER_IDS"
     done <<< "$BLOCKED_MRS"
   fi
@@ -210,7 +219,7 @@ while IFS= read -r RIG; do
           --source "plugin:stuck-work-dog" \
           --fingerprint "stuck-work-dog:queue-stall:$RIG" \
           --reason "The merge queue has entries but none are progressing and no polecat in $RIG has in_progress work. Check for a blocked-mr escalation above (an unassigned blocker is the usual cause) or a stuck refinery." \
-          2>/dev/null || log "  WARNING: gt escalate failed for queue-stall:$RIG"
+          || escalate_failed "queue-stall:$RIG"
       fi
     fi
   fi
@@ -219,6 +228,13 @@ done <<< "$RIG_LIST"
 echo ""
 SUMMARY="Checked $CHECKED_RIGS rig(s), raised $ESCALATIONS stuck-work escalation(s)"
 echo "=== $SUMMARY ==="
+
+if [ "$ESCALATE_FAILURES" -gt 0 ]; then
+  SUMMARY="$SUMMARY, $ESCALATE_FAILURES FAILED to send"
+  gt plugin record-run --plugin stuck-work-dog --result failure \
+    --title "stuck-work-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  exit 1
+fi
 
 gt plugin record-run --plugin stuck-work-dog --result success \
   --title "stuck-work-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true

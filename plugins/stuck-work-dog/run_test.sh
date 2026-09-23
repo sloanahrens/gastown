@@ -143,6 +143,10 @@ case "${1:-}" in
       esac
     done
     printf 'ESCALATE|%s|%s|%s\n' "$fingerprint" "$related" "$desc" >> "$TEST_STATE/escalate.log"
+    if [ -f "$TEST_STATE/escalate_fail" ]; then
+      printf 'escalate: dolt unreachable\n' >&2
+      exit 1
+    fi
     exit 0
     ;;
   plugin)
@@ -421,6 +425,30 @@ test_no_unexpected_calls() {
   assert_file_empty "$TEST_STATE/unexpected.log" "no_unexpected_calls: only known gt/bd subcommands were invoked"
 }
 
+
+# --- Failed escalation: exit 1 so the daemon hands the run to a dog ---------
+test_failed_escalation_exits_nonzero() {
+  local rc=0
+  setup_test "failed_escalation"
+  mkdir -p "$GT_TOWN_ROOT/gastown"
+  set_rigs '[{"name":"gastown","status":"operational"}]'
+  set_mq "gastown" "[
+    {\"id\":\"gt-mr-010\",\"status\":\"open\",\"created_at\":\"$(iso_ago 3600)\"}
+  ]"
+  touch "$TEST_STATE/escalate_fail"
+
+  run_plugin || rc=$?
+
+  if [ "$rc" -eq 1 ]; then
+    record_pass "failed_escalation: exit 1"
+  else
+    record_fail "failed_escalation: exit 1 (got $rc)"
+  fi
+  assert_file_contains "$TEST_STATE/stdout.log" "ESCALATION FAILED: queue-stall:gastown" "failed_escalation: named in output"
+  assert_file_contains "$TEST_STATE/stderr.log" "dolt unreachable" "failed_escalation: gt error kept"
+  assert_file_contains "$TEST_STATE/record.log" "RECORD|stuck-work-dog|failure" "failed_escalation: records failure"
+}
+
 test_no_rigs
 test_empty_queue
 test_stale_unassigned_blocker
@@ -433,6 +461,7 @@ test_queue_not_stalled_when_mr_in_progress
 test_closed_mrs_ignored
 test_multiple_rigs_checked
 test_no_unexpected_calls
+test_failed_escalation_exits_nonzero
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="
