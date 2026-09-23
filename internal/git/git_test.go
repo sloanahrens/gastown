@@ -2918,6 +2918,41 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		}
 	})
 
+	// gt-ycvx: the branch carries a fix origin/main never received, and the
+	// index is reverted to main's content. Content equality with main is the
+	// revert here, not evidence of a moved ref — HEAD is ahead of every
+	// comparison ref — so it must block rather than read as reuse-clean.
+	t.Run("staged revert of a fix this branch carries, absent from main, still blocks", func(t *testing.T) {
+		localDir, _, mainBranch := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		runGitTestCmd(t, localDir, "checkout", "-b", "polecat/jasper/om-x")
+		if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test fixed\n"), 0644); err != nil {
+			t.Fatalf("write fix: %v", err)
+		}
+		runGitTestCmd(t, localDir, "commit", "-am", "fix: confine the reviewer to a read-only allowlist")
+		runGitTestCmd(t, localDir, "push", "-u", "origin", "polecat/jasper/om-x")
+
+		// Stage the revert: git checkout <ref> -- <path> puts main's content in
+		// the index and the worktree (porcelain "M ") with HEAD still on the
+		// fix.
+		runGitTestCmd(t, localDir, "checkout", "origin/"+mainBranch, "--", "README.md")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if len(status.StagedOnly) != 1 || status.StagedOnly[0] != "README.md" {
+			t.Fatalf("StagedOnly = %v, want [README.md]: the revert is staged, not unstaged", status.StagedOnly)
+		}
+		if skew := status.IndexSkewFiles(g); len(skew) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: HEAD is not behind the ref the content matches, so no ref moved under this checkout", skew)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew(g) {
+			t.Fatal("a staged security-fix revert must block seat reuse: the content matching origin/main is the revert, not evidence the content is already known")
+		}
+	})
+
 	t.Run("unstaged edit always blocks regardless of skew classification", func(t *testing.T) {
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
