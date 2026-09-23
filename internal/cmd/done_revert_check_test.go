@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -442,6 +443,50 @@ func TestDetectRevertedMerges_PreexistingCopyDoesNotRescue(t *testing.T) {
 	}
 }
 
+// TestDetectRevertedMerges_LaterTargetAdditionDoesNotRescue is gt-0wy03
+// attempt 3's own repro for the hole attempt 2 left open: commit X, already
+// merged to main, adds t.Parallel() to TestA in pkg/foo_test.go. A SECOND,
+// LATER commit Y — also already merged, after X — adds its own t.Parallel()
+// to TestZ in a sibling file, pkg/bar_test.go, that the candidate never
+// touches. The polecat rebases onto both X and Y, then genuinely reverts X's
+// own line (removes TestA's t.Parallel(), for an unrelated reason) without
+// adding anything anywhere in the package. Y is a LATER TARGET commit's own
+// contribution, not this branch's, and must not rescue the removal: the old
+// parent-anchored check summed every line gained anywhere in the package
+// since just before X ran, which included Y's unrelated addition to a file
+// the candidate never touched.
+func TestDetectRevertedMerges_LaterTargetAdditionDoesNotRescue(t *testing.T) {
+	t.Parallel()
+	const (
+		fooPath = "pkg/foo_test.go"
+		barPath = "pkg/bar_test.go"
+	)
+	fooBase := "package pkg\n\nfunc TestA(t *testing.T) {\n\tdoStuff()\n}\n"
+	fooAdvanced := "package pkg\n\nfunc TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n"
+	fooFinal := "package pkg\n\nfunc TestA(t *testing.T) {\n\tdoStuff()\n}\n"
+	barContent := "package pkg\n\nfunc TestZ(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+
+	s := newRebasedPackageScenario(t, fooPath, fooBase)
+	rebasePolecatOntoSeed(t, s, fooPath, fooAdvanced, "cmd tests: t.Parallel for TestA (gt-kf0r)")
+
+	writeTestFile(t, filepath.Join(s.seed, barPath), barContent)
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", "cmd tests: t.Parallel for TestZ (gt-kf0r)")
+	runGitCmd(t, s.seed, "push", "origin", "main")
+	runGitCmd(t, s.polecat, "fetch", "origin")
+	runGitCmd(t, s.polecat, "rebase", "origin/main")
+
+	commitPolecat(t, s.polecat, map[string]string{fooPath: fooFinal}, "fix(pkg): TestA cannot run in parallel, it swaps a global (gt-test)")
+
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (a later target commit's addition in an untouched sibling file must not rescue the removal): %+v", len(found), found)
+	}
+}
+
 // TestDetectRevertedMerges_RefusesUndocumentedFullRemoval is the baseline
 // guard: the identical shape as the Reverts-trailer scenario above — content
 // gone from the whole package, so relocation cannot rescue it — but with no
@@ -469,8 +514,10 @@ func TestDetectRevertedMerges_RefusesUndocumentedFullRemoval(t *testing.T) {
 
 // TestRequireRevertOverrideAuthorization pins the gt-61x-style guardrail: an
 // agent invoking --allow-reverts must name the bead that authorized it, since
-// commit-message text can no longer excuse a revert on its own. A human at a
-// plain terminal is not gated the same way.
+// commit-message text can no longer excuse a revert on its own. An empty
+// actor must refuse rather than pass — gt-0wy03 attempt 3: it means role
+// detection failed, not that a human is running the command, since gt done
+// already refuses to start unless BD_ACTOR names a validated polecat.
 func TestRequireRevertOverrideAuthorization(t *testing.T) {
 	t.Parallel()
 	t.Run("refuses an agent without an authorization bead", func(t *testing.T) {
@@ -492,9 +539,13 @@ func TestRequireRevertOverrideAuthorization(t *testing.T) {
 		}
 	})
 
-	t.Run("does not gate a human actor", func(t *testing.T) {
-		if err := requireRevertOverrideAuthorization("", ""); err != nil {
-			t.Errorf("expected a human actor to pass without a bead, got: %v", err)
+	t.Run("fails closed when role detection failed, even with a bead named", func(t *testing.T) {
+		err := requireRevertOverrideAuthorization("", "hq-abc")
+		if err == nil {
+			t.Fatal("expected refusal when actor identity could not be verified, regardless of --allow-reverts-authorized-by")
+		}
+		if !strings.Contains(err.Error(), "gt-0wy03") {
+			t.Errorf("error should reference the guardrail bead, got: %v", err)
 		}
 	})
 }
@@ -537,6 +588,97 @@ func TestRecordRevertOverride(t *testing.T) {
 		addComment := func(id, text string) error { return fmt.Errorf("bead not found") }
 		if err := recordRevertOverride(g, addComment, "gastown/polecats/onyx", "hq-missing", "origin/main"); err == nil {
 			t.Fatal("expected recordRevertOverride to fail when the audit comment cannot be written")
+		}
+	})
+}
+
+// TestVerifyRevertOverrideBead pins the gt-2oy-style guardrail closing
+// gt-0wy03 attempt 3's second hole: requireRevertOverrideAuthorization only
+// checked that SOME bead ID was supplied, so nothing stopped a polecat
+// pointing --allow-reverts-authorized-by at its own hooked issue and
+// approving its own override. The bead must be a genuine mayor ruling: it
+// must exist, be created by the mayor, and name both this branch and every
+// commit the override is about to let through.
+func TestVerifyRevertOverrideBead(t *testing.T) {
+	t.Parallel()
+	s := newRevertScenario(t)
+	commitPolecat(t, s.polecat, map[string]string{
+		"shared.txt": "base\npolecat line\n",
+		"fix.txt":    "the fix\n",
+	}, "wip: start")
+	advanceMain(t, s.seed)
+	staleResetOntoMain(t, s.polecat)
+	g := git.NewGit(s.polecat)
+	const branch = "polecat/zircon/gt-test"
+
+	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) == 0 {
+		t.Fatal("expected the scenario to reproduce a reverted commit")
+	}
+
+	t.Run("refuses a missing authorization bead", func(t *testing.T) {
+		shower := fakeIssueShower{err: fmt.Errorf("not found")}
+		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-missing", branch); err == nil {
+			t.Fatal("expected refusal for a missing authorization bead")
+		}
+	})
+
+	t.Run("refuses a bead the polecat created itself", func(t *testing.T) {
+		shower := fakeIssueShower{issue: &beads.Issue{
+			ID:          "gt-0wy03",
+			CreatedBy:   "gastown/polecats/onyx",
+			Description: branch + " " + found[0].Commit,
+		}}
+		err := verifyRevertOverrideBead(shower, g, "origin/main", "gt-0wy03", branch)
+		if err == nil {
+			t.Fatal("expected refusal for a bead not created by the mayor")
+		}
+		if !strings.Contains(err.Error(), "mayor") {
+			t.Errorf("error should explain the bead must come from the mayor, got: %v", err)
+		}
+	})
+
+	t.Run("refuses a mayor bead that does not name this branch", func(t *testing.T) {
+		shower := fakeIssueShower{issue: &beads.Issue{
+			ID:          "hq-ruling",
+			CreatedBy:   "mayor",
+			Description: "reverting " + found[0].Commit,
+		}}
+		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err == nil {
+			t.Fatal("expected refusal for a ruling that does not name this branch")
+		}
+	})
+
+	t.Run("refuses a mayor bead that does not name the reverted commits", func(t *testing.T) {
+		shower := fakeIssueShower{issue: &beads.Issue{
+			ID:          "hq-ruling",
+			CreatedBy:   "mayor",
+			Description: "authorizing --allow-reverts on " + branch,
+		}}
+		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err == nil {
+			t.Fatal("expected refusal for a ruling that does not name the reverted commits")
+		}
+	})
+
+	t.Run("allows a mayor ruling naming the branch and every reverted commit", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("authorizing --allow-reverts on ")
+		b.WriteString(branch)
+		b.WriteByte('\n')
+		for _, f := range found {
+			b.WriteString(f.Commit)
+			b.WriteByte('\n')
+		}
+		shower := fakeIssueShower{issue: &beads.Issue{
+			ID:          "hq-ruling",
+			CreatedBy:   "mayor",
+			Description: b.String(),
+		}}
+		if err := verifyRevertOverrideBead(shower, g, "origin/main", "hq-ruling", branch); err != nil {
+			t.Errorf("expected a genuine mayor ruling to pass, got: %v", err)
 		}
 	})
 }

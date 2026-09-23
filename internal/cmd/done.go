@@ -1656,6 +1656,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				return err
 			}
 			if doneAllowRevertsAuthorizedBy != "" {
+				if err := verifyRevertOverrideBead(beads.New(cwd), g, contaminationBase, doneAllowRevertsAuthorizedBy, branch); err != nil {
+					return err
+				}
 				if err := recordRevertOverride(g, beads.New(cwd).AddComment, actor, doneAllowRevertsAuthorizedBy, contaminationBase); err != nil {
 					return err
 				}
