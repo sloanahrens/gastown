@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -198,6 +199,8 @@ func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 // worktree list that cannot be read must refuse, not report the branch free.
 func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
 	notARepo := t.TempDir()
+	// Keep the probe out of any repo an enclosing TMPDIR might be inside.
+	t.Setenv("GIT_CEILING_DIRECTORIES", notARepo)
 	branch := "polecat/other/gt-x+aaa"
 
 	err := heldByOtherWorktree(git.NewGit(notARepo), branch)
@@ -209,6 +212,45 @@ func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), branch) {
 		t.Errorf("refusal does not name the branch: %v", err)
+	}
+}
+
+// TestReuseIdlePolecat_IgnoresPrunableHolder covers a registration whose
+// directory is gone: git still lists the branch for it, but there is no HEAD
+// there to conflict with, and refusing would strand the resume until someone
+// pruned the stale entry by hand.
+func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
+	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+
+	// The holder: a worktree deleted without being pruned, left on the branch.
+	deadPath := filepath.Join(t.TempDir(), "stale-worktree")
+	resumeBranch := "polecat/jasper/gt-bagu+mudcl5gv"
+	resumeSHA := branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
+	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+resumeBranch, resumeSHA)
+	runGit(t, mayorRig, "worktree", "add", "--detach", deadPath, mainSHA)
+	runGit(t, deadPath, "checkout", resumeBranch)
+	if err := os.RemoveAll(deadPath); err != nil {
+		t.Fatalf("removing the holder's directory: %v", err)
+	}
+	if listed := gitProbeOutput(t, mayorRig, "worktree", "list", "--porcelain"); !strings.Contains(listed, "prunable") {
+		t.Fatalf("holder is not prunable, so this test no longer covers a stale registration:\n%s", listed)
+	}
+
+	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	reused, err := mgr.ReuseIdlePolecat("alpha", AddOptions{
+		HookBead:     "gt-next",
+		ResumeBranch: resumeBranch,
+	})
+	if err != nil {
+		t.Fatalf("ReuseIdlePolecat refused a branch whose only holder is a deleted worktree: %v", err)
+	}
+	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != resumeSHA {
+		t.Errorf("HEAD = %s, want the resume branch's origin tip %s (worktree %s)", tip, resumeSHA, alpha.ClonePath)
 	}
 }
 

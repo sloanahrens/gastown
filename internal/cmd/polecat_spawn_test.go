@@ -87,11 +87,14 @@ func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
 // idlePolecatReuseFake stands in for the polecat manager's idle-reuse surface.
 type idlePolecatReuseFake struct {
 	idle     *polecat.Polecat
+	findErr  error
 	reuseErr error
 	getCalls int
 }
 
-func (f *idlePolecatReuseFake) FindIdlePolecat() (*polecat.Polecat, error) { return f.idle, nil }
+func (f *idlePolecatReuseFake) FindIdlePolecat() (*polecat.Polecat, error) {
+	return f.idle, f.findErr
+}
 
 func (f *idlePolecatReuseFake) ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
 	if f.reuseErr != nil {
@@ -155,14 +158,25 @@ func TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure(t *testing.
 	}
 }
 
-// TestReuseIdlePolecatForSling_NoIdlePolecat covers the ordinary no-op path.
+// TestReuseIdlePolecatForSling_NoIdlePolecat covers the ordinary no-op paths:
+// nothing to reuse, and a lookup that failed.
 func TestReuseIdlePolecatForSling_NoIdlePolecat(t *testing.T) {
-	info, err := reuseIdlePolecatForSling(&idlePolecatReuseFake{}, tmux.NewTmux(),
-		&rig.Rig{Name: "rig", Path: t.TempDir()}, t.TempDir(), "rig",
-		SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+	for _, tt := range []struct {
+		name string
+		fake *idlePolecatReuseFake
+	}{
+		{"empty pool", &idlePolecatReuseFake{}},
+		{"lookup failed", &idlePolecatReuseFake{findErr: errors.New("beads unavailable")}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := reuseIdlePolecatForSling(tt.fake, tmux.NewTmux(),
+				&rig.Rig{Name: "rig", Path: t.TempDir()}, t.TempDir(), "rig",
+				SlingSpawnOptions{HookBead: "gt-next"}, func() {})
 
-	if err != nil || info != nil {
-		t.Errorf("no idle polecat gave (%+v, %v), want (nil, nil)", info, err)
+			if err != nil || info != nil {
+				t.Errorf("reuseIdlePolecatForSling gave (%+v, %v), want (nil, nil) so the caller allocates", info, err)
+			}
+		})
 	}
 }
 

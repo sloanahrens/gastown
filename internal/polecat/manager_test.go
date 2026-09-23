@@ -1936,17 +1936,13 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 func TestAddWithOptions_ResumeBranch(t *testing.T) {
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
-	// Create a "PR branch" on origin with a marker commit, mimicking an existing
-	// open PR that a polecat needs to resume.
+	// Create a "PR branch" with a marker commit, mimicking an existing open PR a
+	// polecat needs to resume. It is created as a ref alone: leaving it checked
+	// out in the rig's own clone would make this a second test, of the refusal to
+	// attach another worktree to a live ref (gt-0kk2).
 	prBranch := "polecat/example/gh-1234@abcdef"
-	prCommit := createStalePolecatCommit(t, mayorRig, "main", prBranch)
-
-	// Push the branch to the remote-tracking ref so the bare repo can resolve it.
-	cmd := exec.Command("git", "update-ref", "refs/remotes/origin/"+prBranch, "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("update-ref origin/%s: %v\n%s", prBranch, err, out)
-	}
+	prCommit := branchAtNewCommit(t, mayorRig, prBranch, "main", "PR work (gh-1234)")
+	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+prBranch, prCommit)
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{ResumeBranch: prBranch})
 	if err != nil {

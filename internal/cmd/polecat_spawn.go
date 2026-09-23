@@ -192,7 +192,9 @@ func reuseIdlePolecatForSling(
 		ResumeBranch: opts.ResumeBranch,
 	}
 	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
-		if errors.Is(err, polecat.ErrBranchHeld) {
+		// Only a resume can end up on a branch someone already holds: a fresh
+		// sling names a new branch, so its fallback cannot collide (gt-0kk2).
+		if errors.Is(err, polecat.ErrBranchHeld) && opts.ResumeBranch != "" {
 			return nil, fmt.Errorf("cannot reuse idle polecat %s: %w", polecatName, err)
 		}
 		if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
