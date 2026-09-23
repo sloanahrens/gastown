@@ -484,23 +484,47 @@ func writeSandboxGitConfig(home string) error {
 	return nil
 }
 
-// goEnvCarryVars are the variables preserveGoEnv pins to their current
-// effective values before the harness redirects HOME. The cgo flags in
-// particular: on a host with a keg-only icu4c they live in the Go env FILE
-// ($GOENV, itself under $HOME), and the redirect loses them from every `go`
-// subprocess a test spawns (gt-mjll).
-var goEnvCarryVars = []string{
-	"GOPATH", "GOCACHE", "GOMODCACHE",
-	"CGO_CPPFLAGS", "CGO_CFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS",
-}
+// goEnvCarryVars are the cache-location variables preserveGoEnv pins to
+// their current effective values before the harness redirects HOME, so `go`
+// invocations from tests keep using the real build and module caches
+// instead of a cold cache under the throwaway sandbox.
+var goEnvCarryVars = []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
 
-// preserveGoEnv pins goEnvCarryVars to their current effective values (asking
-// the go tool) before HOME is redirected, so `go` invocations from tests keep
-// using the real build and module caches and the real cgo flags. It fails on
-// every error except a missing go tool: a test process with no `go` on PATH
-// cannot build anything that would notice, but silently dropping the flags
-// resurfaces much later as a compile error inside a dependency.
+// preserveGoEnv pins GOENV to the go tool's current env file, and
+// goEnvCarryVars to their current effective values, before HOME is
+// redirected.
+//
+// GOENV is what actually carries a host's cgo flags: on a host with a
+// keg-only icu4c, CGO_CPPFLAGS/CGO_LDFLAGS live in the go env FILE ($GOENV,
+// itself under $HOME), not the process environment, and the redirect would
+// otherwise point `go env` at an empty file under the sandbox HOME, losing
+// them from every `go` subprocess a test spawns (gt-mjll). Pinning the file
+// pointer, rather than exporting the flags themselves, leaves the process
+// environment untouched, so a caller like buildGTBinary's brew-icu4c
+// fallback still runs on a host whose env file lacks them.
+//
+// Fails on every error except a missing go tool: a test process with no
+// `go` on PATH cannot build anything that would notice the loss, but a `go
+// env` failure with the tool present means the carry did not happen, and
+// dropping it silently resurfaces much later as an obscure compile error.
 func preserveGoEnv() error {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return nil
+	}
+
+	if os.Getenv("GOENV") == "" {
+		out, err := exec.Command(goBin, "env", "GOENV").Output()
+		if err != nil {
+			return fmt.Errorf("asking the go tool for GOENV: %w", err)
+		}
+		if goEnvPath := strings.TrimSpace(string(out)); goEnvPath != "" {
+			if err := os.Setenv("GOENV", goEnvPath); err != nil {
+				return fmt.Errorf("pinning GOENV: %w", err)
+			}
+		}
+	}
+
 	var missing []string
 	for _, v := range goEnvCarryVars {
 		if os.Getenv(v) == "" {
@@ -508,10 +532,6 @@ func preserveGoEnv() error {
 		}
 	}
 	if len(missing) == 0 {
-		return nil
-	}
-	goBin, err := exec.LookPath("go")
-	if err != nil {
 		return nil
 	}
 	// -json: values are space-bearing flag strings and may legitimately be
@@ -534,166 +554,6 @@ func preserveGoEnv() error {
 		}
 	}
 	return nil
-}
-
-// icu4cHeader is the header Dolt's go-icu-regex dependency includes from C++;
-// the harness probes for it by compiling this translation unit.
-const icu4cHeader = "<unicode/regex.h>"
-
-// verifyCgoIncludePath fails loud when a cgo build a test shells out to (the
-// buildGT's `go build`) cannot compile: it asks the C compiler whether the
-// cgo include flags resolve icu4c's unicode/regex.h, and reports the flags,
-// the compiler's own line, and a portable repair when they do not. The
-// question is include-path resolution, not C++ dialect support (clang rejects
-// the header under -x c++), so the probe compiles a one-line C translation
-// unit. Runs from the build helper, not StartHermetic: about thirty packages
-// run the harness and most never build cgo, and the only consumer of this
-// diagnosis is a go build (gt-mjll). Skipped with a stderr notice when no
-// include directory is configured or no compiler is reachable; a compiler
-// error that is not a missing-header diagnosis is not evidence about the
-// include path, so it is ignored.
-// VerifyCgoIncludePath is verifyCgoIncludePath, exported for the build
-// helpers that need the diagnosis without the rest of the harness.
-func VerifyCgoIncludePath() error { return verifyCgoIncludePath() }
-
-func verifyCgoIncludePath() error {
-	cgoFlags := splitCgoFlags(os.Getenv("CGO_CPPFLAGS") + " " + os.Getenv("CGO_CXXFLAGS"))
-	if !hasIncludeDir(cgoFlags) {
-		return nil
-	}
-	cc := os.Getenv("CC")
-	if cc == "" {
-		cc = "cc"
-	}
-	// Split CC the way cmd/go does (quoted-aware): "ccache clang" and
-	// "/path/to/cc -g" are valid CC values that LookPath on the whole string
-	// would read as one missing binary.
-	ccParts := shellSplit(cc)
-	if len(ccParts) == 0 {
-		fmt.Fprintf(os.Stderr, "hermetic harness: CC=%s does not name a compiler; skipping the icu4c include-path probe\n", cc)
-		return nil
-	}
-	if _, err := exec.LookPath(ccParts[0]); err != nil {
-		fmt.Fprintf(os.Stderr, "hermetic harness: no C compiler at %q; skipping the icu4c include-path probe\n", ccParts[0])
-		return nil
-	}
-	args := append(append([]string{}, cgoFlags...), "-fsyntax-only", "-x", "c", "-")
-	probe := exec.Command(ccParts[0], args...)
-	probe.Stdin = strings.NewReader("#include " + icu4cHeader + "\n")
-	out, err := probe.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	// Only a missing-header diagnosis (clang's "file not found", gcc's
-	// "No such file or directory") is evidence about the include path.
-	msg := string(out)
-	if !strings.Contains(msg, "file not found") && !strings.Contains(msg, "No such file or directory") {
-		return nil
-	}
-	return fmt.Errorf(`cgo include path cannot resolve icu4c's %s, so Dolt's go-icu-regex dependency will not compile:
-  CGO_CPPFLAGS=%s
-  CGO_CXXFLAGS=%s
-  %s: %s
-The hermetic harness carries these flags explicitly (preserveGoEnv), so this is
-a broken install rather than a lost environment: icu4c's headers are not in any
--I directory above. icu4c installs keg-only or into a prefix the compiler does
-not search, and upgrading or reinstalling moves the prefix without updating
-$GOENV. Repair it, then re-run — or prefer the rig's own gate, whose Makefile
-derives the flags itself (make test):
-  export CGO_CPPFLAGS="-I<icu4c-prefix>/include" CGO_LDFLAGS="-L<icu4c-prefix>/lib"
-  go env -w CGO_CPPFLAGS=... CGO_LDFLAGS=...   # persists them into $GOENV`,
-		icu4cHeader, os.Getenv("CGO_CPPFLAGS"), os.Getenv("CGO_CXXFLAGS"),
-		strings.Join(ccParts, " "), firstLine(out))
-}
-
-// splitCgoFlags splits cgo flag variables on the same quoting rules the go
-// tool applies, so a quoted path with spaces stays one word.
-func splitCgoFlags(s string) []string {
-	return shellSplit(s)
-}
-
-// shellSplit splits s like cmd/go's shellQuotedSplit: runs of unquoted
-// whitespace separate fields; single and double quotes group, with backslash
-// escapes inside double quotes.
-func shellSplit(s string) []string {
-	var fields []string
-	var cur strings.Builder
-	inField := false
-	i := 0
-	for i < len(s) {
-		switch c := s[i]; c {
-		case ' ', '\t':
-			if inField {
-				fields = append(fields, cur.String())
-				cur.Reset()
-				inField = false
-			}
-			i++
-		case '"':
-			inField = true
-			i++
-			for i < len(s) && s[i] != '"' {
-				if s[i] == '\\' && i+1 < len(s) {
-					if n := s[i+1]; n == '"' || n == '\\' {
-						cur.WriteByte(n)
-						i += 2
-						continue
-					}
-				}
-				cur.WriteByte(s[i])
-				i++
-			}
-			if i < len(s) {
-				i++ // closing quote
-			}
-		case '\'':
-			inField = true
-			i++
-			for i < len(s) && s[i] != '\'' {
-				cur.WriteByte(s[i])
-				i++
-			}
-			if i < len(s) {
-				i++ // closing quote
-			}
-		default:
-			inField = true
-			if c == '\\' && i+1 < len(s) {
-				cur.WriteByte(s[i+1])
-				i += 2
-				continue
-			}
-			cur.WriteByte(c)
-			i++
-		}
-	}
-	if inField || cur.Len() > 0 {
-		fields = append(fields, cur.String())
-	}
-	return fields
-}
-
-// hasIncludeDir reports whether cgo flags name at least one include directory,
-// in either the joined (-I/path) or separated (-I /path) spelling. Both match
-// on the prefix, so the bare forms need no special case.
-func hasIncludeDir(cgoFlags []string) bool {
-	for _, f := range cgoFlags {
-		if strings.HasPrefix(f, "-I") || strings.HasPrefix(f, "-isystem") {
-			return true
-		}
-	}
-	return false
-}
-
-// firstLine trims compiler output to its first non-empty line, so a probe
-// failure reads as one actionable sentence instead of a clang banner.
-func firstLine(out []byte) string {
-	for _, line := range strings.Split(string(out), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return line
-		}
-	}
-	return "(no output)"
 }
 
 // writeSandboxTown creates a minimal valid town (mayor/town.json marker) at
