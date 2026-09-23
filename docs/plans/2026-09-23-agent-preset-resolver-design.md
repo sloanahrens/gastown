@@ -36,7 +36,7 @@ name:
 | `runtime.SessionIDFromEnv` | Falls back to `CLAUDE_SESSION_ID` (correct only by accident) |
 | `cmd/hooks_sync.go`, `doctor/hooks_sync_check.go` | Skip; a no-op for Claude harnesses, wrong for custom non-Claude harnesses |
 | `rig/manager.go` polecat scaffold | Custom `default_agent` gets no scaffold |
-| `templates/commands/provision.go` | Custom agent gets no config dir |
+| `rig/manager.go` → `commands.ProvisionFor` | Custom `default_agent` gets no commands provisioned |
 
 ## Decisions (settled by grilling)
 
@@ -74,13 +74,21 @@ func customAgentFor(name string, town *TownSettings, rig *RigSettings) *RuntimeC
 `ResolveAgentPreset` tries these in order:
 
 1. An empty name returns `(nil, false)`.
-2. If the name is in the registry, return that preset (built-ins plus
+2. If the name is a custom agent (rig settings win over town settings), pass
+   its command, args and provider to `harnessPresetName` and return that
+   preset. Custom agents come before built-ins, the same order as
+   `lookupAgentConfigIfExists`: a `config.json` agent named `codex` that runs
+   `opencode` is opencode, whatever the built-in `codex` says.
+3. If the name is in the registry, return that preset (built-ins plus
    `agents.json`; `LoadAgentRegistry(DefaultAgentRegistryPath(townRoot))`
    runs first, as in `ResolveAgentConfigByName`).
-3. If the name is a custom agent (rig settings win over town settings), pass
-   its command, args and provider to `harnessPresetName` and return that
-   registry preset.
 4. Otherwise return `(nil, false)`.
+
+`harnessPresetName` looks names up in a table merged from the immutable
+`builtinPresets` and a snapshot of `globalRegistry`, so a concurrent
+`ResetRegistryForTesting` cannot empty it (gt-5v82). The exported
+`HarnessPreset(rc *RuntimeConfig) (*AgentPresetInfo, bool)` applies the same
+rule to a resolved `RuntimeConfig`, for callers that already hold one.
 
 `harnessPresetName` picks the harness:
 
@@ -99,7 +107,10 @@ func customAgentFor(name string, town *TownSettings, rig *RigSettings) *RuntimeC
 
 `isClaudeAgent(rc)` is reimplemented as
 `harnessPresetName(...) == "claude"`, and its existing tests must pass
-unchanged. The command-match loop in `ResolveProcessNames` switches to the same
+unchanged. Two cases change on purpose, because the command now wins
+everywhere: `provider=claude command=gemini` becomes non-Claude (today it
+counts as Claude), and a wrapped `env … claude` becomes Claude (today it
+does not). The command-match loop in `ResolveProcessNames` switches to the same
 canonical-first, sorted lookup, which removes a latent map-order
 nondeterminism.
 
@@ -109,8 +120,8 @@ unresolvable, not an error.
 
 ### 2. Nudge path (`internal/tmux`, `internal/cmd`), MR1
 
-- `(t *Tmux) sessionPreset(session, townRootHint string) (*config.AgentPresetInfo, bool)`
-  reads `GT_AGENT`, `GT_ROOT` and `GT_RIG` from the session environment. The
+- `(t *Tmux) SessionAgentPreset(session, townRootHint string) (agent string, preset *config.AgentPresetInfo, ok bool)`
+  (exported; `cmd/nudge.go` and the poller use it too) reads `GT_AGENT`, `GT_ROOT` and `GT_RIG` from the session environment. The
   town root comes from the session `GT_ROOT`, then `townRootHint`, then the
   process `GT_ROOT`. The rig path is `<townRoot>/<GT_RIG>` when `GT_RIG` is
   set. It then calls `config.ResolveAgentPreset`.
@@ -127,8 +138,8 @@ unresolvable, not an error.
   `display-message -p -t <pane> '#{session_name}'` and uses the same
   `escapeSafe`. If that lookup fails, the session name is empty, the agent is
   unresolvable, and no Escape is sent.
-- `readyPromptPrefixForSession` uses `sessionPreset`.
-- `cmd/nudge_poller.go` uses `config.ResolveAgentPreset(agentName, townRoot, rigPathFromSessionEnv)`
+- `readyPromptPrefixForSession` uses `SessionAgentPreset`.
+- `cmd/nudge_poller.go` uses `t.SessionAgentPreset(sessionName, townRoot)`
   for `SkipEscape` and prompt detection. An unresolved agent sets
   `SkipEscape=true`.
 - In `cmd/nudge.go` wait-idle, a set but unresolvable `GT_AGENT`, or a
@@ -144,6 +155,13 @@ path it already has, or the process `GT_ROOT`/`GT_RIG` in
 resolves the worker agent's name instead of `rc.Provider`. The nil-handling in
 each caller does not change: an unresolved agent behaves as a nil preset does
 today.
+
+`rig/manager.go` resolves the town's `default_agent` and passes the
+harness preset's name, not the custom name, to both the hooks scaffold and
+`commands.ProvisionFor`. `templates/commands/provision.go` itself does not
+change: every other caller already passes a harness name. `crew/manager.go`
+uses `HarnessPreset(rc)` on the resolved worker config when there is no
+`--agent` override.
 
 `seance.go`, `config.go` (agent list) and `runtime.go:42` iterate built-in
 names or key on the hooks provider, so they stay as they are.
