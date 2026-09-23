@@ -448,6 +448,98 @@ func TestRun_BackendTimeoutRetriesOnceThenFails(t *testing.T) {
 	}
 }
 
+// TestClassifyOutcome_GateUsageError pins the marker ordering: om-gate.sh's
+// usage_error() prints its whole flag list, and that list advertises
+// --timeout, so a substring search for "timeout" reads every rejected
+// invocation as a backend timeout (gt-o6xh).
+func TestClassifyOutcome_GateUsageError(t *testing.T) {
+	// Byte-for-byte the line om-gate.sh's usage_error() prints, so the search
+	// this guards is the one the deployed script actually feeds it.
+	usageLine := "om-gate: usage: om-gate.sh --base <ref> --head <ref> [--dir <path>] " +
+		"[--mr <bead-id>] [--worker <name>] [--rig <name>] [--out <file>] " +
+		"[--prior-findings <file>] [--timeout <seconds>] [--fail-closed]\n"
+	tests := []struct {
+		name   string
+		exit   int
+		stderr string
+		want   FailureClass
+	}{
+		{
+			// The gt-o6xh repro: a gate that predates the flag.
+			name:   "unknown argument --timeout",
+			exit:   2,
+			stderr: "om-gate: usage error: unknown argument: --timeout\n" + usageLine,
+			want:   ConfigError,
+		},
+		{
+			// A gate that DOES parse --timeout still prints it in the usage
+			// line, so the word alone never distinguishes the two.
+			name:   "missing required flag",
+			exit:   2,
+			stderr: "om-gate: usage error: --base is required\n" + usageLine,
+			want:   ConfigError,
+		},
+		{
+			name: "a real backend timeout is unchanged",
+			exit: 2,
+			stderr: "om-gate: reviewing abc..def in .\n" +
+				"om-gate: backend timeout override: 1800s (forwarded to om review)\n" +
+				"om-gate: execution error: om review exited 2: om: execution error: backend timed out\n" +
+				"om-gate: fail-closed: blocking the merge (exit 2)\n",
+			want: BackendTimeout,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			verdictPath := filepath.Join(t.TempDir(), "verdict.json")
+			_, class, err := classifyOutcome(nil, tc.exit, tc.stderr, verdictPath)
+			if class != tc.want {
+				t.Fatalf("class = %q, want %q (err=%v)", class, tc.want, err)
+			}
+		})
+	}
+}
+
+// TestRun_GateRejectingTimeoutFlagDoesNotRetry is the end-to-end gt-o6xh
+// repro. A usage error is deterministic, so the gate must run once and the
+// failure must name the caller's mistake, not a backend that never ran.
+func TestRun_GateRejectingTimeoutFlagDoesNotRetry(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	calls := 0
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, _ []string, _ string) (string, int, error) {
+			calls++
+			return "om-gate: usage error: unknown argument: --timeout\n" +
+				"om-gate: usage: om-gate.sh --base <ref> --head <ref> [--timeout <seconds>]\n", 2, nil
+		},
+	}
+
+	req := fixture.request()
+	req.TimeoutSeconds = 1800
+	result := Run(context.Background(), req, deps)
+
+	if calls != 1 {
+		t.Fatalf("Exec called %d times, want 1 (a usage error is deterministic)", calls)
+	}
+	if result.Class != ConfigError {
+		t.Fatalf("Class = %q, want config_error", result.Class)
+	}
+	if result.Exit != 2 {
+		t.Fatalf("Exit = %d, want 2", result.Exit)
+	}
+	if !strings.Contains(result.Stderr, "unknown argument: --timeout") {
+		t.Errorf("Stderr = %q, want the gate's own rejection", result.Stderr)
+	}
+	if result.Note != nil {
+		t.Fatal("expected no note on a failure")
+	}
+}
+
 func TestRun_MalformedVerdictZeroByteRetriesThenFails(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)
