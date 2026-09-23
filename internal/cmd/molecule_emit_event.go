@@ -32,6 +32,12 @@ comes from --rig, the GT_RIG environment variable, or the rig containing the
 current directory; emitting on a per-rig channel with no rig context is an
 error. Town-global channels (e.g. "mayor") ignore the rig.
 
+The witness channel is consumed by the witness *session* rather than by an
+await-event poller — the patrol waits on await-signal (the activity feed), so a
+file alone wakes nobody. Emitting there also nudges the witness session, and
+exits non-zero when that wake cannot be delivered (gt-wpf0). The refinery
+channel is polled by await-event, so its file is the delivery.
+
 EVENT FORMAT:
 Creates a JSON file at ~/gt/events/<channel>[/<rig>]/<timestamp>.event:
   {"type": "...", "channel": "...", "timestamp": "...", "payload": {...}}
@@ -88,9 +94,12 @@ func runMoleculeEmitEvent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", emitEventChannel)
 	}
 
-	path, err := channelevents.EmitToTown(townRoot, emitEventChannel, rigName, emitEventType, emitEventPayload)
+	path, err := emitChannelEventAndWake(townRoot, emitEventChannel, rigName, emitEventType, emitEventPayload)
 	if err != nil {
-		return err
+		if path == "" {
+			return err
+		}
+		return fmt.Errorf("event written to %s, but the wake failed: %w", path, err)
 	}
 
 	if moleculeJSON {
