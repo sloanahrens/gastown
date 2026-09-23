@@ -967,6 +967,16 @@ func (g *Git) CheckoutDetach(ref string) error {
 	return err
 }
 
+// CheckoutDetachForce detaches HEAD at ref, discarding index and working-tree
+// changes that would block the switch. Use it to reach a state where a
+// following `git reset --hard` can clean the worktree without the reset landing
+// on a branch: attached, `reset --hard` moves whatever branch happens to be
+// checked out, which in a shared repo can be another agent's in-flight ref.
+func (g *Git) CheckoutDetachForce(ref string) error {
+	_, err := g.run("checkout", "--detach", "--force", ref)
+	return err
+}
+
 // CheckoutNewBranch creates a new branch from startPoint and checks it out.
 // Equivalent to: git checkout -b <branch> <startPoint>
 func (g *Git) CheckoutNewBranch(branch, startPoint string) error {

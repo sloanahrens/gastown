@@ -1876,11 +1876,46 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, fmt.Errorf("start point %s not found — fall back to full repair", startPoint)
 	}
 
+	// Name the branch this reuse ends up on before touching the worktree. It has
+	// to be known to run the guard below, and the only honest way to refuse is
+	// before anything has been mutated.
+	//
+	// For resume the branch IS opts.ResumeBranch (so pushes go back to the
+	// existing PR head). For fresh work, build a new polecat/<name>/<bead>+<ts>
+	// branch.
+	branchName := m.buildBranchName(name, opts.HookBead)
+	if opts.ResumeBranch != "" {
+		branchName = opts.ResumeBranch
+	}
+
+	// gt-0kk2: refuse to switch this worktree onto a branch another worktree
+	// already has checked out. Polecat worktrees share the rig's .repo.git, so a
+	// branch held elsewhere is another polecat's live HEAD; two worktrees on one
+	// ref commit into each other's work and make every subsequent reset a
+	// cross-polecat write.
+	if holder, held := worktreeHoldingBranch(polecatGit, branchName); held {
+		return nil, fmt.Errorf("refusing to reuse %s on branch %s: already checked out at %s\n"+
+			"Another worktree is working on that branch — finish, release, or drop it there "+
+			"before resuming it here, or dispatch this bead on a fresh branch (omit --branch)",
+			name, branchName, holder)
+	}
+
 	// GH#2536: Clean worktree state before branch switch — the worktree may have
 	// stale state from a previous dog/pool dispatch (uncommitted changes, untracked
 	// files, detached HEAD, or checked out on an old dog/alpha-* branch).
 	// Reset to the start point directly (not HEAD) to avoid "local changes would
 	// be overwritten" errors when the start point has different file content.
+	//
+	// gt-0kk2: detach first. This worktree may merely *hold* a branch that belongs
+	// to another bead — a leftover from a prior reuse, or a hand-rolled recovery.
+	// A `git reset --hard` here runs on whatever branch happens to be checked out,
+	// which in a shared .repo.git moves that ref under its owner and strands their
+	// in-flight work (gt-9ed0: quartz's branch was reset onto jasper's origin tip
+	// this way). Detached, the cleanup reset moves HEAD and nothing else; the
+	// target branch is then moved deliberately by the switch below.
+	if err := polecatGit.CheckoutDetachForce("HEAD"); err != nil {
+		return nil, fmt.Errorf("detaching HEAD to clean worktree for reuse: %w", err)
+	}
 	_ = polecatGit.ResetHard(startPoint)
 	_ = polecatGit.CleanForce()
 
@@ -1893,12 +1928,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		style.PrintWarning("could not re-provision polecat CLAUDE.md on reuse: %v", err)
 	}
 
-	// Create or reset the branch tracking the start point. For resume, the branch
-	// IS opts.ResumeBranch (so pushes go back to the existing PR head). For fresh
-	// work, build a new polecat/<name>/<bead>+<ts> branch.
-	branchName := m.buildBranchName(name, opts.HookBead)
 	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
 		// CheckoutResetBranch (`git checkout -B`) creates or resets the branch to
 		// the start point. Use this instead of CheckoutNewBranch because the local
 		// branch may already exist from a prior run on this idle polecat.
@@ -1965,6 +1995,28 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
+}
+
+// worktreeHoldingBranch reports the path of a worktree other than g's own that
+// has branch checked out. Polecat worktrees share one .repo.git, so a branch
+// checked out somewhere else is a live HEAD there, not a free name to switch to.
+// A missing branch, or a repo whose worktree list cannot be read, reports false
+// — callers only use this to refuse, so failing open would be silent damage.
+func worktreeHoldingBranch(g *git.Git, branch string) (string, bool) {
+	if branch == "" {
+		return "", false
+	}
+	worktrees, err := g.WorktreeList()
+	if err != nil {
+		return "", false
+	}
+	self := g.WorkDir()
+	for _, wt := range worktrees {
+		if wt.Branch == branch && !sameWorktreePath(wt.Path, self) {
+			return wt.Path, true
+		}
+	}
+	return "", false
 }
 
 // killExistingPolecatSession clears an existing tmux session before reusing or
