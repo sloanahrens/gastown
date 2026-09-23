@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func hasTmux() bool {
@@ -2668,36 +2671,67 @@ func TestShouldSendEscape_CaptureErrorSuppressesEscape(t *testing.T) {
 	}
 }
 
-// TestEffectiveSkipEscape guards gt-cyyg: Claude Code (and Copilot, Gemini)
-// must never receive the vim-mode Escape keystroke regardless of the live
-// busy-indicator scrape, because that scrape can miss a real busy window
-// (e.g. a long-running tool call whose status text falls outside the
-// captured lines) and a missed window sends Escape straight into an agent
-// mid-tool-call — which Claude Code reports back as an operator interrupt.
-// Unlike shouldSendEscape, this check depends only on agent identity, not on
-// a pane snapshot, so it can't race a busy window.
-func TestEffectiveSkipEscape(t *testing.T) {
+// TestEscapeAllowed guards gt-cyyg and claude-9a8: an agent whose harness
+// cancels on Escape (Claude Code, Gemini, Copilot), or whose harness cannot
+// be identified, never receives the vim-mode Escape, whatever the busy
+// scrape says.
+func TestEscapeAllowed(t *testing.T) {
 	t.Parallel()
-
+	claude := config.GetAgentPresetByName("claude")
+	gemini := config.GetAgentPresetByName("gemini")
+	codex := config.GetAgentPresetByName("codex")
 	tests := []struct {
-		name      string
-		agentType string
-		want      bool
+		name   string
+		agent  string
+		preset *config.AgentPresetInfo
+		ok     bool
+		want   bool
 	}{
-		{"claude - always skip", "claude", true},
-		{"gemini - always skip (EscapeCancelsRequest)", "gemini", true},
-		{"copilot - always skip (legacy hardcode)", "copilot", true},
-		{"codex - busy-scrape gate still applies, no unconditional skip", "codex", false},
-		{"empty agent type - no unconditional skip", "", false},
-		{"unknown agent type - no unconditional skip", "not-a-real-agent", false},
+		{"claude", "claude", claude, true, false},
+		{"custom agent resolved to claude", "deepseek-flash", claude, true, false},
+		{"gemini", "gemini", gemini, true, false},
+		{"copilot legacy hardcode", "copilot", nil, false, false},
+		{"codex keeps scrape-gated escape", "codex", codex, true, true},
+		{"unresolved agent fails safe", "not-a-real-agent", nil, false, false},
+		{"no GT_AGENT fails safe", "", nil, false, false},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := effectiveSkipEscape(tt.agentType); got != tt.want {
-				t.Errorf("effectiveSkipEscape(%q) = %v, want %v", tt.agentType, got, tt.want)
+			if got := escapeAllowed(tt.agent, tt.preset, tt.ok); got != tt.want {
+				t.Errorf("escapeAllowed(%q) = %v, want %v", tt.agent, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEscapeSafe_CustomClaudeAgentOnIdlePane is the claude-9a8 regression: a
+// session whose GT_AGENT is a custom town agent running claude gets no
+// Escape even when the pane looks idle, and codex on an idle pane still does.
+func TestEscapeSafe_CustomClaudeAgentOnIdlePane(t *testing.T) {
+	tm := newTestTmux(t)
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"),
+		[]byte(`{"type":"town-settings","version":1,"agents":{"test-9a8-flash":{"provider":"claude","command":"claude"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := "gt-test-escape-safe-" + t.Name()
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+	_ = tm.SetEnvironment(session, "GT_ROOT", town)
+
+	_ = tm.SetEnvironment(session, "GT_AGENT", "test-9a8-flash")
+	if tm.escapeSafe(session, session, "") {
+		t.Fatal("escapeSafe for custom claude agent on idle pane = true, want false")
+	}
+	_ = tm.SetEnvironment(session, "GT_AGENT", "codex")
+	if !tm.escapeSafe(session, session, "") {
+		t.Fatal("escapeSafe for codex on idle pane = false, want true")
 	}
 }
 
