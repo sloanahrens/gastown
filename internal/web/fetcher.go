@@ -1313,10 +1313,6 @@ func (f *LiveConvoyFetcher) townMergeQueueSnapshot() (TownMergeQueue, error) {
 			}
 			continue
 		}
-		answered++
-		for _, issue := range issues {
-			rows = append(rows, townMergeQueueRow(issue, rigName, now))
-		}
 	}
 	// A rig that answered with nothing is an answer. Only a town where no read
 	// succeeded is worth failing the whole refresh over, because that is the
