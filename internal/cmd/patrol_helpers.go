@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/witness"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -26,19 +27,11 @@ import (
 // patrol_new.go, and prime_molecule.go, and the deacon case drifted out of
 // sync with resolveSelfTarget's "deacon/" convention — patrol wisps were
 // written with assignee "deacon" (no slash), making them invisible to
-// `gt hook`'s "deacon/" query (gt-cut). Route all patrol-config construction
-// through this one function so the address form can't drift again.
+// `gt hook`'s "deacon/" query (gt-cut). Delegates to witness.PatrolAssignee,
+// which the daemon's patrol-liveness watchdog (gt-4z3b7) also needs, so
+// there is exactly one implementation of this address form.
 func patrolAssignee(roleName, rig string) string {
-	switch roleName {
-	case "deacon":
-		return "deacon/"
-	case "witness":
-		return rig + "/witness"
-	case "refinery":
-		return rig + "/refinery"
-	default:
-		return roleName
-	}
+	return witness.PatrolAssignee(roleName, rig)
 }
 
 // PatrolConfig holds role-specific patrol configuration.

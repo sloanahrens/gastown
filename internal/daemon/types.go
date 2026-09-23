@@ -137,6 +137,11 @@ type PatrolsConfig struct {
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
 	// per run; the open bead is the double-dispatch guard (gt-nj23).
 	ScheduledSlings *ScheduledSlingsConfig `json:"scheduled_slings,omitempty"`
+
+	// PatrolWatchdog flags a patrol role (witness, deacon, refinery) whose
+	// session is alive but whose last COMPLETED patrol cycle is older than
+	// N x its cadence — awake but not patrolling (gt-4z3b7).
+	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -342,6 +347,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.MayorDispatch.Enabled
+	}
+	// patrol_watchdog defaults ON for the same reason mayor_dispatch does: it
+	// exists to catch a role going silent while still looking alive (gt-4z3b7),
+	// and a detector that has to be switched on cannot prevent the state it
+	// was written for. An explicit config entry can still disable it.
+	if patrol == "patrol_watchdog" {
+		if config == nil || config.Patrols == nil || config.Patrols.PatrolWatchdog == nil {
+			return true
+		}
+		return config.Patrols.PatrolWatchdog.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

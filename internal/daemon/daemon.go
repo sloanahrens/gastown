@@ -275,6 +275,13 @@ type Daemon struct {
 	// dispatch-check` and then nudges, either of which can take tens of
 	// seconds, and running them inline would hold the tick loop (gt-59o9).
 	mayorDispatchRunning atomic.Bool
+
+	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
+	// patrol, on its own goroutine: it checks every known rig's witness and
+	// refinery plus the deacon, each read involving a bd subprocess and a
+	// tmux liveness check, and any Fail also shells out to `gt escalate` and
+	// `gt nudge` — running inline would hold the tick loop (gt-4z3b7).
+	patrolWatchdogRunning atomic.Bool
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -918,6 +925,19 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Mayor dispatch ticker started (interval %v)", interval)
 	}
 
+	// Start the patrol watchdog ticker if configured. Flags a patrol role
+	// (witness, deacon, refinery) whose session is alive but whose last
+	// COMPLETED patrol cycle is older than N x its cadence (gt-4z3b7).
+	var patrolWatchdogTicker *time.Ticker
+	var patrolWatchdogChan <-chan time.Time
+	if d.isPatrolActive("patrol_watchdog") {
+		interval := patrolWatchdogInterval(d.patrolConfig)
+		patrolWatchdogTicker = time.NewTicker(interval)
+		patrolWatchdogChan = patrolWatchdogTicker.C
+		defer patrolWatchdogTicker.Stop()
+		d.logger.Printf("Patrol watchdog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1063,6 +1083,17 @@ func (d *Daemon) Run() (err error) {
 			// hold for 15s (gt-59o9).
 			if !d.isShutdownInProgress() {
 				d.triggerMayorDispatch()
+			}
+
+		case <-patrolWatchdogChan:
+			// Patrol watchdog — flags a role (witness, deacon, refinery)
+			// whose session is alive but whose last completed patrol cycle
+			// is stale, escalates, and optionally nudges (gt-4z3b7).
+			// Dispatched onto its own goroutine for the same reason
+			// mayor_dispatch is: bd + tmux reads plus any escalate/nudge
+			// subprocess can take real time.
+			if !d.isShutdownInProgress() {
+				d.triggerPatrolWatchdog()
 			}
 
 		case <-timer.C:
