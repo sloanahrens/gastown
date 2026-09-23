@@ -39,6 +39,17 @@ type RekeyRequest struct {
 	// SecondParent also stamps the note on Landed's second parent, the
 	// polecat head a merge commit brought in.
 	SecondParent bool
+	// AllowAnyMR accepts an approve note whose patch-id matches the landed
+	// diff even when the note's own "mr" field names a different MR — the
+	// note gt mq review's own reuse lookup would have answered from
+	// (FindVerdictForDiff is patch-id-keyed, not MR-scoped, because MR beads
+	// are wisps that are routinely reaped and re-minted for the same diff:
+	// gt-qa2p). Without this, a resume whose editorial_reviewed_head names a
+	// note written under an earlier or unrelated MR id can never find proof
+	// for its own MR id and refuses forever (gt-bagu). The manual `gt mq
+	// rekey-note` command leaves this false: an operator naming an MR
+	// deliberately wants proof that MR's own note covers what landed.
+	AllowAnyMR bool
 	// Reason is the operator's justification for the copy, required. The
 	// command records it verbatim next to the patch-id verification it
 	// performs itself, so the note says both who claims the copy was
@@ -163,7 +174,16 @@ func RekeyNote(g *git.Git, req RekeyRequest) (*RekeyResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(found.forMR) == 0 {
+	candidates := found.forMR
+	borrowedMR := false
+	if len(candidates) == 0 && req.AllowAnyMR && len(found.coveringSources) > 0 {
+		// No note under this exact MR id, but req.AllowAnyMR says a note
+		// covering the same diff by patch-id is proof enough regardless of
+		// whose MR id it carries (see RekeyRequest.AllowAnyMR, gt-bagu).
+		candidates = found.coveringSources
+		borrowedMR = true
+	}
+	if len(candidates) == 0 {
 		// Nothing to copy. The hint is the useful part: an operator who has
 		// the landed sha but guessed the MR id is told which MRs actually
 		// own this diff, and a clone whose notes ref has not caught up is
@@ -181,9 +201,14 @@ func RekeyNote(g *git.Git, req RekeyRequest) (*RekeyResult, error) {
 	// patch-id(diff X^ X) for every first-parent commit and rejects a
 	// mismatch, so copying it would publish a note that still reads as
 	// uncovered. Refuse before writing anything.
-	source, err := selectSourceNote(mr, landed, landedPatchID, plan, found.forMR)
+	source, err := selectSourceNote(mr, landed, landedPatchID, plan, candidates)
 	if err != nil {
 		return nil, err
+	}
+	if borrowedMR {
+		// The note now proves mr's landing, not the MR it was originally
+		// written under — re-key it so a later lookup by mr.ID finds it too.
+		source.note.MR = mr
 	}
 	for _, t := range plan {
 		if t.patchID != source.note.PatchID {
@@ -281,6 +306,10 @@ type notesForMR struct {
 	// equals the landed diff — the hints a "no note for that MR" refusal
 	// hands back.
 	covering []string
+	// coveringSources is the same set as covering, kept as full sources
+	// rather than display strings, for AllowAnyMR to select from when mr's
+	// own note is nowhere to be found.
+	coveringSources []rekeySource
 }
 
 // loadNotesForMR reads refs/notes/om once and sorts the notes into the shape
@@ -312,6 +341,7 @@ func loadNotesForMR(g *git.Git, mr string, plan []rekeyTarget, landedPatchID str
 		}
 		if n.Verdict == "approve" && n.PatchID == landedPatchID {
 			found.covering = append(found.covering, fmt.Sprintf("%s (on %s)", n.MR, shortCommit(e.Annotated)))
+			found.coveringSources = append(found.coveringSources, rekeySource{commit: e.Annotated, note: n})
 		}
 	}
 	sort.Strings(found.covering)

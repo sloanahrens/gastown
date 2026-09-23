@@ -1546,33 +1546,21 @@ func reRehearsedHead(t *testing.T, fixture *reviewFixture, label string) string 
 // lookup was keyed to a rehearsal head that is new every time.
 //
 // The head recorded for the push precondition is asserted too: it must name
-// THIS invocation's head (head2), not the commit the note was originally
-// found on (fixture.head). Recording the found-on head was gt-bagu: a landing
-// check requires the reviewed head to be an ancestor of the branch tip, and a
-// stale found-on head that a later rebase left behind can never satisfy that
-// — nothing re-reviews the new head, so the MR loops, refused and requeued
-// unchanged forever. The patch-id match is the proof that head2 carries the
-// same content, so the note is copied onto head2 and head2 is what gets
-// recorded — the reviewed head trivially IS the tip.
+// the commit the note is on, not this invocation's rehearsal commit, or the
+// precondition would refuse to push an MR the gate just approved. That
+// recorded head can be a commit that is not an ancestor of the branch tip
+// (head2, the rehearsal commit this invocation produced, is a sibling of
+// fixture.head): CheckPrecondition reads the note by sha and compares
+// patch-id, never ancestry, so that relationship does not matter here (see
+// resume_landed_merge.go's ensureLandedEditorialNote for the landing check
+// that actually cares which MR a note belongs to, and why gt-bagu's real fix
+// lives there, not in this reuse path).
 func TestRun_ReusesRecordedVerdictOnANewRehearsalHead(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)
 	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
 	recordVerdict(t, fixture, recordedNoteFor(t, fixture, 0.74, "approve"))
 	head2 := reRehearsedHead(t, fixture, "second invocation")
-
-	// head2 and fixture.head are siblings (both parented on fixture.base),
-	// exactly the shape a byte-identical rebase leaves behind: the old
-	// found-on head is NOT an ancestor of the new tip. This is the relation
-	// that made recording fixture.head as editorial_reviewed_head loop
-	// gt-bagu — a landing check that requires the reviewed head be an
-	// ancestor of the tip could never be satisfied by it.
-	deps0 := git.NewGit(fixture.repoDir)
-	if ancestor, err := deps0.IsAncestor(fixture.head, head2); err != nil {
-		t.Fatalf("IsAncestor: %v", err)
-	} else if ancestor {
-		t.Fatalf("fixture.head is an ancestor of head2: the test needs a rebase-shaped, non-ancestor pair")
-	}
 
 	execCalls := 0
 	deps := Deps{
@@ -1600,22 +1588,16 @@ func TestRun_ReusesRecordedVerdictOnANewRehearsalHead(t *testing.T) {
 		t.Errorf("Note = %.2f/%s, want the recorded 0.74/approve", result.Note.Score, result.Note.Verdict)
 	}
 
-	if result.Note.HeadSHA != head2 {
-		t.Errorf("Note.HeadSHA = %s, want this invocation's head %s", result.Note.HeadSHA, head2)
-	}
-
 	updated, err := store.GetIssue(context.Background(), "gt-mr-1")
 	if err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
 	fields := beads.ParseMRFields(&beads.Issue{Description: updated.Description})
-	if fields == nil || fields.EditorialReviewedHead != head2 {
-		t.Fatalf("editorial_reviewed_head = %+v, want the current tip %s, not the found-on head %s (gt-bagu)", fields, head2, fixture.head)
+	if fields == nil || fields.EditorialReviewedHead != fixture.head {
+		t.Fatalf("editorial_reviewed_head = %+v, want the reviewed head %s (the commit the note is on)", fields, fixture.head)
 	}
 	// The precondition reads the note by that head, so the recorded value has
-	// to be a commit this clone can actually read the note from — and it
-	// must be an ancestor of (here, equal to) the branch tip it is landing,
-	// which a stale found-on head can never be after a rebase.
+	// to be a commit this clone can actually read the note from.
 	if _, err := ReadNote(deps.Git, fields.EditorialReviewedHead); err != nil {
 		t.Errorf("ReadNote at the recorded reviewed head: %v", err)
 	}

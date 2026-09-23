@@ -487,6 +487,91 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 	}
 }
 
+// TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDifferentMR_Backfilled
+// is the gt-bagu regression, driven end to end through doMerge: the approve
+// note that answers for this diff was written under a DIFFERENT MR id than
+// the one now landing.
+//
+// This is not a contrived shape: gt mq review's own reuse lookup
+// (FindVerdictForDiff, gt-qa2p) answers a diff from any note in
+// refs/notes/om whose patch-id matches, whatever MR wrote it — deliberately,
+// because MR beads are wisps that are routinely reaped and re-minted for the
+// same underlying diff (see RekeyRequest.MR's doc). So editorial_reviewed_
+// head can legitimately point at a note recorded under an earlier MR's id
+// by the time this MR (a later mint for the same branch/diff) reaches
+// doMerge.
+//
+// Before the fix, resumeLandedMerge's rewritten-SHA backfill
+// (ensureLandedEditorialNote -> RekeyNote) required the note it found to
+// belong to this exact MR id, which an earlier mint's note never does: the
+// landing refused every cycle with EDITORIAL_RESUME_UNPROVEN, and nothing
+// could ever satisfy it — a permanent loop, misdiagnosed at the time as
+// requiring the reviewed head to be an ancestor of the tip (no such check
+// exists; see ensureLandedEditorialNote's doc comment). The fix accepts any
+// approve note whose patch-id matches the landed diff, the same proof
+// CheckPrecondition and FindVerdictForDiff already accept regardless of MR
+// id, and re-keys it onto the current MR so a later lookup by this MR's own
+// id finds it too.
+func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDifferentMR_Backfilled(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/resume-renamed-note-remint"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
+	head := run(t, workDir, "git", "rev-parse", branch)
+	// Written under an earlier mint's MR id — gt mq review's reuse lookup
+	// would have found and answered from this note too, since it is keyed
+	// on patch-id, not MR id.
+	patchID := writeApproveNote(t, g, "mr-nt1l-earlier-mint", "polecats/max", head)
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "other.txt", "other\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "other: unrelated MR landed first")
+	run(t, workDir, "git", "push", "origin", "main")
+	landed := simulateCherryPickedLanding(t, workDir, branch)
+	atCommit(t, workDir, branch, head)
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Editorial = &config.EditorialConfig{Required: true}
+
+	// The current MR bead is a re-mint: a different id from the one the note
+	// was recorded under, for the same branch and diff.
+	mr := &MRInfo{
+		ID:        "mr-nt1l-current-mint",
+		Branch:    branch,
+		Target:    "main",
+		Worker:    "polecats/max",
+		CommitSHA: head,
+	}
+
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+	result := e.doMerge(context.Background(), mr)
+	if !result.Success {
+		t.Fatalf("doMerge refused a renamed landing whose note belongs to an earlier MR mint for the same diff (gt-bagu): %s", result.Error)
+	}
+	if result.MergeCommit != landed {
+		t.Fatalf("expected the landed commit %s to be reported, got %s", landed, result.MergeCommit)
+	}
+	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
+		t.Fatalf("doMerge moved origin/main during resume: before=%s after=%s", before, after)
+	}
+
+	note, err := editorial.ReadNote(g, landed)
+	if err != nil {
+		t.Fatalf("expected the landed commit to carry its backfilled note, got: %v", err)
+	}
+	if note.Verdict != "approve" || note.PatchID != patchID || !note.Backfill {
+		t.Fatalf("backfilled note = verdict %q patch-id %s backfill=%v, want approve/%s/true", note.Verdict, note.PatchID, note.Backfill, patchID)
+	}
+	if note.RekeyedFrom != head {
+		t.Fatalf("expected the note to be rekeyed from the reviewed sha %s, got %q", head, note.RekeyedFrom)
+	}
+	if note.MR != mr.ID {
+		t.Fatalf("backfilled note.MR = %q, want it re-keyed onto the current MR %q so a later lookup by this MR's id finds it too", note.MR, mr.ID)
+	}
+}
+
 // TestDoMerge_ResumeAfterInterruptedBookkeeping_EditorialNotRequired_NoOp
 // covers a rig that has not opted into merge_queue.editorial.required:
 // resume still completes (no re-merge), but nothing touches refs/notes/om.

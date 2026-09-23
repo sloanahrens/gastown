@@ -2906,14 +2906,20 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 		// live ls-remote query, not the local refs/remotes/origin/* cache,
 		// which goes stale whenever nothing has fetched since the branch was
 		// pushed (gt-7v66).
+		// Warnings here go to os.Stderr, never e.output: `gt refinery ready
+		// --all --json` builds this Engineer on the default e.output
+		// (os.Stdout) and encodes its JSON result straight to os.Stdout, so
+		// a warning on e.output would land before the JSON and corrupt the
+		// stream the witness patrol parses for BranchExistsLocal/Remote
+		// (gt-bagu).
 		var localWarn, remoteWarn string
 		mr.BranchExistsLocal, localWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.BranchExists(fields.Branch) })
 		if localWarn != "" {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check local branch existence for %s: %s\n", fields.Branch, localWarn)
+			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check local branch existence for %s: %s\n", fields.Branch, localWarn)
 		}
 		mr.BranchExistsRemote, remoteWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.RemoteBranchExists("origin", fields.Branch) })
 		if remoteWarn != "" {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check remote branch existence for %s: %s\n", fields.Branch, remoteWarn)
+			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check remote branch existence for %s: %s\n", fields.Branch, remoteWarn)
 		}
 		mr.BlockedBy = e.firstOpenBlocker(issue)
 
