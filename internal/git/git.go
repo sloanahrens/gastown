@@ -2753,6 +2753,26 @@ func (g *Git) Parents(commit string) ([]string, error) {
 	return fields[1:], nil
 }
 
+// FirstParentContains reports whether commit is on the first-parent chain of
+// descendant — whether walking descendant's first parents reaches it.
+//
+// It is the membership test the editorial-coverage check's walk makes: that
+// walk follows first parents only, so a commit inside a merged branch is an
+// ancestor of the target without being a commit the check ever reads. A note
+// stamped on such a commit is proof of nothing (gt-ljn8).
+func (g *Git) FirstParentContains(commit, descendant string) (bool, error) {
+	out, err := g.run("rev-list", "--first-parent", descendant)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == commit {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // IsAncestor checks if ancestor is an ancestor of descendant.
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
@@ -3517,6 +3537,27 @@ func (g *Git) preservationOfRefAgainstRef(head, ref string) (BranchPreservationS
 		status.Evidence = "cherry"
 	}
 	return status, nil
+}
+
+// MergedTree returns the tree a conflict-free merge of revA and revB would
+// produce at their merge base. It is what "is this merge commit the merge of
+// its parents?" is measured against: a merge commit whose own tree equals
+// this changed nothing the two parents did not, while one that differs
+// carries a conflict resolution or an edit no parent made.
+//
+// An error means the two revs have no conflict-free merge tree at all
+// (git merge-tree exits non-zero and lists the conflicts), which is a
+// different answer from "here is the tree".
+func (g *Git) MergedTree(revA, revB string) (string, error) {
+	out, err := g.run("merge-tree", "--write-tree", revA, revB)
+	if err != nil {
+		return "", fmt.Errorf("merge-tree --write-tree %s %s: %w", shortSHA(revA), shortSHA(revB), err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("git merge-tree produced no tree for %s %s", shortSHA(revA), shortSHA(revB))
+	}
+	return fields[0], nil
 }
 
 func (g *Git) mergeTreeNoopAgainstRef(ref string) (bool, error) {
