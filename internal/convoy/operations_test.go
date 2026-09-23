@@ -1957,3 +1957,98 @@ exit 0
 		t.Errorf("expected gt nudge gastown/witness in log, got: %q\nlogger output: %v", logStr, logged)
 	}
 }
+
+// TestFeedNextReadyIssue_SkipsHeldBead feeds through the event-driven
+// continuation path, the second feeder a close event triggers. A bead held by
+// its own record must be left alone and the next ready bead dispatched
+// (gt-tq6l).
+func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-convoyhold",
+		Title:     "Convoy With A Held Bead",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Sorts first (same priority, lower ID), so the feed reaches it first.
+	held := &beadsdk.Issue{
+		ID:        "test-held1",
+		Title:     "Held For The Mayor",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		Notes:     "MAYOR DESIGN DECISION: route this through the deacon",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	ready := &beadsdk.Issue{
+		ID:        "test-ready2",
+		Title:     "Next Ready Task",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	for _, iss := range []*beadsdk.Issue{convoy, held, ready} {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+	if err := store.AddLabel(ctx, held.ID, "needs-mayor-review", "test"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+	for _, trackedID := range []string{held.ID, ready.ID} {
+		dep := &beadsdk.Dependency{
+			IssueID:     convoy.ID,
+			DependsOnID: trackedID,
+			Type:        beadsdk.DependencyType("tracks"),
+			CreatedAt:   now,
+			CreatedBy:   "test",
+		}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s: %v", trackedID, err)
+		}
+	}
+
+	townRoot := setupTownRoot(t)
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, msgs := makeLogger()
+
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub was not called (no log file): %v", err)
+	}
+	logStr := string(logData)
+	if strings.Contains(logStr, held.ID) {
+		t.Errorf("held bead must not be dispatched by the continuation feed, got: %q", logStr)
+	}
+	if !strings.Contains(logStr, ready.ID) {
+		t.Errorf("expected the next ready bead to be dispatched, got: %q", logStr)
+	}
+
+	heldLogged := false
+	for _, m := range *msgs {
+		if strings.Contains(m, held.ID) && strings.Contains(m, "held by label needs-mayor-review") {
+			heldLogged = true
+		}
+	}
+	if !heldLogged {
+		t.Errorf("expected a hold log for %s, got: %v", held.ID, *msgs)
+	}
+}

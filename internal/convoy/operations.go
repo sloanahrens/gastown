@@ -341,6 +341,14 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
+		// A hold recorded on the bead takes it off this path too: the
+		// continuation feed would sling it with the rig default agent, which is
+		// what a routing label or a keep-off decision forbids (gt-tq6l).
+		if reason := DispatchHoldReason(ctx, store, issue.ID, resolver); reason != "" {
+			logger("%s: convoy %s: %s held by %s, skipping", caller, convoyID, issue.ID, reason)
+			continue
+		}
+
 		agent, agentDesc := FeedDispatchAgent(convoyAgent, townRoot, rig)
 		logger("%s: convoy %s: feeding next ready issue %s to %s (%s)", caller, convoyID, issue.ID, rig, agentDesc)
 		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch, agent); err != nil {

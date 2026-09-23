@@ -4061,3 +4061,239 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 		t.Errorf("expected one escalation about a failed preserve push, got: %v", escalated)
 	}
 }
+
+// holdTestStorage serves fixed issue records and comments, so the stranded
+// scan's per-bead checks are testable without a Dolt container. The embedded
+// interface panics on anything else the code under test starts calling.
+type holdTestStorage struct {
+	beadsdk.Storage
+	issues   map[string]*beadsdk.Issue
+	comments map[string][]*beadsdk.Comment
+	readErr  error
+}
+
+func (s *holdTestStorage) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	issue, ok := s.issues[id]
+	if !ok {
+		return nil, fmt.Errorf("holdTestStorage: no issue %s", id)
+	}
+	return issue, nil
+}
+
+func (s *holdTestStorage) GetIssueComments(_ context.Context, id string) ([]*beadsdk.Comment, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	return s.comments[id], nil
+}
+
+// TestFeedFirstReady_DispatchHold_Skips pins the per-bead checks the stranded
+// scan makes before re-dispatching: a bead whose own record carries a deferral,
+// a routing label, or a "do not redispatch" decision is skipped and logged,
+// while an unheld sibling still feeds (gt-tq6l).
+func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
+	t.Parallel()
+
+	held := []struct {
+		id         string
+		issue      *beadsdk.Issue
+		comments   []*beadsdk.Comment
+		wantReason string
+	}{
+		{
+			id:         "gt-holddefer",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusDeferred},
+			wantReason: "status deferred",
+		},
+		{
+			// Frozen in beads' own status model, alongside deferred.
+			id:         "gt-holdpinned",
+			issue:      &beadsdk.Issue{Status: beadsdk.Status("pinned")},
+			wantReason: "status pinned",
+		},
+		{
+			id:         "gt-holdsonnet",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-sonnet"}},
+			wantReason: "label needs-sonnet",
+		},
+		{
+			id:         "gt-holdsonnetcaps",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-SONNET"}},
+			wantReason: "label NEEDS-SONNET",
+		},
+		{
+			id:         "gt-holdmayor",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"bug", "needs-mayor-review"}},
+			wantReason: "label needs-mayor-review",
+		},
+		{
+			id: "gt-holddesign",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "MAYOR DESIGN DECISION: route this through the deacon, not the convoy feeder",
+			},
+			wantReason: "MAYOR DESIGN DECISION in notes",
+		},
+		{
+			id: "gt-holdnodisp",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Notes:  "Blocked on gt-nj23.7 landing first — do not redispatch",
+			},
+			wantReason: "do not redispatch in notes",
+		},
+		{
+			id: "gt-holdindesign",
+			issue: &beadsdk.Issue{
+				Status: beadsdk.StatusOpen,
+				Design: "MAYOR DESIGN DECISION: the deacon owns this one",
+			},
+			wantReason: "MAYOR DESIGN DECISION in design",
+		},
+		{
+			id:    "gt-holdcomment",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "do-not-redispatch until gt-nj23.7 is merged"},
+			},
+			wantReason: "do not redispatch in comment",
+		},
+		{
+			// Same decision, hyphen between "re" and "dispatch": the fold has to
+			// reach both spellings (gt-tq6l).
+			id:    "gt-holdcommenthyphen",
+			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			comments: []*beadsdk.Comment{
+				{Author: "mayor", Text: "Do not re-dispatch until gt-nj23.7 is merged"},
+			},
+			wantReason: "do not redispatch in comment",
+		},
+	}
+
+	store := &holdTestStorage{
+		issues:   map[string]*beadsdk.Issue{"gt-control": {Status: beadsdk.StatusOpen}},
+		comments: map[string][]*beadsdk.Comment{},
+	}
+	var readyIssues []string
+	for _, h := range held {
+		h.issue.ID = h.id
+		store.issues[h.id] = h.issue
+		store.comments[h.id] = h.comments
+		readyIssues = append(readyIssues, h.id)
+	}
+	readyIssues = append(readyIssues, "gt-control")
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-hold",
+		Title:       "Holds and a control",
+		ReadyCount:  len(readyIssues),
+		ReadyIssues: readyIssues,
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	slingLog := string(data)
+
+	for _, h := range held {
+		if strings.Contains(slingLog, h.id) {
+			t.Errorf("%s must not be redispatch by the convoy feeder (held by %q), got sling: %q", h.id, h.wantReason, slingLog)
+		}
+		found := false
+		for _, l := range logged {
+			if strings.Contains(l, h.id) && strings.Contains(l, h.wantReason) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected a skip log naming %q for %s, got: %v", h.wantReason, h.id, logged)
+		}
+	}
+	if !strings.Contains(slingLog, "gt-control") {
+		t.Errorf("expected the unheld control to still feed, got sling log: %q", slingLog)
+	}
+}
+
+// TestFeedFirstReady_DispatchHold_UnreadableStoreFailsOpen keeps the hold check
+// from becoming a town-wide stall: a rig store that cannot be read must not
+// block a dispatch (gt-tq6l).
+func TestFeedFirstReady_DispatchHold_UnreadableStoreFailsOpen(t *testing.T) {
+	t.Parallel()
+
+	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-unreadable",
+		Title:       "Unreadable store",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-control"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-control") {
+		t.Errorf("expected the bead to feed when the store cannot be read, got sling log: %q", string(data))
+	}
+}

@@ -967,6 +967,14 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// A hold is checked after the dead-holder/worktree checks above, which
+		// keep their escalation for a dead holder's unpreserved work: that
+		// warning is worth more than the earlier, quieter skip (gt-tq6l).
+		if reason := m.dispatchHoldReason(rig, issueID); reason != "" {
+			m.logger("Convoy %s: %s held by %s, skipping", c.ID, issueID, reason)
+			continue
+		}
+
 		// A convoy the operator closed between the stranded scan and here must
 		// not be fed. The scan's list is a snapshot from the top of the cycle
 		// (findStranded) and the checks above it are not cheap, so a close
@@ -1138,6 +1146,19 @@ func (m *ConvoyManager) resetOriginBranches() {
 	m.originBranchesCache = nil
 	m.scanAlertKeysClaimed = nil
 	m.originBranchesMu.Unlock()
+}
+
+// dispatchHoldReason reports why the stranded scan must not re-dispatch
+// issueID, or "" when it may (gt-tq6l). The rule lives in convoy, which the
+// event-driven continuation feed shares; this only picks the rig's store.
+func (m *ConvoyManager) dispatchHoldReason(rig, issueID string) string {
+	m.storesMu.Lock()
+	store := m.stores[rig]
+	m.storesMu.Unlock()
+	if store == nil {
+		return ""
+	}
+	return convoy.DispatchHoldReason(m.ctx, store, issueID, nil)
 }
 
 // hasRejectionMarker reports whether issueID's notes carry the refinery's
