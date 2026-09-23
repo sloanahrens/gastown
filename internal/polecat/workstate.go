@@ -75,7 +75,9 @@ type WorkstateInput struct {
 
 // WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
 // policy: callers gather facts, this classifier decides how every subsystem
-// should present and count the polecat.
+// should present and count the polecat. Every refusing verdict names its
+// predicate in Blockers, so no consumer has to report an unnamed guard
+// (gt-3r1h).
 type WorkstateDisposition struct {
 	Verdict              string   `json:"verdict"`
 	Reason               string   `json:"reason,omitempty"`
@@ -193,6 +195,10 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			Reason:               "not-idle",
 			NeedsRecovery:        needsRecovery,
 			CountsTowardCapacity: true,
+			// Name the state (gt-3r1h). Refusing on in.State while leaving
+			// Blockers empty is what let check-recovery render a refusal whose
+			// own text admitted it could not say what refused.
+			Blockers: []string{"lifecycle_state=" + string(in.State)},
 		}
 		if in.ActiveWorkBlocker != "" {
 			d.Blockers = append(d.Blockers, in.ActiveWorkBlocker)

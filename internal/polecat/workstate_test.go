@@ -126,9 +126,12 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictWorking, Reason: "not-idle", NeedsRecovery: false, CountsTowardCapacity: true},
 		},
 		{
-			name: "stalled active work preserves blocker",
+			// The state blocker comes first: the lifecycle state is this
+			// branch's own predicate, and the active-work blocker is the
+			// caller's supplementary one (gt-3r1h).
+			name: "stalled active work preserves both blockers",
 			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, ActiveWorkBlocker: "assigned_work=gt-open status=open", ActiveWorkCountsTowardCapacity: true},
-			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true, Blockers: []string{"assigned_work=gt-open status=open"}},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true, Blockers: []string{"lifecycle_state=stalled", "assigned_work=gt-open status=open"}},
 		},
 	}
 

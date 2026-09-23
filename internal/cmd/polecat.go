@@ -1632,6 +1632,11 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 		fmt.Fprintln(w, "  Work is waiting on an active merge request; preserve this polecat until it lands.")
 	case polecat.WorkstateVerdictNeedsRecovery:
 		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render("NEEDS_RECOVERY"))
+		if status.Reason != "" {
+			// The predicate family the classifier used, so the text names the
+			// same thing --json's reason field does (gt-3r1h).
+			fmt.Fprintf(w, "  Reason:          %s\n", status.Reason)
+		}
 		fmt.Fprintln(w)
 		if len(status.Blockers) > 0 {
 			fmt.Fprintf(w, "  %s Cleanup refused by these predicate(s):\n", style.Warning.Render("⚠"))
@@ -1646,7 +1651,14 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 				}
 			}
 		} else {
-			fmt.Fprintf(w, "  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
+			// DecideWorkstate names a blocker for every refusal
+			// (WorkstateDisposition.Blockers), so a status that reaches here
+			// was assembled without it. Report that gap concretely instead of
+			// the former "refused by an unknown recovery predicate", which
+			// told the reader nothing and forced an escalation every time
+			// (gt-3r1h).
+			fmt.Fprintf(w, "  %s Cleanup refused, but this status names no blocker (reason=%q).\n", style.Warning.Render("⚠"), status.Reason)
+			fmt.Fprintln(w, "  DecideWorkstate names a blocker for every refusal, so this status did not come from it. Report the gap before acting.")
 		}
 		fmt.Fprintln(w, "  Escalate to Mayor for recovery before cleanup.")
 	case polecat.WorkstateVerdictWorking:

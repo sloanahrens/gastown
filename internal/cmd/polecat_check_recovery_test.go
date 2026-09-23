@@ -976,6 +976,72 @@ func TestCheckRecoveryTextRendersUnknownVerdictAsUnsafe(t *testing.T) {
 	}
 }
 
+// TestCheckRecoveryTextNamesRefusalPredicate is the gt-3r1h regression at the
+// surface the witness actually reads: a finished polecat with a clean worktree,
+// a live session and a stale recorded cleanup_status was refused with the text
+// "Cleanup refused by an unknown recovery predicate". A refusal that names no
+// predicate is un-actionable, so the only correct response was to escalate. The
+// test drives the real decision layer and the real renderer.
+func TestCheckRecoveryTextNamesRefusalPredicate(t *testing.T) {
+	t.Parallel()
+	input := polecat.WorkstateInput{
+		State:          polecat.StateReviewNeeded,
+		CleanupStatus:  polecat.CleanupUnpushed,
+		Branch:         "polecat/flint",
+		GitStateSource: polecat.GitStateSourceLive,
+	}
+	d := polecat.DecideWorkstate(input)
+	if d.Verdict != polecat.WorkstateVerdictNeedsRecovery {
+		t.Fatalf("DecideWorkstate() = %+v, want NEEDS_RECOVERY — fixture invalid", d)
+	}
+
+	status := RecoveryStatus{Rig: "gastown", Polecat: "flint"}
+	applyWorkstateDispositionToRecoveryStatus(&status, d)
+
+	var buf bytes.Buffer
+	renderCheckRecoveryText(&buf, status)
+	text := buf.String()
+
+	if strings.Contains(text, "unknown recovery predicate") {
+		t.Fatalf("refusal text names no predicate: %s", text)
+	}
+	for _, want := range []string{"NEEDS_RECOVERY", "lifecycle_state=review-needed", "not-idle"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("refusal text %q missing %q", text, want)
+		}
+	}
+	if status.SafeToNuke || strings.Contains(text, "Safe to nuke") {
+		t.Fatalf("refusal rendered as a clearance: %s", text)
+	}
+}
+
+// TestCheckRecoveryTextRefusalWithoutBlockerReportsTheGap guards the renderer's
+// fallback: a NEEDS_RECOVERY status carrying no blocker did not come from
+// DecideWorkstate, and the text must say that concretely rather than present an
+// unnamed guard as an unknown risk (gt-3r1h).
+func TestCheckRecoveryTextRefusalWithoutBlockerReportsTheGap(t *testing.T) {
+	t.Parallel()
+	status := RecoveryStatus{
+		Rig:     "gastown",
+		Polecat: "amethyst",
+		Verdict: polecat.WorkstateVerdictNeedsRecovery,
+		Reason:  "not-idle",
+	}
+
+	var buf bytes.Buffer
+	renderCheckRecoveryText(&buf, status)
+	text := buf.String()
+
+	if strings.Contains(text, "unknown recovery predicate") {
+		t.Fatalf("refusal text names no predicate: %s", text)
+	}
+	for _, want := range []string{"NEEDS_RECOVERY", "names no blocker", "not-idle"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("refusal text %q missing %q", text, want)
+		}
+	}
+}
+
 func TestPartialSpawnWithoutDurableHook(t *testing.T) {
 	t.Parallel()
 	assignee := "gastown/polecats/nitro"
