@@ -175,7 +175,12 @@ func SessionIDFromEnv() string {
 	}
 	// Use the current agent's session ID env var from its preset
 	if agentName := os.Getenv("GT_AGENT"); agentName != "" {
-		if preset := config.GetAgentPresetByName(agentName); preset != nil && preset.SessionIDEnv != "" {
+		townRoot := os.Getenv("GT_ROOT")
+		rigPath := ""
+		if rig := os.Getenv("GT_RIG"); rig != "" && townRoot != "" {
+			rigPath = filepath.Join(townRoot, rig)
+		}
+		if preset, ok := config.ResolveAgentPreset(agentName, townRoot, rigPath); ok && preset.SessionIDEnv != "" {
 			if sessionID := os.Getenv(preset.SessionIDEnv); sessionID != "" {
 				return sessionID
 			}

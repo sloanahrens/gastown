@@ -176,14 +176,14 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			preset := config.GetAgentPresetByName(agentName)
-			if preset == nil || preset.HooksDir == "" || preset.HooksSettingsFile == "" {
+			preset, ok := config.ResolveAgentPreset(agentName, townRoot, rigPath)
+			if !ok || preset.HooksDir == "" || preset.HooksSettingsFile == "" {
 				continue
 			}
 
 			hooksProvider := preset.HooksProvider
 			if hooksProvider == "" {
-				hooksProvider = agentName
+				hooksProvider = string(preset.Name)
 			}
 
 			// Claude targets are already handled by DiscoverTargets + syncTarget above.

@@ -774,8 +774,8 @@ func ensureAgentReady(sessionName string) error {
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear
 	_ = t.AcceptWorkspaceTrustDialog(sessionName)
-	agentName, _ := t.GetEnvironment(sessionName, "GT_AGENT")
-	if shouldAcceptPermissionWarning(agentName) {
+	agentName, preset, ok := t.SessionAgentPreset(sessionName, "")
+	if shouldAcceptPermissionWarning(agentName, preset, ok) {
 		_ = t.AcceptBypassPermissionsWarning(sessionName)
 	}
 
@@ -1638,17 +1638,15 @@ func loadRigCommandVars(townRoot, rig string) []string {
 	return vars
 }
 
-// shouldAcceptPermissionWarning checks if the agent emits a bypass-permissions
-// warning on startup that needs to be acknowledged via tmux.
-func shouldAcceptPermissionWarning(agentName string) bool {
+// shouldAcceptPermissionWarning checks if the agent's harness emits a
+// bypass-permissions warning on startup that must be acknowledged via tmux.
+// preset/ok come from SessionAgentPreset; a session without GT_AGENT is
+// Claude by default.
+func shouldAcceptPermissionWarning(agentName string, preset *config.AgentPresetInfo, ok bool) bool {
 	if agentName == "" {
-		agentName = "claude" // Default sessions without GT_AGENT are Claude
+		preset, ok = config.GetAgentPreset(config.AgentClaude), true
 	}
-	preset := config.GetAgentPresetByName(agentName)
-	if preset == nil {
-		return false
-	}
-	return preset.EmitsPermissionWarning
+	return ok && preset != nil && preset.EmitsPermissionWarning
 }
 
 // updateAgentMode updates the mode field on the agent bead.

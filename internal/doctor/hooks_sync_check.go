@@ -110,13 +110,13 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			if agentName == "" {
 				continue
 			}
-			preset := config.GetAgentPresetByName(agentName)
-			if preset == nil || preset.HooksDir == "" || preset.HooksSettingsFile == "" {
+			preset, ok := config.ResolveAgentPreset(agentName, ctx.TownRoot, rigPath)
+			if !ok || preset.HooksDir == "" || preset.HooksSettingsFile == "" {
 				continue
 			}
 			hooksProvider := preset.HooksProvider
 			if hooksProvider == "" {
-				hooksProvider = agentName
+				hooksProvider = string(preset.Name)
 			}
 			// Claude targets are handled by Loop 1.
 			if hooksProvider == "claude" {
