@@ -95,6 +95,74 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 	}
 }
 
+// TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON is the polecat
+// counterpart to TestInstallForRole_ConcurrentSpawnsProduceValidJSON: since
+// gt-8stz, polecat no longer takes the writeTemplate path that test targets
+// (role "witness" above) — it goes through the JSON merge path
+// (SyncManagedClaudeSettings, a read-modify-write over the same shared
+// settings.json every polecat in a rig reads). That path had no concurrency
+// coverage of its own (found reviewing gt-wisp-4nns). This asserts N
+// concurrent polecat installs still leave a valid settings.json that carries
+// the PermissionRequest guard — the atomic rename in SyncManagedClaudeSettings
+// should serialize the writes the same way it does for the template path.
+func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	rigRoot := t.TempDir()
+	settingsDir := filepath.Join(rigRoot, "gastown", "polecats")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settingsDir: %v", err)
+	}
+	target := filepath.Join(settingsDir, ".claude", "settings.json")
+
+	const concurrency = 64
+	start := make(chan struct{})
+	var ready, wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		ready.Add(1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			if err := InstallForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+
+	settings, err := LoadSettings(target)
+	if err != nil {
+		t.Fatalf("settings.json is not valid JSON after concurrent writes: %v\n--- file contents (%d bytes) ---\n%s", err, len(data), string(data))
+	}
+
+	foundGuard := false
+	for _, entry := range settings.Hooks.PermissionRequest {
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, "tap guard permission-request") {
+				foundGuard = true
+			}
+		}
+	}
+	if !foundGuard {
+		t.Fatalf("concurrent polecat install did not carry the PermissionRequest guard, got: %+v", settings.Hooks.PermissionRequest)
+	}
+}
+
 // TestInstallForRole_AtomicWriteErrorPropagates covers the error-return
 // branch added in the gh#3500 fix: when the underlying atomic write fails
 // (here: target dir is read-only so os.CreateTemp returns EACCES), the

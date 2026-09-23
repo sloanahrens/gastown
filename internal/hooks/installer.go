@@ -48,6 +48,12 @@ var templateFS embed.FS
 //
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
+//
+// For boot/dog/polecat on Claude, install goes through the JSON merge path
+// (SyncManagedClaudeSettings) and fails closed: an unparseable hooks-base.json,
+// hooks-override file, or existing settings.json aborts the install with an
+// error naming the file, rather than silently falling back to a template that
+// may be missing hooks a rig-scoped override added. See gt-8stz.
 func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return nil
@@ -65,14 +71,27 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, c
 		key := role
 		if role == "polecat" {
 			key = "polecats"
+			// Polecat settings are shared per rig (config.RoleSettingsDir joins
+			// rigPath + "polecats"), and DiscoverTargets/GetApplicableOverrides
+			// manage the file under the rig-scoped key "<rig>/polecats" so that
+			// ~/.gt/hooks-overrides/<rig>__polecats.json is applied. Using the
+			// bare "polecats" key here skips that override, so every polecat
+			// spawn (this call site) would silently drop rig-scoped hooks the
+			// next sync had put in, then gt hooks sync would put them back —
+			// the file would flip on every spawn/sync cycle.
+			if rig := filepath.Base(filepath.Dir(settingsDir)); rig != "." && rig != string(filepath.Separator) && rig != "" {
+				key = rig + "/polecats"
+			}
 		}
-		_, err := SyncManagedClaudeSettings(Target{
+		if _, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
 			Key:      key,
 			Role:     role,
 			Provider: "claude",
-		}, false)
-		return err
+		}, false); err != nil {
+			return fmt.Errorf("installing managed claude settings for role %q at %s: %w", role, targetPath, err)
+		}
+		return nil
 	}
 
 	if existing, err := os.ReadFile(targetPath); err == nil {
