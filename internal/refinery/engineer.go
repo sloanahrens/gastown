@@ -606,8 +606,13 @@ type ProcessResult struct {
 	TestsFailed    bool
 	SlotTimeout    bool // Merge slot contention timeout (distinct from build/test failure)
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
-	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
-	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	// OriginUnreadable marks a refusal to stage a merge because origin could
+	// not be read at all (ls-remote/fetch failure), so the submission itself is
+	// unjudged — like SlotTimeout this is transient, the MR stays queued, and
+	// no polecat is nudged to push a branch that may already be pushed.
+	OriginUnreadable bool
+	NoMerge          bool // MR/source is intentionally not merge-eligible, not a build failure
+	NeedsApproval    bool // PR exists but lacks required approving review (merge_strategy=pr)
 	// EditorialRefused marks a refusal by the om editorial push precondition
 	// (om-gate T6): no approve note exists whose patch-id still matches the
 	// range about to land. Like NeedsApproval it is not a build/test/conflict
@@ -683,6 +688,10 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	mergeRef, err := e.submittedBranchHead(mr)
 	if err != nil {
 		return ProcessResult{Success: false, Error: err.Error()}
+	}
+	if refusal := e.assertSubmittedHeadReachableOnOrigin(mr, mergeRef); refusal != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Refusing to gate/merge MR %s: %v\n", mr.ID, refusal.Err)
+		return refusal.result()
 	}
 
 	// Step 2: Stage the merge on the target branch.
@@ -2077,6 +2086,80 @@ func (e *Engineer) submittedBranchHead(mr *MRInfo) (string, error) {
 	return commit, nil
 }
 
+// headRefusal is a refusal to stage a merge because origin does not carry the
+// head the MR declares (gt-sda9). The two flags classify it for callers:
+// BranchMissing means origin has no such branch at all (the work may be lost —
+// escalate), and OriginUnreadable means origin could not be read (transient
+// infrastructure — keep the MR queued rather than blaming the submission).
+type headRefusal struct {
+	BranchMissing    bool
+	OriginUnreadable bool
+	Err              error
+}
+
+// result maps the refusal onto the ProcessResult fields callers route on.
+func (r *headRefusal) result() ProcessResult {
+	return ProcessResult{
+		Success:          false,
+		Error:            r.Err.Error(),
+		BranchNotFound:   r.BranchMissing,
+		OriginUnreadable: r.OriginUnreadable,
+	}
+}
+
+// assertSubmittedHeadReachableOnOrigin refuses when origin's tip for mr's
+// branch does not carry its declared head (gt-sda9). It runs wherever a merge
+// path takes a ref from submittedBranchHead, whose local refs/heads check
+// cannot see an unpushed head in a rig sharing .repo.git with the polecats.
+//
+// Only the declared head is asserted: adoptConflictResolvedHead has already
+// adopted a head that moved through a closed conflict task, and a
+// content-preserving rebase passes the same patch-preservation fallback every
+// other push verification uses.
+func (e *Engineer) assertSubmittedHeadReachableOnOrigin(mr *MRInfo, head string) *headRefusal {
+	if mr == nil {
+		return &headRefusal{Err: fmt.Errorf("merge request is missing")}
+	}
+	if e.git == nil {
+		return &headRefusal{OriginUnreadable: true, Err: fmt.Errorf("git client is missing")}
+	}
+	branch := strings.TrimSpace(mr.Branch)
+	if branch == "" {
+		return &headRefusal{Err: fmt.Errorf("missing source branch")}
+	}
+	// Synthetic merge-mechanics MRs exist to exercise the merge paths on
+	// branches origin has never heard of, so they carry no submission to guard.
+	if e.isSyntheticMergeMechanicsMR(mr) {
+		return nil
+	}
+	commit := strings.TrimSpace(head)
+	if commit == "" {
+		return &headRefusal{Err: fmt.Errorf("missing submitted commit_sha")}
+	}
+	tip, err := e.git.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		return &headRefusal{OriginUnreadable: true, Err: fmt.Errorf(
+			"refusing to gate: cannot read origin/%s to check submitted head %s (%v) — "+
+				"a read failure is not a submission failure; the MR stays queued and re-checks next cycle: %s",
+			branch, shortSHA(commit), err, mr.ID)}
+	}
+	tip = strings.TrimSpace(tip)
+	if tip == "" {
+		return &headRefusal{BranchMissing: true, Err: fmt.Errorf(
+			"refusing to gate: origin has no branch %s, so it cannot carry submitted head %s — "+
+				"the branch is gone and the work may be lost; push origin %s to restore it, or escalate: %s",
+			branch, shortSHA(commit), branch, mr.ID)}
+	}
+	if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", branch, commit); err != nil {
+		return &headRefusal{Err: fmt.Errorf(
+			"refusing to gate: submitted head %s is not reachable from origin/%s (tip %s) — "+
+				"the polecat's push has not landed, or the branch moved underneath the MR; "+
+				"push origin %s so the declared head lands: %s",
+			shortSHA(commit), branch, shortSHA(tip), branch, mr.ID)}
+	}
+	return nil
+}
+
 func (e *Engineer) deleteLocalBranchIfAt(branch, expectedHead string) error {
 	branch = strings.TrimSpace(branch)
 	expectedHead = strings.TrimSpace(expectedHead)
@@ -2149,6 +2232,15 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	if result.SlotTimeout {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Slot timeout: %s - %s\n", mr.ID, result.Error)
 		_, _ = fmt.Fprintln(e.output, "[Engineer] MR remains in queue for automatic retry (slot contention)")
+		return
+	}
+
+	// OriginUnreadable (gt-sda9): the pre-gate reachability assertion could not
+	// read origin, so the submission is unjudged. Same handling as a slot
+	// timeout — keep the MR queued and retry, and nudge nobody.
+	if result.OriginUnreadable {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Origin unreadable while verifying the submitted head of %s: %s\n", mr.ID, result.Error)
+		_, _ = fmt.Fprintln(e.output, "[Engineer] MR remains in queue for automatic retry (origin unreadable)")
 		return
 	}
 
