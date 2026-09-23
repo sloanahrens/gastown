@@ -38,7 +38,7 @@ var templateFS embed.FS
 //   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
 //   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     boot/dog settings-sync path, which must not apply to non-Claude agents.
+//     boot/dog/polecat settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -48,23 +48,50 @@ var templateFS embed.FS
 //
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
+//
+// For boot/dog/polecat on Claude, install goes through the JSON merge path
+// (SyncManagedClaudeSettings) and fails closed: an unparseable hooks-base.json,
+// hooks-override file, or existing settings.json aborts the install with an
+// error naming the file, rather than silently falling back to a template that
+// may be missing hooks a rig-scoped override added. See gt-8stz.
 func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return nil
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	// Boot and dog kennels are managed through the JSON merge path so their
-	// role overrides (e.g. the dog formula-allowlist guard, gt-9iv) are
-	// applied and kept in sync rather than frozen at first install.
-	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog") && isSettingsFile(hooksFile) {
-		_, err := SyncManagedClaudeSettings(Target{
+	// Boot, dog, and polecat kennels are managed through the JSON merge path
+	// so their role overrides are kept in sync rather than frozen at first
+	// install; the needsUpgrade heuristic below has no way to detect a hook
+	// type added in code (gt-8stz REOPENED).
+	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog" || role == "polecat") && isSettingsFile(hooksFile) {
+		// DefaultOverrides keys the polecat entry "polecats" (plural); role is
+		// singular everywhere else. ComputeExpected resolves Key literally, so
+		// this must be normalized or the merge silently drops the override.
+		key := role
+		if role == "polecat" {
+			key = "polecats"
+			// Polecat settings are shared per rig (config.RoleSettingsDir joins
+			// rigPath + "polecats"), and DiscoverTargets/GetApplicableOverrides
+			// manage the file under the rig-scoped key "<rig>/polecats" so that
+			// ~/.gt/hooks-overrides/<rig>__polecats.json is applied. Using the
+			// bare "polecats" key here skips that override, so every polecat
+			// spawn (this call site) would silently drop rig-scoped hooks the
+			// next sync had put in, then gt hooks sync would put them back —
+			// the file would flip on every spawn/sync cycle.
+			if rig := filepath.Base(filepath.Dir(settingsDir)); rig != "." && rig != string(filepath.Separator) && rig != "" {
+				key = rig + "/polecats"
+			}
+		}
+		if _, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
-			Key:      role,
+			Key:      key,
 			Role:     role,
 			Provider: "claude",
-		}, false)
-		return err
+		}, false); err != nil {
+			return fmt.Errorf("installing managed claude settings for role %q at %s: %w", role, targetPath, err)
+		}
+		return nil
 	}
 
 	if existing, err := os.ReadFile(targetPath); err == nil {

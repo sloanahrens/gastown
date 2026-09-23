@@ -10,13 +10,15 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
-	// Claude has autonomous/interactive variants
+	// Claude has autonomous/interactive variants. "polecat" is exercised
+	// separately (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks):
+	// it now routes through the JSON merge path like boot/dog, not the
+	// static template compared here (gt-8stz).
 	tests := []struct {
 		name     string
 		role     string
 		wantFile string // expected template used
 	}{
-		{"autonomous polecat", "polecat", "settings-autonomous.json"},
 		{"autonomous witness", "witness", "settings-autonomous.json"},
 		{"interactive crew", "crew", "settings-interactive.json"},
 		{"interactive mayor", "mayor", "settings-interactive.json"},
@@ -221,6 +223,184 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestInstallForRole_PolecatClaudeSettingsUseManagedHooks pins gt-8stz: a
+// polecat's settings.json is produced by the JSON merge path
+// (SyncManagedClaudeSettings), same as boot/dog, so a hook config change
+// (e.g. the PermissionRequest guard) reaches an existing settings file
+// instead of the install being a silent no-op.
+func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing bool
+	}{
+		{name: "creates managed settings"},
+		{name: "updates existing pre-fix settings", existing: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setTestHome(t, dir)
+			settingsPath := filepath.Join(dir, ".claude", "settings.json")
+
+			if tt.existing {
+				// Simulate the exact production drift: a settings.json written
+				// before the PermissionRequest guard existed, carrying no such
+				// entry, plus a customized field that must survive the sync.
+				if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+					t.Fatalf("creating settings dir: %v", err)
+				}
+				stale := `{"customSentinel":true,"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"gt tap guard dangerous-command"}]}]}}`
+				if err := os.WriteFile(settingsPath, []byte(stale), 0600); err != nil {
+					t.Fatalf("writing existing settings: %v", err)
+				}
+			}
+
+			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+				t.Fatalf("InstallForRole: %v", err)
+			}
+
+			settings, err := LoadSettings(settingsPath)
+			if err != nil {
+				t.Fatalf("LoadSettings: %v", err)
+			}
+			foundGuard := false
+			for _, entry := range settings.Hooks.PermissionRequest {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, "tap guard permission-request") {
+						foundGuard = true
+					}
+				}
+			}
+			if !foundGuard {
+				t.Fatalf("polecat install did not carry the PermissionRequest guard, got: %+v", settings.Hooks.PermissionRequest)
+			}
+			if !HasClaudePromptDefaults(settings) {
+				t.Fatal("polecat managed settings missing Claude prompt defaults")
+			}
+			if tt.existing {
+				if raw, ok := settings.Extra["customSentinel"]; !ok || string(raw) != "true" {
+					t.Fatalf("customSentinel not preserved: %s", raw)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallForRole_PolecatUsesRigScopedOverrideKey pins the install-path
+// regression found reviewing gt-wisp-4nns: polecat settings are shared per
+// rig (config.RoleSettingsDir joins rigPath+"polecats"), and DiscoverTargets/
+// GetApplicableOverrides manage the file under the rig-scoped key
+// "<rig>/polecats" so a ~/.gt/hooks-overrides/<rig>__polecats.json override
+// applies. Resolving the bare "polecats" key instead would silently drop
+// that override on every polecat spawn, and gt hooks sync would put it back
+// — the file would flip between the two on every spawn/sync cycle.
+func TestInstallForRole_PolecatUsesRigScopedOverrideKey(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	override := &HooksConfig{
+		PreToolUse: []HookEntry{
+			{
+				Matcher: "Bash",
+				Hooks: []Hook{
+					{Type: "command", Command: "gt tap guard rig-marker"},
+				},
+			},
+		},
+	}
+	if err := SaveOverride("gastown/polecats", override); err != nil {
+		t.Fatalf("SaveOverride: %v", err)
+	}
+
+	// settingsDir must look like <rig>/polecats for the rig-scoped key
+	// derivation (filepath.Base(filepath.Dir(settingsDir))) to find "gastown",
+	// matching what config.RoleSettingsDir produces for a real polecat spawn.
+	rigRoot := t.TempDir()
+	settingsDir := filepath.Join(rigRoot, "gastown", "polecats")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settingsDir: %v", err)
+	}
+
+	if err := InstallForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	settings, err := LoadSettings(filepath.Join(settingsDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	found := false
+	for _, entry := range settings.Hooks.PreToolUse {
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, "tap guard rig-marker") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("rig-scoped override was not applied — polecat install used the bare \"polecats\" key instead of \"<rig>/polecats\"")
+	}
+}
+
+// TestInstallForRole_PolecatFailsClosedOnUnparseableBaseConfig pins the
+// mayor-scoped decision on gt-8stz: a malformed ~/.gt/hooks-base.json must
+// abort a polecat install with an actionable error naming the file, rather
+// than silently falling back to a template that could be missing hooks a
+// rig-scoped override added. This file controls a security guard's own
+// settings, so installing on unreadable config (or leaving a stale copy in
+// place with no signal) is worse than blocking the spawn with a clear error.
+func TestInstallForRole_PolecatFailsClosedOnUnparseableBaseConfig(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	basePath := BasePath()
+	if err := os.MkdirAll(filepath.Dir(basePath), 0755); err != nil {
+		t.Fatalf("mkdir .gt: %v", err)
+	}
+	if err := os.WriteFile(basePath, []byte(`{not valid json`), 0644); err != nil {
+		t.Fatalf("write malformed base: %v", err)
+	}
+
+	dir := t.TempDir()
+	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
+	if err == nil {
+		t.Fatal("expected error from malformed hooks-base.json, got nil")
+	}
+	if !strings.Contains(err.Error(), basePath) {
+		t.Errorf("error does not name the broken file %q: %v", basePath, err)
+	}
+}
+
+// TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings is the
+// existing-settings.json counterpart: a corrupt settings.json for an
+// already-spawned polecat must abort the install rather than proceed as if
+// the file did not exist.
+func TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{not valid json`), 0600); err != nil {
+		t.Fatalf("write corrupt settings: %v", err)
+	}
+
+	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
+	if err == nil {
+		t.Fatal("expected error from corrupt existing settings.json, got nil")
+	}
+	if !strings.Contains(err.Error(), settingsPath) {
+		t.Errorf("error does not name the broken file %q: %v", settingsPath, err)
+	}
+	if !IsSettingsIntegrityError(err) {
+		t.Errorf("expected a SettingsIntegrityError in the chain, got: %v", err)
 	}
 }
 

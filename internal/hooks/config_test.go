@@ -10,10 +10,15 @@ import (
 )
 
 // setTestHome sets HOME (and USERPROFILE on Windows) so that
-// os.UserHomeDir() returns tmpDir on all platforms.
+// os.UserHomeDir() returns tmpDir on all platforms, and clears GT_HOME so
+// gtConfigDirs() can't fall through to a real town's ~/.gt config — a test
+// running inside a live gastown session (polecat, refinery, ...) normally has
+// GT_HOME set, and gtConfigDirs() checks it before HOME, so leaving it set
+// would make the test read live hooks-base.json/overrides.
 func setTestHome(t *testing.T, tmpDir string) {
 	t.Helper()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("GT_HOME", "")
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", tmpDir)
 	}
