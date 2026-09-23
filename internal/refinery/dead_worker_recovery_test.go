@@ -636,7 +636,11 @@ func TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient(t *testing.T) {
 }
 
 func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel(): fakeBDAndGt uses t.Setenv, which panics with a
+	// parallel ancestor. HandleMRInfoFailure nudges the polecat and mayor
+	// for a non-conflict failure (gt-i0ld) — fake gt on PATH so the test
+	// never shells out to the real binary.
+	fakeBDAndGt(t)
 	// A non-conflict branch failure must consult the dead-worker recovery
 	// seam; conflict failures must not (they get a conflict-resolution task).
 	workDir := t.TempDir()
