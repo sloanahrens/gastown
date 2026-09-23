@@ -21,12 +21,10 @@ var rejectFindingsRE = regexp.MustCompile(`gt mq reject[^\n]*--findings-json`)
 // a severity. Both bullets, so a hand-write under either one is caught.
 var findingLineRE = regexp.MustCompile(`[-•]\s*id:[0-9a-f]{6,}\s+sev:`)
 
-// gt-s4f6: the '- id:<hex> sev:<sev> <path>:<line> — <title>' lines are the
-// contract editorial.BuildPriorFindings parses, and the refinery that writes
-// them is a formula an agent executes — which has already got the format
-// wrong once, emitting the rows under '•' so they matched nothing and the
-// rejection reached the next attempt with no findings at all (gt-3mp1).
-// `gt mq reject --findings-json` formats them from the om verdict instead.
+// The '- id:<hex> sev:<sev> <path>:<line> — <title>' lines are a format
+// contract with editorial.BuildPriorFindings, so a formula must not hand-write
+// them: `gt mq reject --findings-json` formats them from the om verdict
+// (gt-3mp1, gt-s4f6).
 func TestRefineryRejectionRecordsFindingsViaReject(t *testing.T) {
 	const patrol = "formulas/mol-refinery-patrol.formula.toml"
 	raw, err := formulasFS.ReadFile(patrol)

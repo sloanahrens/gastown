@@ -39,6 +39,7 @@ var (
 	mqRejectStdin     bool // Read reason from stdin
 	mqRejectNoRecover bool // Skip dead-worker recovery of the source bead
 	mqRejectFindings  string
+	mqRejectAttempt   int // Attempt this rejection IS, when the caller numbers them
 
 	// List command flags
 	mqListReady  bool
@@ -446,6 +447,7 @@ func init() {
 	mqRejectCmd.Flags().BoolVar(&mqRejectStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
 	mqRejectCmd.Flags().BoolVar(&mqRejectNoRecover, "no-recover", false, "Do not reopen the source bead for redispatch (use for superseded/duplicate/already-merged work)")
 	mqRejectCmd.Flags().StringVar(&mqRejectFindings, "findings-json", "", "Path to a 'gt mq review --json' result (or - for stdin): its findings are recorded on the source bead's notes in the format the next attempt parses, even with --no-recover")
+	mqRejectCmd.Flags().IntVar(&mqRejectAttempt, "attempt", 0, "Attempt number this rejection is, when the caller numbers them: the recorded note names it, so it matches the attempt in --reason")
 
 	// Status flags
 	mqStatusCmd.Flags().BoolVar(&mqStatusJSON, "json", false, "Output as JSON")
@@ -575,11 +577,12 @@ func runMQRetry(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// readRejectFindings parses the om verdict named by --findings-json. The file
-// is a `gt mq review --json` result; a verdict that produced no note (an infra
+// readRejectFindings parses the om verdict named by --findings-json into the
+// record a rejection carries onto the source bead. The file is a
+// `gt mq review --json` result; a verdict that produced no note (an infra
 // failure) contributes no findings, and an empty list is not an error — the
 // rejection is still recorded, just with no finding lines.
-func readRejectFindings(path string) ([]refinery.RejectionFinding, error) {
+func readRejectFindings(path string) (refinery.RejectionRecord, error) {
 	var (
 		raw []byte
 		err error
@@ -590,68 +593,59 @@ func readRejectFindings(path string) ([]refinery.RejectionFinding, error) {
 		raw, err = os.ReadFile(path)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading findings: %w", err)
+		return refinery.RejectionRecord{}, fmt.Errorf("reading findings: %w", err)
 	}
 	var result editorial.ReviewResult
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("parsing findings %s (expected a 'gt mq review --json' result): %w", path, err)
+		return refinery.RejectionRecord{}, fmt.Errorf("parsing findings %s (expected a 'gt mq review --json' result): %w", path, err)
 	}
 	if result.Note == nil {
-		return nil, nil
+		return refinery.RejectionRecord{}, nil
 	}
-	return refinery.RejectionFindingsFromNote(result.Note.Findings), nil
+	// The receipt rides along with the findings so a rejection made through
+	// this flag feeds the deacon's convergence rule the same verdict the
+	// batch path's automatic review does — without it, `gt deacon redispatch`
+	// falls back to plain attempt-count redispatch for the formula path.
+	return refinery.RejectionRecord{
+		Findings: refinery.RejectionFindingsFromNote(result.Note.Findings),
+		Receipt: &refinery.EditorialReceipt{
+			Score:      result.Note.Score,
+			Unresolved: result.Note.PriorFindings.Unresolved,
+		},
+	}, nil
 }
 
-func runMQReject(cmd *cobra.Command, args []string) error {
+// rejectReason resolves the reject reason and rejects the flag combinations
+// that would read it from two places at once. It runs before anything is
+// rejected — and is split out from runMQReject so both refusals are testable
+// without a rig.
+func rejectReason(stdin bool, reason, findingsPath string, stdinReader io.Reader) (string, error) {
 	// Handle --stdin: read reason from stdin (avoids shell quoting issues)
-	if mqRejectStdin {
-		if mqRejectReason != "" {
-			return fmt.Errorf("cannot use --stdin with --reason/-r")
+	if stdin {
+		if reason != "" {
+			return "", fmt.Errorf("cannot use --stdin with --reason/-r")
 		}
-		data, err := io.ReadAll(os.Stdin)
+		if findingsPath == "-" {
+			return "", fmt.Errorf("cannot read both --stdin and --findings-json - from stdin")
+		}
+		data, err := io.ReadAll(stdinReader)
 		if err != nil {
-			return fmt.Errorf("reading stdin: %w", err)
+			return "", fmt.Errorf("reading stdin: %w", err)
 		}
-		mqRejectReason = strings.TrimRight(string(data), "\n")
+		reason = strings.TrimRight(string(data), "\n")
 	}
 
 	// Require reason via --reason or --stdin
-	if mqRejectReason == "" {
-		return fmt.Errorf("required flag \"reason\" not set (use --reason/-r or --stdin)")
+	if reason == "" {
+		return "", fmt.Errorf("required flag \"reason\" not set (use --reason/-r or --stdin)")
 	}
-	if mqRejectStdin && mqRejectFindings == "-" {
-		return fmt.Errorf("cannot read both --stdin and --findings-json - from stdin")
-	}
+	return reason, nil
+}
 
-	rigName := args[0]
-	mrIDOrBranch := args[1]
-
-	mgr, _, _, err := getRefineryManager(rigName)
-	if err != nil {
-		return err
-	}
-
-	result, err := mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover)
-	if err != nil {
-		return fmt.Errorf("rejecting MR: %w", err)
-	}
-
-	// The verdict's findings go onto the source bead's notes as the parseable
-	// lines the next attempt reads back. A caller that runs its own redispatch
-	// passes --no-recover (no note is written on that path) and a caller that
-	// still holds the bead gets no note from recovery either, so this is the
-	// only write either of them gets (gt-s4f6).
-	if mqRejectFindings != "" {
-		findings, ferr := readRejectFindings(mqRejectFindings)
-		if ferr != nil {
-			return ferr
-		}
-		mgr.RecordRejectionFindings(result, mqRejectReason, findings)
-	}
-
+func printRejectionSummary(result *refinery.MergeRequest, reason string, notify bool) {
 	fmt.Printf("%s Rejected: %s\n", style.Bold.Render("✗"), result.Branch)
 	fmt.Printf("  Worker: %s\n", result.Worker)
-	fmt.Printf("  Reason: %s\n", mqRejectReason)
+	fmt.Printf("  Reason: %s\n", reason)
 
 	if result.IssueID != "" {
 		statusNote := "status unknown"
@@ -661,8 +655,61 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("("+statusNote+")"))
 	}
 
-	if mqRejectNotify {
+	if notify {
 		fmt.Printf("  %s\n", style.Dim.Render("Worker notified via mail"))
+	}
+}
+
+func runMQReject(cmd *cobra.Command, args []string) error {
+	reason, err := rejectReason(mqRejectStdin, mqRejectReason, mqRejectFindings, os.Stdin)
+	if err != nil {
+		return err
+	}
+	mqRejectReason = reason
+
+	// Parse --findings-json before rejecting anything: a missing or malformed
+	// file must fail while nothing has changed yet, not after the MR is closed
+	// and recovery has run (gt-s4f6).
+	var rec refinery.RejectionRecord
+	if mqRejectFindings != "" {
+		rec, err = readRejectFindings(mqRejectFindings)
+		if err != nil {
+			return err
+		}
+	}
+	rec.Attempt = mqRejectAttempt
+
+	rigName := args[0]
+	mrIDOrBranch := args[1]
+
+	mgr, _, _, err := getRefineryManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	// The verdict's findings go onto the source bead's notes as the parseable
+	// lines the next attempt reads back. RejectMRRecording does that whatever
+	// --no-recover says: a caller that redispatches the bead itself leaves the
+	// record, and one that lets recovery run gets the identical note from
+	// there (gt-s4f6).
+	var result *refinery.MergeRequest
+	if mqRejectFindings != "" {
+		result, err = mgr.RejectMRRecording(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover, rec)
+	} else {
+		result, err = mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover)
+	}
+
+	// Printed whenever the MR was rejected, error or not: a rejection whose
+	// durable record failed still rejected the MR, and the caller needs to
+	// see both halves.
+	if result != nil {
+		printRejectionSummary(result, mqRejectReason, mqRejectNotify)
+	}
+	if err != nil {
+		if result != nil {
+			return fmt.Errorf("MR rejected, but its findings were not recorded on the source bead: %w", err)
+		}
+		return fmt.Errorf("rejecting MR: %w", err)
 	}
 
 	return nil

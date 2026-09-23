@@ -122,12 +122,8 @@ func TestBuildPriorFindings_ParsesEmptyTitleAndColonInPath(t *testing.T) {
 }
 
 func TestBuildPriorFindings_ParsesBulletPrefixedLines(t *testing.T) {
-	// The rejection notes are written by a formula an agent executes, and it
-	// has emitted these lines under '•' — matching zero times against the
-	// '-'-only pattern, so the rejection carried no findings at all
-	// (gt-3mp1). Either bullet parses; the prose "FINDING [major] ..." lines
-	// the same notes carry are still not findings, because they hold no om
-	// finding id to classify on.
+	// Either bullet parses, and a prose "FINDING [major] ..." line is still
+	// not a finding: it holds no om finding id to classify on (gt-3mp1).
 	notes := `MERGE REJECTION (attempt 1): om-editorial - findings on MR bead gt-mr-1
 • id:cb332644e4cf sev:major internal/hooks/config.go:432 — boot hook override has no self-filtering path
 - id:cc825768ed16 sev:minor internal/hooks/config_test.go:898 — test rewritten to agree with the regression

@@ -771,15 +771,24 @@ is N=1). Reuse this same N below in the FIX_NEEDED mail and the reject
 reason.
 
 ```bash
-gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json > /tmp/<mr-bead-id>-review.json
+REVIEW_DIR="${TMPDIR:-/tmp}/gt-mq-review-$(id -u)"; mkdir -p -m 700 "$REVIEW_DIR"
+gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json > "$REVIEW_DIR/<mr-bead-id>.json"
 REVIEW_EXIT=$?
-cat /tmp/<mr-bead-id>-review.json
+cat "$REVIEW_DIR/<mr-bead-id>.json"
 ```
 
 Keep that file: the reject call on a request_changes verdict records the
 verdict's findings from it, and the exit-2 branch reads its `Class`. A verdict
 you pipe or retype instead of writing to the file is one the reject call
 cannot record.
+
+Write it under your own uid's directory, as above, and not to a bare
+`/tmp/<mr-bead-id>-review.json`: the file is input to the reject call, so a
+predictable name in a world-writable directory is one another local user can
+pre-create or symlink to feed the source bead findings the refinery never
+produced. The other blocks name the same path as
+`"${TMPDIR:-/tmp}/gt-mq-review-$(id -u)/<mr-bead-id>.json"` — each fenced block
+is its own shell, so re-derive it rather than expecting a variable to survive.
 
 Run it in the foreground and wait: a review takes about five minutes,
 well inside any Bash ceiling, so there is nothing to background. A
@@ -817,7 +826,7 @@ per MR for no reason.
   — a re-roll that comes back approve satisfies the push precondition for a
   diff a reviewer already rejected (gt-bveg). One call does both:
   ```bash
-  gt mq reject <rig> <mr-bead-id> --no-recover --findings-json /tmp/<mr-bead-id>-review.json --reason "EDITORIAL REJECTION (attempt <N>): om gate request_changes, <score>, <n> findings"
+  gt mq reject <rig> <mr-bead-id> --no-recover --attempt <N> --findings-json "${TMPDIR:-/tmp}/gt-mq-review-$(id -u)/<mr-bead-id>.json" --reason "EDITORIAL REJECTION (attempt <N>): om gate request_changes, <score>, <n> findings"
   ```
   `--findings-json` appends the MERGE REJECTION note to the source bead —
   the marker, the Branch/Target/MR lines, and one machine-parsable line per om
@@ -825,11 +834,47 @@ per MR for no reason.
   mol-polecat-work resume path read them. Never compose the finding lines
   yourself: a line the formatter did not write parses as no finding, so the
   rejection reaches the next attempt without them and the same defect is
-  re-merged (gt-3mp1, gt-s4f6).
-  `--no-recover` because the same polecat-liveness check and dead-polecat
-  RECOVERED_BEAD redispatch that handle-failures uses for test/build
-  rejections are this step's own (see that step); a second recovery would
+  re-merged (gt-3mp1, gt-s4f6). The call errors if it could not write them, so
+  a rejection you see reported is one the record survived.
+  `--attempt <N>` is the same N the reason names, so the recorded note's own
+  `(attempt <N>)` header agrees with it instead of falling back to the MR's
+  conflict-retry count.
+  `--no-recover` because the polecat-liveness check and dead-polecat
+  RECOVERED_BEAD redispatch below are this step's own; a second recovery would
   hand the deacon a second redispatch request for the same bead.
+- **Check whether the polecat is still alive** (gt-tc0 — transient polecats
+  exit at `gt done` and their source bead is closed, so FIX_NEEDED mail to a
+  dead polecat is never read and this rejection sits unread forever while the
+  MR stays closed):
+  ```bash
+  gt session status <rig>/<polecat-name> --json   # check .running
+  ```
+  **If running is false (or the session does not exist):**
+  1. Reopen the source bead so it is dispatchable:
+     ```bash
+     bd update <issue-id> --status=open --assignee=
+     ```
+  2. Hand it to the deacon redispatch pipeline (cooldown + attempt limits
+     are enforced there):
+     ```bash
+     gt mail send deacon/ -s "RECOVERED_BEAD <issue-id>" --stdin <<'BODY'
+     Merge rejection with no live worker (transient polecat).
+
+     Bead: <issue-id>
+     Polecat: <rig>/polecats/<polecat-name>
+     MR: <mr-bead-id>
+     Branch: <branch>
+     Failure-Type: om-editorial
+     Attempt-Number: <N>
+
+     Source bead reopened with MERGE REJECTION notes. Please re-dispatch.
+     The branch survives on origin; the next polecat can resume it.
+     BODY
+     ```
+  The redispatched polecat reads that note — finding lines included — and
+  fixes forward on the branch. **Completion condition:** the polecat's session
+  was checked, and either it is running (FIX_NEEDED reaches it) or the bead is
+  reopened and the deacon has been mailed.
 - Leave the polecat branch in place — the next polecat fixes forward on it,
   which is what makes this a resubmit rather than a fresh start.
 - Archive the MERGE_READY message and skip to loop-check.
@@ -843,7 +888,7 @@ config_error here means the rig's config changed to required mid-run, or a
 never as an approval or a skip.)
 - Read the failure class from the review JSON:
   ```bash
-  jq -r '.Class' /tmp/<mr-bead-id>-review.json
+  jq -r '.Class' "${TMPDIR:-/tmp}/gt-mq-review-$(id -u)/<mr-bead-id>.json"
   ```
 - Leave the MR bead open and the branch intact — do not touch either.
 - Escalate to the witness with the failure class:
@@ -860,9 +905,10 @@ never as an approval or a skip.)
   ```
 - Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
 
-Track: review exit code, failure class (exit 2 only), MR closed as rejected
-and the source bead carrying the MERGE REJECTION note with its finding lines
-(exit 1 only)."""
+Track: review exit code, failure class (exit 2 only), polecat liveness checked
+and the dead-polecat case reopened + handed to the deacon, and — exit 1 only —
+the MR closed as rejected with the source bead carrying the MERGE REJECTION
+note and its finding lines."""
 
 [[steps]]
 id = "handle-failures"

@@ -13,10 +13,9 @@ import (
 // the FINDING, not the diff it was found on — see RejectionFinding.ID for
 // what a writer of these lines must not use (gt-2ok0).
 //
-// Either bullet matches. The writer is a formula an agent executes, and it
-// has emitted these lines under '•' — a line that then parsed as nothing, so
-// the rejection carried no findings at all (gt-3mp1). The rest of the line is
-// format enough that a bullet choice cannot make a non-finding line match.
+// Either bullet matches: the writer is an agent-executed formula, and the rest
+// of the line is format enough that the bullet cannot make a non-finding line
+// match (gt-3mp1).
 //
 // The prose finding lines the same notes carry ("FINDING [major] <path>
 // (~line N): <title>") are deliberately not parsed: they carry no om finding

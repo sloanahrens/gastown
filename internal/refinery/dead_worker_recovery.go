@@ -140,12 +140,39 @@ func workerNameFromMR(worker string) string {
 	return parts[len(parts)-1]
 }
 
+// rejectionAttempt is the attempt number a rejection is recorded as. A caller
+// that numbers its attempts (mol-refinery-patrol counts the source bead's
+// "MERGE REJECTION (attempt" entries) passes the number it also puts in the
+// reason, so the note header and the reason name the same attempt. The MR's
+// RetryCount is a conflict-retry count and is only a fallback for callers with
+// no attempt of their own (gt-s4f6).
+func rejectionAttempt(mr *MergeRequest, rec *RejectionRecord) int {
+	if rec != nil && rec.Attempt > 0 {
+		return rec.Attempt
+	}
+	return mr.RetryCount + 1
+}
+
+// noteField collapses a free-text note field onto one line. Titles, paths, and
+// the reject reason are model- or agent-supplied, and a newline in one of them
+// injects whole lines into the notes: a forged finding line, a "MERGE
+// REJECTION (attempt" marker that inflates the attempt count, or a receipt
+// line `gt deacon redispatch` reads back (gt-s4f6).
+func noteField(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
+	attempt := req.AttemptNumber
+	if attempt < 1 {
+		attempt = 1
+	}
 	note := fmt.Sprintf("%s (attempt %d): %s - %s\nBranch: %s\nTarget: %s\nMR: %s",
-		MergeRejectionNoteMarker, req.AttemptNumber, req.FailureType, req.ErrorMsg,
+		MergeRejectionNoteMarker, attempt, noteField(req.FailureType), noteField(req.ErrorMsg),
 		req.Branch, req.Target, req.MRID)
 	for _, f := range req.Findings {
-		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s", f.ID, f.Severity, f.Path, f.Line, f.Title)
+		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s",
+			noteField(f.ID), noteField(f.Severity), noteField(f.Path), f.Line, noteField(f.Title))
 	}
 	// Score/Unresolved are the machine-readable receipt `gt deacon
 	// redispatch` greps back out (deacon.ParseEditorialReceiptFromNotes) to
@@ -162,48 +189,28 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 
 // appendRejectionNote adds note to a source bead's notes unless an identical
 // block is already there, so a refinery re-gating an unchanged branch on every
-// poll does not pile up copies of one rejection. `bd update --notes` replaces
-// rather than appends, so the existing text is carried through in the same
-// write (gt-nxvg).
+// poll does not pile up copies of one rejection.
+//
+// The write appends (`--append-notes`) rather than replacing the field from
+// the copy read here: a rejection is usually recorded while the owning polecat
+// is still alive and appending its own notes, and a replace silently drops
+// whatever landed between the read and the write (gt-nxvg).
 //
 // Dead-worker recovery and the Manager's rejection record both write through
 // here so their blocks are byte-identical: the notes are read back by
 // editorial.BuildPriorFindings, and a rejection recorded in a second format is
 // one the next attempt never sees (gt-s4f6).
-func appendRejectionNote(bd rejectedSourceBeads, issue *beads.Issue, note string, logf func(string, ...interface{})) {
+func appendRejectionNote(bd rejectedSourceBeads, issue *beads.Issue, note string) error {
 	if issue == nil || strings.TrimSpace(note) == "" {
-		return
+		return nil
 	}
 	if strings.Contains(issue.Notes, note) {
-		return
+		return nil
 	}
-	combined := note
-	if existing := strings.TrimSpace(issue.Notes); existing != "" {
-		combined = existing + "\n\n" + note
+	if _, err := bd.Run("update", issue.ID, "--append-notes", note); err != nil {
+		return fmt.Errorf("appending rejection note to %s: %w", issue.ID, err)
 	}
-	if _, err := bd.Run("update", issue.ID, "--notes", combined); err != nil {
-		logf("[Engineer] Warning: failed to record rejection note on %s: %v\n", issue.ID, err)
-	}
-}
-
-// rejectionNoteRequest is the rejection-record shape of a rejected MR: the
-// same fields dead-worker recovery writes for the same rejection, so the note
-// text is identical whichever path writes it first. Attempt is the attempt
-// this rejection IS, not the one that failed before it (mr.RetryCount + 1),
-// matching how the reviewer and the RECOVERED_BEAD redispatch number it.
-func rejectionNoteRequest(mr *MergeRequest, rigName, reason string, findings []RejectionFinding) deadWorkerRecoveryRequest {
-	return deadWorkerRecoveryRequest{
-		MRID:          mr.ID,
-		Branch:        mr.Branch,
-		Target:        mr.TargetBranch,
-		SourceIssue:   mr.IssueID,
-		Worker:        mr.Worker,
-		RigName:       rigName,
-		FailureType:   "editorial",
-		ErrorMsg:      reason,
-		AttemptNumber: mr.RetryCount + 1,
-		Findings:      findings,
-	}
+	return nil
 }
 
 // recordRejectionFindings appends the MERGE REJECTION note for req onto its
@@ -211,16 +218,22 @@ func rejectionNoteRequest(mr *MergeRequest, rigName, reason string, findings []R
 // testable without a live beads store (the seam newDeadWorkerRecoverer exists
 // for). The bead is neither reopened nor mailed: the caller's own redispatch
 // path owns that, and this is the record it leaves behind.
-func recordRejectionFindings(bd rejectedSourceBeads, req deadWorkerRecoveryRequest, warn func(string, ...interface{})) {
+//
+// It reports a write it could not make. The durable record IS the point of the
+// call, so a caller that swallows the error exits 0 on a rejection whose
+// findings never reached the next attempt — the failure gt-s4f6 is about.
+func recordRejectionFindings(bd rejectedSourceBeads, req deadWorkerRecoveryRequest) error {
 	if strings.TrimSpace(req.SourceIssue) == "" {
-		return
+		return nil
 	}
 	issue, err := bd.Show(req.SourceIssue)
-	if err != nil || issue == nil {
-		warn("Warning: could not read source bead %s to record rejection findings: %v\n", req.SourceIssue, err)
-		return
+	if err != nil {
+		return fmt.Errorf("reading source bead %s to record rejection findings: %w", req.SourceIssue, err)
 	}
-	appendRejectionNote(bd, issue, formatMergeRejectionNote(req), warn)
+	if issue == nil {
+		return fmt.Errorf("reading source bead %s to record rejection findings: not found", req.SourceIssue)
+	}
+	return appendRejectionNote(bd, issue, formatMergeRejectionNote(req))
 }
 
 // deliberateTerminalCloseReasonMarkers are substrings of a bead's close_reason
@@ -355,8 +368,13 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 
 	// Persist the rejection so it survives into the next session. Notes are
 	// the resume-path contract: mol-polecat-work greps for the marker and the
-	// Branch: line.
-	appendRejectionNote(bd, issue, formatMergeRejectionNote(req), logf)
+	// Branch: line. A write that fails is warned about, not fatal: the reopen
+	// and the RECOVERED_BEAD mail below carry the same findings, and a bead
+	// left closed because its note would not write is the orphan this whole
+	// function exists to avoid.
+	if err := appendRejectionNote(bd, issue, formatMergeRejectionNote(req)); err != nil {
+		logf("[Engineer] Warning: %v\n", err)
+	}
 
 	// Reopen with no assignee so the deacon's Redispatch (which requires
 	// status=open) can re-sling it.
