@@ -218,13 +218,26 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// runtimes that have short hook timeouts (Gemini CLI).
 	staticDelivered := primeStaticTextDelivered()
 	if useCompactResumePath(primeHookSource, primeHandoffReason, staticDelivered) {
-		runPrimeCompactResume(ctx)
-		return nil
+		return runPrimeCompactResume(ctx)
 	}
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
 
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
+	}
+
+	// A patrol role must have a live patrol wisp before the payload is assembled:
+	// starting one is a side effect, and the only section that would otherwise do
+	// it is droppable under the hook budget (gt-e1ie). Running it first also puts
+	// the wisp on the hook, so the never-dropped hooked-work section below
+	// renders the patrol instead of an empty hook.
+	var patrolStatus primePatrolStatus
+	if !primeDryRun {
+		var patrolErr error
+		patrolStatus, patrolErr = ensurePrimePatrol(ctx)
+		if patrolErr != nil {
+			return reportPrimeMissingPatrol(ctx, patrolErr)
+		}
 	}
 
 	// P0: Fetch work context once — used for both OTel attribution and output.
@@ -293,6 +306,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 			explain(true, "Session metadata: always included for seance discovery")
 			return captureOutput(func() { outputSessionMetadata(ctx) })
 		},
+		patrol:     func() string { return primePatrolSection(patrolStatus) },
 		hookedWork: func() string { return hookedWorkText },
 		molecule:   func() string { return captureOutput(func() { outputMoleculeContext(ctx) }) },
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
@@ -369,10 +383,14 @@ func roleRequiresWorktreeIntegrity(role Role) bool {
 // setupPrimeSession and findAgentWork (which hit Dolt) to stay fast
 // enough for non-Claude runtimes with short hook timeouts.
 //
+// Patrol roles are the exception: a resumed witness, refinery or deacon whose
+// patrol wisp is gone has no step to run, and this path renders none of the
+// sections that would tell it so (gt-e1ie).
+//
 // Unlike the full prime path, this outputs a brief recovery line instead of
 // the full AUTONOMOUS WORK MODE block. This prevents agents from re-announcing
 // and re-initializing after compaction. (GH#1965)
-func runPrimeCompactResume(ctx RoleContext) {
+func runPrimeCompactResume(ctx RoleContext) error {
 	// Brief identity confirmation
 	actor := getAgentIdentity(ctx)
 	source := primeHookSource
@@ -381,6 +399,12 @@ func runPrimeCompactResume(ctx RoleContext) {
 	}
 	fmt.Printf("\n> **Recovery**: Context %s complete. You are **%s** (%s).\n",
 		source, actor, ctx.Role)
+
+	status, err := ensurePrimePatrol(ctx)
+	if err != nil {
+		return reportPrimeMissingPatrol(ctx, err)
+	}
+	fmt.Print(primePatrolSection(status))
 
 	// Session metadata for seance
 	outputSessionMetadata(ctx)
@@ -399,6 +423,7 @@ func runPrimeCompactResume(ctx RoleContext) {
 			fmt.Printf("\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit to the merge queue.\n", cli.Name())
 		}
 	}
+	return nil
 }
 
 // validatePrimeFlags checks that CLI flag combinations are valid.
