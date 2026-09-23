@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 
@@ -82,16 +83,18 @@ func runClose(cmd *cobra.Command, args []string) error {
 	// the bead's prefix to the owning rig's directory and strip BEADS_DIR so
 	// bd discovers the database from the working directory.
 	bdArgs := append([]string{"close"}, convertedArgs...)
-	bdCmd := exec.Command("bd", bdArgs...)
+	var dir string
+	var env []string
+	if beadIDs := extractBeadIDs(convertedArgs); len(beadIDs) > 0 {
+		if d := resolveBeadDir(beadIDs[0]); d != "" && d != "." {
+			dir = d
+			env = filterEnvKey(os.Environ(), "BEADS_DIR")
+		}
+	}
+	bdCmd := beads.CommandWithEnv(dir, env, bdArgs...)
 	bdCmd.Stdin = os.Stdin
 	bdCmd.Stdout = os.Stdout
 	bdCmd.Stderr = os.Stderr
-	if beadIDs := extractBeadIDs(convertedArgs); len(beadIDs) > 0 {
-		if dir := resolveBeadDir(beadIDs[0]); dir != "" && dir != "." {
-			bdCmd.Dir = dir
-			bdCmd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
-		}
-	}
 	if err := bdCmd.Run(); err != nil {
 		return err
 	}
@@ -145,11 +148,13 @@ func closeChildren(parentID string, visited map[string]bool, depth int) error {
 
 	// Query children via bd children --json.
 	// Route to the correct rig database via prefix resolution.
-	childCmd := exec.Command("bd", "children", parentID, "--json")
-	if dir := resolveBeadDir(parentID); dir != "" && dir != "." {
-		childCmd.Dir = dir
-		childCmd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
+	var childDir string
+	var childEnv []string
+	if d := resolveBeadDir(parentID); d != "" && d != "." {
+		childDir = d
+		childEnv = filterEnvKey(os.Environ(), "BEADS_DIR")
 	}
+	childCmd := beads.CommandWithEnv(childDir, childEnv, "children", parentID, "--json")
 	out, err := childCmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() != 0 {
@@ -192,13 +197,15 @@ func closeChildren(parentID string, visited map[string]bool, depth int) error {
 
 	fmt.Fprintf(os.Stderr, "Cascade: closing %d children of %s\n", len(childIDs), parentID)
 
-	closeBd := exec.Command("bd", closeArgs...)
+	var closeDir string
+	var closeEnv []string
+	if d := resolveBeadDir(parentID); d != "" && d != "." {
+		closeDir = d
+		closeEnv = filterEnvKey(os.Environ(), "BEADS_DIR")
+	}
+	closeBd := beads.CommandWithEnv(closeDir, closeEnv, closeArgs...)
 	closeBd.Stdout = os.Stdout
 	closeBd.Stderr = os.Stderr
-	if dir := resolveBeadDir(parentID); dir != "" && dir != "." {
-		closeBd.Dir = dir
-		closeBd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
-	}
 	return closeBd.Run()
 }
 
@@ -208,9 +215,9 @@ func extractBeadIDs(args []string) []string {
 	// Flags that consume a following argument (value flags without = form)
 	valueFlags := map[string]bool{
 		"--reason": true, "-r": true,
-		"--session": true,
-		"--actor": true,
-		"--db": true,
+		"--session":          true,
+		"--actor":            true,
+		"--db":               true,
 		"--dolt-auto-commit": true,
 		// Also handle the --comment alias (before conversion)
 		"--comment": true,

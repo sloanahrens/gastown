@@ -296,10 +296,9 @@ type dbPrefixGetter interface {
 type realDBPrefixGetter struct{}
 
 func (r *realDBPrefixGetter) GetDBPrefix(rigPath string) (string, error) {
-	cmd := exec.Command("bd", "config", "get", "issue_prefix")
-	cmd.Dir = rigPath
 	beadsDir := beads.ResolveBeadsDir(rigPath)
-	cmd.Env = append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
+	env := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
+	cmd := beads.CommandWithEnv(rigPath, env, "config", "get", "issue_prefix")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err

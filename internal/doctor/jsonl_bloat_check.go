@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -125,8 +124,7 @@ func countJSONLEntries(rigDir string) (total, ephemeral int, err error) {
 // queryLiveIssueCount returns the total count of issues in the live DB.
 // Counts all records (including closed) to match countJSONLEntries which also counts all.
 func queryLiveIssueCount(rigDir string) (int, error) {
-	cmd := exec.Command("bd", "sql", "--csv", "SELECT COUNT(*) as cnt FROM issues") //nolint:gosec // G204: query is a constant
-	cmd.Dir = rigDir
+	cmd := beads.CommandWithEnv(rigDir, nil, "sql", "--csv", "SELECT COUNT(*) as cnt FROM issues")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("bd sql: %w", err)

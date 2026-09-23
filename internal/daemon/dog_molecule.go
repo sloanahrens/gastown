@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -451,8 +450,7 @@ func (dm *dogMol) runBd(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bdMolTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bdPath, args...)
-	beads.ConfigureCommand(cmd, dm.townRoot, filepath.Join(dm.townRoot, ".beads"), beads.SubprocessModeForArgs(args))
+	cmd := beads.CommandContextWithBin(ctx, bdPath, dm.townRoot, filepath.Join(dm.townRoot, ".beads"), beads.SubprocessModeForArgs(args), args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

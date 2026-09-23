@@ -167,9 +167,7 @@ func (b *bdCmd) buildEnv() []string {
 // This allows callers to further customize the command before execution.
 func (b *bdCmd) Build() *exec.Cmd {
 	args := b.resolvedArgs()
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = b.dir
-	cmd.Env = b.buildEnv()
+	cmd := beads.CommandWithEnv(b.dir, b.buildEnv(), args...)
 	cmd.Stdin = b.stdin
 	cmd.Stderr = b.stderr
 	return cmd
@@ -186,10 +184,8 @@ func resolveBdCmdTimeout() time.Duration {
 
 func (b *bdCmd) buildContextCommand(ctx context.Context) *exec.Cmd {
 	args := b.resolvedArgs()
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := beads.CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
 	util.SetProcessGroup(cmd)
-	cmd.Dir = b.dir
-	cmd.Env = b.buildEnv()
 	cmd.Stdin = b.stdin
 	cmd.Stderr = b.stderr
 	return cmd
@@ -282,10 +278,8 @@ func (b *bdCmd) CombinedOutput() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	args := b.resolvedArgs()
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := beads.CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
 	util.SetProcessGroup(cmd)
-	cmd.Dir = b.dir
-	cmd.Env = b.buildEnv()
 	cmd.Stdin = b.stdin
 	out, err := cmd.CombinedOutput()
 	return out, b.wrapCommandError(ctx, err, deadline)

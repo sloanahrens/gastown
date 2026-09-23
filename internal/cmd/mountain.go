@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -275,8 +275,7 @@ func bdAddLabelTown(beadID, label string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("bd", "update", beadID, "--add-label="+label)
-	cmd.Dir = townBeads
+	cmd := beads.CommandWithEnv(townBeads, nil, "update", beadID, "--add-label="+label)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd update %s --add-label=%s: %w\noutput: %s", beadID, label, err, out)
 	}
@@ -289,8 +288,7 @@ func bdRemoveLabelTown(beadID, label string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("bd", "update", beadID, "--remove-label="+label)
-	cmd.Dir = townBeads
+	cmd := beads.CommandWithEnv(townBeads, nil, "update", beadID, "--remove-label="+label)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd update %s --remove-label=%s: %w\noutput: %s", beadID, label, err, out)
 	}

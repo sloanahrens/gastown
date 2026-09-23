@@ -324,8 +324,7 @@ func runSynthesisClose(cmd *cobra.Command, args []string) error {
 
 	// Read convoy to validate lifecycle state before closing
 	showArgs := []string{"show", convoyID, "--json"}
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = townBeads
+	showCmd := beads.CommandWithEnv(townBeads, nil, showArgs...)
 	var showOut bytes.Buffer
 	showCmd.Stdout = &showOut
 	if err := showCmd.Run(); err != nil {
@@ -354,8 +353,7 @@ func runSynthesisClose(cmd *cobra.Command, args []string) error {
 	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
 		closeArgs = append(closeArgs, "--session="+sessionID)
 	}
-	closeCmd := exec.Command("bd", closeArgs...)
-	closeCmd.Dir = townBeads
+	closeCmd := beads.CommandWithEnv(townBeads, nil, closeArgs...)
 	closeCmd.Stderr = os.Stderr
 
 	if err := closeCmd.Run(); err != nil {
@@ -377,8 +375,7 @@ func getConvoyMeta(convoyID string) (*ConvoyMeta, error) {
 		return nil, err
 	}
 
-	showCmd := exec.Command("bd", "show", convoyID, "--json")
-	showCmd.Dir = townBeads
+	showCmd := beads.CommandWithEnv(townBeads, nil, "show", convoyID, "--json")
 	var stdout bytes.Buffer
 	showCmd.Stdout = &stdout
 
@@ -601,8 +598,7 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 		return "", err
 	}
 
-	createCmd := exec.Command("bd", createArgs...)
-	createCmd.Dir = townBeads
+	createCmd := beads.CommandWithEnv(townBeads, nil, createArgs...)
 	var stdout bytes.Buffer
 	createCmd.Stdout = &stdout
 	createCmd.Stderr = os.Stderr

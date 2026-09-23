@@ -20,11 +20,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // MigrateWispsResult holds migration statistics.
@@ -120,8 +121,7 @@ func MigrateAgentBeadsToWisps(townRoot, workDir string, dryRun bool) (*MigrateWi
 
 // bdSQL executes a SQL query via `bd sql`.
 func bdSQL(workDir, query string) error {
-	cmd := exec.Command("bd", "sql", query)
-	cmd.Dir = workDir
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", query)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -132,8 +132,7 @@ func bdSQL(workDir, query string) error {
 
 // bdSQLCSV executes a SQL query via `bd sql --csv` and returns the output.
 func bdSQLCSV(workDir, query string) (string, error) {
-	cmd := exec.Command("bd", "sql", "--csv", query)
-	cmd.Dir = workDir
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", "--csv", query)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -144,8 +143,7 @@ func bdSQLCSV(workDir, query string) (string, error) {
 
 // bdExec executes a bd command.
 func bdExec(workDir string, args ...string) error {
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = workDir
+	cmd := beads.CommandWithEnv(workDir, nil, args...)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

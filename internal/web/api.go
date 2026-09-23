@@ -1550,10 +1550,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", args...)
-	if h.workDir != "" {
-		cmd.Dir = h.workDir
-	}
+	cmd := beads.CommandContextWithEnv(ctx, h.workDir, nil, args...)
 	cmd.Stdin = nil
 
 	var stdout, stderr bytes.Buffer

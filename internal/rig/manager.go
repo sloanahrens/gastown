@@ -656,9 +656,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 					"--destroy-token=DESTROY-"+opts.BeadsPrefix,
 				)
 			}
-			cmd := exec.Command("bd", initArgs...)
-			cmd.Dir = mayorRigPath
-			cmd.Env = sourceBdEnv
+			cmd := beads.CommandWithEnv(mayorRigPath, sourceBdEnv, initArgs...)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, strings.TrimSpace(string(output)))
 			}
@@ -1068,9 +1066,7 @@ func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefi
 		return nil // bd not installed — rig add already tolerates this elsewhere
 	}
 
-	cmd := exec.Command("bd", "config", "get", "issue_prefix")
-	cmd.Dir = rigPath
-	cmd.Env = bdSubprocessEnv(resolvedBeadsDir, "")
+	cmd := beads.CommandWithEnv(rigPath, bdSubprocessEnv(resolvedBeadsDir, ""), "config", "get", "issue_prefix")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("round-trip verification failed: bd cannot read issue_prefix from database %q: %v (%s)",
@@ -1335,9 +1331,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
 	// --force ensures bd 1.0+ persists issue_prefix on existing server-side DBs.
 	initArgs = append(initArgs, "--force")
-	cmd := exec.Command("bd", initArgs...)
-	cmd.Dir = rigPath
-	cmd.Env = filteredEnv
+	cmd := beads.CommandWithEnv(rigPath, filteredEnv, initArgs...)
 	_, bdInitErr := cmd.CombinedOutput()
 	if bdInitErr != nil {
 		// bd might not be installed or failed — the shared helper below will
@@ -1351,9 +1345,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			{"types.custom", constants.BeadsCustomTypes},
 			{"types.infra", constants.BeadsInfraTypes},
 		} {
-			configCmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
-			configCmd.Dir = rigPath
-			configCmd.Env = filteredEnv
+			configCmd := beads.CommandWithEnv(rigPath, filteredEnv, "config", "set", cfg.key, cfg.value)
 			// Ignore errors - older beads versions don't need this
 			_, _ = configCmd.CombinedOutput()
 		}
@@ -1362,9 +1354,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		// Without this, bd create and gt sling fail with "issue_prefix config is missing".
 		// bd >= 1.0.0 rejects this with "cannot be set via 'bd config set'" because init persists
 		// it directly; treat that as already-set rather than a failure.
-		prefixSetCmd := exec.Command("bd", "config", "set", "issue_prefix", prefix)
-		prefixSetCmd.Dir = rigPath
-		prefixSetCmd.Env = filteredEnv
+		prefixSetCmd := beads.CommandWithEnv(rigPath, filteredEnv, "config", "set", "issue_prefix", prefix)
 		if prefixOutput, prefixErr := prefixSetCmd.CombinedOutput(); prefixErr != nil {
 			out := strings.TrimSpace(string(prefixOutput))
 			if !strings.Contains(out, "cannot be set via") {
@@ -1401,9 +1391,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// Ensure database has repository fingerprint (GH #25).
 	// This is idempotent - safe on both new and legacy (pre-0.17.5) databases.
 	// Without fingerprint, the bd daemon fails to start silently.
-	migrateCmd := exec.Command("bd", "migrate", "--update-repo-id")
-	migrateCmd.Dir = rigPath
-	migrateCmd.Env = filteredEnv
+	migrateCmd := beads.CommandWithEnv(rigPath, filteredEnv, "migrate", "--update-repo-id")
 	migrateOutput, migrateErr := migrateCmd.CombinedOutput()
 	if migrateErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: migrate --update-repo-id failed: %v\nOutput: %s\n", migrateErr, strings.TrimSpace(string(migrateOutput)))
@@ -2045,8 +2033,7 @@ func (m *Manager) ListRigNames() []string {
 // These molecules define the work loops for Deacon, Witness, and Refinery roles.
 func (m *Manager) seedPatrolMolecules(rigPath string) error {
 	// Use bd command to seed molecules (more reliable than internal API)
-	cmd := exec.Command("bd", "mol", "seed", "--patrol")
-	cmd.Dir = rigPath
+	cmd := beads.CommandWithEnv(rigPath, nil, "mol", "seed", "--patrol")
 	if err := cmd.Run(); err != nil {
 		// Fallback: bd mol seed might not support --patrol yet
 		// Try creating them individually via bd create
@@ -2078,21 +2065,20 @@ func (m *Manager) seedPatrolMoleculesManually(rigPath string) error {
 
 	for _, mol := range patrolMols {
 		// Check if already exists by title
-		checkCmd := exec.Command("bd", "list", "--type=molecule", "--format=json")
-		checkCmd.Dir = rigPath
+		checkCmd := beads.CommandWithEnv(rigPath, nil, "list", "--type=molecule", "--format=json")
 		output, _ := checkCmd.Output()
 		if strings.Contains(string(output), mol.title) {
 			continue // Already exists
 		}
 
 		// Create the molecule
-		cmd := exec.Command("bd", "create", //nolint:gosec // G204: bd is a trusted internal tool
+		cmd := beads.CommandWithEnv(rigPath, nil,
+			"create",
 			"--type=molecule",
 			"--title="+mol.title,
 			"--description="+mol.desc,
 			"--priority=2",
 		)
-		cmd.Dir = rigPath
 		if err := cmd.Run(); err != nil {
 			// Non-fatal, continue with others
 			continue

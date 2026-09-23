@@ -36,12 +36,56 @@ func CommandContext(ctx context.Context, dir, fallbackBeadsDir string, mode Subp
 	return cmd
 }
 
+// CommandContextWithBin is CommandContext for a caller that resolves and caches
+// bd's path itself.
+func CommandContextWithBin(ctx context.Context, bin, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
+	ConfigureCommand(cmd, dir, fallbackBeadsDir, mode)
+	return cmd
+}
+
 // ConfigureCommand applies the shared bd subprocess policy to an existing
 // command. This is for callers that need a custom bd path.
 func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode SubprocessEnvMode) {
 	cmd.Dir = dir
 	cmd.Env = EnvForSubprocessMode(os.Environ(), fallbackBeadsDir, mode)
 	util.SetDetachedProcessGroup(cmd)
+}
+
+// CommandWithEnv builds a bd command for a caller that supplies its own dir and
+// env, without the environment policy Command applies; a nil env inherits the
+// parent's environment and takes PWD from dir, as exec.Command does.
+func CommandWithEnv(dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command("bd", args...) //nolint:gosec // G204: args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd
+}
+
+// CommandContextWithEnv is the context-bound counterpart to CommandWithEnv.
+func CommandContextWithEnv(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd
+}
+
+// CommandWithPath is CommandWithEnv for a caller that resolves and caches bd's
+// path itself; for the same with the environment policy applied, use
+// CommandContextWithBin.
+func CommandWithPath(bin, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin/args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd
+}
+
+// CommandContextWithPath is the context-bound counterpart to CommandWithPath.
+func CommandContextWithPath(ctx context.Context, bin, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd
 }
 
 func EnvForSubprocessMode(base []string, fallbackBeadsDir string, mode SubprocessEnvMode) []string {

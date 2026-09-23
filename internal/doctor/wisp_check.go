@@ -3,9 +3,10 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // WispGCCheck detects and cleans orphaned wisps that are older than a threshold.
@@ -88,8 +89,7 @@ func (c *WispGCCheck) Run(ctx *CheckContext) *CheckResult {
 // Queries the wisps table via bd mol wisp list (Dolt server is required).
 func (c *WispGCCheck) countAbandonedWisps(rigPath string) int {
 	// Query wisps table via bd CLI
-	cmd := exec.Command("bd", "mol", "wisp", "list", "--json")
-	cmd.Dir = rigPath
+	cmd := beads.CommandWithEnv(rigPath, nil, "mol", "wisp", "list", "--json")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -134,8 +134,7 @@ func (c *WispGCCheck) Fix(ctx *CheckContext) error {
 		rigPath := filepath.Join(ctx.TownRoot, rigName)
 
 		// Run bd mol wisp gc
-		cmd := exec.Command("bd", "mol", "wisp", "gc")
-		cmd.Dir = rigPath
+		cmd := beads.CommandWithEnv(rigPath, nil, "mol", "wisp", "gc")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			lastErr = fmt.Errorf("%s: %v (%s)", rigName, err, string(output))
 		}

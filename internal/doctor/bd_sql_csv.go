@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // runBdSQLCSV runs `bd sql --csv <query>` in dir and returns the parsed CSV
@@ -17,8 +18,7 @@ import (
 // CombinedOutput corrupts parsing — a one-line notice becomes CSV line 1 and
 // the real header fails with "record on line 2: wrong number of fields" (gt-m7t).
 func runBdSQLCSV(dir, query string) ([][]string, error) {
-	cmd := exec.Command("bd", "sql", "--csv", query) //nolint:gosec // G204: callers pass constant queries
-	cmd.Dir = dir
+	cmd := beads.CommandWithEnv(dir, nil, "sql", "--csv", query)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

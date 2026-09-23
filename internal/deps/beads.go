@@ -51,8 +51,7 @@ func CheckBeads() (BeadsStatus, string) {
 	// Use a clean environment that strips BEADS target env vars
 	// to prevent stale shell state from leaking into version checks.
 	baseEnv := beads.StripBDTargetEnv(os.Environ())
-	cmd := exec.CommandContext(ctx, "bd", "version")
-	cmd.Env = baseEnv
+	cmd := beads.CommandContextWithEnv(ctx, "", baseEnv, "version")
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {

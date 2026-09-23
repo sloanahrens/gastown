@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // execBdShow runs 'bd show' with stdio passthrough on Windows.
@@ -20,12 +22,10 @@ func execBdShow(args []string) error {
 
 	invocation := currentBdShowInvocation(args)
 
-	cmd := exec.Command(bdPath, invocation.CommandArgs...)
-	cmd.Dir = invocation.Dir
+	cmd := beads.CommandWithPath(bdPath, invocation.Dir, invocation.Env, invocation.CommandArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = invocation.Env
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
