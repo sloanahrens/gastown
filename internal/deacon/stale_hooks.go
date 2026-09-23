@@ -409,11 +409,19 @@ func checkWorktreeState(townRoot, assignee string, result *StaleHookResult) {
 
 // AssigneeWorktreePath resolves an assignee address (e.g. "rig/polecats/name")
 // to its git worktree path, for callers outside this package that need the
-// same resolution the stale-hook scan uses — the convoy manager's dead-holder
-// preservation check (gt-utt4) is the other caller. Returns "" if the
-// assignee format is unrecognized or no worktree exists there.
+// same resolution the stale-hook scan uses. Returns "" if the assignee format
+// is unrecognized or no worktree exists there.
 func AssigneeWorktreePath(townRoot, assignee string) string {
 	return assigneeToWorktreePath(townRoot, assignee)
+}
+
+// isUnsafePathComponent reports whether s cannot safely be joined into a
+// filesystem path as a single component: empty, or a "." / ".." traversal
+// segment. Assignees are system-written, but this is exported and now drives
+// a git push (AssigneeWorktreePath's dead-holder caller), so a rig or agent
+// name like ".." must not resolve outside the town root.
+func isUnsafePathComponent(s string) bool {
+	return s == "" || s == "." || s == ".."
 }
 
 // assigneeToWorktreePath resolves an assignee address to its git worktree path.
@@ -427,6 +435,9 @@ func assigneeToWorktreePath(townRoot, assignee string) string {
 
 	rigName, agentType, name := parts[0], parts[1], parts[2]
 	if agentType != "polecats" && agentType != "crew" {
+		return ""
+	}
+	if isUnsafePathComponent(rigName) || isUnsafePathComponent(name) {
 		return ""
 	}
 

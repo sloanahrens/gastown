@@ -52,6 +52,10 @@ func TestAssigneeToWorktreePath_InvalidFormats(t *testing.T) {
 		{"two parts", "gastown/witness"},
 		{"four parts", "a/b/c/d"},
 		{"unknown agent type", "gastown/unknown/agent"},
+		{"rig traversal", "../polecats/max"},
+		{"name traversal", "gastown/polecats/.."},
+		{"rig dot", "./polecats/max"},
+		{"name dot", "gastown/polecats/."},
 	}
 
 	for _, tt := range tests {
