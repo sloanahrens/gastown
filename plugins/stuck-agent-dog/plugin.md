@@ -21,24 +21,23 @@ severity = "high"
 # Stuck Agent Dog
 
 Detects stuck or crashed polecats before restart and escalates deacon issues.
-Unlike the daemon's blind kill-and-restart approach, this plugin checks central
-health and active work state before acting.
+Unlike the daemon's blind kill-and-restart approach, this checks central health
+and active work state before acting.
 
-**Design principle**: The daemon should NEVER kill workers. It detects and logs.
-This plugin makes polecat restart decisions from central health plus active hook
-state, and escalates deacon issues without restarting the deacon itself.
+**Design principle**: the daemon should NEVER kill workers — only detect and
+log. This plugin restarts polecats from central health plus active hook state,
+and escalates deacon issues without restarting the deacon itself.
 
 Reference: WAR-ROOM-SERIAL-KILLER.md, commit f3d47a96.
 
 ## How this runs
 
 The daemon runs `run.sh` directly (`[execution] type = "script"`, claude-l5w):
-the decision framework in Step 4 is encoded in `hook_restartable` and the
-mass-death re-check, so the common all-clear run costs no agent session. A dog
-reads these steps only when `run.sh` exits nonzero — including when an
-escalation or restart mail it sent failed (`ACTION FAILED` in the output).
-Outside a tmux session the script reaches the town server through
-`GT_TMUX_SOCKET`, which the daemon exports.
+Step 4's decision framework is encoded in `hook_restartable` and the
+mass-death re-check, so an all-clear run costs no agent session. A dog reads
+these steps only when `run.sh` exits nonzero — including a failed escalation
+or restart mail (`ACTION FAILED` in the output). Outside tmux the script
+reaches the town server via the daemon-exported `GT_TMUX_SOCKET`.
 
 ## Scope — What You May and May NOT Touch
 
@@ -72,10 +71,9 @@ echo "=== Stuck Agent Dog: Checking agent health ==="
 
 TOWN_ROOT="$HOME/gt"
 
-# Read the live rig registry for operational rig names and beads prefixes.
-# CRITICAL: We need both the rig name (for filesystem paths like $TOWN_ROOT/$RIG/polecats/)
-# and the beads prefix (for tmux session names like $PREFIX-$NAME).
-# These can differ — e.g. rig "cfutons" may have prefix "CF".
+# Read the live rig registry for rig names and beads prefixes.
+# Need both: rig name for paths ($TOWN_ROOT/$RIG/polecats/) and beads
+# prefix for tmux session names ($PREFIX-$NAME) — these can differ.
 if ! RIG_JSON=$(gt rig list --json 2>/dev/null); then
   echo "SKIP: gt rig list --json unavailable; cannot verify operational rig state"
   exit 0
@@ -111,20 +109,15 @@ A polecat is a concern if:
   counts as paused too.
 - Its agent identity bead (`gt polecat identity show --json`) does not report
   a TERMINAL `agent_state` of `done` or `nuked`. A finished polecat can leave
-  behind an unclosed `in_progress` formula-step wisp still carrying its
-  assignee; `gt done`/nuke are the only writers of `done`/`nuked`
-  (`done.go:2500`), so those two values reliably override a lingering
-  hooked/in_progress bead (gt-bd68). `agent_state=idle` is deliberately NOT
-  treated as terminal here: only fresh spawn ever writes `working`
-  (`polecat_spawn.go:465`), so a pool-initialized or reused polecat slung
-  work as an existing agent sits at `idle` while genuinely working.
-  `hook_bead` is likewise not consulted — per `hq-l6mm5`
-  (`sling_helpers.go:888-896`) it is a documented no-op outside fresh spawn
-  and empty/null is expected for that whole class of polecats, not evidence
-  of idleness. If the identity lookup itself fails or is unavailable (older
-  rig, transient error), the gate falls open and defers entirely to the
-  hook-status check above, so identity-bead unavailability never blocks a
-  genuinely stuck restart.
+  an unclosed `in_progress` formula-step wisp still carrying its assignee;
+  `gt done`/nuke are the only writers of `done`/`nuked` (`done.go:2500`), so
+  those two values override a lingering hooked/in_progress bead (gt-bd68).
+  `agent_state=idle` is NOT terminal: only fresh spawn writes `working`
+  (`polecat_spawn.go:465`), so a reused idle polecat may be genuinely working.
+  `hook_bead` is not consulted — per `hq-l6mm5` (`sling_helpers.go:888-896`)
+  it is a documented no-op outside fresh spawn. If the identity lookup fails
+  or is unavailable, the gate falls open to the hook-status check above, so
+  identity-bead unavailability never blocks a genuinely stuck restart.
 
 Polecat liveness must use `gt session health`, which wraps the central
 `tmux.CheckSessionHealth` path. That path reads `GT_PROCESS_NAMES`, `GT_AGENT`,
@@ -256,10 +249,9 @@ fi
 polecat, act only when central runtime health and active hook state agree that
 the polecat is currently actionable.
 
-**SCOPE REMINDER: You may ONLY kill/restart-request entries in the `CRASHED[]`
-and `STUCK[]` arrays populated by Step 2. These arrays contain ONLY polecats.
-Do NOT inspect, evaluate, or act on ANY other sessions (crew, mayor, witness,
-refinery). If you find yourself considering a session not in these arrays, STOP.**
+**SCOPE REMINDER: only kill/restart-request entries in the `CRASHED[]`/`STUCK[]`
+arrays from Step 2 — polecats only. Do NOT act on any other session (crew,
+mayor, witness, refinery). If considering a session not in these arrays, STOP.**
 
 **You (the dog agent) must evaluate each case:**
 
