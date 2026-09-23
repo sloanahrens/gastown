@@ -3874,13 +3874,13 @@ type UncommittedWorkStatus struct {
 	indexSkewFiles    []string
 }
 
-// IndexSkewFiles is the subset of StagedOnly whose content already matches
-// origin's default branch or the local default branch. This is the
-// shared-.repo.git checkout-skew pattern from gt-ui2x: a dormant checkout's
-// index describes a commit that moved out from under it, not real unsaved
-// work. Only CleanExcludingRuntimeAndIndexSkew treats these as non-blocking —
-// every other consumer (HasUncommittedChanges, Clean, gt done) is unaffected,
-// so real staged-but-uncommitted work still blocks everywhere it always has.
+// IndexSkewFiles is the subset of StagedOnly whose content already matches a
+// comparison ref this checkout is at or behind. This is the shared-.repo.git
+// checkout-skew pattern from gt-ui2x: a dormant checkout's index describes a
+// commit that moved out from under it, not real unsaved work. Only
+// CleanExcludingRuntimeAndIndexSkew treats these as non-blocking — every other
+// consumer (HasUncommittedChanges, Clean, gt done) is unaffected, so real
+// staged-but-uncommitted work still blocks everywhere it always has.
 //
 // The classification runs several git subprocesses (classifyIndexSkew), so it
 // is computed lazily on first call and memoized — a caller that never asks
@@ -4053,13 +4053,13 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 }
 
 // CleanExcludingRuntimeAndIndexSkew is CleanExcludingRuntime plus one more
-// exclusion: staged-only files whose content already matches origin's default
-// branch or the local default branch (IndexSkewFiles). Used by polecat
-// seat-reuse dirt checks, where a shared-.repo.git checkout's index can
-// describe a commit that moved out from under it — content already known
-// elsewhere, not real unsaved work (gt-ui2x). gt done and every other
-// uncommitted-work consumer keep using CleanExcludingRuntime unchanged, so
-// this relaxation is scoped to reuse eligibility only.
+// exclusion: staged-only files whose content already matches a comparison ref
+// this checkout is at or behind (IndexSkewFiles). Used by polecat seat-reuse
+// dirt checks, where a shared-.repo.git checkout's index can describe a commit
+// that moved out from under it — content already known elsewhere, not real
+// unsaved work (gt-ui2x). gt done and every other uncommitted-work consumer
+// keep using CleanExcludingRuntime unchanged, so this relaxation is scoped to
+// reuse eligibility only.
 func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew(g *Git) bool {
 	if len(s.UnmergedFiles) > 0 {
 		return false
@@ -4113,6 +4113,14 @@ func (s *UncommittedWorkStatus) String() string {
 // network calls (no fetch) — only refs already known to this clone count, so
 // a polecat that has never fetched fails closed with no candidates rather
 // than reaching out over the network on every dirt check.
+//
+// A candidate ref counts only while HEAD is at or behind it. That is the
+// checkout-skew shape the exemption exists for: a ref that moved out from
+// under a dormant checkout, so the index describes where the ref went. A
+// checkout HEAD is *ahead* of is a different shape entirely — content
+// matching that ref is then a deliberate edit back to it, most often a staged
+// revert of work this checkout carries (gt-ycvx), and the ref is dropped so
+// those paths keep blocking.
 func (g *Git) indexSkewComparisonRefs() []string {
 	branch := g.RemoteDefaultBranch()
 	if branch == "" {
@@ -4120,16 +4128,21 @@ func (g *Git) indexSkewComparisonRefs() []string {
 	}
 	var refs []string
 	for _, ref := range []string{"origin/" + branch, branch} {
-		if _, err := g.run("rev-parse", "--verify", "--quiet", ref); err == nil {
-			refs = append(refs, ref)
+		if _, err := g.run("rev-parse", "--verify", "--quiet", ref); err != nil {
+			continue
 		}
+		if atOrBehind, err := g.IsAncestor("HEAD", ref); err != nil || !atOrBehind {
+			continue
+		}
+		refs = append(refs, ref)
 	}
 	return refs
 }
 
 // classifyIndexSkew narrows paths down to the ones whose staged index blob
-// is affirmatively confirmed identical to the same path's blob on origin's
-// default branch or the local default branch.
+// is affirmatively confirmed identical to the same path's blob on a
+// qualifying comparison ref (see indexSkewComparisonRefs for which refs
+// qualify and why HEAD's position relative to them decides it).
 //
 // This compares blob shas directly (git ls-files -s for the index side, git
 // ls-tree <ref> for the ref side) instead of inferring identity from a

@@ -35,6 +35,37 @@ func initLiveGitRepo(t *testing.T) string {
 	return dir
 }
 
+// initLiveGitRepoWithRemote is initLiveGitRepo plus a bare origin carrying the
+// main branch, so the index-skew comparison refs a real seat has (origin/main
+// and the local main) both exist.
+func initLiveGitRepoWithRemote(t *testing.T) string {
+	t.Helper()
+	dir := initLiveGitRepo(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	for _, args := range [][]string{
+		{"init", "--bare", remote},
+		{"remote", "add", "origin", remote},
+		{"push", "-u", "origin", "main"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// runLiveGit drives git in a probe test worktree, failing the test on error.
+func runLiveGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
 // TestProbeLiveGitState measures the three facts the reuse verdict re-derives
 // from, and fails closed rather than reporting a clean worktree when it cannot
 // measure at all.
@@ -119,6 +150,29 @@ func TestProbeLiveGitState(t *testing.T) {
 		// discriminates layout, not mere repo membership.
 		if !IsWorktreeRoot(rigRoot) {
 			t.Fatalf("IsWorktreeRoot(%q) = false, want true", rigRoot)
+		}
+	})
+
+	// gt-ycvx: the seat verdict this probe feeds is a cleanliness check, so a
+	// staged revert of a fix this checkout carries must read dirty — not as
+	// index skew, which would advertise the seat as reusable with the revert
+	// still in its index.
+	t.Run("staged revert of a fix this checkout carries reads dirty", func(t *testing.T) {
+		dir := initLiveGitRepoWithRemote(t)
+		runLiveGit(t, dir, "checkout", "-b", "polecat/jasper/om-x")
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test fixed\n"), 0644); err != nil {
+			t.Fatalf("write fix: %v", err)
+		}
+		runLiveGit(t, dir, "commit", "-am", "fix: confine the reviewer to a read-only allowlist")
+		runLiveGit(t, dir, "push", "-u", "origin", "polecat/jasper/om-x")
+		runLiveGit(t, dir, "checkout", "origin/main", "--", "README.md")
+
+		got := ProbeLiveGitState(dir)
+		if got.Source != GitStateSourceLive {
+			t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
+		}
+		if !got.Dirty {
+			t.Fatalf("Dirty = false for a seat holding a staged security-fix revert (probe %+v)", got)
 		}
 	})
 }
