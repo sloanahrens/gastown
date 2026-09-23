@@ -308,6 +308,13 @@ const (
 	RoleDog = "dog"
 )
 
+// DeaconSelfProbeSubjectPrefix marks a mail message as a doctor-dog
+// self-probe (see internal/daemon.SendDeaconSelfProbe). Defined here rather
+// than in internal/daemon so internal/mail can also recognize probes (for
+// unread-count purposes) without an import cycle through internal/daemon,
+// which already depends on internal/mail.
+const DeaconSelfProbeSubjectPrefix = "DEACON_SELF_PROBE"
+
 // Role emojis - centralized for easy customization.
 // These match the Gas Town visual identity (see ~/Desktop/Gas Town/ prompts).
 const (

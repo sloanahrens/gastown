@@ -502,6 +502,66 @@ exit 1
 	}
 }
 
+// TestRouterBatchMailSummariesExcludesDeaconSelfProbes is a regression test
+// for gt-ecqx0: DEACON_SELF_PROBE wisps (see daemon.SendDeaconSelfProbe) are
+// a mechanical supervision signal, not mail a human or agent should see in
+// their unread count, and were previously counted like any other unread
+// wisp — inflating `gt status` with "ghost" unreads the deacon had no way
+// to clear (they're filtered out of `gt mail inbox` by the same prefix, so
+// there was nothing to read/ack).
+func TestRouterBatchMailSummariesExcludesDeaconSelfProbes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake bd is POSIX-only")
+	}
+
+	binDir := t.TempDir()
+	fakeBD := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+if [ "$1" = "sql" ]; then
+  case "$3" in
+    *"FROM issues"*)
+      printf '[]\n'
+      ;;
+    *"FROM wisps"*)
+      case "$3" in
+        *"'gastown/max'"*)
+          printf '%s\n' '[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-probe","title":"` + constants.DeaconSelfProbeSubjectPrefix + ` nonce-abc","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0}]'
+          ;;
+        *)
+          printf '[]\n'
+          ;;
+      esac
+      ;;
+    *)
+      printf '[]\n'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected bd args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	summaries, err := r.BatchMailSummaries([]string{"gastown/max"})
+	if err != nil {
+		t.Fatalf("BatchMailSummaries: %v", err)
+	}
+
+	// Only wisp-direct should count; wisp-probe (a DEACON_SELF_PROBE) must
+	// be excluded even though it matches assignee and is unread.
+	if got := summaries["gastown/max"].UnreadCount; got != 1 {
+		t.Errorf("gastown/max UnreadCount = %d, want 1 (probe must be excluded)", got)
+	}
+	if got := summaries["gastown/max"].FirstSubject; got != "Wisp direct" {
+		t.Errorf("gastown/max FirstSubject = %q, want %q", got, "Wisp direct")
+	}
+}
+
 func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a bash bd stub")

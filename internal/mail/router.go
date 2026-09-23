@@ -1599,6 +1599,15 @@ func isSelfMail(from, to string) bool {
 	return AddressToIdentity(from) == AddressToIdentity(to)
 }
 
+// isDeaconSelfProbe reports whether subject identifies a doctor-dog
+// self-probe (internal/daemon.SendDeaconSelfProbe). Probes are a
+// supervision signal read back by the deacon-self-probe doctor check, not
+// mail for a human or agent to triage, so unread-mail counts (Mailbox.Count,
+// BatchMailSummaries) exclude them the same way `gt mail inbox` does.
+func isDeaconSelfProbe(subject string) bool {
+	return strings.HasPrefix(subject, constants.DeaconSelfProbeSubjectPrefix)
+}
+
 // GetMailbox returns a Mailbox for the given address.
 // Routes to the correct beads database based on the address.
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
@@ -1733,6 +1742,9 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 		for i := range wisps {
 			bm := &wisps[i].message
 			if bm.HasLabel("read") {
+				continue
+			}
+			if isDeaconSelfProbe(bm.Title) {
 				continue
 			}
 			assigneeAddr, hasAssignee := variantToAddr[bm.Assignee]
