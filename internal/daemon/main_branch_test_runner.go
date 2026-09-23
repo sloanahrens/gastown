@@ -524,6 +524,83 @@ type MainBranchTestConfig struct {
 	// in main. Set 25 to skip a cycle when less than a quarter of the host's
 	// CPU is idle. Values outside (0, 100] are treated as disabled.
 	MinCPUIdlePercent *float64 `json:"min_cpu_idle_percent,omitempty"`
+
+	// SkipWhenGateBusy makes a cycle yield the container-gate pool to a
+	// refinery holding it instead of competing for a slot (gt-lf2r).
+	//
+	// This patrol is itself gate-class (role "<rig>/main-branch-test", see
+	// slot.IsGateRole), so it takes the reserved slot the merge gates take: a
+	// baseline run that starts while a merge gate is queued delays the merge,
+	// at any interval. Yielding is what makes that harmless.
+	//
+	// Enabled by default, unlike MinCPUIdlePercent: the caller it protects has
+	// the harder deadline, and the rig is picked up again on the next tick.
+	// That default is only safe because the yield is bounded — see
+	// GateBusyStarveAfterStr — and skip_when_gate_busy=false competes instead.
+	SkipWhenGateBusy *bool `json:"skip_when_gate_busy,omitempty"`
+
+	// GateBusyStarveAfterStr bounds the yield above: a rig whose skips have run
+	// unbroken for this long is escalated as untested rather than quietly
+	// skipped again (e.g., "6h"). Default: 6h.
+	//
+	// The yield trades "tested on schedule" for "the merge gate does not
+	// wait", and that trade is only safe bounded: a pool held indefinitely
+	// would otherwise stop the patrol that catches regressions in main,
+	// silently. The rig still yields past the bound rather than running, since
+	// starving a merge gate is what the yield exists to prevent; the
+	// escalation is what gets the held pool looked at. A value <= 0 disables
+	// the bound.
+	GateBusyStarveAfterStr string `json:"gate_busy_starve_after,omitempty"`
+}
+
+// defaultGateBusyStarveAfter is how long a rig may be skipped for a busy gate
+// before the cycle escalates. Six hours is ~6 consecutive skips at the 60m
+// interval: long enough that a normal refinery burst (a few minutes to tens of
+// minutes) never trips it, short enough that a rig starved across a working
+// morning is reported rather than inferred from a missing cycle (gt-lf2r).
+const defaultGateBusyStarveAfter = 6 * time.Hour
+
+// refineryGateRoleSuffixes are the role suffixes that mean "a merge gate is
+// running and this patrol must not make it wait". Both are gate-class roles
+// that take the reserved slot this patrol competes for:
+// "<rig>/refinery" (the rig's own merge gate) and "<rig>/refinery-batch" (the
+// batch gate, internal/cmd/mq_batch.go).
+//
+// Matched as suffixes of the full "<rig>/<role>" string, not by Contains:
+// Contains("/refinery") would also match a role merely mentioning one
+// ("<rig>/my-refinery-watcher"), and a false positive here silently stops the
+// patrol. Suffix matching also keeps "<rig>/main-branch-test" — this runner's
+// own role, which must never count as a busy gate — out of the set without
+// naming it.
+var refineryGateRoleSuffixes = []string{"/refinery", "/refinery-batch"}
+
+// isRefineryGateRole reports whether role is a merge gate holding the pool.
+func isRefineryGateRole(role string) bool {
+	for _, suffix := range refineryGateRoleSuffixes {
+		if strings.HasSuffix(role, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// refineryGateHolder returns the role holding a container-gate slot that is a
+// merge gate, or "" when none is. The first match in slot order wins, so the
+// reason a skip reports is stable across cycles: the report is ordered by slot
+// index, and the reserved slot 0 — the one a merge gate takes first, and the
+// one that hurts most when this patrol takes it instead — comes first.
+//
+// A slot with no readable owner file counts as not-a-holder. That direction is
+// deliberate: an unreadable owner is not evidence of a merge gate, and
+// skipping on it would stop the patrol on a corrupt lock dir rather than on a
+// busy gate.
+func refineryGateHolder(rep slot.Report) string {
+	for _, s := range rep.Slots {
+		if s.Held && s.Owner != nil && isRefineryGateRole(s.Owner.Role) {
+			return s.Owner.Role
+		}
+	}
+	return ""
 }
 
 // mainBranchTestInterval returns the configured interval, or the default (30m).
@@ -566,6 +643,37 @@ func mainBranchTestMinCPUIdlePercent(config *DaemonPatrolConfig) float64 {
 		return *config.Patrols.MainBranchTest.MinCPUIdlePercent
 	}
 	return 0
+}
+
+// mainBranchTestSkipWhenGateBusy returns whether a cycle yields the gate pool
+// to a running merge gate, defaulting to true. The default is the point of the
+// knob (see MainBranchTestConfig.SkipWhenGateBusy): only an explicit false
+// makes this patrol compete with a merge gate for the slot.
+func mainBranchTestSkipWhenGateBusy(config *DaemonPatrolConfig) bool {
+	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil &&
+		config.Patrols.MainBranchTest.SkipWhenGateBusy != nil {
+		return *config.Patrols.MainBranchTest.SkipWhenGateBusy
+	}
+	return true
+}
+
+// mainBranchTestGateBusyStarveAfter returns how long a rig may be skipped for a
+// busy gate before the cycle escalates, or 0 (bound disabled) when the knob is
+// set to a non-positive or unparseable duration. An unparseable value disables
+// the bound rather than silently substituting the default: the alternative
+// reads a typo as agreement (gt-lf2r, same reasoning as
+// hostBusyReason's out-of-range floor, which runs rather than skips).
+func mainBranchTestGateBusyStarveAfter(config *DaemonPatrolConfig) time.Duration {
+	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil {
+		if s := config.Patrols.MainBranchTest.GateBusyStarveAfterStr; s != "" {
+			d, err := time.ParseDuration(s)
+			if err != nil || d <= 0 {
+				return 0
+			}
+			return d
+		}
+	}
+	return defaultGateBusyStarveAfter
 }
 
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
@@ -662,6 +770,39 @@ func (d *Daemon) triggerMainBranchTests() bool {
 // (gt-59yz); see analyzeRunFailure for where it is raised.
 var errMainBranchTestInterrupted = errors.New("main_branch_test run interrupted")
 
+// errMainBranchTestGateBusy marks a rig this cycle deliberately did not test
+// because a merge gate holds the container-gate pool. It is not a verdict about
+// main: the cycle counts it as a skip, so it never reaches the "tested" total an
+// all-green run uses to clear the failure alert (gt-lf2r).
+var errMainBranchTestGateBusy = errors.New("skipped: gate busy")
+
+// mainBranchTestGatePoolStatusFn reads the container-gate pool's held/owner
+// picture for the skip decision. A package variable, following this package's
+// *Fn seam convention (measureHostLoadFn, maintenanceExecFn), so a test can
+// pin a pool state — "gastown/refinery holds slot 0" — without racing a real
+// refinery into a real flock.
+//
+// slot.StatusPoolLocksOnly, not slot.StatusPool: the decision reads nothing
+// but held/owner, and its doc comment names exactly this caller shape as the
+// one that should not pay for the `docker ps` cross-check (gt-a8kx). The
+// container half answers "is an unwrapped suite running", which is the
+// question AcquirePoolReal already asks below — and answers on the state it
+// actually takes the slot in, rather than on a stale check from before the
+// setup commands ran.
+var mainBranchTestGatePoolStatusFn = func(townRoot string) (slot.Report, error) {
+	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
+	pool := slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
+	return slot.StatusPoolLocksOnly(townRoot, pool)
+}
+
+// mainBranchTestEscalateFn reports a rig starved off its baseline test by a
+// persistently busy gate. Seamed for the same reason as maintenanceEscalateFn:
+// the escalation is the only signal that a yielding patrol has stopped testing
+// a rig at all, so it needs a test that drives it.
+var mainBranchTestEscalateFn = func(d *Daemon, key, source, message string) {
+	d.escalateAlert(key, source, message)
+}
+
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates failures.
 func (d *Daemon) runMainBranchTests() {
@@ -702,7 +843,7 @@ func (d *Daemon) runMainBranchTests() {
 	allowedRigs := mainBranchTestRigs(d.patrolConfig)
 	timeout := mainBranchTestTimeout(d.patrolConfig)
 
-	var tested, failed int
+	var tested, failed, skipped int
 	var failures []string
 
 	for _, rigName := range rigNames {
@@ -712,6 +853,24 @@ func (d *Daemon) runMainBranchTests() {
 
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
 		err := d.testRigMainBranch(rigName, rigPath, timeout)
+		if errors.Is(err, errMainBranchTestGateBusy) {
+			// A skip, not a verdict: this rig was not tested, so it must not
+			// count toward the "tested" total the summary and the alert-clearing
+			// below are built on. An all-skipped cycle that reported
+			// "1 tested, 0 failed" would read as a green run over main that
+			// nothing looked at (gt-lf2r).
+			d.logger.Printf("main_branch_test: %s: %s", rigName, oneLine(err.Error()))
+			skipped++
+			d.reportGateBusyStarved(rigName)
+			continue
+		}
+		// This rig got its cycle — it ran, failed, or was stopped mid-run — so
+		// any unbroken run of gate-busy skips it was on is over. Cleared here
+		// rather than on a successful run alone: what the bound measures is
+		// "this rig is not being reached", and a failing run has been reached.
+		if d.clearGateBusySkip(rigName) {
+			d.clearAlerts(fmt.Sprintf("main branch test for %s ran again", rigName), mainBranchTestGateBusyAlertKey(rigName))
+		}
 		if errors.Is(err, errMainBranchTestInterrupted) {
 			// The daemon stopped this run (its context was canceled while the
 			// gate command was in flight), so nothing was verified and the kill
@@ -753,7 +912,74 @@ func (d *Daemon) runMainBranchTests() {
 		d.clearAlerts("main branch tests green", alertKeyMainBranchTest)
 	}
 
-	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed)", tested, failed)
+	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed, %d skipped)", tested, failed, skipped)
+}
+
+// mainBranchTestGateBusyAlertKey is the alert fingerprint for a rig starved off
+// its baseline test by a persistently busy gate. One key per rig: a single
+// town-wide key would let the first rig that runs again clear the alert while
+// another is still starved, which is the silent-starvation this alert exists to
+// end (gt-lf2r).
+func mainBranchTestGateBusyAlertKey(rigName string) string {
+	return "main_branch_test:gate_busy:" + rigName
+}
+
+// reportGateBusyStarved records that rigName was skipped for a busy gate this
+// cycle, and escalates when its unbroken run of such skips has outlasted
+// mainBranchTestGateBusyStarveAfter.
+//
+// The rig stays skipped even past the bound: starving a merge gate is what the
+// yield exists to prevent, so the bound buys visibility, not a forced run. The
+// run it measures lives in this daemon's memory, so a restart restarts the
+// bound — which is the deliberate trade, since a restart already stops and
+// resumes this patrol visibly in the log (gt-lf2r).
+func (d *Daemon) reportGateBusyStarved(rigName string) {
+	skippedFor := d.noteGateBusySkip(rigName, time.Now())
+	starveAfter := mainBranchTestGateBusyStarveAfter(d.patrolConfig)
+	if starveAfter <= 0 || skippedFor < starveAfter {
+		return
+	}
+
+	msg := fmt.Sprintf(
+		"main branch test for %s has been skipped for %s: a merge gate has held the container-gate pool on every cycle since then, so nothing has verified main for this rig in that window.\n"+
+			"The rig keeps yielding — a merge gate must not wait on a baseline run — so this is a report, not a self-heal: look at why the gate pool has been held continuously (a stuck gate holder, or a pool too small for the town's gate traffic).\n"+
+			"bound: patrols.main_branch_test.gate_busy_starve_after (%s); set it to 0 to keep skipping without this escalation, or skip_when_gate_busy=false to compete for the slot instead of yielding.",
+		rigName, skippedFor.Round(time.Minute), starveAfter)
+	d.logger.Printf("main_branch_test: %s: STARVED: not tested for %s while a merge gate held the pool", rigName, skippedFor.Round(time.Minute))
+	mainBranchTestEscalateFn(d, mainBranchTestGateBusyAlertKey(rigName), "main_branch_test", msg)
+}
+
+// noteGateBusySkip starts or advances rigName's unbroken run of gate-busy skips
+// and returns how long that run has lasted. The clock starts on the first skip
+// of a run, and only clearGateBusySkip ends one. now is a parameter rather than
+// a time.Now() call so the run's arithmetic — the part the bound is measured on
+// — is testable without waiting out a real bound.
+func (d *Daemon) noteGateBusySkip(rigName string, now time.Time) time.Duration {
+	d.gateBusyMu.Lock()
+	defer d.gateBusyMu.Unlock()
+	if d.gateBusySince == nil {
+		d.gateBusySince = map[string]time.Time{}
+	}
+	since, ok := d.gateBusySince[rigName]
+	if !ok {
+		since = now
+		d.gateBusySince[rigName] = since
+	}
+	return now.Sub(since)
+}
+
+// clearGateBusySkip ends rigName's run of gate-busy skips, reporting whether
+// there was one to end. The caller uses that to clear the starvation alert only
+// when it could still be up, rather than shelling out a `gt escalate clear` on
+// every cycle of a town whose pool was never contended.
+func (d *Daemon) clearGateBusySkip(rigName string) bool {
+	d.gateBusyMu.Lock()
+	defer d.gateBusyMu.Unlock()
+	if _, ok := d.gateBusySince[rigName]; !ok {
+		return false
+	}
+	delete(d.gateBusySince, rigName)
+	return true
 }
 
 // testRigMainBranch tests a single rig's main branch.
@@ -766,6 +992,30 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	if gateCfg == nil {
 		d.logger.Printf("main_branch_test: %s: no test commands configured, skipping", rigName)
 		return nil
+	}
+
+	// Yield to a running merge gate before any setup work, not just before the
+	// slot wait: the fetch and worktree-add are pointless for a rig this cycle
+	// has already decided not to test, and they are the only steps that touch
+	// the rig's bare repo while a refinery gate may be reading it (gt-lf2r).
+	//
+	// This reading is taken outside the lock, so it is not airtight: a refinery
+	// arriving during the setup below still meets this run at AcquirePoolReal
+	// and waits for it. That window is the setup commands, bounded by
+	// mainBranchTestSetupTimeout, rather than the 60m slot wait the merge gates
+	// were losing.
+	if mainBranchTestSkipWhenGateBusy(d.patrolConfig) {
+		rep, err := mainBranchTestGatePoolStatusFn(d.config.TownRoot)
+		if err != nil {
+			// Failing open: a pool this daemon cannot read is not evidence of
+			// a merge gate, and skipping on it would let a broken lock dir
+			// stop the patrol that catches regressions in main. The run then
+			// goes through AcquirePoolReal below, which applies the real,
+			// authoritative check and blocks on it if it must.
+			d.logger.Printf("main_branch_test: %s: could not read container-gate pool (%v); not treating it as busy", rigName, err)
+		} else if holder := refineryGateHolder(rep); holder != "" {
+			return fmt.Errorf("%w: %s", errMainBranchTestGateBusy, holder)
+		}
 	}
 
 	// Determine default branch

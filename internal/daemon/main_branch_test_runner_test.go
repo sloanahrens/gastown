@@ -1774,3 +1774,504 @@ func TestEnsureLifecycleDefaultsFillsMainBranchTest(t *testing.T) {
 		t.Error("expected MainBranchTest.Enabled=true after defaults")
 	}
 }
+
+// --- gt-lf2r: main_branch_test yields to a busy merge gate ---
+
+// poolHeldBy builds the held/owner picture a status report shows when the named
+// roles hold slots 0..n-1, in order — the shape slot.StatusPoolLocksOnly
+// returns, and the "fake slot state" the skip decision is driven with here.
+func poolHeldBy(roles ...string) slot.Report {
+	rep := slot.Report{Total: len(roles)}
+	for i, role := range roles {
+		rep.Slots = append(rep.Slots, slot.SlotState{
+			Index: i,
+			Held:  true,
+			Owner: &slot.Owner{Role: role, PID: 4242, Slot: i},
+		})
+	}
+	rep.HeldCount = len(roles)
+	rep.Held = len(roles) > 0
+	if len(roles) > 0 {
+		rep.Owner = rep.Slots[0].Owner
+	}
+	return rep
+}
+
+// stubGatePool pins the container-gate pool's held/owner picture for the
+// duration of t so the skip decision is driven by a named pool state instead of
+// racing a real refinery into a real flock — the same need stubHostLoad serves
+// for the host-busy gate (gt-lf2r).
+func stubGatePool(t *testing.T, rep slot.Report) {
+	t.Helper()
+	prev := mainBranchTestGatePoolStatusFn
+	mainBranchTestGatePoolStatusFn = func(string) (slot.Report, error) { return rep, nil }
+	t.Cleanup(func() { mainBranchTestGatePoolStatusFn = prev })
+}
+
+// stubGatePoolError makes the pool unreadable, for the fail-open path.
+func stubGatePoolError(t *testing.T, err error) {
+	t.Helper()
+	prev := mainBranchTestGatePoolStatusFn
+	mainBranchTestGatePoolStatusFn = func(string) (slot.Report, error) { return slot.Report{}, err }
+	t.Cleanup(func() { mainBranchTestGatePoolStatusFn = prev })
+}
+
+// writeTestTownRig lays out the minimum a cycle needs to reach a rig: the rig
+// listed in mayor/rigs.json and, when withGateConfig is set, a config.json whose
+// merge_queue gives the rig something to run. The rig has no .repo.git, so a
+// cycle that gets past the skip decision fails at setup — which is what makes
+// "was this rig skipped?" observable from the error alone.
+func writeTestTownRig(t *testing.T, townRoot, rigName string, withGateConfig bool) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigs, err := json.Marshal(map[string]interface{}{
+		"rigs": map[string]interface{}{rigName: map[string]interface{}{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), rigs, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !withGateConfig {
+		return
+	}
+	cfg, err := json.Marshal(map[string]interface{}{
+		"type": "rig", "version": 1, "name": rigName,
+		"merge_queue": map[string]interface{}{"test_command": "go test ./..."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), cfg, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newMainBranchTestDaemon builds the daemon a cycle test drives: a town root it
+// owns, a logger it can read back, and main_branch_test enabled.
+func newMainBranchTestDaemon(townRoot string, logged *bytes.Buffer, cfg *MainBranchTestConfig) *Daemon {
+	return &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{MainBranchTest: cfg},
+		},
+	}
+}
+
+// TestIsRefineryGateRole pins the suffix match that decides the skip, including
+// the near-misses: Contains("/refinery") would match a role that merely mentions
+// one, and treating this runner's own role as a busy gate would make every cycle
+// skip itself.
+func TestIsRefineryGateRole(t *testing.T) {
+	busy := []string{
+		"gastown/refinery",
+		"gastown/refinery-batch",
+		"otherrig/refinery",
+	}
+	for _, role := range busy {
+		if !isRefineryGateRole(role) {
+			t.Errorf("%q holds a merge gate and must count as busy", role)
+		}
+	}
+
+	notBusy := []string{
+		"gastown/main-branch-test",
+		"gastown/my-refinery-watcher",
+		"gastown/refinery-helper",
+		"gastown/jasper",
+		"gastown/refiner",
+		"",
+	}
+	for _, role := range notBusy {
+		if isRefineryGateRole(role) {
+			t.Errorf("%q is not a merge gate and must not count as busy", role)
+		}
+	}
+}
+
+// TestRefineryGateHolder drives the decision over the pool states it has to tell
+// apart: a free pool runs, a refinery hold skips and names the holder, and a
+// hold by anyone else (a polecat, this runner's own role, a slot with no
+// readable owner) runs.
+func TestRefineryGateHolder(t *testing.T) {
+	cases := []struct {
+		name string
+		rep  slot.Report
+		want string
+	}{
+		{"free pool", slot.Report{Total: 4}, ""},
+		{"refinery holds slot 0", poolHeldBy("gastown/refinery"), "gastown/refinery"},
+		{"batch gate holds slot 0", poolHeldBy("gastown/refinery-batch"), "gastown/refinery-batch"},
+		{"another rig's refinery", poolHeldBy("otherrig/refinery"), "otherrig/refinery"},
+		{"polecat holds a slot", poolHeldBy("gastown/jasper"), ""},
+		{"our own role holds a slot", poolHeldBy("gastown/main-branch-test"), ""},
+		{"held slot with no owner file", slot.Report{
+			Held: true, HeldCount: 1, Total: 4,
+			Slots: []slot.SlotState{{Index: 0, Held: true}},
+		}, ""},
+		{"refinery behind a polecat's slot", poolHeldBy("gastown/jasper", "gastown/refinery"), "gastown/refinery"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := refineryGateHolder(tc.rep); got != tc.want {
+				t.Errorf("refineryGateHolder = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMainBranchTestSkipWhenGateBusyDefault is the "default true" half of the
+// knob: it has to be on for an unconfigured town, and off only when a config
+// says so explicitly. A gate that yields by default is the opposite polarity of
+// min_cpu_idle_percent, so the default is its own documented decision and needs
+// its own test.
+func TestMainBranchTestSkipWhenGateBusyDefault(t *testing.T) {
+	if !mainBranchTestSkipWhenGateBusy(nil) {
+		t.Error("nil config must default to skipping for a busy gate")
+	}
+	if !mainBranchTestSkipWhenGateBusy(&DaemonPatrolConfig{}) {
+		t.Error("a config with no patrols must default to skipping for a busy gate")
+	}
+	unset := &DaemonPatrolConfig{Patrols: &PatrolsConfig{MainBranchTest: &MainBranchTestConfig{Enabled: true}}}
+	if !mainBranchTestSkipWhenGateBusy(unset) {
+		t.Error("an unset skip_when_gate_busy must default to true")
+	}
+
+	no := false
+	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{MainBranchTest: &MainBranchTestConfig{SkipWhenGateBusy: &no}}}
+	if mainBranchTestSkipWhenGateBusy(off) {
+		t.Error("skip_when_gate_busy=false must stop the yield")
+	}
+}
+
+// TestMainBranchTestGateBusyStarveAfter covers the bound's three readings: the
+// default when unset, a configured duration, and a value that cannot be met —
+// which disables the bound rather than silently substituting the default, so a
+// typo reads as "no bound" instead of as agreement.
+func TestMainBranchTestGateBusyStarveAfter(t *testing.T) {
+	if got := mainBranchTestGateBusyStarveAfter(nil); got != defaultGateBusyStarveAfter {
+		t.Errorf("nil config: got %v, want the default %v", got, defaultGateBusyStarveAfter)
+	}
+	if got := mainBranchTestGateBusyStarveAfter(&DaemonPatrolConfig{}); got != defaultGateBusyStarveAfter {
+		t.Errorf("empty config: got %v, want the default %v", got, defaultGateBusyStarveAfter)
+	}
+
+	cfg := func(s string) *DaemonPatrolConfig {
+		return &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			MainBranchTest: &MainBranchTestConfig{GateBusyStarveAfterStr: s},
+		}}
+	}
+	if got := mainBranchTestGateBusyStarveAfter(cfg("2h")); got != 2*time.Hour {
+		t.Errorf("configured bound: got %v, want 2h", got)
+	}
+	for _, s := range []string{"0", "-1h", "not-a-duration"} {
+		if got := mainBranchTestGateBusyStarveAfter(cfg(s)); got != 0 {
+			t.Errorf("bound %q: got %v, want 0 (disabled)", s, got)
+		}
+	}
+}
+
+// TestNoteGateBusySkip_MeasuresTheUnbrokenRun is the arithmetic the starvation
+// bound is measured on: the clock starts at the first skip of a run, keeps
+// running across later skips, and restarts only once the rig has been reached
+// again. Without the restart, one busy hour would leave the rig permanently
+// "starved" and the alert would fire on a single later skip.
+func TestNoteGateBusySkip_MeasuresTheUnbrokenRun(t *testing.T) {
+	d := &Daemon{}
+	start := time.Date(2026, 9, 23, 6, 0, 0, 0, time.UTC)
+
+	if got := d.noteGateBusySkip("gastown", start); got != 0 {
+		t.Errorf("first skip of a run must start the clock, got %v", got)
+	}
+	if got := d.noteGateBusySkip("gastown", start.Add(7*time.Hour)); got != 7*time.Hour {
+		t.Errorf("second skip must report the run, got %v", got)
+	}
+	// A different rig keeps its own clock.
+	if got := d.noteGateBusySkip("otherrig", start.Add(1*time.Hour)); got != 0 {
+		t.Errorf("another rig's first skip must start its own clock, got %v", got)
+	}
+	if !d.clearGateBusySkip("gastown") {
+		t.Fatal("clearGateBusySkip must report the run it ended")
+	}
+	if d.clearGateBusySkip("gastown") {
+		t.Error("clearing a rig with no run must report that there was nothing to clear")
+	}
+	if got := d.noteGateBusySkip("gastown", start.Add(14*time.Hour)); got != 0 {
+		t.Errorf("a reached rig must start a fresh run, got %v", got)
+	}
+}
+
+// TestTestRigMainBranch_SkipsBeforeSetupWhenRefineryHoldsSlot is the acceptance
+// case from gt-lf2r: a pool whose slot 0 is held by gastown/refinery must make
+// the rig skip — naming that holder — before the fetch and worktree-add, not
+// after waiting 60m for a slot the merge gate needs.
+func TestTestRigMainBranch_SkipsBeforeSetupWhenRefineryHoldsSlot(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
+
+	if !errors.Is(err, errMainBranchTestGateBusy) {
+		t.Fatalf("want a gate-busy skip, got %v", err)
+	}
+	if got := err.Error(); got != "skipped: gate busy: gastown/refinery" {
+		t.Errorf("skip must name the holder, got %q", got)
+	}
+	// The rig has no .repo.git, so reaching setup would have produced "bare repo
+	// not found" instead. Asserting on the error above already proves the return
+	// came earlier; this pins it to the fetch, which is the step that must not
+	// run.
+	if out := logged.String(); strings.Contains(out, "git fetch") || strings.Contains(out, "bare repo not found") {
+		t.Errorf("the rig was skipped after setup had started:\n%s", out)
+	}
+}
+
+// TestTestRigMainBranch_FreePoolIsNotSkipped is the guard's other half: with
+// nothing holding the pool the rig must be tested normally. The rig has no bare
+// repo, so "tested normally" surfaces as a setup failure — any error other than
+// the gate-busy sentinel is the proof that the skip decision let it through.
+func TestTestRigMainBranch_FreePoolIsNotSkipped(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy())
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
+
+	if errors.Is(err, errMainBranchTestGateBusy) {
+		t.Fatalf("a free pool must not skip the rig: %v", err)
+	}
+	if err == nil {
+		t.Fatal("expected the bare-repo setup to fail on a town with no .repo.git")
+	}
+	if !strings.Contains(err.Error(), "bare repo not found") {
+		t.Errorf("expected the rig to reach setup, got %v", err)
+	}
+}
+
+// TestTestRigMainBranch_GateBusyCheckCanBeDisabled is the knob's own test: with
+// skip_when_gate_busy=false a refinery hold must not stop the rig, which is what
+// lets a town that would rather compete for the slot opt out.
+func TestTestRigMainBranch_GateBusyCheckCanBeDisabled(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	no := false
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true, SkipWhenGateBusy: &no})
+
+	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
+
+	if errors.Is(err, errMainBranchTestGateBusy) {
+		t.Fatalf("skip_when_gate_busy=false must not skip: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "bare repo not found") {
+		t.Errorf("expected the disabled gate to run the rig to setup, got %v", err)
+	}
+}
+
+// TestTestRigMainBranch_UnreadablePoolDoesNotSkip is the fail-open case: a pool
+// status this daemon cannot read is not evidence of a merge gate, and treating
+// it as one would let a broken lock directory stop the patrol that catches
+// regressions in main.
+func TestTestRigMainBranch_UnreadablePoolDoesNotSkip(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePoolError(t, errors.New("lock dir unreadable"))
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
+
+	if errors.Is(err, errMainBranchTestGateBusy) {
+		t.Fatalf("an unreadable pool must not skip the rig: %v", err)
+	}
+	if out := logged.String(); !strings.Contains(out, "could not read container-gate pool") {
+		t.Errorf("expected the unreadable pool to be logged rather than swallowed:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_AllSkippedCycleCountsSkips is the summary half of
+// gt-lf2r: a cycle that skipped every rig must say so. Reporting "1 tested, 0
+// failed" over a rig nothing looked at is the reading that clears the failure
+// alert on an unverified main.
+func TestRunMainBranchTests_AllSkippedCycleCountsSkips(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	var logged, escalated bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	captureMainBranchTestEscalations(t, &escalated)
+
+	d.runMainBranchTests()
+
+	out := logged.String()
+	if !strings.Contains(out, "skipped: gate busy: gastown/refinery") {
+		t.Errorf("expected the skip to name the holder:\n%s", out)
+	}
+	if !strings.Contains(out, "(0 tested, 0 failed, 1 skipped)") {
+		t.Errorf("expected the summary to count the skip separately from the tests:\n%s", out)
+	}
+	if strings.Contains(out, "FAILED") {
+		t.Errorf("a skipped rig is not a failure:\n%s", out)
+	}
+	// tested == 0 means the cycle must not clear the failure alert: nothing was
+	// verified. clearAlerts shells out to gt and only logs when it fails, so a
+	// clearAlerts line here is exactly the over-clear this guards.
+	if strings.Contains(out, "clearAlerts(") {
+		t.Errorf("an all-skipped cycle must not clear the failure alert:\n%s", out)
+	}
+	// The skip is not yet a starvation: the bound is measured in hours and this
+	// is the first skip of the run.
+	if escalated.Len() > 0 {
+		t.Errorf("a single skip must not escalate a starvation:\n%s", escalated.String())
+	}
+}
+
+// TestRunMainBranchTests_CountsSkipsAcrossRigs pins the tally over more than
+// one rig: the summary has to count every skip, not just the first. The rig
+// order a cycle walks is map order out of mayor/rigs.json, so a per-rig
+// stub would be flaky — the pool state is therefore shared, and both rigs
+// skipping is the case both orders produce.
+func TestRunMainBranchTests_CountsSkipsAcrossRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	addTestTownRig(t, townRoot, "otherrig", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{
+		Enabled: true,
+		// The bound is off so the tally is the only thing this test reports on.
+		GateBusyStarveAfterStr: "0",
+	})
+	captureMainBranchTestEscalations(t, &bytes.Buffer{})
+
+	d.runMainBranchTests()
+
+	if out := logged.String(); !strings.Contains(out, "(0 tested, 0 failed, 2 skipped)") {
+		t.Errorf("expected both rigs counted as skipped:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_StarvedRigEscalates is the alarming branch of the
+// starvation bound: a rig whose skips have run unbroken past the configured
+// bound must be escalated by name, so a yielding patrol that has stopped
+// testing a rig is reported rather than inferred from a missing cycle.
+//
+// It takes two cycles, and that is the point rather than a test artifact: a
+// single skip has waited out nothing, so the clock the bound is measured on has
+// not moved yet. The bound is 1ns so the second cycle crosses it without the
+// test waiting out the default 6h.
+func TestRunMainBranchTests_StarvedRigEscalates(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	var logged, escalated bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{
+		Enabled:                true,
+		GateBusyStarveAfterStr: "1ns",
+	})
+	captureMainBranchTestEscalations(t, &escalated)
+
+	d.runMainBranchTests()
+	if escalated.Len() > 0 {
+		t.Fatalf("the first skip cannot have waited out a bound, but it escalated:\n%s", escalated.String())
+	}
+
+	d.runMainBranchTests()
+
+	out := logged.String()
+	if !strings.Contains(out, "STARVED") {
+		t.Errorf("expected the starvation to be logged loudly:\n%s", out)
+	}
+	body := escalated.String()
+	if !strings.Contains(body, mainBranchTestGateBusyAlertKey("gastown")) {
+		t.Errorf("expected an escalation under this rig's own alert key, got:\n%s", body)
+	}
+	if !strings.Contains(body, "gastown") {
+		t.Errorf("expected the escalation to name the rig, got:\n%s", body)
+	}
+	// The rig still must not have been tested: starving a merge gate is the
+	// outcome the yield exists to prevent, so the bound buys visibility, not a
+	// forced run.
+	if !strings.Contains(out, "(0 tested, 0 failed, 1 skipped)") {
+		t.Errorf("a starved rig is still skipped, not tested:\n%s", out)
+	}
+}
+
+// captureMainBranchTestEscalations redirects the starvation escalation into buf
+// for the duration of the calling test. Seamed for the same reason
+// maintenanceEscalateFn is: the escalation is the only signal that a yielding
+// patrol has stopped testing a rig, so it needs a test that drives it — and one
+// that asserts the escalation does not fire, on the cycles that must not.
+func captureMainBranchTestEscalations(t *testing.T, buf *bytes.Buffer) {
+	t.Helper()
+	prev := mainBranchTestEscalateFn
+	mainBranchTestEscalateFn = func(_ *Daemon, key, source, message string) {
+		fmt.Fprintf(buf, "key=%s source=%s\n%s\n", key, source, message)
+	}
+	t.Cleanup(func() { mainBranchTestEscalateFn = prev })
+}
+
+// addTestTownRig adds a second rig to a town laid out by writeTestTownRig.
+func addTestTownRig(t *testing.T, townRoot, rigName string, withGateConfig bool) {
+	t.Helper()
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	data, err := os.ReadFile(rigsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Rigs map[string]interface{} `json:"rigs"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	parsed.Rigs[rigName] = map[string]interface{}{}
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigsPath, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !withGateConfig {
+		return
+	}
+	cfg, err := json.Marshal(map[string]interface{}{
+		"type": "rig", "version": 1, "name": rigName,
+		"merge_queue": map[string]interface{}{"test_command": "go test ./..."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), cfg, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
