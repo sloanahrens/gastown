@@ -5,7 +5,7 @@ version = 1
 
 [gate]
 type = "cooldown"
-duration = "10m"
+duration = "30m"
 
 [tracking]
 labels = ["plugin:stuck-work-dog", "category:health"]
