@@ -246,6 +246,60 @@ func TestChoosePoolAgentRequestedSeatIsHonoredOrRefused(t *testing.T) {
 	}
 }
 
+// An explicit request for an agent the pool does not own outranks the bead's
+// spent local attempt (gt-gcrk). `gt sling <bead> gastown --agent claude-sonnet`
+// on a local-attempt:1 bead was refused as "overflow full": the spent-attempt
+// rule ran first and answered a request the pool never had. local-attempt:1
+// records an attempt on the pool's own seat, so it says nothing about a seat the
+// pool does not own, and the request has to reach the caller untouched.
+func TestChoosePoolAgentNonPoolRequestOutranksSpentLocalAttempt(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+	capped := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 2, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 2}
+	sess := func(agent string, age time.Duration) poolSession {
+		return poolSession{name: agent + "-" + age.String(), agent: agent, created: now.Add(-age)}
+	}
+	// The state the sonnet sling hit: every seat the bead's labels could route it
+	// to is taken, so the spent-attempt rule refused the sling outright.
+	allFull := []poolSession{
+		sess("local-coder-polecat", 30*time.Minute), sess("local-coder-polecat", 20*time.Minute),
+		sess("deepseek-flash", 30*time.Minute), sess("deepseek-flash", 20*time.Minute),
+	}
+	spent := poolBead{Type: "bug", Labels: []string{localAttemptLabel}}
+
+	// The request stands untouched whether or not the pool is full: it is not the
+	// pool's to admit, and a non-empty answer here is the pool spending on the
+	// provider the caller did not ask for.
+	if a, r, refused := choosePoolAgent(capped, spent, "claude-sonnet", allFull, now); a != "" || r != "" || refused {
+		t.Errorf("a non-pool request on a spent-attempt bead must stand untouched, got %q %q refused=%v", a, r, refused)
+	}
+	if a, r, refused := choosePoolAgent(capped, spent, "claude-sonnet", nil, now); a != "" || r != "" || refused {
+		t.Errorf("a non-pool request with every seat free must stand untouched too, got %q %q refused=%v", a, r, refused)
+	}
+	// An explicit route:* label is the operator's own decision, and rule 1 keeps
+	// it ahead of the request whatever the bead carries (gt-4lbz).
+	routed := poolBead{Type: "bug", Labels: []string{localAttemptLabel, routeFlashLabel}}
+	if a, _, refused := choosePoolAgent(capped, routed, "claude-sonnet", nil, now); a != "deepseek-flash" || refused {
+		t.Errorf("route:flash must still outrank a non-pool request, got %q refused=%v", a, refused)
+	}
+	// A request naming one of the pool's own seats keeps the rules it had: the
+	// spent attempt still spends it on the overflow seat, silently for the local
+	// seat and as a refusal at that seat's cap.
+	if a, r, refused := choosePoolAgent(capped, spent, "local-coder-polecat", nil, now); a != "deepseek-flash" || refused {
+		t.Errorf("a requested local seat on a spent-attempt bead still overflows, got %q refused=%v (%s)", a, refused, r)
+	}
+	if a, r, refused := choosePoolAgent(capped, spent, "deepseek-flash", allFull, now); !refused || a != "deepseek-flash" {
+		t.Errorf("a requested overflow seat at its cap must still refuse, got %q refused=%v (%s)", a, refused, r)
+	}
+	// The seat is the same one the request named, and the line still credits the
+	// spent attempt rather than the request — the request changed no routing.
+	if a, r, refused := choosePoolAgent(capped, spent, "deepseek-flash", nil, now); a != "deepseek-flash" || refused {
+		t.Errorf("a requested overflow seat with room must be taken, got %q refused=%v", a, refused)
+	} else if want := "pool: overflow -> deepseek-flash (local-attempt:1 failed)"; r != want {
+		t.Errorf("reason = %q, want %q", r, want)
+	}
+}
+
 type fakeLister struct {
 	sessions map[string]map[string]string // name -> env
 	created  map[string]time.Time
@@ -506,6 +560,38 @@ func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
 	}
 	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
 		t.Errorf("a refused request must not claim a seat: %v", claims)
+	}
+}
+
+// The sling path the bug was reported on: `gt sling <bead> --agent claude-sonnet`
+// on a local-attempt:1 bead with every seat taken came back as a backpressure
+// refusal, so the convoy feeder deferred a bead that was never the pool's to
+// place (gt-gcrk). The pool must answer nothing here — not a seat, not a
+// refusal, not a claim.
+func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
+	townRoot, added := fakePoolTownWithPool(t,
+		&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 1},
+		poolBead{ID: "gt-b", Type: "bug", Labels: []string{localAttemptLabel}}, nil, nil)
+	now := time.Now()
+	newPoolSessionLister = func() sessionLister {
+		return &fakeLister{
+			sessions: map[string]map[string]string{
+				"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"},
+				"gt-b": {"GT_ROLE": "gastown/polecats/b", "GT_AGENT": "deepseek-flash"},
+			},
+			created: map[string]time.Time{"gt-a": now.Add(-time.Hour), "gt-b": now.Add(-time.Hour)},
+		}
+	}
+
+	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "claude-sonnet")
+	if err != nil || agent != "" || reason != "" {
+		t.Fatalf("a non-pool request must pass through untouched: got %q %q %v", agent, reason, err)
+	}
+	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+		t.Errorf("a request the pool does not answer must claim no seat: %v", claims)
+	}
+	if len(*added) != 0 {
+		t.Errorf("a request the pool does not answer must write no label: %v", *added)
 	}
 }
 
