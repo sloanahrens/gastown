@@ -439,18 +439,12 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 		t.Error("heartbeat step must contain \"gt deacon heartbeat\" command")
 	}
 
-	// inbox-check must depend on heartbeat
+	// inbox-check must run after the heartbeat refresh — directly, or through
+	// an intermediate step the ack-probes step introduced (hq-90m15)
 	for _, step := range f.Steps {
 		if step.ID == "inbox-check" {
-			hasHeartbeatDep := false
-			for _, dep := range step.Needs {
-				if dep == "heartbeat" {
-					hasHeartbeatDep = true
-					break
-				}
-			}
-			if !hasHeartbeatDep {
-				t.Error("inbox-check step must depend on \"heartbeat\" step")
+			if !dependsOnStep(f, "inbox-check", "heartbeat") {
+				t.Error("inbox-check step must depend on \"heartbeat\" step, directly or transitively")
 			}
 			break
 		}
@@ -493,4 +487,29 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 	if !foundMandatoryHandoff {
 		t.Error("deacon patrol formula must require gt handoff after patrol report")
 	}
+}
+
+// dependsOnStep reports whether stepID reaches targetID through the needs
+// graph, so an ordering that holds through an intermediate step still counts.
+func dependsOnStep(f *Formula, stepID, targetID string) bool {
+	needs := make(map[string][]string, len(f.Steps))
+	for _, step := range f.Steps {
+		needs[step.ID] = step.Needs
+	}
+
+	seen := map[string]bool{stepID: true}
+	queue := append([]string{}, needs[stepID]...)
+	for len(queue) > 0 {
+		dep := queue[0]
+		queue = queue[1:]
+		if dep == targetID {
+			return true
+		}
+		if seen[dep] {
+			continue
+		}
+		seen[dep] = true
+		queue = append(queue, needs[dep]...)
+	}
+	return false
 }

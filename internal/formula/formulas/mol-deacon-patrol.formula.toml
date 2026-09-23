@@ -42,6 +42,8 @@ This happens when idle_cycles >= {{idle_effort_threshold}} (no activity detected
 
 Abbreviated patrol rules:
 - **heartbeat**: ALWAYS run (required by daemon).
+- **ack-probes**: ALWAYS run (one mechanical command; a cycle that skips it
+  leaves its self-probe unacked and the doctor check pages the Mayor).
 - **inbox-check**: Run `gt mail drain` only. Skip individual message processing unless drain reports unprocessed HELP or RECOVERED_BEAD messages.
 - **orphan-process-cleanup**: SKIP.
 - **test-pollution-cleanup**: SKIP.
@@ -73,7 +75,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 20
+version = 21
 
 [vars]
 [vars.wisp_type]
@@ -102,9 +104,33 @@ This MUST run before any other step. Skipping it risks the daemon killing a heal
 Deacon mid-cycle."""
 
 [[steps]]
+id = "ack-probes"
+title = "Acknowledge self-probes"
+needs = ["heartbeat"]
+description = """
+Acknowledge the doctor-dog self-probes that arrived since the last cycle.
+
+Probes prove this patrol reacts to an injected event, not just a clock
+heartbeat (glossary "Self-probe"). They are filtered out of `gt mail inbox` and
+their notification is suppressed, so this step is the only place a cycle sees
+them:
+
+```bash
+gt deacon ack-probes
+```
+
+It takes no judgment: the command finds unacked probes and acks each one. Run it
+here, before the long steps, so a probe waits at most one cycle — the
+deacon-self-probe doctor check reads the ack back and pages the Mayor once the
+wait passes `self_probe_budget`.
+
+**Exit criteria:** the command ran this cycle and printed `Acked N/M pending
+probe(s)` or `No pending probes`."""
+
+[[steps]]
 id = "inbox-check"
 title = "Handle callbacks from agents"
-needs = ["heartbeat"]
+needs = ["ack-probes"]
 description = """
 > **Verify a hook by its RENDERED TITLE.** A title printed by `gt hook` or
 > `gt mol status` is the liveness proof; for a hooked MAIL use `gt mail show <id>`.
@@ -213,23 +239,9 @@ The `redispatch` command handles:
 Exit codes: 0=dispatched, 2=cooldown, 3=skipped. Non-zero non-error codes are
 informational - archive the message regardless.
 
-**DEACON_SELF_PROBE messages** (from doctor-dog, gt-jmy3):
-Subject format: `DEACON_SELF_PROBE <nonce>`. Sent once per doctor-dog cycle
-(every 5m) to prove the patrol reacts to a known injected event rather than
-just a clock heartbeat (glossary "Self-probe"). These never appear in
-`gt mail inbox` (filtered by the DEACON_SELF_PROBE prefix, same as `gt
-status` unread counts) — you cannot discover their message IDs there.
-Mechanical only — no judgment call, one command handles all pending probes:
-```bash
-gt deacon ack-probes
-```
-This reads the mailbox directly (bypassing the inbox filter), finds
-unacked probes, and acks each one exactly as `gt mail read <id>` would
-(delivery:acked label) — that ack is what the deacon-self-probe doctor
-check reads back on the next doctor-dog cycle. It does NOT archive/delete
-the messages: they stay in the inbox, acked, until the doctor-dog cycle
-that reads them back has run; the normal wisp GC reaps them afterward
-since they're wisps (Message.Wisp=true).
+**DEACON_SELF_PROBE messages** (from doctor-dog): these are acked in the
+`ack-probes` step above, not here. They never appear in `gt mail inbox`, so
+this step's drain cannot surface them.
 
 Callbacks may spawn new polecats, update issue state, or trigger other actions.
 
@@ -1353,6 +1365,14 @@ Refresh the heartbeat again immediately before the long idle wait:
 gt deacon heartbeat "pre-await checkpoint"
 ```
 
+Then ack any probe that arrived while this cycle was working. The wait below can
+run 15 minutes, and without this the next cycle's `ack-probes` step is the only
+other opportunity — the deacon-self-probe doctor check reads that ack back:
+
+```bash
+gt deacon ack-probes
+```
+
 Use await-signal with exponential backoff to wait for activity:
 
 ```bash
@@ -1398,6 +1418,7 @@ After await-signal returns, check the EFFORT directive in the output:
 
 **If `EFFORT: reduced`** — Run ABBREVIATED patrol:
 - heartbeat: ALWAYS run
+- ack-probes: ALWAYS run
 - inbox-check: Quick drain only, skip individual messages unless HELP/RECOVERED_BEAD
 - orphan-process-cleanup through fire-notifications: SKIP all
 - heartbeat-mid: SKIP
@@ -1418,9 +1439,9 @@ After await-signal returns (either by signal or timeout):
 3. Close current patrol and start next cycle:
 ```bash
 gt patrol report --summary "<brief summary>" \
-  --steps "heartbeat:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
+  --steps "heartbeat:OK,ack-probes:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
-The --steps flag is REQUIRED. List ALL 27 steps with their actual status.
+The --steps flag is REQUIRED. List ALL 28 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created

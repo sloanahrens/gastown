@@ -80,9 +80,9 @@ type RoleHealthConfig struct {
 	HungSessionThreshold Duration `toml:"hung_session_threshold"`
 
 	// SelfProbeBudget is how long the deacon patrol has to acknowledge a
-	// DEACON_SELF_PROBE mail before it's judged late. Sized for an agent
-	// patrol loop (minutes), deliberately separate from PingTimeout, which
-	// is a network health-check value (seconds) — see daemon.deaconSelfProbeBudget.
+	// DEACON_SELF_PROBE mail before it's judged late. It bounds one patrol
+	// cycle, deliberately separate from PingTimeout, which is a network
+	// health-check value (seconds) — see daemon.deaconSelfProbeBudget.
 	SelfProbeBudget Duration `toml:"self_probe_budget"`
 }
 

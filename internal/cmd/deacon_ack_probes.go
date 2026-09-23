@@ -73,6 +73,11 @@ func runDeaconAckProbes(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acking probes: %w", err)
 	}
 
+	// Record the run even when nothing was pending: the doctor check reads it
+	// to tell a probe the patrol never had the chance to ack from one it left
+	// behind (hq-90m15). Best-effort — a failed record must not fail the ack.
+	_ = daemon.RecordDeaconAckProbesRun(townRoot)
+
 	if deaconAckProbesJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

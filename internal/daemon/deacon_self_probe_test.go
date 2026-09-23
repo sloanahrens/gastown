@@ -65,6 +65,16 @@ func writeDeaconSelfProbeBaselineForTest(t *testing.T, townRoot, nonce string, s
 	}
 }
 
+// writeAckProbesRunForTest records an ack-probes run at at, standing in for a
+// patrol that reached its ack step. Recorded after a probe's send time, it is
+// what turns a still-unacked probe from "no opportunity yet" into a miss.
+func writeAckProbesRunForTest(t *testing.T, townRoot string, at time.Time) {
+	t.Helper()
+	if err := writeDeaconAckProbesRun(deaconAckProbesRunPath(townRoot), deaconAckProbesRun{LastRun: at}); err != nil {
+		t.Fatalf("writeDeaconAckProbesRun: %v", err)
+	}
+}
+
 // writeDeaconHealthSelfProbeBudget writes a town-level roles/deacon.toml
 // override so deaconSelfProbeBudget resolves to a known value instead of
 // the compiled-in default (config/roles/deacon.toml's self_probe_budget =
@@ -199,13 +209,15 @@ func TestEvaluateDeaconSelfProbe_UnackedWithinBudget_Pending(t *testing.T) {
 }
 
 // TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error is the other side of
-// the boundary: once elapsed (20m) exceeds the budget (15m), the same
-// still-unacked probe becomes Error — escalation fires only after the
-// budget is actually exceeded, not merely because a probe is outstanding.
+// the boundary: once elapsed (20m) exceeds the budget (15m) AND an ack-probes
+// run has covered the probe, the same still-unacked probe becomes Error —
+// escalation fires only after the budget is exceeded and the patrol had its
+// chance to ack, not merely because a probe is outstanding.
 func TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-10*time.Minute))
 
 	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
 		unackedProbeMessage("nonce-1"),
@@ -216,8 +228,98 @@ func TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error(t *testing.T) {
 	if verdict.Verdict != deaconSelfProbeVerdictError {
 		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictError, verdict.Message)
 	}
-	if !strings.Contains(verdict.Message, "not ack") {
-		t.Errorf("Message = %q, want it to say the probe was not acked", verdict.Message)
+	if !strings.Contains(verdict.Message, "unacked") {
+		t.Errorf("Message = %q, want it to say the probe was left unacked", verdict.Message)
+	}
+}
+
+// TestEvaluateDeaconSelfProbe_UnackedPastBudget_NoAckOpportunity_Pending is
+// the hq-90m15 false positive this guard removes: a patrol acks only when it
+// reaches its ack-probes step, so a probe sent when no ack-probes run has
+// happened since is past the budget but not yet evidence of a missed ack.
+// Without the guard this reads as Error, which is how a healthy patrol paged
+// the Mayor on every probe.
+func TestEvaluateDeaconSelfProbe_UnackedPastBudget_NoAckOpportunity_Pending(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
+
+	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
+		unackedProbeMessage("nonce-1"),
+	}}
+
+	verdict := evaluateDeaconSelfProbeWith(reader, townRoot)
+
+	if verdict.Verdict != deaconSelfProbeVerdictPending {
+		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictPending, verdict.Message)
+	}
+	if !strings.Contains(verdict.Message, "ack opportunity") {
+		t.Errorf("Message = %q, want it to say no ack opportunity has passed", verdict.Message)
+	}
+}
+
+// TestEvaluateDeaconSelfProbe_StaleAckRun_Pending guards the other direction:
+// an ack-probes run from BEFORE the probe was sent proves only that the patrol
+// was cycling earlier, not that this probe ever had its chance.
+func TestEvaluateDeaconSelfProbe_StaleAckRun_Pending(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-40*time.Minute))
+
+	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
+		unackedProbeMessage("nonce-1"),
+	}}
+
+	verdict := evaluateDeaconSelfProbeWith(reader, townRoot)
+
+	if verdict.Verdict != deaconSelfProbeVerdictPending {
+		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictPending, verdict.Message)
+	}
+}
+
+// TestEvaluateDeaconSelfProbe_NoAckRunPastCeiling_Error is the ceiling: a
+// patrol that has not reached its ack-probes step for twice the budget is not
+// merely slow to ack, it has stopped cycling — the failure the probe exists to
+// catch, and the one the no-opportunity guard would otherwise hide forever.
+func TestEvaluateDeaconSelfProbe_NoAckRunPastCeiling_Error(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-40*time.Minute))
+
+	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
+		unackedProbeMessage("nonce-1"),
+	}}
+
+	verdict := evaluateDeaconSelfProbeWith(reader, townRoot)
+
+	if verdict.Verdict != deaconSelfProbeVerdictError {
+		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictError, verdict.Message)
+	}
+	if !strings.Contains(verdict.Message, "no ack step") {
+		t.Errorf("Message = %q, want it to say the patrol never reached its ack step", verdict.Message)
+	}
+}
+
+// TestEvaluateDeaconSelfProbe_AckedLateOnCoveringCycle_OK is the steady state
+// hq-90m15 reported as failing: the patrol acks at the first cycle boundary
+// after the send, so the ack latency is one patrol cycle. With the budget sized
+// for a cycle, that ack is healthy — not the "acked late" Error a 15m budget
+// produced on every probe.
+func TestEvaluateDeaconSelfProbe_AckedLateOnCoveringCycle_OK(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "45m")
+	sentAt := time.Now().Add(-40 * time.Minute)
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", sentAt)
+
+	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
+		ackedProbeMessage("nonce-1", sentAt, 30*time.Minute), // one ~30m patrol cycle
+	}}
+
+	verdict := evaluateDeaconSelfProbeWith(reader, townRoot)
+
+	if verdict.Verdict != deaconSelfProbeVerdictOK {
+		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictOK, verdict.Message)
 	}
 }
 
@@ -289,6 +391,7 @@ func TestDeaconSelfProbe_EscalatesAfterConsecutiveErrors(t *testing.T) {
 	townRoot := t.TempDir()
 	sentAt := time.Now().Add(-1 * time.Hour)
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", sentAt)
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
 
 	recorder := &fakeAlertRecorder{}
 	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
@@ -330,6 +433,7 @@ func TestDeaconSelfProbe_EscalatesAfterConsecutiveErrors(t *testing.T) {
 func TestDeaconSelfProbe_EscalatesOnceThenDedupes(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
 	recorder := &fakeAlertRecorder{}
 	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
 
@@ -354,6 +458,7 @@ func TestDeaconSelfProbe_EscalatesOnceThenDedupes(t *testing.T) {
 func TestDeaconSelfProbe_BelowThreshold_NoEscalation(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
 	recorder := &fakeAlertRecorder{}
 	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
 
@@ -375,6 +480,7 @@ func TestDeaconSelfProbe_Recovery_ResetsCounterAndClears(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "1h") // generous, so the OK round doesn't trip on latency
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
 	recorder := &fakeAlertRecorder{}
 
 	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
@@ -414,6 +520,7 @@ func TestDeaconSelfProbe_Recovery_ResetsCounterAndClears(t *testing.T) {
 func TestDeaconSelfProbe_Skipped_LeavesCounterUntouched(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
+	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
 	recorder := &fakeAlertRecorder{}
 
 	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
@@ -631,5 +738,29 @@ func TestEvaluateDeaconSelfProbe_LastSendFailed_Skipped(t *testing.T) {
 
 	if verdict.Verdict != deaconSelfProbeVerdictSkipped {
 		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictSkipped, verdict.Message)
+	}
+}
+
+// TestRecordDeaconAckProbesRun_RoundTrips covers the record the cadence guard
+// reads: `gt deacon ack-probes` writes it, and an evaluation in a later process
+// must read the same time back (hq-90m15).
+func TestRecordDeaconAckProbesRun_RoundTrips(t *testing.T) {
+	townRoot := t.TempDir()
+
+	if _, ok := readDeaconAckProbesRun(townRoot); ok {
+		t.Fatal("expected no ack-probes run before one is recorded")
+	}
+
+	before := time.Now().Add(-time.Second)
+	if err := RecordDeaconAckProbesRun(townRoot); err != nil {
+		t.Fatalf("RecordDeaconAckProbesRun: %v", err)
+	}
+
+	got, ok := readDeaconAckProbesRun(townRoot)
+	if !ok {
+		t.Fatal("expected an ack-probes run after recording one")
+	}
+	if got.Before(before) || got.After(time.Now().Add(time.Second)) {
+		t.Errorf("recorded run = %s, want a time near now", got)
 	}
 }
