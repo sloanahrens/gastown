@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -506,7 +508,7 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	// --force for its own safety guards, so a cap --force opens is one those
 	// paths are not held by (gt-4lbz). Capacity is raised in the pool's own
 	// settings, which the caller reads on the next sling.
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
 		t.Errorf("a refused sling must not claim a seat: %v", claims)
 	}
 
@@ -558,7 +560,7 @@ func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "sling refused: ") {
 		t.Errorf("the refusal must carry the deferral marker: %q", err)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
 		t.Errorf("a refused request must not claim a seat: %v", claims)
 	}
 }
@@ -587,7 +589,7 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
 	if err != nil || agent != "" || reason != "" {
 		t.Fatalf("a non-pool request must pass through untouched: got %q %q %v", agent, reason, err)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
 		t.Errorf("a request the pool does not answer must claim no seat: %v", claims)
 	}
 	if len(*added) != 0 {
@@ -746,6 +748,18 @@ const (
 	claimOverflow = "deepseek-flash"
 )
 
+// mustReadPoolSeatClaims reads the claims for a test. Every caller here reads a
+// directory it wrote itself, so a read failure is the test being wrong, not a
+// claim set to report on the way past.
+func mustReadPoolSeatClaims(t *testing.T, townRoot string) []poolSeatClaim {
+	t.Helper()
+	claims, err := readPoolSeatClaims(townRoot)
+	if err != nil {
+		t.Fatalf("reading seat claims: %v", err)
+	}
+	return claims
+}
+
 // fakeRacingPoolTown wires a town with local seats and, unless a gap is given,
 // no stagger at all — so the seat count alone decides. The tmux server has not
 // heard of any of the slings racing each other, which is the moment the cap
@@ -841,13 +855,13 @@ func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
 	if a, r := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
 		t.Fatalf("empty pool: want the local seat, got %q (%s)", a, r)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
 		t.Fatalf("a local route must claim a seat, got %d claims", len(claims))
 	}
 
 	// StartSession: the tmux session is now the record of that seat.
 	releasePoolSeatClaim()
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
 		t.Fatalf("StartSession must drop the claim, %d left", len(claims))
 	}
 
@@ -873,7 +887,7 @@ func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
 	if a, _, _ := peekPolecatPoolAgent(townRoot, "gt-a", ""); a != claimLocal {
 		t.Fatalf("empty pool: the preview route should be the local seat, got %q", a)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 0 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
 		t.Fatalf("a dry run must not claim a seat, got %d claims", len(claims))
 	}
 
@@ -885,7 +899,7 @@ func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
 	if _, r, _ := peekPolecatPoolAgent(townRoot, "gt-b", ""); !strings.Contains(r, "local seat 2/2") {
 		t.Errorf("the preview must count the seat another sling claimed: %q", r)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
 		t.Errorf("a dry run must not drop another sling's claim, %d left", len(claims))
 	}
 }
@@ -916,10 +930,217 @@ func TestPoolSeatClaimCleanupDropsCrashedAndStaleSlingers(t *testing.T) {
 
 	cleanupStalePoolSeatClaims(townRoot, time.Now())
 
-	got := readPoolSeatClaims(townRoot)
+	got := mustReadPoolSeatClaims(t, townRoot)
 	if len(got) != 1 || got[0].ID != held.ID {
 		t.Fatalf("only the live, fresh claim survives, got %v (crashed=%s stale=%s held=%s)",
 			got, crashed.ID, stale.ID, held.ID)
+	}
+}
+
+// ── A claim set that cannot be read (gt-t8q5) ───────────────────────────────
+
+// errSeatFSUnreadable stands in for the failure a real directory read produces
+// (permissions, I/O) — the one that is not "no directory yet".
+var errSeatFSUnreadable = errors.New("input/output error")
+
+// fakeSeatFS is the seat claim filesystem in memory. It records every operation,
+// so a test can tell a claim that was made and dropped from one that was never
+// made, and it can be told to fail its directory reads, which is how the
+// fail-closed path is reached without a town on disk.
+type fakeSeatFS struct {
+	mu         sync.Mutex
+	dirs       map[string]bool
+	files      map[string][]byte
+	ops        []string
+	readDirErr error
+}
+
+func newFakeSeatFS() *fakeSeatFS {
+	return &fakeSeatFS{dirs: map[string]bool{}, files: map[string][]byte{}}
+}
+
+// injectSeatFS puts an in-memory claim filesystem in place for one test.
+func injectSeatFS(t *testing.T) *fakeSeatFS {
+	t.Helper()
+	seatFS := newFakeSeatFS()
+	orig := poolSeatClaimFS
+	poolSeatClaimFS = seatFS
+	t.Cleanup(func() { poolSeatClaimFS = orig })
+	return seatFS
+}
+
+// injectUnreadableSeatFS injects a claim filesystem whose directory reads fail.
+func injectUnreadableSeatFS(t *testing.T) *fakeSeatFS {
+	t.Helper()
+	seatFS := newFakeSeatFS()
+	seatFS.readDirErr = errSeatFSUnreadable
+	orig := poolSeatClaimFS
+	poolSeatClaimFS = seatFS
+	t.Cleanup(func() { poolSeatClaimFS = orig })
+	return seatFS
+}
+
+func (f *fakeSeatFS) log(format string, args ...any) {
+	f.ops = append(f.ops, fmt.Sprintf(format, args...))
+}
+
+// claimFiles names the claim files still present.
+func (f *fakeSeatFS) claimFiles() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.files))
+	for path := range f.files {
+		out = append(out, filepath.Base(path))
+	}
+	return out
+}
+
+// wroteClaim reports whether this filesystem saw a claim published: the setup
+// assertion that separates "the claim was dropped on the way out" from "the
+// claim was never made".
+func (f *fakeSeatFS) wroteClaim() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, op := range f.ops {
+		if strings.HasPrefix(op, "rename ") {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeSeatFS) MkdirAll(path string, _ os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirs[path] = true
+	f.log("mkdirall %s", path)
+	return nil
+}
+
+func (f *fakeSeatFS) WriteFile(name string, data []byte, _ os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[name] = append([]byte(nil), data...)
+	f.log("write %s", filepath.Base(name))
+	return nil
+}
+
+func (f *fakeSeatFS) Rename(oldpath, newpath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[oldpath]
+	if !ok {
+		return &os.PathError{Op: "rename", Path: oldpath, Err: os.ErrNotExist}
+	}
+	delete(f.files, oldpath)
+	f.files[newpath] = data
+	f.log("rename %s", filepath.Base(newpath))
+	return nil
+}
+
+func (f *fakeSeatFS) Remove(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log("remove %s", filepath.Base(name))
+	delete(f.files, name)
+	return nil
+}
+
+func (f *fakeSeatFS) ReadFile(name string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[name]
+	if !ok {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (f *fakeSeatFS) ReadDir(name string) ([]os.DirEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readDirErr != nil {
+		f.log("readdir %s -> %v", name, f.readDirErr)
+		return nil, f.readDirErr
+	}
+	if !f.dirs[name] {
+		// A directory nothing has written to yet, as os.ReadDir reports it.
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+	}
+	f.log("readdir %s", name)
+	var entries []os.DirEntry
+	for path := range f.files {
+		if filepath.Dir(path) == name {
+			entries = append(entries, fakeSeatDirEntry{name: filepath.Base(path)})
+		}
+	}
+	return entries, nil
+}
+
+type fakeSeatDirEntry struct{ name string }
+
+func (e fakeSeatDirEntry) Name() string { return e.name }
+func (e fakeSeatDirEntry) IsDir() bool  { return false }
+func (e fakeSeatDirEntry) Type() os.FileMode {
+	return 0
+}
+func (e fakeSeatDirEntry) Info() (os.FileInfo, error) {
+	return nil, fmt.Errorf("fakeSeatFS entry %s carries no file info", e.name)
+}
+
+// A claim set that could not be read is not a claim set that is empty: the
+// seats it holds are unknown, and the local seat is the seat the claims exist
+// to hold the cap on, so it is not taken on a count that cannot see them.
+// Letting the read failure read as "no claims" is the gt-eoi9 race back, with
+// the guard removed by a transient error.
+func TestPoolSeatClaimReadFailureFailsClosedOnTheLocalSeat(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 3, "", 0)
+	seatFS := injectUnreadableSeatFS(t)
+
+	agent, reason := slingFromAnotherProcess(t, townRoot, "gt-a")
+	if agent != claimOverflow {
+		t.Errorf("the local seat must not be taken while its claims are unreadable: got %q (%s)", agent, reason)
+	}
+	if !strings.Contains(reason, "cannot read seat claims") || !strings.Contains(reason, errSeatFSUnreadable.Error()) {
+		t.Errorf("the reason names the failure rather than a clean count: %q", reason)
+	}
+	if files := seatFS.claimFiles(); len(files) != 0 {
+		t.Errorf("a route taken without a reservation claims no seat: %v", files)
+	}
+
+	// A preview has to print the route a live sling would take, and that sling
+	// would take the fallback.
+	peekAgent, peekReason, err := peekPolecatPoolAgent(townRoot, "gt-b", "")
+	if err != nil || peekAgent != agent || peekReason != reason {
+		t.Errorf("peek = %q %q %v, want the live sling's route %q %q", peekAgent, peekReason, err, agent, reason)
+	}
+}
+
+// A claim is released on the spawn paths that fail too. The seat a failed spawn
+// reserved stands for a polecat that never existed, and cleanup leaves it alone
+// for the whole TTL because the process holding it is alive, so every sling in
+// the meantime routes away from a seat nobody is using.
+func TestSpawnPolecatForSlingReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 3, "", 0)
+	seatFS := injectSeatFS(t)
+
+	// A rig that does not exist is one of the failures that come after the pool
+	// has already claimed the seat for the spawn.
+	result, err := SpawnPolecatForSling("no-such-rig", SlingSpawnOptions{TownRoot: townRoot})
+	if err == nil {
+		t.Fatalf("spawning into a rig that does not exist must fail, got %+v", result)
+	}
+	if !strings.Contains(err.Error(), "no-such-rig") {
+		t.Fatalf("the failure names the rig: %v", err)
+	}
+	if !seatFS.wroteClaim() {
+		t.Fatal("setup: the failed spawn must have reached the pool decision and claimed a seat")
+	}
+	if files := seatFS.claimFiles(); len(files) != 0 {
+		t.Errorf("a spawn that failed must leave no seat claimed behind it: %v", files)
+	}
+	if own := processPoolSeatClaims.ownID(); own != "" {
+		t.Errorf("this process must not still think it holds a claim: %q", own)
 	}
 }
 
@@ -971,7 +1192,7 @@ func TestPoolOverflowCapRefusesTheSlingThatOverfillsIt(t *testing.T) {
 	if a1 != claimOverflow || !strings.Contains(r1, "local full (1/1) -> "+claimOverflow) {
 		t.Fatalf("the last flash seat goes to the first sling, got %q (%s)", a1, r1)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 || claims[0].Agent != claimOverflow {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 || claims[0].Agent != claimOverflow {
 		t.Fatalf("an overflow route must claim the overflow seat, got %v", claims)
 	}
 
@@ -984,7 +1205,7 @@ func TestPoolOverflowCapRefusesTheSlingThatOverfillsIt(t *testing.T) {
 	if !strings.Contains(reason, "pool: overflow full (1/1)") {
 		t.Errorf("the refusal must count the capped seat: %q", reason)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
 		t.Errorf("a refused sling claims no seat, got %v", claims)
 	}
 }
@@ -1004,7 +1225,7 @@ func TestPeekPolecatPoolAgentReportsTheOverflowRefusal(t *testing.T) {
 	if !strings.Contains(err.Error(), "sling refused: "+reason) {
 		t.Errorf("the refusal carries the pool's own reason line: %q vs %q", err, reason)
 	}
-	if claims := readPoolSeatClaims(townRoot); len(claims) != 1 {
+	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
 		t.Errorf("a dry run must not claim or drop a seat, got %v", claims)
 	}
 }

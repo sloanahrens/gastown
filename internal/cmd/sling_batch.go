@@ -231,6 +231,13 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 // preventing orphaned polecats from accumulating. Cleans up worktree, agent bead, git branch,
 // and optionally the associated auto-convoy.
 func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, rigName, convoyID string) {
+	// The spawn's seat claim goes with the spawn: no session will ever exist
+	// for this polecat, so the seat it reserved must not stay reserved. This is
+	// the one path every caller-side failure after a spawn comes through —
+	// returning before the cleanup below, which is best-effort and gives up
+	// early when the workspace or rig cannot be read (gt-t8q5).
+	releasePoolSeatClaim()
+
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return
