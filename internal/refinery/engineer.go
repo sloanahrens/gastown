@@ -276,6 +276,15 @@ type MRInfo struct {
 	Assignee           string    // Who claimed this MR (empty = unclaimed)
 	BranchExistsLocal  bool      // Whether the MR branch exists locally (this repo's refs/heads)
 	BranchExistsRemote bool      // Whether the MR branch exists on origin (live ls-remote, not cached tracking refs)
+	// BranchExistsLocalUnknown/Remote are true when the corresponding
+	// existence check's query itself failed (network hiccup, timeout, a repo
+	// in a bad state) rather than confirming absence — safeBranchExistenceCheck
+	// then reports the paired BranchExists* as true (the fail-open direction
+	// ListQueueAnomalies' both-false orphan rule needs), so this is the only
+	// way a JSON reader of `gt refinery ready --all --json` can distinguish
+	// "confirmed present" from "could not tell" (gt-bagu).
+	BranchExistsLocalUnknown  bool
+	BranchExistsRemoteUnknown bool
 }
 
 // MRAnomaly represents an MR queue health problem that can stall processing.
@@ -2914,10 +2923,12 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 		// (gt-bagu).
 		var localWarn, remoteWarn string
 		mr.BranchExistsLocal, localWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.BranchExists(fields.Branch) })
+		mr.BranchExistsLocalUnknown = localWarn != ""
 		if localWarn != "" {
 			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check local branch existence for %s: %s\n", fields.Branch, localWarn)
 		}
 		mr.BranchExistsRemote, remoteWarn = safeBranchExistenceCheck(func() (bool, error) { return e.git.RemoteBranchExists("origin", fields.Branch) })
+		mr.BranchExistsRemoteUnknown = remoteWarn != ""
 		if remoteWarn != "" {
 			_, _ = fmt.Fprintf(os.Stderr, "[Engineer] Warning: could not check remote branch existence for %s: %s\n", fields.Branch, remoteWarn)
 		}
