@@ -204,7 +204,7 @@ func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args .
 	// Dir is the rig dir, so bd's cwd routing lands on the rig database
 	// (never --repo: see the bd-create-repo memory).
 	rigDir := filepath.Join(r.townRoot, rig)
-	cmd := beads.CommandContextWithBin(ctx, r.bdPath, rigDir, filepath.Join(rigDir, ".beads"), beads.SubprocessModeForArgs(args))
+	cmd := beads.CommandContextWithBin(ctx, r.bdPath, rigDir, filepath.Join(rigDir, ".beads"), beads.SubprocessModeForArgs(args), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
