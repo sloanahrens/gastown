@@ -540,11 +540,53 @@ func resolveGuardDir(path string) string {
 	return filepath.Clean(path)
 }
 
+// configScratchSubdirs are the $CLAUDE_CONFIG_DIR subdirectories a session owns
+// and may write to: plan mode's plan files, the transcript and session-memory
+// store, and todos.
+var configScratchSubdirs = []string{"plans", "projects", "todos"}
+
+// claudeConfigScratchRoots returns the writable subdirectories of the session's
+// $CLAUDE_CONFIG_DIR.
+//
+// The config dir ITSELF is deliberately not a root. Gas Town points
+// CLAUDE_CONFIG_DIR at the town's config tree (~/gt/.claude-town), which holds
+// .claude.json (permissions, trust, MCP servers), settings.json (hooks) and
+// session-env/ beside those state dirs — so allowlisting the whole tree let a
+// guarded session rewrite the very harness config that governs it (gt-ovo1).
+// Only the enumerated subdirectories are handed over.
+//
+// Fail closed on a config dir that cannot be a session's own: unset, relative,
+// or at $HOME / above it. Each of those would allowlist a tree far wider than
+// session state — $HOME would expose ~/plans next to ~/.ssh, and "/" would
+// expose the filesystem root's own plans/, projects/ and todos/ — so they yield
+// NO roots rather than a wrong one. The guard never depends on these entries,
+// so an empty result only narrows it: the worktree, the town scratchpad and the
+// temp directories stay writable.
+func claudeConfigScratchRoots(configDir, home string) []string {
+	if configDir == "" || !filepath.IsAbs(configDir) {
+		return nil
+	}
+	cleaned := filepath.Clean(configDir)
+	// A filesystem root is rejected before the home comparison: isWithinPath
+	// matches on a "<root>/" prefix, which a lone "/" cannot form.
+	if cleaned == string(filepath.Separator) {
+		return nil
+	}
+	if home != "" && isWithinPath(filepath.Clean(home), cleaned) {
+		return nil // the home dir itself, or an ancestor of it
+	}
+	roots := make([]string, 0, len(configScratchSubdirs))
+	for _, sub := range configScratchSubdirs {
+		roots = append(roots, filepath.Join(cleaned, sub))
+	}
+	return roots
+}
+
 // scratchRoots lists the directories a session may always write to: the host's
-// temp directories, the session's own CLAUDE_CONFIG_DIR tree (plan mode writes
-// its plans/, projects/, todos/ here), and the transcripts/scratch area the
-// agent runtime keeps outside the worktree (~/.claude/projects, and the town's
-// own .claude-town).
+// temp directories, the state subdirectories of the session's own
+// CLAUDE_CONFIG_DIR (see claudeConfigScratchRoots), and the transcripts/scratch
+// area the agent runtime keeps outside the worktree (~/.claude/projects, and
+// the town's own .claude-town).
 //
 // The temp entries are the session's own $TMPDIR (os.TempDir — which is where
 // mktemp hands out paths) plus the well-known /tmp and /var/tmp. A blanket
@@ -554,13 +596,15 @@ func resolveGuardDir(path string) string {
 // meaningless — a temp-dir test town looked like scratch space.
 func scratchRoots(townRoot string) []string {
 	candidates := []string{os.TempDir(), "/tmp", "/var/tmp"}
-	if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
-		candidates = append(candidates, configDir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
 	}
+	candidates = append(candidates, claudeConfigScratchRoots(os.Getenv("CLAUDE_CONFIG_DIR"), home)...)
 	if townRoot != "" {
 		candidates = append(candidates, filepath.Join(townRoot, sessionScratchDir, "projects"))
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	if home != "" {
 		candidates = append(candidates, filepath.Join(home, ".claude", "projects"))
 	}
 	roots := make([]string, 0, len(candidates))
