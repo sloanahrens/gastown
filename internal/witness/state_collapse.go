@@ -38,8 +38,13 @@ type DetectStateCollapseResult struct {
 	Checked     int  // number of open MR beads examined
 	MRLookupRan bool // whether the open merge-request queue was successfully resolved
 	OpenMRsSeen int  // number of open MRs the resolved queue returned
-	Findings    []StateCollapseFinding
-	Errors      []error
+	// RecordsUnreadable counts source issues whose bead record could not be
+	// decoded. Such an issue is dropped from examination, so it is a candidate
+	// this scan silently skipped rather than judged — StateCollapseSummary
+	// withholds the all-clear while this is non-zero (gt-n899).
+	RecordsUnreadable int
+	Findings          []StateCollapseFinding
+	Errors            []error
 }
 
 // errNoOpenMRSource is reported when DetectStateCollapse is wired without an
@@ -116,8 +121,16 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 		}
 		result.Checked++
 
-		record, ok := getBeadRecord(bd, workDir, mr.SourceIssue)
-		if !ok || record.Status == "" {
+		record, found, err := getBeadRecord(bd, workDir, mr.SourceIssue)
+		if err != nil {
+			// Unreadable is not open: without a status the scan cannot tell a
+			// closed source issue from a live one, so it drops the MR. Counted
+			// so the summary withholds the all-clear (gt-n899).
+			result.RecordsUnreadable++
+			result.Errors = append(result.Errors, fmt.Errorf("reading source issue %s of MR %s: %w", mr.SourceIssue, mr.ID, err))
+			continue
+		}
+		if !found {
 			continue // source issue not found/unreachable — can't assert collapse
 		}
 		if record.Status != string(beads.StatusClosed) {
@@ -298,9 +311,14 @@ type DetectStrandedBranchesResult struct {
 	Checked     int  // number of closed-issue polecat branches examined
 	MRLookupRan bool // whether the open merge-request queue was successfully resolved
 	OpenMRsSeen int  // number of open MRs in the resolved queue
-	Findings    []BranchStrandFinding
-	Superseded  []SupersededBranch // candidates suppressed as adjudicated, not stranded
-	Errors      []error
+	// RecordsUnreadable counts candidates whose bead record could not be
+	// decoded. Every close-reason filter reads through that record, so such a
+	// candidate was dropped rather than adjudicated — StateCollapseSummary
+	// withholds the all-clear while this is non-zero (gt-n899).
+	RecordsUnreadable int
+	Findings          []BranchStrandFinding
+	Superseded        []SupersededBranch // candidates suppressed as adjudicated, not stranded
+	Errors            []error
 }
 
 // errNoMRLookup is reported when DetectStrandedBranches is wired without an
@@ -533,7 +551,16 @@ func DetectStrandedBranches(bd *BdCli, refs *BranchRefSource, workDir, rigName, 
 			continue // no issue encoded in the branch name — nothing to check
 		}
 
-		record, found := getBeadRecord(bd, workDir, meta.Issue)
+		record, found, err := getBeadRecord(bd, workDir, meta.Issue)
+		if err != nil {
+			// The close-reason filters below read through this record, so a
+			// branch whose record is unreadable was neither reported nor
+			// suppressed — dropped. Counted so the summary withholds the
+			// all-clear (gt-n899).
+			result.RecordsUnreadable++
+			result.Errors = append(result.Errors, fmt.Errorf("reading issue %s of branch %s: %w", meta.Issue, branch, err))
+			continue
+		}
 		if !found || record.Status != string(beads.StatusClosed) {
 			continue // bead unreachable, or not closed — no collapse to report
 		}
@@ -631,36 +658,91 @@ type beadRecord struct {
 }
 
 // getBeadRecord returns a bead's status, close reason, and notes, and whether
-// the lookup succeeded. The close reason separates a genuine strand from a
+// the lookup found it. The close reason separates a genuine strand from a
 // deliberate discard (gt-3ii); the notes carry the refinery's merge-rejection
 // record, which adjudicates rejected branches (gt-hsum).
 //
-// A field bd does not return reads as empty, which every caller treats as
-// "unknown" rather than as evidence. Verified 2026-09-21 against the live
-// town: `bd show --json` returns both fields for a bead that has them, checked
-// on om-i0p and gt-2ok0 (gt-n899 probed an absent field, not this path).
-func getBeadRecord(bd *BdCli, workDir, beadID string) (beadRecord, bool) {
+// An unreadable response is an error rather than an empty record: see
+// decodeBeadRecord for why that distinction is load-bearing (gt-n899).
+func getBeadRecord(bd *BdCli, workDir, beadID string) (beadRecord, bool, error) {
 	if beadID == "" {
-		return beadRecord{}, false
+		return beadRecord{}, false, nil
 	}
 	output, err := bd.Exec(workDir, "show", beadID, "--json")
 	if err != nil || output == "" {
-		return beadRecord{}, false
+		// bd exits non-zero for an id it cannot resolve, so an unreachable or
+		// purged bead lands here, not in the decode.
+		return beadRecord{}, false, nil
 	}
-	var issues []struct {
-		Status      string `json:"status"`
-		CloseReason string `json:"close_reason"`
-		Notes       string `json:"notes"`
+	return decodeBeadRecord(output)
+}
+
+// errBeadRecordShape is returned when a bd JSON response parses but does not
+// carry the bead state these scans read.
+var errBeadRecordShape = errors.New("bd JSON response is not a readable bead record")
+
+// decodeBeadRecord parses one `bd show --json` response: an ARRAY holding one
+// element per requested id.
+//
+// bd omits fields a bead does not have, so `close_reason` is absent both on a
+// bead closed without a reason and on one that never closed. Absence is a
+// property of the bead, and reads as the empty string every caller already
+// treats as "no suppression recorded" — verified against the live town
+// 2026-09-23, where gt-wvmw and gt-tlwv are closed with no close reason in
+// either `bd show --json` or `bd list --status=closed --json`, while gt-akap
+// returns close_reason and notes from the same call (gt-n899).
+//
+// A response in a shape this cannot read — not JSON, not an array of objects,
+// no status, or a read field that is not a string — is instead an error. The
+// close reason is the channel every suppression filter in this file reads
+// through, so a shape change would leave the filters matching nothing while
+// the scan kept reporting findings it could no longer qualify, and callers
+// treat a decode failure as "not closed" and drop the candidate. Both halves
+// fail silently, which is the failure gt-n899 cataloged; the callers count
+// these and the summary refuses an all-clear.
+func decodeBeadRecord(output string) (beadRecord, bool, error) {
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return beadRecord{}, false, fmt.Errorf("%w: %v", errBeadRecordShape, err)
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		// Valid response but no results — bead was reaped/deleted.
-		return beadRecord{}, true
+	if len(raw) == 0 {
+		// Well-formed response naming no bead: the id was reaped or purged
+		// between the branch listing and this lookup.
+		return beadRecord{}, false, nil
 	}
-	return beadRecord{
-		Status:      issues[0].Status,
-		CloseReason: issues[0].CloseReason,
-		Notes:       issues[0].Notes,
-	}, true
+
+	status, err := beadStringField(raw[0], "status")
+	if err != nil {
+		return beadRecord{}, false, err
+	}
+	if status == "" {
+		return beadRecord{}, false, fmt.Errorf("%w: element carries no status", errBeadRecordShape)
+	}
+	closeReason, err := beadStringField(raw[0], "close_reason")
+	if err != nil {
+		return beadRecord{}, false, err
+	}
+	notes, err := beadStringField(raw[0], "notes")
+	if err != nil {
+		return beadRecord{}, false, err
+	}
+	return beadRecord{Status: status, CloseReason: closeReason, Notes: notes}, true, nil
+}
+
+// beadStringField reads one string field out of a decoded bead object. A field
+// bd omitted and a field bd emitted as JSON null say the same thing about the
+// bead, so both read as empty; any other type is a shape change, reported
+// rather than coerced to empty and silently un-matchable (gt-n899).
+func beadStringField(obj map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := obj[name]
+	if !ok || string(raw) == "null" {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("%w: field %q is %.80s, want a string", errBeadRecordShape, name, raw)
+	}
+	return value, nil
 }
 
 // supersededByRecord reports whether the issue's own record already adjudicates
@@ -819,20 +901,26 @@ it and re-dispatch.`, f.IssueID, f.Branch, targetBranch, openMRsSeen, targetBran
 // found" is precisely the failure this scan exists to catch, a failure
 // serializing as success (gt-92ry for the MR-driven half, gt-akap for the
 // branch-driven half, where the same wording mistake reported "has no MR"
-// for 11 of 13 live findings). allClear=false therefore means "do not trust
-// this as a clean bill of health", and the summary names which lookup was
-// missing so the operator can tell "checked and clean" from "never ran".
+// for 11 of 13 live findings). A candidate whose bead record could not be read
+// is unchecked in the same way and withholds the all-clear too: its close
+// reason is the channel the suppression filters read, so it was neither
+// reported nor suppressed (gt-n899). allClear=false therefore means "do not
+// trust this as a clean bill of health", and the summary names which lookup or
+// read was missing so the operator can tell "checked and clean" from "never
+// ran".
 func StateCollapseSummary(mr *DetectStateCollapseResult, branches *DetectStrandedBranchesResult, rigName string) (summary string, allClear bool) {
-	mrChecked, mrRan, findings := 0, false, 0
+	mrChecked, mrRan, findings, unreadable := 0, false, 0, 0
 	if mr != nil {
 		mrChecked, mrRan = mr.Checked, mr.MRLookupRan
 		findings += len(mr.Findings)
+		unreadable += mr.RecordsUnreadable
 	}
 	branchChecked, branchRan, superseded := 0, false, 0
 	if branches != nil {
 		branchChecked, branchRan = branches.Checked, branches.MRLookupRan
 		findings += len(branches.Findings)
 		superseded = len(branches.Superseded)
+		unreadable += branches.RecordsUnreadable
 	}
 
 	// Suppressions are named, never silent: "0 findings" and "0 findings, 3
@@ -858,6 +946,10 @@ func StateCollapseSummary(mr *DetectStateCollapseResult, branches *DetectStrande
 		return fmt.Sprintf("No all-clear for %s: MR lookup unavailable — the open merge-request queue could not be resolved, "+
 			"so the branch-driven check judged no branch (%d open MR(s) were checked by the MR-driven check). "+
 			"Unchecked is not a clean result.", rigName, mrChecked), false
+	case unreadable > 0:
+		return fmt.Sprintf("No all-clear for %s: %d candidate bead record(s) could not be read, so the close-reason "+
+			"filters that suppress their false positives matched nothing and those candidates were neither reported "+
+			"nor suppressed. Unread is not a clean result.", rigName, unreadable), false
 	}
 	return fmt.Sprintf("No state collapse found (checked %d open MR(s) — lookup ran; %d closed-issue branch(es) checked%s in %s)",
 		mrChecked, branchChecked, suppressed, rigName), true

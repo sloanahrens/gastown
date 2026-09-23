@@ -74,18 +74,20 @@ func init() {
 
 // PatrolStateCollapseOutput is the JSON output format for `gt patrol state-collapse`.
 type PatrolStateCollapseOutput struct {
-	Rig              string                         `json:"rig"`
-	Checked          int                            `json:"checked"`
-	MRLookupRan      bool                           `json:"mr_lookup_ran"`
-	OpenMRs          int                            `json:"open_mrs,omitempty"`
-	Findings         []witness.StateCollapseFinding `json:"findings,omitempty"`
-	BranchChecked    int                            `json:"branch_checked"`
-	BranchMRLookup   bool                           `json:"branch_mr_lookup_ran"`
-	BranchOpenMRs    int                            `json:"branch_open_mrs,omitempty"`
-	BranchFindings   []witness.BranchStrandFinding  `json:"branch_findings,omitempty"`
-	BranchSuperseded []witness.SupersededBranch     `json:"branch_superseded,omitempty"`
-	Errors           []string                       `json:"errors,omitempty"`
-	AllClear         bool                           `json:"all_clear"`
+	Rig               string                         `json:"rig"`
+	Checked           int                            `json:"checked"`
+	MRLookupRan       bool                           `json:"mr_lookup_ran"`
+	OpenMRs           int                            `json:"open_mrs,omitempty"`
+	RecordsUnreadable int                            `json:"records_unreadable,omitempty"`
+	Findings          []witness.StateCollapseFinding `json:"findings,omitempty"`
+	BranchChecked     int                            `json:"branch_checked"`
+	BranchMRLookup    bool                           `json:"branch_mr_lookup_ran"`
+	BranchOpenMRs     int                            `json:"branch_open_mrs,omitempty"`
+	BranchUnreadable  int                            `json:"branch_records_unreadable,omitempty"`
+	BranchFindings    []witness.BranchStrandFinding  `json:"branch_findings,omitempty"`
+	BranchSuperseded  []witness.SupersededBranch     `json:"branch_superseded,omitempty"`
+	Errors            []string                       `json:"errors,omitempty"`
+	AllClear          bool                           `json:"all_clear"`
 }
 
 // openMRRefSource returns a witness.BranchRefSource input that resolves the
@@ -189,18 +191,20 @@ func runPatrolStateCollapse(cmd *cobra.Command, args []string) error {
 			errs = append(errs, e.Error())
 		}
 		out := PatrolStateCollapseOutput{
-			Rig:              rigName,
-			Checked:          result.Checked,
-			MRLookupRan:      result.MRLookupRan,
-			OpenMRs:          result.OpenMRsSeen,
-			Findings:         result.Findings,
-			BranchChecked:    branchResult.Checked,
-			BranchMRLookup:   branchResult.MRLookupRan,
-			BranchOpenMRs:    branchResult.OpenMRsSeen,
-			BranchFindings:   branchResult.Findings,
-			BranchSuperseded: branchResult.Superseded,
-			Errors:           errs,
-			AllClear:         allClear,
+			Rig:               rigName,
+			Checked:           result.Checked,
+			MRLookupRan:       result.MRLookupRan,
+			OpenMRs:           result.OpenMRsSeen,
+			RecordsUnreadable: result.RecordsUnreadable,
+			Findings:          result.Findings,
+			BranchChecked:     branchResult.Checked,
+			BranchMRLookup:    branchResult.MRLookupRan,
+			BranchOpenMRs:     branchResult.OpenMRsSeen,
+			BranchUnreadable:  branchResult.RecordsUnreadable,
+			BranchFindings:    branchResult.Findings,
+			BranchSuperseded:  branchResult.Superseded,
+			Errors:            errs,
+			AllClear:          allClear,
 		}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")

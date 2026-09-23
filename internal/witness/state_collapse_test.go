@@ -1344,3 +1344,282 @@ func TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker(t *testing.T) {
 		})
 	}
 }
+
+// bdShowJSONNoChangesDiscard is live `bd show gt-md4z --json` output
+// (2026-09-23, bd 1.2.2/8a1eeb9), description trimmed for length. It is the
+// reference payload for the deliberate-discard filter: the response is an
+// ARRAY, bd omits fields the bead lacks, and close_reason carries the
+// "no-changes:" convention (gt-n899).
+const bdShowJSONNoChangesDiscard = `[
+  {
+    "id": "gt-md4z",
+    "title": "Polecat model pool: local Qwen for up to N polecats",
+    "status": "closed",
+    "priority": 1,
+    "issue_type": "task",
+    "assignee": "gastown/polecats/lapis",
+    "created_at": "2026-09-18T20:51:38Z",
+    "updated_at": "2026-09-20T20:27:20Z",
+    "closed_at": "2026-09-19T14:35:42Z",
+    "close_reason": "no-changes: polecat model pool feature already implemented and landed via commits 0a71c9b, 99f49e2; branch has no new commits",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 14,
+    "comments_omitted": true,
+    "revision": -1902286529224863341
+  }
+]`
+
+// bdShowJSONClosedNoReason is live `bd show gt-wvmw --json` output
+// (2026-09-23), description trimmed. gt-wvmw is one of the two stranded-branch
+// findings gt-n899 was filed about, and it shows why the report misread the
+// shape: this bead is closed and bd emits no close_reason key at all, because
+// it has none — every other closed bead in the same database returns one.
+// Absence here is a property of the bead, not an unreadable response.
+const bdShowJSONClosedNoReason = `[
+  {
+    "id": "gt-wvmw",
+    "title": "Polecat path guard blocks Claude Code writing plan files",
+    "status": "closed",
+    "priority": 1,
+    "issue_type": "bug",
+    "owner": "sloan.ahrens@gmail.com",
+    "created_at": "2026-09-17T19:48:09Z",
+    "created_by": "mayor",
+    "updated_at": "2026-09-19T04:08:32Z",
+    "closed_at": "2026-09-19T04:08:32Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 4,
+    "comments_omitted": true,
+    "revision": -7332207332659337171
+  }
+]`
+
+// TestDecodeBeadRecord_LiveBdShowPayloads reads the fields the suppression
+// filters depend on out of real bd output. The gt-n899 report claimed `bd show
+// --json` omits close_reason; these payloads are the counter-evidence, and the
+// first case is the regression that matters — if the deliberate-discard filter
+// is inert, a discarded branch is reported as a strand (gt-3ii, gt-g6b).
+func TestDecodeBeadRecord_LiveBdShowPayloads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		output        string
+		wantStatus    string
+		wantReason    string
+		wantReasonSet bool
+	}{
+		{
+			name:          "closed with a no-changes discard reason",
+			output:        bdShowJSONNoChangesDiscard,
+			wantStatus:    "closed",
+			wantReason:    "no-changes: polecat model pool feature already implemented and landed via commits 0a71c9b, 99f49e2; branch has no new commits",
+			wantReasonSet: true,
+		},
+		{
+			name:       "closed with no reason recorded",
+			output:     bdShowJSONClosedNoReason,
+			wantStatus: "closed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			record, found, err := decodeBeadRecord(tt.output)
+			if err != nil {
+				t.Fatalf("decodeBeadRecord() error = %v, want nil", err)
+			}
+			if !found {
+				t.Fatal("found = false, want true for a payload naming a bead")
+			}
+			if record.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", record.Status, tt.wantStatus)
+			}
+			if record.CloseReason != tt.wantReason {
+				t.Errorf("CloseReason = %q, want %q", record.CloseReason, tt.wantReason)
+			}
+			if got := isDeliberateDiscard(record.CloseReason); got != tt.wantReasonSet {
+				t.Errorf("isDeliberateDiscard(%q) = %v, want %v", record.CloseReason, got, tt.wantReasonSet)
+			}
+		})
+	}
+}
+
+// TestDecodeBeadRecord_RejectsUnreadableShapes pins the difference between a
+// bead that carries no close reason and a response this cannot read. The
+// second must be an error: read as an empty record it is indistinguishable
+// from "not closed" at the call sites, so the candidate is dropped and the
+// filters match nothing — the silent shape of gt-n899.
+func TestDecodeBeadRecord_RejectsUnreadableShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		output    string
+		wantFound bool
+		wantErr   bool
+	}{
+		{
+			name:      "well-formed response naming no bead is not an error",
+			output:    `[]`,
+			wantFound: false,
+		},
+		{
+			name:    "prose instead of JSON",
+			output:  "bead gt-md4z not found",
+			wantErr: true,
+		},
+		{
+			name:    "JSON object instead of the array bd returns",
+			output:  `{"id":"gt-md4z","status":"closed"}`,
+			wantErr: true,
+		},
+		{
+			name:    "element carrying no status",
+			output:  `[{"id":"gt-md4z","close_reason":"no-changes: x"}]`,
+			wantErr: true,
+		},
+		{
+			name:    "close_reason moved to a nested object",
+			output:  `[{"id":"gt-md4z","status":"closed","close_reason":{"reason":"no-changes: x"}}]`,
+			wantErr: true,
+		},
+		{
+			name:    "close_reason emitted as a non-string",
+			output:  `[{"id":"gt-md4z","status":"closed","close_reason":42}]`,
+			wantErr: true,
+		},
+		{
+			name:    "notes emitted as an array",
+			output:  `[{"id":"gt-md4z","status":"closed","notes":["a"]}]`,
+			wantErr: true,
+		},
+		{
+			name:      "explicit null fields read as absent",
+			output:    `[{"id":"gt-md4z","status":"closed","close_reason":null,"notes":null}]`,
+			wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, found, err := decodeBeadRecord(tt.output)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("decodeBeadRecord(%s) error = nil, want a shape error", tt.output)
+				}
+				if !errors.Is(err, errBeadRecordShape) {
+					t.Errorf("error = %v, want it to wrap errBeadRecordShape", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeBeadRecord(%s) error = %v, want nil", tt.output, err)
+			}
+			if found != tt.wantFound {
+				t.Errorf("found = %v, want %v", found, tt.wantFound)
+			}
+		})
+	}
+}
+
+// TestDetectStrandedBranches_UnreadableRecordIsNotAnAllClear is the end-to-end
+// half of gt-n899: a response the scan cannot read must withhold the all-clear
+// rather than drop the candidate and report clean. The branch below has every
+// on-disk property of a strand, so the only thing keeping it out of Findings
+// is the unreadable record — which is exactly the state that must be loud.
+func TestDetectStrandedBranches_UnreadableRecordIsNotAnAllClear(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/basalt/gt-md4z+abc"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			// The shape change this guards against: a response that parses but
+			// carries no status the scan can read.
+			return `{"results":[{"id":"gt-md4z","close_reason":"no-changes: x"}]}`, nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "gastown", "main", nil)
+
+	if result.RecordsUnreadable != 1 {
+		t.Errorf("RecordsUnreadable = %d, want 1", result.RecordsUnreadable)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1 naming the unreadable record: %v", len(result.Errors), result.Errors)
+	}
+	if !errors.Is(result.Errors[0], errBeadRecordShape) {
+		t.Errorf("error = %v, want it to wrap errBeadRecordShape", result.Errors[0])
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings from an unreadable record, got %+v", result.Findings)
+	}
+
+	summary, allClear := StateCollapseSummary(
+		&DetectStateCollapseResult{MRLookupRan: true},
+		result, "gastown",
+	)
+	if allClear {
+		t.Errorf("allClear = true with %d unreadable record(s); summary = %q", result.RecordsUnreadable, summary)
+	}
+	if !strings.Contains(summary, "could not be read") {
+		t.Errorf("summary = %q, want it to name the unreadable records", summary)
+	}
+}
+
+// TestDetectStateCollapse_UnreadableRecordIsNotAnAllClear covers the same rule
+// on the MR-driven scan, where an unreadable record likewise reads as "not
+// closed" and silently drops the MR from examination.
+func TestDetectStateCollapse_UnreadableRecordIsNotAnAllClear(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			return `[{"id":"gt-zzd","close_reason":"pending_mr: gt-wisp-1"}]`, nil // no status
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSourceWithMRs(nil, nil, []OpenMRRef{
+		{ID: "gt-wisp-1", SourceIssue: "gt-zzd"},
+	})
+	result := DetectStateCollapse(bd, refs, "/work", "gastown", nil)
+
+	if result.RecordsUnreadable != 1 {
+		t.Errorf("RecordsUnreadable = %d, want 1", result.RecordsUnreadable)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %d, want 1: %v", len(result.Errors), result.Errors)
+	}
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no findings from an unreadable record, got %+v", result.Findings)
+	}
+
+	summary, allClear := StateCollapseSummary(result, &DetectStrandedBranchesResult{MRLookupRan: true}, "gastown")
+	if allClear {
+		t.Errorf("allClear = true with %d unreadable record(s); summary = %q", result.RecordsUnreadable, summary)
+	}
+}
+
+// TestStateCollapseSummary_ReadableRecordsStillAllClear keeps the new rule
+// from swallowing the normal case: a scan that examined records it could read
+// and found nothing is still an all-clear, so the unreadable counter is what
+// decides the verdict and not the presence of candidates.
+func TestStateCollapseSummary_ReadableRecordsStillAllClear(t *testing.T) {
+	t.Parallel()
+	summary, allClear := StateCollapseSummary(
+		&DetectStateCollapseResult{Checked: 3, MRLookupRan: true, OpenMRsSeen: 3},
+		&DetectStrandedBranchesResult{Checked: 4, MRLookupRan: true, OpenMRsSeen: 3},
+		"gastown",
+	)
+	if !allClear {
+		t.Errorf("allClear = false for a scan with no unreadable records; summary = %q", summary)
+	}
+	if !strings.Contains(summary, "No state collapse found") {
+		t.Errorf("summary = %q, want the all-clear wording", summary)
+	}
+}
