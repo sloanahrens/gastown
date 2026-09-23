@@ -1614,34 +1614,12 @@ func IsResolvedAgentClaude(rc *RuntimeConfig) bool {
 	return isClaudeAgent(rc)
 }
 
-// isClaudeAgent returns true if the RuntimeConfig represents a Claude agent.
-// Command "claude" (or a path to a claude binary) is authoritative regardless of Provider.
-// When Command is explicitly set to a non-claude value, Provider is authoritative.
-// When Command is empty, it defaults to Claude (unless Provider says otherwise).
+// isClaudeAgent returns true if the RuntimeConfig launches Claude Code.
+// The command is authoritative (basename, gt- prefix and wrappers such as
+// `env -u X claude` unwrapped — see harnessPresetName); provider is the
+// fallback; empty command and provider default to Claude.
 func isClaudeAgent(rc *RuntimeConfig) bool {
-	// Command "claude" always means Claude harness, even when Provider != "claude"
-	// (e.g., local-coder preset: provider=ollama, command=claude).
-	if rc.Command == "claude" {
-		return true
-	}
-	if rc.Command != "" {
-		base := filepath.Base(rc.Command)
-		base = strings.TrimSuffix(base, filepath.Ext(base))
-		if base == "claude" {
-			return true
-		}
-		// Command explicitly set to non-claude; Provider is authoritative.
-		if rc.Provider != "" {
-			return rc.Provider == "claude"
-		}
-		// Non-claude command with no Provider → not a Claude agent.
-		return false
-	}
-	// Command is empty → defaults to Claude (unless Provider says otherwise).
-	if rc.Provider != "" {
-		return rc.Provider == "claude"
-	}
-	return true
+	return harnessPresetName(rc.Command, rc.Args, rc.Provider, presetTable()) == string(AgentClaude)
 }
 
 // withRoleSettingsFlag appends --settings to the Args for Claude agents whose

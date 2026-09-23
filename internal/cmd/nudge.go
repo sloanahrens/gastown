@@ -310,9 +310,8 @@ func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string
 	// so WaitForIdle produces false positives — it sees no busy indicator
 	// and matches stale prompt characters in the pane buffer. (GH#gt-5ey3)
 	// Degrade to queue mode for agents without prompt-based detection.
-	if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
-		preset := config.GetAgentPresetByName(agentName)
-		if preset != nil && preset.ReadyPromptPrefix == "" {
+	if agentName, preset, ok := t.SessionAgentPreset(sessionName, townRoot); agentName != "" {
+		if !ok || preset.ReadyPromptPrefix == "" {
 			fmt.Fprintf(os.Stderr, "wait-idle: %s agent %q has no prompt detection, using queue mode\n", sessionName, agentName)
 			if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
 				Sender:   sender,

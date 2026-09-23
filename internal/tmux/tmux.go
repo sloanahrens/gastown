@@ -1962,24 +1962,53 @@ func isTmuxIndex(value string) bool {
 	return err == nil && n >= 0
 }
 
-// effectiveSkipEscape reports whether the Escape keystroke (nudge delivery
-// step 5) must be skipped for the given GT_AGENT value, independent of the
-// live busy-indicator scrape (shouldSendEscape). Copilot CLI and Gemini CLI
-// cancel in-flight generation on Escape (hq-isz, GH#gt-wasn); Claude Code
-// treats a mid-tool-call Escape as an operator interrupt (gt-cyyg). For these
-// agents the keystroke is unconditionally unsafe, so it is never sent —
-// unlike the busy scrape, this does not depend on catching the busy window at
-// the exact moment of the pre-send snapshot.
-func effectiveSkipEscape(agentType string) bool {
-	// Copilot has no dedicated preset flag for this yet; keep the historical
-	// hardcoded check (hq-isz) alongside the preset-driven one below.
-	if agentType == "copilot" {
-		return true
+// SessionAgentPreset resolves the harness preset of the agent running in
+// session from the session's own GT_AGENT, GT_ROOT and GT_RIG. The town root
+// falls back to townRootHint, then the process GT_ROOT. It returns the
+// GT_AGENT value; ok=false means the harness is unknown. (claude-9a8)
+func (t *Tmux) SessionAgentPreset(session, townRootHint string) (string, *config.AgentPresetInfo, bool) {
+	if session == "" {
+		return "", nil, false
 	}
-	if preset := config.GetAgentPresetByName(agentType); preset != nil && preset.EscapeCancelsRequest {
-		return true
+	agent, _ := t.GetEnvironment(session, "GT_AGENT")
+	if agent == "" {
+		return "", nil, false
 	}
-	return false
+	townRoot, _ := t.GetEnvironment(session, "GT_ROOT")
+	if townRoot == "" {
+		townRoot = townRootHint
+	}
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_ROOT")
+	}
+	rigPath := ""
+	if rig, _ := t.GetEnvironment(session, "GT_RIG"); rig != "" && townRoot != "" {
+		rigPath = filepath.Join(townRoot, rig)
+	}
+	preset, ok := config.ResolveAgentPreset(agent, townRoot, rigPath)
+	return agent, preset, ok
+}
+
+// escapeAllowed reports whether agent identity permits the vim-mode Escape
+// (nudge delivery step 5). Copilot and Gemini cancel generation on Escape
+// (hq-isz, GH#gt-wasn); Claude Code reads a mid-tool-call Escape as an
+// operator interrupt (gt-cyyg). An unidentified harness fails safe: custom
+// town agents went unidentified and were interrupted for weeks (claude-9a8).
+func escapeAllowed(agentName string, preset *config.AgentPresetInfo, ok bool) bool {
+	if agentName == "copilot" {
+		return false
+	}
+	if !ok || preset == nil {
+		return false
+	}
+	return !preset.EscapeCancelsRequest
+}
+
+// escapeSafe is the single Escape gate for nudge delivery: identity first
+// (no pane capture for Claude sessions), then the busy scrape.
+func (t *Tmux) escapeSafe(target, session, townRootHint string) bool {
+	agent, preset, ok := t.SessionAgentPreset(session, townRootHint)
+	return escapeAllowed(agent, preset, ok) && t.shouldSendEscape(target)
 }
 
 // NudgeSessionWithOpts is like NudgeSession but accepts delivery options.
@@ -2030,13 +2059,9 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// 2. Sanitize control characters that corrupt delivery
 	sanitized := sanitizeNudgeMessage(message)
 
-	if !opts.SkipEscape {
-		agentType, _ := t.GetEnvironment(session, "GT_AGENT")
-		opts.SkipEscape = effectiveSkipEscape(agentType)
-	}
-	// Snapshot before typing the nudge so the message text itself cannot look
+	// Decide before typing the nudge so the message text itself cannot look
 	// like the agent's busy indicator.
-	sendEscape := !opts.SkipEscape && t.shouldSendEscape(target)
+	sendEscape := !opts.SkipEscape && t.escapeSafe(target, session, opts.TownRoot)
 
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
@@ -2091,6 +2116,16 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	return nil
 }
 
+// sessionForPane returns the session owning pane, or "" if tmux cannot say
+// (which leaves the agent unidentified, so no Escape is sent).
+func (t *Tmux) sessionForPane(pane string) string {
+	out, err := t.run("display-message", "-p", "-t", pane, "#{session_name}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // NudgePane sends a message to a specific pane reliably.
 // Same pattern as NudgeSession but targets a pane ID (e.g., "%9") instead of session name.
 // After sending, triggers SIGWINCH to wake Claude in detached sessions.
@@ -2119,7 +2154,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	sanitized := sanitizeNudgeMessage(message)
 	// Snapshot before typing the nudge so the message text itself cannot look
 	// like the agent's busy indicator.
-	sendEscape := t.shouldSendEscape(pane)
+	sendEscape := t.escapeSafe(pane, t.sessionForPane(pane), "")
 
 	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
 	//    with 10ms inter-chunk delays to avoid argument length limits.
@@ -3824,14 +3859,9 @@ func (t *Tmux) shouldSendEscape(target string) bool {
 }
 
 func readyPromptPrefixForSession(t *Tmux, session string) string {
-	promptPrefix := DefaultReadyPromptPrefix
-	agentName, err := t.GetEnvironment(session, "GT_AGENT")
-	if err != nil || agentName == "" {
-		return promptPrefix
-	}
-	preset := config.GetAgentPresetByName(agentName)
-	if preset == nil || preset.ReadyPromptPrefix == "" {
-		return promptPrefix
+	_, preset, ok := t.SessionAgentPreset(session, "")
+	if !ok || preset.ReadyPromptPrefix == "" {
+		return DefaultReadyPromptPrefix
 	}
 	return preset.ReadyPromptPrefix
 }
