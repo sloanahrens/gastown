@@ -191,3 +191,103 @@ func TestDoMerge_SucceedsWhenAnotherWorktreeHoldsTarget(t *testing.T) {
 		t.Errorf("the holding worktree was moved off main, now on %q", got)
 	}
 }
+
+// TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b) on
+// the single-MR path: doMerge must refuse rather than silently build on top
+// of a local target that already holds commits origin/target doesn't have.
+func TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+
+	e := newTestEngineer(t, workDir, g)
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "leftover.txt", "leftover\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "Merge rejected-branch into main (gt-xxxx)")
+	leftoverSHA := run(t, workDir, "git", "rev-parse", "main")
+
+	mr := makeMR("mr-a", "feature-a", "main")
+	result := e.doMerge(context.Background(), mr)
+	if result.Success {
+		t.Fatal("expected doMerge to refuse when local main is ahead of origin/main")
+	}
+	if !strings.Contains(result.Error, "ahead of origin") {
+		t.Errorf("expected an ahead-of-origin refusal, got: %v", result.Error)
+	}
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != leftoverSHA {
+		t.Errorf("refusal changed local main from %s to %s", leftoverSHA, got)
+	}
+}
+
+// TestRestoreTargetToOrigin_Attached covers gt-u093 fix (a) when this
+// worktree has target checked out: restoreTargetToOrigin must hard-reset it.
+func TestRestoreTargetToOrigin_Attached(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "extra.txt", "extra\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "ahead of origin")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin: %v", err)
+	}
+
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != originMain {
+		t.Errorf("expected main reset to origin/main %s, got %s", originMain, got)
+	}
+}
+
+// TestRestoreTargetToOrigin_DetachedMovesBranchPointer covers gt-u093 fix (a)
+// in the case its bug report names explicitly: a run staged on a detached
+// HEAD (because this worktree moved off target after advancing it) must still
+// get target's ref itself back to origin, not just the detached HEAD — a
+// plain ResetHard only moves the latter.
+func TestRestoreTargetToOrigin_DetachedMovesBranchPointer(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "extra.txt", "extra\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "ahead of origin")
+	run(t, workDir, "git", "checkout", "-b", "scratch")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin: %v", err)
+	}
+
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != originMain {
+		t.Errorf("expected main force-updated to origin/main %s, got %s", originMain, got)
+	}
+}
+
+// TestRestoreTargetToOrigin_HeldElsewhere_NoOp covers gt-u093 fix (a) when
+// another worktree holds target: this run never advanced refs/heads/target,
+// so there is nothing to restore and it must not error.
+func TestRestoreTargetToOrigin_HeldElsewhere_NoOp(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	run(t, workDir, "git", "checkout", "-b", "refinery/scratch")
+	addWorktreeHolding(t, workDir, "main")
+	expectCheckoutRefused(t, workDir, "main")
+
+	if err := e.restoreTargetToOrigin("main"); err != nil {
+		t.Fatalf("restoreTargetToOrigin with main held elsewhere: %v", err)
+	}
+}

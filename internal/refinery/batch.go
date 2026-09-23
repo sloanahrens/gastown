@@ -325,6 +325,11 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.processSingleMR(ctx, batch[0], target)
 	}
 
+	if err := e.refuseIfTargetAhead(target); err != nil {
+		result.Error = err
+		return result
+	}
+
 	// merge_strategy=pr routes single MRs through the VCS provider's PR merge
 	// API (doMerge -> doMergePR) so branch protection/required-review rules
 	// apply. fastForwardBatch below has no PR equivalent — it merges locally
@@ -441,6 +446,9 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		_, _ = fmt.Fprintf(e.output, "[Batch] Merging %d good MRs after bisection\n", len(good))
 		if resetErr := e.resetAndRebuildStack(good, target); resetErr != nil {
 			result.Error = fmt.Errorf("rebuild good MRs: %w", resetErr)
+			if restoreErr := e.restoreTargetToOrigin(target); restoreErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to restore %s to origin after rebuild failure: %v\n", target, restoreErr)
+			}
 			return result
 		}
 		// Verify the good subset actually passes
@@ -451,6 +459,13 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		// If the good subset also fails, something is wrong — don't merge anything
 		_, _ = fmt.Fprintln(e.output, "[Batch] Warning: good subset also failed gates, aborting batch")
 		result.Error = fmt.Errorf("good subset failed verification after bisection")
+	}
+
+	// Nothing was pushed: the stack bisection left staged — a culprit's merge,
+	// or a good subset that failed re-verification — must not stay ahead of
+	// origin/target, or the next successful run's push would carry it (gt-u093).
+	if restoreErr := e.restoreTargetToOrigin(target); restoreErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to restore %s to origin after bisection: %v\n", target, restoreErr)
 	}
 
 	return result
@@ -633,6 +648,9 @@ func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target 
 		} else {
 			result.Error = fmt.Errorf("gates failed: %s", gateResult.Error)
 		}
+		if restoreErr := e.restoreTargetToOrigin(target); restoreErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to restore %s to origin after gate failure: %v\n", target, restoreErr)
+		}
 		return result
 	}
 
@@ -655,7 +673,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	// hasn't set merge_queue.editorial.required.
 	notes, landed, cerr := e.editorialPrecondition("[Batch]", stacked, target)
 	if cerr != nil {
-		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+		if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after editorial precondition failure: %v\n", target, resetErr)
 		}
 		result.Error = cerr
@@ -668,7 +686,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		var slotErr error
 		pushHolder, slotErr = e.acquireMainPushSlot(ctx)
 		if slotErr != nil {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after slot failure: %v\n", target, resetErr)
 			}
 			result.Error = fmt.Errorf("acquire merge slot: %w", slotErr)
@@ -685,7 +703,7 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 
 	for _, mr := range stacked {
 		if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
 			}
 			if eligibility.NoMerge {
@@ -703,14 +721,14 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	// Refinery may itself run inside one.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Pushing %d merged MRs to origin/%s...\n", len(stacked), target)
 	if pushErr := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); pushErr != nil {
-		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+		if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
 		}
 		result.Error = fmt.Errorf("push to origin: %w", pushErr)
 		return result
 	}
 	if verifyErr := e.git.VerifyPushedCommit("origin", target, tipSHA); verifyErr != nil {
-		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+		if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after verified-push failure: %v\n", target, resetErr)
 		}
 		result.Error = verifyErr

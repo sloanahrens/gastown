@@ -1042,6 +1042,137 @@ func TestProcessBatch_SingleMR_BranchNotFound(t *testing.T) {
 	}
 }
 
+// TestProcessBatch_AllCulprits_RestoresTargetToOrigin covers gt-u093: when
+// bisection isolates every stacked MR as a culprit, ProcessBatch pushes
+// nothing, but a prior version left local main wherever bisection's last
+// resetAndRebuildStack call staged it — a rejected stacked merge, ahead of
+// origin/main. The next successful push would have carried that merge to
+// origin.
+func TestProcessBatch_AllCulprits_RestoresTargetToOrigin(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "FAIL_A", "fail a\n")
+	createFeatureBranch(t, workDir, "feature-b", "FAIL_B", "fail b\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Gates = map[string]*GateConfig{
+		"check": {Cmd: "test ! -f FAIL_A && test ! -f FAIL_B"},
+	}
+
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	batch := []*MRInfo{
+		makeMR("mr-a", "feature-a", "main"),
+		makeMR("mr-b", "feature-b", "main"),
+	}
+	cfg := &BatchConfig{MaxBatchSize: 5, RetryBatchOnFlaky: false}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", cfg)
+
+	if len(result.Merged) != 0 {
+		t.Errorf("expected nothing merged when every MR is a culprit, got %v", stackedIDs(result.Merged))
+	}
+	if len(result.Culprits) != 2 {
+		t.Fatalf("expected both MRs isolated as culprits, got %v", stackedIDs(result.Culprits))
+	}
+
+	localMain := run(t, workDir, "git", "rev-parse", "main")
+	if localMain != originMain {
+		t.Errorf("gt-u093: local main is %s after bisection found only culprits, want it restored to origin/main %s", localMain, originMain)
+	}
+}
+
+// TestProcessBatch_SingleSurvivorGateFailure_RestoresTargetToOrigin covers the
+// same gt-u093 gap in verifyAndPush: when conflict removal leaves exactly one
+// MR stacked and its gates fail, that MR's merge must not stay on local main.
+func TestProcessBatch_SingleSurvivorGateFailure_RestoresTargetToOrigin(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	writeFile(t, workDir, "shared.txt", "main version\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "main: add shared.txt")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	createConflictingBranch(t, workDir, "feature-conflict", "shared.txt", "conflicting version\n")
+	createFeatureBranch(t, workDir, "feature-bad", "FAIL_MARKER", "fail\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Gates = map[string]*GateConfig{
+		"check": {Cmd: failMarkerGateCmd()},
+	}
+
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	batch := []*MRInfo{
+		makeMR("mr-conflict", "feature-conflict", "main"),
+		makeMR("mr-bad", "feature-bad", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+
+	if len(result.Conflicts) != 1 || result.Conflicts[0].ID != "mr-conflict" {
+		t.Fatalf("expected mr-conflict to conflict, got %v", stackedIDs(result.Conflicts))
+	}
+	if len(result.Culprits) != 1 || result.Culprits[0].ID != "mr-bad" {
+		t.Fatalf("expected mr-bad as culprit via verifyAndPush, got %v", stackedIDs(result.Culprits))
+	}
+
+	localMain := run(t, workDir, "git", "rev-parse", "main")
+	if localMain != originMain {
+		t.Errorf("gt-u093: local main is %s after single-survivor gate failure, want origin/main %s", localMain, originMain)
+	}
+}
+
+// TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b):
+// a run must never build a new stack on top of a local target that already
+// holds commits origin/target doesn't have — the exact leftover state a prior
+// run that skipped restoreTargetToOrigin produces. Silently discarding it via
+// prepareMergeTarget's reset would hide the very evidence of the bug.
+func TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+	createFeatureBranch(t, workDir, "feature-b", "b.txt", "hello b\n")
+
+	e := newTestEngineer(t, workDir, g)
+
+	// Simulate a prior run's rejected stacked merge left on local main.
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "leftover.txt", "leftover\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "Merge rejected-branch into main (gt-xxxx)")
+	leftoverSHA := run(t, workDir, "git", "rev-parse", "main")
+
+	batch := []*MRInfo{
+		makeMR("mr-a", "feature-a", "main"),
+		makeMR("mr-b", "feature-b", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+
+	if result.Error == nil {
+		t.Fatal("expected ProcessBatch to refuse when local main is ahead of origin/main")
+	}
+	if !strings.Contains(result.Error.Error(), "ahead of origin") {
+		t.Errorf("expected an ahead-of-origin refusal, got: %v", result.Error)
+	}
+	if len(result.Merged) != 0 {
+		t.Errorf("expected nothing merged, got %v", stackedIDs(result.Merged))
+	}
+
+	// The refusal must not discard the leftover commit either — that would
+	// erase the evidence a human needs to diagnose how it got there.
+	if got := run(t, workDir, "git", "rev-parse", "main"); got != leftoverSHA {
+		t.Errorf("refusal changed local main from %s to %s", leftoverSHA, got)
+	}
+}
+
 // --- Helpers ---
 
 func stackedIDs(mrs []*MRInfo) []string {

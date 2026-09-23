@@ -617,6 +617,10 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	}
 	branch, target := mr.Branch, mr.Target
 
+	if err := e.refuseIfTargetAhead(target); err != nil {
+		return ProcessResult{Success: false, Error: err.Error()}
+	}
+
 	if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
 		if eligibility.NoMerge {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is not merge-eligible — skipping merge: %s\n", mr.ID, eligibility.Error)
@@ -823,7 +827,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	if !shouldSkipGates {
 		postResult := e.runGatesForPhase(ctx, GatePhasePostSquash)
 		if !postResult.Success {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after post-squash gate failure: %v\n", target, resetErr)
 			}
 			return postResult
@@ -835,7 +839,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	// branch whose content the target already carries has a tree of its own
 	// that differs from the target's (gt-j5cc).
 	if landed := e.checkLandedMergeAddsChange(mr, target, mergeRef); !landed.Success {
-		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+		if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after empty merge: %v\n", target, resetErr)
 		}
 		return landed
@@ -859,7 +863,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		// merge_queue.editorial.required.
 		notes, landed, cerr := e.editorialPrecondition("[Engineer]", []*MRInfo{mr}, target)
 		if cerr != nil {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after editorial precondition failure: %v\n", target, resetErr)
 			}
 			return editorialRefusalResult(cerr)
@@ -873,9 +877,8 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			var slotErr error
 			pushHolder, slotErr = e.acquireMainPushSlot(ctx)
 			if slotErr != nil {
-				// Reset the checked-out target branch to origin to undo the local merge commit.
-				// ResetHard is required because target is the current branch (checked out in Step 2).
-				if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				// Undo the local merge commit staged onto target in Step 2.
+				if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after slot failure: %v\n", target, resetErr)
 				}
 				// Only classify as SlotTimeout for actual contention (retries exhausted).
@@ -899,7 +902,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		}
 
 		if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
 			}
 			return eligibility
@@ -910,9 +913,9 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		// owns landing verified MRs, so it names that signal explicitly.
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
 		if err := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); err != nil {
-			// Reset the checked-out target branch to undo the local merge commit.
-			// Without this, the next retry could see stale local state from the failed push.
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			// Undo the local merge commit. Without this, the next retry could
+			// see stale local state from the failed push.
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
 			}
 			return ProcessResult{
@@ -921,7 +924,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			}
 		}
 		if err := e.git.VerifyPushedCommit("origin", target, mergeCommit); err != nil {
-			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after verified-push failure: %v\n", target, resetErr)
 			}
 			return ProcessResult{

@@ -73,6 +73,72 @@ func (e *Engineer) worktreeHolding(target string) (string, bool) {
 	return "", false
 }
 
+// restoreTargetToOrigin makes local <target> exactly match origin/<target>,
+// regardless of how this worktree is staged: attached to target (ResetHard
+// moves the checked-out branch) or detached because another worktree holds
+// target. `git branch -f` cannot move a ref another worktree's HEAD points
+// at, but a run staged detached for that reason never advanced refs/heads/
+// target in the first place, so there is nothing to restore there. Every
+// batch-processing exit path must call this before returning without having
+// pushed — a run that left target mid-bisection, ahead of origin and holding
+// a rejected stacked merge, let the next push carry that merge to origin
+// (gt-u093).
+func (e *Engineer) restoreTargetToOrigin(target string) error {
+	current, err := e.git.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("resolve current branch before restoring %s: %w", target, err)
+	}
+	if current == target {
+		return e.git.ResetHard("origin/" + target)
+	}
+	if _, held := e.worktreeHolding(target); held {
+		return nil
+	}
+	if exists, existsErr := e.git.BranchExists(target); existsErr != nil || !exists {
+		return nil
+	}
+	return e.git.ResetBranch(target, "origin/"+target)
+}
+
+// refuseIfTargetAhead refuses to start a merge cycle when local <target>
+// already holds commits origin/<target> doesn't have. prepareMergeTarget's
+// own reset-to-origin silently discards exactly that state on every call it
+// makes during stack construction and bisection, which is correct there —
+// but if the discarded commits are a rejected stacked merge left behind by a
+// run that exited without calling restoreTargetToOrigin (gt-u093), silent
+// discard is also how that merge would slip into the next successful push
+// unnoticed. So this checks once, before the first prepareMergeTarget call of
+// a cycle, and refuses loudly instead of quietly resetting through it.
+func (e *Engineer) refuseIfTargetAhead(target string) error {
+	if err := e.git.Fetch("origin"); err != nil {
+		return fmt.Errorf("fetch origin before ahead-of-origin check on %s: %w", target, err)
+	}
+	if exists, err := e.git.BranchExists(target); err != nil || !exists {
+		return nil
+	}
+	localSHA, err := e.git.Rev(target)
+	if err != nil {
+		return nil
+	}
+	originSHA, err := e.git.Rev("origin/" + target)
+	if err != nil {
+		return fmt.Errorf("resolve origin/%s: %w", target, err)
+	}
+	if localSHA == originSHA {
+		return nil
+	}
+	ahead, err := e.git.IsAncestor("origin/"+target, target)
+	if err != nil {
+		return fmt.Errorf("check whether %s is ahead of origin/%s: %w", target, target, err)
+	}
+	if !ahead {
+		// Diverged or behind origin — a different problem than the one this
+		// guards against; prepareMergeTarget's reset-to-origin handles it safely.
+		return nil
+	}
+	return fmt.Errorf("local %s (%s) is ahead of origin/%s (%s) — refusing to build on it; a prior run may have exited without restoring %s (see gt-u093)", target, shortSHA(localSHA), target, shortSHA(originSHA), target)
+}
+
 // mergePushRef is the refspec that lands a merge staged on target. HEAD holds
 // the merge tip whether the staging tree is attached to target or detached at
 // origin/target, and naming it keeps the landing push independent of a local
