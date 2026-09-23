@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	gtbeads "github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/style"
@@ -166,8 +166,7 @@ func collectChangelogEntries(townRoot string, since time.Time) ([]ChangelogEntry
 
 // fetchClosedBeads queries a single beads location for non-ephemeral closed beads since cutoff.
 func fetchClosedBeads(dir, rig string, since time.Time) ([]ChangelogEntry, error) {
-	cmd := exec.Command("bd", "list", "--status=closed", "--all", "--limit=0", "--json")
-	cmd.Dir = dir
+	cmd := gtbeads.CommandWithEnv(dir, os.Environ(), "list", "--status=closed", "--all", "--limit=0", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

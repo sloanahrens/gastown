@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -182,8 +181,7 @@ func listUnclaimedQueueMessages(beadsDir, queueName string) ([]queueMessage, err
 		"--limit", "0",
 	}
 
-	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -263,11 +261,10 @@ func claimQueueMessage(beadsDir, messageID, claimant string) error {
 		"claimed-at:" + now,
 	}
 
-	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(),
+	cmd := beads.CommandWithEnv("", append(os.Environ(),
 		"BEADS_DIR="+beadsDir,
 		"BD_ACTOR="+claimant,
-	)
+	), args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -343,8 +340,7 @@ type queueMessageInfo struct {
 func getQueueMessageInfo(beadsDir, messageID string) (*queueMessageInfo, error) {
 	args := []string{"show", messageID, "--json"}
 
-	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -425,11 +421,10 @@ func releaseQueueMessage(beadsDir, messageID, actor string) error {
 
 	// Remove all claim labels in a single bd command
 	args := append([]string{"label", "remove", messageID}, labelsToRemove...)
-	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(),
+	cmd := beads.CommandWithEnv("", append(os.Environ(),
 		"BEADS_DIR="+beadsDir,
 		"BD_ACTOR="+actor,
-	)
+	), args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

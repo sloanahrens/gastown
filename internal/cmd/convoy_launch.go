@@ -3,11 +3,13 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -94,8 +96,7 @@ func bdUpdateStatus(beadID, status string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("bd", "update", beadID, "--status="+status)
-	cmd.Dir = townBeads
+	cmd := beads.CommandWithEnv(townBeads, os.Environ(), "update", beadID, "--status="+status)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd update %s --status=%s: %w\noutput: %s", beadID, status, err, out)
 	}

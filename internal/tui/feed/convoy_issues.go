@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os/exec"
+	"os"
 	"sync"
 	"time"
 
@@ -50,9 +50,8 @@ func trackedIssueIDs(beadsDir, convoyID string) []string {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", "dep", "list", convoyID, "-t", "tracks", "--json")
+	cmd := beads.CommandContextWithEnv(ctx, beadsDir, os.Environ(), "dep", "list", convoyID, "-t", "tracks", "--json")
 	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = beadsDir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -97,7 +96,7 @@ func batchIssueStatus(ids []string) map[string]string {
 
 	args := append([]string{"show"}, ids...)
 	args = append(args, "--json")
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := beads.CommandContextWithEnv(ctx, "", os.Environ(), args...)
 	util.SetDetachedProcessGroup(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

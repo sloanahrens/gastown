@@ -809,8 +809,7 @@ func queryAssignedIssues(rigPath, assignee, status string) ([]IssueInfo, error) 
 		args = append(args, "--status="+status)
 	}
 
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = rigPath
+	cmd := beads.CommandWithEnv(rigPath, os.Environ(), args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

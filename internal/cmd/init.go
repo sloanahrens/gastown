@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/git"
@@ -177,8 +178,7 @@ func registerCustomTypes(workDir string) error {
 		{"types.custom", constants.BeadsCustomTypes},
 		{"types.infra", constants.BeadsInfraTypes},
 	} {
-		cmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
-		cmd.Dir = workDir
+		cmd := beads.CommandWithEnv(workDir, os.Environ(), "config", "set", cfg.key, cfg.value)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			// Check for common expected errors

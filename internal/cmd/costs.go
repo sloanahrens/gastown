@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
@@ -465,8 +465,7 @@ func querySessionEventsFromLocation(location string) ([]CostEntry, error) {
 		"--json",
 	}
 
-	listCmd := exec.Command("bd", listArgs...)
-	listCmd.Dir = location
+	listCmd := beads.CommandWithEnv(location, os.Environ(), listArgs...)
 	listOutput, err := listCmd.Output()
 	if err != nil {
 		// If bd fails (e.g., no beads database), return empty list
@@ -489,8 +488,7 @@ func querySessionEventsFromLocation(location string) ([]CostEntry, error) {
 		showArgs = append(showArgs, item.ID)
 	}
 
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = location
+	showCmd := beads.CommandWithEnv(location, os.Environ(), showArgs...)
 	showOutput, err := showCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("showing events: %w", err)
@@ -549,7 +547,7 @@ func queryDigestBeads(days int) ([]CostEntry, error) {
 		"--json",
 	}
 
-	listCmd := exec.Command("bd", listArgs...)
+	listCmd := beads.CommandWithEnv("", os.Environ(), listArgs...)
 	listOutput, err := listCmd.Output()
 	if err != nil {
 		return nil, nil
@@ -570,7 +568,7 @@ func queryDigestBeads(days int) ([]CostEntry, error) {
 		showArgs = append(showArgs, item.ID)
 	}
 
-	showCmd := exec.Command("bd", showArgs...)
+	showCmd := beads.CommandWithEnv("", os.Environ(), showArgs...)
 	showOutput, err := showCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("showing events: %w", err)
@@ -1331,7 +1329,7 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 		"--silent",
 	}
 
-	bdCmd := exec.Command("bd", bdArgs...)
+	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
 	output, err := bdCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("creating digest bead: %w\nOutput: %s", err, string(output))
@@ -1340,7 +1338,7 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 	digestID := strings.TrimSpace(string(output))
 
 	// Auto-close the digest (it's an audit record, not work)
-	closeCmd := exec.Command("bd", "close", digestID, "--reason=daily cost digest")
+	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", digestID, "--reason=daily cost digest")
 	_ = closeCmd.Run() // Best effort
 
 	return digestID, nil

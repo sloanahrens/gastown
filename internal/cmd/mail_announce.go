@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -188,8 +188,7 @@ func listAnnounceMessages(townRoot, channelName string) ([]announceMessage, erro
 		"--json",
 	}
 
-	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

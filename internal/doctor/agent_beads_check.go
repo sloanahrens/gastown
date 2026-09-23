@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -497,8 +496,7 @@ func verifyLabelAdded(workDir, beadID, label string) bool {
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("SELECT 1 FROM labels WHERE issue_id = '%s' AND label = '%s' LIMIT 1", escapedID, escapedLabel)
-	cmd := exec.Command("bd", "sql", query) //nolint:gosec // G204: query uses escaped internal values
-	cmd.Dir = workDir
+	cmd := beads.CommandWithEnv(workDir, os.Environ(), "sql", query)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false

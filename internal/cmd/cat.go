@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 var catJSON bool
@@ -48,14 +48,15 @@ func runCat(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
-	bdCmd := exec.Command("bd", bdArgs...)
+	dir, env := "", os.Environ()
+	// Route to the correct rig database via prefix resolution.
+	if d := resolveBeadDir(beadID); d != "" && d != "." {
+		dir = d
+		env = filterEnvKey(os.Environ(), "BEADS_DIR")
+	}
+	bdCmd := beads.CommandWithEnv(dir, env, bdArgs...)
 	bdCmd.Stdout = os.Stdout
 	bdCmd.Stderr = os.Stderr
-	// Route to the correct rig database via prefix resolution.
-	if dir := resolveBeadDir(beadID); dir != "" && dir != "." {
-		bdCmd.Dir = dir
-		bdCmd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
-	}
 
 	return bdCmd.Run()
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
@@ -131,9 +131,8 @@ func listConvoys(beadsDir, status, closedAfter string) ([]convoyListItem, error)
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", listArgs...) //nolint:gosec // G204: args are constructed internally
+	cmd := beads.CommandContextWithEnv(ctx, beadsDir, os.Environ(), listArgs...)
 	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = beadsDir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
@@ -474,13 +473,12 @@ func listMQBeads(rigPath, status string) []mqListItem {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", "list",
+	cmd := beads.CommandContextWithEnv(ctx, rigPath, os.Environ(), "list",
 		"--label=gt:merge-request",
 		"--status="+status,
 		"--json",
 	)
 	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = rigPath
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

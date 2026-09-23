@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -301,14 +301,14 @@ func sanitizeKey(key string) string {
 
 // bdKvSet calls bd kv set <key> <value>.
 func bdKvSet(key, value string) error {
-	cmd := exec.Command("bd", "kv", "set", key, value)
+	cmd := beads.CommandWithEnv("", os.Environ(), "kv", "set", key, value)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 // bdKvGet calls bd kv get <key> and returns the value.
 func bdKvGet(key string) (string, error) {
-	cmd := exec.Command("bd", "kv", "get", key)
+	cmd := beads.CommandWithEnv("", os.Environ(), "kv", "get", key)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -318,7 +318,7 @@ func bdKvGet(key string) (string, error) {
 
 // bdKvClear calls bd kv clear <key>.
 func bdKvClear(key string) error {
-	cmd := exec.Command("bd", "kv", "clear", key)
+	cmd := beads.CommandWithEnv("", os.Environ(), "kv", "clear", key)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -356,7 +356,7 @@ func parseBdKvListJSON(data []byte) (map[string]string, error) {
 
 // bdKvListJSON calls bd kv list --json and returns the parsed string values.
 func bdKvListJSON() (map[string]string, error) {
-	cmd := exec.Command("bd", "kv", "list", "--json")
+	cmd := beads.CommandWithEnv("", os.Environ(), "kv", "list", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

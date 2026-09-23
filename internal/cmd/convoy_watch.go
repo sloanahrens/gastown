@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"os"
 	"strconv"
 	"strings"
 
@@ -241,8 +241,7 @@ type convoyForWatch struct {
 
 // getConvoyForWatch fetches and validates a convoy for watch/unwatch operations.
 func getConvoyForWatch(townBeads, convoyID string) (*convoyForWatch, error) {
-	showCmd := exec.Command("bd", "show", convoyID, "--json")
-	showCmd.Dir = townBeads
+	showCmd := beads.CommandWithEnv(townBeads, os.Environ(), "show", convoyID, "--json")
 	var stdout bytes.Buffer
 	showCmd.Stdout = &stdout
 
@@ -282,8 +281,7 @@ func getConvoyForWatch(townBeads, convoyID string) (*convoyForWatch, error) {
 
 // updateConvoyDescription updates a convoy's description via bd update.
 func updateConvoyDescription(townBeads, convoyID, newDesc string) error {
-	updateCmd := exec.Command("bd", "update", convoyID, "--description", newDesc)
-	updateCmd.Dir = townBeads
+	updateCmd := beads.CommandWithEnv(townBeads, os.Environ(), "update", convoyID, "--description", newDesc)
 	var stderr bytes.Buffer
 	updateCmd.Stderr = &stderr
 

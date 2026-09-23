@@ -2,10 +2,11 @@ package doctor
 
 import (
 	"fmt"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -168,8 +169,7 @@ func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
 
 // execBdSQLWrite executes a SQL write statement via bd sql.
 func execBdSQLWrite(rigDir, query string) error {
-	cmd := exec.Command("bd", "sql", query) //nolint:gosec // G204: query is a constant
-	cmd.Dir = rigDir
+	cmd := beads.CommandWithEnv(rigDir, os.Environ(), "sql", query)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)

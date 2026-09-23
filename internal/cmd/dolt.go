@@ -1744,8 +1744,7 @@ func runDoltRollback(cmd *cobra.Command, args []string) error {
 
 	// Validate restored state
 	fmt.Println("\nValidating restored state...")
-	validateCmd := exec.Command("bd", "list", "--limit", "5")
-	validateCmd.Dir = townRoot
+	validateCmd := beads.CommandWithEnv(townRoot, os.Environ(), "list", "--limit", "5")
 	output, validateErr := validateCmd.CombinedOutput()
 	if validateErr != nil {
 		fmt.Printf("  %s bd list returned an error: %v\n",
