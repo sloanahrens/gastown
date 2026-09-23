@@ -3979,27 +3979,49 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 }
 
+// stubNukePolecat overrides the package-level nukePolecatFunc so archive-path
+// tests never shell out to the real `gt polecat nuke` (gt-evdg): NukePolecat
+// kills a real tmux session and deletes a real worktree, so a test that
+// reaches the archive path with the real function — on a live rig/polecat
+// name — can destroy an in-use polecat. Returns a func reporting whether the
+// stub was invoked. Restores the original in t.Cleanup.
+func stubNukePolecat(t *testing.T, err error) func() bool {
+	t.Helper()
+	old := nukePolecatFunc
+	called := false
+	nukePolecatFunc = func(bd *BdCli, workDir, rigName, polecatName string) error {
+		called = true
+		return err
+	}
+	t.Cleanup(func() { nukePolecatFunc = old })
+	return func() bool { return called }
+}
+
 // TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged verifies the aa-apw fix:
 // when a stopped polecat's branch work is already merged to origin/main (e.g.,
 // via squash-merge), the witness must NOT restart the session — restarting
 // would let the polecat re-push its pre-squash HEAD and create a duplicate MR.
 // Instead the polecat is archived.
 //
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
+// nukePolecatFunc vars.
 func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
 	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return true, nil
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	nuked := stubNukePolecat(t, nil)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
 		func(args []string) error { return nil },
 	)
 
-	z := &ZombieResult{PolecatName: "scavenger", HookBead: "ma-poc.4"}
-	handleZombieRestart(bd, t.TempDir(), "testrig", "scavenger", "ma-poc.4", "has_unpushed", z)
+	// hookBead is reaped ("" with found=true) — the original always-archive-
+	// eligible case that predates gt-evdg.
+	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "ma-poc.4"}
+	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "", true, "has_unpushed", z)
 
 	// Action must reflect the archive decision; must NOT be a "restarted*" action.
 	if !strings.Contains(z.Action, "work-already-merged") {
@@ -4008,31 +4030,39 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 	if strings.HasPrefix(z.Action, "restarted") || strings.HasPrefix(z.Action, "restart-") {
 		t.Errorf("action = %q, polecat must not be restarted when work is already merged", z.Action)
 	}
+	if !nuked() {
+		t.Error("nukePolecatFunc was not called; archive path should invoke it")
+	}
 }
 
 // TestHandleZombieRestart_RestartsWhenBranchNotMerged verifies the pre-aa-apw
 // behavior is preserved when work is NOT merged: handleZombieRestart proceeds
 // to its normal cleanup/restart flow.
 //
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
+// nukePolecatFunc vars.
 func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
 	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return false, nil
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	nuked := stubNukePolecat(t, nil)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
 		func(args []string) error { return nil },
 	)
 
-	z := &ZombieResult{PolecatName: "scavenger", HookBead: "ma-poc.4"}
-	handleZombieRestart(bd, t.TempDir(), "testrig", "scavenger", "ma-poc.4", "clean", z)
+	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "ma-poc.4"}
+	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "in_progress", true, "clean", z)
 
 	// Should NOT take the archive path.
 	if strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
+	}
+	if nuked() {
+		t.Error("nukePolecatFunc was called; archive path should not fire when work is not merged")
 	}
 }
 
@@ -4041,12 +4071,17 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 // polecat whose session died before its first commit) is trivially
 // "preserved" under every evidence path in verifyBranchAlreadyMerged —
 // ancestor, merge-tree-noop, and cherry are all satisfied by zero commits,
-// exactly like a genuinely completed squash merge. An OPEN hookBead means
-// the assignment is not done by definition, so a "merged" verdict from git
-// alone must not be trusted to license a nuke; the archive path must only
-// fire when the hookBead is confirmed closed (or absent).
+// exactly like a genuinely completed squash merge. bd status "open" means
+// the assignment was never even claimed, so a "merged" verdict from git
+// alone must not be trusted to license a nuke.
 //
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
+// Uses fake rig/polecat names and a stubbed nukePolecatFunc, never the real
+// NukePolecat — per the MAYOR SAFETY WARNING on gt-evdg, a live rig/polecat
+// name here would let a regression in this gate shell out to the real
+// `gt polecat nuke` and kill a real tmux session.
+//
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
+// nukePolecatFunc vars.
 func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 	oldVerify := verifyBranchAlreadyMerged
 	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
@@ -4057,24 +4092,83 @@ func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 		return true, nil
 	}
 	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	nuked := stubNukePolecat(t, nil)
 
 	bd, _ := mockBd(
-		func(args []string) (string, error) {
-			if len(args) > 0 && args[0] == "show" {
-				return `[{"status":"open"}]`, nil
-			}
-			return "[]", nil
-		},
+		func(args []string) (string, error) { return "[]", nil },
 		func(args []string) error { return nil },
 	)
 
-	// NukePolecat shells out to the real `gt polecat nuke` binary — if the
-	// archive path were reached, this test would attempt that subprocess.
-	// Asserting the action alone is enough to confirm it never is.
-	z := &ZombieResult{PolecatName: "flint", HookBead: "gt-3qfp"}
-	handleZombieRestart(bd, t.TempDir(), "gastown", "flint", "gt-3qfp", "clean", z)
+	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "gt-3qfp"}
+	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-3qfp", "open", true, "clean", z)
 
 	if strings.Contains(z.Action, "work-already-merged") {
-		t.Errorf("action = %q, must not archive a session-dead polecat whose hookBead is open (gt-evdg)", z.Action)
+		t.Errorf("action = %q, must not archive a session-dead polecat whose hookBead status is open (gt-evdg)", z.Action)
+	}
+	if nuked() {
+		t.Error("nukePolecatFunc must not be called when hookBead status is open — real (gt-3qfp) or fake (this test), the assignment was never claimed")
+	}
+}
+
+// TestHandleZombieRestart_ArchivesWhenHookBeadInProgressAndMerged covers the
+// realistic case the gt-evdg fix must not regress (om review on MR gt-wisp-
+// z4vl): a hooked/in_progress bead whose branch really was squash-merged.
+// The refinery may not have closed the bead yet — that race must not block
+// the archive, or the polecat gets restarted and re-pushes a duplicate MR
+// for work already on main.
+//
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
+// nukePolecatFunc vars.
+func TestHandleZombieRestart_ArchivesWhenHookBeadInProgressAndMerged(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	nuked := stubNukePolecat(t, nil)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "gt-real"}
+	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-real", "in_progress", true, "clean", z)
+
+	if !strings.Contains(z.Action, "work-already-merged") {
+		t.Errorf("action = %q, want archive when a hooked/in_progress bead's branch is really merged", z.Action)
+	}
+	if !nuked() {
+		t.Error("nukePolecatFunc was not called; a real merge must still archive even with a non-closed hookBead status")
+	}
+}
+
+// TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged pins the
+// original aa-apw case: no hookBead at all (or a reaped one, "" with
+// found=true), branch really merged — must archive.
+//
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
+// nukePolecatFunc vars.
+func TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	nuked := stubNukePolecat(t, nil)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "zz-test-cat"}
+	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "", "", false, "clean", z)
+
+	if !strings.Contains(z.Action, "work-already-merged") {
+		t.Errorf("action = %q, want archive when there is no hookBead and the branch is really merged", z.Action)
+	}
+	if !nuked() {
+		t.Error("nukePolecatFunc was not called; an empty hookBead with a real merge must still archive")
 	}
 }

@@ -1505,14 +1505,6 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 // rewrites commit SHAs and therefore escapes a plain ancestor check.
 //
 // Flow (aa-apw):
-//  0. Divergence guard (gt-evdg): the branch must have at least one commit
-//     past its merge-base with the default branch. A branch that never
-//     diverged trivially satisfies every evidence path below — ancestor,
-//     merge-tree-noop, and zero-cherry-patches all read "nothing to
-//     preserve" as "fully preserved" — which is indistinguishable from a
-//     polecat whose real work landed and was squash-merged. Skipping this
-//     guard let a session-dead polecat that never made a commit be archived
-//     (and nuked) as if its nonexistent work were done (flint/gt-3qfp).
 //  1. Fast path: ancestor check via verifyCommitOnMain (catches fast-forward /
 //     regular merges).
 //  2. Target-preservation path: reuse git.BranchTargetStatus so squash-merged
@@ -1525,6 +1517,11 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 // new work. Its merge status says nothing about the CURRENT hookBead's
 // (unstarted) work, so both paths above are skipped unless the checked-out
 // branch's embedded issue ID actually matches hookBead.
+//
+// gt-evdg: a branch that never diverged from the default branch trivially
+// satisfies this function's evidence too, indistinguishable from real work
+// that landed — see handleZombieRestart, which gates on hookBead's own
+// status for that reason.
 //
 // Returns:
 //   - true, nil: work on this branch is already on default branch (skip restart,
@@ -1561,6 +1558,11 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 		}
 	}
 
+	// Fast path: reuse existing ancestor check.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		return true, nil
+	}
+
 	defaultBranch := "main"
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
@@ -1569,20 +1571,6 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 	remotes, err := g.Remotes()
 	if err != nil || len(remotes) == 0 {
 		remotes = []string{"origin"}
-	}
-
-	// gt-evdg divergence guard: see flow note 0 above.
-	diverged, err := branchDivergedFromDefault(g, branch, remotes, defaultBranch)
-	if err != nil {
-		return false, err
-	}
-	if !diverged {
-		return false, nil
-	}
-
-	// Fast path: reuse existing ancestor check.
-	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-		return true, nil
 	}
 
 	for _, remote := range remotes {
@@ -1597,33 +1585,6 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 	}
 
 	return false, nil
-}
-
-// branchDivergedFromDefault reports whether branch has at least one commit
-// past its merge-base with the default branch on any remote. See gt-evdg:
-// without this, a branch that never diverged (zero commits past merge-base)
-// is indistinguishable from one whose real work was fully squash-merged —
-// both have zero unpreserved patches.
-func branchDivergedFromDefault(g *git.Git, branch string, remotes []string, defaultBranch string) (bool, error) {
-	var lastErr error
-	for _, remote := range remotes {
-		upstream := remote + "/" + defaultBranch
-		base, err := g.MergeBase(upstream, branch)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		count, err := g.CommitsAhead(base, branch)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return count > 0, nil
-	}
-	if lastErr != nil {
-		return false, lastErr
-	}
-	return false, fmt.Errorf("no remotes to check divergence against")
 }
 
 // ZombieClassification categorizes why a polecat was classified as a zombie.
@@ -2346,8 +2307,13 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// for reaped wisps. A missing bead is not evidence of a crash.
 	// But a FAILED lookup ("", false) — e.g., cross-rig routing error — must
 	// NOT be treated as closed. Default to restart (safe). (hq-wisp-n530)
+	//
+	// hookStatus/hookFound are reused below by handleZombieRestart (gt-evdg)
+	// so a zombie with a hook bead costs exactly one bd show, not two.
+	var hookStatus string
+	var hookFound bool
 	if snapHook != "" {
-		hookStatus, hookFound := getBeadStatus(bd, workDir, snapHook)
+		hookStatus, hookFound = getBeadStatus(bd, workDir, snapHook)
 		if hookFound && (hookStatus == "closed" || hookStatus == "") {
 			return ZombieResult{}, false
 		}
@@ -2369,7 +2335,7 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// gt-dsgp: Restart instead of nuking. For dirty state, escalate AND restart.
 	// gt-2gra: Use snapshot's cleanup status instead of calling getCleanupStatus.
 	cleanupStatus := snap.cleanupStatus()
-	handleZombieRestart(bd, workDir, rigName, polecatName, snapHook, cleanupStatus, &zombie)
+	handleZombieRestart(bd, workDir, rigName, polecatName, snapHook, hookStatus, hookFound, cleanupStatus, &zombie)
 	return zombie, true
 }
 
@@ -2395,7 +2361,11 @@ func isZombieState(agentState beads.AgentState, hookBead string) bool {
 // wisp ID) ensures exactly one patrol proceeds with the restart.
 //
 // gt-qnp: If Mayor ACP session is active, vetoes automatic cleanup to allow Mayor review.
-func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cleanupStatus string, zombie *ZombieResult) {
+//
+// hookStatus/hookFound are the bd status of hookBead, already looked up once
+// by the caller (gt-evdg) — passing them in avoids a second bd show for the
+// same bead on every zombie with a hook.
+func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, hookStatus string, hookFound bool, cleanupStatus string, zombie *ZombieResult) {
 	zombie.CleanupStatus = cleanupStatus
 	skipRestart := false
 
@@ -2405,21 +2375,22 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// pre-squash HEAD and create a duplicate MR for work already in main.
 	// Instead archive the polecat — its work is done.
 	//
-	// gt-evdg: the hookBead's bd status is not evidence of whether real work
-	// landed — a session-dead polecat with an OPEN hookBead and a branch that
-	// never diverged from the default branch (flint/gt-3qfp) trivially reads
-	// as "merged" too. The root-cause fix lives in verifyBranchAlreadyMerged
-	// itself, which now requires the branch to actually have diverged before
-	// trusting any merge evidence, so it stays correct regardless of hookBead
-	// status — including the realistic case of a hooked/in_progress bead
-	// whose real commits were squash-merged.
-	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
-		zombie.Action = "archived-work-already-merged (aa-apw)"
-		if nukeErr := nukePolecatFunc(bd, workDir, rigName, polecatName); nukeErr != nil {
-			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
-			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+	// gt-evdg: git evidence alone can't tell "never started" from "merged" —
+	// an unclaimed hookBead (status "open") means real work can't have
+	// happened, so a "merged" verdict is trusted only when the bead was
+	// actually claimed (hooked/in_progress/closed/reaped) or there is no
+	// hookBead at all. A failed status lookup is treated the same as "open":
+	// unknown is not evidence of done.
+	archiveEligible := hookBead == "" || (hookFound && hookStatus != "open")
+	if archiveEligible {
+		if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
+			zombie.Action = "archived-work-already-merged (aa-apw)"
+			if nukeErr := nukePolecatFunc(bd, workDir, rigName, polecatName); nukeErr != nil {
+				zombie.Error = fmt.Errorf("archive: %w", nukeErr)
+				zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+			}
+			return
 		}
-		return
 	}
 
 	// Persistence interlock (gt-qnp): check if Mayor ACP session is active before cleanup.
