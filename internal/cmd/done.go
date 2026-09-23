@@ -87,6 +87,13 @@ const (
 	ExitDeferred  = "DEFERRED"
 )
 
+// envDoneFromHandoff marks a `gt done` subprocess as gt handoff's polecat
+// redirect (handoff.go), not a directly- or agent-issued final status report.
+// Session retirement must not apply to this path (gt-5g3e): polecat-CLAUDE.md
+// promises a mid-work handoff continues the work, and only the Witness's
+// lifecycle handling owns the polecat from here.
+const envDoneFromHandoff = "GT_DONE_FROM_HANDOFF"
+
 func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	targetBranch := defaultBranch
 	if explicitTarget != "" {
@@ -118,7 +125,13 @@ func isFinalDoneExitType(exitType string) bool {
 	}
 }
 
-func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFailed, mrFailed bool) bool {
+func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFailed, mrFailed, fromHandoff bool) bool {
+	// A handoff-triggered DEFERRED defers the work mid-task; the polecat (or its
+	// successor) is expected to keep going, so it must never be torn down here,
+	// regardless of exit type (gt-5g3e).
+	if fromHandoff {
+		return false
+	}
 	// A polecat that has signaled a final status and stays alive keeps spending
 	// tokens on work it already reported finished (gt-5g3e).
 	if !isFinalDoneExitType(exitType) {
@@ -130,6 +143,15 @@ func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFai
 		return false
 	}
 	return mergeStrategy != "local"
+}
+
+// shouldResolveConvoyForRetirement reports whether gt done still needs to look
+// up convoy info to correctly gate session retirement. Every final exit type
+// needs this now that DEFERRED and ESCALATED can also retire the session, not
+// only COMPLETED (gt-5g3e): a "local" merge strategy must exempt those exits
+// from retirement exactly as it does COMPLETED.
+func shouldResolveConvoyForRetirement(issueID string, convoyInfo *ConvoyInfo) bool {
+	return issueID != "" && convoyInfo == nil
 }
 
 type doneSessionKiller interface {
@@ -643,9 +665,9 @@ func retirePolecatSessionAfterDone(rigName, polecatName string, pid int) error {
 //
 // Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
 // caller's own PID, so the durable handoff writes above it still finish.
-func retirePolecatSessionAfterFinalExit(exitType, mergeStrategy string, pushFailed, mrFailed bool, rigName, polecatName string, pid int) bool {
-	if !shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed) {
-		fmt.Printf("%s Session preserved for recovery or local review\n", style.Bold.Render("→"))
+func retirePolecatSessionAfterFinalExit(exitType, mergeStrategy string, pushFailed, mrFailed, fromHandoff bool, rigName, polecatName string, pid int) bool {
+	if !shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed, fromHandoff) {
+		fmt.Printf("%s Session preserved for recovery, local review, or handoff continuation\n", style.Bold.Render("→"))
 		return false
 	}
 	fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
@@ -2661,17 +2683,23 @@ notifyWitness:
 	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
 	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
 
-	// Clean successful polecats are retired after durable handoff. Preserve the
-	// feature branch and metadata; Witness/refinery cleanup owns the sandbox.
+	// Every final exit status (COMPLETED, ESCALATED, DEFERRED) retires the
+	// polecat session after durable handoff, unless it's a handoff-triggered
+	// DEFERRED (gt-5g3e). Preserve the feature branch and metadata;
+	// Witness/refinery cleanup owns the sandbox.
 	isPolecat := false
 	mergeStrategy := ""
+	fromHandoff := os.Getenv(envDoneFromHandoff) == "1"
 	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil && roleInfo.Role == RolePolecat {
 		isPolecat = true
 
 		if pushFailed || mrFailed {
 			fmt.Printf("%s Work needs recovery (push or MR failed) — session preserved\n", style.Bold.Render("⚠"))
 		}
-		if exitType == ExitCompleted && issueID != "" && convoyInfo == nil {
+		// Resolve convoy info for every final exit, not only COMPLETED: DEFERRED
+		// and ESCALATED can also retire the session now, so a local-review convoy
+		// on either of those exits must still be exempted (gt-5g3e).
+		if shouldResolveConvoyForRetirement(issueID, convoyInfo) {
 			convoyInfo = getConvoyInfoFromSourceIssue(sourceIssueForNoMerge)
 			if convoyInfo == nil {
 				convoyInfo = getConvoyInfoForIssue(issueID)
@@ -2691,7 +2719,7 @@ notifyWitness:
 	// Retire the live session as the final action. The PID exclusion prevents
 	// killing gt done before all metadata and notifications above are written.
 	if isPolecat {
-		retirePolecatSessionAfterFinalExit(exitType, mergeStrategy, pushFailed, mrFailed, rigName, polecatName, os.Getpid())
+		retirePolecatSessionAfterFinalExit(exitType, mergeStrategy, pushFailed, mrFailed, fromHandoff, rigName, polecatName, os.Getpid())
 	}
 
 	// Fail closed on a push that could not be verified against origin (gt-2wqt):

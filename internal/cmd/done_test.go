@@ -1128,29 +1128,57 @@ func TestShouldRetirePolecatSessionAfterDone(t *testing.T) {
 		mergeStrategy string
 		pushFailed    bool
 		mrFailed      bool
+		fromHandoff   bool
 		want          bool
 	}{
-		{"completed default strategy retires", ExitCompleted, "", false, false, true},
-		{"completed direct strategy retires", ExitCompleted, "direct", false, false, true},
-		{"completed mr strategy retires", ExitCompleted, "mr", false, false, true},
-		{"local strategy preserves session", ExitCompleted, "local", false, false, false},
-		{"deferred retires session", ExitDeferred, "", false, false, true},
-		{"escalated retires session", ExitEscalated, "", false, false, true},
-		{"push failure preserves session", ExitCompleted, "", true, false, false},
-		{"mr failure preserves session", ExitCompleted, "", false, true, false},
-		{"deferred push failure preserves session", ExitDeferred, "", true, false, false},
-		{"escalated mr failure preserves session", ExitEscalated, "", false, true, false},
-		{"non-final exit preserves session", "PHASE_COMPLETE", "", false, false, false},
-		{"unknown exit preserves session", "PAUSED", "", false, false, false},
-		{"empty exit preserves session", "", "", false, false, false},
+		{"completed default strategy retires", ExitCompleted, "", false, false, false, true},
+		{"completed direct strategy retires", ExitCompleted, "direct", false, false, false, true},
+		{"completed mr strategy retires", ExitCompleted, "mr", false, false, false, true},
+		{"local strategy preserves session", ExitCompleted, "local", false, false, false, false},
+		{"deferred retires session", ExitDeferred, "", false, false, false, true},
+		{"escalated retires session", ExitEscalated, "", false, false, false, true},
+		{"deferred local strategy preserves session", ExitDeferred, "local", false, false, false, false},
+		{"escalated local strategy preserves session", ExitEscalated, "local", false, false, false, false},
+		{"push failure preserves session", ExitCompleted, "", true, false, false, false},
+		{"mr failure preserves session", ExitCompleted, "", false, true, false, false},
+		{"deferred push failure preserves session", ExitDeferred, "", true, false, false, false},
+		{"escalated mr failure preserves session", ExitEscalated, "", false, true, false, false},
+		{"non-final exit preserves session", "PHASE_COMPLETE", "", false, false, false, false},
+		{"unknown exit preserves session", "PAUSED", "", false, false, false, false},
+		{"empty exit preserves session", "", "", false, false, false, false},
+		{"handoff-triggered deferred preserves session", ExitDeferred, "", false, false, true, false},
+		{"handoff flag overrides completed retirement", ExitCompleted, "", false, false, true, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed)
+			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.fromHandoff)
 			if got != tt.want {
-				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %q, %v, %v) = %v, want %v",
-					tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, got, tt.want)
+				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %q, %v, %v, %v) = %v, want %v",
+					tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.fromHandoff, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldResolveConvoyForRetirement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		issueID    string
+		convoyInfo *ConvoyInfo
+		want       bool
+	}{
+		{"issue with no convoy yet needs resolution", "gt-abc", nil, true},
+		{"issue that already resolved a convoy skips re-lookup", "gt-abc", &ConvoyInfo{}, false},
+		{"no issue id skips lookup", "", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldResolveConvoyForRetirement(tt.issueID, tt.convoyInfo)
+			if got != tt.want {
+				t.Errorf("shouldResolveConvoyForRetirement(%q, %v) = %v, want %v", tt.issueID, tt.convoyInfo, got, tt.want)
 			}
 		})
 	}
@@ -1223,20 +1251,22 @@ func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
 // leave work recoverable from the live session must keep it.
 func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 	tests := []struct {
-		name       string
-		exitType   string
-		pushFailed bool
-		mrFailed   bool
-		wantKills  int
+		name        string
+		exitType    string
+		pushFailed  bool
+		mrFailed    bool
+		fromHandoff bool
+		wantKills   int
 	}{
-		{"completed retires session", ExitCompleted, false, false, 1},
-		{"deferred retires session", ExitDeferred, false, false, 1},
-		{"escalated retires session", ExitEscalated, false, false, 1},
-		{"non-final exit preserves session", "PHASE_COMPLETE", false, false, 0},
-		{"unknown exit preserves session", "PAUSED", false, false, 0},
-		{"failed push preserves session", ExitCompleted, true, false, 0},
-		{"failed push preserves deferred session", ExitDeferred, true, false, 0},
-		{"failed MR preserves escalated session", ExitEscalated, false, true, 0},
+		{"completed retires session", ExitCompleted, false, false, false, 1},
+		{"deferred retires session", ExitDeferred, false, false, false, 1},
+		{"escalated retires session", ExitEscalated, false, false, false, 1},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, false, false, 0},
+		{"unknown exit preserves session", "PAUSED", false, false, false, 0},
+		{"failed push preserves session", ExitCompleted, true, false, false, 0},
+		{"failed push preserves deferred session", ExitDeferred, true, false, false, 0},
+		{"failed MR preserves escalated session", ExitEscalated, false, true, false, 0},
+		{"handoff-triggered deferred preserves session", ExitDeferred, false, false, true, 0},
 	}
 
 	for _, tt := range tests {
@@ -1246,7 +1276,7 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 			newDoneSessionKiller = func() doneSessionKiller { return fake }
 			t.Cleanup(func() { newDoneSessionKiller = old })
 
-			retired := retirePolecatSessionAfterFinalExit(tt.exitType, "", tt.pushFailed, tt.mrFailed, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(tt.exitType, "", tt.pushFailed, tt.mrFailed, tt.fromHandoff, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
