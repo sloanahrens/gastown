@@ -333,7 +333,19 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 		// Get tracked issues for progress and activity calculation
 		tracked, err := f.getTrackedIssues(c.ID)
 		if err != nil {
-			log.Printf("warning: skipping convoy %s: %v", c.ID, err)
+			// The convoy is open — only its detail read failed. Dropping the
+			// row made a failed read render as a convoy that is not there, so
+			// the panel showed a smaller count than reality with nothing to
+			// say it was partial (gt-huzu). Emit the row with DetailErr set:
+			// it counts, and the panel marks its progress unreadable.
+			log.Printf("warning: convoy %s: detail unavailable: %v", c.ID, err)
+			row.DetailErr = convoyDetailUnavailable
+			row.Progress = "—"
+			row.LastActivity = activity.Info{
+				FormattedAge: convoyDetailUnavailable,
+				ColorClass:   activity.ColorUnknown,
+			}
+			rows = append(rows, row)
 			continue
 		}
 		row.Total = len(tracked)

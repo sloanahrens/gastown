@@ -435,6 +435,58 @@ func TestConvoyTemplate_StatusIndicators(t *testing.T) {
 	}
 }
 
+// TestConvoyTemplate_UnreadableConvoyRenders covers gt-huzu: a convoy whose
+// detail read failed renders as a row marked Unknown, and the panel names how
+// many rows are unreadable. The list must not read as whole when part of it
+// failed to load.
+func TestConvoyTemplate_UnreadableConvoyRenders(t *testing.T) {
+	tmpl, err := LoadTemplates()
+	if err != nil {
+		t.Fatalf("LoadTemplates() error = %v", err)
+	}
+
+	data := ConvoyData{
+		Convoys: []ConvoyRow{
+			{ID: "hq-cv-ok", Title: "Readable", Status: "open", Progress: "1/2", Total: 2},
+			{
+				ID:           "hq-cv-slow",
+				Title:        "Unreadable",
+				Status:       "open",
+				Progress:     "—",
+				DetailErr:    convoyDetailUnavailable,
+				LastActivity: activity.Info{FormattedAge: convoyDetailUnavailable, ColorClass: activity.ColorUnknown},
+			},
+		},
+		UnreadableConvoys: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+
+	output := buf.String()
+
+	if !strings.Contains(output, "hq-cv-slow") {
+		t.Error("an unreadable convoy must still be listed, not omitted")
+	}
+	// Anchored to the badge's own title, not the word "Unknown": the mayor
+	// banner renders "Unknown" too when no mayor is attached, so a bare word
+	// check passes on a panel that never marked the row (gt-huzu).
+	if !strings.Contains(output, "Progress could not be read") {
+		t.Error("an unreadable convoy must carry the Unknown badge in its status cell")
+	}
+	if !strings.Contains(output, "convoy-unreadable-note") {
+		t.Error("the panel must say how many of its rows are unreadable")
+	}
+	if !strings.Contains(output, "1 of 2 convoys unreadable") {
+		t.Error("the panel warning must name the unreadable count against the total")
+	}
+	if !strings.Contains(output, "1/2") {
+		t.Error("a readable convoy beside an unreadable one must still show its progress")
+	}
+}
+
 func TestConvoyTemplate_EmptyState(t *testing.T) {
 	tmpl, err := LoadTemplates()
 	if err != nil {
