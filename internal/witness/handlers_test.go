@@ -4035,3 +4035,46 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
 	}
 }
+
+// TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen verifies gt-evdg:
+// a branch that never diverged from the default branch (a session-dead
+// polecat whose session died before its first commit) is trivially
+// "preserved" under every evidence path in verifyBranchAlreadyMerged —
+// ancestor, merge-tree-noop, and cherry are all satisfied by zero commits,
+// exactly like a genuinely completed squash merge. An OPEN hookBead means
+// the assignment is not done by definition, so a "merged" verdict from git
+// alone must not be trusted to license a nuke; the archive path must only
+// fire when the hookBead is confirmed closed (or absent).
+//
+// Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
+func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+		// Simulates the false positive from a branch that never diverged:
+		// the git layer alone cannot tell "never started" from "already
+		// merged" here, so it reports merged=true just as it would for
+		// real, completed work.
+		return true, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"open"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// NukePolecat shells out to the real `gt polecat nuke` binary — if the
+	// archive path were reached, this test would attempt that subprocess.
+	// Asserting the action alone is enough to confirm it never is.
+	z := &ZombieResult{PolecatName: "flint", HookBead: "gt-3qfp"}
+	handleZombieRestart(bd, t.TempDir(), "gastown", "flint", "gt-3qfp", "clean", z)
+
+	if strings.Contains(z.Action, "work-already-merged") {
+		t.Errorf("action = %q, must not archive a session-dead polecat whose hookBead is open (gt-evdg)", z.Action)
+	}
+}

@@ -2354,13 +2354,32 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// ancestor check), do NOT restart. Restarting would let the polecat push its
 	// pre-squash HEAD and create a duplicate MR for work already in main.
 	// Instead archive the polecat — its work is done.
-	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
-		zombie.Action = "archived-work-already-merged (aa-apw)"
-		if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
-			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
-			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+	//
+	// gt-evdg: gate the archive on the hookBead being confirmed closed (or
+	// absent). verifyBranchAlreadyMerged's git evidence (ancestor /
+	// merge-tree-noop / cherry) is trivially satisfied by a branch that never
+	// diverged from the default branch at all — a polecat whose session died
+	// before its first commit reads as "zero unpreserved patches" exactly
+	// like one whose real work landed and was squash-merged. An OPEN
+	// hookBead means the current assignment is not done by definition, so
+	// git evidence alone must not license a nuke: a session-dead polecat
+	// with real, unstarted work still on its hook is a restart/recovery
+	// case, never an archive target.
+	archiveEligible := hookBead == ""
+	if hookBead != "" {
+		if status, found := getBeadStatus(bd, workDir, hookBead); found && (status == "closed" || status == "") {
+			archiveEligible = true
 		}
-		return
+	}
+	if archiveEligible {
+		if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
+			zombie.Action = "archived-work-already-merged (aa-apw)"
+			if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
+				zombie.Error = fmt.Errorf("archive: %w", nukeErr)
+				zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+			}
+			return
+		}
 	}
 
 	// Persistence interlock (gt-qnp): check if Mayor ACP session is active before cleanup.
