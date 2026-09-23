@@ -1006,7 +1006,10 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 
 	// Agent name doesn't match or command differs — look up by command
 	if cmdBase != "" {
-		for _, info := range globalRegistry.Agents {
+		// Canonical-first, sorted: builtin groq-compound also runs "claude",
+		// and map order must not decide which preset a binary belongs to.
+		for _, name := range canonicalFirst(sortedPresetNames(globalRegistry.Agents), cmdBase, unwrappedCmdBase) {
+			info := globalRegistry.Agents[name]
 			if len(info.ProcessNames) == 0 {
 				continue
 			}

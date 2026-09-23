@@ -2482,6 +2482,8 @@ func TestIsClaudeAgent(t *testing.T) {
 		{"aider command no provider", &RuntimeConfig{Command: "aider"}, false},
 		{"generic provider", &RuntimeConfig{Provider: "generic"}, false},
 		{"codex provider + aider command → provider authoritative", &RuntimeConfig{Provider: "codex", Command: "aider"}, false},
+		{"env-wrapped claude → claude", &RuntimeConfig{Command: "env", Args: []string{"-u", "X", "claude"}}, true},
+		{"claude provider + gemini command → command wins", &RuntimeConfig{Provider: "claude", Command: "gemini"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
