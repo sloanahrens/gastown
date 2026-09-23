@@ -1347,6 +1347,12 @@ var restartSessionExec = func(workDir, address string) error {
 	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
 }
 
+// nukePolecatFunc is a package variable so tests can assert the zombie
+// archive path's decision without shelling out to the real `gt polecat
+// nuke`, which kills a live tmux session and deletes a real worktree (gt-evdg).
+// Swap it only from a non-parallel test, and restore it in t.Cleanup.
+var nukePolecatFunc = NukePolecat
+
 // NukePolecat executes the actual nuke operation for a polecat.
 // This kills the tmux session, removes the worktree, and cleans up beads.
 // Refuses to nuke polecats with pending MRs in the refinery queue (gt-6a9d).
@@ -1499,6 +1505,14 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 // rewrites commit SHAs and therefore escapes a plain ancestor check.
 //
 // Flow (aa-apw):
+//  0. Divergence guard (gt-evdg): the branch must have at least one commit
+//     past its merge-base with the default branch. A branch that never
+//     diverged trivially satisfies every evidence path below — ancestor,
+//     merge-tree-noop, and zero-cherry-patches all read "nothing to
+//     preserve" as "fully preserved" — which is indistinguishable from a
+//     polecat whose real work landed and was squash-merged. Skipping this
+//     guard let a session-dead polecat that never made a commit be archived
+//     (and nuked) as if its nonexistent work were done (flint/gt-3qfp).
 //  1. Fast path: ancestor check via verifyCommitOnMain (catches fast-forward /
 //     regular merges).
 //  2. Target-preservation path: reuse git.BranchTargetStatus so squash-merged
@@ -1547,11 +1561,6 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 		}
 	}
 
-	// Fast path: reuse existing ancestor check.
-	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-		return true, nil
-	}
-
 	defaultBranch := "main"
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
@@ -1560,6 +1569,20 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 	remotes, err := g.Remotes()
 	if err != nil || len(remotes) == 0 {
 		remotes = []string{"origin"}
+	}
+
+	// gt-evdg divergence guard: see flow note 0 above.
+	diverged, err := branchDivergedFromDefault(g, branch, remotes, defaultBranch)
+	if err != nil {
+		return false, err
+	}
+	if !diverged {
+		return false, nil
+	}
+
+	// Fast path: reuse existing ancestor check.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		return true, nil
 	}
 
 	for _, remote := range remotes {
@@ -1574,6 +1597,33 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead string) 
 	}
 
 	return false, nil
+}
+
+// branchDivergedFromDefault reports whether branch has at least one commit
+// past its merge-base with the default branch on any remote. See gt-evdg:
+// without this, a branch that never diverged (zero commits past merge-base)
+// is indistinguishable from one whose real work was fully squash-merged —
+// both have zero unpreserved patches.
+func branchDivergedFromDefault(g *git.Git, branch string, remotes []string, defaultBranch string) (bool, error) {
+	var lastErr error
+	for _, remote := range remotes {
+		upstream := remote + "/" + defaultBranch
+		base, err := g.MergeBase(upstream, branch)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		count, err := g.CommitsAhead(base, branch)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return count > 0, nil
+	}
+	if lastErr != nil {
+		return false, lastErr
+	}
+	return false, fmt.Errorf("no remotes to check divergence against")
 }
 
 // ZombieClassification categorizes why a polecat was classified as a zombie.
@@ -2355,31 +2405,21 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// pre-squash HEAD and create a duplicate MR for work already in main.
 	// Instead archive the polecat — its work is done.
 	//
-	// gt-evdg: gate the archive on the hookBead being confirmed closed (or
-	// absent). verifyBranchAlreadyMerged's git evidence (ancestor /
-	// merge-tree-noop / cherry) is trivially satisfied by a branch that never
-	// diverged from the default branch at all — a polecat whose session died
-	// before its first commit reads as "zero unpreserved patches" exactly
-	// like one whose real work landed and was squash-merged. An OPEN
-	// hookBead means the current assignment is not done by definition, so
-	// git evidence alone must not license a nuke: a session-dead polecat
-	// with real, unstarted work still on its hook is a restart/recovery
-	// case, never an archive target.
-	archiveEligible := hookBead == ""
-	if hookBead != "" {
-		if status, found := getBeadStatus(bd, workDir, hookBead); found && (status == "closed" || status == "") {
-			archiveEligible = true
+	// gt-evdg: the hookBead's bd status is not evidence of whether real work
+	// landed — a session-dead polecat with an OPEN hookBead and a branch that
+	// never diverged from the default branch (flint/gt-3qfp) trivially reads
+	// as "merged" too. The root-cause fix lives in verifyBranchAlreadyMerged
+	// itself, which now requires the branch to actually have diverged before
+	// trusting any merge evidence, so it stays correct regardless of hookBead
+	// status — including the realistic case of a hooked/in_progress bead
+	// whose real commits were squash-merged.
+	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
+		zombie.Action = "archived-work-already-merged (aa-apw)"
+		if nukeErr := nukePolecatFunc(bd, workDir, rigName, polecatName); nukeErr != nil {
+			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
+			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
 		}
-	}
-	if archiveEligible {
-		if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
-			zombie.Action = "archived-work-already-merged (aa-apw)"
-			if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
-				zombie.Error = fmt.Errorf("archive: %w", nukeErr)
-				zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
-			}
-			return
-		}
+		return
 	}
 
 	// Persistence interlock (gt-qnp): check if Mayor ACP session is active before cleanup.
