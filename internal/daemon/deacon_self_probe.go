@@ -143,6 +143,13 @@ const (
 	deaconSelfProbeVerdictOK      = "ok"
 	deaconSelfProbeVerdictError   = "error"
 	deaconSelfProbeVerdictSkipped = "skipped"
+	// deaconSelfProbeVerdictPending marks an unacked probe that is still
+	// inside its budget: neither evidence of failure (Error) nor of health
+	// (OK). Distinct from Skipped so runDeaconSelfProbeCycle can tell "wait
+	// for this same probe to resolve" apart from the ambiguous cases
+	// (missing message, unreadable inbox) where sending a replacement is
+	// safe.
+	deaconSelfProbeVerdictPending = "pending"
 )
 
 // EvaluateDeaconSelfProbe reads back whether the last probe
@@ -191,14 +198,27 @@ func evaluateDeaconSelfProbeWith(reader deaconInboxLister, townRoot string) Deac
 		return DeaconSelfProbeVerdict{Verdict: deaconSelfProbeVerdictSkipped, Message: "unknown: previous probe is no longer present in the deacon inbox, could not verify ack"}
 	}
 
+	budget := deaconSelfProbeBudget(townRoot)
+
 	if found.DeliveryState != mail.DeliveryStateAcked || found.DeliveryAckedAt == nil {
+		elapsed := time.Since(baseline.SentAt)
+		if elapsed <= budget {
+			// Still inside the budget: not evidence of failure. Judged
+			// against self_probe_budget BEFORE being counted as Error, so
+			// a probe that would ack any second now doesn't trip the
+			// counter early (see runDeaconSelfProbeCycle, which holds this
+			// same probe rather than replacing it while pending).
+			return DeaconSelfProbeVerdict{
+				Verdict: deaconSelfProbeVerdictPending,
+				Message: fmt.Sprintf("deacon patrol has not yet acked the probe sent %s ago (budget %s)", elapsed.Round(time.Second), budget),
+			}
+		}
 		return DeaconSelfProbeVerdict{
 			Verdict: deaconSelfProbeVerdictError,
-			Message: fmt.Sprintf("deacon patrol did not ack the probe sent %s ago", time.Since(baseline.SentAt).Round(time.Second)),
+			Message: fmt.Sprintf("deacon patrol did not ack the probe sent %s ago (budget %s)", elapsed.Round(time.Second), budget),
 		}
 	}
 
-	budget := deaconSelfProbeBudget(townRoot)
 	latency := found.DeliveryAckedAt.Sub(baseline.SentAt)
 	if latency > budget {
 		return DeaconSelfProbeVerdict{
@@ -246,10 +266,11 @@ func recordDeaconSelfProbeVerdict(townRoot string, verdict DeaconSelfProbeVerdic
 				"deacon patrol has failed %d consecutive self-probes: %s",
 				baseline.ConsecutiveErrors, verdict.Message))
 		}
-	case deaconSelfProbeVerdictSkipped:
+	case deaconSelfProbeVerdictSkipped, deaconSelfProbeVerdictPending:
 		// Not evidence in either direction (e.g. probe missing, inbox
-		// unreadable) — leave ConsecutiveErrors untouched rather than let an
-		// ambiguous read either mask a real failure streak or falsely trip one.
+		// unreadable, or still inside its budget) — leave ConsecutiveErrors
+		// untouched rather than let an ambiguous or premature read either
+		// mask a real failure streak or falsely trip one.
 	}
 }
 
@@ -271,15 +292,43 @@ func runDeaconSelfProbeCycle(townRoot string, mailbox deaconInboxLister, sender 
 		// paused" (heartbeat.go:156's precedent), and a deliberately paused
 		// deacon legitimately will not ack — either way, evaluating now
 		// would raise a false alarm rather than reflect deacon health.
+		//
+		// Drop any outstanding probe and its error streak so a probe sent
+		// before the pause is never judged after resume: without this, the
+		// first tick after `gt deacon resume` judges an hours-old probe
+		// against the budget and can page the mayor immediately.
+		resetDeaconSelfProbeBaseline(townRoot)
 		return nil
 	}
 
 	verdict := evaluateDeaconSelfProbeWith(mailbox, townRoot)
 	recordDeaconSelfProbeVerdict(townRoot, verdict, alert, clear)
 
+	if verdict.Verdict == deaconSelfProbeVerdictPending {
+		// Still inside its budget and unacked: keep judging this same
+		// probe rather than replacing it, so the elapsed time being
+		// measured against the budget survives across ticks. Sending a
+		// replacement here is what made the budget check inert — every
+		// probe was judged at ~one doctor-dog interval old, never at its
+		// real age.
+		return nil
+	}
+
 	// sendDeaconSelfProbeWith already records a failure in the baseline for
 	// the next evaluation; the returned error is only for the caller to log.
 	return sendDeaconSelfProbeWith(sender, townRoot)
+}
+
+// resetDeaconSelfProbeBaseline drops any outstanding probe and its error
+// streak. Called while the deacon is paused (see runDeaconSelfProbeCycle) so
+// a probe sent before the pause is never judged after resume.
+func resetDeaconSelfProbeBaseline(townRoot string) {
+	statePath := deaconSelfProbeStatePath(townRoot)
+	baseline, exists := readDeaconSelfProbeBaseline(statePath)
+	if !exists || (baseline == deaconSelfProbeBaseline{}) {
+		return
+	}
+	_ = writeDeaconSelfProbeBaseline(statePath, deaconSelfProbeBaseline{})
 }
 
 func deaconSelfProbeSubject(nonce string) string {

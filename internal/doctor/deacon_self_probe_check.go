@@ -24,7 +24,7 @@ func NewDeaconSelfProbeCheck() *DeaconSelfProbeCheck {
 	return &DeaconSelfProbeCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "deacon-self-probe",
-			CheckDescription: "Verify the deacon patrol acknowledges an injected probe mail within its ping-timeout budget",
+			CheckDescription: "Verify the deacon patrol acknowledges an injected probe mail within its self_probe_budget",
 			CheckCategory:    CategoryPatrol,
 		},
 	}

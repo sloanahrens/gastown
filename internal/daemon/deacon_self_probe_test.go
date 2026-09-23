@@ -178,9 +178,34 @@ func TestEvaluateDeaconSelfProbe_AckedLate_Error(t *testing.T) {
 	}
 }
 
-func TestEvaluateDeaconSelfProbe_Unacked_Error(t *testing.T) {
+// TestEvaluateDeaconSelfProbe_UnackedWithinBudget_Pending is one side of the
+// boundary gt-6gsfv's critical finding requires: an unacked probe must be
+// judged against self_probe_budget BEFORE being counted as Error. Elapsed
+// (5m) is inside the budget (15m), so this is not evidence of failure yet.
+func TestEvaluateDeaconSelfProbe_UnackedWithinBudget_Pending(t *testing.T) {
 	townRoot := t.TempDir()
-	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-10*time.Minute))
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-5*time.Minute))
+
+	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
+		unackedProbeMessage("nonce-1"),
+	}}
+
+	verdict := evaluateDeaconSelfProbeWith(reader, townRoot)
+
+	if verdict.Verdict != deaconSelfProbeVerdictPending {
+		t.Fatalf("Verdict = %q, want %q; message: %s", verdict.Verdict, deaconSelfProbeVerdictPending, verdict.Message)
+	}
+}
+
+// TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error is the other side of
+// the boundary: once elapsed (20m) exceeds the budget (15m), the same
+// still-unacked probe becomes Error — escalation fires only after the
+// budget is actually exceeded, not merely because a probe is outstanding.
+func TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
 
 	reader := &fakeDeaconInboxLister{messages: []*mail.Message{
 		unackedProbeMessage("nonce-1"),
@@ -497,6 +522,90 @@ func TestRunDeaconSelfProbeCycle_BoundsBacklogToOneOutstandingProbe(t *testing.T
 	}
 	if baseline.Nonce != sender.sent[len(sender.sent)-1].Subject[len(DeaconSelfProbeSubjectPrefix)+1:] {
 		t.Errorf("baseline tracks exactly the most recent send's nonce, not an accumulating list")
+	}
+}
+
+// TestRunDeaconSelfProbeCycle_PendingWithinBudget_DoesNotResend guards the
+// mechanism behind the budget fix: replacing an unacked-but-pending probe
+// with a fresh one on every tick is what made the earlier budget check
+// inert (every probe judged at ~one doctor-dog interval old, never at its
+// real age). The same nonce must survive a pending tick.
+func TestRunDeaconSelfProbeCycle_PendingWithinBudget_DoesNotResend(t *testing.T) {
+	townRoot := t.TempDir()
+	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
+	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-5*time.Minute))
+	recorder := &fakeAlertRecorder{}
+	unacked := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("nonce-1")}}
+	sender := &fakeRouter{}
+
+	if err := runDeaconSelfProbeCycle(townRoot, unacked, sender, recorder.alert, recorder.clear); err != nil {
+		t.Fatalf("runDeaconSelfProbeCycle: %v", err)
+	}
+
+	if len(sender.sent) != 0 {
+		t.Errorf("a pending probe must not be replaced, got %d sent", len(sender.sent))
+	}
+	baseline, ok := readDeaconSelfProbeBaseline(deaconSelfProbeStatePath(townRoot))
+	if !ok || baseline.Nonce != "nonce-1" {
+		t.Errorf("expected the original nonce to survive a pending tick, got %+v (ok=%v)", baseline, ok)
+	}
+	if len(recorder.alerts) != 0 {
+		t.Errorf("a pending probe must not escalate, got %v", recorder.alerts)
+	}
+}
+
+// TestRunDeaconSelfProbeCycle_Pause_ResetsBaselineSoStaleProbeIsNeverJudged
+// is the major finding from gt-6gsfv's first rejected attempt: a probe sent
+// before a pause must not be judged after resume, and the consecutive-error
+// streak must reset across the pause. Without this, the first tick after
+// `gt deacon resume` judges an hours-old probe against the budget and can
+// page the mayor immediately.
+func TestRunDeaconSelfProbeCycle_Pause_ResetsBaselineSoStaleProbeIsNeverJudged(t *testing.T) {
+	townRoot := t.TempDir()
+	// A streak already in progress before the pause.
+	if err := writeDeaconSelfProbeBaseline(deaconSelfProbeStatePath(townRoot), deaconSelfProbeBaseline{
+		Nonce:             "stale-nonce",
+		SentAt:            time.Now().Add(-1 * time.Hour),
+		ConsecutiveErrors: 2,
+	}); err != nil {
+		t.Fatalf("writeDeaconSelfProbeBaseline: %v", err)
+	}
+	if err := deacon.Pause(townRoot, "test", "test"); err != nil {
+		t.Fatalf("deacon.Pause: %v", err)
+	}
+	recorder := &fakeAlertRecorder{}
+	// This mailbox would fail every check if it were ever evaluated: the
+	// stale probe is present, unacked, and long past any reasonable budget.
+	stale := &fakeDeaconInboxLister{messages: []*mail.Message{unackedProbeMessage("stale-nonce")}}
+	sender := &fakeRouter{}
+
+	if err := runDeaconSelfProbeCycle(townRoot, stale, sender, recorder.alert, recorder.clear); err != nil {
+		t.Fatalf("runDeaconSelfProbeCycle (paused): %v", err)
+	}
+
+	if err := deacon.Resume(townRoot); err != nil {
+		t.Fatalf("deacon.Resume: %v", err)
+	}
+
+	// First tick after resume: the stale probe must already be forgotten,
+	// so this reads as "no probe has been sent yet" and starts a fresh
+	// observation window, not as an error against the pre-pause probe.
+	if err := runDeaconSelfProbeCycle(townRoot, stale, sender, recorder.alert, recorder.clear); err != nil {
+		t.Fatalf("runDeaconSelfProbeCycle (resumed): %v", err)
+	}
+
+	if len(recorder.alerts) != 0 {
+		t.Errorf("a probe sent before a pause must never escalate after resume, got %v", recorder.alerts)
+	}
+	baseline, ok := readDeaconSelfProbeBaseline(deaconSelfProbeStatePath(townRoot))
+	if !ok {
+		t.Fatal("expected a baseline after the post-resume tick sent a fresh probe")
+	}
+	if baseline.Nonce == "stale-nonce" {
+		t.Error("expected the stale pre-pause nonce to be replaced by a fresh probe, not reused")
+	}
+	if baseline.ConsecutiveErrors != 0 {
+		t.Errorf("ConsecutiveErrors = %d after a pause, want 0 (the streak must reset)", baseline.ConsecutiveErrors)
 	}
 }
 
