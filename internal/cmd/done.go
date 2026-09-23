@@ -103,8 +103,30 @@ func shouldUpdateAgentStateOnDone(pushFailed, mrFailed bool) bool {
 	return !pushFailed && !mrFailed
 }
 
+// isFinalDoneExitType reports whether a gt done exit status ends the polecat's
+// turn on its hooked bead: the outcome is signaled and the session has nothing
+// left to do. A deferred *issue* is still a finished *turn*, so DEFERRED ends
+// the session exactly like COMPLETED and ESCALATED. Only a non-final exit
+// (legacy PHASE_COMPLETE, which recycles a polecat still mid-workflow) leaves it
+// running.
+func isFinalDoneExitType(exitType string) bool {
+	switch exitType {
+	case ExitCompleted, ExitEscalated, ExitDeferred:
+		return true
+	default:
+		return false
+	}
+}
+
 func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFailed, mrFailed bool) bool {
-	if exitType != ExitCompleted || pushFailed || mrFailed {
+	// A polecat that has signaled a final status and stays alive keeps spending
+	// tokens on work it already reported finished (gt-5g3e).
+	if !isFinalDoneExitType(exitType) {
+		return false
+	}
+	// A failed push or MR submission leaves work only recoverable from this
+	// session, and a local-review merge strategy still expects a human in it.
+	if pushFailed || mrFailed {
 		return false
 	}
 	return mergeStrategy != "local"
@@ -614,6 +636,26 @@ func retirePolecatSessionAfterDone(rigName, polecatName string, pid int) error {
 	return newDoneSessionKiller().KillSessionWithProcessesExcluding(sessionName, excludePIDs)
 }
 
+// retirePolecatSessionAfterFinalExit decides whether this exit retires the live
+// polecat session and, when it does, tears the session down. The decision and
+// the kill share one function so a final status cannot report itself retired
+// and then skip the kill; tests drive this path directly (gt-5g3e).
+//
+// Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
+// caller's own PID, so the durable handoff writes above it still finish.
+func retirePolecatSessionAfterFinalExit(exitType, mergeStrategy string, pushFailed, mrFailed bool, rigName, polecatName string, pid int) bool {
+	if !shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed) {
+		fmt.Printf("%s Session preserved for recovery or local review\n", style.Bold.Render("→"))
+		return false
+	}
+	fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
+	fmt.Printf("%s Terminating polecat session\n", style.Bold.Render("→"))
+	if err := retirePolecatSessionAfterDone(rigName, polecatName, pid); err != nil {
+		style.PrintWarning("could not terminate polecat session: %v", err)
+	}
+	return true
+}
+
 func cleanupStatusAfterSuccessfulPush(status string) string {
 	if status == "unpushed" || status == "has_unpushed" {
 		return "clean"
@@ -1061,8 +1103,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("invalid exit status '%s': must be COMPLETED, ESCALATED, or DEFERRED", doneStatus)
 	}
 
-	// Clean completions retire the live polecat session after durable handoff.
-	// Failed, deferred, escalated, and local-review paths preserve the session for recovery.
+	// Every final exit status retires the live polecat session after durable
+	// handoff; failed submissions and local-review paths preserve it.
 
 	worktree, err := resolveDonePolecatWorktree()
 	if err != nil {
@@ -2622,7 +2664,7 @@ notifyWitness:
 	// Clean successful polecats are retired after durable handoff. Preserve the
 	// feature branch and metadata; Witness/refinery cleanup owns the sandbox.
 	isPolecat := false
-	retirePolecat := false
+	mergeStrategy := ""
 	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil && roleInfo.Role == RolePolecat {
 		isPolecat = true
 
@@ -2635,15 +2677,8 @@ notifyWitness:
 				convoyInfo = getConvoyInfoForIssue(issueID)
 			}
 		}
-		mergeStrategy := ""
 		if convoyInfo != nil {
 			mergeStrategy = convoyInfo.MergeStrategy
-		}
-		retirePolecat = shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed)
-		if retirePolecat {
-			fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
-		} else {
-			fmt.Printf("%s Session preserved for recovery or local review\n", style.Bold.Render("→"))
 		}
 	}
 
@@ -2655,11 +2690,8 @@ notifyWitness:
 
 	// Retire the live session as the final action. The PID exclusion prevents
 	// killing gt done before all metadata and notifications above are written.
-	if retirePolecat {
-		fmt.Printf("%s Terminating polecat session\n", style.Bold.Render("→"))
-		if err := retirePolecatSessionAfterDone(rigName, polecatName, os.Getpid()); err != nil {
-			style.PrintWarning("could not terminate polecat session: %v", err)
-		}
+	if isPolecat {
+		retirePolecatSessionAfterFinalExit(exitType, mergeStrategy, pushFailed, mrFailed, rigName, polecatName, os.Getpid())
 	}
 
 	// Fail closed on a push that could not be verified against origin (gt-2wqt):

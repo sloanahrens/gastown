@@ -153,7 +153,10 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Polecat detected (%s) - using gt done for handoff\n",
 			style.Bold.Render("🐾"), polecatName)
 		// Polecats don't respawn themselves - Witness handles lifecycle
-		// Call gt done with DEFERRED status to preserve work state
+		// Call gt done with DEFERRED status to preserve work state: the hooked
+		// bead stays open and hookable, the sandbox is protected from stale
+		// cleanup, and the session ends (gt-5g3e), leaving the Witness to decide
+		// when this polecat works again.
 		doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
 		doneCmd.Stdout = os.Stdout
 		doneCmd.Stderr = os.Stderr
