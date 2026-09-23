@@ -163,6 +163,24 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
 
+	// dogPourMu guards dogPour.
+	dogPourMu sync.Mutex
+
+	// dogPour is the daemon's memory of each dog's molecule-pour health across
+	// patrol cycles (gt-i3rpw). Guarded rather than heartbeat-only because
+	// compactor_dog's startup catch-up goroutine and pourDoctorMolecule's
+	// anomaly goroutine both pour alongside the heartbeat.
+	dogPour map[string]dogPourHealth
+
+	// dogPourBdFn backs every bd call made through a poured molecule's handle —
+	// the pour, its step discovery, and its closes. dogPourWaitFn replaces the
+	// pour retry's backoff only; the close retries keep their own. Both are set
+	// by tests, which need an always-failing bd and no real wall-clock to drive
+	// the retry and escalation paths without a Dolt server. Nil uses the real bd
+	// and time.Sleep.
+	dogPourBdFn   func(args ...string) (string, error)
+	dogPourWaitFn func(time.Duration)
+
 	// lastDoctorMolTime tracks when the last mol-dog-doctor molecule was poured.
 	// Option B throttling: only pour when anomaly detected AND cooldown elapsed.
 	// Only accessed from heartbeat loop goroutine - no sync needed.

@@ -883,8 +883,19 @@ func (d *Daemon) escalate(source, message string) {
 // times with exponential backoff, and on final drop log the full message to
 // the feed as a last-resort fallback (gt-tlwv).
 func (d *Daemon) escalateAlert(key, source, message string) {
+	// The callers that do not branch on delivery have no next action to take on a
+	// drop: escalateAlertErr's own escalation_dropped feed line is their record.
+	_ = d.escalateAlertErr(key, source, message)
+}
+
+// escalateAlertErr is escalateAlert with the delivery outcome exposed, for the
+// callers whose next action depends on whether the alert actually landed: an
+// alarm that reports itself as raised when it never arrived is worse than no
+// alarm, because it closes the streak that would have retried.
+func (d *Daemon) escalateAlertErr(key, source, message string) error {
 	title := escalationTitle(source, message)
 
+	var lastErr error
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
 		cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--fingerprint", key, "--stdin", title)
@@ -894,6 +905,7 @@ func (d *Daemon) escalateAlert(key, source, message string) {
 		util.SetDetachedProcessGroup(cmd)
 
 		output, err := cmd.CombinedOutput()
+		lastErr = err
 
 		// Check for context deadline exceeded before cmd.Wait() may mask the
 		// cause; cmd.Process is nil once the process exits, so we must check
@@ -924,7 +936,7 @@ func (d *Daemon) escalateAlert(key, source, message string) {
 		cancel()
 
 		if err == nil {
-			return // success
+			return nil // success
 		}
 
 		// When a process is killed by signal (SIGKILL from CommandContext),
@@ -959,6 +971,14 @@ func (d *Daemon) escalateAlert(key, source, message string) {
 			time.Sleep(backoff)
 		}
 	}
+
+	if lastErr == nil {
+		// Unreachable in practice: every path that does not return nil above
+		// recorded an error. A caller that branches on delivery must still get an
+		// answer rather than a bare nil door out.
+		lastErr = fmt.Errorf("gt escalate %s did not report success", key)
+	}
+	return lastErr
 }
 
 // clearAlerts auto-closes the escalations for the given keys, because the
