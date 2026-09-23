@@ -1347,6 +1347,12 @@ var restartSessionExec = func(workDir, address string) error {
 	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
 }
 
+// nukePolecatFunc is a package variable so tests can assert the zombie
+// archive path's decision without shelling out to the real `gt polecat
+// nuke`, which kills a live tmux session and deletes a real worktree (gt-evdg).
+// Swap it only from a non-parallel test, and restore it in t.Cleanup.
+var nukePolecatFunc = NukePolecat
+
 // NukePolecat executes the actual nuke operation for a polecat.
 // This kills the tmux session, removes the worktree, and cleans up beads.
 // Refuses to nuke polecats with pending MRs in the refinery queue (gt-6a9d).
@@ -1511,6 +1517,11 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 // new work. Its merge status says nothing about the CURRENT hookBead's
 // (unstarted) work, so both paths above are skipped unless the checked-out
 // branch's embedded issue ID actually matches hookBead.
+//
+// gt-evdg: a branch that never diverged from the default branch trivially
+// satisfies this function's evidence too, indistinguishable from real work
+// that landed — see handleZombieRestart, which gates on hookBead's own
+// status for that reason.
 //
 // Returns:
 //   - true, nil: work on this branch is already on default branch (skip restart,
@@ -2296,8 +2307,13 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// for reaped wisps. A missing bead is not evidence of a crash.
 	// But a FAILED lookup ("", false) — e.g., cross-rig routing error — must
 	// NOT be treated as closed. Default to restart (safe). (hq-wisp-n530)
+	//
+	// hookStatus/hookFound are reused below by handleZombieRestart (gt-evdg)
+	// so a zombie with a hook bead costs exactly one bd show, not two.
+	var hookStatus string
+	var hookFound bool
 	if snapHook != "" {
-		hookStatus, hookFound := getBeadStatus(bd, workDir, snapHook)
+		hookStatus, hookFound = getBeadStatus(bd, workDir, snapHook)
 		if hookFound && (hookStatus == "closed" || hookStatus == "") {
 			return ZombieResult{}, false
 		}
@@ -2319,7 +2335,7 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// gt-dsgp: Restart instead of nuking. For dirty state, escalate AND restart.
 	// gt-2gra: Use snapshot's cleanup status instead of calling getCleanupStatus.
 	cleanupStatus := snap.cleanupStatus()
-	handleZombieRestart(bd, workDir, rigName, polecatName, snapHook, cleanupStatus, &zombie)
+	handleZombieRestart(bd, workDir, rigName, polecatName, snapHook, hookStatus, hookFound, cleanupStatus, &zombie)
 	return zombie, true
 }
 
@@ -2345,7 +2361,11 @@ func isZombieState(agentState beads.AgentState, hookBead string) bool {
 // wisp ID) ensures exactly one patrol proceeds with the restart.
 //
 // gt-qnp: If Mayor ACP session is active, vetoes automatic cleanup to allow Mayor review.
-func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cleanupStatus string, zombie *ZombieResult) {
+//
+// hookStatus/hookFound are the bd status of hookBead, already looked up once
+// by the caller (gt-evdg) — passing them in avoids a second bd show for the
+// same bead on every zombie with a hook.
+func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, hookStatus string, hookFound bool, cleanupStatus string, zombie *ZombieResult) {
 	zombie.CleanupStatus = cleanupStatus
 	skipRestart := false
 
@@ -2354,13 +2374,23 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// ancestor check), do NOT restart. Restarting would let the polecat push its
 	// pre-squash HEAD and create a duplicate MR for work already in main.
 	// Instead archive the polecat — its work is done.
-	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
-		zombie.Action = "archived-work-already-merged (aa-apw)"
-		if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
-			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
-			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+	//
+	// gt-evdg: git evidence alone can't tell "never started" from "merged" —
+	// an unclaimed hookBead (status "open") means real work can't have
+	// happened, so a "merged" verdict is trusted only when the bead was
+	// actually claimed (hooked/in_progress/closed/reaped) or there is no
+	// hookBead at all. A failed status lookup is treated the same as "open":
+	// unknown is not evidence of done.
+	archiveEligible := hookBead == "" || (hookFound && hookStatus != "open")
+	if archiveEligible {
+		if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName, hookBead); err == nil && merged {
+			zombie.Action = "archived-work-already-merged (aa-apw)"
+			if nukeErr := nukePolecatFunc(bd, workDir, rigName, polecatName); nukeErr != nil {
+				zombie.Error = fmt.Errorf("archive: %w", nukeErr)
+				zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+			}
+			return
 		}
-		return
 	}
 
 	// Persistence interlock (gt-qnp): check if Mayor ACP session is active before cleanup.
