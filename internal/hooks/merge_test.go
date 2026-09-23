@@ -339,6 +339,47 @@ func TestMergeHooksDoesNotMutateBase(t *testing.T) {
 	}
 }
 
+// TestMergeHooksPropagatesPermissionRequest pins the gt-8stz regression:
+// cloneConfig and applyOverride once omitted the PermissionRequest field, so
+// an override's PermissionRequest entries were silently dropped by every
+// caller of MergeHooks/Merge, including ComputeExpected (gt-8stz review,
+// finding 48f9948f3436).
+func TestMergeHooksPropagatesPermissionRequest(t *testing.T) {
+	base := &HooksConfig{
+		PermissionRequest: []HookEntry{
+			{Matcher: "Bash", Hooks: []Hook{{Type: "command", Command: "base guard"}}},
+		},
+	}
+	overrides := map[string]*HooksConfig{
+		"polecats": {
+			PermissionRequest: []HookEntry{
+				{Matcher: "Edit|Write|MultiEdit|NotebookEdit", Hooks: []Hook{{Type: "command", Command: "override guard"}}},
+			},
+		},
+	}
+
+	result := MergeHooks(base, overrides, "polecats")
+
+	if len(result.PermissionRequest) != 2 {
+		t.Fatalf("expected 2 PermissionRequest entries (base kept, override added), got %d: %+v", len(result.PermissionRequest), result.PermissionRequest)
+	}
+	var sawBase, sawOverride bool
+	for _, entry := range result.PermissionRequest {
+		if entry.Matcher == "Bash" {
+			sawBase = true
+		}
+		if entry.Matcher == "Edit|Write|MultiEdit|NotebookEdit" {
+			sawOverride = true
+		}
+	}
+	if !sawBase {
+		t.Error("base PermissionRequest entry was dropped")
+	}
+	if !sawOverride {
+		t.Error("override PermissionRequest entry was dropped")
+	}
+}
+
 func TestMergeHooksOverrideAddsNewType(t *testing.T) {
 	base := &HooksConfig{
 		SessionStart: []HookEntry{

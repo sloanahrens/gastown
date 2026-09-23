@@ -122,6 +122,7 @@ func diffHooksConfigs(current, expected *hooks.HooksConfig) []string {
 	}{
 		{"PreToolUse", current.PreToolUse, expected.PreToolUse},
 		{"PostToolUse", current.PostToolUse, expected.PostToolUse},
+		{"PermissionRequest", current.PermissionRequest, expected.PermissionRequest},
 		{"SessionStart", current.SessionStart, expected.SessionStart},
 		{"Stop", current.Stop, expected.Stop},
 		{"PreCompact", current.PreCompact, expected.PreCompact},

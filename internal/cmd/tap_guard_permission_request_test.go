@@ -192,12 +192,29 @@ func TestPermissionRequestDenialShape(t *testing.T) {
 	}
 }
 
+// fakeParkedPromptMailer substitutes for parkedPromptMailer so a test can
+// verify escalateParkedPromptOnce reaches (or does not reach) the send call
+// without ever touching the town's real mail store (gt-8stz review, finding
+// d1058e444298). Restored automatically at test cleanup.
+func fakeParkedPromptMailer(t *testing.T, result bool) *[]string {
+	t.Helper()
+	var sent []string
+	orig := parkedPromptMailer
+	parkedPromptMailer = func(subject, body string) bool {
+		sent = append(sent, subject+"\n"+body)
+		return result
+	}
+	t.Cleanup(func() { parkedPromptMailer = orig })
+	return &sent
+}
+
 // TestPermissionRequestEscalatesOncePerShape keeps the escalation off the Dolt
 // churn path: one report per session and shape, however often the agent
 // retries the denied call.
 func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	asPolecat(t)
+	sent := fakeParkedPromptMailer(t, true)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
 	first := escalateParkedPromptOnce(hook)
@@ -207,14 +224,71 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	if _, err := os.Stat(promptEscalationMarker(hook, promptShape(hook))); err != nil {
 		t.Fatalf("no marker written for the first call: %v", err)
 	}
+	if len(*sent) != 1 {
+		t.Fatalf("fake mailer received %d sends, want 1: %v", len(*sent), *sent)
+	}
 	if second := escalateParkedPromptOnce(hook); !strings.Contains(second, "already reported") {
 		t.Errorf("second call did not reuse the marker: %q", second)
+	}
+	if len(*sent) != 1 {
+		t.Errorf("repeat call reached the mailer again: %v", *sent)
 	}
 	// A different shape in the same session is a different incident.
 	other := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 	other.ToolInput.Command = `rm -rf /tmp/x/*`
 	if got := escalateParkedPromptOnce(other); strings.Contains(got, "already reported") {
 		t.Errorf("second shape was suppressed by the first shape's marker: %q", got)
+	}
+	if len(*sent) != 2 {
+		t.Errorf("second shape did not reach the mailer: %v", *sent)
+	}
+}
+
+// TestPermissionRequestEscalationMailerFailure pins the failure-message
+// distinction the review asked for: a mailer failure must not read like no
+// escalation was attempted at all (gt-8stz review, finding 4ce05cf3cf09).
+func TestPermissionRequestEscalationMailerFailure(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	asPolecat(t)
+	fakeParkedPromptMailer(t, false)
+	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
+
+	got := escalateParkedPromptOnce(hook)
+	if !strings.Contains(got, "Escalating to the mayor failed") {
+		t.Errorf("mailer failure did not surface a distinct message: %q", got)
+	}
+}
+
+// TestPermissionRequestEscalationBodyRedactsSecrets pins the mail-safety
+// requirement: a token-shaped substring in the denied command must never
+// reach the mayor's mail unredacted, and the raw command itself must not
+// appear at all (gt-8stz review, finding 36adb619b71a).
+func TestPermissionRequestEscalationBodyRedactsSecrets(t *testing.T) {
+	token := "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	command := `curl -H "Authorization: Bearer ` + token + `" https://example.com`
+	hook := payloadInput(t, bashPermissionPayload(command))
+
+	body := promptEscalationBody(hook, promptShape(hook))
+	if strings.Contains(body, token) {
+		t.Fatalf("escalation body leaked the raw token: %q", body)
+	}
+	if strings.Contains(body, command) {
+		t.Fatalf("escalation body carried the raw command text: %q", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") {
+		t.Errorf("escalation body does not show a redaction marker: %q", body)
+	}
+}
+
+// TestPermissionRequestEscalationMarkerSessionFallback pins the rate-limit
+// fix: an empty session id must not collapse every session's dedup key onto
+// one shared marker (gt-8stz review, finding 8de95c69660d).
+func TestPermissionRequestEscalationMarkerSessionFallback(t *testing.T) {
+	shape := "bash cd-compound-write"
+	a := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/alpha/gastown", ToolName: "Bash"}
+	b := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/beta/gastown", ToolName: "Bash"}
+	if promptEscalationMarker(a, shape) == promptEscalationMarker(b, shape) {
+		t.Error("two sessions with no session_id but different cwds collapsed onto one marker")
 	}
 }
 
@@ -236,4 +310,3 @@ func TestPermissionRequestShapeLabels(t *testing.T) {
 		}
 	}
 }
-

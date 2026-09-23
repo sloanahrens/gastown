@@ -77,6 +77,7 @@ func LoadAllOverrides() (map[string]*HooksConfig, error) {
 func applyOverride(result, override *HooksConfig) *HooksConfig {
 	result.PreToolUse = mergeEntries(result.PreToolUse, override.PreToolUse)
 	result.PostToolUse = mergeEntries(result.PostToolUse, override.PostToolUse)
+	result.PermissionRequest = mergeEntries(result.PermissionRequest, override.PermissionRequest)
 	result.SessionStart = mergeEntries(result.SessionStart, override.SessionStart)
 	result.Stop = mergeEntries(result.Stop, override.Stop)
 	result.PreCompact = mergeEntries(result.PreCompact, override.PreCompact)
@@ -203,14 +204,15 @@ func hookKey(h Hook) string {
 // cloneConfig creates a deep copy of a HooksConfig.
 func cloneConfig(cfg *HooksConfig) *HooksConfig {
 	return &HooksConfig{
-		PreToolUse:       cloneEntries(cfg.PreToolUse),
-		PostToolUse:      cloneEntries(cfg.PostToolUse),
-		SessionStart:     cloneEntries(cfg.SessionStart),
-		Stop:             cloneEntries(cfg.Stop),
-		PreCompact:       cloneEntries(cfg.PreCompact),
-		UserPromptSubmit: cloneEntries(cfg.UserPromptSubmit),
-		WorktreeCreate:   cloneEntries(cfg.WorktreeCreate),
-		WorktreeRemove:   cloneEntries(cfg.WorktreeRemove),
+		PreToolUse:        cloneEntries(cfg.PreToolUse),
+		PostToolUse:       cloneEntries(cfg.PostToolUse),
+		PermissionRequest: cloneEntries(cfg.PermissionRequest),
+		SessionStart:      cloneEntries(cfg.SessionStart),
+		Stop:              cloneEntries(cfg.Stop),
+		PreCompact:        cloneEntries(cfg.PreCompact),
+		UserPromptSubmit:  cloneEntries(cfg.UserPromptSubmit),
+		WorktreeCreate:    cloneEntries(cfg.WorktreeCreate),
+		WorktreeRemove:    cloneEntries(cfg.WorktreeRemove),
 	}
 }
 

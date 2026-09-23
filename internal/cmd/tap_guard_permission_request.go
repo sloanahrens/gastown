@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,24 +17,12 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// tap_guard_permission_request.go implements `gt tap guard permission-request` (gt-8stz).
-//
-// Claude Code answers some Bash shapes with a prompt rather than an allow: a
-// compound command that changes directory and writes ("Compound command
-// contains cd with write operation — manual approval required to prevent path
-// resolution bypass"), and a removal whose target the analyzer cannot resolve
-// (an rm over a glob after a cd). The message says those asks cannot be
-// auto-allowed by permission rules, and the rm class is bypass-immune, so
-// --dangerously-skip-permissions does not clear it either.
-//
-// A prompt is only meaningful when someone can answer it. A polecat or dog
-// runs alone in a tmux pane and the harness counts that pane as an interactive
-// surface, so the dialog is raised and never answered: the session parks while
-// still reading as running. Registered as a PermissionRequest hook for those
-// roles, this guard answers the ask with a deny whose message carries the safe
-// formulation, so the model gets a failure it can act on (gt-8stz). Interactive
-// roles get no PermissionRequest entry (internal/hooks), so their prompts keep
-// reaching a person.
+// tap_guard_permission_request.go implements `gt tap guard permission-request`:
+// a PermissionRequest hook that denies, rather than leaves standing, a prompt
+// an unattended session (polecat, dog) has nobody to answer — the denial names
+// a retry formulation instead of parking the session silently (gt-8stz).
+// Interactive roles carry no PermissionRequest entry, so their prompts still
+// reach a person.
 const (
 	// promptEscalationTimeout bounds the mail that records the park. A hung
 	// Dolt must not hold the decision past the hook's budget.
@@ -264,7 +253,10 @@ func writePermissionRequestDenial(hook permissionRequestInput, escalation string
 // escalateParkedPromptOnce mails the mayor that a prompt parked this session,
 // and returns the sentence the denial carries about it. The marker is written
 // before the mail is attempted, so a retry loop cannot write a Dolt commit per
-// attempt.
+// attempt. Each failure path returns its own sentence rather than "" so a
+// silent bookkeeping or delivery failure is never indistinguishable from a
+// deny that carries no escalation note at all (gt-8stz review,
+// finding 4ce05cf3cf09).
 func escalateParkedPromptOnce(hook permissionRequestInput) string {
 	shape := promptShape(hook)
 	marker := promptEscalationMarker(hook, shape)
@@ -272,15 +264,11 @@ func escalateParkedPromptOnce(hook permissionRequestInput) string {
 		return " This call was already reported once this session."
 	}
 	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-		return ""
-	}
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return ""
+		return " Escalation bookkeeping failed, so a retry of this call may report it again."
 	}
 	subject := fmt.Sprintf("Parked prompt denied: %s", shape)
 	body := promptEscalationBody(hook, shape)
-	if !sendParkedPromptMail(townRoot, subject, body) {
+	if !parkedPromptMailer(subject, body) {
 		return " Escalating to the mayor failed; mail the witness if this call is required."
 	}
 	return " The mayor has been notified."
@@ -305,38 +293,102 @@ func promptShape(hook permissionRequestInput) string {
 
 // promptEscalationMarker is the per-session, per-shape marker path that makes
 // the escalation once-only.
+//
+// A missing session_id must not fall back to a bare empty string: every
+// session missing it would then share one marker, so the first one to park
+// would silently suppress every later, unrelated session's report of the same
+// shape (gt-8stz review, finding 8de95c69660d). The cwd is stable for one
+// session and distinct across polecats, so it is the first fallback; a
+// process-local key is the last resort when even that is empty, which trades
+// per-session dedup for never colliding with another session.
 func promptEscalationMarker(hook permissionRequestInput, shape string) string {
-	sum := sha256.Sum256([]byte(hook.SessionID + "\x00" + hook.ToolName + "\x00" + shape))
+	key := hook.SessionID
+	if key == "" {
+		if hook.Cwd != "" {
+			key = "cwd:" + hook.Cwd
+		} else {
+			key = fmt.Sprintf("pid:%d", os.Getpid())
+		}
+	}
+	sum := sha256.Sum256([]byte(key + "\x00" + hook.ToolName + "\x00" + shape))
 	return filepath.Join(os.TempDir(), fmt.Sprintf("gt-parked-prompt-%x", sum[:8]))
 }
 
-// promptEscalationBody carries the command and the reason, which is what the
-// mayor needs to judge whether the deny is the right call or the shape should
-// be steered away from (gt-8stz).
+// secretLikeToken matches a run of base64/hex/url-safe characters long enough
+// to be a credential rather than an ordinary path segment or flag value.
+var secretLikeToken = regexp.MustCompile(`[A-Za-z0-9_\-+/=]{20,}`)
+
+// redactSecrets masks token-shaped substrings before a command reaches mail a
+// third party (the mayor) reads. It is deliberately over-eager — a false
+// positive over a long non-secret string costs nothing, a leaked token is a
+// real credential exposure — so this must run on any command text this guard
+// mails, never the raw string (gt-8stz review, finding 36adb619b71a).
+func redactSecrets(s string) string {
+	return secretLikeToken.ReplaceAllString(s, "[REDACTED]")
+}
+
+// cwdClass buckets a session's cwd into the shape the mayor needs to judge
+// the report, without repeating the full path into mail the way the denied
+// command no longer is (gt-8stz review, finding 36adb619b71a).
+func cwdClass(cwd string) string {
+	switch {
+	case cwd == "":
+		return "(unknown)"
+	case strings.Contains(cwd, "/polecats/"):
+		return "polecat worktree"
+	case strings.Contains(cwd, "/dogs/"):
+		return "dog worktree"
+	default:
+		return "other"
+	}
+}
+
+// promptEscalationBody carries the rule name, session, cwd class, and a
+// secret-redacted preview of the call plus its full hash — enough for the
+// mayor to judge whether the deny is right or the shape should be steered
+// away from, without the raw command (which may carry a credential) ever
+// landing in mail (gt-8stz review, finding 36adb619b71a).
 func promptEscalationBody(hook permissionRequestInput, shape string) string {
 	dispatch := hook.ToolInput.Command
 	if dispatch == "" {
 		dispatch = hook.ToolInput.FilePath
 	}
-	if len(dispatch) > promptEscalationMaxDispatch {
-		dispatch = dispatch[:promptEscalationMaxDispatch] + " [truncated]"
+	preview := redactSecrets(dispatch)
+	if len(preview) > promptEscalationMaxDispatch {
+		preview = preview[:promptEscalationMaxDispatch] + " [truncated]"
+	}
+	hash := sha256.Sum256([]byte(dispatch))
+	session := hook.SessionID
+	if session == "" {
+		session = "(none)"
 	}
 	return fmt.Sprintf(`A permission prompt was denied instead of parking an unattended session.
 
+Rule: %s
 Session: %s
-Cwd: %s
-Shape: %s
-Denied call: %s
+Cwd class: %s
+Denied call (secret-redacted): %s
+Call hash: %x
 
 Claude Code raised a permission prompt that nobody can answer at this pane, so
 the guard answered it with a deny and a retry formulation. If the call was
 legitimate, steer the worker to a formulation that does not ask.`,
-		hook.SessionID, hook.Cwd, shape, dispatch)
+		shape, session, cwdClass(hook.Cwd), preview, hash[:8])
 }
 
-// sendParkedPromptMail delivers the escalation, bounded so a slow or hung Dolt
-// cannot hold the hook open.
-func sendParkedPromptMail(townRoot, subject, body string) bool {
+// parkedPromptMailer delivers the escalation mail. A package-level var so
+// tests can substitute a fake and verify escalateParkedPromptOnce reaches the
+// send call without ever touching the town's mail store (gt-8stz review,
+// finding d1058e444298).
+var parkedPromptMailer = defaultParkedPromptMailer
+
+// defaultParkedPromptMailer sends the escalation through the town's mail
+// router, bounded so a slow or hung Dolt cannot hold the hook open.
+func defaultParkedPromptMailer(subject, body string) bool {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return false
+	}
 	done := make(chan error, 1)
 	go func() {
 		router := mail.NewRouter(townRoot)
