@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -211,10 +212,13 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 
 	// Redirecting HOME moves the Go toolchain's default cache locations
-	// (GOPATH=$HOME/go etc.), which would make any `go` invocation from a
-	// test re-download the module cache. Pin the current effective values
-	// before HOME changes.
-	preserveGoEnv()
+	// (GOPATH=$HOME/go etc.) AND its go env file ($GOENV, itself under
+	// $HOME), which would make any `go` invocation from a test re-download
+	// the module cache and, on a host with a keg-only icu4c, lose the cgo
+	// flags. Pin the current effective values before HOME changes.
+	if err := preserveGoEnv(); err != nil {
+		return nil, err
+	}
 
 	setenvs := map[string]string{
 		"HOME":              h.HomeDir,
@@ -246,7 +250,6 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 			return nil, fmt.Errorf("setting %s: %w", k, err)
 		}
 	}
-
 	if h.cfg.dolt {
 		// Replaces the poisoned port vars with the container's mapped port.
 		if err := EnsureDoltContainerForTestMain(); err != nil {
@@ -482,38 +485,103 @@ func writeSandboxGitConfig(home string) error {
 	return nil
 }
 
-// preserveGoEnv pins GOPATH/GOCACHE/GOMODCACHE to their current effective
-// values (asking the go tool) before HOME is redirected, so `go` invocations
-// from tests keep using the real build and module caches. Best-effort: when
-// the go tool is unavailable, nothing is pinned.
-func preserveGoEnv() {
-	vars := []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
+// goEnvCarryVars are the cache-location variables preserveGoEnv pins to
+// their current effective values before the harness redirects HOME, so `go`
+// invocations from tests keep using the real build and module caches
+// instead of a cold cache under the throwaway sandbox.
+var goEnvCarryVars = []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
+
+// preserveGoEnv pins GOENV to the go tool's current env file, and
+// goEnvCarryVars to their current effective values, before HOME is
+// redirected.
+//
+// GOENV is what actually carries a host's cgo flags: on a host with a
+// keg-only icu4c, CGO_CPPFLAGS/CGO_LDFLAGS live in the go env FILE ($GOENV,
+// itself under $HOME), not the process environment, and the redirect would
+// otherwise point `go env` at an empty file under the sandbox HOME, losing
+// them from every `go` subprocess a test spawns (gt-mjll). Pinning the file
+// pointer, rather than exporting the flags themselves, leaves the process
+// environment untouched, so a caller like buildGTBinary's brew-icu4c
+// fallback still runs on a host whose env file lacks them.
+//
+// Fails on every error except a missing go tool: a test process with no
+// `go` on PATH cannot build anything that would notice the loss, but a `go
+// env` failure with the tool present means the carry did not happen, and
+// dropping it silently resurfaces much later as an obscure compile error.
+//
+// Trade-off: pinning GOENV carries the whole file, not just the cgo flags —
+// GOFLAGS, GOPROXY, GOPRIVATE and GOTOOLCHAIN included — into every `go`
+// subprocess a test spawns, which is broader than the cache-location carry
+// it replaces. Accepted: those are the same values a developer's own shell
+// already sees outside the harness.
+func preserveGoEnv() error {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return nil
+	}
+
+	if os.Getenv("GOENV") == "" {
+		out, err := exec.Command(goBin, "env", "GOENV").Output()
+		if err != nil {
+			return fmt.Errorf("asking the go tool for GOENV: %w", err)
+		}
+		if goEnvPath := strings.TrimSpace(string(out)); goEnvPath != "" {
+			if err := os.Setenv("GOENV", goEnvPath); err != nil {
+				return fmt.Errorf("pinning GOENV: %w", err)
+			}
+		}
+	}
+
 	var missing []string
-	for _, v := range vars {
+	for _, v := range goEnvCarryVars {
 		if os.Getenv(v) == "" {
 			missing = append(missing, v)
 		}
 	}
 	if len(missing) == 0 {
-		return
+		return nil
 	}
-	goBin, err := exec.LookPath("go")
+	// -json: values are space-bearing flag strings and may legitimately be
+	// empty, so splitting output on newlines would be lossy.
+	args := append([]string{"env", "-json"}, missing...)
+	out, err := exec.Command(goBin, args...).Output() //nolint:gosec // fixed args
 	if err != nil {
-		return
+		return fmt.Errorf("asking the go tool for %s: %w", strings.Join(missing, ", "), err)
 	}
-	out, err := exec.Command(goBin, append([]string{"env"}, missing...)...).Output() //nolint:gosec // fixed args
-	if err != nil {
-		return
+	values := map[string]string{}
+	if err := json.Unmarshal(out, &values); err != nil {
+		return fmt.Errorf("parsing `go env -json %s`: %w", strings.Join(missing, " "), err)
 	}
-	values := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	if len(values) != len(missing) {
-		return
-	}
-	for i, v := range missing {
-		if values[i] != "" {
-			_ = os.Setenv(v, values[i])
+	for _, v := range missing {
+		if values[v] == "" {
+			continue
+		}
+		if err := os.Setenv(v, values[v]); err != nil {
+			return fmt.Errorf("carrying %s into the hermetic environment: %w", v, err)
 		}
 	}
+	return nil
+}
+
+// WithFailingGoOnPath points PATH at a stand-in `go` that runs but always
+// exits nonzero, so a `go env` call made by code under test returns an error
+// instead of hitting the "no go on PATH" branch several callers treat as a
+// silent no-op. Restored via t.Setenv's automatic cleanup. Exported so
+// packages that pin gt-mjll's loud-failure path in their own tests (e.g.
+// internal/cmd's cgo probe) share this setup instead of reimplementing it.
+func WithFailingGoOnPath(t testing.TB) {
+	t.Helper()
+	binDir := t.TempDir()
+	name := "go"
+	script := "#!/bin/sh\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		name = "go.bat"
+		script = "@exit /b 1\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing stand-in go: %v", err)
+	}
+	t.Setenv("PATH", binDir)
 }
 
 // writeSandboxTown creates a minimal valid town (mayor/town.json marker) at
@@ -569,7 +637,9 @@ func HermeticTest(t testing.TB) string {
 	if err := writeSandboxGitConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	preserveGoEnv()
+	if err := preserveGoEnv(); err != nil {
+		t.Fatal(err)
+	}
 
 	testEnvs := map[string]string{
 		"HOME":                  home,
