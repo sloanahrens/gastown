@@ -730,6 +730,16 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushed %d submodule(s)\n", len(subChanges))
 	}
 
+	// Step 3.9 (gt-sda9): before any gate or merge runs, assert the MR's
+	// declared commit_sha is reachable from origin's live tip for the source
+	// branch (fetched first). A submission recorded from an unpushed local
+	// head — the trap shared-.repo.git rigs fall into — must refuse loudly
+	// instead of spending gates on and then merging work origin never has.
+	if err := e.assertSubmittedHeadReachableOnOrigin(mr); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Refusing to gate/merge MR %s: %v\n", mr.ID, err)
+		return ProcessResult{Success: false, Error: err.Error()}
+	}
+
 	// Step 4: Run quality gates (or legacy tests) if configured.
 	// Phase 3 fast-path: if skipGates is true (pre-verified MR with matching base),
 	// skip all gate execution — the polecat already ran gates after rebasing.
@@ -2044,6 +2054,64 @@ func (e *Engineer) submittedBranchHead(mr *MRInfo) (string, error) {
 		return "", fmt.Errorf("source branch %s changed from submitted head %s to %s", branch, shortSHA(commit), shortSHA(localHead))
 	}
 	return commit, nil
+}
+
+// assertSubmittedHeadReachableOnOrigin is the refinery-side half of gt-2wqt
+// (item 3, gt-sda9): before gates or merge run, assert the MR's declared
+// commit_sha is reachable from origin's live tip for the source branch,
+// fetched and queried against the push target (PushRemoteBranchTip matches
+// where the polecat's push lands when pushurl differs from the fetch URL).
+//
+// This is belt-and-braces on top of two earlier lines of defense:
+//
+//   - gt done itself now creates the MR only after ls-remote confirms
+//     origin/<branch> == HEAD, so a healthy submission is always consistent;
+//   - submittedBranchHead catches the common rig case, but in a rig where the
+//     refinery shares .repo.git with the polecats that local ref IS the
+//     polecat's HEAD — a worktree nuke, ref prune, or rewrite leaves a local
+//     head that still matches commit_sha while origin never received it.
+//
+// Only the MR's exact submitted head is asserted — not "the branch moved and
+// here's a different head", which adoptConflictResolvedHead handles through the
+// closed conflict task, and not a content-preserving rebase, which the
+// patch-preservation fallback below still accepts, as
+// VerifyPushedCommitReachableFromPushTarget does for every push.
+//
+// The refusal message names the recovery paths and the retry semantics: the MR
+// bead keeps its commit_sha, so a retry re-runs this exact assertion — the fix
+// is pushing the declared head (a push that rewrites the branch instead leaves
+// the MR unretryable by design), or, when the branch is gone, escalating like
+// the BranchNotFound path does.
+func (e *Engineer) assertSubmittedHeadReachableOnOrigin(mr *MRInfo) error {
+	if mr == nil {
+		return fmt.Errorf("merge request is missing")
+	}
+	if e.git == nil {
+		return fmt.Errorf("git client is missing")
+	}
+	branch := strings.TrimSpace(mr.Branch)
+	if branch == "" {
+		return fmt.Errorf("missing source branch")
+	}
+	// Synthetic merge-mechanics MRs (test-only, "mr-*" without a source issue)
+	// exist precisely to exercise doMerge on local branches origin has never
+	// heard of — under testAllowSyntheticMRs there is no beads store backing
+	// them and no submission to speak of, so the remote assertion has nothing
+	// to guard. Real MRs always carry a submission and always pass through it.
+	if e.isSyntheticMergeMechanicsMR(mr) {
+		return nil
+	}
+	commit := strings.TrimSpace(mr.CommitSHA)
+	if commit == "" {
+		return fmt.Errorf("missing submitted commit_sha")
+	}
+	if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", branch, commit); err != nil {
+		return fmt.Errorf("refusing to gate: submitted head %s is not reachable from origin's tip for %s (%v) — "+
+			"the polecat's push has not landed (or the branch moved underneath the MR); "+
+			"push origin %s so the declared head lands, or escalate: MR %s keeps commit_sha %s and will re-check on retry",
+			shortSHA(commit), branch, err, branch, mr.ID, shortSHA(commit))
+	}
+	return nil
 }
 
 func (e *Engineer) deleteLocalBranchIfAt(branch, expectedHead string) error {

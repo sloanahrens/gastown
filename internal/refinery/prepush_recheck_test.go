@@ -381,6 +381,10 @@ func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
 			defer cleanup()
 			createFeatureBranch(t, workDir, "feature-"+tc.name, tc.name+".txt", tc.name+"\n")
 			commit := run(t, workDir, "git", "rev-parse", "feature-"+tc.name)
+			// gt-sda9: doMerge asserts the declared head is reachable from
+			// origin's tip before gating; push the branch so that hold —
+			// this test exercises the pre-push policy recheck, not the push.
+			run(t, workDir, "git", "push", "-u", "origin", "feature-"+tc.name)
 			store := newPrepushStore(
 				prepushIssue("gt-src", ""),
 				prepushMRIssue("gt-mr", "feature-"+tc.name, "main", "gt-src", commit),
