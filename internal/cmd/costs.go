@@ -39,7 +39,6 @@ var (
 	digestYesterday bool
 	digestDate      string
 	digestDryRun    bool
-
 )
 
 var costsCmd = &cobra.Command{
@@ -173,8 +172,8 @@ type TranscriptMessage struct {
 
 // TranscriptMessageBody contains the message content and usage info.
 type TranscriptMessageBody struct {
-	Model string          `json:"model"`
-	Role  string          `json:"role"`
+	Model string           `json:"model"`
+	Role  string           `json:"role"`
 	Usage *TranscriptUsage `json:"usage,omitempty"`
 }
 
@@ -465,7 +464,7 @@ func querySessionEventsFromLocation(location string) ([]CostEntry, error) {
 		"--json",
 	}
 
-	listCmd := beads.CommandWithEnv(location, os.Environ(), listArgs...)
+	listCmd := beads.CommandWithEnv(location, nil, listArgs...)
 	listOutput, err := listCmd.Output()
 	if err != nil {
 		// If bd fails (e.g., no beads database), return empty list
@@ -488,7 +487,7 @@ func querySessionEventsFromLocation(location string) ([]CostEntry, error) {
 		showArgs = append(showArgs, item.ID)
 	}
 
-	showCmd := beads.CommandWithEnv(location, os.Environ(), showArgs...)
+	showCmd := beads.CommandWithEnv(location, nil, showArgs...)
 	showOutput, err := showCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("showing events: %w", err)
@@ -547,7 +546,7 @@ func queryDigestBeads(days int) ([]CostEntry, error) {
 		"--json",
 	}
 
-	listCmd := beads.CommandWithEnv("", os.Environ(), listArgs...)
+	listCmd := beads.CommandWithEnv("", nil, listArgs...)
 	listOutput, err := listCmd.Output()
 	if err != nil {
 		return nil, nil
@@ -568,7 +567,7 @@ func queryDigestBeads(days int) ([]CostEntry, error) {
 		showArgs = append(showArgs, item.ID)
 	}
 
-	showCmd := beads.CommandWithEnv("", os.Environ(), showArgs...)
+	showCmd := beads.CommandWithEnv("", nil, showArgs...)
 	showOutput, err := showCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("showing events: %w", err)
@@ -1329,7 +1328,7 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 		"--silent",
 	}
 
-	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
+	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
 	output, err := bdCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("creating digest bead: %w\nOutput: %s", err, string(output))
@@ -1338,7 +1337,7 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 	digestID := strings.TrimSpace(string(output))
 
 	// Auto-close the digest (it's an audit record, not work)
-	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", digestID, "--reason=daily cost digest")
+	closeCmd := beads.CommandWithEnv("", nil, "close", digestID, "--reason=daily cost digest")
 	_ = closeCmd.Run() // Best effort
 
 	return digestID, nil
@@ -1402,4 +1401,3 @@ func deleteSessionCostEntries(targetDate time.Time) (int, error) {
 
 	return deletedCount, nil
 }
-

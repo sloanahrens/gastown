@@ -1593,7 +1593,7 @@ func looksLikeBeadID(s string) bool {
 // hookBeadForHandoff attaches a bead to the current agent's hook.
 func hookBeadForHandoff(beadID string) error {
 	// Verify the bead exists first
-	verifyCmd := beads.CommandWithEnv("", os.Environ(), "show", beadID, "--json")
+	verifyCmd := beads.CommandWithEnv("", nil, "show", beadID, "--json")
 	if err := verifyCmd.Run(); err != nil {
 		return fmt.Errorf("bead '%s' not found", beadID)
 	}
@@ -1612,7 +1612,7 @@ func hookBeadForHandoff(beadID string) error {
 	}
 
 	// Pin the bead using bd update (discovery-based approach)
-	pinCmd := beads.CommandWithEnv("", os.Environ(), "update", beadID, "--status=pinned", "--assignee="+agentID)
+	pinCmd := beads.CommandWithEnv("", nil, "update", beadID, "--status=pinned", "--assignee="+agentID)
 	pinCmd.Stderr = os.Stderr
 	if err := pinCmd.Run(); err != nil {
 		return fmt.Errorf("pinning bead: %w", err)
@@ -1658,7 +1658,7 @@ func collectHandoffState() string {
 	}
 
 	// Get ready beads
-	readyOutput, err := beads.CommandWithEnv("", os.Environ(), "ready").Output()
+	readyOutput, err := beads.CommandWithEnv("", nil, "ready").Output()
 	if err == nil {
 		readyStr := strings.TrimSpace(string(readyOutput))
 		if readyStr != "" && !strings.Contains(readyStr, "No issues ready") {
@@ -1672,7 +1672,7 @@ func collectHandoffState() string {
 	}
 
 	// Get in-progress beads
-	inProgressOutput, err := beads.CommandWithEnv("", os.Environ(), "list", "--status=in_progress").Output()
+	inProgressOutput, err := beads.CommandWithEnv("", nil, "list", "--status=in_progress").Output()
 	if err == nil {
 		ipStr := strings.TrimSpace(string(inProgressOutput))
 		if ipStr != "" && !strings.Contains(ipStr, "No issues") {

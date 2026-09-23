@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -69,20 +70,6 @@ func TestCommandContextWithEnvPreservesCallerEnv(t *testing.T) {
 func TestCommandWithPathUsesGivenArgv0(t *testing.T) {
 	env := []string{"PATH=/usr/bin"}
 	cmd := CommandWithPath("/opt/bin/bd", "/work", env, "show", "gt-1")
-	if cmd.Path != "/opt/bin/bd" && (len(cmd.Args) == 0 || cmd.Args[0] != "/opt/bin/bd") {
-		t.Fatalf("argv0 = %q/%v, want /opt/bin/bd", cmd.Path, cmd.Args)
-	}
-	if cmd.Dir != "/work" {
-		t.Fatalf("Dir = %q, want /work", cmd.Dir)
-	}
-	if len(cmd.Env) != len(env) {
-		t.Fatalf("Env len = %d, want %d", len(cmd.Env), len(env))
-	}
-}
-
-func TestCommandContextWithPathUsesGivenArgv0(t *testing.T) {
-	env := []string{"PATH=/usr/bin"}
-	cmd := CommandContextWithPath(context.Background(), "/opt/bin/bd", "/work", env, "list")
 	if len(cmd.Args) == 0 || cmd.Args[0] != "/opt/bin/bd" {
 		t.Fatalf("Args[0] = %v, want /opt/bin/bd", cmd.Args)
 	}
@@ -92,4 +79,53 @@ func TestCommandContextWithPathUsesGivenArgv0(t *testing.T) {
 	if len(cmd.Env) != len(env) {
 		t.Fatalf("Env len = %d, want %d", len(cmd.Env), len(env))
 	}
+}
+
+func TestCommandContextWithBinUsesGivenArgv0AndAppliesPolicy(t *testing.T) {
+	cmd := CommandContextWithBin(context.Background(), "/opt/bin/bd", "/work", "/work/.beads", MutationRouting, "list")
+	if len(cmd.Args) == 0 || cmd.Args[0] != "/opt/bin/bd" {
+		t.Fatalf("Args[0] = %v, want /opt/bin/bd", cmd.Args)
+	}
+	if cmd.Dir != "/work" {
+		t.Fatalf("Dir = %q, want /work", cmd.Dir)
+	}
+	if cmd.SysProcAttr == nil {
+		t.Fatal("SysProcAttr not set; expected a detached process group")
+	}
+}
+
+// TestNilEnvCarriesPWD pins the contract call sites rely on: bd locates its
+// database through PWD, and os/exec supplies it only while Env is nil. (gt-sz0s)
+func TestNilEnvCarriesPWD(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{"CommandWithEnv", CommandWithEnv("/work", nil, "list")},
+		{"CommandContextWithEnv", CommandContextWithEnv(context.Background(), "/work", nil, "list")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !hasEnvEntry(tc.cmd.Environ(), "PWD=/work") {
+				t.Fatalf("Environ() = %v, want a PWD=/work entry", tc.cmd.Environ())
+			}
+		})
+	}
+}
+
+// TestExplicitEnvLeavesPWDtoCaller states the other half of the contract, so a
+// call site passing os.Environ() can see it is handing bd the parent's PWD.
+func TestExplicitEnvLeavesPWDtoCaller(t *testing.T) {
+	cmd := CommandWithEnv("/work", []string{"PATH=/usr/bin"}, "list")
+	if hasEnvEntry(cmd.Environ(), "PWD=/work") {
+		t.Fatalf("Environ() = %v, want no injected PWD", cmd.Environ())
+	}
+}
+
+func hasEnvEntry(env []string, want string) bool {
+	for _, e := range env {
+		if e == want {
+			return true
+		}
+	}
+	return false
 }

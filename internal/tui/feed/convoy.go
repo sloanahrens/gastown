@@ -131,7 +131,7 @@ func listConvoys(beadsDir, status, closedAfter string) ([]convoyListItem, error)
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	cmd := beads.CommandContextWithEnv(ctx, beadsDir, os.Environ(), listArgs...)
+	cmd := beads.CommandContextWithEnv(ctx, beadsDir, nil, listArgs...)
 	util.SetDetachedProcessGroup(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -473,7 +473,7 @@ func listMQBeads(rigPath, status string) []mqListItem {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdSubprocessTimeout)
 	defer cancel()
 
-	cmd := beads.CommandContextWithEnv(ctx, rigPath, os.Environ(), "list",
+	cmd := beads.CommandContextWithEnv(ctx, rigPath, nil, "list",
 		"--label=gt:merge-request",
 		"--status="+status,
 		"--json",

@@ -13,46 +13,76 @@ import (
 	"testing"
 )
 
-// legacyAdHocBDSubprocesses is a ratchet, not an allowlist to add to: it names
-// every file outside internal/beads that still builds a bd exec.Cmd by hand
-// instead of going through Command/CommandContext/CommandWithEnv/
-// CommandWithPath (or their CommandContext counterparts), together with the
-// exact number of such call sites still in that file as of gt-sz0s. A file
-// converted since is expected to drop out of this map entirely — leaving a
-// stale higher count here would silently stop catching a regression back up
-// to it. gt-sz0s is the tracking bead for finishing this migration; see its
-// notes for the remaining packages.
-//
-// Do not add a new entry, or raise an existing count, to make this test pass:
-// that defeats its purpose. New code should call the centralized
-// constructors from the start.
-var legacyAdHocBDSubprocesses = map[string]int{}
+// hardenedPackages route their bd subprocesses through the policy constructors
+// because their reads drive gate decisions. (gt-sz0s)
+var hardenedPackages = []string{
+	"internal/deacon",
+	"internal/plugin",
+	"internal/refinery",
+	"internal/witness",
+}
 
-// TestNoAdHocBdSubprocessesOutsideBeads is the repo-wide version of the
-// hardened-package check: two independent MRs in one night (gt-wisp-nysy and
-// gt-wisp-a74, see gt-sz0s) hand-rolled a bd exec.Cmd outside internal/beads
-// and each shipped its own env/error-handling bug that the centralized
-// constructors already avoid. Rather than re-listing "hardened" packages one
-// at a time as each gets bitten, this scans every package outside
-// internal/beads (the constructors' own implementation) and internal/testutil
-// (the equivalent, deliberately separate, sanctioned helper for tests — see
-// its doc comment) and fails on any ad hoc bd subprocess beyond the tracked
-// legacy count in legacyAdHocBDSubprocesses. A brand new file starts at zero
-// tolerance automatically, since it has no entry in that map.
-func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+// policyConstructors apply ConfigureCommand: env targeting, read-only routing
+// and a detached process group. A constructor absent from this map is denied to
+// hardenedPackages, so a new pass-through fails closed rather than silently
+// widening their reach. (gt-sz0s)
+var policyConstructors = map[string]bool{
+	"Command":               true,
+	"CommandContext":        true,
+	"CommandContextWithBin": true,
+}
+
+// TestBdSubprocessPolicyInHardenedPackages requires hardenedPackages to reach bd
+// only through policyConstructors.
+func TestBdSubprocessPolicyInHardenedPackages(t *testing.T) {
+	repoRoot := repoRootFromCaller(t)
+
+	var violations []string
+	for _, pkg := range hardenedPackages {
+		dir := filepath.Join(repoRoot, pkg)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			violations = append(violations, scanBDSubprocesses(t, repoRoot, path, isBypassOfPolicy)...)
+		}
 	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 
-	counts := map[string][]string{}
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		t.Fatalf("spawn bd through %s in hardened packages; the pass-through constructors skip env targeting, read-only mode and the detached process group (gt-sz0s):\n%s",
+			strings.Join(sortedNames(policyConstructors), "/"), strings.Join(violations, "\n"))
+	}
+}
+
+func sortedNames(set map[string]bool) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestNoAdHocBdSubprocessesOutsideBeads scans every package outside the
+// constructors' own implementation for a hand-built bd exec.Cmd.
+func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
+	repoRoot := repoRootFromCaller(t)
+
+	var violations []string
 	err := filepath.WalkDir(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			rel, relErr := filepath.Rel(repoRoot, path)
+			// internal/testutil holds the equivalent, deliberately separate helper.
 			if relErr == nil && (rel == "internal/beads" || rel == "internal/testutil") {
 				return filepath.SkipDir
 			}
@@ -62,34 +92,30 @@ func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		rel, relErr := filepath.Rel(repoRoot, path)
-		if relErr != nil {
-			rel = path
-		}
-		for _, loc := range adHocBDSubprocesses(t, repoRoot, path) {
-			counts[rel] = append(counts[rel], loc)
-		}
+		violations = append(violations, scanBDSubprocesses(t, repoRoot, path, isAdHocBDSubprocess)...)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk internal/: %v", err)
 	}
 
-	var violations []string
-	for rel, locs := range counts {
-		allowed := legacyAdHocBDSubprocesses[rel]
-		if len(locs) > allowed {
-			violations = append(violations, locs...)
-		}
-	}
-
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("do not spawn bd directly outside internal/beads; use Command/CommandContext/CommandWithEnv/CommandContextWithEnv/CommandWithPath/CommandContextWithPath so env targeting, read-only mode, and side-effect suppression stay centralized (gt-sz0s):\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("do not spawn bd directly outside internal/beads; use Command/CommandContext/CommandContextWithBin for the environment policy, or CommandWithEnv/CommandContextWithEnv/CommandWithPath to supply your own dir and env (gt-sz0s):\n%s", strings.Join(violations, "\n"))
 	}
 }
 
-func adHocBDSubprocesses(t *testing.T, repoRoot, path string) []string {
+func repoRootFromCaller(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+}
+
+// scanBDSubprocesses reports every call in path that flag returns true for.
+func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.CallExpr) bool) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -100,19 +126,12 @@ func adHocBDSubprocesses(t *testing.T, repoRoot, path string) []string {
 	var out []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !isExecCommandCall(call) {
-			return true
-		}
-		argIndex := 0
-		if selectorName(call) == "CommandContext" {
-			argIndex = 1
-		}
-		if len(call.Args) <= argIndex || !isBDCommandArg(call.Args[argIndex]) {
+		if !ok || !flag(call) {
 			return true
 		}
 		pos := fset.Position(call.Pos())
-		rel, err := filepath.Rel(repoRoot, pos.Filename)
-		if err != nil {
+		rel, relErr := filepath.Rel(repoRoot, pos.Filename)
+		if relErr != nil {
 			rel = pos.Filename
 		}
 		out = append(out, rel+":"+strconv.Itoa(pos.Line))
@@ -121,20 +140,61 @@ func adHocBDSubprocesses(t *testing.T, repoRoot, path string) []string {
 	return out
 }
 
-func isExecCommandCall(call *ast.CallExpr) bool {
+// isBypassOfPolicy matches a bd subprocess that skips the environment policy.
+func isBypassOfPolicy(call *ast.CallExpr) bool {
+	if isAdHocBDSubprocess(call) {
+		return true
+	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || (sel.Sel.Name != "Command" && sel.Sel.Name != "CommandContext") {
+	if !ok {
 		return false
 	}
-	x, ok := sel.X.(*ast.Ident)
-	return ok && x.Name == "exec"
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "beads" {
+		return false
+	}
+	if !bdCommandConstructor(sel.Sel.Name) {
+		return false
+	}
+	return !policyConstructors[sel.Sel.Name]
 }
 
-func selectorName(call *ast.CallExpr) string {
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		return sel.Sel.Name
+// bdCommandConstructor reports whether name is one of this package's bd
+// command builders.
+func bdCommandConstructor(name string) bool {
+	return strings.HasPrefix(name, "Command") || name == "ConfigureCommand"
+}
+
+// isAdHocBDSubprocess matches exec.Command/exec.CommandContext spawning the bd
+// binary, however the binary was named.
+func isAdHocBDSubprocess(call *ast.CallExpr) bool {
+	name, ok := calledName(call)
+	if !ok || (name != "Command" && name != "CommandContext") {
+		return false
 	}
-	return ""
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "exec" {
+		return false
+	}
+	argIndex := 0
+	if name == "CommandContext" {
+		argIndex = 1
+	}
+	return len(call.Args) > argIndex && isBDCommandArg(call.Args[argIndex])
+}
+
+// calledName returns the final identifier of a call's function expression.
+func calledName(call *ast.CallExpr) (string, bool) {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name, true
+	case *ast.SelectorExpr:
+		return fun.Sel.Name, true
+	default:
+		return "", false
+	}
 }
 
 func isBDCommandArg(expr ast.Expr) bool {
@@ -146,9 +206,20 @@ func isBDCommandArg(expr ast.Expr) bool {
 		value, err := strconv.Unquote(v.Value)
 		return err == nil && value == "bd"
 	case *ast.Ident:
-		return strings.EqualFold(v.Name, "bdPath")
+		return isBDCommandName(v.Name)
 	case *ast.SelectorExpr:
-		return strings.EqualFold(v.Sel.Name, "bdPath")
+		return isBDCommandName(v.Sel.Name)
+	default:
+		return false
+	}
+}
+
+// isBDCommandName reports whether a variable or field name denotes the bd
+// binary, so a renamed local such as bin := f.bdBin is still caught.
+func isBDCommandName(name string) bool {
+	switch strings.ToLower(name) {
+	case "bd", "bdpath", "bdbin":
+		return true
 	default:
 		return false
 	}

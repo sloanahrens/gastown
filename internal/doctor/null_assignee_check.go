@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -92,7 +91,7 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	return &CheckResult{
-		Name: c.Name(),
+		Name:   c.Name(),
 		Status: StatusWarning,
 		Message: fmt.Sprintf(
 			"%d in_progress bead(s) with NULL assignee — invisible to bd, blocking molecule progress",
@@ -169,7 +168,7 @@ func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
 
 // execBdSQLWrite executes a SQL write statement via bd sql.
 func execBdSQLWrite(rigDir, query string) error {
-	cmd := beads.CommandWithEnv(rigDir, os.Environ(), "sql", query)
+	cmd := beads.CommandWithEnv(rigDir, nil, "sql", query)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)

@@ -496,7 +496,7 @@ func verifyLabelAdded(workDir, beadID, label string) bool {
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("SELECT 1 FROM labels WHERE issue_id = '%s' AND label = '%s' LIMIT 1", escapedID, escapedLabel)
-	cmd := beads.CommandWithEnv(workDir, os.Environ(), "sql", query)
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", query)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false

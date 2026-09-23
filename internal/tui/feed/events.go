@@ -36,7 +36,7 @@ type BdActivitySource struct {
 func NewBdActivitySource(workDir string) (*BdActivitySource, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	cmd := beads.CommandContextWithEnv(ctx, workDir, os.Environ(), "activity", "--follow")
+	cmd := beads.CommandContextWithEnv(ctx, workDir, nil, "activity", "--follow")
 	util.SetDetachedProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()

@@ -869,7 +869,7 @@ func (c *BeadsConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Check if bd command works
-	cmd := beads.CommandWithEnv(c.rigPath, os.Environ(), "stats", "--json")
+	cmd := beads.CommandWithEnv(c.rigPath, nil, "stats", "--json")
 	if err := cmd.Run(); err != nil {
 		return &CheckResult{
 			Name:    c.Name(),

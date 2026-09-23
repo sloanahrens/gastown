@@ -70,16 +70,16 @@ func init() {
 
 // PatrolDigest represents the aggregated daily patrol report.
 type PatrolDigest struct {
-	Date         string                   `json:"date"`
-	TotalCycles  int                      `json:"total_cycles"`
-	ByRole       map[string]int           `json:"by_role"`        // deacon, witness, refinery
-	Cycles       []PatrolCycleEntry       `json:"cycles"`
+	Date        string             `json:"date"`
+	TotalCycles int                `json:"total_cycles"`
+	ByRole      map[string]int     `json:"by_role"` // deacon, witness, refinery
+	Cycles      []PatrolCycleEntry `json:"cycles"`
 }
 
 // PatrolCycleEntry represents a single patrol cycle in the digest.
 type PatrolCycleEntry struct {
 	ID          string    `json:"id"`
-	Role        string    `json:"role"`         // deacon, witness, refinery
+	Role        string    `json:"role"` // deacon, witness, refinery
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -186,7 +186,7 @@ func runPatrolDigest(cmd *cobra.Command, args []string) error {
 func queryPatrolDigests(targetDate time.Time) ([]PatrolCycleEntry, error) {
 	// List closed issues with "digest" label that are ephemeral
 	// Patrol digests have titles like "Digest: mol-deacon-patrol", "Digest: mol-witness-patrol"
-	listCmd := beads.CommandWithEnv("", os.Environ(), "list",
+	listCmd := beads.CommandWithEnv("", nil, "list",
 		"--status=closed",
 		"--label=digest",
 		"--json",
@@ -308,7 +308,7 @@ func createPatrolDigestBead(digest PatrolDigest) (string, error) {
 		"--silent",
 	}
 
-	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
+	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
 	output, err := bdCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("creating digest bead: %w\nOutput: %s", err, string(output))
@@ -317,7 +317,7 @@ func createPatrolDigestBead(digest PatrolDigest) (string, error) {
 	digestID := strings.TrimSpace(string(output))
 
 	// Auto-close the digest (it's an audit record, not work)
-	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", digestID, "--reason=daily patrol digest")
+	closeCmd := beads.CommandWithEnv("", nil, "close", digestID, "--reason=daily patrol digest")
 	_ = closeCmd.Run() // Best effort
 
 	return digestID, nil
@@ -329,7 +329,7 @@ func findExistingPatrolDigest(dateStr string) (string, error) {
 	expectedTitle := fmt.Sprintf("Patrol Report %s", dateStr)
 
 	// Query event beads with patrol.digest category
-	listCmd := beads.CommandWithEnv("", os.Environ(), "list",
+	listCmd := beads.CommandWithEnv("", nil, "list",
 		"--type=event",
 		"--json",
 		"--limit=50", // Recent events only
@@ -377,7 +377,7 @@ func deletePatrolDigests(targetDate time.Time) (int, error) {
 
 	// Delete in batch
 	deleteArgs := append([]string{"delete", "--force"}, idsToDelete...)
-	deleteCmd := beads.CommandWithEnv("", os.Environ(), deleteArgs...)
+	deleteCmd := beads.CommandWithEnv("", nil, deleteArgs...)
 	if err := deleteCmd.Run(); err != nil {
 		return 0, fmt.Errorf("deleting patrol digests: %w", err)
 	}

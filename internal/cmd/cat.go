@@ -48,7 +48,8 @@ func runCat(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
-	dir, env := "", os.Environ()
+	var dir string
+	var env []string
 	// Route to the correct rig database via prefix resolution.
 	if d := resolveBeadDir(beadID); d != "" && d != "." {
 		dir = d

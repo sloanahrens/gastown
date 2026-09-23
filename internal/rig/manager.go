@@ -2033,7 +2033,7 @@ func (m *Manager) ListRigNames() []string {
 // These molecules define the work loops for Deacon, Witness, and Refinery roles.
 func (m *Manager) seedPatrolMolecules(rigPath string) error {
 	// Use bd command to seed molecules (more reliable than internal API)
-	cmd := beads.CommandWithEnv(rigPath, os.Environ(), "mol", "seed", "--patrol")
+	cmd := beads.CommandWithEnv(rigPath, nil, "mol", "seed", "--patrol")
 	if err := cmd.Run(); err != nil {
 		// Fallback: bd mol seed might not support --patrol yet
 		// Try creating them individually via bd create
@@ -2065,14 +2065,14 @@ func (m *Manager) seedPatrolMoleculesManually(rigPath string) error {
 
 	for _, mol := range patrolMols {
 		// Check if already exists by title
-		checkCmd := beads.CommandWithEnv(rigPath, os.Environ(), "list", "--type=molecule", "--format=json")
+		checkCmd := beads.CommandWithEnv(rigPath, nil, "list", "--type=molecule", "--format=json")
 		output, _ := checkCmd.Output()
 		if strings.Contains(string(output), mol.title) {
 			continue // Already exists
 		}
 
 		// Create the molecule
-		cmd := beads.CommandWithEnv(rigPath, os.Environ(),
+		cmd := beads.CommandWithEnv(rigPath, nil,
 			"create",
 			"--type=molecule",
 			"--title="+mol.title,

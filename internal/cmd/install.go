@@ -813,7 +813,7 @@ func ensureCustomTypes(beadsPath string) error {
 		{"types.custom", constants.BeadsCustomTypes},
 		{"types.infra", constants.BeadsInfraTypes},
 	} {
-		cmd := beads.CommandWithEnv(beadsPath, os.Environ(), "config", "set", cfg.key, cfg.value)
+		cmd := beads.CommandWithEnv(beadsPath, nil, "config", "set", cfg.key, cfg.value)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("bd config set %s: %s", cfg.key, strings.TrimSpace(string(output)))
@@ -908,7 +908,7 @@ func ensureBeadsCustomTypes(workDir string, types []string) error {
 		{"types.custom", strings.Join(types, ",")},
 		{"types.infra", constants.BeadsInfraTypes},
 	} {
-		cmd := beads.CommandWithEnv(workDir, os.Environ(), "config", "set", cfg.key, cfg.value)
+		cmd := beads.CommandWithEnv(workDir, nil, "config", "set", cfg.key, cfg.value)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("bd config set %s failed: %s", cfg.key, strings.TrimSpace(string(output)))

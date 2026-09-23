@@ -235,7 +235,7 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the new bead
-	createCmd := beads.CommandWithEnv("", os.Environ(), createArgs...)
+	createCmd := beads.CommandWithEnv("", nil, createArgs...)
 	createCmd.Stderr = os.Stderr
 	newIDBytes, err := createCmd.Output()
 	if err != nil {
@@ -247,12 +247,12 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 
 	// Close the source bead with reference
 	closeReason := fmt.Sprintf("Moved to %s", newID)
-	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", sourceID, "--reason", closeReason)
+	closeCmd := beads.CommandWithEnv("", nil, "close", sourceID, "--reason", closeReason)
 	closeCmd.Stderr = os.Stderr
 	if err := closeCmd.Run(); err != nil {
 		// Clean up the new bead since we couldn't close the source
 		fmt.Fprintf(os.Stderr, "Warning: failed to close source bead: %v\n", err)
-		cleanupCmd := beads.CommandWithEnv("", os.Environ(), "close", newID, "--reason", "Cleanup: source bead close failed during move")
+		cleanupCmd := beads.CommandWithEnv("", nil, "close", newID, "--reason", "Cleanup: source bead close failed during move")
 		if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: also failed to clean up new bead %s: %v\n", newID, cleanupErr)
 			fmt.Fprintf(os.Stderr, "Both %s and %s remain open - manual cleanup needed\n", sourceID, newID)

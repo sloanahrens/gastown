@@ -1247,7 +1247,7 @@ func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 
 // getAgentBeadFreshness gets the most recent write time from an agent bead.
 func getAgentBeadFreshness(townRoot, beadID string) (time.Time, error) {
-	cmd := beads.CommandWithEnv(townRoot, os.Environ(), "show", beadID, "--json")
+	cmd := beads.CommandWithEnv(townRoot, nil, "show", beadID, "--json")
 
 	output, err := cmd.Output()
 	if err != nil {

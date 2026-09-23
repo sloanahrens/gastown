@@ -1227,7 +1227,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 			}
 			if json.Unmarshal(metaBytes, &meta) == nil && meta.Backend == "dolt" {
 				workDir := filepath.Dir(beadsDir)
-				bdCmd := beads.CommandWithEnv(workDir, os.Environ(), "config", "get", "issue_prefix")
+				bdCmd := beads.CommandWithEnv(workDir, nil, "config", "get", "issue_prefix")
 				if out, bdErr := bdCmd.Output(); bdErr == nil {
 					detected := strings.TrimSpace(string(out))
 					if detected != "" {

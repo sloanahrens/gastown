@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -122,7 +121,7 @@ func MigrateAgentBeadsToWisps(townRoot, workDir string, dryRun bool) (*MigrateWi
 
 // bdSQL executes a SQL query via `bd sql`.
 func bdSQL(workDir, query string) error {
-	cmd := beads.CommandWithEnv(workDir, os.Environ(), "sql", query)
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", query)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -133,7 +132,7 @@ func bdSQL(workDir, query string) error {
 
 // bdSQLCSV executes a SQL query via `bd sql --csv` and returns the output.
 func bdSQLCSV(workDir, query string) (string, error) {
-	cmd := beads.CommandWithEnv(workDir, os.Environ(), "sql", "--csv", query)
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", "--csv", query)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -144,7 +143,7 @@ func bdSQLCSV(workDir, query string) (string, error) {
 
 // bdExec executes a bd command.
 func bdExec(workDir string, args ...string) error {
-	cmd := beads.CommandWithEnv(workDir, os.Environ(), args...)
+	cmd := beads.CommandWithEnv(workDir, nil, args...)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

@@ -885,7 +885,7 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
-	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, os.Environ(), "show", issueID, "--json")
+	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "show", issueID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
@@ -982,7 +982,7 @@ func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
-	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, os.Environ(), "update", issueID, "--status=hooked", "--assignee="+agentID)
+	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "update", issueID, "--status=hooked", "--assignee="+agentID)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

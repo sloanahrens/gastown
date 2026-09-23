@@ -3,7 +3,6 @@ package doctor
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -61,7 +60,9 @@ func (c *RoutingModeCheck) Run(ctx *CheckContext) *CheckResult {
 // checkRoutingMode checks the routing mode in a specific beads directory.
 func (c *RoutingModeCheck) checkRoutingMode(beadsDir, location string) *CheckResult {
 	// Run bd config get routing.mode
-	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), append(os.Environ(), "BEADS_DIR="+beadsDir), "config", "get", "routing.mode")
+	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), nil, "config", "get", "routing.mode")
+	// cmd.Environ() carries PWD=filepath.Dir(beadsDir), which bd reads.
+	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+beadsDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -135,7 +136,8 @@ func (c *RoutingModeCheck) Fix(ctx *CheckContext) error {
 
 // setRoutingMode sets routing.mode to "explicit" in the specified beads directory.
 func (c *RoutingModeCheck) setRoutingMode(beadsDir string) error {
-	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), append(os.Environ(), "BEADS_DIR="+beadsDir), "config", "set", "routing.mode", "explicit")
+	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), nil, "config", "set", "routing.mode", "explicit")
+	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+beadsDir)
 
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd config set failed: %s", strings.TrimSpace(string(output)))

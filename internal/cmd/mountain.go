@@ -275,7 +275,7 @@ func bdAddLabelTown(beadID, label string) error {
 	if err != nil {
 		return err
 	}
-	cmd := beads.CommandWithEnv(townBeads, os.Environ(), "update", beadID, "--add-label="+label)
+	cmd := beads.CommandWithEnv(townBeads, nil, "update", beadID, "--add-label="+label)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd update %s --add-label=%s: %w\noutput: %s", beadID, label, err, out)
 	}
@@ -288,7 +288,7 @@ func bdRemoveLabelTown(beadID, label string) error {
 	if err != nil {
 		return err
 	}
-	cmd := beads.CommandWithEnv(townBeads, os.Environ(), "update", beadID, "--remove-label="+label)
+	cmd := beads.CommandWithEnv(townBeads, nil, "update", beadID, "--remove-label="+label)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd update %s --remove-label=%s: %w\noutput: %s", beadID, label, err, out)
 	}

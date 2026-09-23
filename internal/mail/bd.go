@@ -3,7 +3,6 @@ package mail
 import (
 	"bytes"
 	"context"
-	"os"
 	"strings"
 	"time"
 
@@ -69,9 +68,10 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	// own injection. (GH#2746)
 	args = beads.InjectFlatForListJSON(args)
 
-	env := bdSubprocessEnv(os.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
-	cmd := beads.CommandContextWithEnv(ctx, workDir, env, args...)
+	cmd := beads.CommandContextWithEnv(ctx, workDir, nil, args...)
 	util.SetDetachedProcessGroup(cmd)
+	// cmd.Environ() carries PWD=workDir, which bd's own file discovery reads.
+	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

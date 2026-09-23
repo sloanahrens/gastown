@@ -236,7 +236,7 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
-	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
+	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
 	bdCmd.Stdout = os.Stdout
 	bdCmd.Stderr = os.Stderr
 	return bdCmd.Run()
@@ -250,7 +250,7 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
-	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
+	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
 	bdCmd.Stdout = os.Stdout
 	bdCmd.Stderr = os.Stderr
 	return bdCmd.Run()
@@ -769,7 +769,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		createArgs = append(createArgs, "--force")
 	}
 
-	createCmd := beads.CommandWithEnv(townBeads, os.Environ(), createArgs...)
+	createCmd := beads.CommandWithEnv(townBeads, nil, createArgs...)
 	createCmd.Stderr = os.Stderr
 	if err := createCmd.Run(); err != nil {
 		return fmt.Errorf("creating convoy bead: %w", err)
@@ -965,7 +965,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), leg.ID, err)
 			// Add comment to bead about failure
 			commentArgs := []string{"comments", "add", legBeadID, fmt.Sprintf("Failed to sling: %v", err)}
-			commentCmd := beads.CommandWithEnv(townBeads, os.Environ(), commentArgs...)
+			commentCmd := beads.CommandWithEnv(townBeads, nil, commentArgs...)
 			_ = commentCmd.Run()
 			continue
 		}

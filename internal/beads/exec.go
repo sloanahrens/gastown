@@ -36,6 +36,14 @@ func CommandContext(ctx context.Context, dir, fallbackBeadsDir string, mode Subp
 	return cmd
 }
 
+// CommandContextWithBin is CommandContext for a caller that resolves and caches
+// bd's path itself.
+func CommandContextWithBin(ctx context.Context, bin, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
+	ConfigureCommand(cmd, dir, fallbackBeadsDir, mode)
+	return cmd
+}
+
 // ConfigureCommand applies the shared bd subprocess policy to an existing
 // command. This is for callers that need a custom bd path.
 func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode SubprocessEnvMode) {
@@ -44,18 +52,9 @@ func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode Subproce
 	util.SetDetachedProcessGroup(cmd)
 }
 
-// CommandWithEnv builds a bd command from a caller-supplied dir and
-// environment. Use this when a caller already computes its own bd
-// environment — by composing StripBDTargetEnv, EnvForSubprocessMode, or its
-// own additions such as GT_ROOT or auto-commit overrides — and only needs
-// the mechanical exec.Cmd construction (bd on PATH via a single argv0
-// literal) centralized alongside Command/CommandContext. Unlike
-// Command/CommandContext, this does not set a process group: callers that
-// relied on a specific process-group policy (or none) before migrating to
-// this constructor apply it the same way afterward, so the migration changes
-// nothing beyond where the exec.Cmd is built. Passing os.Environ() as env
-// reproduces a bare exec.Command("bd", ...)'s inherited-environment behavior
-// exactly, for callers migrating off one with no env override to preserve.
+// CommandWithEnv builds a bd command for a caller that supplies its own dir and
+// env, without the environment policy Command applies; a nil env inherits the
+// parent's environment and takes PWD from dir, as exec.Command does.
 func CommandWithEnv(dir string, env []string, args ...string) *exec.Cmd {
 	cmd := exec.Command("bd", args...) //nolint:gosec // G204: args are constructed internally
 	cmd.Dir = dir
@@ -71,21 +70,11 @@ func CommandContextWithEnv(ctx context.Context, dir string, env []string, args .
 	return cmd
 }
 
-// CommandWithPath is CommandWithEnv for a caller that resolves and caches
-// bd's absolute path itself (for example once at process startup via
-// exec.LookPath, to avoid a PATH search on every subprocess) instead of
-// spawning the literal "bd" on PATH each time. bin is used as argv0 in its
-// place; dir and env behave exactly as in CommandWithEnv.
+// CommandWithPath is CommandWithEnv for a caller that resolves and caches bd's
+// path itself; for the same with the environment policy applied, use
+// CommandContextWithBin.
 func CommandWithPath(bin, dir string, env []string, args ...string) *exec.Cmd {
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin/args are constructed internally
-	cmd.Dir = dir
-	cmd.Env = env
-	return cmd
-}
-
-// CommandContextWithPath is the context-bound counterpart to CommandWithPath.
-func CommandContextWithPath(ctx context.Context, bin, dir string, env []string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
 	cmd.Dir = dir
 	cmd.Env = env
 	return cmd

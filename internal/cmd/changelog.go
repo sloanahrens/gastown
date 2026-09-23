@@ -64,12 +64,12 @@ type ChangelogEntry struct {
 
 // closedBead is the raw shape from bd list --status=closed --json.
 type closedBead struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	IssueType   string `json:"issue_type"`
-	Ephemeral   bool   `json:"ephemeral"`
-	ClosedAt    string `json:"closed_at"`
-	CloseReason string `json:"close_reason"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	IssueType   string   `json:"issue_type"`
+	Ephemeral   bool     `json:"ephemeral"`
+	ClosedAt    string   `json:"closed_at"`
+	CloseReason string   `json:"close_reason"`
 	Labels      []string `json:"labels"`
 }
 
@@ -166,7 +166,7 @@ func collectChangelogEntries(townRoot string, since time.Time) ([]ChangelogEntry
 
 // fetchClosedBeads queries a single beads location for non-ephemeral closed beads since cutoff.
 func fetchClosedBeads(dir, rig string, since time.Time) ([]ChangelogEntry, error) {
-	cmd := gtbeads.CommandWithEnv(dir, os.Environ(), "list", "--status=closed", "--all", "--limit=0", "--json")
+	cmd := gtbeads.CommandWithEnv(dir, nil, "list", "--status=closed", "--all", "--limit=0", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

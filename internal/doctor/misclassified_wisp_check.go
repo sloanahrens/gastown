@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -292,7 +291,7 @@ func (c *CheckMisclassifiedWisps) purgeRigBatch(ctx *CheckContext, workDir, rigN
 // bdTableExistsDoctor checks if a table exists by attempting to query it.
 // Doctor-local wrapper (wisps_migrate.go has its own unexported copy).
 func bdTableExistsDoctor(workDir, tableName string) bool {
-	cmd := beads.CommandWithEnv(workDir, os.Environ(), "sql", fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", tableName))
+	cmd := beads.CommandWithEnv(workDir, nil, "sql", fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", tableName))
 	err := cmd.Run()
 	return err == nil
 }
