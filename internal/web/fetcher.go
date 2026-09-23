@@ -141,7 +141,7 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	if bin == "" {
 		bin = "bd"
 	}
-	cmd := beads.CommandWithPath(bin, beadsDir, nil, args...)
+	cmd := beads.CommandContextWithPath(ctx, bin, beadsDir, nil, args...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

@@ -129,3 +129,31 @@ func hasEnvEntry(env []string, want string) bool {
 	}
 	return false
 }
+
+// TestContextConstructorsAreContextBound pins which constructors apply a
+// caller's context. The policy test cannot see this, and losing it silently
+// removes a call site's timeout: a bd subprocess that used to be killed by
+// cmdTimeout then runs unbounded. (gt-sz0s)
+func TestContextConstructorsAreContextBound(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		cmd  *exec.Cmd
+		want bool
+	}{
+		{"Command", Command("/work", "", MutationRouting, "list"), false},
+		{"CommandContext", CommandContext(ctx, "/work", "", MutationRouting, "list"), true},
+		{"CommandContextWithBin", CommandContextWithBin(ctx, "/opt/bin/bd", "/work", "", MutationRouting, "list"), true},
+		{"CommandWithEnv", CommandWithEnv("/work", nil, "list"), false},
+		{"CommandContextWithEnv", CommandContextWithEnv(ctx, "/work", nil, "list"), true},
+		{"CommandWithPath", CommandWithPath("/opt/bin/bd", "/work", nil, "list"), false},
+		{"CommandContextWithPath", CommandContextWithPath(ctx, "/opt/bin/bd", "/work", nil, "list"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cmd.Cancel != nil; got != tt.want {
+				t.Fatalf("context-bound = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

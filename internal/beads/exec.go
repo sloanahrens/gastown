@@ -80,6 +80,14 @@ func CommandWithPath(bin, dir string, env []string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// CommandContextWithPath is the context-bound counterpart to CommandWithPath.
+func CommandContextWithPath(ctx context.Context, bin, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd
+}
+
 func EnvForSubprocessMode(base []string, fallbackBeadsDir string, mode SubprocessEnvMode) []string {
 	switch mode {
 	case ReadOnlyRouting:
