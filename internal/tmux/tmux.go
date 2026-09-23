@@ -2694,6 +2694,24 @@ func (t *Tmux) GetWindowActivity(session string) (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
+// SessionCreated returns when a tmux session was created.
+//
+// It is the start of a run for an ephemeral session that is spawned fresh per
+// turn (Boot), where neither pane activity nor a spawn stamp in another file
+// survives the spawning process (gt-w28o).
+func (t *Tmux) SessionCreated(session string) (time.Time, error) {
+	out, err := t.run("display-message", "-t", session, "-p", "#{session_created}")
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing session creation time: %w", err)
+	}
+	return time.Unix(timestamp, 0), nil
+}
+
 // SessionID returns the tmux session id (`#{session_id}`, e.g. "$3").
 //
 // It is the identity that changes when a session is killed and recreated under
