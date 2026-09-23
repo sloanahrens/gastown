@@ -1461,6 +1461,41 @@ func TestRun_GateBaseIsMergeBaseNotMovedTarget(t *testing.T) {
 	if result.Note.BaseSHA != fixture.base {
 		t.Errorf("Note.BaseSHA = %q, want %s", result.Note.BaseSHA, fixture.base)
 	}
+	// BaseSHA (the merge-base) does not move as target advances past it —
+	// that is the point of the test above. ReviewedTargetTip is the field
+	// that does: it must record target's actual tip at review time (moved),
+	// not the merge-base, or the push precondition's drift check (gt-6bsp)
+	// has nothing to compare against.
+	if result.Note.ReviewedTargetTip != moved {
+		t.Errorf("Note.ReviewedTargetTip = %q, want origin/main's current tip %s", result.Note.ReviewedTargetTip, moved)
+	}
+}
+
+// TestRun_NoteRecordsReviewedTargetTip_Unmoved is the baseline for the
+// moved-target test above: when target has not moved since the branch was
+// cut, ReviewedTargetTip and BaseSHA agree.
+func TestRun_NoteRecordsReviewedTargetTip_Unmoved(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q)", result.Exit, result.Stderr)
+	}
+	if result.Note.ReviewedTargetTip != fixture.base {
+		t.Errorf("Note.ReviewedTargetTip = %q, want %s (target has not moved)", result.Note.ReviewedTargetTip, fixture.base)
+	}
 }
 
 // recordVerdict attaches n as the note on fixture's head, standing in for the

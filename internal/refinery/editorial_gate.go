@@ -32,6 +32,12 @@ func (e *Engineer) buildLandedMRs(mrs []*MRInfo, target string) ([]editorial.Lan
 	if len(landedCommits) != len(mrs) {
 		return nil, fmt.Errorf("first-parent log for %s: found %d commit(s), expected %d for %d MR(s)", target, len(landedCommits), len(mrs), len(mrs))
 	}
+	// Same tip for every mr in this push: one target, checked once rather
+	// than once per MR (see LandedMR.TargetTip / Note.ReviewedTargetTip).
+	targetTip, err := e.git.Rev("origin/" + target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve origin/%s: %w", target, err)
+	}
 
 	landed := make([]editorial.LandedMR, 0, len(mrs))
 	for i, mr := range mrs {
@@ -48,6 +54,7 @@ func (e *Engineer) buildLandedMRs(mrs []*MRInfo, target string) ([]editorial.Lan
 			ReviewedHead: mr.EditorialReviewedHead,
 			Base:         base,
 			Head:         head,
+			TargetTip:    targetTip,
 			LandedCommit: landedCommits[i],
 		})
 	}
@@ -115,11 +122,16 @@ func (e *Engineer) editorialPreconditionPR(logPrefix string, mr *MRInfo, target 
 	if err != nil {
 		return nil, nil, e.failEditorialRange(logPrefix, mr, fmt.Errorf("merge-base for %s: %w", mr.ID, err))
 	}
+	targetTip, err := e.git.Rev("origin/" + target)
+	if err != nil {
+		return nil, nil, e.failEditorialRange(logPrefix, mr, fmt.Errorf("resolve origin/%s: %w", target, err))
+	}
 	return e.checkEditorialPrecondition(logPrefix, []*MRInfo{mr}, []editorial.LandedMR{{
 		MRID:         mr.ID,
 		ReviewedHead: mr.EditorialReviewedHead,
 		Base:         base,
 		Head:         head,
+		TargetTip:    targetTip,
 	}})
 }
 
@@ -180,8 +192,11 @@ func editorialRefusalResult(cerr *editorial.PreconditionError) ProcessResult {
 // range was never reviewed (the next cycle reviews it; refusing to push a
 // range with no verdict yet is the precondition working as designed),
 // ReasonPatchIDMismatch means the head moved since the verdict (re-reviewed,
-// not rejected), ReasonVersionBelowMin is a rubric floor, and
-// ReasonRangeUnresolvable is a git failure, not a judgment.
+// not rejected), ReasonVersionBelowMin is a rubric floor,
+// ReasonRangeUnresolvable is a git failure, not a judgment, and
+// ReasonTargetDriftMaterial means target moved onto files this range also
+// touches since the note was written — nobody has reviewed the two
+// combined, which is a gap in coverage, not a verdict against this diff.
 var editorialVerdictReasons = map[editorial.PreconditionReason]bool{
 	editorial.ReasonVerdictNotApprove: true,
 }

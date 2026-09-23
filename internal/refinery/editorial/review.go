@@ -240,6 +240,17 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("merge-base: %v", err), 0)
 		}
 	}
+	// targetTip is target's own tip at review time — see Note.ReviewedTargetTip
+	// for why this must be resolved separately from mergeBase. A landed review
+	// has no "since review" window to measure (the review IS the after-the-fact
+	// look at what landed), so it leaves this unset.
+	targetTip := ""
+	if req.Landed == nil {
+		targetTip, err = deps.Git.Rev("origin/" + req.Target)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("resolve origin/%s: %v", req.Target, err), 0)
+		}
+	}
 	// The diff's identity, and so the key the verdict is recorded under. A
 	// landed review keys it on the landed diff (ResolveLandedRange.PatchID):
 	// that is what the coverage check recomputes from the commit the note sits
@@ -420,20 +431,21 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	}
 
 	note := Note{
-		OMVersion:     manifest.OMBinary.Version,
-		RubricSHA256:  manifest.Rubric.SHA256,
-		Rig:           req.Rig,
-		MR:            req.MRID,
-		Worker:        req.Worker,
-		BaseSHA:       mergeBase,
-		HeadSHA:       noteCommit,
-		PatchID:       patchID,
-		Score:         v.Score,
-		Verdict:       v.Verdict,
-		FindingsCount: len(v.Findings),
-		Findings:      v.Findings,
-		Attempt:       req.Attempt,
-		ReviewedAt:    time.Now().UTC(),
+		OMVersion:         manifest.OMBinary.Version,
+		RubricSHA256:      manifest.Rubric.SHA256,
+		Rig:               req.Rig,
+		MR:                req.MRID,
+		Worker:            req.Worker,
+		BaseSHA:           mergeBase,
+		ReviewedTargetTip: targetTip,
+		HeadSHA:           noteCommit,
+		PatchID:           patchID,
+		Score:             v.Score,
+		Verdict:           v.Verdict,
+		FindingsCount:     len(v.Findings),
+		Findings:          v.Findings,
+		Attempt:           req.Attempt,
+		ReviewedAt:        time.Now().UTC(),
 		// Recorded only when the review actually ran with an override, so
 		// the note distinguishes "used the rig default" from "was allowed
 		// N seconds" (see Note.TimeoutSeconds).
