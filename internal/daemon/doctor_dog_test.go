@@ -2,8 +2,12 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 func TestDoctorDogInterval(t *testing.T) {
@@ -192,5 +196,138 @@ func TestDoctorDogConfigThresholdFields(t *testing.T) {
 	}
 	if config.BackupStaleSeconds != 1800.0 {
 		t.Errorf("expected backup_stale_seconds=1800, got %.0f", config.BackupStaleSeconds)
+	}
+}
+
+// healthyDoctorProbes answers every doctor_dog check with a healthy value.
+func healthyDoctorProbes() doctorProbes {
+	return doctorProbes{
+		latency:   func() (time.Duration, error) { return 20 * time.Millisecond, nil },
+		conns:     func() (int, int, error) { return 12, 1000, nil },
+		databases: func() ([]string, error) { return []string{"hq", "gt"}, nil },
+		orphans:   func() (int, error) { return 0, nil },
+		backupAge: func(string) (time.Duration, bool) { return 10 * time.Minute, true },
+		reap:      func() (slot.ReapReport, error) { return slot.ReapReport{}, nil },
+	}
+}
+
+func defaultDoctorLimits() doctorLimits {
+	return doctorLimits{latency: 5 * time.Second, orphans: 20, backupStale: time.Hour}
+}
+
+// The all-clear case is the one the precheck exists for: no finding means no
+// molecule and no agent session (claude-l5w).
+func TestDoctorDogFindings_AllClear(t *testing.T) {
+	r := doctorDogFindings(healthyDoctorProbes(), defaultDoctorLimits())
+	if len(r.findings) != 0 {
+		t.Fatalf("healthy probes produced findings: %v", r.findings)
+	}
+	if r.latency != 20*time.Millisecond || r.conns != 12 || r.connMax != 1000 {
+		t.Errorf("report values not carried: %+v", r)
+	}
+}
+
+func TestDoctorDogFindings_EachCheckTrips(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*doctorProbes)
+		want string
+	}{
+		{"unreachable", func(p *doctorProbes) {
+			p.latency = func() (time.Duration, error) { return 0, errors.New("connection refused") }
+		}, "unreachable"},
+		{"slow", func(p *doctorProbes) {
+			p.latency = func() (time.Duration, error) { return 6 * time.Second, nil }
+		}, "latency"},
+		{"connections", func(p *doctorProbes) {
+			p.conns = func() (int, int, error) { return 850, 1000, nil }
+		}, "connections"},
+		{"orphans", func(p *doctorProbes) {
+			p.orphans = func() (int, error) { return 21, nil }
+		}, "orphan"},
+		{"stale backup", func(p *doctorProbes) {
+			p.backupAge = func(db string) (time.Duration, bool) {
+				if db == "gt" {
+					return 3 * time.Hour, true
+				}
+				return time.Minute, true
+			}
+		}, "backup gt"},
+		{"reap removal failed", func(p *doctorProbes) {
+			p.reap = func() (slot.ReapReport, error) {
+				return slot.ReapReport{Failed: []string{"gt-gate-1: permission denied"}}, nil
+			}
+		}, "reap"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := healthyDoctorProbes()
+			tc.mut(&p)
+			r := doctorDogFindings(p, defaultDoctorLimits())
+			if len(r.findings) != 1 || !strings.Contains(r.findings[0], tc.want) {
+				t.Fatalf("want one finding containing %q, got %v", tc.want, r.findings)
+			}
+		})
+	}
+}
+
+// .dolt-backup keeps directories for databases the server no longer serves
+// (on the live town: forkrig, pt0, testrig — untouched for weeks). Judging
+// those stale would pour a molecule on every run forever.
+func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
+	p := healthyDoctorProbes()
+	var asked []string
+	p.backupAge = func(db string) (time.Duration, bool) {
+		asked = append(asked, db)
+		return time.Minute, true
+	}
+	doctorDogFindings(p, defaultDoctorLimits())
+	if strings.Join(asked, ",") != "hq,gt" {
+		t.Errorf("backup ages checked for %v, want exactly the served databases [hq gt]", asked)
+	}
+
+	// A served database with no backup directory is not a finding: the backup
+	// patrol may not cover it, which is configuration, not an outage.
+	p.backupAge = func(string) (time.Duration, bool) { return 0, false }
+	if r := doctorDogFindings(p, defaultDoctorLimits()); len(r.findings) != 0 {
+		t.Errorf("missing backup dirs produced findings: %v", r.findings)
+	}
+}
+
+// An unreachable server makes every server-side check meaningless; report the
+// outage alone rather than a pile of consequential failures.
+func TestDoctorDogFindings_UnreachableSkipsServerChecks(t *testing.T) {
+	p := healthyDoctorProbes()
+	p.latency = func() (time.Duration, error) { return 0, errors.New("dial tcp: connection refused") }
+	p.conns = func() (int, int, error) { t.Error("conns probed on an unreachable server"); return 0, 0, nil }
+	p.databases = func() ([]string, error) { t.Error("databases probed on an unreachable server"); return nil, nil }
+	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 1 {
+		t.Errorf("want only the unreachable finding, got %v", r.findings)
+	}
+}
+
+// A docker that cannot be listed (not installed, Docker Desktop stopped) is
+// nothing an agent can fix from a dog session; it is logged, not poured. A
+// removal that failed on a container classified as debris is.
+func TestDoctorDogFindings_ReapListingErrorIsANoteNotAFinding(t *testing.T) {
+	p := healthyDoctorProbes()
+	p.reap = func() (slot.ReapReport, error) {
+		return slot.ReapReport{}, errors.New("listing gate containers: exec: \"docker\": executable file not found")
+	}
+	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 0 {
+		t.Errorf("docker listing error produced findings: %v", r.findings)
+	}
+	if len(r.notes) != 1 || !strings.Contains(r.notes[0], "docker") {
+		t.Errorf("docker listing error not noted: %v", r.notes)
+	}
+
+	p.reap = func() (slot.ReapReport, error) {
+		return slot.ReapReport{Removed: []string{"gt-gate-7 (3h)"}}, nil
+	}
+	r = doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 0 || len(r.notes) != 1 || !strings.Contains(r.notes[0], "gt-gate-7") {
+		t.Errorf("successful reap should be a note: findings=%v notes=%v", r.findings, r.notes)
 	}
 }

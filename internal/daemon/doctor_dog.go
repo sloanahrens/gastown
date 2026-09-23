@@ -1,10 +1,16 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -90,25 +96,180 @@ func doctorDogDatabases(config *DaemonPatrolConfig) []string {
 	return []string{"hq", "gt", "mo"}
 }
 
-// runDoctorDog pours a mol-dog-doctor molecule for agent execution.
-// The daemon is a thin ticker — it creates the molecule and agents (Deacon)
-// execute the formula steps (probe, inspect, report). This follows ZFC:
-// daemons schedule, agents decide and act.
+// doctorProbes are the measurements behind every mol-dog-doctor step. They
+// are functions so tests can drive each branch without a Dolt server or a
+// docker daemon.
+type doctorProbes struct {
+	// latency times SELECT active_branch(); an error means unreachable.
+	latency func() (time.Duration, error)
+	// conns returns the active connection count and the configured maximum.
+	conns func() (int, int, error)
+	// databases lists the databases the server serves.
+	databases func() ([]string, error)
+	// orphans counts databases no rig references (gt dolt cleanup's set).
+	orphans func() (int, error)
+	// backupAge is the age of db's backup directory; false when it has none.
+	backupAge func(db string) (time.Duration, bool)
+	// reap removes gate-container debris (gt slot reap).
+	reap func() (slot.ReapReport, error)
+}
+
+// doctorLimits are the thresholds past which a measurement becomes a finding.
+type doctorLimits struct {
+	latency     time.Duration
+	orphans     int
+	backupStale time.Duration
+}
+
+// doctorReport is one precheck: findings need an agent, notes are logged.
+type doctorReport struct {
+	findings []string
+	notes    []string
+	latency  time.Duration
+	conns    int
+	connMax  int
+	orphans  int
+}
+
+// doctorConnAlertPct is the share of max connections the formula warns at.
+const doctorConnAlertPct = 80
+
+// doctorDogFindings runs the mol-dog-doctor checks deterministically. Every
+// step in that formula is a threshold comparison or a sanctioned reap; an
+// agent session added nothing to the all-clear case except a ~24k-token
+// uncached first turn every five minutes (claude-l5w).
+func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
+	var r doctorReport
+
+	latency, err := p.latency()
+	if err != nil {
+		r.findings = append(r.findings, fmt.Sprintf("Dolt server unreachable: %v", err))
+		// Every other server check would fail for the same reason.
+		r.notes = append(r.notes, reapNotes(p, &r)...)
+		return r
+	}
+	r.latency = latency
+	if latency > lim.latency {
+		r.findings = append(r.findings, fmt.Sprintf("query latency %v exceeds %v", latency.Round(time.Millisecond), lim.latency))
+	}
+
+	if n, limit, err := p.conns(); err != nil {
+		r.notes = append(r.notes, fmt.Sprintf("connection count unavailable: %v", err))
+	} else {
+		r.conns, r.connMax = n, limit
+		if limit > 0 && n*100 >= limit*doctorConnAlertPct {
+			r.findings = append(r.findings, fmt.Sprintf("connections %d of %d (>= %d%%)", n, limit, doctorConnAlertPct))
+		}
+	}
+
+	if n, err := p.orphans(); err != nil {
+		r.notes = append(r.notes, fmt.Sprintf("orphan scan unavailable: %v", err))
+	} else {
+		r.orphans = n
+		if n > lim.orphans {
+			r.findings = append(r.findings, fmt.Sprintf("%d orphan databases exceed %d; recommend gt dolt cleanup", n, lim.orphans))
+		}
+	}
+
+	// Only served databases: .dolt-backup keeps directories for databases
+	// long since dropped, and judging those would trip on every run.
+	if dbs, err := p.databases(); err != nil {
+		r.notes = append(r.notes, fmt.Sprintf("database list unavailable: %v", err))
+	} else {
+		for _, db := range dbs {
+			if age, ok := p.backupAge(db); ok && age > lim.backupStale {
+				r.findings = append(r.findings, fmt.Sprintf("backup %s is %v old (threshold %v)", db, age.Round(time.Minute), lim.backupStale))
+			}
+		}
+	}
+
+	r.notes = append(r.notes, reapNotes(p, &r)...)
+	return r
+}
+
+// reapNotes runs the debris reap. A removal that failed is a finding; a
+// docker that cannot be listed is a note, since no dog session can start it.
+func reapNotes(p doctorProbes, r *doctorReport) []string {
+	var notes []string
+	rep, err := p.reap()
+	if err != nil {
+		notes = append(notes, fmt.Sprintf("slot reap skipped: %v", err))
+	}
+	if len(rep.Removed) > 0 {
+		notes = append(notes, "slot reap removed: "+strings.Join(rep.Removed, ", "))
+	}
+	for _, f := range rep.Failed {
+		r.findings = append(r.findings, "slot reap failed: "+f)
+	}
+	return notes
+}
+
+// doctorDogProbes wires doctorProbes to the live town.
+func doctorDogProbes(townRoot string) doctorProbes {
+	return doctorProbes{
+		latency: func() (time.Duration, error) { return doltserver.MeasureQueryLatency(townRoot) },
+		conns: func() (int, int, error) {
+			n, err := doltserver.GetActiveConnectionCount(townRoot)
+			limit := doltserver.DefaultConfig(townRoot).MaxConnections
+			if limit <= 0 {
+				limit = 1000 // Dolt default, as GetHealthMetrics assumes
+			}
+			return n, limit, err
+		},
+		databases: func() ([]string, error) { return doltserver.ListDatabases(townRoot) },
+		orphans: func() (int, error) {
+			o, err := doltserver.FindOrphanedDatabases(townRoot)
+			return len(o), err
+		},
+		backupAge: func(db string) (time.Duration, bool) {
+			info, err := os.Stat(filepath.Join(townRoot, ".dolt-backup", db))
+			if err != nil || !info.IsDir() {
+				return 0, false
+			}
+			return time.Since(info.ModTime()), true
+		},
+		reap: func() (slot.ReapReport, error) { return slot.Reap(townRoot, slot.ReapOptions{}) },
+	}
+}
+
+// runDoctorDog runs the doctor checks in the daemon and pours a mol-dog-doctor
+// molecule for an agent only when one of them finds something. The daemon
+// still only measures and reaps what the formula already sanctioned; the
+// judgment (escalate, recommend cleanup) stays with the agent, which now gets
+// the findings instead of re-deriving them.
 func (d *Daemon) runDoctorDog() {
 	if !d.isPatrolActive("doctor_dog") {
 		return
 	}
 
-	d.logger.Printf("doctor_dog: pouring molecule for agent execution")
+	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
+	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot), doctorLimits{
+		latency:     time.Duration(latencyMs) * time.Millisecond,
+		orphans:     orphanCount,
+		backupStale: time.Duration(backupStaleSec) * time.Second,
+	})
+	for _, n := range r.notes {
+		d.logger.Printf("doctor_dog: %s", n)
+	}
+	if len(r.findings) == 0 {
+		d.logger.Printf("doctor_dog: all clear (latency %v, connections %d/%d, orphans %d); no molecule",
+			r.latency.Round(time.Millisecond), r.conns, r.connMax, r.orphans)
+		return
+	}
 
-	port := d.doltServerPort()
-	latencyThreshold, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
+	findings := strings.Join(r.findings, "; ")
+	d.logger.Printf("doctor_dog: %d finding(s), pouring molecule for agent execution: %s", len(r.findings), findings)
 
 	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
-		"port":              strconv.Itoa(port),
-		"latency_threshold": strconv.FormatFloat(latencyThreshold, 'f', 0, 64) + "ms",
+		"port":              strconv.Itoa(d.doltServerPort()),
+		"latency_threshold": strconv.FormatFloat(latencyMs, 'f', 0, 64) + "ms",
 		"orphan_threshold":  strconv.Itoa(orphanCount),
 		"backup_threshold":  strconv.FormatFloat(backupStaleSec, 'f', 0, 64) + "s",
+		"findings":          findings,
+		"latency":           r.latency.Round(time.Millisecond).String(),
+		"conn_count":        strconv.Itoa(r.conns),
+		"conn_max":          strconv.Itoa(r.connMax),
+		"orphan_count":      strconv.Itoa(r.orphans),
 	})
 	defer mol.close()
 

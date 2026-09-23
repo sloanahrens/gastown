@@ -4295,7 +4295,11 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	defer cancel()
 
 	start := time.Now()
-	var branch string
+	// NullString: the DSN selects no database, and active_branch() is NULL
+	// outside one. Scanning into a string failed every probe on a healthy
+	// server, which GetHealthMetrics discarded (latency read 0) and the
+	// doctor_dog precheck read as unreachable (claude-l5w).
+	var branch sql.NullString
 	err = db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch)
 	elapsed := time.Since(start)
 

@@ -12,6 +12,13 @@ Current behavior (from dolt.go checkHealthLocked):
 4. Database count: detect orphan test databases
 5. Backup freshness: warn if backups are stale
 
+## When this is poured
+
+The daemon runs every check below itself on the doctor_dog interval and
+pours this molecule only when one of them finds something (claude-l5w). The
+findings are in {{findings}}; start from them. The reap-debris step has
+already run in the daemon, so a finding there means a removal failed.
+
 ## Dog Contract
 
 This is infrastructure work. You:
@@ -138,9 +145,9 @@ or anything whose age docker did not report, is kept.
 ```bash
 gt slot reap
 ```
-`gt doctor --check slot-debris --fix` runs the same reap. Both reach the host's
-docker directly — the daemon does not, so this step is what keeps the gate
-clear on the patrol cadence.
+`gt doctor --check slot-debris --fix` runs the same reap. The daemon already ran
+it (slot.Reap) before pouring this molecule; rerun it here only when the
+findings name a failed removal.
 
 **4. Record what was reaped for the report:**
 - Container names removed, with ages
@@ -206,6 +213,10 @@ Status: COMPLETE"
 **Exit criteria:** Report sent, dog returned to kennel."""
 
 [vars]
+[vars.findings]
+description = "What the daemon's precheck found; the reason this molecule was poured"
+default = "none recorded"
+
 [vars.latency_threshold]
 description = "Latency warning threshold"
 default = "1s"
