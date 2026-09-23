@@ -59,6 +59,14 @@ func createFeatureBranch(t *testing.T, workDir, branchName, filename, content st
 	run(t, workDir, "git", "checkout", "main")
 }
 
+// pushBranch publishes branch on origin. The gt-sda9 pre-gate assertion reads
+// origin rather than the shared local ref, so a test that stages a merge from a
+// branch needs it published first.
+func pushBranch(t *testing.T, workDir, branch string) {
+	t.Helper()
+	run(t, workDir, "git", "push", "-u", "origin", branch)
+}
+
 // createConflictingBranch creates a branch that modifies the same file as another.
 func createConflictingBranch(t *testing.T, workDir, branchName, filename, content string) {
 	t.Helper()

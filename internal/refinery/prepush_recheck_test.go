@@ -382,7 +382,7 @@ func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
 			createFeatureBranch(t, workDir, "feature-"+tc.name, tc.name+".txt", tc.name+"\n")
 			commit := run(t, workDir, "git", "rev-parse", "feature-"+tc.name)
 			// gt-sda9: doMerge asserts the declared head is reachable from
-			// origin's tip before gating; push the branch so that hold —
+			// origin's tip before gating; push the branch so that holds —
 			// this test exercises the pre-push policy recheck, not the push.
 			run(t, workDir, "git", "push", "-u", "origin", "feature-"+tc.name)
 			store := newPrepushStore(
@@ -449,6 +449,9 @@ func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
 	run(t, workDir, "git", "commit", "-m", "feat: update submodule")
 	commit := run(t, workDir, "git", "rev-parse", "feature-submodule")
 	run(t, workDir, "git", "checkout", "main")
+	// gt-sda9: doMerge asserts origin carries the submitted head before it
+	// gates — this test exercises the pre-submodule-push recheck, not the push.
+	pushBranch(t, workDir, "feature-submodule")
 
 	store := newPrepushStore(prepushIssue("gt-src", ""), prepushMRIssue("gt-mr", "feature-submodule", "main", "gt-src", commit))
 	sourceReads := 0
@@ -511,6 +514,10 @@ func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
 	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
 	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
+	// gt-sda9: a merge is staged only from a head origin carries, so publish
+	// both members before the batch considers them.
+	pushBranch(t, workDir, "feature-a")
+	pushBranch(t, workDir, "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", ""),
@@ -572,6 +579,10 @@ func TestProcessBatch_IneligibleMemberDoesNotAbortRestOfBatch(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
 	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
 	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
+	// gt-sda9: a merge is staged only from a head origin carries, so publish
+	// both members before the batch considers them.
+	pushBranch(t, workDir, "feature-a")
+	pushBranch(t, workDir, "feature-b")
 
 	srcA := prepushIssue("gt-src-a", "")
 	srcB := prepushIssue("gt-src-b", "")
@@ -627,6 +638,10 @@ func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
 	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
 	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
+	// gt-sda9: a merge is staged only from a head origin carries, so publish
+	// both members before the batch considers them.
+	pushBranch(t, workDir, "feature-a")
+	pushBranch(t, workDir, "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", "no_merge: true"),
@@ -668,6 +683,10 @@ func TestProcessBatch_RechecksMRCloseReasonBeforePush(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
 	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
 	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
+	// gt-sda9: a merge is staged only from a head origin carries, so publish
+	// both members before the batch considers them.
+	pushBranch(t, workDir, "feature-a")
+	pushBranch(t, workDir, "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", ""),

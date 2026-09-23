@@ -163,6 +163,15 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		if shaErr != nil {
 			return nil, nil, shaErr
 		}
+		if refusal := e.assertSubmittedHeadReachableOnOrigin(mr, mergeRef); refusal != nil {
+			// Unlike a stale local ref (fatal above), an unpushed head is
+			// confined to this MR: report it, then leave the MR queued by
+			// keeping it out of the stack instead of aborting the batch.
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: %v, removing from batch\n", mr.ID, refusal.Err)
+			e.HandleMRInfoFailure(mr, refusal.result())
+			conflicts = append(conflicts, mr)
+			continue
+		}
 
 		// Check for conflicts before merging
 		conflictFiles, conflictErr := e.git.CheckConflictsAtHead(mergeRef)
