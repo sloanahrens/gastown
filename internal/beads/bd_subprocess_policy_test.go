@@ -115,7 +115,9 @@ func repoRootFromCaller(t *testing.T) string {
 }
 
 // scanBDSubprocesses reports every call in path that flag returns true for.
-func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.CallExpr) bool) []string {
+// Names are tracked per function, so two unrelated locals called bin in one
+// file do not be mistaken for each other.
+func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.CallExpr, map[string]bool) bool) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -125,24 +127,73 @@ func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.Call
 
 	var out []string
 	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || !flag(call) {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok {
 			return true
 		}
-		pos := fset.Position(call.Pos())
-		rel, relErr := filepath.Rel(repoRoot, pos.Filename)
-		if relErr != nil {
-			rel = pos.Filename
-		}
-		out = append(out, rel+":"+strconv.Itoa(pos.Line))
-		return true
+		named := bdNamedIdents(fn.Body)
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok || !flag(call, named) {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			rel, relErr := filepath.Rel(repoRoot, pos.Filename)
+			if relErr != nil {
+				rel = pos.Filename
+			}
+			out = append(out, rel+":"+strconv.Itoa(pos.Line))
+			return true
+		})
+		return false
 	})
 	return out
 }
 
+// bdNamedIdents returns the identifiers within body that hold the bd binary,
+// following local assignments such as bin := f.bdBin or bin = "bd".
+func bdNamedIdents(body *ast.BlockStmt) map[string]bool {
+	named := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(body, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || len(assign.Lhs) != len(assign.Rhs) {
+				return true
+			}
+			for i, lhs := range assign.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || named[ident.Name] {
+					continue
+				}
+				if bdNamedExpr(assign.Rhs[i], named) {
+					named[ident.Name] = true
+					changed = true
+				}
+			}
+			return true
+		})
+	}
+	return named
+}
+
+// bdNamedExpr reports whether expr yields the bd binary.
+func bdNamedExpr(expr ast.Expr, named map[string]bool) bool {
+	switch v := expr.(type) {
+	case *ast.BasicLit:
+		return v.Kind == token.STRING && unquoteString(v.Value) == "bd"
+	case *ast.Ident:
+		return isBDCommandName(v.Name) || named[v.Name]
+	case *ast.SelectorExpr:
+		return isBDCommandName(v.Sel.Name) || named[v.Sel.Name]
+	default:
+		return false
+	}
+}
+
 // isBypassOfPolicy matches a bd subprocess that skips the environment policy.
-func isBypassOfPolicy(call *ast.CallExpr) bool {
-	if isAdHocBDSubprocess(call) {
+func isBypassOfPolicy(call *ast.CallExpr, named map[string]bool) bool {
+	if isAdHocBDSubprocess(call, named) {
 		return true
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -165,8 +216,8 @@ func bdCommandConstructor(name string) bool {
 }
 
 // isAdHocBDSubprocess matches exec.Command/exec.CommandContext spawning the bd
-// binary, however the binary was named.
-func isAdHocBDSubprocess(call *ast.CallExpr) bool {
+// binary, including through a local renamed from a bd-named variable.
+func isAdHocBDSubprocess(call *ast.CallExpr, named map[string]bool) bool {
 	name, ok := calledName(call)
 	if !ok || (name != "Command" && name != "CommandContext") {
 		return false
@@ -182,7 +233,7 @@ func isAdHocBDSubprocess(call *ast.CallExpr) bool {
 	if name == "CommandContext" {
 		argIndex = 1
 	}
-	return len(call.Args) > argIndex && isBDCommandArg(call.Args[argIndex])
+	return len(call.Args) > argIndex && isBDCommandArg(call.Args[argIndex], named)
 }
 
 // calledName returns the final identifier of a call's function expression.
@@ -197,25 +248,21 @@ func calledName(call *ast.CallExpr) (string, bool) {
 	}
 }
 
-func isBDCommandArg(expr ast.Expr) bool {
+func isBDCommandArg(expr ast.Expr, named map[string]bool) bool {
 	switch v := expr.(type) {
 	case *ast.BasicLit:
-		if v.Kind != token.STRING {
-			return false
-		}
-		value, err := strconv.Unquote(v.Value)
-		return err == nil && value == "bd"
+		return v.Kind == token.STRING && unquoteString(v.Value) == "bd"
 	case *ast.Ident:
-		return isBDCommandName(v.Name)
+		return isBDCommandName(v.Name) || named[v.Name]
 	case *ast.SelectorExpr:
-		return isBDCommandName(v.Sel.Name)
+		return isBDCommandName(v.Sel.Name) || named[v.Sel.Name]
 	default:
 		return false
 	}
 }
 
 // isBDCommandName reports whether a variable or field name denotes the bd
-// binary, so a renamed local such as bin := f.bdBin is still caught.
+// binary.
 func isBDCommandName(name string) bool {
 	switch strings.ToLower(name) {
 	case "bd", "bdpath", "bdbin":
@@ -223,4 +270,12 @@ func isBDCommandName(name string) bool {
 	default:
 		return false
 	}
+}
+
+func unquoteString(lit string) string {
+	value, err := strconv.Unquote(lit)
+	if err != nil {
+		return ""
+	}
+	return value
 }
