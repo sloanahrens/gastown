@@ -1309,7 +1309,7 @@ if [ "{{editorial_required}}" = "true" ] && [ -n "$LANDED_SHA" ]; then
   if [ -n "$BRANCH_TIP" ] && [ "$MERGE_LANDED_HERE" = "true" ]; then
     REKEY_REASON="wisp raw-git merge-push: the verdict is keyed to the rehearsal head and the landed commit is a different merge (gt-fr3r)"
     if ! gt mq rekey-note <mr-bead-id> --landed "$LANDED_SHA" --target <merge-target> --reason "$REKEY_REASON"; then
-      echo "EDITORIAL_RECORD_FAILED: <mr-bead-id> landed as $LANDED_SHA with no om note on it; editorial-coverage reads it as uncovered until the note is re-keyed."
+      echo "EDITORIAL_RECORD_FAILED: <mr-bead-id> landed as $LANDED_SHA with no om note on it. Until the note is re-keyed, editorial-coverage counts the landed commit as covered by patch-id (a backfill moves the proof, not the verdict) and reports a Warning; a run that re-walks this commit will keep naming it in the details."
       gt mail send <rig>/witness -s "HELP: om note missing on landed commit <mr-bead-id>" --stdin <<BODY
 MR: <mr-bead-id>
 Issue: <issue-id>
