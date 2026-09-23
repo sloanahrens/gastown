@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestNewMailbox(t *testing.T) {
@@ -242,6 +243,31 @@ func TestMailboxLegacyCount(t *testing.T) {
 	}
 	if unread != 2 {
 		t.Errorf("unread = %d, want 2", unread)
+	}
+}
+
+func TestMailboxLegacyCountExcludesDeaconSelfProbes(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := NewMailbox(tmpDir)
+
+	msgs := []*Message{
+		{ID: "msg-001", Read: false, Subject: "hello"},
+		{ID: "msg-002", Read: false, Subject: constants.DeaconSelfProbeSubjectPrefix + " nonce-abc"},
+	}
+	for _, msg := range msgs {
+		if err := m.Append(msg); err != nil {
+			t.Fatalf("Append error: %v", err)
+		}
+	}
+
+	total, unread, err := m.Count()
+	if err != nil {
+		t.Fatalf("Count error: %v", err)
+	}
+	// A self-probe stuck unread must never inflate `gt status` counts —
+	// it's a supervision signal, not mail for a human/agent to see.
+	if total != 1 || unread != 1 {
+		t.Errorf("count = (%d, %d), want (1, 1) — probe should be excluded", total, unread)
 	}
 }
 

@@ -1260,16 +1260,21 @@ func (m *Mailbox) Search(opts SearchOptions) ([]*Message, error) {
 	return matches, nil
 }
 
-// Count returns the total and unread message counts.
+// Count returns the total and unread message counts, excluding doctor-dog
+// self-probes (see isDeaconSelfProbe) — a supervision signal, not mail for
+// a human or agent to see in their counts.
 func (m *Mailbox) Count() (total, unread int, err error) {
 	messages, err := m.List()
 	if err != nil {
 		return 0, 0, err
 	}
 
-	total = len(messages)
-	// Count messages that are NOT marked as read (including via "read" label)
 	for _, msg := range messages {
+		if msg == nil || isDeaconSelfProbe(msg.Subject) {
+			continue
+		}
+		total++
+		// Count messages that are NOT marked as read (including via "read" label)
 		if !msg.Read {
 			unread++
 		}

@@ -18,11 +18,13 @@ import (
 // self-probe: a known event injected through the deacon's own mail inbox
 // (glossary "Self-probe"), followed by a nonce for correlation. The
 // deacon patrol's inbox-hygiene step recognizes this prefix and
-// acknowledges the message mechanically — no LLM judgment involved.
-// Probes are always sent with Message.Wisp=true (ephemeral, GC'd on ack,
-// never a durable bead) and are excluded from `gt mail inbox`'s default
-// view by this same prefix.
-const DeaconSelfProbeSubjectPrefix = "DEACON_SELF_PROBE"
+// acknowledges the message mechanically via `gt deacon ack-probes` — no
+// LLM judgment involved. Probes are always sent with Message.Wisp=true
+// (ephemeral, GC'd on ack, never a durable bead) and are excluded from
+// `gt mail inbox`'s default view and `gt status` unread counts by this
+// same prefix. Re-exported from internal/constants, which internal/mail
+// also depends on to exclude probes from unread counts.
+const DeaconSelfProbeSubjectPrefix = constants.DeaconSelfProbeSubjectPrefix
 
 // defaultDeaconSelfProbeBudget is used when the deacon role's ping_timeout
 // cannot be loaded, matching config/roles/deacon.toml's built-in default.

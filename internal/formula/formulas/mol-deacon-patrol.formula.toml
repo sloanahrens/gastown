@@ -73,7 +73,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 19
+version = 20
 
 [vars]
 [vars.wisp_type]
@@ -209,20 +209,20 @@ informational - archive the message regardless.
 **DEACON_SELF_PROBE messages** (from doctor-dog, gt-jmy3):
 Subject format: `DEACON_SELF_PROBE <nonce>`. Sent once per doctor-dog cycle
 (every 5m) to prove the patrol reacts to a known injected event rather than
-just a clock heartbeat (glossary "Self-probe"). Mechanical only — no
-judgment call:
+just a clock heartbeat (glossary "Self-probe"). These never appear in
+`gt mail inbox` (filtered by the DEACON_SELF_PROBE prefix, same as `gt
+status` unread counts) — you cannot discover their message IDs there.
+Mechanical only — no judgment call, one command handles all pending probes:
 ```bash
-# For each DEACON_SELF_PROBE message:
-gt mail read <id>
+gt deacon ack-probes
 ```
-`gt mail read` alone acknowledges delivery (delivery:acked label) — that ack
-is what the deacon-self-probe doctor check reads back on the next
-doctor-dog cycle. Do NOT archive/delete the message here: the probe stays
-in the inbox, acked, until the doctor-dog cycle that reads it back has run;
-the normal wisp GC reaps it afterward since it's a wisp (Message.Wisp=true).
-It never appears in `gt mail inbox`'s default view or any digest regardless
-(filtered by the DEACON_SELF_PROBE prefix), so leaving it acked here does
-not clutter the inbox a human or agent would triage.
+This reads the mailbox directly (bypassing the inbox filter), finds
+unacked probes, and acks each one exactly as `gt mail read <id>` would
+(delivery:acked label) — that ack is what the deacon-self-probe doctor
+check reads back on the next doctor-dog cycle. It does NOT archive/delete
+the messages: they stay in the inbox, acked, until the doctor-dog cycle
+that reads them back has run; the normal wisp GC reaps them afterward
+since they're wisps (Message.Wisp=true).
 
 Callbacks may spawn new polecats, update issue state, or trigger other actions.
 
