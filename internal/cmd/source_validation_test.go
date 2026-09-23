@@ -464,13 +464,16 @@ func resetMqSubmitFlagsForTest(t *testing.T) {
 	oldBranch, oldIssue, oldEpic := mqSubmitBranch, mqSubmitIssue, mqSubmitEpic
 	oldPriority := mqSubmitPriority
 	oldNoCleanup, oldSkipDeps, oldResubmit := mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit
+	oldAllowReverts, oldReason := mqSubmitAllowReverts, mqSubmitReason
 	mqSubmitBranch, mqSubmitIssue, mqSubmitEpic = "", "", ""
 	mqSubmitPriority = -1
 	mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit = false, false, false
+	mqSubmitAllowReverts, mqSubmitReason = false, ""
 	t.Cleanup(func() {
 		mqSubmitBranch, mqSubmitIssue, mqSubmitEpic = oldBranch, oldIssue, oldEpic
 		mqSubmitPriority = oldPriority
 		mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit = oldNoCleanup, oldSkipDeps, oldResubmit
+		mqSubmitAllowReverts, mqSubmitReason = oldAllowReverts, oldReason
 	})
 }
 

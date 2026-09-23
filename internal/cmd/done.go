@@ -67,15 +67,15 @@ Examples:
 }
 
 var (
-	doneIssue                    string
-	donePriority                 int
-	doneStatus                   string
-	doneCleanupStatus            string
-	doneResume                   bool
-	donePreVerified              bool
-	doneTarget                   string
-	doneSkipVerify               bool
-	doneAllowReverts bool
+	doneIssue         string
+	donePriority      int
+	doneStatus        string
+	doneCleanupStatus string
+	doneResume        bool
+	donePreVerified   bool
+	doneTarget        string
+	doneSkipVerify    bool
+	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
 )

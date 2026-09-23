@@ -89,10 +89,11 @@ type RevertedMerge struct {
 // find.
 //
 // There is no escape hatch keyed off commit-message text — an author's own
-// words must never bypass a landing check. The one sanctioned override is
-// --allow-reverts, gated on an explicit mayor ruling (see
-// requireRevertOverrideAuthorization in internal/cmd/done_revert_check.go).
-// A real revert has no relocation and is still refused.
+// words must never bypass a landing check. The one sanctioned override is a
+// mayor-side `gt mq submit --allow-reverts`, refused outright from a polecat
+// worktree (see requireNonPolecatCloneForRevertOverride in
+// internal/cmd/done_revert_check.go). A real revert has no relocation and is
+// still refused.
 func DetectRevertedMerges(g *Git, target, headTreeRef string) ([]RevertedMerge, error) {
 	mergeBase, err := g.MergeBase(target, "HEAD")
 	if err != nil {

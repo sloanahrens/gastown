@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,4 +258,46 @@ func TestValidateMoleculePrereqs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRecordAllowRevertsAudit pins gt-0wy03 AC1's audit trail for the
+// mayor-side override: the MR bead gets a permanent comment naming who ran
+// it, why, and which target commits it lets through. A failure to write that
+// comment fails the call rather than proceeding as if it were recorded.
+func TestRecordAllowRevertsAudit(t *testing.T) {
+	t.Parallel()
+	s := newRevertScenario(t)
+	commitPolecat(t, s.polecat, map[string]string{
+		"shared.txt": "base\npolecat line\n",
+		"fix.txt":    "the fix\n",
+	}, "wip: start")
+	advanceMain(t, s.seed)
+	staleResetOntoMain(t, s.polecat)
+	g := gitpkg.NewGit(s.polecat)
+
+	t.Run("writes the reason and reverted commits to the MR bead", func(t *testing.T) {
+		var comments []string
+		addComment := func(id, text string) error {
+			comments = append(comments, id+": "+text)
+			return nil
+		}
+		if err := recordAllowRevertsAudit(g, addComment, "gt-mr-1", "origin/main", "polecat/zircon/gt-test", "rebase artifact, verified by hand"); err != nil {
+			t.Fatalf("recordAllowRevertsAudit: %v", err)
+		}
+		if len(comments) != 1 {
+			t.Fatalf("expected 1 audit comment, got %d: %v", len(comments), comments)
+		}
+		for _, want := range []string{"gt-mr-1:", "polecat/zircon/gt-test", "origin/main", "rebase artifact, verified by hand"} {
+			if !strings.Contains(comments[0], want) {
+				t.Errorf("audit comment missing %q: %s", want, comments[0])
+			}
+		}
+	})
+
+	t.Run("fails when the bead comment cannot be written", func(t *testing.T) {
+		addComment := func(id, text string) error { return fmt.Errorf("bead not found") }
+		if err := recordAllowRevertsAudit(g, addComment, "gt-mr-missing", "origin/main", "polecat/zircon/gt-test", "why"); err == nil {
+			t.Fatal("expected recordAllowRevertsAudit to fail when the audit comment cannot be written")
+		}
+	})
 }

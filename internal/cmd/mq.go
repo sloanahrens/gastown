@@ -22,13 +22,15 @@ import (
 // MQ command flags
 var (
 	// Submit flags
-	mqSubmitBranch    string
-	mqSubmitIssue     string
-	mqSubmitEpic      string
-	mqSubmitPriority  int
-	mqSubmitNoCleanup bool
-	mqSubmitSkipDeps  bool
-	mqSubmitResubmit  bool
+	mqSubmitBranch       string
+	mqSubmitIssue        string
+	mqSubmitEpic         string
+	mqSubmitPriority     int
+	mqSubmitNoCleanup    bool
+	mqSubmitSkipDeps     bool
+	mqSubmitResubmit     bool
+	mqSubmitAllowReverts bool
+	mqSubmitReason       string
 
 	// Retry flags
 	mqRetryNow bool
@@ -115,7 +117,16 @@ Examples:
   gt mq submit --issue gp-abc            # Explicit issue
   gt mq submit --epic gt-xyz             # Target integration branch explicitly
   gt mq submit --priority 0              # Override priority (P0)
-  gt mq submit --no-cleanup              # Submit without auto-cleanup`,
+  gt mq submit --no-cleanup              # Submit without auto-cleanup
+
+--allow-reverts (mayor only):
+  gt done refuses --allow-reverts unconditionally from a polecat worktree
+  (gt-0wy03). The only way to submit a branch that undoes merged work is this
+  command, run with --allow-reverts and --reason from a non-polecat clone
+  (e.g. mayor/rig). It records who ran it, why, and which target commits the
+  branch undoes as a comment on the MR bead.
+
+  gt mq submit --allow-reverts --branch <branch> --reason "<why>"`,
 	RunE: runMqSubmit,
 }
 
@@ -429,6 +440,8 @@ func init() {
 	mqSubmitCmd.Flags().BoolVar(&mqSubmitNoCleanup, "no-cleanup", false, "Don't auto-cleanup after submit (for polecats)")
 	mqSubmitCmd.Flags().BoolVar(&mqSubmitSkipDeps, "skip-deps", false, "Skip molecule step dependency check")
 	mqSubmitCmd.Flags().BoolVar(&mqSubmitResubmit, "resubmit", false, "Resubmit after a fix (skips dependency check)")
+	mqSubmitCmd.Flags().BoolVar(&mqSubmitAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target; refused from a polecat worktree (gt-0wy03)")
+	mqSubmitCmd.Flags().StringVar(&mqSubmitReason, "reason", "", "Why this branch is allowed to undo merged work (required with --allow-reverts)")
 
 	// Retry flags
 	mqRetryCmd.Flags().BoolVar(&mqRetryNow, "now", false, "Immediately process instead of waiting for refinery loop")

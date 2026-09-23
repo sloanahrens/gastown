@@ -116,6 +116,19 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// --allow-reverts is the one sanctioned override for a branch gt done
+	// refuses to submit (gt-0wy03 AC1): gt done refuses it unconditionally
+	// from a polecat worktree, so the override can only be exercised here,
+	// and only from a non-polecat clone.
+	if mqSubmitAllowReverts {
+		if err := requireNonPolecatCloneForRevertOverride(cwd); err != nil {
+			return err
+		}
+		if strings.TrimSpace(mqSubmitReason) == "" {
+			return fmt.Errorf("--allow-reverts requires --reason \"<why>\" (gt-0wy03): recorded on the MR bead as the audit trail for bypassing the merged-work revert check")
+		}
+	}
+
 	g := git.NewGit(cwd)
 
 	// Get current branch
@@ -324,6 +337,16 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Record the --allow-reverts audit trail on the MR bead: who ran the
+	// override, why, and which target commits the branch undoes (gt-0wy03
+	// AC1). Runs after the MR exists, so a comment failure here never leaves
+	// an audit record for a submission that didn't happen.
+	if mqSubmitAllowReverts {
+		if err := recordAllowRevertsAudit(g, bd.AddComment, mrIssue.ID, target, branch, mqSubmitReason); err != nil {
+			return err
+		}
+	}
+
 	// Success output
 	fmt.Printf("%s Submitted to merge queue\n", style.Bold.Render("✓"))
 	fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrIssue.ID))
@@ -354,6 +377,39 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 func resolveMQSubmitCommitSHA(g *git.Git, branch string) (string, error) {
 	return g.Rev(fmt.Sprintf("refs/heads/%s^{commit}", branch))
+}
+
+// recordAllowRevertsAudit writes the audit trail --allow-reverts must leave
+// on the MR bead: who invoked the override, why, and which target commits
+// the branch undoes (gt-0wy03 AC1). Detection is best-effort — a clone
+// missing the target's history should not block an override the worktree
+// check already authorized, so a detection failure is recorded as-is rather
+// than treated as "none found". Fetches origin first: this command may run
+// from a clone that has not seen the branch or the target's latest commits.
+func recordAllowRevertsAudit(g *git.Git, addComment func(id, text string) error, mrID, target, branch, reason string) error {
+	if err := g.Fetch("origin"); err != nil {
+		style.PrintWarning("could not fetch origin before recording --allow-reverts commits: %v", err)
+	}
+	var detail string
+	found, err := git.DetectRevertedMerges(g, target, "origin/"+branch)
+	switch {
+	case err != nil:
+		detail = fmt.Sprintf("could not determine (error: %v)", err)
+	case len(found) == 0:
+		detail = "none detected"
+	default:
+		commits := make([]string, 0, len(found))
+		for _, f := range found {
+			commits = append(commits, shortSHA(f.Commit))
+		}
+		detail = strings.Join(commits, ", ")
+	}
+	comment := fmt.Sprintf("gt mq submit --allow-reverts by %s: bypassing merged-work revert check for %s against %s; reason: %s; reverted commit(s): %s",
+		cleanupActorLabel(), branch, target, reason, detail)
+	if err := addComment(mrID, comment); err != nil {
+		return fmt.Errorf("cannot write --allow-reverts audit record to %s (gt-0wy03): %w", mrID, err)
+	}
+	return nil
 }
 
 func verifyMQSubmitPushedBranch(g *git.Git, branch, commitSHA string) error {

@@ -335,16 +335,22 @@ func rebasePolecatOntoSeed(t *testing.T, s scenarioPaths, path, advanced, subjec
 	runGitCmd(t, s.polecat, "rebase", "origin/main")
 }
 
-// TestDetectRevertedMerges_RelocationSurvivesInPackage is gt-0wy03's own
-// repro: the merged commit adds t.Parallel() to TestA only (TestB's own
-// t.Parallel() predates it, at the base commit). The polecat, now fully
-// rebased onto that commit, removes TestB's — a call for an unrelated
-// reason (gt-k317: it swaps a package global and cannot run in parallel) —
-// leaving TestA's untouched. The line-multiset test alone reads this as
-// undoing the merged commit, since it removed one instance of the exact
-// line the commit added; the fix must see that the commit's own line
-// survives, right where the commit put it, and not refuse.
-func TestDetectRevertedMerges_RelocationSurvivesInPackage(t *testing.T) {
+// TestDetectRevertedMerges_TargetCommitOwnLineNotTreatedAsRelocated pins
+// gt-0wy03 AC2: relocation counts only lines the CANDIDATE's own diff (merge
+// base to branch-tip) adds, never content already present at the merge base.
+// This is gt-0wy03's original repro — the merged commit (X) adds
+// t.Parallel() to TestA; the candidate, fully rebased onto X, removes an
+// unrelated PRE-EXISTING t.Parallel() from TestB (gt-k317: it swaps a
+// package global and cannot run in parallel) — but the candidate never added
+// a matching line itself: X's own addition predates the merge base, so it
+// cannot rescue the removal however identical its content reads. An earlier
+// attempt rescued this by measuring from the flagged commit's own parent
+// instead of the merge base, but that same baseline also let a LATER target
+// commit's addition rescue a real revert (gt-0wy03 attempt 3), so the mayor
+// ruled it too permissive and required the strict merge-base baseline
+// instead. The removal is refused here; only the mayor's
+// gt mq submit --allow-reverts path can let it through.
+func TestDetectRevertedMerges_TargetCommitOwnLineNotTreatedAsRelocated(t *testing.T) {
 	t.Parallel()
 	const path = "pkg/foo_test.go"
 	base := "package pkg\n\n" +
@@ -361,7 +367,67 @@ func TestDetectRevertedMerges_RelocationSurvivesInPackage(t *testing.T) {
 	rebasePolecatOntoSeed(t, s, path, advanced, "cmd tests: t.Parallel for TestA (gt-kf0r)")
 	commitPolecat(t, s.polecat, map[string]string{path: final}, "fix(pkg): make TestB sequential, it swaps a global (gt-test)")
 
-	assertNoRevertedMerges(t, s.polecat)
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (AC2: a target commit's own line, already baked into the merge base, must not rescue a same-content removal elsewhere): %+v", len(found), found)
+	}
+}
+
+// TestDetectRevertedMerges_LaterTargetAdditionInFlaggedFileDoesNotRescue is
+// gt-0wy03 AC2's named test: X, already merged to main, adds t.Parallel() to
+// TestA in pkg/foo_test.go. A LATER commit Y, also already merged, adds its
+// own t.Parallel() to TestB in the SAME FILE. The candidate rebases onto
+// both, then genuinely reverts X's own line (removes TestA's t.Parallel())
+// without adding anything itself. Y's addition is already baked into the
+// merge base like X's, so under the strict merge-base baseline it cannot
+// rescue the removal either — closing the gap TestDetectRevertedMerges_
+// LaterTargetAdditionDoesNotRescue left open by only covering an untouched
+// sibling file (gt-0wy03 attempt 3 review).
+func TestDetectRevertedMerges_LaterTargetAdditionInFlaggedFileDoesNotRescue(t *testing.T) {
+	t.Parallel()
+	const path = "pkg/foo_test.go"
+	base := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tdoOtherStuff()\n}\n"
+	afterX := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tdoOtherStuff()\n}\n"
+	afterY := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+	final := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+
+	s := newRebasedPackageScenario(t, path, base)
+	rebasePolecatOntoSeed(t, s, path, afterX, "cmd tests: t.Parallel for TestA (gt-kf0r)")
+	g := git.NewGit(s.polecat)
+	xCommit, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD after X: %v", err)
+	}
+	rebasePolecatOntoSeed(t, s, path, afterY, "cmd tests: t.Parallel for TestB (gt-kf0r)")
+	commitPolecat(t, s.polecat, map[string]string{path: final}, "fix(pkg): TestA cannot run in parallel, it swaps a global (gt-test)")
+
+	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) == 0 {
+		t.Fatal("detectRevertedMerges rescued a real revert: a later target commit's matching addition in the flagged file must not rescue it")
+	}
+	foundX := false
+	for _, f := range found {
+		if f.Commit == xCommit {
+			foundX = true
+		}
+	}
+	if !foundX {
+		t.Errorf("expected the actually-reverted commit %s among reported reverts, got: %+v", xCommit, found)
+	}
 }
 
 // TestDetectRevertedMerges_RevertsTrailerDoesNotBypass covers a removal
