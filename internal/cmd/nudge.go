@@ -89,7 +89,10 @@ Delivery modes (--mode):
   immediate  Send directly via tmux send-keys. Refuses to interrupt a busy
              target — falls back to wait-idle/queue delivery instead — unless
              --force is given. Use only when you need to break through
-             (e.g., stuck agent, emergency).
+             (e.g., stuck agent, emergency). After delivery, immediate mode
+             watches the target for a few seconds: if it started no turn (or
+             the pane could not be read), it prints a warning to stderr —
+             the exit code stays 0, because delivery itself succeeded.
 
 Queue and wait-idle modes require a drain mechanism. Claude agents drain
 via UserPromptSubmit hook; other agents use a background nudge-poller
@@ -239,8 +242,10 @@ var immediateTurnProbeWindow = 3 * time.Second
 
 // immediateConsumptionWarning watches a target for a reaction to a nudge that
 // immediate mode has just delivered, and returns a warning line when the target
-// took the input without acting on it. It returns "" when there is nothing to
-// report.
+// took the input without acting on it — or when consumption could not be
+// established (an unreadable pane, or a frozen pane with nothing to date it by,
+// both read UNKNOWN and name a re-probe instead of claiming a wedge, gt-7xnv).
+// It returns "" only on a positive, unambiguous verdict.
 //
 // This exists because "the pty took the keystrokes" and "the agent acted on
 // them" are different claims, and only the first was ever being verified
@@ -257,9 +262,24 @@ var immediateTurnProbeWindow = 3 * time.Second
 func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
 	verdict, err := t.WaitForInputConsumed(sessionName, immediateTurnProbeWindow)
 	if err != nil {
-		// An unobservable pane says nothing about the nudge. Stay quiet: a
-		// warning here would fire for every agent without prompt detection.
-		return ""
+		// Fail closed (gt-7xnv): an unobservable pane says nothing about the
+		// nudge, so it must not read as one that was consumed — but it must not
+		// claim a wedge either, so the word here is UNKNOWN, not "started no
+		// turn". Re-probe before acting on it.
+		return fmt.Sprintf(
+			"immediate: %s took the nudge but consumption is UNKNOWN — the probe could not read the pane (%v). "+
+				"Re-check with 'gt session health %s' before acting.\n",
+			sessionName, err, sessionName)
+	}
+	if verdict == tmux.InputConsumptionUndated {
+		// The pane was frozen and holding input but has no content above the
+		// input box to date it by (gt-7xnv): the nudge may be the input, or
+		// any older text. Not a strand claim — re-probe on a longer window.
+		return fmt.Sprintf(
+			"immediate: %s still holds input and the pane was frozen for %s, but it has nothing above "+
+				"the input box to date it by — consumption is UNKNOWN (UNDATED), not a strand. "+
+				"Re-check with 'gt session health %s' before acting.\n",
+			sessionName, immediateTurnProbeWindow, sessionName)
 	}
 	if verdict != tmux.InputConsumptionNotConsumed {
 		return ""
