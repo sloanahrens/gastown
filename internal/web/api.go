@@ -356,7 +356,7 @@ func (h *APIHandler) acquireUserCmdSlot(ctx context.Context) error {
 // separate from execTimeout so a queued call still gets the full timeout
 // once it starts running. Defaults to execTimeout: a fixed budget shorter
 // than that turned slow-but-successful reads into hard failures under
-// exactly the contention this bound exists for (gt-d5xr rework 2).
+// exactly the contention this bound exists for (gt-d5xr).
 // slotWaitBudget overrides the default so a test's pool-full case can
 // resolve in milliseconds instead of waiting out a realistic timeout.
 func (h *APIHandler) waitBudget(execTimeout time.Duration) time.Duration {
@@ -370,7 +370,7 @@ func (h *APIHandler) waitBudget(execTimeout time.Duration) time.Duration {
 // pool (userCommandConcurrency) only. It calls runGtCommandExec directly
 // rather than runGtCommand, which also acquires cmdSem: wrapping that
 // function held a short-read slot for a long command's whole lifetime,
-// undoing the pool split (gt-d5xr rework 2).
+// undoing the pool split (gt-d5xr).
 func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
 	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
 	err := h.acquireUserCmdSlot(waitCtx)
@@ -399,7 +399,7 @@ func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, ar
 // runGtCommandExec runs a gt subcommand without acquiring any subprocess
 // slot. Callers that already hold one — cmdSem via runGtCommand, or
 // userCmdSem via runUserGtCommand — call this directly so a command never
-// draws a slot from both pools at once (gt-d5xr rework 2).
+// draws a slot from both pools at once (gt-d5xr).
 func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration, args []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

@@ -110,7 +110,7 @@ var fetcherGetSessionEnv = func(sessionName, key string) (string, error) {
 // separate from execTimeout so a queued call still gets the full timeout
 // once it starts running. Defaults to execTimeout: a fixed budget shorter
 // than that turned slow-but-successful bd reads into hard failures under
-// exactly the Dolt contention this bound exists for (gt-d5xr rework 2).
+// exactly the Dolt contention this bound exists for (gt-d5xr).
 // slotWaitBudget overrides the default so a test's pool-full case can
 // resolve in milliseconds instead of waiting out a realistic timeout.
 func (f *LiveConvoyFetcher) waitBudget(execTimeout time.Duration) time.Duration {
