@@ -2369,7 +2369,15 @@ func ExtractSimpleRole(gtRole string) string {
 // If envVars contains GT_ROLE, the function uses role-based agent resolution
 // (ResolveRoleAgentConfig) to select the appropriate agent for the role.
 // This enables per-role model selection via role_agents in settings.
-func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) string {
+//
+// Returns ok=false when the resolved agent's env references an unset variable
+// (guard in BuildStartupCommandWithAgentOverride). The command then describes
+// what the pre-existing session already runs — no unexpanded reference — so a
+// caller that restarts a live session in place (crew restart in `gt start`)
+// can keep it and rerun via the full managed path
+// (BuildStartupCommandFromConfig), which builds before it kills and fails
+// safe (gt-wisp-jsm).
+func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (string, bool) {
 	var rc *RuntimeConfig
 	var townRoot string
 
@@ -2451,7 +2459,26 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 
 	SanitizeAgentEnv(resolvedEnv, envVars)
 
-	var cmd string
+	// Unset ${VAR} guard: an agent resolved out of settings skips
+	// ValidateAgentConfig, so expanding a missing reference here would export
+	// an empty credential that fails only once the agent is already running
+	// (gt-yih1). Rather than a hardcoded empty-string fallback, report the
+	// condition and leave the command describing what the pre-existing session
+	// already runs: the only caller that hits this (crew restart in `gt start`)
+	// keeps that live session instead of sending a broken command into it and
+	// reruns via the full managed path (BuildStartupCommandFromConfig), which
+	// builds before it kills and fails safe (gt-wisp-jsm).
+	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+		name := rc.ResolvedAgent
+		if name == "" {
+			name = rc.Provider
+		}
+		log.Printf("config: agent %q env references %s, which is not set in the environment", name, strings.Join(missing, ", "))
+		return cmd, false
+	}
+
+	return cmd, true
+}
 	if runtime.GOOS == "windows" {
 		// On Windows, tmux (psmux) uses PowerShell and send-keys has line length
 		// limits. Write env vars + agent command to a temp .ps1 script and invoke
