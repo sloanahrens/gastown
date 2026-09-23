@@ -21,13 +21,13 @@ structural defect from boundary case.
 
 ### The gate contract
 
-`gt mq review <mr-bead-id> --rehearsed temp` invokes `om` (through the
+`gt mq review <mr-bead-id> --rehearsed <sha>` invokes `om` (through the
 backend-agnostic `om-gate.sh` script) and carries the verdict in its exit
 code:
 
 | Exit | Meaning | Refinery action |
 |------|---------|-----------------|
-| 0 | approve | proceed with the merge |
+| 0 | approve | proceed with the merge, if the test suite also passed — a red suite discards the verdict |
 | 1 | request_changes — editorial rejection | abort merge, FIX_NEEDED to the polecat (`Failure-Type: om-editorial`) |
 | 2 | infra error (always fails closed) | skip the MR, escalate to Witness, do NOT send FIX_NEEDED |
 

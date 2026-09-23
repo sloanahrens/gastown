@@ -64,7 +64,7 @@ source of truth.
 | build_command | (empty) | Build command (e.g., `go build ./...`). Empty = skip. |
 | target_branch | main | Default target branch for merges |
 | delete_merged_branches | true | Whether to delete source branches after merge |
-| editorial_required | false | Whether merge_queue.editorial.required is set for this rig; gates whether quality-review calls gt mq review at all |
+| editorial_required | false | Whether merge_queue.editorial.required is set for this rig; gates whether process-branch launches gt mq review at all |
 | merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
@@ -169,7 +169,7 @@ description = "Whether to delete source branches after merge"
 default = "true"
 
 [vars.editorial_required]
-description = "Whether merge_queue.editorial.required is set for this rig (from config, resolved at prime time). Gates whether quality-review invokes gt mq review at all."
+description = "Whether merge_queue.editorial.required is set for this rig (from config, resolved at prime time). Gates whether process-branch launches gt mq review at all."
 default = "false"
 
 [vars.merge_strategy]
@@ -639,22 +639,21 @@ the original work and must be preserved for conflict resolution.
 **Step 3.5: Launch editorial review concurrently with the test suite (gt-cmcv)**
 
 Only reached on a successful rehearsal — the conflict branch above never
-reaches this step. Skip entirely when `editorial_required` is not `"true"`:
-`gt mq review` refuses to run without `--force` on such a rig, and there is
-nothing for quality-review to join later.
+reaches this step. Skip when `editorial_required` is not `"true"`: `gt mq
+review` refuses to run without `--force` on such a rig, so there would be
+nothing for quality-review to join.
 
 **Config: editorial_required = {{editorial_required}}**
 
-The point of starting review here, instead of serially after run-tests, is
-to reclaim its wall time: the test suite and the review now overlap instead
-of stacking. This is ref-only and safe to run alongside run-tests' build/test
-commands in the same live clone — pass an ALREADY-RESOLVED SHA (never the
-moving branch name `temp`) so `gt mq review` takes its no-checkout path
-(setting `RehearsedHead` skips rehearsal/checkout entirely — confirmed in
-internal/refinery/editorial/review.go) and never touches this clone's HEAD or
-index. Nothing else may check out or mutate branches here until the review is
-joined in quality-review — the step DAG (run-tests -> quality-review ->
-handle-failures -> merge-push) already guarantees that ordering.
+Starting the review here rather than serially after run-tests is what
+reclaims its wall time: the suite and the review overlap instead of
+stacking. Passing a SHA instead of the branch name `temp` is what makes that
+safe — `--rehearsed <sha>` skips rehearsal and checkout entirely, so the
+review never touches this clone's HEAD or index while run-tests' build and
+test commands are using it (internal/refinery/editorial/review.go). Nothing
+may check out or mutate branches here until quality-review joins the review;
+the step order run-tests -> quality-review -> handle-failures -> merge-push
+already guarantees that.
 
 Determine N: this issue's current attempt number (count prior `MERGE
 REJECTION (attempt` entries in the issue's bd notes, plus 1 — first attempt
@@ -663,41 +662,35 @@ REJECTION notes.
 
 ```bash
 if [ "{{editorial_required}}" = "true" ]; then
+  REVIEW=/tmp/<mr-bead-id>-review
   TEMP_SHA=$(git rev-parse temp)
-  REVIEW_OUT=/tmp/<mr-bead-id>-review.json
-  REVIEW_LOG=/tmp/<mr-bead-id>-review.log
-  REVIEW_EXIT_FILE=/tmp/<mr-bead-id>-review.exit
-  REVIEW_PID_FILE=/tmp/<mr-bead-id>-review.pid
-  rm -f "$REVIEW_OUT" "$REVIEW_LOG" "$REVIEW_EXIT_FILE" "$REVIEW_PID_FILE"
-  ( gt mq review <mr-bead-id> --rehearsed "$TEMP_SHA" --attempt <N> --json \
-      > "$REVIEW_OUT" 2> "$REVIEW_LOG"; echo $? > "$REVIEW_EXIT_FILE" ) \
-      </dev/null >/dev/null 2>&1 &
-  echo $! > "$REVIEW_PID_FILE"
+  rm -f "$REVIEW.sha" "$REVIEW.pid" "$REVIEW.exit" "$REVIEW.json" "$REVIEW.log"
+  echo "$TEMP_SHA" > "$REVIEW.sha"
+  ( nohup gt mq review <mr-bead-id> --rehearsed "$TEMP_SHA" --attempt <N> --json \
+      > "$REVIEW.json" 2> "$REVIEW.log"
+    echo "REVIEW_EXIT=$?" > "$REVIEW.exit" ) </dev/null >/dev/null 2>&1 &
+  echo $! > "$REVIEW.pid"
   disown
 fi
 ```
 
-This is the one place `--rehearsed` takes a resolved SHA rather than the
-branch name `temp`: a moving ref would defeat the ref-only safety argument
-above, and a SHA captured once here removes even the theoretical dependency
-on `temp` not moving during the concurrent window. `disown` detaches the
-background job from this shell so it keeps running past this tool call —
-quality-review joins it later by PID file and exit file, not by shell job
-control, because each formula step is its own invocation and cannot `wait`
-on a PID it did not fork itself. The outer `</dev/null >/dev/null 2>&1` on
-the whole subshell (on top of the inner command's own file redirects) closes
-every fd the job would otherwise inherit from this call's own stdout/stderr —
-without it the launch call does not actually return early: the tool
-capturing this call's output blocks until every process holding its stdout
-pipe closes it, including a backgrounded child that never explicitly
-redirected away from the inherited fd, silently serializing this "concurrent"
-launch back into a wait.
+`$REVIEW.sha` records the head this review is reviewing, so quality-review
+can refuse a verdict left over from an earlier attempt on the same MR bead.
+Keep both the inner file redirects and the outer `>/dev/null 2>&1`: without
+the outer one the job holds this call's stdout pipe open and the call does
+not return until the review finishes, serializing the overlap away. `nohup`
+plus `disown` keep the review alive past this call, as
+plugins/dolt-snapshots/plugin.md does for its watcher; if the harness kills
+the job anyway, quality-review fails closed at exit 2 — the overlap is lost,
+never the requirement that a merge has a verdict.
 
-If review was NOT launched (`editorial_required` != "true"), proceed to
-run-tests exactly as before — quality-review's own Step 0 skips the join too.
+**Exit criterion:** with `editorial_required = "true"`,
+`/tmp/<mr-bead-id>-review.sha` holds the rehearsed SHA and a review is
+running in the background; otherwise no review was started. Either way,
+continue to run-tests.
 
 Track: merge rehearsal result (success/conflict), conflict task ID if
-created, whether the editorial review was launched (and its PID-file path)."""
+created, whether the editorial review was launched."""
 
 [[steps]]
 id = "run-tests"
@@ -837,46 +830,61 @@ handle-failures exactly as if quality-review did not exist.
 
 **Step 1: Join the review launched concurrently in process-branch (gt-cmcv)**
 
-process-branch's Step 3.5 already started `gt mq review` in the background,
-right after rehearsal succeeded — before run-tests ran, not serially after
-it. By the time run-tests (the previous step) finished, the review is very
-likely already done: it typically completes in a few minutes, well under its
-`.om.json` `timeout=900s` ceiling, and `{{test_command}}` usually runs
-longer. Join it now:
+process-branch's Step 3.5 already started the review — before run-tests ran,
+not serially after it — and by now it is usually done: a review takes a few
+minutes against its `.om.json` `timeout=900s` ceiling, and
+`{{test_command}}` usually runs longer. So this waits for a job's tail, not
+for the job. Join it now:
 
 ```bash
-REVIEW_OUT=/tmp/<mr-bead-id>-review.json
-REVIEW_EXIT_FILE=/tmp/<mr-bead-id>-review.exit
-REVIEW_PID_FILE=/tmp/<mr-bead-id>-review.pid
-REVIEW_PID=$(cat "$REVIEW_PID_FILE" 2>/dev/null)
+REVIEW=/tmp/<mr-bead-id>-review
+HEAD_SHA=$(git rev-parse temp)
+LAUNCH_SHA=$(cat "$REVIEW.sha" 2>/dev/null)
+REVIEW_EXIT=
+REVIEW_STATE=unknown_head
 
-REVIEW_WAITED=0
-while [ -n "$REVIEW_PID" ] && kill -0 "$REVIEW_PID" 2>/dev/null; do
-  sleep 5
-  REVIEW_WAITED=$((REVIEW_WAITED + 5))
-  if [ "$REVIEW_WAITED" -ge 950 ]; then
-    break
-  fi
-done
+if [ -n "$LAUNCH_SHA" ] && [ "$LAUNCH_SHA" = "$HEAD_SHA" ]; then
+  REVIEW_STATE=joined
+  i=0
+  while [ ! -s "$REVIEW.exit" ]; do
+    kill -0 "$(cat "$REVIEW.pid" 2>/dev/null)" 2>/dev/null || break
+    [ "$i" -ge "${REVIEW_WAIT_ITERS:-108}" ] && { REVIEW_STATE=still_running; break; }
+    sleep "${REVIEW_POLL_SECS:-5}"
+    i=$((i + 1))
+  done
+  REVIEW_EXIT=$(sed -n 's/^REVIEW_EXIT=//p' "$REVIEW.exit" 2>/dev/null)
+fi
 
-REVIEW_EXIT=$(cat "$REVIEW_EXIT_FILE" 2>/dev/null)
-REVIEW_JSON=$(cat "$REVIEW_OUT" 2>/dev/null)
+if [ "$REVIEW_STATE" != still_running ]; then
+  REVIEW_EXIT=${REVIEW_EXIT:-2}
+  REVIEW_JSON=$(cat "$REVIEW.json" 2>/dev/null)
+  rm -f "$REVIEW.sha" "$REVIEW.pid" "$REVIEW.exit" "$REVIEW.json"
+fi
 ```
 
-This is a bounded poll for the TAIL of a job already mostly done by the time
-run-tests finishes — not the sleep-poll pattern run-tests warns against
-(which backgrounds an otherwise-instant foreground gate and then idles on
-it for its whole duration). A formula step is a separate tool call with its
-own shell, so this step cannot `wait` on process-branch's PID directly —
-`wait` only reaps a shell's own children — so the PID file plus polling by
-`kill -0` is how the join crosses that step boundary. `.om.json`'s own
-`timeout=900s` is the backstop that keeps this loop's 950s bound from firing
-in practice; if it does fire, `REVIEW_EXIT_FILE` stays empty, and the branch
-below reads that as an execution error (exit 2), same as any other one.
+Three states, only two of them a verdict:
 
-If review was never launched (`REVIEW_PID_FILE` absent because
-`editorial_required` was not `"true"` when process-branch ran), Step 0 above
-already skipped this entire step.
+- **`still_running`** — the review outlasted this call's wait (a review may
+  run to om's 900s ceiling plus its 60s wrapper deadline, longer than one
+  Bash call runs). Nothing was consumed: **re-run this same call.** It is
+  idempotent, and one more round always finishes the review. Do NOT continue
+  to Step 1.5 or Step 2 from here.
+- **`joined` with a non-empty `REVIEW_EXIT`** — this attempt's verdict.
+  Continue to Step 1.5.
+- **`unknown_head`, or `joined` with an empty `REVIEW_EXIT`** (the review
+  died without recording one) — `REVIEW_EXIT` is set to `2`, the fail-closed
+  value, so an unobtainable or unattributable verdict can never read as an
+  approval. Continue to Step 1.5; Step 2's exit 2 path handles it.
+
+The `.sha` comparison is what ties a verdict to the head it reviewed: the
+same MR bead comes back after an exit-2 escalation or a rejection, and the
+`rm -f` after reading means the next attempt's launch, never a leftover, is
+the only thing a later join can find. The defaults are 5s per poll and 108
+polls — 540s, inside the 600s Bash ceiling — and both are env-overridable
+because tests need a sub-second poll.
+
+If review was never launched (`editorial_required` was not `"true"` when
+process-branch ran), Step 0 above already skipped this entire step.
 
 **Step 1.5: If run-tests already failed, discard the verdict (gt-cmcv)**
 
@@ -893,8 +901,8 @@ failure. Discard `REVIEW_EXIT`/`REVIEW_JSON` entirely:
   REJECTION notes as non-blocking context (e.g. `Editorial (discarded, tests
   failed): <exit>/<class-or-verdict>`) — informational only, never a second
   rejection reason.
-- The join above still ran (nothing is left orphaned regardless of outcome),
-  it is only the verdict that is thrown away.
+- Step 1 already joined and consumed the review, so no verdict survives to be
+  read again; only this step's use of it is dropped.
 - Skip the rest of this step (Step 2 below) and continue straight to
   handle-failures, which already owns the test/build FIX_NEEDED path.
 
@@ -902,6 +910,8 @@ If run-tests PASSED, continue to Step 2 and act on the now-joined
 `REVIEW_EXIT` exactly as below.
 
 **Step 2: Branch on the exit code (run-tests already passed — Step 1.5 routed anything else away)**
+
+`REVIEW_EXIT` is `0`, `1` or `2` here — Step 1 always leaves it set.
 
 **Exit 0 — approve:** Continue to handle-failures, then merge-push, as normal.
 
