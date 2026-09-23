@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -96,30 +94,25 @@ Examples:
 
 var pluginRunCmd = &cobra.Command{
 	Use:   "run <name>",
-	Short: "Manually trigger a plugin outside its normal gate",
-	Long: `Manually trigger a plugin — a parked manual-gate plugin, or any plugin
-whose gate type has no automatic dispatcher (cron/condition/event, gt-qehkn).
+	Short: "Manually trigger a parked (manual-gate) plugin",
+	Long: `Manually trigger a plugin that is parked on a manual gate.
 
-For a script-type plugin (has a run.sh), this runs run.sh directly — the same
-run the daemon heartbeat would make for a cooldown-gated one — and records the
-real result (success, failure, or skipped). A run.sh that defers (see the
-plugin's own exit-code contract) earns no receipt, same as when the daemon
-runs it: nothing happened, so nothing satisfies the gate.
-
-For every other plugin, this command does no work of its own: it prints the
-instructions and records a "printed" receipt, distinct from success. Execute
-the instructions yourself, then record the real result with ` + "`gt plugin record-run`" + `
-(--result success or failure). A receipt is never written as success on the
-command's say-so alone (gt-o1z7).
+This command does no work: it prints the plugin's instructions and records a
+"printed" receipt, distinct from success, that does not satisfy the plugin's
+own cooldown gate. Execute the instructions yourself, then record the real
+result with ` + "`gt plugin record-run`" + ` (--result success or failure).
+A receipt is never written as success on the command's say-so alone (gt-o1z7).
 
 Gate behavior:
 - closed cooldown: the run is refused; nothing is recorded (a refusal is not
   a run, and a receipt here would count toward the daemon's own cooldown)
-- --force: bypasses the cooldown check only
+- --force: bypasses the cooldown check only; the receipt is still a "printed,
+  not executed" record
+- script-type plugin (has a run.sh): refused; the daemon heartbeat is its
+  scheduler and this command has no script interpreter (gt-o1z7)
 
 Examples:
-  gt plugin run github-sheriff          # manual-gate plugin: prints instructions
-  gt plugin run dolt-snapshots          # event-gate script plugin: runs run.sh
+  gt plugin run github-sheriff          # parked plugin: prints instructions
   gt plugin run <name> --dry-run        # Show what would happen`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginRun,
@@ -168,10 +161,10 @@ and leaves the receipt available to plugin history/cooldown queries that use
 closed beads. This keeps plugin scripts from leaking open run-log beads.
 
 Two callers use this: a plugin's own "Record Result" section, and whoever
-executed the instructions ` + "`gt plugin run`" + ` printed for a non-script
-plugin (script-type plugins record their own result when run.sh finishes,
-whether triggered by the daemon or by ` + "`gt plugin run`" + `). A receipt
-never claims success for work that was not done (gt-o1z7).`,
+executed the instructions ` + "`gt plugin run`" + ` printed (script-type
+plugins have no manual trigger; the daemon records its own receipt when it
+runs their run.sh). A receipt never claims success for work that was not
+done (gt-o1z7).`,
 	RunE: runPluginRecordRun,
 }
 
@@ -183,7 +176,7 @@ func init() {
 	pluginShowCmd.Flags().BoolVar(&pluginShowJSON, "json", false, "Output as JSON")
 
 	// Run subcommand flags
-	pluginRunCmd.Flags().BoolVar(&pluginRunForce, "force", false, "Bypass the cooldown check (the receipt still records what actually happened: printed instructions, or run.sh's real result)")
+	pluginRunCmd.Flags().BoolVar(&pluginRunForce, "force", false, "Bypass the cooldown check (the run is still recorded as printed, not executed)")
 	pluginRunCmd.Flags().BoolVar(&pluginRunDryRun, "dry-run", false, "Show what would happen without executing")
 
 	// History subcommand flags
@@ -465,15 +458,6 @@ func outputPluginShowText(p *plugin.Plugin) error {
 	return nil
 }
 
-// runsAsScript reports whether p is a script-type plugin gt plugin run can
-// actually execute: it must both declare [execution] type = "script" and
-// ship a run.sh. This mirrors the daemon's own runsAsScript
-// (internal/daemon/plugin_script.go) so the CLI and the heartbeat agree on
-// which plugins run as scripts.
-func runsAsScript(p *plugin.Plugin) bool {
-	return p.HasRunScript && p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript
-}
-
 func runPluginRun(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
@@ -486,15 +470,6 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	// A plugin that declares script execution but ships no run.sh has
-	// nothing either side can run; say so plainly rather than pretending a
-	// script it does not have would execute.
-	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript && !p.HasRunScript {
-		fmt.Fprintf(os.Stderr, "Plugin %s declares execution type \"script\" but has no run.sh; nothing to run.\n", p.Name)
-		return fmt.Errorf("plugin %s declares script execution with no run.sh", p.Name)
-	}
-	isScript := runsAsScript(p)
 
 	// Check gate status for cooldown gates
 	gateOpen := true
@@ -523,8 +498,6 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		}
 		if !gateOpen {
 			fmt.Printf("%s %s (use --force to override)\n", style.Warning.Render("Gate closed:"), gateReason)
-		} else if isScript {
-			fmt.Printf("%s Would run run.sh directly\n", style.Success.Render("Gate open:"))
 		} else {
 			fmt.Printf("%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
 		}
@@ -543,8 +516,17 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if isScript {
-		return runPluginScriptManually(cmd.Context(), p, townRoot, gateOpen, pluginRunForce)
+	// A script-type plugin the daemon can run in-process is not something
+	// `gt plugin run` executes: there is no script interpreter here, so the
+	// command cannot have run the plugin. Refusing outright is the honest
+	// answer — a printed receipt would misstate what happened. Only a
+	// cooldown gate has an automatic executor (the daemon heartbeat); a
+	// script plugin on any other gate has no run path at all today
+	// (gt-o1z7, d249eaeae0f3/fec069dde34c: executing run.sh from the CLI
+	// both fails open on a bd error and can overlap the daemon's own run).
+	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript {
+		fmt.Fprintf(os.Stderr, "Plugin %s has a run.sh; `gt plugin run` does not execute plugin scripts (there is no script interpreter here). If its gate is cooldown, the daemon heartbeat runs it; otherwise, run the script directly or edit the plugin's gate.\n", p.Name)
+		return fmt.Errorf("plugin %s is script-type; gt plugin run does not run scripts", p.Name)
 	}
 
 	// Print the instructions for the agent/user to execute. This command
@@ -572,46 +554,6 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		fmt.Println("This receipt says the instructions were printed, not executed. Record the real result after doing the work.")
 	}
 
-	return nil
-}
-
-// runPluginScriptManually executes a script-type plugin's run.sh directly —
-// the same run the daemon heartbeat would make, just triggered by hand — and
-// records the real outcome. A deferral earns no receipt, matching the
-// daemon's own handling (internal/daemon/plugin_script.go): the whole point
-// of a deferral is that nothing happened, so nothing satisfies the cooldown.
-func runPluginScriptManually(ctx context.Context, p *plugin.Plugin, townRoot string, gateOpen, forced bool) error {
-	fmt.Printf("%s Running plugin: %s\n", style.Success.Render("●"), p.Name)
-	if forced && !gateOpen {
-		fmt.Printf("  %s\n", style.Dim.Render("(gate bypassed with --force)"))
-	}
-	fmt.Println()
-	fmt.Printf("%s\n", style.Bold.Render("Executing run.sh..."))
-
-	deferred, result, status, output := daemon.RunScriptPluginManually(ctx, p, townRoot)
-	fmt.Println(output)
-
-	if deferred {
-		fmt.Printf("%s deferred (%s); nothing accomplished, no receipt recorded\n", style.Dim.Render("●"), status)
-		return nil
-	}
-
-	recorder := plugin.NewRecorder(townRoot)
-	beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
-		PluginName: p.Name,
-		RigName:    p.RigName,
-		Result:     result,
-		Body:       fmt.Sprintf("Manual run via gt plugin run (execution type script): %s\n\n%s", status, output),
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to record run: %v\n", err)
-	} else {
-		fmt.Printf("\n%s Recorded run (%s): %s\n", style.Dim.Render("●"), result, beadID)
-	}
-
-	if result == plugin.ResultFailure {
-		return fmt.Errorf("plugin %s failed: %s", p.Name, status)
-	}
 	return nil
 }
 

@@ -193,6 +193,38 @@ func TestQueryRunsIncludesInfraFlag(t *testing.T) {
 	}
 }
 
+// A ResultPrinted receipt records that `gt plugin run` printed a plugin's
+// instructions without doing any work. It must not count toward the
+// cooldown gate — otherwise printing instructions for a cooldown-gated
+// plugin holds the daemon off for a full cooldown window even though
+// nothing happened (gt-o1z7, finding f53b7b837c35).
+func TestCountRunsSinceExcludesPrinted(t *testing.T) {
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-args.log")
+	bdPath := filepath.Join(binDir, "bd")
+	fakeBD := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"  list) printf '[{\"id\":\"gt-1\",\"title\":\"Plugin run: p\",\"created_at\":\"2020-01-01T00:00:00Z\",\"labels\":[\"type:plugin-run\",\"plugin:p\",\"result:printed\"]}]\\n' ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", logPath)
+
+	recorder := NewRecorder(townRoot)
+	count, err := recorder.CountRunsSince("p", "1h")
+	if err != nil {
+		t.Fatalf("CountRunsSince failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("CountRunsSince = %d, want 0: a printed receipt must not satisfy the cooldown gate", count)
+	}
+}
+
 // Integration tests for RecordRun, GetLastRun, GetRunsSince require
 // a working beads installation and are skipped in unit tests.
 // These functions shell out to `bd` commands.

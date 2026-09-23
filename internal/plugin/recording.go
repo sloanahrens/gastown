@@ -224,12 +224,22 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 	return runs, nil
 }
 
-// CountRunsSince returns the count of runs for a plugin since the given duration.
-// This is useful for cooldown gate evaluation.
+// CountRunsSince returns the count of runs for a plugin since the given
+// duration, for cooldown gate evaluation. A ResultPrinted receipt is
+// excluded: `gt plugin run` writes it for a merely-printed, not-yet-executed
+// run, and a receipt for work nobody did must not buy the plugin a cooldown
+// window (gt-o1z7, finding f53b7b837c35).
 func (r *Recorder) CountRunsSince(pluginName string, since string) (int, error) {
 	runs, err := r.GetRunsSince(pluginName, since)
 	if err != nil {
 		return 0, err
 	}
-	return len(runs), nil
+	count := 0
+	for _, run := range runs {
+		if run.Result == ResultPrinted {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }

@@ -873,8 +873,11 @@ parked off the automatic path by design, and it stays parked unless something
 asks for it. A manual plugin is run only when a bead, mail, or mayor
 instruction names it. Default outcome for this step: nothing to run.
 
-`gt plugin run <name>` only prints the plugin's instructions; it does no work.
-Carry out those instructions, then record the honest result:
+`gt plugin run <name>` does no work of its own. For a script-type plugin (one
+with a run.sh) it refuses outright — there is no script interpreter here,
+and only the daemon heartbeat runs that plugin's script. For every other
+plugin it only prints the plugin's instructions; it does no work. Carry out
+those instructions, then record the honest result (105ab901d318):
 
 ```bash
 gt plugin run <name>

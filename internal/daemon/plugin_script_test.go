@@ -101,46 +101,6 @@ func TestRunPluginScript_FailureExitCode(t *testing.T) {
 	}
 }
 
-// RunScriptPluginManually is `gt plugin run`'s entry point for a script-type
-// plugin: it must classify a manual run.sh execution exactly the way the
-// daemon's own heartbeat dispatch does (gt-o1z7, gt-wisp-1h80 finding
-// df0b394715a8 — the manual trigger for script plugins must not just refuse).
-func TestRunScriptPluginManually(t *testing.T) {
-	cases := []struct {
-		name         string
-		script       string
-		wantDeferred bool
-		wantResult   plugin.RunResult
-	}{
-		{"success", "exit 0\n", false, plugin.ResultSuccess},
-		{"failure", "echo boom >&2; exit 2\n", false, plugin.ResultFailure},
-		{"skipped", "echo '[plugin-result skipped]'\n", false, plugin.ResultSkipped},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := scriptPlugin(t, tc.name, tc.script)
-			deferred, result, status, output := RunScriptPluginManually(context.Background(), p, "/town")
-			if deferred != tc.wantDeferred {
-				t.Fatalf("deferred = %v, want %v (status=%q)", deferred, tc.wantDeferred, status)
-			}
-			if result != tc.wantResult {
-				t.Errorf("result = %q, want %q (output=%q)", result, tc.wantResult, output)
-			}
-		})
-	}
-
-	// A deferral needs the plugin's own opt-in (allow_deferred_exit); only
-	// then does exit 3 read as "nothing accomplished" instead of a failure.
-	t.Run("deferred", func(t *testing.T) {
-		p := scriptPlugin(t, "deferred", "exit 3\n")
-		p.Execution.AllowDeferredExit = true
-		deferred, _, _, _ := RunScriptPluginManually(context.Background(), p, "/town")
-		if !deferred {
-			t.Fatal("expected deferred=true for an opted-in exit 3")
-		}
-	})
-}
-
 // A timeout must kill the whole process tree, not just bash: the child the
 // script backgrounds has to be gone too (gt-6t43 is the orphan shape).
 func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {

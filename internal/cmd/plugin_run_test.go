@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,18 +175,16 @@ Do the thing by hand.
 	}
 }
 
-// A script-type plugin on a gate the daemon never dispatches (event, in this
-// case) used to have no manual trigger at all: `gt plugin run` refused
-// outright (gt-wisp-1h80 finding df0b394715a8). It must now actually run
-// run.sh and record the real, honest outcome.
-func TestRunPluginRun_ScriptPluginRunsAndRecordsHonestResult(t *testing.T) {
+// A script-type plugin has no manual trigger: `gt plugin run` refuses it
+// outright, since there is no script interpreter here and the daemon
+// heartbeat is that plugin's only executor (gt-o1z7).
+func TestRunPluginRun_ScriptPluginRefuses(t *testing.T) {
 	setupFakePluginTown(t, "script-plugin", `+++
 name = "script-plugin"
 description = "test plugin"
 
 [gate]
-type = "event"
-on = "startup"
+type = "manual"
 
 [execution]
 type = "script"
@@ -204,91 +201,13 @@ type = "script"
 	pluginRunDryRun = false
 	t.Cleanup(func() { pluginRunForce = false; pluginRunDryRun = false })
 
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	if err := runPluginRun(cmd, []string{"script-plugin"}); err != nil {
-		t.Fatalf("runPluginRun: %v", err)
-	}
-
-	log := readBDLog(t, logPath)
-	if !strings.Contains(log, "-l result:success") {
-		t.Fatalf("expected run.sh's exit 0 to record result:success, got:\n%s", log)
-	}
-}
-
-// A failing run.sh must record result:failure and return an error, not a
-// silently-swallowed success (gt-o1z7).
-func TestRunPluginRun_ScriptPluginFailureRecordsFailure(t *testing.T) {
-	setupFakePluginTown(t, "script-plugin-fail", `+++
-name = "script-plugin-fail"
-description = "test plugin"
-
-[gate]
-type = "event"
-on = "startup"
-
-[execution]
-type = "script"
-+++
-
-# Instructions
-
-(unused for a script plugin)
-`, "#!/usr/bin/env bash\nexit 1\n")
-
-	logPath := setupFakeBD(t, "[]")
-
-	pluginRunForce = false
-	pluginRunDryRun = false
-	t.Cleanup(func() { pluginRunForce = false; pluginRunDryRun = false })
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	err := runPluginRun(cmd, []string{"script-plugin-fail"})
+	err := runPluginRun(&cobra.Command{}, []string{"script-plugin"})
 	if err == nil {
-		t.Fatal("expected an error from a failing run.sh, got nil")
-	}
-
-	log := readBDLog(t, logPath)
-	if !strings.Contains(log, "-l result:failure") {
-		t.Fatalf("expected run.sh's exit 1 to record result:failure, got:\n%s", log)
-	}
-	if strings.Contains(log, "-l result:success") {
-		t.Fatalf("failing run.sh recorded result:success:\n%s", log)
-	}
-}
-
-// gt plugin run refuses a plugin that declares script execution but ships no
-// run.sh, rather than silently falling back to the print-instructions path
-// (gt-wisp-1h80 finding df0b394715a8: the old check ignored HasRunScript).
-func TestRunPluginRun_ScriptWithoutRunShRefuses(t *testing.T) {
-	setupFakePluginTown(t, "script-no-runsh", `+++
-name = "script-no-runsh"
-description = "test plugin"
-
-[gate]
-type = "manual"
-
-[execution]
-type = "script"
-+++
-
-# Instructions
-`, "")
-
-	logPath := setupFakeBD(t, "[]")
-
-	pluginRunForce = false
-	pluginRunDryRun = false
-	t.Cleanup(func() { pluginRunForce = false; pluginRunDryRun = false })
-
-	err := runPluginRun(&cobra.Command{}, []string{"script-no-runsh"})
-	if err == nil {
-		t.Fatal("expected an error for a script plugin with no run.sh, got nil")
+		t.Fatal("expected an error for a script-type plugin, got nil")
 	}
 
 	log := readBDLog(t, logPath)
 	if bdLogHasCall(log, "create") {
-		t.Fatalf("refusal for a missing run.sh recorded a receipt:\n%s", log)
+		t.Fatalf("script-type refusal recorded a receipt:\n%s", log)
 	}
 }
