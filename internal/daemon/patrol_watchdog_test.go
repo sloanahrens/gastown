@@ -119,6 +119,19 @@ func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
 	if !sawWitness || !sawRefinery {
 		t.Errorf("expected both witness and refinery targets for the rig, got %+v", targets)
 	}
+
+	// Every target reads its patrol wisps from the TOWN database, rig-scoped
+	// roles included: `gt patrol report` writes them with
+	// BeadsDir=roleInfo.TownRoot (internal/cmd/patrol_report.go). A rig workdir
+	// resolves through <rig>/.beads/redirect into the rig database, which holds
+	// no patrol wisp at all, and the resulting empty result read as a resolved
+	// "never patrolled" for every witness and refinery (hq-3h7ac).
+	for _, target := range targets {
+		if target.WorkDir != "/town" {
+			t.Errorf("%s %s: expected WorkDir to be the town root %q, got %q",
+				target.Rig, target.Role, "/town", target.WorkDir)
+		}
+	}
 }
 
 func stubTarget(role, rig string) patrolWatchdogTarget {
