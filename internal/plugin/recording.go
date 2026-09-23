@@ -18,6 +18,11 @@ const (
 	ResultSuccess RunResult = "success"
 	ResultFailure RunResult = "failure"
 	ResultSkipped RunResult = "skipped"
+	// ResultPrinted marks a `gt plugin run` receipt for a plugin whose
+	// instructions were printed but not executed: distinct from
+	// ResultSuccess so history, dashboards and cooldown accounting never
+	// read a merely-printed run as work that was actually done (gt-o1z7).
+	ResultPrinted RunResult = "printed"
 )
 
 // PluginRunRecord represents data for creating a plugin run bead.

@@ -233,6 +233,38 @@ type scriptRunHooks struct {
 	logf      func(format string, args ...any)
 }
 
+// classifyScriptResult maps a finished run.sh to the receipt it earns and
+// whether it earns one at all. A deferral (see scriptExitDeferred) earns no
+// record — that is what holds the retry to the next heartbeat instead of a
+// full cooldown — so callers must check deferred before using result.
+func classifyScriptResult(p *plugin.Plugin, res scriptResult) (deferred bool, result plugin.RunResult) {
+	if res.deferred(p) {
+		return true, ""
+	}
+	result = plugin.ResultSuccess
+	switch {
+	case !res.ok():
+		result = plugin.ResultFailure
+	case res.skipped():
+		result = plugin.ResultSkipped
+	}
+	return false, result
+}
+
+// RunScriptPluginManually runs p's run.sh synchronously for an explicit
+// manual trigger (`gt plugin run`) and classifies the result the same way
+// the daemon's own heartbeat dispatch does. It does not record a receipt or
+// dispatch a dog on failure — those depend on a live daemon (dog pack, mail
+// router) that a bare CLI invocation does not have, and every other `gt
+// plugin run` path already leaves recording to the caller. deferred==true
+// means the run earned no receipt at all; the caller should say so rather
+// than record one.
+func RunScriptPluginManually(ctx context.Context, p *plugin.Plugin, townRoot string) (deferred bool, result plugin.RunResult, status string, output string) {
+	res := runPluginScript(ctx, p, townRoot, scriptTimeout(p))
+	deferred, result = classifyScriptResult(p, res)
+	return deferred, result, res.status(), res.output
+}
+
 // completeScriptRun records the result and, on failure, hands the plugin to
 // a dog with the output attached. A failed record must not hide the failure:
 // the dog dispatch runs regardless, and the record error is logged.
@@ -241,16 +273,10 @@ type scriptRunHooks struct {
 // the cooldown gate, and a run that accomplished nothing must not buy one
 // (see scriptExitDeferred). The log line is the whole of its trail.
 func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
-	if res.deferred(p) {
+	deferred, result := classifyScriptResult(p, res)
+	if deferred {
 		h.logf("Handler: script plugin %s deferred (%s); will retry on the next heartbeat", p.Name, res.status())
 		return
-	}
-	result := plugin.ResultSuccess
-	switch {
-	case !res.ok():
-		result = plugin.ResultFailure
-	case res.skipped():
-		result = plugin.ResultSkipped
 	}
 	body := fmt.Sprintf("Direct run by the daemon (execution type script): %s\n\n%s", res.status(), res.output)
 	if err := h.record(plugin.PluginRunRecord{

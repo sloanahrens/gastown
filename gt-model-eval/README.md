@@ -55,8 +55,6 @@ Each test provides a **neutral** role_context with NO answer hints. These measur
 | `class-a-dog.yaml` | Dog | 3 | Reset vs recover vs escalate from raw evidence |
 
 **Total: 84 test cases** (72 Class B + 12 Class A) across 4 patrol roles.
-(The 10-case `deacon-plugin-gate.yaml` was retired when plugin gate evaluation
-moved off the deacon and onto the daemon heartbeat — gt-o1z7.)
 
 Each test provides simulated shell output and expects a structured JSON decision. Class B tests are split into "clear" cases (all models should agree) and "edge" cases (where model quality matters). Class A results are what directly informs the downgrade decision.
 

@@ -25,12 +25,16 @@ a patrol step also runs it (gt-o1z7).
 
 A `manual` gate parks a plugin off the automatic path, by design: the daemon
 prints one skip line per heartbeat while it stays parked, and the only way to
-run it is `gt plugin run <name>` — which prints the plugin's instructions and
-nothing more, so whoever runs it executes the instructions and records the
-result (`gt plugin record-run`) (gt-o1z7).
+run it is `gt plugin run <name>`. For a script-type plugin this runs `run.sh`
+directly and records the real result; for any other plugin it prints the
+instructions and nothing more, so whoever runs it executes the instructions
+and records the result (`gt plugin record-run`) (gt-o1z7).
 
 `cron`, `condition` and `event` are parsed but nothing dispatches them
 (gt-qehkn); a plugin on one of these gates has no automatic path today.
+`gt plugin run <name>` still works on them — for a script-type plugin it runs
+`run.sh` directly, for any other type it prints instructions — same as a
+manual gate, minus the cooldown check.
 
 ## Agent routing
 

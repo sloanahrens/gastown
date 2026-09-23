@@ -92,6 +92,15 @@ func TestRunResultConstants(t *testing.T) {
 	if ResultSkipped != "skipped" {
 		t.Errorf("expected ResultSkipped to be 'skipped', got %q", ResultSkipped)
 	}
+	// ResultPrinted must stay distinct from ResultSuccess: it is what `gt
+	// plugin run` records for a merely-printed, not-yet-executed run
+	// (gt-o1z7). Collapsing the two back together is the fail-open bug.
+	if ResultPrinted != "printed" {
+		t.Errorf("expected ResultPrinted to be 'printed', got %q", ResultPrinted)
+	}
+	if ResultPrinted == ResultSuccess {
+		t.Error("ResultPrinted must not equal ResultSuccess")
+	}
 }
 
 func TestNewRecorder(t *testing.T) {
