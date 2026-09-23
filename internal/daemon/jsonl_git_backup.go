@@ -234,9 +234,20 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	mol.closeStep("verify")
 
-	// Phase D: Spike detection — compare current counts to previous commit.
+	// Phase D: Spike detection — compare current counts against the rolling
+	// baseline derived from recent backup commit history.
 	threshold := spikeThreshold(config)
-	spikes := d.verifyExportCounts(gitRepo, databases, counts, threshold)
+	spikes, baselineErr := d.verifyExportCounts(gitRepo, databases, counts, threshold)
+	if baselineErr != nil {
+		// No baseline can be computed at all (no history, no cache). Fail
+		// loud (gt-tj-he): committing would anchor an unchecked baseline,
+		// and silently skipping would mask the hole forever.
+		d.logger.Printf("jsonl_git_backup: HALTING — %v", baselineErr)
+		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup",
+			fmt.Sprintf("cannot compute spike baseline: %v — refusing to commit an unchecked export", baselineErr))
+		mol.failStep("push", baselineErr.Error())
+		return // Do NOT commit — no baseline to verify against.
+	}
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
@@ -465,11 +476,12 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		return fmt.Errorf("git commit: %w", err)
 	}
 
-	// Note: DO NOT remove the spike baseline here. The baseline file (.spike-counts.json)
-	// stores the actual previous export count, not the git HEAD count. If we remove it
-	// after every commit, the next run will fall back to git show HEAD:<path> which may
-	// read stale/transient counts (bug gt-qo0e). Instead, keep the baseline until it's
-	// verified trustworthy (when the count is stable vs the baseline within threshold).
+	// The rolling spike baseline is re-derived from commit history (the subject
+	// lines recorded above) on every run, so nothing to clean up here. The
+	// in-repo cache (.spike-baseline-cache.json) is git-ignored and left
+	// in place: it only seeds the next recompute across a spike halt, and is
+	// overwritten by history on the very next run, so it can never outrank a
+	// committed level (gt-tj-he).
 
 	// Push requires a remote. This is the OFFSITE layer — a repo with commits
 	// but no remote is data sitting on the same disk it started on, which is
@@ -1080,52 +1092,192 @@ func filterTestPollution(data []byte) ([]byte, int) {
 	return out.Bytes(), removed
 }
 
-// previousCommitLineCount returns the line count of a file in the previous git
-// commit (HEAD). Returns 0, nil if the file doesn't exist in HEAD (first export).
+// errNoSpikeBaseline is returned when no spike baseline can be computed at all
+// (no committed history and no cached window). Callers must surface it as a
+// hard failure, never silently substitute a stale or zero value (gt-tj-he).
+var errNoSpikeBaseline = errors.New("no spike baseline available")
+
+// recomputeSpikeBaseline derives the rolling spike baseline from the backup
+// repo's commit history (gt-tj-he). Each backup commit records its per-database
+// counts in the subject line ("backup <ts>: db1=N1 db2=N2"), so the last
+// defaultSpikeBaselineWindow backup commits supply the window. This replaces
+// the old git show HEAD:<relPath> read, which misjudged spikes whenever the
+// committed file count diverged from what the detector expected.
 //
-// This function first checks for a .spike-counts.json baseline file (which stores
-// the actual previous run's count) and uses that as the authoritative baseline.
-// Only if no baseline exists does it fall back to reading from git show HEAD:<path>.
-// This prevents false spike alarms caused by git show reading stale/transient counts.
-func previousCommitLineCount(gitRepo, relPath string) (int, error) {
-	// First, check for a spike baseline file - this is the authoritative source
-	// for the previous count, as it records what was actually exported last time.
-	spikeBase := loadSpikeBaseline(gitRepo)
-	if spikeBase != nil {
-		// The baseline file stores counts with database names as keys.
-		// The relPath is like "db/issues.jsonl", so extract "db" as the key.
-		db := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(filepath.Base(relPath)))
-		// Try the db name as key (e.g., "db" for path "db/issues.jsonl")
-		if baseCount, ok := spikeBase.Counts[db]; ok && baseCount > 0 {
-			return baseCount, nil
-		}
-		// Also try the issues.jsonl filename as a key (fallback)
-		if baseCount, ok := spikeBase.Counts[filepath.Base(relPath)]; ok && baseCount > 0 {
-			return baseCount, nil
+// The in-repo cache (saveSpikeBaselineHistory) is consulted first so a spike
+// halt that blocked a commit doesn't lose the levels it was derived from;
+// every run re-derives from history and overwrites the cache, so it can never
+// be trusted over history — only fill the one-cycle gap a halt leaves.
+//
+// Returns an error when neither committed history nor a cached window exists.
+// Callers must fail loud, never fall back to a stale or zero value.
+func recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) {
+	// Seed from the in-repo cache so a halted cycle doesn't lose the levels it
+	// was derived from. Cached entries are the newest known levels (age 0).
+	cached := loadSpikeBaselineHistory(gitRepo)
+	window := make(map[string][]spikeCommit) // db → newest-first
+	order := []string{}
+	if cached != nil {
+		for db, entries := range cached.Counts {
+			if len(entries) == 0 {
+				continue
+			}
+			fresh := make([]spikeCommit, len(entries))
+			copy(fresh, entries)
+			fresh[0].Age = 0 // cache records what was last exported, i.e. newest
+			window[db] = fresh
+			order = append(order, db)
 		}
 	}
 
+	// Derive the window from commit history. Each backup commit's subject line
+	// carries its per-database counts; the most recent defaultSpikeBaselineWindow
+	// such commits form the rolling window, newest first.
+	//
+	// Ordering matters: commit dates have second resolution, so two commits in
+	// the same second tie on date and a date sort is ambiguous. --topo-order
+	// instead orders by actual ancestry (commit graph), which is the genuine
+	// newest-first backup sequence git log already shows. We fetch a generous
+	// pool (not a tight --max-count, which truncates by commit-graph order and
+	// can drop newer commits in favor of older side-branches) and keep the
+	// topological order.
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "show", "HEAD:"+filepath.ToSlash(relPath))
+	fetch := 64 // generous pool; well under any realistic backup repo's commits
+	const sep = "\x1f"
+	args := []string{"-C", gitRepo, "log", "--all", "--topo-order", "--max-count",
+		strconv.Itoa(fetch), "--format=%H" + sep + "%cI" + sep + "%s"}
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = gitChildEnv()
 	util.SetDetachedProcessGroup(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	// stderr intentionally not captured — "does not exist" is an expected case.
-
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// File doesn't exist in HEAD — first export, no baseline.
-		return 0, nil
+		return nil, fmt.Errorf("git log: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	lines := 0
+	type commitSubject struct{ hash, date, subject string }
+	var commits []commitSubject
+	seen := map[string]bool{}
 	scanner := bufio.NewScanner(&stdout)
 	for scanner.Scan() {
-		lines++
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, sep, 3)
+		if len(fields) != 3 {
+			continue
+		}
+		hash, ts, subject := fields[0], fields[1], fields[2]
+		counts := parseCommitCounts(subject)
+		if len(counts) == 0 || seen[hash] {
+			continue
+		}
+		seen[hash] = true
+		date := ""
+		if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+			date = parsed.Format(time.RFC3339)
+		}
+		commits = append(commits, commitSubject{hash, date, subject})
 	}
-	return lines, nil
+	// git log --topo-order is already newest-first by ancestry; trim to the
+	// window. (We sort topologically rather than by date: commit dates are
+	// second-resolution, so same-second commits tie and a date sort is
+	// ambiguous, whereas ancestry order is exact.)
+	if len(commits) > defaultSpikeBaselineWindow {
+		commits = commits[:defaultSpikeBaselineWindow]
+	}
+
+	// Layer commits into each database's window. `commits` is newest-first, so
+	// a lower age is a more recent backup commit. We collect (not prepend) and
+	// sort each window by age ascending afterward: relying on append order
+	// would be fragile to Go's (non-deterministic) map iteration order inside
+	// the per-commit count loop, whereas an explicit age sort makes the
+	// newest-first invariant exact. A committed level always outranks a cached
+	// one for the same database, so the cache — seeded at age 0 — is displaced
+	// whenever a real commit carries that database.
+	for i, c := range commits {
+		age := i
+		for db, n := range parseCommitCounts(c.subject) {
+			e := spikeCommit{Db: db, N: n, Age: age, Date: c.date}
+			if window[db] == nil {
+				window[db] = []spikeCommit{}
+				order = append(order, db)
+			}
+			window[db] = append(window[db], e)
+		}
+	}
+	for db := range window {
+		sort.Slice(window[db], func(i, j int) bool { return window[db][i].Age < window[db][j].Age })
+	}
+
+	sb := &spikeBaseline{
+		Window:   defaultSpikeBaselineWindow,
+		Computed: time.Now().Format(time.RFC3339),
+		Counts:   map[string][]spikeCommit{},
+	}
+	for _, db := range order {
+		entries := window[db]
+		if len(entries) > sb.Window {
+			entries = entries[:sb.Window]
+		}
+		if len(entries) > 0 {
+			sb.Counts[db] = entries
+		}
+	}
+	if len(sb.Counts) == 0 {
+		// No committed history and no cache: nothing to baseline against.
+		// Fail loud (gt-tj-he) — a silent zero would read as a first export.
+		return nil, errNoSpikeBaseline
+	}
+	// Persist the window so the next run can re-derive across a halt.
+	if err := saveSpikeBaselineHistory(gitRepo, sb); err != nil {
+		// Non-fatal: the window is computed in-memory; a cache write failure
+		// only means the next run re-derives from commits without the cache
+		// seed. The baseline itself is sound.
+		return sb, nil
+	}
+	return sb, nil
+}
+
+// spikeBaselineCount returns the baseline count for a database from a rolling
+// baseline: the newest entry in its window. ok is false when the database is
+// absent from the window (first export) or the window is empty.
+func spikeBaselineCount(sb *spikeBaseline, db string) (n int, ok bool) {
+	if sb == nil {
+		return 0, false
+	}
+	entries := sb.Counts[db]
+	if len(entries) == 0 {
+		return 0, false
+	}
+	return entries[0].N, true
+}
+
+// spikeHistoryDetail renders the baseline window for one database as a
+// source-annotated string, e.g. "hq: 1271 (HEAD), 1266 (HEAD~1), 1250 (HEAD~2)".
+// Used in the report so both counts' sources are visible (gt-tj-he).
+func spikeHistoryDetail(sb *spikeBaseline, db string) string {
+	if sb == nil {
+		return ""
+	}
+	entries := sb.Counts[db]
+	if len(entries) == 0 {
+		return ""
+	}
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		label := "HEAD"
+		if i > 0 {
+			label = fmt.Sprintf("HEAD~%d", i)
+		}
+		parts[i] = fmt.Sprintf("%d (%s)", e.N, label)
+	}
+	return db + ": " + strings.Join(parts, ", ")
 }
 
 // spikeInfo holds the result of a spike check for a single database file.
@@ -1137,19 +1289,81 @@ type spikeInfo struct {
 	Delta    float64 // absolute fractional change (0.0–1.0+)
 }
 
-// spikeBaseline records counts from a halted export so that subsequent runs
-// can detect when the count has stabilized at a new level.
-type spikeBaseline struct {
-	Counts    map[string]int `json:"counts"`
-	Timestamp string         `json:"timestamp"`
+// spikeCommit is one database's count record from a single backup commit:
+// parsed from the "db=NNN" pairs in the commit's subject line.
+//
+// Two correctness constraints drive the shape:
+//   - Fields are exported with explicit json tags. This host's Go toolchains
+//     run the encoding/json v2 experiment, which (like v1) drops unexported
+//     fields during marshal — a "cached window" of unexported-tagged fields
+//     silently serializes to {} and the cache never rehydrates. go vet
+//     rejects tagged unexported fields outright, so exporting is the only
+//     clean form.
+//   - Age is the ONLY order the code may rely on. The per-commit count loop
+//     iterates a map, whose order Go does not guarantee, so any window built
+//     by append/prepend discipline is fragile; recomputeSpikeBaseline sorts
+//     every window by Age ascending to make newest-first exact. Never
+//     depend on a slice's element order here.
+//
+// The in-repo cache (saveSpikeBaselineHistory) marshals these records, so a
+// halted cycle's window survives to the next run.
+type spikeCommit struct {
+	Db   string `json:"db"`   // database name
+	N    int    `json:"n"`    // record count at this commit
+	Age  int    `json:"age"`  // backup commits before the most recent one (0 = latest)
+	Date string `json:"date"` // commit date (RFC3339); "" if unavailable
 }
 
-const spikeBaselineFile = ".spike-counts.json"
+// spikeBaseline is the rolling baseline: each database's count across the last
+// defaultSpikeBaselineWindow backup commits, newest first. Unlike the
+// single-snapshot .spike-counts.json (which goes stale the moment a spike halt
+// blocks the commit it was derived from — gt-tj-he), this window is re-derived
+// from commit history on every run and tracks committed levels.
+type spikeBaseline struct {
+	Window   int                 `json:"window"`
+	Computed string              `json:"computed"`
+	Counts   map[string][]spikeCommit `json:"counts"`
+}
 
-// loadSpikeBaseline reads the spike baseline file from the git repo directory.
-// Returns nil if the file doesn't exist or can't be parsed.
-func loadSpikeBaseline(gitRepo string) *spikeBaseline {
-	path := filepath.Join(gitRepo, spikeBaselineFile)
+const (
+	// defaultSpikeBaselineWindow is how many recent backup commits the rolling
+	// baseline spans (gt-tj-he). Eight commits at the default 15-minute interval
+	// is two hours of history.
+	defaultSpikeBaselineWindow = 8
+	// spikeBaselineCacheFile is the in-repo cache of the last computed rolling
+	// baseline. It exists so an uncommitted spike halt doesn't lose the levels
+	// the window was derived from — the cache seeds the next recompute across
+	// the halt (gt-tj-he). It is NOT the source of truth: every run recomputes
+	// from commit history and overwrites it, so it can never be trusted
+	// instead of history, only fill the gap one halted commit leaves.
+	spikeBaselineCacheFile = ".spike-baseline-cache.json"
+)
+
+// parseCommitCounts extracts the "db=NNN" count pairs from a git commit's
+// subject line. Backup commits are always titled
+// "backup <timestamp>: db1=N1 db2=N2 [FAILED: ...]" (see commitAndPushJsonlBackup),
+// so the subject is the only count record surviving an unpushed or halted
+// cycle. Returns nil when no pairs are present.
+func parseCommitCounts(subject string) map[string]int {
+	var out map[string]int
+	for _, field := range strings.Fields(subject) {
+		if i := strings.IndexByte(field, '='); i > 0 {
+			if n, err := strconv.Atoi(field[i+1:]); err == nil && n >= 0 &&
+				validDBName.MatchString(field[:i]) {
+				if out == nil {
+					out = make(map[string]int)
+				}
+				out[field[:i]] = n
+			}
+		}
+	}
+	return out
+}
+
+// loadSpikeBaselineHistory reads the rolling baseline cache from the git repo
+// directory. Returns nil if the file doesn't exist or can't be parsed.
+func loadSpikeBaselineHistory(gitRepo string) *spikeBaseline {
+	path := filepath.Join(gitRepo, spikeBaselineCacheFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -1161,20 +1375,20 @@ func loadSpikeBaseline(gitRepo string) *spikeBaseline {
 	return &sb
 }
 
-// saveSpikeBaseline writes the current counts as a spike baseline file.
-// Also ensures the file is git-ignored so it doesn't get committed.
-func saveSpikeBaseline(gitRepo string, counts map[string]int) error {
-	sb := spikeBaseline{
-		Counts:    counts,
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
+// saveSpikeBaselineHistory writes the rolling baseline cache. The file is
+// git-ignored so it never lands in the backup repo.
+func saveSpikeBaselineHistory(gitRepo string, sb *spikeBaseline) error {
 	data, err := json.MarshalIndent(sb, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Ensure the spike baseline file is git-ignored.
-	ensureGitIgnore(gitRepo, spikeBaselineFile)
-	return os.WriteFile(filepath.Join(gitRepo, spikeBaselineFile), data, 0644)
+	ensureGitIgnore(gitRepo, spikeBaselineCacheFile)
+	return os.WriteFile(filepath.Join(gitRepo, spikeBaselineCacheFile), data, 0644)
+}
+
+// removeSpikeBaselineHistory deletes the rolling baseline cache.
+func removeSpikeBaselineHistory(gitRepo string) {
+	os.Remove(filepath.Join(gitRepo, spikeBaselineCacheFile))
 }
 
 // ensureGitIgnore adds an entry to .gitignore if not already present.
@@ -1198,33 +1412,35 @@ func ensureGitIgnore(gitRepo, entry string) {
 	}
 }
 
-// removeSpikeBaseline removes the spike baseline file when the baseline is
-// no longer needed (e.g., when counts have stabilized and the git HEAD count
-// is now trustworthy). This should only be called when the baseline has been
-// verified as stale, not after every successful commit.
-func removeSpikeBaseline(gitRepo string) {
-	os.Remove(filepath.Join(gitRepo, spikeBaselineFile))
-}
-
-// verifyExportCounts compares current export line counts against the previous
-// commit for each database. Returns a list of anomalies that exceed the spike
-// threshold. On first export (no baseline), verification is skipped.
+// verifyExportCounts compares current export counts against the rolling
+// baseline derived from recent backup commit history. Returns a list of
+// anomalies that exceed the spike threshold, or (nil, err) when no baseline
+// could be computed at all (new repo, empty cache) — callers must surface that
+// as a hard failure rather than silently treating it as a first export
+// (gt-tj-he).
 //
-// Asymmetric thresholds: drops (possible data loss) use the configured threshold;
-// increases (new issues filed) use 2x the threshold since growth is normal.
-// Small absolute changes (<20 records) are always allowed to avoid false alarms
-// on small databases.
+// Asymmetric thresholds: drops (possible data loss) use the configured
+// threshold; increases (new issues filed) use 2x the threshold since growth is
+// normal. Small absolute changes (<20 records) are always allowed to avoid
+// false alarms on small databases.
 //
-// Recovery mechanism: when spike detection fires, a baseline file is saved with
-// the current counts. On the next run, if the current count is stable relative
-// to the spike baseline (within threshold), the spike is cleared and the export
-// proceeds. This prevents permanent blocking after legitimate large changes
-// (e.g., Reaper purges, filter updates).
-func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64) []spikeInfo {
+// A database absent from the baseline window is a first export and is skipped.
+// When a database jumps to a new level, that level is recorded in the in-repo
+// cache (written by recomputeSpikeBaseline) so a spike halt that blocks the
+// commit still leaves a baseline for the next run instead of re-halting
+// forever against a stale value (gt-tj-he).
+func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64) ([]spikeInfo, error) {
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
 	var spikes []spikeInfo
-	spikeBase := loadSpikeBaseline(gitRepo)
+	spikeBase, err := recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		// No committed history and no cache — nothing to compare against.
+		// Fail loud (gt-tj-he): a silent skip would read as a first export and
+		// the first commit would anchor an unchecked baseline.
+		d.logger.Printf("jsonl_git_backup: verify: cannot compute spike baseline: %v", err)
+		return nil, fmt.Errorf("no spike baseline: %w", err)
+	}
 
 	for _, db := range databases {
 		currentCount, ok := counts[db]
@@ -1232,14 +1448,9 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 			continue // database failed export, skip
 		}
 
-		relPath := filepath.Join(db, "issues.jsonl")
-		prevCount, err := previousCommitLineCount(gitRepo, relPath)
-		if err != nil {
-			d.logger.Printf("jsonl_git_backup: verify: %s: error reading baseline: %v", db, err)
-			continue
-		}
-		if prevCount == 0 {
-			// First export — no baseline to compare against.
+		prevCount, ok := spikeBaselineCount(spikeBase, db)
+		if !ok {
+			// First export of this database — no baseline to compare against.
 			d.logger.Printf("jsonl_git_backup: verify: %s: first export (%d records), skipping spike check", db, currentCount)
 			continue
 		}
@@ -1264,22 +1475,9 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		}
 
 		if fractionalDelta > effectiveThreshold {
-			// Check spike baseline: if the current count is stable relative
-			// to a previously-halted count, this is a confirmed new level.
-			if spikeBase != nil {
-				if baseCount, ok := spikeBase.Counts[db]; ok && baseCount > 0 {
-					baseDelta := math.Abs(float64(currentCount-baseCount)) / float64(baseCount)
-					if baseDelta <= threshold {
-						d.logger.Printf("jsonl_git_backup: %s: count stable vs spike baseline (%d → %d, %.1f%% vs baseline %d), accepting new level",
-							db, prevCount, currentCount, fractionalDelta*100, baseCount)
-						continue // Stable relative to spike baseline — not a new spike.
-					}
-				}
-			}
-
 			spike := spikeInfo{
 				DB:       db,
-				File:     relPath,
+				File:     filepath.Join(db, "issues.jsonl"),
 				Previous: prevCount,
 				Current:  currentCount,
 				Delta:    fractionalDelta,
@@ -1290,19 +1488,13 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 			if currentCount < prevCount {
 				direction = "drop"
 			}
-			d.logger.Printf("jsonl_git_backup: SPIKE DETECTED: %s: %s from %d to %d (%.1f%% %s, threshold %.1f%%)",
-				db, direction, prevCount, currentCount, fractionalDelta*100, direction, effectiveThreshold*100)
+			d.logger.Printf("jsonl_git_backup: SPIKE DETECTED: %s: %s from %d to %d (%.1f%% %s, threshold %.1f%%) — baseline window: %s",
+				db, direction, prevCount, currentCount, fractionalDelta*100, direction, effectiveThreshold*100,
+				spikeHistoryDetail(spikeBase, db))
 		}
 	}
 
-	// Save or clear spike baseline depending on results.
-	if len(spikes) > 0 {
-		if err := saveSpikeBaseline(gitRepo, counts); err != nil {
-			d.logger.Printf("jsonl_git_backup: failed to save spike baseline: %v", err)
-		}
-	}
-
-	return spikes
+	return spikes, nil
 }
 
 // formatSpikeReport creates a human-readable summary of spike anomalies for escalation.
