@@ -526,6 +526,54 @@ func TestRecoverRejectedMRDeadWorker_ReassignedBead_NoAction(t *testing.T) {
 	}
 }
 
+// TestRecoverRejectedMRDeadWorker_HookedNoAssignee_NoAction covers the gap
+// behind gt-on0d: a bead can read status=hooked (an active molecule is
+// attached — someone is working it right now) with an empty or stale
+// assignee, e.g. because a prior redispatch didn't populate it, or a
+// concurrent reject already touched it. Status=hooked is itself evidence of
+// a live hold; recovery must not read the missing/mismatched assignee as
+// "nobody holds this" and clear it out from under the actual holder,
+// regardless of whether the rejected MR's own worker session is alive or
+// dead. The reassigned-skip guard used to require a non-empty assignee to
+// fire, so this exact case fell through to the unconditional recovery below.
+func TestRecoverRejectedMRDeadWorker_HookedNoAssignee_NoAction(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:       "gt-src1",
+		Status:   "hooked",
+		Assignee: "",
+	}}
+	sendMail := func(m *mail.Message) error {
+		t.Fatal("mail should not be sent for a hooked bead with no confirmed holder match")
+		return nil
+	}
+
+	if recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, deadWorkerReq()) {
+		t.Fatal("expected no recovery for a hooked bead whose assignee doesn't confirm this worker still holds it")
+	}
+	if len(bd.updates) != 0 || len(bd.runCalls) != 0 {
+		t.Fatal("expected no bead mutations for a hooked bead with an unconfirmed holder")
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_InProgressNoAssignee_NoAction is the same
+// gap on the other status IsAssigned() reports as a live hold.
+func TestRecoverRejectedMRDeadWorker_InProgressNoAssignee_NoAction(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:       "gt-src1",
+		Status:   "in_progress",
+		Assignee: "",
+	}}
+
+	if recoverRejectedMRDeadWorker(bd, deadSession, nil, nil, deadWorkerReq()) {
+		t.Fatal("expected no recovery for an in_progress bead whose assignee doesn't confirm this worker still holds it")
+	}
+	if len(bd.updates) != 0 || len(bd.runCalls) != 0 {
+		t.Fatal("expected no bead mutations for an in_progress bead with an unconfirmed holder")
+	}
+}
+
 func TestRecoverRejectedMRDeadWorker_DeadWorkerStillAssigned_Recovers(t *testing.T) {
 	t.Parallel()
 	// Bead still hooked to the dead worker itself: reset it.

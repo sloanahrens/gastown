@@ -340,9 +340,20 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	}
 
 	// If a live reassignment already happened (another polecat owns the bead),
-	// leave it alone — the deacon or a fresh worker is already on it.
-	if !status.IsTerminal() && assignee != "" && !stillAssignedHere {
-		logf("[Engineer] Source bead %s already reassigned to %s — skipping dead-worker recovery\n", req.SourceIssue, assignee)
+	// leave it alone — the deacon or a fresh worker is already on it. This
+	// used to require a non-empty assignee to fire, but status.IsAssigned()
+	// (hooked/in_progress) is itself evidence of a live hold: an assignee
+	// that's missing or doesn't match this worker on an assigned-status bead
+	// means SOME holder we can't positively identify has it, not that nobody
+	// does. Falling through to the unconditional recovery below in that case
+	// is exactly how a hooked-but-momentarily-unassigned bead had its
+	// assignee cleared out from under an actively working polecat (gt-on0d).
+	if !status.IsTerminal() && !stillAssignedHere && (assignee != "" || status.IsAssigned()) {
+		if assignee != "" {
+			logf("[Engineer] Source bead %s already reassigned to %s — skipping dead-worker recovery\n", req.SourceIssue, assignee)
+		} else {
+			logf("[Engineer] Source bead %s is %s with no confirmed holder — skipping dead-worker recovery rather than clear a possibly-live hold\n", req.SourceIssue, status)
+		}
 		return false
 	}
 
