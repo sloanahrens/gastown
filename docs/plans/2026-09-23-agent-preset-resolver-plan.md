@@ -1,3 +1,5 @@
+> Status: in progress (2026-09-23). Implemented across three MRs (resolver + nudge path, remaining callers, role templates). Tracked in claude-9a8.
+
 # Agent Preset Resolver Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
