@@ -54,6 +54,10 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	}
 
 	var issues []*beads.Issue
+	// gt-k1qf: computed from every open MR, not the --ready-filtered list
+	// below — a duplicate pair where one twin is still blocked must still
+	// mark its unblocked sibling "duplicate" rather than "ready".
+	var duplicates []refinery.DuplicateBranchMR
 
 	if mqListReady {
 		// Query all open MRs and filter out blocked ones manually.
@@ -64,6 +68,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("querying ready MRs: %w", err)
 		}
+		duplicates = refinery.DuplicateBranchMRs(allOpen, rigName)
 		for _, issue := range allOpen {
 			if !isMergeRequestReadyForSelection(issue) {
 				continue
@@ -74,6 +79,17 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		issues, err = b.ListMergeRequests(opts)
 		if err != nil {
 			return fmt.Errorf("querying merge queue: %w", err)
+		}
+		duplicates = refinery.DuplicateBranchMRs(issues, rigName)
+	}
+
+	// mark every MR that shares a branch with another open MR so the
+	// single-MR patrol path (queue-scan/process-branch) refuses to gate
+	// either one, same as the batch path (ListReadyMRs).
+	duplicateIDs := make(map[string]bool, len(duplicates)*2)
+	for _, d := range duplicates {
+		for _, id := range d.IDs {
+			duplicateIDs[id] = true
 		}
 	}
 
@@ -86,6 +102,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		branchMissing   bool // true if branch doesn't exist in git (when --verify is set)
 		branchVerifyErr bool // true if git check errored (corrupt repo, permission, etc.)
 		alreadyLanded   bool // true if the submitted commit is already on target (when --verify is set): merged, bookkeeping incomplete
+		displayStatus   string
 	}
 	var scored []scoredIssue
 
@@ -148,7 +165,10 @@ func runMQList(cmd *cobra.Command, args []string) error {
 
 		// Calculate priority score
 		score := calculateMRScore(issue, fields, now)
-		scored = append(scored, scoredIssue{issue: issue, fields: fields, score: score, branchMissing: branchMissing, branchVerifyErr: branchVerifyErr, alreadyLanded: alreadyLanded})
+
+		displayStatus := mqListDisplayStatus(issue, alreadyLanded, duplicateIDs[issue.ID])
+
+		scored = append(scored, scoredIssue{issue: issue, fields: fields, score: score, branchMissing: branchMissing, branchVerifyErr: branchVerifyErr, alreadyLanded: alreadyLanded, displayStatus: displayStatus})
 	}
 
 	// Sort by score descending (highest priority first)
@@ -156,7 +176,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		return scored[i].score > scored[j].score
 	})
 
-	// Extract filtered issues for JSON output compatibility
+	// Extract filtered issues for the human-readable empty-queue check below.
 	var filtered []*beads.Issue
 	for _, s := range scored {
 		filtered = append(filtered, s.issue)
@@ -164,30 +184,36 @@ func runMQList(cmd *cobra.Command, args []string) error {
 
 	// JSON output
 	if mqListJSON {
-		if mqListVerify {
-			// Extend JSON with verification results
-			type verifiedIssue struct {
-				*beads.Issue
-				BranchExists  *bool `json:"branch_exists,omitempty"`
-				VerifyError   bool  `json:"verify_error,omitempty"`
-				AlreadyLanded bool  `json:"already_landed,omitempty"`
-			}
-			var verified []verifiedIssue
-			for _, s := range scored {
-				vi := verifiedIssue{Issue: s.issue, AlreadyLanded: s.alreadyLanded}
-				if s.fields != nil && s.fields.Branch != "" {
-					if s.branchVerifyErr {
-						vi.VerifyError = true
-					} else {
-						exists := !s.branchMissing
-						vi.BranchExists = &exists
-					}
-				}
-				verified = append(verified, vi)
-			}
-			return outputJSON(verified)
+		// listedIssue always carries display status and the duplicate-branch
+		// flag (gt-k1qf) so automation agrees with the human-readable table;
+		// verification fields stay empty unless --verify was passed.
+		type listedIssue struct {
+			*beads.Issue
+			DisplayStatus   string `json:"display_status"`
+			DuplicateBranch bool   `json:"duplicate_branch,omitempty"`
+			BranchExists    *bool  `json:"branch_exists,omitempty"`
+			VerifyError     bool   `json:"verify_error,omitempty"`
+			AlreadyLanded   bool   `json:"already_landed,omitempty"`
 		}
-		return outputJSON(filtered)
+		var listed []listedIssue
+		for _, s := range scored {
+			li := listedIssue{
+				Issue:           s.issue,
+				DisplayStatus:   s.displayStatus,
+				DuplicateBranch: duplicateIDs[s.issue.ID],
+				AlreadyLanded:   s.alreadyLanded,
+			}
+			if mqListVerify && s.fields != nil && s.fields.Branch != "" {
+				if s.branchVerifyErr {
+					li.VerifyError = true
+				} else {
+					exists := !s.branchMissing
+					li.BranchExists = &exists
+				}
+			}
+			listed = append(listed, li)
+		}
+		return outputJSON(listed)
 	}
 
 	// Human-readable output
@@ -206,29 +232,14 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		issue := item.issue
 		fields := item.fields
 
-		// Determine display status. A submitted commit already reachable from
-		// target takes priority over ready/blocked: the MR is not waiting to
-		// be merged, it already was — a prior pass merged and pushed it but
-		// crashed before finishing bookkeeping (gt-wh66), and reporting it as
-		// 'ready' invites both an operator and the refinery itself to re-gate
-		// a diff that is already proven and already live.
-		displayStatus := issue.Status
-		if issue.Status == "open" {
-			switch {
-			case item.alreadyLanded:
-				displayStatus = "landed"
-			case beads.HasUnresolvedBlockers(issue):
-				displayStatus = "blocked"
-			default:
-				displayStatus = "ready"
-			}
-		}
-
 		// Format status with styling
+		displayStatus := item.displayStatus
 		styledStatus := displayStatus
 		switch displayStatus {
 		case "ready":
 			styledStatus = style.Success.Render("ready")
+		case "duplicate":
+			styledStatus = style.Error.Render("duplicate")
 		case "landed":
 			styledStatus = style.Warning.Render("landed*")
 		case "in_progress":
@@ -304,6 +315,16 @@ func runMQList(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(table.Render())
 
+	// Show duplicate-branch collisions regardless of --verify: this is the
+	// gt-k1qf failure mode (two open MRs claiming one branch), and process-
+	// branch must refuse and escalate rather than gate either one.
+	if len(duplicates) > 0 {
+		fmt.Printf("\n  %s %s: %s — refuse to gate, escalate to the rig's witness\n",
+			style.Error.Render("⚠ DUPLICATE BRANCH MRs"),
+			refinery.ErrDuplicateBranchMRs,
+			refinery.FormatDuplicateBranchMRs(duplicates))
+	}
+
 	// Show summary of missing branches when --verify is set
 	if mqListVerify {
 		missingCount := 0
@@ -334,11 +355,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	// Show blocking details below table
 	for _, item := range scored {
 		issue := item.issue
-		displayStatus := issue.Status
-		if issue.Status == "open" && beads.HasUnresolvedBlockers(issue) {
-			displayStatus = "blocked"
-		}
-		if blockerID := beads.FirstUnresolvedBlockerID(issue); displayStatus == "blocked" && blockerID != "" {
+		if blockerID := beads.FirstUnresolvedBlockerID(issue); item.displayStatus == "blocked" && blockerID != "" {
 			displayID := issue.ID
 			if len(displayID) > 12 {
 				displayID = displayID[:12]
@@ -381,6 +398,31 @@ func outputJSON(data interface{}) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(data)
+}
+
+// mqListDisplayStatus computes the status `gt mq list` reports for an MR.
+// A duplicate-branch collision (gt-k1qf) takes priority over every other
+// state: gating either MR risks double-processing or stranding the other
+// past normal post-merge cleanup, so neither may read as "ready" here. Next,
+// a submitted commit already reachable from target takes priority over
+// ready/blocked — the MR is not waiting to be merged, it already was, a
+// prior pass merged and pushed it but crashed before finishing bookkeeping
+// (gt-wh66), and reporting it as 'ready' invites both an operator and the
+// refinery itself to re-gate a diff that is already proven and already live.
+func mqListDisplayStatus(issue *beads.Issue, alreadyLanded, duplicateBranch bool) string {
+	if issue.Status != "open" {
+		return issue.Status
+	}
+	switch {
+	case duplicateBranch:
+		return "duplicate"
+	case alreadyLanded:
+		return "landed"
+	case beads.HasUnresolvedBlockers(issue):
+		return "blocked"
+	default:
+		return "ready"
+	}
 }
 
 func buildMQListColumns(verify bool) []style.Column {
