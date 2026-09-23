@@ -186,8 +186,11 @@ else
   LAST_CHECK="{}"
 fi
 
-# Check for recent compactor-dog or flatten runs in beads
-RECENT_RUNS=$(bd list --label plugin:compactor-dog --status closed --json 2>/dev/null \
+# Check for recent compactor-dog or flatten runs in beads.
+# Receipts are ephemeral wisps, hidden from bd without --include-infra: drop the
+# flag and this reports "never" even when runs exist (gt-idwq), so read a
+# "never" as a failed measurement. `gt plugin history compactor-dog` cross-checks.
+RECENT_RUNS=$(bd list --label plugin:compactor-dog --status closed --include-infra --json 2>/dev/null \
   | jq -r '.[0].created_at // "never"' 2>/dev/null || echo "unknown")
 echo "  Last compactor run: $RECENT_RUNS"
 

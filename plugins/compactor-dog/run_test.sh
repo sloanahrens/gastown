@@ -93,6 +93,92 @@ assert_invalid ""
 assert_invalid "../../../etc/passwd"
 assert_invalid "'; DROP TABLE issues; --"
 
+# --- Last-run check finds existing receipts (gt-idwq) ---
+#
+# Receipts are ephemeral wisps (`gt plugin record-run` -> bd create
+# --ephemeral). A real `bd list` hides ephemeral beads, so the query in
+# plugin.md returns [] and reports "never" unless it passes --include-infra.
+# The fake bd below reproduces that filtering, with a receipt on hand: the
+# query has to find it.
+echo ""
+echo "=== last-run query tests ==="
+
+PLUGIN_MD="$SCRIPT_DIR/plugin.md"
+QUERY_OK=true
+
+# Extract the shipped query instead of copying it, so plugin.md stays the
+# single source of truth. Breaking its shape fails the test rather than
+# silently testing a stale copy.
+LAST_RUN_QUERY=$(sed -n '/^RECENT_RUNS=/,/^  | jq/p' "$PLUGIN_MD" || true)
+QUERY_LINES=$(printf '%s\n' "$LAST_RUN_QUERY" | grep -c . || true)
+if [[ "$QUERY_LINES" != "2" || "$LAST_RUN_QUERY" != *"jq"* ]]; then
+  echo "FAIL: expected a 2-line 'RECENT_RUNS=(bd list ... | jq' query in $PLUGIN_MD,"
+  echo "      got $QUERY_LINES line(s). Did the last-run check change shape?"
+  echo "      (A sed range that misses its end pattern runs to EOF, so the shape"
+  echo "      check also keeps this test from eval'ing the rest of the file.)"
+  QUERY_OK=false
+  FAILURES=$((FAILURES + 1))
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "SKIP: jq not installed (the query pipes through jq)"
+elif $QUERY_OK; then
+  FAKE_DIR=$(mktemp -d)
+  trap 'rm -rf "${FAKE_DIR:-}"' EXIT
+
+  # Run the extracted query under whichever fake bd is installed in FAKE_DIR.
+  # The subshell keeps PATH changes from leaking into later tests.
+  run_last_run_query() {
+    (
+      export PATH="$FAKE_DIR:$PATH"
+      export FAKE_RECEIPT="$1"
+      RECENT_RUNS=""
+      eval "$LAST_RUN_QUERY"
+      printf '%s' "$RECENT_RUNS"
+    )
+  }
+
+  write_fake_bd() {
+    cat > "$FAKE_DIR/bd"
+    chmod +x "$FAKE_DIR/bd"
+  }
+
+  # Receipt visible only when --include-infra is passed, as real bd behaves.
+  write_fake_bd <<'FAKE_BD'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == "--include-infra" ]]; then
+    printf '%s\n' "$FAKE_RECEIPT"
+    exit 0
+  fi
+done
+printf '[]\n'
+FAKE_BD
+
+  RECEIPT='[{"id":"hq-wisp-test1","created_at":"2026-09-22T10:00:00Z","labels":["type:plugin-run","plugin:compactor-dog","result:success"]}]'
+  FOUND=$(run_last_run_query "$RECEIPT")
+  if [[ "$FOUND" != "2026-09-22T10:00:00Z" ]]; then
+    echo "FAIL: last-run query missed an existing receipt (got '$FOUND', want '2026-09-22T10:00:00Z')"
+    echo "      The query must pass --include-infra; receipts are ephemeral wisps."
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  # Negative control: against a bd that returns [] no matter what, the same
+  # query must report "never". Without this, a query that never ran (empty
+  # extraction, missing jq) would pass as "found nothing" above.
+  write_fake_bd <<'FAKE_BD_EMPTY'
+#!/usr/bin/env bash
+printf '[]\n'
+FAKE_BD_EMPTY
+
+  EMPTY=$(run_last_run_query "$RECEIPT")
+  if [[ "$EMPTY" != "never" ]]; then
+    echo "FAIL: negative control expected 'never' from an always-empty bd, got '$EMPTY'"
+    echo "      The harness is not exercising the query in plugin.md."
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
 echo ""
 if [[ $FAILURES -gt 0 ]]; then
   echo "FAILED: $FAILURES test(s) failed"
