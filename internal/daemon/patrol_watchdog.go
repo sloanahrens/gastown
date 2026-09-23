@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -103,7 +101,15 @@ type patrolWatchdogTarget struct {
 	Session   string // tmux session name
 	Assignee  string // bd assignee address (witness.PatrolAssignee)
 	PatrolMol string // patrol molecule name (e.g. "mol-witness-patrol")
-	WorkDir   string // bd working directory for this role's patrol wisps
+	// WorkDir is the bd working directory for this role's patrol wisps: the
+	// TOWN root for every role, rig-scoped ones included. Before editing this
+	// field, read gt patrol report's config (internal/cmd/patrol_report.go) —
+	// it writes patrol wisps with BeadsDir=roleInfo.TownRoot, so they live in
+	// the town database (hq-), never in the role's rig database. A rig path
+	// resolves through <rig>/.beads/redirect to <rig>/mayor/rig/.beads, where
+	// the query finds no patrol wisp: a bare [] that read as a trustworthy
+	// "never patrolled" and alarmed on every healthy role (hq-3h7ac).
+	WorkDir string
 }
 
 // patrolWatchdogTargets enumerates every patrol role instance the watchdog
@@ -118,7 +124,6 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 	}}
 
 	for _, rig := range rigs {
-		rigPath := patrolWatchdogRigWorkDir(townRoot, rig)
 		prefix := config.GetRigPrefix(townRoot, rig)
 
 		targets = append(targets,
@@ -128,7 +133,7 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 				Session:   session.WitnessSessionName(prefix),
 				Assignee:  witness.PatrolAssignee(constants.RoleWitness, rig),
 				PatrolMol: constants.MolWitnessPatrol,
-				WorkDir:   rigPath,
+				WorkDir:   townRoot,
 			},
 			patrolWatchdogTarget{
 				Role:      constants.RoleRefinery,
@@ -136,7 +141,7 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 				Session:   session.RefinerySessionName(prefix),
 				Assignee:  witness.PatrolAssignee(constants.RoleRefinery, rig),
 				PatrolMol: constants.MolRefineryPatrol,
-				WorkDir:   rigPath,
+				WorkDir:   townRoot,
 			},
 		)
 	}
@@ -326,17 +331,4 @@ func (d *Daemon) nudgeSession(address, message string) error {
 		return err
 	}
 	return nil
-}
-
-// patrolWatchdogRigWorkDir returns the bd working directory for a rig's
-// patrol wisps. Mirrors PatrolMoleculesExistCheck.Run's rig-path resolution
-// (internal/doctor/patrol_check.go): falls back to the town root when the
-// rig directory doesn't exist under it (e.g. `gt doctor`/the daemon running
-// from a mayor's canonical clone, where TownRoot already resolves inside it).
-func patrolWatchdogRigWorkDir(townRoot, rig string) string {
-	rigPath := filepath.Join(townRoot, rig)
-	if _, err := os.Stat(rigPath); os.IsNotExist(err) {
-		return townRoot
-	}
-	return rigPath
 }

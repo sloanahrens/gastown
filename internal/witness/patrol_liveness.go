@@ -223,7 +223,12 @@ func LastCompletedPatrol(bd *BdCli, workDir, assignee, patrolMolName string) (ti
 	}
 
 	if !found {
-		return time.Time{}, guard.Fail(fmt.Sprintf("no %s wisp found for %s", patrolMolName, assignee))
+		// Name the directory the query ran in: a query aimed at the wrong
+		// database returns the same bare [] as a genuine "never patrolled"
+		// (hq-3h7ac: rig-scoped roles were read from their rig database
+		// instead of the town database that holds the wisps).
+		return time.Time{}, guard.Fail(fmt.Sprintf("no %s wisp found for %s in %s",
+			patrolMolName, assignee, workDir))
 	}
 	return latest, guard.Pass()
 }
