@@ -1939,6 +1939,61 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 	}
 }
 
+// TestWorkstateDispositionForPolecat_StashScopedToOwningSeat is the gt-oznd3
+// regression test. Polecat worktrees share a single .repo.git, so git stores
+// stashes in ONE ref (refs/stash) rather than per-worktree: `git stash list`
+// run from any seat returns every seat's stash entries. workstateInputForPolecat
+// reads StashCount through git.Git.StashCount, which filters stash entries by
+// the branch recorded in each entry's "WIP on <branch>:"/"On <branch>:" text —
+// so a stash taken on seat A's branch must disqualify only seat A, never seat
+// B, even though both worktrees see the identical raw `git stash list` output.
+func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	seatA, err := mgr.AddWithOptions("seata", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions(seata): %v", err)
+	}
+	if _, err := mgr.AddWithOptions("seatb", AddOptions{}); err != nil {
+		t.Fatalf("AddWithOptions(seatb): %v", err)
+	}
+	_ = git.NewGit(seatA.ClonePath).CleanForce()
+
+	// Stash uncommitted work on seat A's branch only. Both worktrees share the
+	// same underlying repo, so this stash lands in the one shared refs/stash.
+	seatAGit := git.NewGit(seatA.ClonePath)
+	if err := os.WriteFile(filepath.Join(seatA.ClonePath, "README.md"), []byte("seata wip\n"), 0644); err != nil {
+		t.Fatalf("write seata dirt: %v", err)
+	}
+	runManagerGit(t, seatA.ClonePath, "stash", "push", "-m", "seata-wip")
+
+	total, err := seatAGit.StashCountAll()
+	if err != nil {
+		t.Fatalf("StashCountAll: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("StashCountAll = %d, want 1 shared repo stash", total)
+	}
+
+	dA := mgr.WorkstateDispositionForPolecat("seata", StateIdle, "")
+	if dA.Reason != "git-stash" {
+		t.Fatalf("seata WorkstateDispositionForPolecat() reason = %q (verdict=%s blockers=%v), want %q — a seat with its own stash must still block",
+			dA.Reason, dA.Verdict, dA.Blockers, "git-stash")
+	}
+	if dA.Reusable || dA.SafeToNuke {
+		t.Fatalf("seata Reusable=%v SafeToNuke=%v, want both false — its own stash must block reuse", dA.Reusable, dA.SafeToNuke)
+	}
+
+	dB := mgr.WorkstateDispositionForPolecat("seatb", StateIdle, "")
+	if dB.Verdict != WorkstateVerdictSafeToNuke {
+		t.Fatalf("seatb WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — seat A's stash must not disqualify seat B",
+			dB.Verdict, dB.Reason, dB.Blockers, WorkstateVerdictSafeToNuke)
+	}
+	if !dB.Reusable || !dB.SafeToNuke {
+		t.Fatalf("seatb Reusable=%v SafeToNuke=%v, want both true — sibling seats must remain reusable", dB.Reusable, dB.SafeToNuke)
+	}
+}
+
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
