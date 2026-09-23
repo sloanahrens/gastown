@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -275,4 +276,143 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// The three scenarios below cover gt-0wy03: the contained (line-multiset)
+// half of DetectRevertedMerges has no positional or context anchor, so it
+// cannot by itself tell an actual revert apart from a candidate that merely
+// deletes one instance of a repeated line a merged commit also added
+// elsewhere in the same file. Each scenario shares the same shape — a
+// candidate fully rebased onto (so containing every one of) a target commit
+// that adds a line already present, for an unrelated reason, somewhere else
+// in the same file — and differs only in how, if at all, that removal is
+// rescued from being read as an inversion of the merged commit.
+
+// newRebasedPackageScenario builds origin.git with a base commit holding
+// path with initial content, clones it into a seed (standing in for
+// origin/main) and a polecat checkout already rebased onto the seed's
+// current tip — the fast-forward shape the real incident described ("HEAD's
+// parent IS origin/main"), as opposed to newRevertScenario's stale,
+// never-rebased checkouts.
+func newRebasedPackageScenario(t *testing.T, path, initial string) scenarioPaths {
+	t.Helper()
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	polecat := filepath.Join(dir, "polecat")
+
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCmd(t, "", "clone", remote, seed)
+	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
+	runGitCmd(t, seed, "config", "user.name", "Seed")
+	if err := os.MkdirAll(filepath.Join(seed, filepath.Dir(path)), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	writeTestFile(t, filepath.Join(seed, path), initial)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", "base")
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	runGitCmd(t, "", "clone", remote, polecat)
+	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
+	runGitCmd(t, polecat, "config", "user.name", "Polecat")
+	runGitCmd(t, polecat, "switch", "-c", "polecat/zircon/gt-test")
+	return scenarioPaths{seed: seed, polecat: polecat}
+}
+
+// rebasePolecatOntoSeed advances main past its current tip with a commit
+// that writes path to advanced (the merged commit under test — subject
+// carries the issue tag DetectRevertedMerges' documentedRemoval check looks
+// for), pushes it, then fast-forwards the polecat checkout onto it — so the
+// polecat's tree genuinely contains the merged change, the shape the
+// contained test's escape hatches assume.
+func rebasePolecatOntoSeed(t *testing.T, s scenarioPaths, path, advanced, subject string) {
+	t.Helper()
+	writeTestFile(t, filepath.Join(s.seed, path), advanced)
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", subject)
+	runGitCmd(t, s.seed, "push", "origin", "main")
+	runGitCmd(t, s.polecat, "fetch", "origin")
+	runGitCmd(t, s.polecat, "rebase", "origin/main")
+}
+
+// TestDetectRevertedMerges_RelocationSurvivesInPackage is gt-0wy03's own
+// repro: the merged commit adds t.Parallel() to TestA only (TestB's own
+// t.Parallel() predates it, at the base commit). The polecat, now fully
+// rebased onto that commit, removes TestB's — a call for an unrelated
+// reason (gt-k317: it swaps a package global and cannot run in parallel) —
+// leaving TestA's untouched. The line-multiset test alone reads this as
+// undoing the merged commit, since it removed one instance of the exact
+// line the commit added; the fix must see that the commit's own line
+// survives, right where the commit put it, and not refuse.
+func TestDetectRevertedMerges_RelocationSurvivesInPackage(t *testing.T) {
+	t.Parallel()
+	const path = "pkg/foo_test.go"
+	base := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+	advanced := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tt.Parallel()\n\tdoOtherStuff()\n}\n"
+	final := "package pkg\n\n" +
+		"func TestA(t *testing.T) {\n\tt.Parallel()\n\tdoStuff()\n}\n\n" +
+		"func TestB(t *testing.T) {\n\tdoOtherStuff()\n}\n"
+
+	s := newRebasedPackageScenario(t, path, base)
+	rebasePolecatOntoSeed(t, s, path, advanced, "cmd tests: t.Parallel for TestA (gt-kf0r)")
+	commitPolecat(t, s.polecat, map[string]string{path: final}, "fix(pkg): make TestB sequential, it swaps a global (gt-test)")
+
+	assertNoRevertedMerges(t, s.polecat)
+}
+
+// TestDetectRevertedMerges_DocumentedRemovalIsNotRefused covers a removal
+// whose content genuinely does not survive anywhere in the package — so
+// linesSurviveInPackage cannot rescue it — but whose own commit message
+// documents, by the merged commit's issue id, that the removal is
+// deliberate and reviewed (gt-k317's convention). That commit message is
+// the only signal available in this shape, and it must be enough.
+func TestDetectRevertedMerges_DocumentedRemovalIsNotRefused(t *testing.T) {
+	t.Parallel()
+	const path = "pkg/bar.go"
+	base := "package pkg\n\nfunc Bar() {\n\tdoA()\n}\n"
+	advanced := "package pkg\n\nfunc Bar() {\n\tdoA()\n\tdoB() // guard\n}\n"
+	final := "package pkg\n\nfunc Bar() {\n\tdoA()\n}\n"
+
+	s := newRebasedPackageScenario(t, path, base)
+	rebasePolecatOntoSeed(t, s, path, advanced, "pkg: add guard call (gt-uniq1)")
+	writeTestFile(t, filepath.Join(s.polecat, path), final)
+	runGitCmd(t, s.polecat, "add", "-A")
+	runGitCmd(t, s.polecat, "commit", "-m",
+		"pkg: drop guard call, redundant with caller check\n\n"+
+			"Reverts: gt-uniq1 doB guard in Bar\n\n"+
+			"The guard is redundant now that callers check first; verified in review.")
+
+	assertNoRevertedMerges(t, s.polecat)
+}
+
+// TestDetectRevertedMerges_RefusesUndocumentedFullRemoval is the case (c)
+// guard: the identical shape as the documented-removal scenario above —
+// content gone from the whole package, so linesSurviveInPackage cannot
+// rescue it either — but with no "Reverts:" trailer naming the merged
+// commit. Neither escape hatch applies, and this must still be refused:
+// the fix must not make every single-line removal pass.
+func TestDetectRevertedMerges_RefusesUndocumentedFullRemoval(t *testing.T) {
+	t.Parallel()
+	const path = "pkg/bar.go"
+	base := "package pkg\n\nfunc Bar() {\n\tdoA()\n}\n"
+	advanced := "package pkg\n\nfunc Bar() {\n\tdoA()\n\tdoB() // guard\n}\n"
+	final := "package pkg\n\nfunc Bar() {\n\tdoA()\n}\n"
+
+	s := newRebasedPackageScenario(t, path, base)
+	rebasePolecatOntoSeed(t, s, path, advanced, "pkg: add guard call (gt-uniq1)")
+	commitPolecat(t, s.polecat, map[string]string{path: final}, "pkg: drop guard call")
+
+	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("detectRevertedMerges: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1 (undocumented removal must still be refused): %+v", len(found), found)
+	}
 }
