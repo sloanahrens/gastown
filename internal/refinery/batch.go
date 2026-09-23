@@ -325,8 +325,13 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.processSingleMR(ctx, batch[0], target)
 	}
 
-	if err := e.refuseIfTargetAhead(target); err != nil {
-		result.Error = err
+	// Realign local target to origin before staging: a prior run may have
+	// exited before restoring it (gt-032w, gt-u093). Every stack build below
+	// discards whatever was there anyway, so this never blocks the batch —
+	// it just makes the discard happen up front, and surfaces a real error
+	// instead of silently building on unresolved state.
+	if err := e.restoreTargetToOrigin(target); err != nil {
+		result.Error = fmt.Errorf("realign %s to origin before batch: %w", target, err)
 		return result
 	}
 

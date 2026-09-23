@@ -617,8 +617,13 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	}
 	branch, target := mr.Branch, mr.Target
 
-	if err := e.refuseIfTargetAhead(target); err != nil {
-		return ProcessResult{Success: false, Error: err.Error()}
+	// Realign local target to origin before staging: a prior run may have
+	// exited before restoring it (gt-032w, gt-u093). prepareMergeTarget below
+	// discards whatever was there anyway, so this never blocks the merge —
+	// it just makes the discard happen up front, and surfaces a real error
+	// instead of silently building on unresolved state.
+	if err := e.restoreTargetToOrigin(target); err != nil {
+		return ProcessResult{Success: false, Error: fmt.Errorf("realign %s to origin before merge: %w", target, err).Error()}
 	}
 
 	if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {

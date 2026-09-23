@@ -1136,12 +1136,13 @@ func TestProcessBatch_SingleSurvivorGateFailure_RestoresTargetToOrigin(t *testin
 	}
 }
 
-// TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b):
-// a run must never build a new stack on top of a local target that already
-// holds commits origin/target doesn't have — the exact leftover state a prior
-// run that skipped restoreTargetToOrigin produces. Silently discarding it via
-// prepareMergeTarget's reset would hide the very evidence of the bug.
-func TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
+// TestProcessBatch_RealignsWhenLocalTargetAheadOfOrigin covers gt-u093 fix
+// (b): a leftover commit on the shared local main — from a prior run that
+// exited before restoreTargetToOrigin, or another agent's routine commit
+// (gt-032w) — must never turn into a rig-wide halt. ProcessBatch realigns
+// target to origin up front and proceeds with the batch; every stack build
+// below was going to discard the leftover commit anyway.
+func TestProcessBatch_RealignsWhenLocalTargetAheadOfOrigin(t *testing.T) {
 	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -1150,6 +1151,7 @@ func TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "hello b\n")
 
 	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
 
 	// Simulate a prior run's rejected stacked merge left on local main.
 	run(t, workDir, "git", "checkout", "main")
@@ -1165,20 +1167,18 @@ func TestProcessBatch_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
 
 	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
 
-	if result.Error == nil {
-		t.Fatal("expected ProcessBatch to refuse when local main is ahead of origin/main")
+	if result.Error != nil {
+		t.Fatalf("expected ProcessBatch to realign and proceed, got error: %v", result.Error)
 	}
-	if !strings.Contains(result.Error.Error(), "ahead of origin") {
-		t.Errorf("expected an ahead-of-origin refusal, got: %v", result.Error)
-	}
-	if len(result.Merged) != 0 {
-		t.Errorf("expected nothing merged, got %v", stackedIDs(result.Merged))
+	if len(result.Merged) != 2 {
+		t.Fatalf("expected both MRs merged after realignment, got %v", stackedIDs(result.Merged))
 	}
 
-	// The refusal must not discard the leftover commit either — that would
-	// erase the evidence a human needs to diagnose how it got there.
-	if got := run(t, workDir, "git", "rev-parse", "main"); got != leftoverSHA {
-		t.Errorf("refusal changed local main from %s to %s", leftoverSHA, got)
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", leftoverSHA, "origin/main").Run(); err == nil {
+		t.Errorf("leftover commit %s is still reachable from origin/main — it should have been discarded by realignment", leftoverSHA)
+	}
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", originMain, "origin/main").Run(); err != nil {
+		t.Errorf("origin/main's prior tip %s is not an ancestor of the landed batch", originMain)
 	}
 }
 

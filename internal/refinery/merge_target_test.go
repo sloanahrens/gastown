@@ -192,10 +192,12 @@ func TestDoMerge_SucceedsWhenAnotherWorktreeHoldsTarget(t *testing.T) {
 	}
 }
 
-// TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b) on
-// the single-MR path: doMerge must refuse rather than silently build on top
-// of a local target that already holds commits origin/target doesn't have.
-func TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
+// TestDoMerge_RealignsWhenLocalTargetAheadOfOrigin covers gt-u093 fix (b) on
+// the single-MR path: a stray commit left on the shared local main by another
+// agent (gt-032w) or a run that exited before restoreTargetToOrigin must not
+// permanently block merging. doMerge realigns target to origin up front and
+// proceeds — prepareMergeTarget was going to discard the stray commit anyway.
+func TestDoMerge_RealignsWhenLocalTargetAheadOfOrigin(t *testing.T) {
 	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -203,6 +205,7 @@ func TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
 
 	e := newTestEngineer(t, workDir, g)
+	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
 	run(t, workDir, "git", "checkout", "main")
 	writeFile(t, workDir, "leftover.txt", "leftover\n")
 	run(t, workDir, "git", "add", ".")
@@ -211,14 +214,15 @@ func TestDoMerge_RefusesWhenLocalTargetAheadOfOrigin(t *testing.T) {
 
 	mr := makeMR("mr-a", "feature-a", "main")
 	result := e.doMerge(context.Background(), mr)
-	if result.Success {
-		t.Fatal("expected doMerge to refuse when local main is ahead of origin/main")
+	if !result.Success {
+		t.Fatalf("expected doMerge to realign and proceed when local main is ahead of origin/main: %s", result.Error)
 	}
-	if !strings.Contains(result.Error, "ahead of origin") {
-		t.Errorf("expected an ahead-of-origin refusal, got: %v", result.Error)
+
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", leftoverSHA, "origin/main").Run(); err == nil {
+		t.Errorf("leftover commit %s is still reachable from origin/main — it should have been discarded by realignment", leftoverSHA)
 	}
-	if got := run(t, workDir, "git", "rev-parse", "main"); got != leftoverSHA {
-		t.Errorf("refusal changed local main from %s to %s", leftoverSHA, got)
+	if err := exec.Command("git", "-C", workDir, "merge-base", "--is-ancestor", originMain, "origin/main").Run(); err != nil {
+		t.Errorf("origin/main's prior tip %s is not an ancestor of the landed merge", originMain)
 	}
 }
 
@@ -248,9 +252,9 @@ func TestRestoreTargetToOrigin_Attached(t *testing.T) {
 
 // TestRestoreTargetToOrigin_DetachedMovesBranchPointer covers gt-u093 fix (a)
 // in the case its bug report names explicitly: a run staged on a detached
-// HEAD (because this worktree moved off target after advancing it) must still
-// get target's ref itself back to origin, not just the detached HEAD — a
-// plain ResetHard only moves the latter.
+// HEAD (because this worktree moved off target after advancing it) must reset
+// its own HEAD and working tree, not just target's ref — a plain `branch -f`
+// only moves the latter.
 func TestRestoreTargetToOrigin_DetachedMovesBranchPointer(t *testing.T) {
 	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)
@@ -263,7 +267,7 @@ func TestRestoreTargetToOrigin_DetachedMovesBranchPointer(t *testing.T) {
 	writeFile(t, workDir, "extra.txt", "extra\n")
 	run(t, workDir, "git", "add", ".")
 	run(t, workDir, "git", "commit", "-m", "ahead of origin")
-	run(t, workDir, "git", "checkout", "-b", "scratch")
+	run(t, workDir, "git", "checkout", "--detach")
 
 	if err := e.restoreTargetToOrigin("main"); err != nil {
 		t.Fatalf("restoreTargetToOrigin: %v", err)
@@ -271,6 +275,12 @@ func TestRestoreTargetToOrigin_DetachedMovesBranchPointer(t *testing.T) {
 
 	if got := run(t, workDir, "git", "rev-parse", "main"); got != originMain {
 		t.Errorf("expected main force-updated to origin/main %s, got %s", originMain, got)
+	}
+	if got := run(t, workDir, "git", "rev-parse", "HEAD"); got != originMain {
+		t.Errorf("expected this worktree's detached HEAD reset to origin/main %s, got %s", originMain, got)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "extra.txt")); statErr == nil {
+		t.Error("expected extra.txt from the ahead commit gone from the working tree after restore")
 	}
 }
 
