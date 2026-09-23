@@ -138,32 +138,30 @@ func labelFactSources(in WorkstateInput, d WorkstateDisposition) WorkstateDispos
 // clean tree — the self-report was simply wrong, and it was the only thing
 // consulted.
 //
-// gt-ui2x: missing/unknown gets exactly the same demotion. A missing
-// cleanup_status is the *absence* of a self-report (gt done crashed before
-// selfReportCleanupStatus ran, or never ran at all on an old seat) — it is
-// not evidence of risk, and once a live probe has actually measured
-// GitDirty/StashCount/UnpushedCommits there is nothing left for the missing
-// record to add. Those three measurements are re-checked as their own
-// blockers immediately after this call returns (decideWorkstate's
-// GitDirty/StashCount/UnpushedCommits ifs), so a live probe that finds real
-// risk still blocks — this only removes the SECOND, redundant veto that used
-// to strand a seat forever with no probe result able to ever clear it.
+// gt-14a fixed a fail-open regression here: missing/unknown must NOT clear
+// just because a live probe ran, because a probe only measures
+// GitDirty/StashCount/UnpushedCommits — it says nothing about hook_bead,
+// push_failed, mr_failed or active_mr, which is exactly the information a
+// missing or unreadable agent bead leaves unverified (see
+// GetAgentBead(...) returning not-found as (nil, nil, nil) in
+// workstateInputForPolecat and checkRecoveryForPolecat's no-agent-bead
+// branch, both of which default CleanupStatus to CleanupUnknown on purpose
+// for this reason). Demoting missing/unknown here on gitStateSource alone
+// would clear those seats too, undoing gt-14a/gt-7kr.
 //
-// The demotion is one-directional and fails closed:
-//
-//   - no probe attempt (GitStateSourceRecorded) → the record still blocks,
-//     because nothing has replaced it;
-//   - a failed probe (GitStateSourceUnknown) → the record still blocks, on top
-//     of the git-check-failed blocker the classifier already raises;
-//   - a recorded status never makes a verdict cleaner than live git: with the
-//     probe answering dirty/stashed/unpushed the verdict is NEEDS_RECOVERY no
-//     matter what the record claims (CleanupClean included, and missing/unknown
-//     included since gt-ui2x).
+// gt-ui2x gives missing/unknown a *narrower* way out instead:
+// ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch, gated
+// on the agent bead having actually been read (so hook_bead/push_failed/
+// mr_failed/active_mr are verified, not defaulted) in addition to the same
+// hookSafe/activeMRSafe/gitSafe facts this function's git-derived case
+// already trusts. That path only reaches this function's caller
+// (decideWorkstate) via IgnoreCleanupStatus, so it is decided once, in one
+// place, instead of here.
 func RecordedCleanupBlocks(status CleanupStatus, gitStateSource string) bool {
 	if status.IsSafe() {
 		return false
 	}
-	if gitStateSource == GitStateSourceLive {
+	if status.RequiresRecovery() && gitStateSource == GitStateSourceLive {
 		return false
 	}
 	return true
@@ -353,7 +351,7 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 // fallback below is retained for direct callers and for statuses the demotion
 // does not reach, not because the classifier still needs it.
 //
-// It wraps CanIgnoreStaleCleanupStatus with two narrow extensions, each
+// It wraps CanIgnoreStaleCleanupStatus with three narrow extensions, each
 // gated by the SAME hook/active-MR safety facts required for every other
 // case — never granted unconditionally:
 //
@@ -370,6 +368,18 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 //     from a live git check that is impossible against a nonexistent
 //     directory, and requiring it would permanently veto reclaiming the
 //     slot. The structural proof of absence stands in for it instead.
+//  3. agentBeadRead && liveGitProbeRan (gt-ui2x): a missing/unknown status
+//     on an agent bead that WAS successfully read — as opposed to a bead
+//     that could not be read at all, which RecordedCleanupBlocks keeps
+//     blocking unconditionally — plus a live probe that verified
+//     gitSafe/hookSafe/activeMRSafe. Requiring agentBeadRead is what makes
+//     this narrower than gt-14a's regression: hook_bead, push_failed,
+//     mr_failed and active_mr all came from that same successful read, so
+//     they are verified facts here, not the unread defaults gt-14a's fix
+//     protects against. Requiring liveGitProbeRan on top of gitSafe closes
+//     the gap where a caller that never probed leaves GitDirty/StashCount/
+//     UnpushedCommits at their zero value and gitSafe reads true by
+//     omission rather than by measurement.
 //
 // gt-hsg: a prior version of this check (in cmd/polecat.go's check-recovery
 // handler) set IgnoreCleanupStatus=true for the partial-spawn case without
@@ -377,12 +387,15 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 // exactly the shape gt-7kr removed from workstateInputForPolecat, just
 // reintroduced via a different precondition in a second, undiscovered copy
 // of this policy. Route every caller through this one function instead.
-func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpawn, allowMissingForGoneWorktree, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpawn, allowMissingForGoneWorktree, agentBeadRead, liveGitProbeRan, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	if status == "" || status == CleanupUnknown {
 		if allowMissingForPartialSpawn && hookSafe && activeMRSafe && gitSafe {
 			return true
 		}
 		if allowMissingForGoneWorktree && hookSafe && activeMRSafe {
+			return true
+		}
+		if agentBeadRead && liveGitProbeRan && hookSafe && activeMRSafe && gitSafe {
 			return true
 		}
 	}
@@ -410,6 +423,14 @@ type WorkstateFacts struct {
 	HookBeadTerminal               bool
 	PartialSpawnWithoutDurableHook bool
 	WorktreeStructurallyMissing    bool
+	// AgentBeadRead marks that the caller successfully read the polecat's
+	// agent bead (as opposed to a not-found or error result, which
+	// GetAgentBead-style lookups return as CleanupStatus staying at its
+	// CleanupUnknown default). Only a caller that actually read the bead can
+	// set this true — hook_bead, push_failed, mr_failed and active_mr came
+	// from that same read, so they are verified facts, not unread defaults.
+	// See ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch.
+	AgentBeadRead                  bool
 	CleanupStatus                  CleanupStatus
 	PushFailed                     bool
 	MRFailed                       bool
@@ -473,7 +494,8 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		input.HookBead = f.HookBead
 	}
 	if !input.CleanupStatus.IsSafe() {
-		input.IgnoreCleanupStatus = ResolveIgnoreCleanupStatus(f.CleanupStatus, f.PartialSpawnWithoutDurableHook, f.WorktreeStructurallyMissing, workTerminal, f.HookBeadSafe, activeMRSafe, gitSafe)
+		liveGitProbeRan := f.GitStateSource == GitStateSourceLive
+		input.IgnoreCleanupStatus = ResolveIgnoreCleanupStatus(f.CleanupStatus, f.PartialSpawnWithoutDurableHook, f.WorktreeStructurallyMissing, f.AgentBeadRead, liveGitProbeRan, workTerminal, f.HookBeadSafe, activeMRSafe, gitSafe)
 	}
 	return input
 }

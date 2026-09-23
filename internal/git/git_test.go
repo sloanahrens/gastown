@@ -517,6 +517,28 @@ func TestStatusPreservesLeadingSpaceColumnOnSoleUnstagedModification(t *testing.
 	}
 }
 
+// TestStatusUnquotesCQuotedPaths guards against a regression where Status()
+// left a porcelain path still C-quoted (git wraps a path containing a
+// backslash, double-quote or non-ASCII byte in double quotes and escapes
+// it). Left quoted, the string is not the real filename: passing it back to
+// git as a pathspec (classifyIndexSkew, gt-ui2x) looks for a literal file
+// whose name contains quote characters, which matches nothing.
+func TestStatusUnquotesCQuotedPaths(t *testing.T) {
+	dir := initTestRepo(t)
+	name := `weird"quote.txt`
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("content\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	status, err := NewGit(dir).Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Untracked) != 1 || status.Untracked[0] != name {
+		t.Fatalf("Untracked = %v, want [%q]", status.Untracked, name)
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
@@ -2831,6 +2853,67 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 		}
 		if status.CleanExcludingRuntimeAndIndexSkew() {
 			t.Fatal("a real unstaged edit is exactly the risk this check exists to catch")
+		}
+	})
+
+	// TestCheckUncommittedWorkIndexSkewVsRealDirty/pathspec-special filenames
+	// is the om-review regression: the pre-fix classifier inferred skew from a
+	// path's *absence* in `git diff --name-only` output, so a pathspec that
+	// matched nothing at all — glob-magic characters in a real filename, or a
+	// still-C-quoted path from Status() — read as "no difference found" and
+	// silently misclassified a real staged edit as skew. classifyIndexSkew now
+	// confirms identity by comparing blob shas directly (git ls-files -s vs
+	// git ls-tree, both with :(literal) pathspecs), so a filename that would
+	// have broken the old approach must classify correctly in both
+	// directions: skew when the content really matches, blocking when it
+	// doesn't.
+	t.Run("pathspec-special filename with content on origin is still classified as skew", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := "notes [draft] v2.txt"
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		runGitTestCmd(t, localDir, "push", "origin", "HEAD")
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if len(status.IndexSkewFiles) != 1 || status.IndexSkewFiles[0] != name {
+			t.Fatalf("IndexSkewFiles = %v, want [%q]", status.IndexSkewFiles, name)
+		}
+		if !status.CleanExcludingRuntimeAndIndexSkew() {
+			t.Fatal("pathspec-special filename with content already on origin must still classify as skew")
+		}
+	})
+
+	t.Run("pathspec-special filename absent from origin is NOT misclassified as skew", func(t *testing.T) {
+		localDir, _, _ := initTestRepoWithRemote(t)
+		g := NewGit(localDir)
+
+		name := "notes [draft] v2.txt"
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("v2\n"), 0644); err != nil {
+			t.Fatalf("write v2: %v", err)
+		}
+		runGitTestCmd(t, localDir, "add", name)
+		runGitTestCmd(t, localDir, "commit", "-m", "add v2")
+		// Deliberately do NOT push: this content is real, unpreserved work.
+		runGitTestCmd(t, localDir, "reset", "--soft", "HEAD~1")
+
+		status, err := g.CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if len(status.IndexSkewFiles) != 0 {
+			t.Fatalf("IndexSkewFiles = %v, want none: a pathspec that fails to match must fail CLOSED, not be silently classified as skew", status.IndexSkewFiles)
+		}
+		if status.CleanExcludingRuntimeAndIndexSkew() {
+			t.Fatal("a pathspec-special filename's real, unpreserved content must still block reuse")
 		}
 	})
 }

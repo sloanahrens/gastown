@@ -14,6 +14,7 @@ type SlotReuseInput struct {
 	HookBead               string
 	HookBeadSafe           bool
 	HookBeadTerminal       bool
+	AgentBeadRead          bool
 	CleanupStatus          CleanupStatus
 	PushFailed             bool
 	MRFailed               bool
@@ -57,6 +58,7 @@ func DecideSlotReuse(in SlotReuseInput) SlotReuseDecision {
 		HookBead:               in.HookBead,
 		HookBeadSafe:           in.HookBeadSafe,
 		HookBeadTerminal:       in.HookBeadTerminal,
+		AgentBeadRead:          in.AgentBeadRead,
 		CleanupStatus:          in.CleanupStatus,
 		PushFailed:             in.PushFailed,
 		MRFailed:               in.MRFailed,

@@ -245,6 +245,12 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	facts := polecat.WorkstateFacts{State: polecat.StateIdle, HookBeadSafe: true}
 	if fields != nil {
+		// gt-ui2x: the bead was actually read here — see
+		// ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch.
+		// Without this, a missing cleanup_status that the reuse gate
+		// (Manager.WorkstateDispositionForPolecat) has cleared would still
+		// display as NEEDS_RECOVERY here.
+		facts.AgentBeadRead = true
 		item.CleanupStatus = strings.TrimSpace(fields.CleanupStatus)
 		item.ActiveMR = strings.TrimSpace(fields.ActiveMR)
 		item.Branch = strings.TrimSpace(fields.Branch)

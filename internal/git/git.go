@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1773,8 +1774,32 @@ func parsePorcelainStatusEntry(line string) (porcelainStatusEntry, bool) {
 	}
 	if strings.ContainsAny(entry.Code, "RC") {
 		entry.SourcePath, entry.Path = porcelainRenameCopyPaths(entry.Path)
+		entry.SourcePath = unquoteGitPath(entry.SourcePath)
 	}
+	entry.Path = unquoteGitPath(entry.Path)
 	return entry, true
+}
+
+// unquoteGitPath reverses git's C-style quoting of a porcelain path. Git
+// wraps a path in double quotes and escapes it (backslash, double-quote,
+// control characters as \a \b \f \n \r \t \v, and — unless
+// core.quotepath=false — any non-ASCII byte as \NNN octal) whenever it
+// contains a character quotepath decides is unsafe to print raw. Left
+// quoted, the string is not the real filename: passing it back to git as a
+// pathspec (as classifyIndexSkew does) looks for a literal file whose name
+// contains quote and backslash characters, which matches nothing (gt-ui2x).
+// Go's octal/backslash escape set is the same as git's, so strconv.Unquote
+// round-trips it; a string that fails to unquote is returned unchanged
+// rather than dropped, since the paths list must stay 1:1 with git's output.
+func unquoteGitPath(path string) string {
+	if len(path) < 2 || path[0] != '"' || path[len(path)-1] != '"' {
+		return path
+	}
+	unquoted, err := strconv.Unquote(path)
+	if err != nil {
+		return path
+	}
+	return unquoted
 }
 
 func (e porcelainStatusEntry) paths() []string {
@@ -3932,12 +3957,25 @@ func (g *Git) indexSkewComparisonRefs() []string {
 	return refs
 }
 
-// classifyIndexSkew narrows paths down to the ones whose current content
-// (working tree, which for a StagedOnly path is identical to the index —
-// see isStagedOnlyCode) already matches origin's default branch or the local
-// default branch. It never errors: a ref that fails to resolve or diff is
-// simply skipped, and a path that cannot be confirmed against any ref is
-// left out of the result — fail closed, the same file stays a blocker.
+// classifyIndexSkew narrows paths down to the ones whose staged index blob
+// is affirmatively confirmed identical to the same path's blob on origin's
+// default branch or the local default branch.
+//
+// This compares blob shas directly (git ls-files -s for the index side, git
+// ls-tree <ref> for the ref side) instead of inferring identity from a
+// path's *absence* in `git diff --name-only` output. That absence-based
+// check failed open: a pathspec that matched nothing at all — because the
+// filename carries glob/magic characters, or because Status() had left it
+// still C-quoted — produced empty diff output too, so a real staged edit
+// with such a name was silently classified as skew (gt-ui2x). Every
+// pathspec here is prefixed with the `:(literal)` magic so glob characters
+// in a real filename are never reinterpreted.
+//
+// It never errors: a ref or path that fails to resolve is simply skipped,
+// and a path whose match cannot be affirmatively confirmed against any ref —
+// including a staged deletion, which has no index blob to confirm at all —
+// is left out of the result entirely. Fail closed: the same file stays a
+// blocker.
 func (g *Git) classifyIndexSkew(paths []string) []string {
 	if len(paths) == 0 {
 		return nil
@@ -3947,44 +3985,107 @@ func (g *Git) classifyIndexSkew(paths []string) []string {
 		return nil
 	}
 
-	remaining := make(map[string]bool, len(paths))
+	indexBlobs := g.lsFilesStagedBlobs(paths)
+
+	unresolved := make([]string, 0, len(paths))
 	for _, p := range paths {
-		remaining[p] = true
+		if indexBlobs[p] != "" {
+			unresolved = append(unresolved, p)
+		}
 	}
 
+	confirmed := make(map[string]bool, len(unresolved))
 	for _, ref := range refs {
-		if len(remaining) == 0 {
+		if len(unresolved) == 0 {
 			break
 		}
-		pending := make([]string, 0, len(remaining))
-		for p := range remaining {
-			pending = append(pending, p)
-		}
-		args := append([]string{"diff", "--name-only", ref, "--"}, pending...)
-		out, err := g.run(args...)
-		if err != nil {
-			continue
-		}
-		differing := make(map[string]bool)
-		for _, line := range strings.Split(out, "\n") {
-			if line = strings.TrimSpace(line); line != "" {
-				differing[line] = true
+		refBlobs := g.lsTreeBlobs(ref, unresolved)
+		var stillUnresolved []string
+		for _, p := range unresolved {
+			if sha := refBlobs[p]; sha != "" && sha == indexBlobs[p] {
+				confirmed[p] = true
+			} else {
+				stillUnresolved = append(stillUnresolved, p)
 			}
 		}
-		for _, p := range pending {
-			if !differing[p] {
-				delete(remaining, p)
-			}
-		}
+		unresolved = stillUnresolved
 	}
 
 	var skew []string
 	for _, p := range paths {
-		if !remaining[p] {
+		if confirmed[p] {
 			skew = append(skew, p)
 		}
 	}
 	return skew
+}
+
+// literalPathspecs wraps each path in the `:(literal)` pathspec magic so
+// glob/magic characters in a real filename (`?`, `*`, `[`, a leading `:`)
+// are matched as literal bytes rather than reinterpreted by git.
+func literalPathspecs(paths []string) []string {
+	specs := make([]string, len(paths))
+	for i, p := range paths {
+		specs[i] = ":(literal)" + p
+	}
+	return specs
+}
+
+// lsFilesStagedBlobs returns each path's staged (index) blob sha, keyed by
+// path (git ls-files -s -z). A path this cannot resolve — including a
+// staged deletion, which is in the index status but not the index tree — is
+// simply absent from the result.
+func (g *Git) lsFilesStagedBlobs(paths []string) map[string]string {
+	args := append([]string{"ls-files", "-s", "-z", "--"}, literalPathspecs(paths)...)
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return nil
+	}
+	blobs := make(map[string]string, len(paths))
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		meta, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		// Format: "<mode> <sha> <stage>".
+		fields := strings.Fields(meta)
+		if len(fields) < 2 {
+			continue
+		}
+		blobs[path] = fields[1]
+	}
+	return blobs
+}
+
+// lsTreeBlobs returns each path's blob sha on ref, keyed by path (git
+// ls-tree -z <ref>). A path absent from ref is simply absent from the
+// result.
+func (g *Git) lsTreeBlobs(ref string, paths []string) map[string]string {
+	args := append([]string{"ls-tree", "-z", ref, "--"}, literalPathspecs(paths)...)
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return nil
+	}
+	blobs := make(map[string]string, len(paths))
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		meta, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		// Format: "<mode> <type> <sha>".
+		fields := strings.Fields(meta)
+		if len(fields) < 3 {
+			continue
+		}
+		blobs[path] = fields[2]
+	}
+	return blobs
 }
 
 // CheckUncommittedWork performs a comprehensive check for uncommitted work.
