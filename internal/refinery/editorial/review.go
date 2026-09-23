@@ -256,14 +256,6 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	if err != nil {
 		return failureResult(deps, req, BinaryMissing, err.Error(), 0)
 	}
-	if err := AssertVersion(manifest, cfg, req.RigDir, req.RepoDir); err != nil {
-		var ce *ClassifiedError
-		class := VersionMismatch
-		if errors.As(err, &ce) {
-			class = ce.Class
-		}
-		return failureResult(deps, req, class, err.Error(), 0)
-	}
 
 	if req.Landed != nil && req.RehearsedHead != "" {
 		return failureResult(deps, req, ConfigError, "--rehearsed and --landed are mutually exclusive: a landed review derives its range from the commit graph", 0)
@@ -301,6 +293,78 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 			return failureResult(deps, req, Tooling, fmt.Sprintf("merge-base: %v", err), 0)
 		}
 	}
+
+	// Whether this diff touches the deployed rubric file has to be known
+	// before AssertVersion runs, not just before the criterion guard below:
+	// AssertVersion's ordinary path hashes the rubric off req.RepoDir's
+	// working tree, which the single-review CLI path has already checked out
+	// onto the reviewed head — the branch's own rubric, if the branch
+	// touched it. Asserting against that would let a branch grade itself
+	// under whatever rubric it proposes, so a touch routes the version
+	// assertion (and, below, the gate script's own cwd) onto the target's
+	// committed rubric instead (gt-7bvf).
+	rubricTouched, rubricRel, err := RubricTouched(deps.Git, req.RepoDir, manifest.Rubric.Path, mergeBase, head)
+	if err != nil {
+		return failureResult(deps, req, Tooling, fmt.Sprintf("rubric touch check: %v", err), 0)
+	}
+
+	reviewDir := req.RepoDir
+	if rubricTouched {
+		// The pre-change rubric has to be read from a ref that does NOT
+		// already carry this diff. For an ordinary (non-landed) review,
+		// target has not merged the branch yet, so origin/<target> IS the
+		// pre-change state. A landed/retro review is different: the landed
+		// commit is already on origin/<target>'s first-parent chain, so that
+		// ref carries the very rubric this diff introduced — reading it there
+		// would grade the change under its own rules, exactly the
+		// self-grading this gate exists to prevent. mergeBase (the landed
+		// range's Base, the merge point before this diff landed) is the
+		// pre-change ref in that case instead (gt-7bvf).
+		preChangeRef := "origin/" + req.Target
+		preChangeDesc := preChangeRef
+		if req.Landed != nil {
+			preChangeRef = mergeBase
+			preChangeDesc = fmt.Sprintf("pre-landing base %s", mergeBase)
+		}
+		targetRubric, err := deps.Git.ShowFile(preChangeRef, rubricRel)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("read pre-change rubric %s:%s: %v", preChangeDesc, rubricRel, err), 0)
+		}
+		if err := AssertVersionWithRubric(manifest, cfg, req.RigDir, targetRubric); err != nil {
+			var ce *ClassifiedError
+			class := VersionMismatch
+			if errors.As(err, &ce) {
+				class = ce.Class
+			}
+			return failureResult(deps, req, class, err.Error(), 0)
+		}
+		// The gate script must never read the rubric off a checkout of the
+		// reviewed head: om-gate.sh runs `om review` at its cwd, so a diff
+		// that changes .om.json would otherwise be scored against its own
+		// proposed criteria. A fresh detached worktree of preChangeRef
+		// carries the deployed (pre-change) rubric regardless of what
+		// req.RepoDir has checked out, and (being a full worktree, not a
+		// shallow one) still resolves --base/--head against mergeBase/head
+		// below by sha.
+		rehearsal, err := BeginRehearsalAt(deps.Git, preChangeRef, req.Target)
+		if err != nil {
+			return failureResult(deps, req, Tooling, fmt.Sprintf("rubric review worktree: %v", err), 0)
+		}
+		defer func() {
+			if closeErr := rehearsal.Close(); closeErr != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "[editorial] warning: %v\n", closeErr)
+			}
+		}()
+		reviewDir = rehearsal.dir
+	} else if err := AssertVersion(manifest, cfg, req.RigDir, req.RepoDir); err != nil {
+		var ce *ClassifiedError
+		class := VersionMismatch
+		if errors.As(err, &ce) {
+			class = ce.Class
+		}
+		return failureResult(deps, req, class, err.Error(), 0)
+	}
+
 	// targetTip is target's own tip at review time — see Note.ReviewedTargetTip
 	// for why this must be resolved separately from mergeBase. A landed review
 	// has no "since review" window to measure (the review IS the after-the-fact
@@ -489,7 +553,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	var lastStderr string
 	retries := 0
 	for attempt := 0; ; attempt++ {
-		stderr, exitCode, execErr := deps.Exec(ctx, scriptPath, args, req.RepoDir)
+		stderr, exitCode, execErr := deps.Exec(ctx, scriptPath, args, reviewDir)
 		lastStderr = stderr
 		v, class, err = classifyOutcome(execErr, exitCode, stderr, verdictPath)
 		if class == "" {
@@ -723,13 +787,22 @@ type Rehearsal struct {
 // BeginRehearsal creates the throwaway detached worktree a Rehearsal runs in,
 // seeded (detached) at origin/<target>. Close must be called to remove it.
 func BeginRehearsal(g *git.Git, target string) (*Rehearsal, error) {
+	return BeginRehearsalAt(g, "origin/"+target, target)
+}
+
+// BeginRehearsalAt is BeginRehearsal for a caller whose seed ref is not
+// origin/<target> itself — a landed/retro review of a diff that touched the
+// rubric, whose pre-change state has already been folded into origin/<target>
+// by the very commit under review (gt-7bvf). target only records what a
+// later Branch call would merge onto; it does not affect the seed.
+func BeginRehearsalAt(g *git.Git, ref, target string) (*Rehearsal, error) {
 	dir, err := os.MkdirTemp("", "gt-mq-rehearse-*")
 	if err != nil {
 		return nil, fmt.Errorf("mktemp rehearsal worktree: %w", err)
 	}
-	if err := g.WorktreeAddDetached(dir, "origin/"+target); err != nil {
+	if err := g.WorktreeAddDetached(dir, ref); err != nil {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("add rehearsal worktree from origin/%s: %w", target, err)
+		return nil, fmt.Errorf("add rehearsal worktree from %s: %w", ref, err)
 	}
 	return &Rehearsal{live: g, dir: dir, wt: git.NewGit(dir), target: target}, nil
 }

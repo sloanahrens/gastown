@@ -646,9 +646,9 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	cleanupWorktree, err := e.beginWorktreeOwnedMerge("merge")
 	if err != nil {
 		return ProcessResult{
-			Success:                false,
+			Success:                 false,
 			WorktreeExternallyDirty: errors.Is(err, ErrExternallyDirtyWorktree),
-			Error:                  err.Error(),
+			Error:                   err.Error(),
 		}
 	}
 	defer cleanupWorktree()
@@ -1855,6 +1855,8 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		return false
 	}
 
+	e.checkAndEscalateRubricChange(mr, result)
+
 	// Update and close the MR bead
 	if mr.ID != "" && !e.isSyntheticMergeMechanicsMR(mr) {
 		if err := e.closeMRWithReason(mr, string(CloseReasonMerged), result.MergeCommit); err != nil {
@@ -1930,6 +1932,47 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// 5. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
 	return true
+}
+
+// checkAndEscalateRubricChange detects whether the merge just landed by mr
+// touched the rig's deployed rubric (.om.json), and if so escalates to the
+// operator rather than restamping the harness manifest — the batch path's
+// half of the CLI post-merge protection (mq.go's
+// detectRubricChangeAfterMerge/escalateRubricChange) (gt-7bvf).
+func (e *Engineer) checkAndEscalateRubricChange(mr *MRInfo, result ProcessResult) {
+	manifest, err := editorial.LoadManifest(e.rig.Path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: loading harness manifest for %s: %v\n", mr.ID, err)
+		}
+		return
+	}
+	landedArg := strings.TrimSpace(result.MergeCommit)
+	if landedArg == "" {
+		landedArg = strings.TrimSpace(mr.CommitSHA)
+	}
+	touched, rel, sha, err := editorial.RubricChangeAfterMerge(e.git, e.workDir, manifest, landedArg, mr.Target)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: rubric change check for %s: %v\n", mr.ID, err)
+	}
+	// touched can be true alongside a non-nil err: an unresolvable rubric
+	// path fails closed rather than being read as untouched (gt-7bvf).
+	if !touched {
+		return
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Rubric changed by %s; escalated to the operator (the manifest is not re-stamped automatically)\n", mr.ID)
+	msg := fmt.Sprintf("rubric changed on %s: re-stamp the harness manifest from main content (rig=%s rubric=%s sha256=%s MR=%s)", mr.Target, e.rig.Name, rel, sha, mr.ID)
+	escalateCmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "rubric-changed", msg)
+	util.SetDetachedProcessGroup(escalateCmd)
+	escalateCmd.Dir = e.workDir
+	if err := escalateCmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: rubric-change escalation failed: %v\n", err)
+	}
+	if mr.ID != "" {
+		if commentErr := e.beads.AddComment(mr.ID, fmt.Sprintf("rubric_changed_escalated: %s sha256=%s", rel, sha)); commentErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not record rubric_changed_escalated comment on %s: %v\n", mr.ID, commentErr)
+		}
+	}
 }
 
 func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {

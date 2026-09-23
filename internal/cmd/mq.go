@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
@@ -763,8 +765,78 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
+	handlePostMergeRubricChange(r.Path, r.Name, rigGit, result.MR, branchCleanup.SubmittedHead)
+
 	printMQPostMergeResult(result, branchCleanup)
 	return nil
+}
+
+// detectRubricChangeAfterMerge reports whether the merge that produced head
+// touched the rig's deployed rubric (.om.json), and the sha256 of what
+// landed there. It never writes to the manifest: re-stamping stays a
+// deliberate operator step; the caller escalates instead via
+// escalateRubricChange (gt-7bvf).
+//
+// touched=false, nil means a rig with no manifest deployed or no rubric
+// configured, or a merge that didn't touch it. touched=true with a non-nil
+// err means this could not fully check the change (an unresolvable rubric
+// path, an unreadable landed blob) and fails closed rather than being read
+// as untouched. touched=false with a non-nil err means the landed range
+// itself could not be reconstructed (ResolveLandedRange refuses a
+// non-mergeable landing) — the caller surfaces that as a warning, never a
+// reason to fail a merge that already landed and closed.
+func detectRubricChangeAfterMerge(rigDir string, rigGit *git.Git, mr *refinery.MergeRequest, head string) (touched bool, rel, sha string, err error) {
+	if mr == nil {
+		return false, "", "", nil
+	}
+	manifest, err := editorial.LoadManifest(rigDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, "", "", nil
+		}
+		return false, "", "", fmt.Errorf("loading harness manifest: %w", err)
+	}
+	landedArg := strings.TrimSpace(mr.MergeCommit)
+	if landedArg == "" {
+		landedArg = strings.TrimSpace(head)
+	}
+	// repoRootDir only anchors the rigRoot math rubricRelPath does for an
+	// absolute rubric path (two directories up from repoDir); it need not
+	// exist on disk, and either clone yields the same rigRoot.
+	repoRootDir := filepath.Join(rigDir, "refinery", "rig")
+	return editorial.RubricChangeAfterMerge(rigGit, repoRootDir, manifest, landedArg, mr.TargetBranch)
+}
+
+// handlePostMergeRubricChange runs detectRubricChangeAfterMerge and, when it
+// reports touched, escalates to the operator and records
+// rubric_changed_escalated on the MR bead. touched can be true alongside a
+// detection error (an unresolvable rubric path fails closed rather than
+// being read as "untouched"), so escalation runs whenever touched is true,
+// not only on a clean detection (gt-7bvf).
+func handlePostMergeRubricChange(rigPath, rigName string, rigGit *git.Git, mr *refinery.MergeRequest, submittedHead string) {
+	touched, rel, sha, checkErr := detectRubricChangeAfterMerge(rigPath, rigGit, mr, submittedHead)
+	if checkErr != nil {
+		style.PrintWarning("rubric change check: %v", checkErr)
+	}
+	if !touched {
+		return
+	}
+	fmt.Printf("  %s Rubric changed by this merge; escalated to the operator (the manifest is not re-stamped automatically)\n", style.Warning.Render("⚠"))
+	escalateRubricChange(rigName, mr.TargetBranch, rel, sha, mr.ID)
+	if commentErr := beads.New(rigPath).AddComment(mr.ID, fmt.Sprintf("rubric_changed_escalated: %s sha256=%s", rel, sha)); commentErr != nil {
+		style.PrintWarning("could not record rubric_changed_escalated comment on %s: %v", mr.ID, commentErr)
+	}
+}
+
+// escalateRubricChange notifies the operator that a merge changed the rig's
+// deployed rubric, without touching the harness manifest. Best-effort: a
+// failed escalation is logged, not fatal — the merge already landed.
+func escalateRubricChange(rigName, target, rubricPath, sha, mrID string) {
+	msg := fmt.Sprintf("rubric changed on %s: re-stamp the harness manifest from main content (rig=%s rubric=%s sha256=%s MR=%s)", target, rigName, rubricPath, sha, mrID)
+	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "rubric-changed", msg)
+	if err := cmd.Run(); err != nil {
+		style.PrintWarning("rubric-change escalation failed: %v", err)
+	}
 }
 
 // resolveMQPostMerge runs the MR-driven cleanup and, when ref resolves to no MR
