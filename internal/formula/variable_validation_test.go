@@ -169,6 +169,31 @@ required = true
 	}
 }
 
+// TestUsedTemplateVariables pins what counts as a placeholder: only {{name}}, so
+// a var can be declared required and still not be demanded of a materializer.
+func TestUsedTemplateVariables(t *testing.T) {
+	f := &Formula{
+		Description: "uses {{alpha}}",
+		Steps: []Step{
+			{ID: "one", Title: "{{beta}}", Description: "{{alpha}} again"},
+			{ID: "two", Acceptance: "{{gamma}} passes"},
+		},
+		Vars: map[string]Var{
+			"alpha": {},
+			"beta":  {},
+			"gamma": {},
+			"delta": {Required: true}, // single-braced prose below
+		},
+	}
+	f.Steps[0].Description += " and {delta} in prose"
+
+	want := []string{"alpha", "beta", "gamma"}
+	got := f.UsedTemplateVariables()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("UsedTemplateVariables() = %v, want %v", got, want)
+	}
+}
+
 // TestMolConvoyFeedFormula_VariableValidation is a regression test for issue #1133.
 // The mol-convoy-feed formula uses template variables like {{ready_count}} that
 // aren't defined in [vars], causing wisp creation to fail.

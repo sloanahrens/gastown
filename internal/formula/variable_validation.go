@@ -61,6 +61,38 @@ func isHandlebarsKeyword(name string) bool {
 //
 // Variables with any definition in [vars] (even with default="") are considered valid.
 func (f *Formula) ValidateTemplateVariables() error {
+	// Extract all variables used
+	usedVars := f.UsedTemplateVariables()
+
+	// Check each against defined vars and inputs
+	var undefined []string
+	for _, v := range usedVars {
+		if _, defined := f.Vars[v]; defined {
+			continue
+		}
+		if _, defined := f.Inputs[v]; defined {
+			continue
+		}
+		undefined = append(undefined, v)
+	}
+
+	if len(undefined) > 0 {
+		return fmt.Errorf("undefined template variables: %s (add to [vars] section with default=\"\" for computed values)",
+			strings.Join(undefined, ", "))
+	}
+
+	return nil
+}
+
+// UsedTemplateVariables returns the {{variable}} placeholders the formula's own
+// prose uses, deduplicated and sorted. It is the set a materializer has to supply
+// values for: bd's bond rejects a proto with an unfilled placeholder.
+//
+// Only {{name}} counts. A bare {name} substitution or an unbraced mention is not
+// a placeholder and is not reported, so a var can be declared required and still
+// not appear here (mol-shutdown-dance's {target}; mol-polecat-conflict-resolve's
+// prose-only original_mr).
+func (f *Formula) UsedTemplateVariables() []string {
 	// Collect all text that might contain variables
 	var allText strings.Builder
 
@@ -73,6 +105,8 @@ func (f *Formula) ValidateTemplateVariables() error {
 		allText.WriteString(step.Title)
 		allText.WriteString("\n")
 		allText.WriteString(step.Description)
+		allText.WriteString("\n")
+		allText.WriteString(step.Acceptance)
 		allText.WriteString("\n")
 	}
 
@@ -99,6 +133,8 @@ func (f *Formula) ValidateTemplateVariables() error {
 		allText.WriteString(tmpl.Title)
 		allText.WriteString("\n")
 		allText.WriteString(tmpl.Description)
+		allText.WriteString("\n")
+		allText.WriteString(tmpl.Acceptance)
 		allText.WriteString("\n")
 	}
 
@@ -136,26 +172,6 @@ func (f *Formula) ValidateTemplateVariables() error {
 		allText.WriteString("\n")
 	}
 
-	// Extract all variables used
-	usedVars := ExtractTemplateVariables(allText.String())
-
-	// Check each against defined vars and inputs
-	var undefined []string
-	for _, v := range usedVars {
-		if _, defined := f.Vars[v]; defined {
-			continue
-		}
-		if _, defined := f.Inputs[v]; defined {
-			continue
-		}
-		undefined = append(undefined, v)
-	}
-
-	if len(undefined) > 0 {
-		return fmt.Errorf("undefined template variables: %s (add to [vars] section with default=\"\" for computed values)",
-			strings.Join(undefined, ", "))
-	}
-
-	return nil
+	return ExtractTemplateVariables(allText.String())
 }
 
