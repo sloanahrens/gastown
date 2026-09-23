@@ -157,6 +157,23 @@ func TestRetryableBdConnectionFailure(t *testing.T) {
 	}
 }
 
+// TestContainerUnavailableNeverExcusesAProductionFailure pins the guard that
+// the container-backed suites' skip rides on (gt-cbtl): the predicate is scoped
+// to a wrapper built for a test container, so no production caller can turn a
+// real failure into a skip.
+func TestContainerUnavailableNeverExcusesAProductionFailure(t *testing.T) {
+	lost := fmt.Errorf("bd init: %s\n%s", observedIoTimeoutStderr, observedOpenFailureStderr)
+
+	production := New(t.TempDir())
+	if production.ContainerUnavailable(lost) {
+		t.Error("a production wrapper reported the test container unavailable")
+	}
+	container := NewIsolatedWithPort(t.TempDir(), 55107)
+	if !container.ContainerUnavailable(lost) {
+		t.Error("a wrapper for the test container did not report it unavailable")
+	}
+}
+
 // TestBdContainerRetryWindowStopsTheLoop pins the bound that the attempt count
 // alone does not give: attempts run subprocesses, so a container that stalls
 // rather than refuses must not be retried on count alone. The window is aged
