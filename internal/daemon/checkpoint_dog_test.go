@@ -435,3 +435,118 @@ func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T)
 		t.Errorf("checkpoint commit changed %q, want only wip.txt", got)
 	}
 }
+
+// TestCheckpointWorktreeExcludesThrowawayFiles reproduces gt-ozo4: a polecat
+// wrote a throwaway diagnostic test file in its worktree to poke at a live
+// system, and deleted it minutes later. The checkpoint dog's `git add -A`
+// snapshotted it mid-window, and gt done's squash carries HEAD's *tree* into
+// the submitted commit — squashing rewrites commit messages, not content — so
+// the scratch file would have landed on main. The checkpoint must snapshot the
+// real work and leave the throwaway file untracked where the polecat left it.
+func TestCheckpointWorktreeExcludesThrowawayFiles(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.MkdirAll(filepath.Join(workDir, "internal", "util"), 0o755); err != nil {
+		t.Fatalf("setup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+
+	// Real work in progress, alongside the throwaway diagnostic file.
+	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n\n// real work\n"), 0o644); err != nil {
+		t.Fatalf("modify source: %v", err)
+	}
+	throwaway := filepath.Join(workDir, "internal", "util", "zz_livecheck_test.go")
+	if err := os.WriteFile(throwaway, []byte("package util\n"), 0o644); err != nil {
+		t.Fatalf("write throwaway: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "internal/util/client.go" {
+		t.Fatalf("checkpoint commit changed %q, want only internal/util/client.go", got)
+	}
+	if tracked := strings.TrimSpace(mustRunGit(t, workDir, "ls-files", "--", "internal/util/zz_livecheck_test.go")); tracked != "" {
+		t.Fatalf("throwaway file reached the branch: %q", tracked)
+	}
+	if _, err := os.Stat(throwaway); err != nil {
+		t.Fatalf("throwaway file was removed from the worktree: %v", err)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "status", "--porcelain", "--", "internal/util/zz_livecheck_test.go")); got != "?? internal/util/zz_livecheck_test.go" {
+		t.Fatalf("throwaway file status = %q, want it left untracked", got)
+	}
+}
+
+// TestCheckpointWorktreeSkipsThrowawayOnlyChanges is the boundary for the rule
+// above: when a throwaway file is the only thing dirty, the checkpoint has
+// nothing to protect and must not create a commit for it.
+func TestCheckpointWorktreeSkipsThrowawayOnlyChanges(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.MkdirAll(filepath.Join(workDir, "internal", "util"), 0o755); err != nil {
+		t.Fatalf("setup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+	before := mustRunGit(t, workDir, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "zz_livecheck_test.go"), []byte("package util\n"), 0o644); err != nil {
+		t.Fatalf("write throwaway: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree created a checkpoint for a throwaway file")
+	}
+	if after := mustRunGit(t, workDir, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("checkpointWorktree advanced HEAD to %s, want %s", after, before)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "status", "--porcelain", "--", "internal/util/zz_livecheck_test.go")); got != "?? internal/util/zz_livecheck_test.go" {
+		t.Fatalf("throwaway file status = %q, want it left untracked", got)
+	}
+}
+
+// TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule is the
+// false-positive control for the throwaway rule. The rule governs what a
+// checkpoint ADDS: a repository that already tracks such a name keeps being
+// checkpointed, because a modification to a tracked file is real work whatever
+// the file is called.
+func TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.WriteFile(filepath.Join(workDir, "zz_fixture_test.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(workDir, "zz_fixture_test.go"), []byte("package main\n\n// real work\n"), 0o644); err != nil {
+		t.Fatalf("modify fixture: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree refused a modification to a tracked file")
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "zz_fixture_test.go" {
+		t.Fatalf("checkpoint commit changed %q, want zz_fixture_test.go", got)
+	}
+}

@@ -241,8 +241,20 @@ func squashMatchingCommits(workDir, baseRef string, matches func(string) bool, a
 	return wipCount, nil
 }
 
-// gitOutput runs a git command and returns trimmed stdout.
+// gitOutput runs a git command and returns trimmed stdout. Callers that parse
+// a -z listing must use gitOutputRaw instead: trimming the blob strips
+// whitespace that is part of the last path, which would change how that path
+// classifies.
 func gitOutput(workDir string, args ...string) (string, error) {
+	out, err := gitOutputRaw(workDir, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// gitOutputRaw runs a git command and returns stdout verbatim.
+func gitOutputRaw(workDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
@@ -258,5 +270,5 @@ func gitOutput(workDir string, args ...string) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
 }

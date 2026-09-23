@@ -76,6 +76,8 @@ var (
 	doneTarget        string
 	doneSkipVerify    bool
 	doneAllowReverts  bool
+
+	doneAllowThrowawayPaths bool
 )
 
 // Valid exit types for gt done
@@ -1037,6 +1039,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
 	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
+	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -1178,6 +1181,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// Unstage runtime/ephemeral artifacts using the centralized git policy.
 				for _, path := range workStatus.RuntimeArtifactPaths() {
 					_ = g.ResetFiles(path)
+				}
+				// Unstage throwaway files (gt-ozo4). This runs `git add -A` for the
+				// same reason the checkpoint dog does, and would sweep up the same
+				// scratch, /tmp, editor-backup and patch-leftover files. They stay
+				// in the worktree, untracked, and are named so the polecat sees
+				// which of them it is not getting a safety-net commit for.
+				if throwaway := checkpoint.ThrowawayPaths(workStatus.UntrackedFiles); len(throwaway) > 0 {
+					_ = g.ResetFiles(throwaway...)
+					style.PrintWarning("auto-commit: left %d throwaway file(s) uncommitted: %s",
+						len(throwaway), strings.Join(throwaway, ", "))
 				}
 				// Unstage deletions of tracked files. A safety-net auto-commit should
 				// preserve work (additions + modifications), never destroy it (deletions).
@@ -1575,6 +1588,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		if doneAllowReverts {
 			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
 		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {
+			return err
+		}
+
+		// Refuse a branch that would add throwaway files to the target
+		// (gt-ozo4). Checked here, before the commit-message squash below
+		// rewrites history, so a refusal leaves the branch exactly as the
+		// polecat left it.
+		if doneAllowThrowawayPaths {
+			style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", contaminationBase)
+		} else if err := reportThrowawayPaths(g, contaminationBase); err != nil {
 			return err
 		}
 
