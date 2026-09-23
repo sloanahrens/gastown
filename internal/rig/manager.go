@@ -846,8 +846,13 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	if defaultAgentName == "" {
 		defaultAgentName = string(config.AgentClaude)
 	}
-	defaultPreset := config.GetAgentPresetByName(defaultAgentName)
-	if defaultPreset != nil && defaultPreset.HooksProvider != "" {
+	// default_agent may be a custom town agent; scaffold for its harness
+	// and provision commands under the harness name (claude-9a8).
+	defaultPreset, ok := config.ResolveAgentPreset(defaultAgentName, m.townRoot, "")
+	if ok {
+		defaultAgentName = string(defaultPreset.Name)
+	}
+	if ok && defaultPreset.HooksProvider != "" {
 		if err := hooks.InstallForRole(defaultPreset.HooksProvider, polecatsPath, polecatsPath, "polecat",
 			defaultPreset.HooksDir, defaultPreset.HooksSettingsFile, defaultPreset.Command, defaultPreset.HooksUseSettingsDir); err != nil {
 			// Non-fatal: session startup will retry via EnsureSettingsForRole

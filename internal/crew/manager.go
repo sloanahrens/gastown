@@ -80,6 +80,25 @@ func validateSessionID(id string) error {
 	return nil
 }
 
+// harnessAgentName returns the preset name of the harness a crew worker runs:
+// the --agent override or the worker's configured agent, resolved through
+// custom town/rig agents (claude-9a8). Keying on rc.Provider misread
+// provider=deepseek command=claude as a non-Claude harness. Defaults to claude.
+func harnessAgentName(override, workerName, townRoot, rigPath string) string {
+	if override != "" {
+		if preset, ok := config.ResolveAgentPreset(override, townRoot, rigPath); ok {
+			return string(preset.Name)
+		}
+		return override
+	}
+	if rc := config.ResolveWorkerAgentConfig(workerName, townRoot, rigPath); rc != nil {
+		if preset, ok := config.HarnessPreset(rc); ok {
+			return string(preset.Name)
+		}
+	}
+	return string(config.AgentClaude)
+}
+
 // buildResumeArgs validates the agent preset supports resume and returns the
 // flag(s) to append to the command string. agentName is the resolved agent
 // preset name (e.g. "claude", "gemini"). sessionID is "last" for auto-resume
@@ -767,14 +786,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 		// Determine agent preset for resume flag.
 		// Try worker-level agent config first, fall back to "claude".
-		agentName := opts.AgentOverride
-		if agentName == "" {
-			if rc := config.ResolveWorkerAgentConfig(name, townRoot, m.rig.Path); rc != nil && rc.Provider != "" {
-				agentName = rc.Provider
-			} else {
-				agentName = "claude"
-			}
-		}
+		agentName := harnessAgentName(opts.AgentOverride, name, townRoot, m.rig.Path)
 		resumeArgs, err := buildResumeArgs(agentName, opts.ResumeSessionID)
 		if err != nil {
 			return err
@@ -879,14 +891,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Workspace trust dialog is independent of bypass permissions and can appear
 	// for any agent, so we always check for non-interactive sessions.
 	if !opts.Interactive {
-		agentName := opts.AgentOverride
-		if agentName == "" {
-			if rc := config.ResolveWorkerAgentConfig(name, townRoot, m.rig.Path); rc != nil && rc.Provider != "" {
-				agentName = rc.Provider
-			} else {
-				agentName = "claude"
-			}
-		}
+		agentName := harnessAgentName(opts.AgentOverride, name, townRoot, m.rig.Path)
 		preset := config.GetAgentPresetByName(agentName)
 		if preset != nil && preset.EmitsPermissionWarning {
 			if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
