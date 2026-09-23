@@ -3412,6 +3412,33 @@ func (g *Git) UnpushedCommitsLocal() (int, error) {
 	return g.unpushedCommits(g.BranchPreservationStatusLocal)
 }
 
+// UnpushedCommitsLocalFailClosed is UnpushedCommitsLocal with the opposite
+// posture on an unresolvable comparison. UnpushedCommitsLocal treats
+// errNoComparisonRefs as "nothing to preserve" (0, nil), which is correct for
+// a caller that only reports a count. A caller about to discard a worktree
+// because it looks clean cannot take that shortcut: a branch that was never
+// fetched into this clone (no exact-branch, upstream, or default-branch ref
+// to compare against) is exactly the case with no evidence either way, and
+// reading "no evidence" as "nothing to preserve" is the silent-discard bug
+// this exists to close (gt-utt4). This reports at least 1 whenever the
+// comparison itself could not be made, so the caller treats the branch as
+// having unpreserved work rather than as clean.
+func (g *Git) UnpushedCommitsLocalFailClosed() (int, error) {
+	branch, branchErr := g.CurrentBranch()
+	if branchErr != nil || branch == "" || branch == "HEAD" {
+		branch = ""
+	}
+
+	status, err := g.BranchPreservationStatusLocal(branch, "origin", nil)
+	if err != nil {
+		if errors.Is(err, errNoComparisonRefs) {
+			return 1, nil
+		}
+		return 0, err
+	}
+	return status.UnpreservedPatchCount, nil
+}
+
 // unpushedCommits is the shared body: read the current branch, then count the
 // patches branchPreservation would not find preserved. Taking the status
 // lookup as a parameter is what keeps the local and live variants from
@@ -4213,6 +4240,17 @@ func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 // when it does this once per seat in the town.
 func (g *Git) CheckUncommittedWorkLocal() (*UncommittedWorkStatus, error) {
 	return g.checkUncommittedWork(g.UnpushedCommitsLocal)
+}
+
+// CheckUncommittedWorkLocalFailClosed is CheckUncommittedWorkLocal built on
+// UnpushedCommitsLocalFailClosed instead of UnpushedCommitsLocal: an
+// unresolvable comparison reports the branch as having unpreserved work
+// rather than as clean. Use this where the caller is about to discard the
+// worktree (feed a fresh polecat, reuse the seat) if it looks clean;
+// UnpushedCommitsLocal's 0-on-no-evidence reading stays correct for callers
+// that only report a count.
+func (g *Git) CheckUncommittedWorkLocalFailClosed() (*UncommittedWorkStatus, error) {
+	return g.checkUncommittedWork(g.UnpushedCommitsLocalFailClosed)
 }
 
 // checkUncommittedWork is the shared body. The unpushed-commit count is the

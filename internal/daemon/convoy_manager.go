@@ -15,6 +15,8 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/util"
@@ -168,12 +170,20 @@ type ConvoyManager struct {
 	escalate        func(key, source, message string)
 	clearEscalation func(reason string, keys ...string)
 
-	// originBranchesCache caches each rig's origin polecat branch list for the
-	// duration of one stranded scan, so a convoy with many ready issues (or an
-	// unreachable remote) costs at most one ls-remote per rig. Cleared at the
-	// top of every scan by resetOriginBranches. Protected by originBranchesMu.
-	originBranchesCache map[string][]string
+	// originBranchesCache caches each rig's origin polecat branch list (and any
+	// lookup error) for the duration of one stranded scan, so a convoy with
+	// many ready issues (or an unreachable remote) costs at most one ls-remote
+	// per rig. Cleared at the top of every scan by resetOriginBranches.
+	// Protected by originBranchesMu.
+	originBranchesCache map[string]originBranchesResult
 	originBranchesMu    sync.Mutex
+
+	// scanAlertKeysClaimed tracks dead-holder alert keys already raised or
+	// cleared during the current scan, so N ready issues sharing one per-rig
+	// condition (the origin remote being unreadable) cost one gt escalate
+	// subprocess, not N. Reset alongside originBranchesCache. Protected by
+	// originBranchesMu.
+	scanAlertKeysClaimed map[string]bool
 
 	// isRigParked reports whether a rig is currently parked/docked.
 	// Parked rigs are skipped during event polling. May be nil (never parked).
@@ -930,7 +940,19 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		if branch, ok := m.survivingBranchFor(rig, issueID); ok {
+		if assignee := m.issueAssignee(rig, issueID); assignee != "" {
+			// A known previous holder distinguishes "dead session, might have
+			// unpreserved work" from "never held, nothing to lose" — only the
+			// former needs the fail-closed origin+worktree check below
+			// (gt-utt4). Issues with no assignee fall through to the
+			// fail-open surviving-branch check in the else branch below.
+			if feed, escalateMsg := m.resolveDeadHolderWork(rig, assignee, issueID); !feed {
+				if escalateMsg != "" {
+					m.logger("Convoy %s: %s", c.ID, escalateMsg)
+				}
+				continue
+			}
+		} else if branch, ok := m.survivingBranchFor(rig, issueID); ok {
 			// The previous holder is gone, but its branch is still on origin:
 			// the work is preserved — either mid-flight (killed by a town
 			// halt or park, which never runs `gt done`) or already submitted
@@ -1064,32 +1086,49 @@ func (m *ConvoyManager) survivingBranchFor(rig, issueID string) (string, bool) {
 	return matches[0], true
 }
 
+// originBranchesResult is one rig's origin polecat-branch listing, or the
+// error that prevented it. Kept together in the cache so a caller that must
+// fail closed on an unreadable remote (resolveDeadHolderWork) and one that
+// fails open on it (survivingBranchFor, for issues with no known holder) can
+// share the same single lookup per rig per scan.
+type originBranchesResult struct {
+	branches []string
+	err      error
+}
+
 // originBranches returns the polecat branches on the rig's origin remote,
 // caching the result for the duration of one stranded scan (see resetOriginBranches).
+// A lookup error is swallowed here (returns nil): this is the fail-open path
+// used for issues with no known previous holder, where there is nothing a
+// stale remote could cause to be discarded. Callers that need to know whether
+// the lookup actually succeeded use originBranchesWithErr.
 //
 // The cache matters: an ls-remote against an unreachable remote blocks for the
 // full query timeout, and scan holds scanMu for the whole cycle, so an
 // uncached lookup per ready issue would stall every other convoy's feed.
 // One ls-remote per rig per scan bounds that to a single timeout.
 func (m *ConvoyManager) originBranches(rig string) []string {
+	return m.originBranchesWithErr(rig).branches
+}
+
+// originBranchesWithErr is originBranches without swallowing the lookup
+// error, for callers that must fail closed rather than treat "unreadable" as
+// "empty" (gt-utt4).
+func (m *ConvoyManager) originBranchesWithErr(rig string) originBranchesResult {
 	m.originBranchesMu.Lock()
 	defer m.originBranchesMu.Unlock()
 
 	if m.originBranchesCache == nil {
-		m.originBranchesCache = make(map[string][]string)
+		m.originBranchesCache = make(map[string]originBranchesResult)
 	}
-	if branches, ok := m.originBranchesCache[rig]; ok {
-		return branches
+	if res, ok := m.originBranchesCache[rig]; ok {
+		return res
 	}
 
 	branches, err := listOriginBranchesFn(filepath.Join(m.townRoot, rig))
-	if err != nil {
-		// Fail open, and remember the failure for this scan only so a single
-		// unreachable remote is not retried once per ready issue.
-		branches = nil
-	}
-	m.originBranchesCache[rig] = branches
-	return branches
+	res := originBranchesResult{branches: branches, err: err}
+	m.originBranchesCache[rig] = res
+	return res
 }
 
 // resetOriginBranches drops the per-scan branch cache so the next scan sees
@@ -1097,6 +1136,7 @@ func (m *ConvoyManager) originBranches(rig string) []string {
 func (m *ConvoyManager) resetOriginBranches() {
 	m.originBranchesMu.Lock()
 	m.originBranchesCache = nil
+	m.scanAlertKeysClaimed = nil
 	m.originBranchesMu.Unlock()
 }
 
@@ -1121,6 +1161,239 @@ func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) bool {
 		return false
 	}
 	return strings.Contains(issue.Notes, refinery.MergeRejectionNoteMarker)
+}
+
+// issueAssignee returns issueID's assignee via the already-open per-rig
+// store, or "" if the store is unavailable, the issue can't be read, or it
+// has no assignee. An empty return is read by callers as "no known previous
+// holder" — the same fail-open posture as hasRejectionMarker, for the same
+// reason: a rig whose store never opened must not block dispatch of issues
+// unrelated to that gap.
+func (m *ConvoyManager) issueAssignee(rig, issueID string) string {
+	m.storesMu.Lock()
+	store := m.stores[rig]
+	m.storesMu.Unlock()
+	if store == nil {
+		return ""
+	}
+
+	issue, err := store.GetIssue(m.ctx, issueID)
+	if err != nil || issue == nil {
+		return ""
+	}
+	return issue.Assignee
+}
+
+// deadHolderWorktreeState is what resolveDeadHolderWork finds when it looks
+// at a dead holder's own worktree, past whatever survivingBranchFor already
+// found on origin. WorktreePath is "" when there is nothing to check —
+// either the assignee resolves to no worktree, or the worktree's current
+// branch does not encode issueID (the seat was reused, or reallocated to a
+// different bead since).
+type deadHolderWorktreeState struct {
+	WorktreePath string
+	Branch       string
+	Status       *git.UncommittedWorkStatus
+}
+
+// deadHolderWorktreeStateFn resolves a dead holder's worktree state. A var so
+// tests can substitute a fake without real git repos; production uses
+// defaultDeadHolderWorktreeState.
+var deadHolderWorktreeStateFn = defaultDeadHolderWorktreeState
+
+// defaultDeadHolderWorktreeState inspects the assignee's worktree directly,
+// using the same path resolution the deacon's stale-hook scan uses. Returns a
+// zero-value state (not an error) when there is simply nothing to check;
+// returns an error only when a worktree that should hold issueID's work could
+// not be read, which the caller must treat as "state undetermined" rather
+// than "clean" (gt-utt4).
+func defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+	path := deacon.AssigneeWorktreePath(townRoot, assignee)
+	if path == "" {
+		return deadHolderWorktreeState{}, nil
+	}
+
+	g := git.NewGit(path)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: %w", err)
+	}
+	meta, ok := polecat.ParseGeneratedBranchName(branch)
+	if !ok || meta.Issue != issueID {
+		// Not this issue's branch: the worktree was reused (or predates the
+		// generated-name convention). Nothing here is attributable to issueID.
+		return deadHolderWorktreeState{}, nil
+	}
+
+	// CheckUncommittedWorkLocalFailClosed, not CheckUncommittedWorkLocal: a
+	// clone that never fetched origin has no comparison ref for this branch,
+	// and the plain local check reads that as "0 unpushed" — the exact
+	// silent-discard this function exists to prevent (gt-utt4).
+	status, err := g.CheckUncommittedWorkLocalFailClosed()
+	if err != nil {
+		return deadHolderWorktreeState{}, fmt.Errorf("checking worktree state: %w", err)
+	}
+	return deadHolderWorktreeState{WorktreePath: path, Branch: branch, Status: status}, nil
+}
+
+// deadHolderAlertKey scopes an escalation to one issue's own dead-holder
+// worktree state (uncommitted edits, an unreadable worktree, a failed
+// preserve push).
+func deadHolderAlertKey(rig, issueID string) string {
+	return "daemon-convoy:dead-holder:" + rig + ":" + issueID
+}
+
+// deadHolderOriginAlertKey scopes an escalation to one rig's origin remote
+// being unreadable during dead-holder recovery. This is a per-rig condition,
+// not a per-issue one, so every ready issue on the same unreachable rig
+// shares one alert (and, via claimAlertOnceThisScan, one gt escalate call per
+// scan) instead of raising its own.
+func deadHolderOriginAlertKey(rig string) string {
+	return "daemon-convoy:dead-holder-origin:" + rig
+}
+
+// resolveDeadHolderWork decides whether it is safe to feed a fresh polecat
+// for issueID, whose readiness came from a dead assignee session (gt-utt4).
+// feed=true means neither the origin remote nor the holder's own worktree
+// found anything at risk. Every other outcome skips feeding this cycle and
+// raises or clears the relevant alert itself, so the alert tracks the
+// condition live rather than sticking once raised: a surviving branch or a
+// successfully preserved push skip quietly (escalateMsg==""); an unreadable
+// remote, an unreadable worktree, or uncommitted edits with no safe
+// auto-preserve skip and escalate.
+func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (feed bool, escalateMsg string) {
+	originKey := deadHolderOriginAlertKey(rig)
+	issueKey := deadHolderAlertKey(rig, issueID)
+
+	origin := m.originBranchesWithErr(rig)
+	if origin.err != nil {
+		msg := fmt.Sprintf("%s: origin branch state could not be determined (%s) — %s's session is dead and its work might be unpreserved, not re-slinging blind",
+			issueID, util.FirstLine(origin.err.Error()), assignee)
+		m.raiseDeadHolderAlert(originKey, msg)
+		return false, msg
+	}
+	m.clearDeadHolderAlert(originKey, "origin branch state now readable")
+
+	if matches := polecat.MatchSurvivingBranches(origin.branches, issueID); len(matches) > 0 {
+		m.logger("Convoy: %s has surviving branch %s on origin (dead holder %s) — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
+			issueID, matches[0], assignee, issueID, rig, matches[0])
+		m.clearDeadHolderAlert(issueKey, "surviving branch found on origin")
+		return false, ""
+	}
+
+	state, err := deadHolderWorktreeStateFn(m.townRoot, assignee, issueID)
+	if err != nil {
+		msg := fmt.Sprintf("%s: %s's worktree state could not be determined (%s), not re-slinging blind",
+			issueID, assignee, util.FirstLine(err.Error()))
+		m.raiseDeadHolderAlert(issueKey, msg)
+		return false, msg
+	}
+	if state.WorktreePath == "" {
+		m.clearDeadHolderAlert(issueKey, "no worktree attributable to this issue")
+		return true, ""
+	}
+
+	// Real uncommitted work — non-runtime modified/untracked/unmerged paths,
+	// or a stash — has no safe auto-preserve; there is nothing to push for
+	// it. Gas Town's own runtime dirt (.beads/, .claude/, CLAUDE.local.md,
+	// ...) is excluded via NonRuntimePaths the same way gt done and the
+	// deacon's stale-hook scan already exclude it, so leftover tool state
+	// left by the dead session does not block recovery forever.
+	dirt := state.Status.NonRuntimePaths()
+	if len(dirt) > 0 || state.Status.StashCount > 0 {
+		msg := fmt.Sprintf("%s: %s's worktree has uncommitted work (%d file(s), stash=%d) that cannot be auto-preserved by pushing — resolve by hand, then reopen",
+			issueID, assignee, len(dirt), state.Status.StashCount)
+		m.raiseDeadHolderAlert(issueKey, msg)
+		return false, msg
+	}
+	if state.Status.UnpushedCommits == 0 {
+		m.clearDeadHolderAlert(issueKey, "worktree clean, nothing to preserve")
+		return true, ""
+	}
+
+	// Clean of real dirt with commits that never reached origin: safe to
+	// publish, since this only pushes what the holder already committed.
+	if err := preserveWorktreeBranch(git.NewGit(state.WorktreePath), state.Branch); err != nil {
+		msg := fmt.Sprintf("%s: pushing %s's unpushed work on %s failed (%s), not re-slinging blind — resolve by hand, then reopen",
+			issueID, assignee, state.Branch, util.FirstLine(err.Error()))
+		m.raiseDeadHolderAlert(issueKey, msg)
+		return false, msg
+	}
+	m.logger("Convoy: %s's dead holder %s had unpushed commits on %s, pushed to preserve — skipping feed", issueID, assignee, state.Branch)
+	m.clearDeadHolderAlert(issueKey, "unpushed work pushed to preserve")
+	return false, ""
+}
+
+// raiseDeadHolderAlert escalates key at most once per stranded scan
+// (claimAlertOnceThisScan): repeated ready issues sharing a per-rig condition
+// must not each pay for their own synchronous gt escalate subprocess while
+// scanMu is held.
+func (m *ConvoyManager) raiseDeadHolderAlert(key, msg string) {
+	if m.escalate == nil || !m.claimAlertOnceThisScan(key) {
+		return
+	}
+	m.escalate(key, "daemon/convoy", msg)
+}
+
+// clearDeadHolderAlert is raiseDeadHolderAlert's counterpart: closes key at
+// most once per scan once the condition it guarded has resolved.
+func (m *ConvoyManager) clearDeadHolderAlert(key, reason string) {
+	if m.clearEscalation == nil || !m.claimAlertOnceThisScan(key) {
+		return
+	}
+	m.clearEscalation(reason, key)
+}
+
+// claimAlertOnceThisScan reports whether key has not yet been raised or
+// cleared during the current scan, claiming it if so. Reset alongside
+// originBranchesCache at the top of every scan (resetOriginBranches).
+func (m *ConvoyManager) claimAlertOnceThisScan(key string) bool {
+	m.originBranchesMu.Lock()
+	defer m.originBranchesMu.Unlock()
+	if m.scanAlertKeysClaimed == nil {
+		m.scanAlertKeysClaimed = make(map[string]bool)
+	}
+	if m.scanAlertKeysClaimed[key] {
+		return false
+	}
+	m.scanAlertKeysClaimed[key] = true
+	return true
+}
+
+// preserveWorktreeBranch pushes branch's tip to origin so it survives even
+// though the local worktree that made it is about to be replaced. Mirrors
+// preserveBranchBeforeNuke's fallback (internal/cmd/polecat.go): on a
+// rejected push (remote branch moved on), publish under a
+// <branch>-<sha7> side ref instead — that name cannot conflict, so a
+// rejection there means the remote itself is unusable.
+func preserveWorktreeBranch(g *git.Git, branch string) error {
+	tip, err := g.Rev("refs/heads/" + branch)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", branch, err)
+	}
+	tip = strings.TrimSpace(tip)
+	if tip == "" {
+		return fmt.Errorf("resolve %s: empty sha", branch)
+	}
+
+	pushTo := branch
+	if err := g.Push("origin", branch+":"+pushTo, false); err != nil {
+		pushTo = branch + "-" + deadHolderRefSuffixSHA(tip)
+		if fallbackErr := g.Push("origin", branch+":"+pushTo, false); fallbackErr != nil {
+			return fmt.Errorf("push %s:%s failed (%v) and fallback push %s:%s failed (%v)",
+				branch, branch, err, branch, pushTo, fallbackErr)
+		}
+	}
+	return g.VerifyPushedCommit("origin", pushTo, tip)
+}
+
+// deadHolderRefSuffixSHA is the short-sha suffix for a fallback preserve ref
+// (<branch>-<sha7>): enough to identify the commit, short enough to read.
+func deadHolderRefSuffixSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose

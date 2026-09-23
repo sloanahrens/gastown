@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -3407,5 +3408,656 @@ func TestOriginBranches_CachesPerScan(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Errorf("expected failed listings to be cached for the scan (3 total), got %d", got)
+	}
+}
+
+// --- gt-utt4: dead-holder worktree preservation ---
+//
+// These pin the fix for the reboot recurrence of gt-qw4u: a bead HOOKED to a
+// polecat whose session died (not rejected, not RECOVERED) is marked ready by
+// isReadyIssue on session-liveness alone. survivingBranchFor (gt-3qfp) only
+// catches work the holder managed to push. A branch that was committed but
+// never pushed — the common case for a session killed mid-work — left no
+// trace on origin at all, so the old code fed a fresh polecat from main and
+// silently discarded it.
+
+// runDeadHolderGit runs a git command in dir, failing the test on error.
+// GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM isolate it from the host's global and
+// system git config — a signing key, hooksPath, or init.defaultBranch set on
+// the developer's machine must not change whether these commits/pushes
+// succeed.
+func runDeadHolderGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// newDeadHolderWorktree creates a bare "origin" remote and a worktree cloned
+// from it, checked out on the given generated polecat branch — the layout
+// assigneeToWorktreePath resolves for assignee "<rig>/polecats/<name>".
+// Returns the worktree path and the bare repo path.
+func newDeadHolderWorktree(t *testing.T, townRoot, rig, name, branch string) (worktreePath, originPath string) {
+	t.Helper()
+
+	originPath = filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(originPath, 0755); err != nil {
+		t.Fatalf("mkdir origin: %v", err)
+	}
+	runDeadHolderGit(t, originPath, "init", "--bare")
+
+	worktreePath = filepath.Join(townRoot, rig, "polecats", name, rig)
+	if err := os.MkdirAll(worktreePath, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	runDeadHolderGit(t, worktreePath, "init")
+	runDeadHolderGit(t, worktreePath, "config", "user.email", "test@test.com")
+	runDeadHolderGit(t, worktreePath, "config", "user.name", "Test")
+	runDeadHolderGit(t, worktreePath, "remote", "add", "origin", originPath)
+	runDeadHolderGit(t, worktreePath, "checkout", "-b", branch)
+	runDeadHolderGit(t, worktreePath, "commit", "--allow-empty", "-m", "initial")
+
+	return worktreePath, originPath
+}
+
+// t.Parallel is deliberately omitted: this test uses withOriginBranches,
+// which overrides the package-level listOriginBranchesFn var — the same
+// reason TestFeedFirstReady_SkipsIssueWithSurvivingBranch and its siblings
+// run serially.
+func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue1", Title: "Held by dead session", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	branch := "polecat/basalt/gt-issue1+abc123"
+	worktreePath, originPath := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
+	localTip := runDeadHolderGit(t, worktreePath, "rev-parse", "HEAD")
+
+	// The rig-level shared-repo listing (survivingBranchFor's source) has
+	// nothing — the branch was never pushed, so it cannot appear there.
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, unpushed work",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue1", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue1") {
+		t.Errorf("expected no sling for gt-issue1 (dead holder has unpushed work), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2 after skipping the preserved issue, got: %q", logContent)
+	}
+	if len(escalated) != 0 {
+		t.Errorf("expected no escalation for a successful preserve, got: %v", escalated)
+	}
+
+	remoteTip := runDeadHolderGit(t, originPath, "rev-parse", branch)
+	if remoteTip != localTip {
+		t.Errorf("expected %s pushed to origin at %s, got %s", branch, localTip, remoteTip)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue2", Title: "Held by dead session, dirty tree", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	branch := "polecat/basalt/gt-issue2+xyz789"
+	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
+	// Push the commit so UnpushedCommits is 0 — isolates the assertion to
+	// uncommitted work, which can never be safely auto-preserved by pushing.
+	runDeadHolderGit(t, worktreePath, "push", "origin", branch)
+	if err := os.WriteFile(filepath.Join(worktreePath, "dirty.txt"), []byte("uncommitted"), 0644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, dirty worktree",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue2", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue2") {
+		t.Errorf("expected no sling for gt-issue2 (dead holder has uncommitted work), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2 after skipping the unpreservable issue, got: %q", logContent)
+	}
+	if len(escalated) != 1 || !strings.Contains(escalated[0], "uncommitted work") {
+		t.Errorf("expected one escalation mentioning uncommitted work, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue3", Title: "Held by dead session, remote unreadable", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("remote unreachable")
+	})
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, unreadable remote",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue3", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue3") {
+		t.Errorf("expected no sling for gt-issue3 (dead holder, branch state undetermined — must fail closed), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2 (no known holder, unaffected by the fail-closed check), got: %q", logContent)
+	}
+	if len(escalated) != 1 || !strings.Contains(escalated[0], "could not be determined") {
+		t.Errorf("expected one escalation about undetermined origin state, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue4", Title: "Held by dead session, already on origin", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	branch := "polecat/basalt/gt-issue4+def456"
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		return []string{branch}, nil
+	})
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, pushed work already on origin",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue4", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue4") {
+		t.Errorf("expected no sling for gt-issue4 (already preserved on origin), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2, got: %q", logContent)
+	}
+	if len(escalated) != 0 {
+		t.Errorf("expected no escalation when the branch already survives on origin, got: %v", escalated)
+	}
+
+	foundSkip := false
+	for _, l := range *logged {
+		if strings.Contains(l, "gt-issue4") && strings.Contains(l, "surviving branch "+branch) {
+			foundSkip = true
+			break
+		}
+	}
+	if !foundSkip {
+		t.Errorf("expected a surviving-branch skip log naming %s, got: %v", branch, *logged)
+	}
+}
+
+// withDeadHolderWorktreeState replaces the worktree-state seam for a test.
+func withDeadHolderWorktreeState(t *testing.T, fn func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error)) {
+	t.Helper()
+	orig := deadHolderWorktreeStateFn
+	deadHolderWorktreeStateFn = fn
+	t.Cleanup(func() { deadHolderWorktreeStateFn = orig })
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *testing.T) {
+	takeStoreSlot(t)
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue5", Title: "Held by dead session, worktree unreadable", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+	withDeadHolderWorktreeState(t, func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: exit status 128")
+	})
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, worktree unreadable",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue5", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue5") {
+		t.Errorf("expected no sling for gt-issue5 (worktree state undetermined — must fail closed), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2, got: %q", logContent)
+	}
+	if len(escalated) != 1 || !strings.Contains(escalated[0], "worktree state could not be determined") {
+		t.Errorf("expected one escalation about undetermined worktree state, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
+	takeStoreSlot(t)
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue6", Title: "Held by dead session, no worktree on disk", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+
+	// No worktree is created at all for gt/polecats/basalt — the assignee is
+	// recorded but nothing on disk resolves to it (e.g. the seat was nuked
+	// after it was assigned). AssigneeWorktreePath then reports "", which
+	// must feed, not escalate.
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	if err := os.MkdirAll(filepath.Join(townRoot, "gt"), 0755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
+	}
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, no worktree",
+		ReadyCount: 1, ReadyIssues: []string{"gt-issue6"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue6") {
+		t.Errorf("expected sling for gt-issue6 (no worktree to lose), got: %q", data)
+	}
+	if len(escalated) != 0 {
+		t.Errorf("expected no escalation when there is no worktree to check, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue7", Title: "Held by dead session, seat reused since", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	// The worktree at basalt's seat is checked out on a DIFFERENT issue's
+	// branch — the seat was reused for other work since gt-issue7's holder
+	// died. Nothing here is attributable to gt-issue7.
+	otherBranch := "polecat/basalt/gt-other9+zzz999"
+	newDeadHolderWorktree(t, townRoot, "gt", "basalt", otherBranch)
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, seat reused",
+		ReadyCount: 1, ReadyIssues: []string{"gt-issue7"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue7") {
+		t.Errorf("expected sling for gt-issue7 (seat's worktree belongs to a different issue), got: %q", data)
+	}
+	if len(escalated) != 0 {
+		t.Errorf("expected no escalation for a reused seat, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue8", Title: "Held by dead session, only runtime dirt", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	branch := "polecat/basalt/gt-issue8+dirt111"
+	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
+	// Push the commit so UnpushedCommits is 0 — the only thing left in the
+	// tree is tool-managed runtime state, which gt done and the deacon's
+	// stale-hook scan already tolerate (85257aacc9b9).
+	runDeadHolderGit(t, worktreePath, "push", "origin", branch)
+	if err := os.MkdirAll(filepath.Join(worktreePath, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreePath, ".beads", "state.db"), []byte("runtime"), 0644); err != nil {
+		t.Fatalf("write runtime dirt: %v", err)
+	}
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, runtime-only dirt",
+		ReadyCount: 1, ReadyIssues: []string{"gt-issue8"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-issue8") {
+		t.Errorf("expected sling for gt-issue8 (only runtime dirt, nothing real to lose), got: %q", data)
+	}
+	if len(escalated) != 0 {
+		t.Errorf("expected no escalation for runtime-only dirt, got: %v", escalated)
+	}
+}
+
+// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
+func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T) {
+	takeStoreSlot(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	held := &beadsdk.Issue{
+		ID: "gt-issue9", Title: "Held by dead session, push fails", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatalf("CreateIssue held: %v", err)
+	}
+	fresh := &beadsdk.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
+		t.Fatalf("CreateIssue fresh: %v", err)
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	branch := "polecat/basalt/gt-issue9+push000"
+	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
+	// Point origin at a path with no repository, so both the primary push
+	// and the <branch>-<sha7> fallback push fail — exercising the "resolve
+	// by hand" escalation preserveWorktreeBranch raises when neither lands.
+	runDeadHolderGit(t, worktreePath, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var escalated []string
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.SetAlertHooks(func(key, source, message string) {
+		escalated = append(escalated, message)
+	}, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Dead holder, unpushed work, push fails",
+		ReadyCount: 2, ReadyIssues: []string{"gt-issue9", "gt-fresh2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, "gt-issue9") {
+		t.Errorf("expected no sling for gt-issue9 (preserve push failed), got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "gt-fresh2") {
+		t.Errorf("expected sling for gt-fresh2 after skipping the unpreservable issue, got: %q", logContent)
+	}
+	if len(escalated) != 1 || !strings.Contains(escalated[0], "pushing") || !strings.Contains(escalated[0], "failed") {
+		t.Errorf("expected one escalation about a failed preserve push, got: %v", escalated)
 	}
 }

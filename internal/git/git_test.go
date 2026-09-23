@@ -4362,6 +4362,58 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 }
 
+// TestUnpushedCommitsLocalFailClosed_NoComparisonRefs pins the gt-utt4 fix:
+// UnpushedCommitsLocal reads "no comparison ref resolved" as "0 unpushed" —
+// correct for a caller that only reports a count, wrong for one about to
+// discard a worktree because it looks clean. The fail-closed variant must
+// report the branch as having unpreserved work in exactly this situation: a
+// remote is configured but was never fetched, so there is no exact-branch,
+// upstream, or default-branch ref to compare HEAD against at all.
+func TestUnpushedCommitsLocalFailClosed_NoComparisonRefs(t *testing.T) {
+	tmp := t.TempDir()
+	remoteDir := filepath.Join(tmp, "remote.git")
+	if err := exec.Command("git", "init", "--bare", remoteDir).Run(); err != nil {
+		t.Fatalf("git init --bare: %v", err)
+	}
+
+	localDir := filepath.Join(tmp, "local")
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	runGit(t, localDir, "init")
+	runGit(t, localDir, "config", "user.email", "test@test.com")
+	runGit(t, localDir, "config", "user.name", "Test User")
+	runGit(t, localDir, "remote", "add", "origin", remoteDir)
+	runGit(t, localDir, "checkout", "-b", "polecat/never-fetched")
+	runGit(t, localDir, "commit", "--allow-empty", "-m", "initial")
+
+	g := NewGit(localDir)
+
+	loose, err := g.UnpushedCommitsLocal()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocal: %v", err)
+	}
+	if loose != 0 {
+		t.Fatalf("UnpushedCommitsLocal = %d, want 0 (fail-open baseline for a plain count)", loose)
+	}
+
+	failClosed, err := g.UnpushedCommitsLocalFailClosed()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocalFailClosed: %v", err)
+	}
+	if failClosed == 0 {
+		t.Fatalf("UnpushedCommitsLocalFailClosed = 0, want > 0: an unresolvable comparison must read as unpreserved work, not as clean")
+	}
+
+	status, err := g.CheckUncommittedWorkLocalFailClosed()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWorkLocalFailClosed: %v", err)
+	}
+	if status.Clean() {
+		t.Fatalf("CheckUncommittedWorkLocalFailClosed().Clean() = true, want false for a never-fetched branch")
+	}
+}
+
 func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
 	got := comparisonRefCandidates("main", "origin")
 	want := []string{"upstream/main", "origin/main", "main"}
