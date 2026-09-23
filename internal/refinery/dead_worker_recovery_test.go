@@ -757,6 +757,50 @@ func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
 	}
 }
 
+// TestHandleMRInfoFailure_AttemptNumberFromSourceBeadHistory covers the third
+// writer of the MERGE REJECTION note — the Engineer's automatic build/test
+// failure path, which is also the batch's failure handler. Its number must come
+// from the source bead's rejection history for the same reason the editorial
+// paths' do: a fresh MR for a bead already rejected three times is that bead's
+// fourth attempt, and numbering from the MR's conflict-retry count wrote a
+// duplicate "attempt 1" (gt-gld77).
+func TestHandleMRInfoFailure_AttemptNumberFromSourceBeadHistory(t *testing.T) {
+	// Not t.Parallel(): fakeBDAndGt uses t.Setenv, which panics with a
+	// parallel ancestor.
+	fakeBDAndGt(t)
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	e := newTestEngineer(t, workDir, g)
+	e.beads = beadsForNotes(t, "gt-src1", priorRejectionBlocks(3))
+	e.output = &bytes.Buffer{}
+
+	var gotReq *deadWorkerRecoveryRequest
+	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		gotReq = &req
+		return true
+	}
+
+	mr := &MRInfo{
+		ID:          "gt-mr1",
+		Branch:      "polecat/nux/gt-src1+abc123",
+		Target:      "main",
+		SourceIssue: "gt-src1",
+		Worker:      "polecats/nux",
+		// RetryCount 0: a fresh MR, which is exactly the gt-0wy03 shape the
+		// duplicate "(attempt 1)" came from.
+		RetryCount: 0,
+	}
+	e.HandleMRInfoFailure(mr, ProcessResult{Success: false, TestsFailed: true, Error: "gate failed"})
+
+	if gotReq == nil {
+		t.Fatal("expected dead-worker recovery for a tests failure")
+	}
+	if gotReq.AttemptNumber != 4 {
+		t.Errorf("AttemptNumber = %d, want 4 — one past the bead's three recorded rejections", gotReq.AttemptNumber)
+	}
+}
+
 func TestHandleMRInfoFailure_SlotTimeout_NoRecovery(t *testing.T) {
 	t.Parallel()
 	workDir := t.TempDir()

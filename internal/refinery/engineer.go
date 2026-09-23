@@ -2391,15 +2391,17 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// excluded: they already get a dispatchable conflict-resolution task.
 	if !result.Conflict && e.recoverDeadWorker != nil {
 		e.recoverDeadWorker(deadWorkerRecoveryRequest{
-			MRID:          mr.ID,
-			Branch:        mr.Branch,
-			Target:        mr.Target,
-			SourceIssue:   mr.SourceIssue,
-			Worker:        mr.Worker,
-			RigName:       e.rig.Name,
-			FailureType:   failureType,
-			ErrorMsg:      result.Error,
-			AttemptNumber: mr.RetryCount + 1,
+			MRID:        mr.ID,
+			Branch:      mr.Branch,
+			Target:      mr.Target,
+			SourceIssue: mr.SourceIssue,
+			Worker:      mr.Worker,
+			RigName:     e.rig.Name,
+			FailureType: failureType,
+			ErrorMsg:    result.Error,
+			// Counted from the source bead's rejection history, like every
+			// other writer of this note (gt-gld77).
+			AttemptNumber: nextRejectionAttemptOnBead(e.beads, mr.SourceIssue),
 		})
 	}
 

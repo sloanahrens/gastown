@@ -1003,10 +1003,18 @@ type RejectionRecord struct {
 // skips — one MERGE REJECTION block per rejection, and the attempt number the
 // note header carries is the one the reason does (gt-s4f6).
 //
+// bd is read only for attempt numbering: a caller that supplied its own attempt
+// needs no read, and one that did not has its number counted from the source
+// bead's MERGE REJECTION history (gt-gld77).
+//
+// One request per rejection, shared by both writers. Building it twice would
+// let recovery's own write become input to the record that follows, numbering
+// the same rejection one attempt higher and appending a second block for it.
+//
 // Receipt is set only from rec, so a manual `gt mq reject` carrying no om
 // verdict leaves it nil and `gt deacon redispatch` keeps falling back to the
 // plain attempt-count Redispatch for that path (gt-j6ez).
-func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRecord) deadWorkerRecoveryRequest {
+func rejectionRequest(bd rejectedSourceBeads, mr *MergeRequest, rigName, reason string, rec *RejectionRecord) deadWorkerRecoveryRequest {
 	req := deadWorkerRecoveryRequest{
 		MRID:          mr.ID,
 		Branch:        mr.Branch,
@@ -1016,7 +1024,7 @@ func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRe
 		RigName:       rigName,
 		FailureType:   "editorial",
 		ErrorMsg:      reason,
-		AttemptNumber: rejectionAttempt(mr, rec),
+		AttemptNumber: rejectionAttempt(bd, mr, rec),
 		// The reason doubles as the RECOVERED_BEAD mail's Rejection-Summary
 		// line.
 		Summary: reason,
@@ -1090,6 +1098,13 @@ func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noReco
 		m.notifyWorkerRejected(mr, reason)
 	}
 
+	// ONE request for both writers below. Building it twice would let
+	// recovery's own write become input to the record that follows: the second
+	// count would read this rejection's freshly appended block as a prior
+	// attempt, number the same rejection one higher, and write a second block
+	// for it (gt-gld77).
+	req := rejectionRequest(b, mr, m.rig.Name, reason, rec)
+
 	// gt-2usm: RejectMR used to close the MR bead and stop — never touching
 	// the source issue at all, unlike PostMerge which closes it on the
 	// success path. That asymmetry orphaned every rejection of a polecat
@@ -1104,7 +1119,7 @@ func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noReco
 			_, _ = fmt.Fprintf(m.output, "  %s\n", style.Dim.Render("--no-recover: source issue left untouched"))
 		}
 	} else if !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" && m.recoverDeadWorker != nil {
-		m.recoverDeadWorker(rejectionRequest(mr, m.rig.Name, reason, rec))
+		m.recoverDeadWorker(req)
 		// This CLI path sends mail (RECOVERED_BEAD to the deacon) via
 		// recoverDeadWorker above; every other mail-sending CLI path waits
 		// for in-flight async notifications before returning so a fast exit
@@ -1121,7 +1136,7 @@ func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noReco
 	// findings on the bead is one the next attempt re-merges (gt-s4f6).
 	var recordErr error
 	if rec != nil && !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" {
-		recordErr = m.RecordRejectionFindings(mr, reason, *rec)
+		recordErr = recordRejectionFindings(b, req)
 	}
 
 	// Read the source issue's actual status back from the bead instead of
@@ -1152,7 +1167,8 @@ func (m *Manager) RecordRejectionFindings(mr *MergeRequest, reason string, rec R
 	if mr == nil {
 		return nil
 	}
-	return recordRejectionFindings(beads.New(m.rig.BeadsPath()), rejectionRequest(mr, m.rig.Name, reason, &rec))
+	b := beads.New(m.rig.BeadsPath())
+	return recordRejectionFindings(b, rejectionRequest(b, mr, m.rig.Name, reason, &rec))
 }
 
 // PostMergeResult holds the result of a post-merge cleanup operation.

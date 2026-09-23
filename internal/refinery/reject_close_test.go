@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -177,6 +178,75 @@ func TestReviewBatchCandidates_RequestChanges_FindingsTravelToRecovery(t *testin
 	f := gotReq.Findings[0]
 	if f.ID != "abc123456789" || f.Severity != "major" || f.Path != "internal/foo.go" || f.Line != 42 || f.Title != "leaky abstraction" {
 		t.Errorf("Findings[0] = %+v, unexpected", f)
+	}
+}
+
+// sourceBeadWithRejectionHistory is a source bead carrying n MERGE REJECTION
+// blocks, as the single-MR path (mol-refinery-patrol) leaves them.
+func sourceBeadWithRejectionHistory(id string, n int) *beadsdk.Issue {
+	now := time.Now()
+	return &beadsdk.Issue{
+		ID:        id,
+		Title:     id,
+		Notes:     priorRejectionBlocks(n),
+		Status:    beadsdk.StatusOpen,
+		IssueType: beadsdk.IssueType("task"),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+// TestReviewBatchCandidates_AttemptNumberFromSourceBeadHistory is gt-gld77's
+// acceptance case on the batch path: a fresh MR (RetryCount 0) whose source
+// bead has already been rejected three times is that bead's FOURTH attempt.
+// The batch used to number the review from the MR's conflict-retry count, so it
+// reviewed this bead as "Attempt 1" and wrote a second "(attempt 1)" onto it —
+// gt-0wy03's markers read 1, 2, 3, 1, leaving anything that reconstructs the
+// bead's history with two attempt 1s and no attempt 4.
+//
+// Both halves of the count are pinned here: the number the review records, and
+// the number the rejection note's header and close reason carry.
+func TestReviewBatchCandidates_AttemptNumberFromSourceBeadHistory(t *testing.T) {
+	e, store, candidates := batchRejectFixture(t)
+	store.issues["gt-src-aaa"] = sourceBeadWithRejectionHistory("gt-src-aaa", 1)
+	store.issues["gt-src-bbb"] = sourceBeadWithRejectionHistory("gt-src-bbb", 3)
+	e.editorialExec = reviewGateStub(t, map[string]string{"gt-wisp-bbb": "request_changes"})
+
+	var gotReq *deadWorkerRecoveryRequest
+	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
+		gotReq = &req
+		return true
+	}
+
+	_, _, notes := e.reviewBatchCandidates(context.Background(), candidates, "main")
+
+	// gt-src-aaa carries one prior rejection, so its review is attempt 2.
+	if note := notes["gt-wisp-aaa"]; note == nil || note.Attempt != 2 {
+		t.Errorf("gt-wisp-aaa reviewed as %v, want attempt 2 (one prior rejection on gt-src-aaa)", note)
+	}
+
+	// gt-src-bbb carries three, so its review — and the rejection that
+	// follows it — is attempt 4.
+	if gotReq == nil {
+		t.Fatal("expected dead-worker recovery for the rejected candidate")
+	}
+	if gotReq.AttemptNumber != 4 {
+		t.Errorf("recovery AttemptNumber = %d, want 4 (three prior rejections on gt-src-bbb)", gotReq.AttemptNumber)
+	}
+	reason := store.closeReasons["gt-wisp-bbb"]
+	if !strings.Contains(reason, "EDITORIAL REJECTION (attempt 4)") {
+		t.Errorf("close_reason = %q, want it to name attempt 4", reason)
+	}
+
+	// The note the rejection leaves behind is this request through the shared
+	// formatter: header number and MR id, so a reader can tell attempts apart
+	// even where numbers legitimately collide.
+	note := formatMergeRejectionNote(*gotReq)
+	if !strings.Contains(note, "MERGE REJECTION (attempt 4):") {
+		t.Errorf("rejection note header does not name attempt 4:\n%s", note)
+	}
+	if !strings.Contains(note, "MR: gt-wisp-bbb") {
+		t.Errorf("rejection note does not carry the MR id:\n%s", note)
 	}
 }
 

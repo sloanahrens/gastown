@@ -2,6 +2,7 @@ package refinery
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +119,7 @@ func TestRecordRejectionFindings_RoundTrip(t *testing.T) {
 	}
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open", Assignee: "flint"}}
 
-	if err := recordRejectionFindings(bd, rejectionRequest(mr, "gastown", "EDITORIAL REJECTION (attempt 2): om gate request_changes", &RejectionRecord{Findings: findings})); err != nil {
+	if err := recordRejectionFindings(bd, rejectionRequest(bd, mr, "gastown", "EDITORIAL REJECTION (attempt 2): om gate request_changes", &RejectionRecord{Findings: findings})); err != nil {
 		t.Fatalf("recordRejectionFindings() error: %v", err)
 	}
 
@@ -157,7 +158,7 @@ func TestRecordRejectionFindings_RoundTrip(t *testing.T) {
 func TestRecordRejectionFindings_SkipsRepeatWrite(t *testing.T) {
 	t.Parallel()
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main"}
-	req := rejectionRequest(mr, "gastown", "rejected", nil)
+	req := rejectionRequest(nil, mr, "gastown", "rejected", nil)
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open", Notes: formatMergeRejectionNote(req)}}
 
 	if err := recordRejectionFindings(bd, req); err != nil {
@@ -203,11 +204,17 @@ func TestRecordRejectionFindings_RecoveryRan_OneBlock(t *testing.T) {
 
 // rejectionPathsRun drives the pair of writes one rejection makes — recovery,
 // then the record — and returns whether recovery ran, plus the record's error.
+//
+// One request feeds both writes, which is the shape rejectMR uses and the only
+// one the shared attempt number survives: a second, independently built request
+// would count recovery's freshly appended block as a prior attempt, number the
+// same rejection one higher, and leave two MERGE REJECTION blocks behind it
+// (gt-gld77).
 func rejectionPathsRun(t *testing.T, bd *fakeRejectedBeads, mr *MergeRequest, reason string, findings []RejectionFinding) (bool, error) {
 	t.Helper()
-	req := rejectionRequest(mr, "gastown", reason, &RejectionRecord{Findings: findings})
+	req := rejectionRequest(bd, mr, "gastown", reason, &RejectionRecord{Findings: findings})
 	recovered := recoverRejectedMRDeadWorker(bd, deadSession, func(*mail.Message) error { return nil }, nil, req)
-	return recovered, recordRejectionFindings(bd, rejectionRequest(mr, "gastown", reason, &RejectionRecord{Findings: findings}))
+	return recovered, recordRejectionFindings(bd, req)
 }
 
 // TestRejectionRequest_CarriesTheVerdict pins the wiring that makes the two
@@ -222,7 +229,7 @@ func TestRejectionRequest_CarriesTheVerdict(t *testing.T) {
 	receipt := &EditorialReceipt{Score: 0.55, Unresolved: []string{"cb332644e4cf"}}
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 3}
 
-	req := rejectionRequest(mr, "gastown", "rejected", &RejectionRecord{Findings: findings, Receipt: receipt, Attempt: 4})
+	req := rejectionRequest(nil, mr, "gastown", "rejected", &RejectionRecord{Findings: findings, Receipt: receipt, Attempt: 4})
 
 	if len(req.Findings) != 1 || req.Findings[0].ID != "cb332644e4cf" {
 		t.Errorf("Findings = %+v, want the verdict's findings on the recovery request", req.Findings)
@@ -245,22 +252,136 @@ func TestRejectionAttempt_CallersNumberWins(t *testing.T) {
 	t.Parallel()
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 4}
 
-	req := rejectionRequest(mr, "gastown", "EDITORIAL REJECTION (attempt 6): request_changes", &RejectionRecord{Attempt: 6})
+	req := rejectionRequest(nil, mr, "gastown", "EDITORIAL REJECTION (attempt 6): request_changes", &RejectionRecord{Attempt: 6})
 
 	if req.AttemptNumber != 6 {
 		t.Errorf("AttemptNumber = %d, want 6 — the number the reason names", req.AttemptNumber)
 	}
 }
 
-// TestRejectionAttempt_FallsBackToRetryCount covers the callers with no attempt
-// of their own: with no number supplied the MR's retry count still numbers the
-// note, as it does for the automatic build/test-failure path.
-func TestRejectionAttempt_FallsBackToRetryCount(t *testing.T) {
+// TestRejectionAttempt_FallsBackToSourceBeadHistory covers the callers with no
+// attempt of their own: the batch paths, and `gt mq reject` without --attempt.
+// The number they get comes from the source bead's own MERGE REJECTION history,
+// never from the MR's RetryCount — that counts conflict retries, and a fresh MR
+// for a bead already recorded as attempts 1, 2 and 3 would be numbered a second
+// attempt 1, leaving the bead's markers to read 1, 2, 3, 1 (gt-0wy03). Anything
+// reconstructing that history then sees two attempt 1s and no attempt 4, which
+// is the label the deacon and the mayor read (gt-gld77).
+func TestRejectionAttempt_FallsBackToSourceBeadHistory(t *testing.T) {
 	t.Parallel()
-	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 2}
+	const priorNotes = `MERGE REJECTION (attempt 1): editorial - om gate request_changes
+Branch: polecat/nux/gt-src1+aaa
+Target: main
+MR: gt-wisp-1
 
-	if req := rejectionRequest(mr, "gastown", "tests failed", nil); req.AttemptNumber != 3 {
-		t.Errorf("AttemptNumber = %d, want 3 (RetryCount+1)", req.AttemptNumber)
+MERGE REJECTION (attempt 2): editorial - om gate request_changes
+Branch: polecat/nux/gt-src1+bbb
+Target: main
+MR: gt-wisp-2
+
+MERGE REJECTION (attempt 3): tests - gate red
+Branch: polecat/nux/gt-src1+ccc
+Target: main
+MR: gt-wisp-3`
+	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open", Notes: priorNotes}}
+
+	// The same bead with three different conflict-retry counts: the number is
+	// the bead's history's, so all three must agree.
+	for _, retryCount := range []int{0, 2, 7} {
+		mr := &MergeRequest{
+			ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main",
+			RetryCount: retryCount,
+		}
+
+		req := rejectionRequest(bd, mr, "gastown", "tests failed", nil)
+
+		if req.AttemptNumber != 4 {
+			t.Errorf("RetryCount %d: AttemptNumber = %d, want 4 — one past the bead's three recorded rejections",
+				retryCount, req.AttemptNumber)
+		}
+	}
+}
+
+// TestRejectionAttempt_UnreadableSourceBeadIsAFirstAttempt pins the best-effort
+// fallback: with no source bead to count, the rejection is numbered as a first
+// attempt rather than falling back to the MR's conflict-retry count.
+func TestRejectionAttempt_UnreadableSourceBeadIsAFirstAttempt(t *testing.T) {
+	t.Parallel()
+	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 4}
+
+	if req := rejectionRequest(nil, mr, "gastown", "tests failed", nil); req.AttemptNumber != 1 {
+		t.Errorf("AttemptNumber = %d, want 1 (no history to count)", req.AttemptNumber)
+	}
+}
+
+// TestRecordRejectionFindings_NumbersFromSourceBeadHistory is the single-MR
+// path's half of gt-gld77, and the pair to the batch path's
+// TestReviewBatchCandidates_AttemptNumberFromSourceBeadHistory: the same bead
+// history must number a rejection the same way whichever path records it, so a
+// bead's markers read 1, 2, 3, 4 rather than restarting.
+//
+// `gt mq reject` without --attempt is the caller this covers — the CLI's
+// default is 0, and the batch paths build their own requests the same way.
+func TestRecordRejectionFindings_NumbersFromSourceBeadHistory(t *testing.T) {
+	t.Parallel()
+	mr := &MergeRequest{ID: "gt-mr-9", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 0}
+	bd := &fakeRejectedBeads{issue: &beads.Issue{
+		ID:     "gt-src1",
+		Status: "open",
+		Notes:  priorRejectionBlocks(3),
+	}}
+
+	req := rejectionRequest(bd, mr, "gastown", "EDITORIAL REJECTION (attempt 4): request_changes", nil)
+	if err := recordRejectionFindings(bd, req); err != nil {
+		t.Fatalf("recordRejectionFindings() error: %v", err)
+	}
+
+	note := bd.issue.Notes
+	if !strings.Contains(note, MergeRejectionNoteMarker+" (attempt 4):") {
+		t.Errorf("note header does not name attempt 4, one past the bead's three recorded rejections:\n%s", note)
+	}
+	if !strings.Contains(note, "MR: gt-mr-9") {
+		t.Errorf("note does not carry the MR id, so a reader cannot disambiguate colliding numbers:\n%s", note)
+	}
+}
+
+// priorRejectionBlocks is n prior MERGE REJECTION blocks as the single-MR path
+// leaves them on a source bead's notes.
+func priorRejectionBlocks(n int) string {
+	blocks := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		blocks = append(blocks, fmt.Sprintf(
+			"%s (attempt %d): editorial - om gate request_changes\nBranch: polecat/nux/gt-src1+abc%d\nTarget: main\nMR: gt-wisp-%d",
+			MergeRejectionNoteMarker, i, i, i))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+// TestNextRejectionAttempt_CountsMarkerHeaders pins the counting rule the
+// single-MR path (mol-refinery-patrol) applies by hand, so the number a batch
+// writes is the number that path would have written for the same bead.
+func TestNextRejectionAttempt_CountsMarkerHeaders(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		notes string
+		want  int
+	}{
+		{"no history", "", 1},
+		{"one rejection", "MERGE REJECTION (attempt 1): tests - gate red\nMR: gt-wisp-1", 2},
+		{"three rejections", "MERGE REJECTION (attempt 1): tests - red\nMR: a\n\nMERGE REJECTION (attempt 2): tests - red\nMR: b\n\nMERGE REJECTION (attempt 3): tests - red\nMR: c", 4},
+		// A polecat's own prose is not history, and the legacy wording this
+		// vocabulary replaced (gt-tc0) carries no number to count.
+		{"unrelated notes", "Findings so far: implemented the parser", 1},
+		{"legacy merge failure wording", "Merge failure: tests - gate red", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := nextRejectionAttempt(tc.notes); got != tc.want {
+				t.Errorf("nextRejectionAttempt() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -272,7 +393,7 @@ func TestRecordRejectionFindings_AttemptNumberMatchesReason(t *testing.T) {
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main", RetryCount: 4}
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open"}}
 
-	req := rejectionRequest(mr, "gastown", "EDITORIAL REJECTION (attempt 2): request_changes", &RejectionRecord{Attempt: 2})
+	req := rejectionRequest(bd, mr, "gastown", "EDITORIAL REJECTION (attempt 2): request_changes", &RejectionRecord{Attempt: 2})
 	if err := recordRejectionFindings(bd, req); err != nil {
 		t.Fatalf("recordRejectionFindings() error: %v", err)
 	}
@@ -290,7 +411,7 @@ func TestRecordRejectionFindings_ReportsWriteFailure(t *testing.T) {
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main"}
 	bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "open"}, runErr: errors.New("dolt unavailable")}
 
-	err := recordRejectionFindings(bd, rejectionRequest(mr, "gastown", "rejected", nil))
+	err := recordRejectionFindings(bd, rejectionRequest(bd, mr, "gastown", "rejected", nil))
 	if err == nil {
 		t.Fatal("expected an error when the rejection note could not be written")
 	}
@@ -306,7 +427,7 @@ func TestRecordRejectionFindings_ReportsUnreadableBead(t *testing.T) {
 	mr := &MergeRequest{ID: "gt-mr-1", Branch: "b", IssueID: "gt-src1", TargetBranch: "main"}
 	bd := &fakeRejectedBeads{showErr: errors.New("boom")}
 
-	if err := recordRejectionFindings(bd, rejectionRequest(mr, "gastown", "rejected", nil)); err == nil {
+	if err := recordRejectionFindings(bd, rejectionRequest(bd, mr, "gastown", "rejected", nil)); err == nil {
 		t.Fatal("expected an error when the source bead could not be read")
 	}
 }

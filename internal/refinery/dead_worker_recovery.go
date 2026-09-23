@@ -140,17 +140,60 @@ func workerNameFromMR(worker string) string {
 	return parts[len(parts)-1]
 }
 
+// rejectionAttemptPrefix is the header every MERGE REJECTION block opens with
+// (see formatMergeRejectionNote). Counting these is what turns a source bead's
+// rejection history into its attempt numbers.
+const rejectionAttemptPrefix = MergeRejectionNoteMarker + " (attempt"
+
+// rejectionAttemptsRecorded counts the MERGE REJECTION blocks already on a
+// bead's notes: the same rule mol-refinery-patrol applies by hand on the
+// single-MR path ("count prior `MERGE REJECTION (attempt` entries in the
+// issue's bd notes"), so a bead's history numbers the same way whichever path
+// wrote it.
+func rejectionAttemptsRecorded(notes string) int {
+	return strings.Count(notes, rejectionAttemptPrefix)
+}
+
+// nextRejectionAttempt is the attempt number the NEXT rejection of a bead with
+// these notes is: one past the blocks already recorded, so a bead's markers read
+// 1, 2, 3, 4 whatever mix of paths wrote them — first attempt is 1.
+//
+// Numbering from the MR's RetryCount instead — a conflict-retry counter with
+// nothing to do with rejections — wrote a duplicate "attempt 1" (gt-gld77;
+// gt-0wy03's markers read 1, 2, 3, 1).
+func nextRejectionAttempt(notes string) int {
+	return rejectionAttemptsRecorded(notes) + 1
+}
+
+// nextRejectionAttemptOnBead reads sourceIssue's notes and returns the attempt
+// number the next rejection of it is.
+//
+// Best-effort, like editorial.BuildPriorFindings: an unreadable or absent bead
+// numbers the rejection as a first attempt. No writer can record that fallback,
+// since recordRejectionFindings and recoverRejectedMRDeadWorker each re-read the
+// bead before appending and skip the write when that read fails.
+func nextRejectionAttemptOnBead(bd rejectedSourceBeads, sourceIssue string) int {
+	if bd == nil || strings.TrimSpace(sourceIssue) == "" {
+		return nextRejectionAttempt("")
+	}
+	issue, err := bd.Show(sourceIssue)
+	if err != nil || issue == nil {
+		return nextRejectionAttempt("")
+	}
+	return nextRejectionAttempt(issue.Notes)
+}
+
 // rejectionAttempt is the attempt number a rejection is recorded as. A caller
-// that numbers its attempts (mol-refinery-patrol counts the source bead's
-// "MERGE REJECTION (attempt" entries) passes the number it also puts in the
-// reason, so the note header and the reason name the same attempt. The MR's
-// RetryCount is a conflict-retry count and is only a fallback for callers with
-// no attempt of their own (gt-s4f6).
-func rejectionAttempt(mr *MergeRequest, rec *RejectionRecord) int {
+// that numbers its attempts passes the number it also puts in the reason, so
+// the note header and the reason name the same attempt. A caller with no number
+// of its own — the batch paths, and `gt mq reject` without --attempt — gets one
+// counted from the source bead's own rejection history, never the MR's
+// RetryCount (gt-gld77, gt-s4f6).
+func rejectionAttempt(bd rejectedSourceBeads, mr *MergeRequest, rec *RejectionRecord) int {
 	if rec != nil && rec.Attempt > 0 {
 		return rec.Attempt
 	}
-	return mr.RetryCount + 1
+	return nextRejectionAttemptOnBead(bd, mr.IssueID)
 }
 
 // noteField collapses a free-text note field onto one line. Titles, paths, and

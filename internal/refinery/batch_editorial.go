@@ -103,6 +103,18 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		}
 	}
 
+	// Each candidate's attempt number is counted once, here, and used for both
+	// halves of its review-and-reject: the review's recorded attempt and the
+	// rejection note's header must be the same number, and re-counting between
+	// them could only differ on a bead this batch is itself writing. Counted
+	// from the SOURCE BEAD's MERGE REJECTION history, never the MR's RetryCount
+	// — a fresh MR for a bead already rejected three times is that bead's fourth
+	// attempt (gt-gld77).
+	attempts := make([]int, len(candidates))
+	for i, mr := range candidates {
+		attempts[i] = nextRejectionAttemptOnBead(e.beads, mr.SourceIssue)
+	}
+
 	results := make([]editorial.ReviewResult, len(candidates))
 	sem := make(chan struct{}, cfg.ReviewParallelism)
 	var wg sync.WaitGroup
@@ -118,7 +130,7 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		go func(i int, mr *MRInfo) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			attempt := mr.RetryCount + 1
+			attempt := attempts[i]
 			req := editorial.ReviewRequest{
 				RigDir:        e.rig.Path,
 				RepoDir:       e.workDir,
@@ -174,7 +186,7 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 		} else if r.Note != nil && r.Note.Verdict != "approve" {
 			// A verdict, not an infra failure: the review ran and rejected
 			// this diff, so the MR must stop being merge-eligible (gt-bsmp).
-			e.rejectReviewedCandidate(mr, target, r)
+			e.rejectReviewedCandidate(mr, target, r, attempts[i])
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial review exit=%d, dropped from batch (left queued)\n", mr.ID, r.Exit)
 		}
@@ -198,7 +210,12 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 //
 // An infra-class result (Exit 2) never reaches this: no Note means no verdict,
 // so that candidate stays queued and untouched for the next cycle.
-func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editorial.ReviewResult) {
+//
+// attempt is the number the review was run under (see reviewBatchCandidates'
+// per-candidate count), so the note header, the close reason, and the review's
+// own recorded attempt are one number rather than three that agree by
+// coincidence (gt-gld77).
+func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editorial.ReviewResult, attempt int) {
 	// No Note means no verdict — an infra-class result, which is not this
 	// function's to act on.
 	if mr == nil || r.Note == nil {
@@ -210,7 +227,6 @@ func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editoria
 	if e.isSyntheticMergeMechanicsMR(mr) {
 		return
 	}
-	attempt := mr.RetryCount + 1
 	reason := fmt.Sprintf("EDITORIAL REJECTION (attempt %d): om gate %s, score %.2f, %d finding(s)",
 		attempt, r.Note.Verdict, r.Note.Score, r.Note.FindingsCount)
 	closeResult, closeErr := e.closeMRWithReasonResult(mr, "rejected: "+reason)
