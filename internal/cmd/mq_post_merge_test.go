@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -52,6 +53,15 @@ type fakeMQPostMergeGit struct {
 	submittedFiles  []string
 	landedFiles     []string
 	diffErr         error
+
+	// Patch-id fixtures (submittedRangeLandedByPatchID): the MR's own commits,
+	// and the patch-id of each commit met walking back from the attested one.
+	// The last landed id repeats, standing in for the target history the walk
+	// stops at.
+	submittedPatchIDs []string
+	landedOwnPatchIDs []string
+	patchIDSteps      int
+	patchIDsErr       error
 
 	// resolvedCommit is what Rev returns for an attested commit, modelling git's
 	// abbreviated-SHA expansion (resolveMQPostMergeCommit).
@@ -164,6 +174,33 @@ func (g *fakeMQPostMergeGit) DiffNameOnly(base, _ string) ([]string, error) {
 		return g.landedFiles, nil
 	}
 	return g.submittedFiles, nil
+}
+
+// PatchIDs returns the submitted range's fixture. An unset fixture is an empty
+// range, which reads as "no patch-id evidence" and leaves the file-level
+// binding to decide, as before this probe existed.
+func (g *fakeMQPostMergeGit) PatchIDs(_, _ string) ([]string, error) {
+	if g.patchIDsErr != nil {
+		return nil, g.patchIDsErr
+	}
+	return g.submittedPatchIDs, nil
+}
+
+// PatchID answers one step of the walk back from the attested commit, in order,
+// repeating the last fixture so the walk stops on its own terms.
+func (g *fakeMQPostMergeGit) PatchID(_, _ string) (string, error) {
+	if g.patchIDsErr != nil {
+		return "", g.patchIDsErr
+	}
+	if len(g.landedOwnPatchIDs) == 0 {
+		return "", nil
+	}
+	step := g.patchIDSteps
+	g.patchIDSteps++
+	if step >= len(g.landedOwnPatchIDs) {
+		step = len(g.landedOwnPatchIDs) - 1
+	}
+	return g.landedOwnPatchIDs[step], nil
 }
 
 func (g *fakeMQPostMergeGit) DeleteRemoteBranchIfAt(_, branch, expectedHash string) error {
@@ -290,6 +327,117 @@ func TestRunVerifiedMQPostMerge_LandedCommitAttestationRejectsUnrelatedCommit(t 
 	}
 	if mgr.postMergeMR != nil && mgr.postMergeMR.MergeCommit == unrelatedOnTargetCommit {
 		t.Fatal("MergeCommit recorded for an attestation that did not match the MR")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_MultiCommitAttestationLandedAsItsOwnCommits covers
+// the reported incident (gt-fq4e): the queue landed the MR's commits
+// individually — a fast-forward of a rebased branch, as gt done's direct-merge
+// convoy pushes — so the attested commit carries only the last commit's change
+// and the file-level binding alone rejected a merge whose work had all landed.
+// Every commit of the submitted range being on target by patch-id has to
+// satisfy the proof.
+func TestRunVerifiedMQPostMerge_MultiCommitAttestationLandedAsItsOwnCommits(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const landedCommit = "a1baa862cdfb5f2ea382ac2a67e8527dee0d5daa"
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:    "oldbase000",
+		landedParent: "oldmain111",
+		// The MR touched both files; the attested commit is the branch's last
+		// one, which touched only the test file. Walking back from it reaches
+		// the go-file commit, then the target history the MR was rebased onto.
+		submittedFiles:    []string{"internal/daemon/jsonl_git_backup.go", "internal/daemon/jsonl_git_backup_test.go"},
+		landedFiles:       []string{"internal/daemon/jsonl_git_backup_test.go"},
+		submittedPatchIDs: []string{"patchid-go", "patchid-test"},
+		landedOwnPatchIDs: []string{"patchid-test", "patchid-go", "patchid-target"},
+	}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called: a multi-commit MR landed as its own commits was refused")
+	}
+	if mgr.postMergeMR.MergeCommit != landedCommit {
+		t.Fatalf("MR MergeCommit = %q, want attested landed commit %q", mgr.postMergeMR.MergeCommit, landedCommit)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_SingleCommitAttestationLandedAsItsOwnCommit is the
+// one-commit shape of the same landing: nothing in the attested commit's diff
+// names the submitted file, so only the patch-id binding can admit it.
+func TestRunVerifiedMQPostMerge_SingleCommitAttestationLandedAsItsOwnCommit(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const landedCommit = "99523cfa0e82ab9e44f915a1939bea8010578070"
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:         "oldbase000",
+		landedParent:      "oldmain111",
+		submittedFiles:    []string{"internal/cmd/mq.go"},
+		landedFiles:       []string{"docs/unrelated.md"},
+		submittedPatchIDs: []string{"patchid-mqgo"},
+		landedOwnPatchIDs: []string{"patchid-mqgo", "patchid-target"},
+	}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called for a single-commit MR present on target by patch-id")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_MultiCommitAttestationRefusedWhenACommitIsMissing
+// is the fail-closed half (gt-fq4e): an MR whose later commits never landed
+// carries patch-ids target does not have, and files the attested commit never
+// touched. Neither binding may accept it.
+func TestRunVerifiedMQPostMerge_MultiCommitAttestationRefusedWhenACommitIsMissing(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const landedCommit = "9af8b303518ec9dde1d4e6e4cf2444fb166bcf5a"
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:         "oldbase000",
+		landedParent:      "oldmain111",
+		submittedFiles:    []string{"impl.go", "impl_test.go"},
+		landedFiles:       []string{"impl.go"},
+		submittedPatchIDs: []string{"patchid-impl-test", "patchid-impl"},
+		// The walk reaches one of the two commits, then target history.
+		landedOwnPatchIDs: []string{"patchid-impl", "patchid-other"},
+	}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err == nil || !strings.Contains(err.Error(), "impl_test.go") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want refusal naming the commit that did not land", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called for a partially-landed MR")
+	}
+}
+
+// TestRunVerifiedMQPostMerge_EmptyPatchIDRangeIsNotProof pins the guard on the
+// patch-id binding: an empty submitted range reads as "nothing to preserve",
+// which must never be taken as evidence that the MR landed.
+func TestRunVerifiedMQPostMerge_EmptyPatchIDRangeIsNotProof(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	const landedCommit = "a1baa862cdfb5f2ea382ac2a67e8527dee0d5daa"
+	rigGit := &fakeMQPostMergeGit{
+		mergeBase:         "oldbase000",
+		landedParent:      "oldmain111",
+		submittedFiles:    []string{"impl.go", "impl_test.go"},
+		landedFiles:       []string{"impl_test.go"},
+		landedOwnPatchIDs: []string{"patchid-impl", "patchid-impl-test"},
+	}
+
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true, landedCommit)
+	if err == nil || !strings.Contains(err.Error(), "impl.go") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want file-level refusal", err)
+	}
+	if mgr.postMergeCalled {
+		t.Fatal("PostMerge called with no patch-id evidence and an uncovered file")
 	}
 }
 
@@ -1378,6 +1526,129 @@ func TestRunVerifiedMQPostMerge_RealRemoteRefusesUnmergedMovedTip(t *testing.T) 
 	}
 	if remote := runOrphanCleanupGit(t, clone, "ls-remote", "--heads", "origin", branch); remote == "" {
 		t.Fatal("remote branch deleted despite carrying work that never landed")
+	}
+}
+
+// initFastForwardedMRRepo builds the gt-fq4e shape in a real repository: a
+// multi-commit branch, a target that moved underneath it, the queue's clean
+// rebase of the branch onto that target, and the landing that leaves main
+// holding the branch's own commits rather than a merge or squash of them —
+// the fast-forward gt done's direct-merge convoy pushes. The MR bead's
+// commit_sha still names the pre-rebase head, and landedCommits caps how much
+// of the branch reaches main (fewer than the branch's commits = a partial
+// landing). The returned origin is bare, so each test clones it.
+func initFastForwardedMRRepo(t *testing.T, commits, landedCommits int) mrCleanupRepo {
+	t.Helper()
+	repo := mrCleanupRepo{branch: "polecat/quartz/gt-fq4e"}
+
+	tmp := t.TempDir()
+	repo.originPath = filepath.Join(tmp, "origin.git")
+	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", repo.originPath)
+
+	clone := filepath.Join(tmp, "clone")
+	runOrphanCleanupGit(t, tmp, "clone", repo.originPath, clone)
+	runOrphanCleanupGit(t, clone, "config", "user.email", "polecat@example.com")
+	runOrphanCleanupGit(t, clone, "config", "user.name", "Polecat Test")
+
+	writeOrphanCleanupFile(t, clone, "seed.txt", "seed\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "seed main")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", "main")
+
+	runOrphanCleanupGit(t, clone, "checkout", "-b", repo.branch)
+	for i := 0; i < commits; i++ {
+		// Alternate the file so no single commit carries the whole branch, as
+		// in the reported 8-commit MR.
+		name := "jsonl_git_backup.go"
+		if i%2 == 1 {
+			name = "jsonl_git_backup_test.go"
+		}
+		writeOrphanCleanupFile(t, clone, name, "change "+strconv.Itoa(i)+"\n")
+		runOrphanCleanupGit(t, clone, "add", "-A")
+		runOrphanCleanupGit(t, clone, "commit", "-m", "fix(daemon): change "+strconv.Itoa(i)+" (gt-fq4e)")
+	}
+	repo.submittedHead = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	runOrphanCleanupGit(t, clone, "push", "-u", "origin", repo.branch)
+
+	// The target moves underneath, so landing the branch means replaying it
+	// onto the new tip.
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	writeOrphanCleanupFile(t, clone, "other.txt", "concurrent\n")
+	runOrphanCleanupGit(t, clone, "add", "-A")
+	runOrphanCleanupGit(t, clone, "commit", "-m", "concurrent target change")
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+
+	runOrphanCleanupGit(t, clone, "checkout", repo.branch)
+	runOrphanCleanupGit(t, clone, "rebase", "main")
+	runOrphanCleanupGit(t, clone, "push", "--force", "origin", repo.branch)
+
+	landedTip := runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	if landedCommits < commits {
+		// Only the first landedCommits commits of the rebased branch reach
+		// main: the rest never land.
+		landedTip = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD~"+strconv.Itoa(commits-landedCommits))
+	}
+	runOrphanCleanupGit(t, clone, "checkout", "main")
+	runOrphanCleanupGit(t, clone, "merge", "--ff-only", landedTip)
+	repo.landedCommit = runOrphanCleanupGit(t, clone, "rev-parse", "HEAD")
+	if landedCommits == commits && repo.landedCommit == runOrphanCleanupGit(t, clone, "rev-parse", "origin/main") {
+		t.Fatalf("test premise broken: the branch landed as nothing new on main")
+	}
+	runOrphanCleanupGit(t, clone, "push", "origin", "main")
+	// The retry that meets a deleted branch: the live-tip lookup falls back to
+	// the recorded commit_sha, which the rebase left stale.
+	runOrphanCleanupGit(t, clone, "push", "origin", "--delete", repo.branch)
+	return repo
+}
+
+// TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranch is the reported
+// defect (gt-fq4e) against real git: 8 commits touching two files, no commit
+// touching both, landed as the branch's own commits on main. The attestation
+// has to satisfy the proof, and the error this test would have failed with is
+// the exact one the report quotes — a submitted file absent from the attested
+// commit's own changed files.
+func TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranch(t *testing.T) {
+	t.Parallel()
+	repo := initFastForwardedMRRepo(t, 8, 8)
+	clone := cloneMRCleanupRepo(t, repo.originPath)
+	g := git.NewGit(clone)
+
+	mr := mrCleanupRequest(repo)
+	mr.CommitSHA = repo.submittedHead
+	recorded, err := verifyMQPostMergeProof(g, mr, repo.landedCommit)
+	if err != nil {
+		t.Fatalf("verifyMQPostMergeProof: %v", err)
+	}
+	if recorded != repo.landedCommit {
+		t.Fatalf("recorded merge commit = %q, want the attested landed commit %q", recorded, repo.landedCommit)
+	}
+	// The landing really is the multi-commit shape: the attested commit's own
+	// diff covers one of the two files, so only the patch-id binding can admit
+	// it.
+	ownFiles := runOrphanCleanupGit(t, clone, "diff", "--name-only", repo.landedCommit+"^", repo.landedCommit)
+	if strings.Contains(ownFiles, "\n") {
+		t.Fatalf("test premise broken: the attested commit already covers every file (%q)", ownFiles)
+	}
+}
+
+// TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranchRefusesPartialLanding
+// is the fail-closed half (gt-fq4e): half the branch landed. The unlanded
+// commits have no patch-id on main, and their files never appear in the
+// attested commit's diff, so the proof must still refuse.
+func TestVerifyMQPostMergeProof_RealFastForwardedMultiCommitBranchRefusesPartialLanding(t *testing.T) {
+	t.Parallel()
+	repo := initFastForwardedMRRepo(t, 4, 2)
+	clone := cloneMRCleanupRepo(t, repo.originPath)
+	g := git.NewGit(clone)
+
+	mr := mrCleanupRequest(repo)
+	mr.CommitSHA = repo.submittedHead
+	_, err := verifyMQPostMergeProof(g, mr, repo.landedCommit)
+	if err == nil {
+		t.Fatal("merge proof accepted a landing that carried only half the submitted commits")
+	}
+	if !strings.Contains(err.Error(), "attestation does not match MR") {
+		t.Fatalf("verifyMQPostMergeProof error = %v, want attestation-does-not-match-MR refusal", err)
 	}
 }
 
