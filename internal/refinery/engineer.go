@@ -913,9 +913,11 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 			return eligibility
 		}
 
-		// The pre-push hook refuses default-branch pushes from a polecat
-		// session unless GT_REFINERY_MERGE=1 is set (gt-ibt8); the Refinery
-		// owns landing verified MRs, so it names that signal explicitly.
+		// The pre-push hook refuses default-branch pushes from a polecat-shaped
+		// context unless GT_REFINERY_MERGE=1 is set AND corroborated by a
+		// Refinery identity signal, GT_REFINERY=1 or GT_ROLE=*/refinery
+		// (gt-ibt8, gt-9tf9); this process inherits GT_REFINERY=1 from the
+		// Refinery's tmux session env (internal/refinery/manager.go).
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
 		if err := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); err != nil {
 			// Undo the local merge commit. Without this, the next retry could

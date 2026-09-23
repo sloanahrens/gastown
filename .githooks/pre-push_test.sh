@@ -6,12 +6,14 @@
 
 set -euo pipefail
 
-# The suite runs from inside a polecat worktree as often as not, and the hook
-# now refuses default-branch pushes from a polecat (gt-ibt8) — so clear the
-# ambient polecat signals first and let each test state its own context
-# explicitly. Without this, every default-branch test below would pass or fail
-# depending on who ran the suite.
-unset GT_ROLE GT_POLECAT GT_POLECAT_PATH 2>/dev/null || true
+# The suite runs from inside a polecat or Refinery session as often as not,
+# and the hook now refuses default-branch pushes from a polecat (gt-ibt8)
+# while trusting GT_REFINERY as a Refinery signal (gt-9tf9) — so clear the
+# ambient role/identity signals first and let each test state its own context
+# explicitly. Without this, a suite run inside a Refinery session (which sets
+# GT_REFINERY=1 at spawn, internal/refinery/manager.go) would leak that var
+# into the Test 28/29/33 self-grant cases and let a spoofed push through.
+unset GT_ROLE GT_POLECAT GT_POLECAT_PATH GT_REFINERY 2>/dev/null || true
 unset GT_REFINERY_MERGE GT_DONE_DIRECT_MERGE 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -376,15 +378,16 @@ local_sha=$(get_sha HEAD)
 assert_pass "Polecat branch push allowed" run_hook_env "GT_ROLE=gastown/polecats/flint" "refs/heads/polecat/flint/gt-ibt8" "$local_sha" "refs/heads/polecat/flint/gt-ibt8" "0000000000000000000000000000000000000000"
 cleanup
 
-# Test 20: Refinery merge path (GT_REFINERY_MERGE=1) — allowed
-echo "Test 20: Default push with GT_REFINERY_MERGE=1 (refinery merge path)"
+# Test 20: Refinery merge path, genuine refinery identity (GT_REFINERY_MERGE=1
+# + GT_ROLE=<rig>/refinery) — allowed
+echo "Test 20: Default push with GT_REFINERY_MERGE=1 + genuine refinery identity"
 setup_repos
 cd "$TMPDIR/local"
 remote_sha=$(get_sha HEAD)
 echo "merged MR" >> file.txt
 git add file.txt && git commit -m "merged MR" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
-assert_pass "Refinery merge allowed" run_hook_env "GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+assert_pass "Refinery merge allowed" run_hook_env "GT_ROLE=gastown/refinery GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # Test 21: gt done direct-merge convoy (GT_DONE_DIRECT_MERGE=1) — allowed
@@ -465,6 +468,106 @@ cd "$TMPDIR/local"
 echo "crew live work" >> file.txt
 git add file.txt && git commit -m "crew live work" >/dev/null 2>&1
 assert_live_pass "LIVE crew default push allowed" "GT_ROLE=gastown/crew/sloan" "HEAD:$DEFAULT_BRANCH"
+cleanup
+
+# ---------------------------------------------------------------------------
+# Allow-list identity binding (gt-9tf9): GT_REFINERY_MERGE /
+# GT_DONE_DIRECT_MERGE are env vars any process in the shell can set, so
+# is_polecat_main_push_allowed must not trust GT_REFINERY_MERGE on its own -
+# it has to be corroborated by is_refinery_caller, and contradictory flag
+# combinations must fail closed.
+# ---------------------------------------------------------------------------
+
+# Test 28: a polecat session (GT_ROLE=polecat) exports GT_REFINERY_MERGE=1
+# itself, with no refinery identity signal at all — still BLOCKED. This is
+# the exact bypass gt-9tf9 closes: the flag alone used to be enough.
+echo "Test 28: Polecat self-granting GT_REFINERY_MERGE=1 (no refinery identity) — BLOCKED"
+setup_repos
+cd "$TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+echo "spoofed merge" >> file.txt
+git add file.txt && git commit -m "spoofed merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Polecat GT_REFINERY_MERGE=1 without refinery identity blocked" run_hook_env "GT_ROLE=polecat GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 29: same bypass attempt, but the polecat is detected by cwd alone (no
+# GT_ROLE at all) — still BLOCKED.
+echo "Test 29: Polecat (cwd-detected) self-granting GT_REFINERY_MERGE=1 — BLOCKED"
+setup_repos "town/gastown/polecats/onyx/gastown"
+cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+remote_sha=$(get_sha HEAD)
+echo "spoofed merge" >> file.txt
+git add file.txt && git commit -m "spoofed merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "cwd-detected polecat GT_REFINERY_MERGE=1 blocked" run_hook_env "GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 30: GT_REFINERY_MERGE=1 corroborated by GT_ROLE=<rig>/refinery even
+# though cwd happens to look polecat-shaped (batch.go: "the Refinery may
+# itself run inside one") — ALLOWED.
+echo "Test 30: GT_REFINERY_MERGE=1 + GT_ROLE=refinery from a polecat-shaped cwd — ALLOWED"
+setup_repos "town/gastown/polecats/onyx/gastown"
+cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+remote_sha=$(get_sha HEAD)
+echo "real merge" >> file.txt
+git add file.txt && git commit -m "real merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_pass "GT_ROLE=refinery corroborates GT_REFINERY_MERGE=1" run_hook_env "GT_ROLE=gastown/refinery GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 31: GT_REFINERY_MERGE=1 corroborated by GT_REFINERY=1 (the session-spawn
+# signal, set once by the Refinery's own session manager) from a
+# polecat-shaped cwd — ALLOWED.
+echo "Test 31: GT_REFINERY_MERGE=1 + GT_REFINERY=1 from a polecat-shaped cwd — ALLOWED"
+setup_repos "town/gastown/polecats/onyx/gastown"
+cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+remote_sha=$(get_sha HEAD)
+echo "real merge" >> file.txt
+git add file.txt && git commit -m "real merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_pass "GT_REFINERY=1 corroborates GT_REFINERY_MERGE=1" run_hook_env "GT_REFINERY=1 GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 32: both allow flags set at once (contradictory — no gt code path does
+# this) — BLOCKED from a polecat session, fail closed on ambiguity rather
+# than picking one, even though GT_REFINERY_MERGE alone would need refinery
+# identity and GT_DONE_DIRECT_MERGE alone would be enough on its own.
+echo "Test 32: Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 set — BLOCKED (ambiguous)"
+setup_repos
+cd "$TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+echo "ambiguous merge" >> file.txt
+git add file.txt && git commit -m "ambiguous merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Both allow flags set is refused" run_hook_env "GT_ROLE=gastown/polecats/flint GT_REFINERY_MERGE=1 GT_DONE_DIRECT_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 33: a polecat GT_ROLE self-granting BOTH the session-spawn signal
+# (GT_REFINERY=1) and GT_REFINERY_MERGE=1 — still BLOCKED. A positive
+# polecat-shaped GT_ROLE contradicts a Refinery identity outright, so it
+# disqualifies the GT_REFINERY corroboration too, not just the bare-flag case
+# above (gt-9tf9).
+echo "Test 33: Polecat GT_ROLE self-granting GT_REFINERY=1 + GT_REFINERY_MERGE=1 — BLOCKED"
+setup_repos
+cd "$TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+echo "spoofed identity merge" >> file.txt
+git add file.txt && git commit -m "spoofed identity merge" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Polecat GT_ROLE with self-granted GT_REFINERY=1 blocked" run_hook_env "GT_ROLE=gastown/polecats/flint GT_REFINERY=1 GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 34: LIVE proof of Test 28 — a real `git push` from a polecat worktree
+# with GT_REFINERY_MERGE=1 self-granted is still refused (gt-9tf9 asks
+# specifically for this live proof, not just a matcher/stdin test).
+echo "Test 34: LIVE push HEAD:$DEFAULT_BRANCH from a polecat worktree with GT_REFINERY_MERGE=1 — refused"
+setup_repos "town/gastown/polecats/flint/gastown"
+cd "$TMPDIR/town/gastown/polecats/flint/gastown"
+echo "live spoofed merge" >> file.txt
+git add file.txt && git commit -m "live spoofed merge" >/dev/null 2>&1
+git checkout --detach HEAD >/dev/null 2>&1
+assert_live_block "LIVE HEAD:default refused for polecat despite GT_REFINERY_MERGE=1" "GT_REFINERY_MERGE=1" "HEAD:$DEFAULT_BRANCH"
 cleanup
 
 echo ""

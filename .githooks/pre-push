@@ -15,6 +15,12 @@
 # 09-17 12:08 (HEAD:main from a detached HEAD). Polecat work lands through
 # `gt done` -> MR -> Refinery. See is_polecat_caller and the check in the
 # loop below for the two deliberate pushers that must still get through.
+#
+# GT_REFINERY_MERGE requires is_refinery_caller corroboration, and a
+# polecat-shaped GT_ROLE disqualifies that corroboration outright even if
+# GT_REFINERY=1 is also set; ambiguous allow-flag combinations fail closed
+# (gt-9tf9). This is still a same-process env-var check, not authentication -
+# closing that for real needs a server-side backstop (gt-9tf9, gt-wvp3c).
 
 # Detect the rig's default branch dynamically.
 # Fallback chain matches Go implementation (git.RemoteDefaultBranch):
@@ -58,23 +64,92 @@ is_polecat_caller() {
   return 1
 }
 
+# is_refinery_caller reports whether this process's env signals look like the
+# Refinery, using the same two signals the Go side treats as authoritative for
+# that role (isRefineryRole, internal/cmd/tap_guard.go). This is a
+# plausibility check, not authentication: GT_REFINERY and GT_ROLE are
+# ordinary environment variables any process in this shell can export. A
+# polecat-shaped GT_ROLE disqualifies the claim outright (gt-9tf9), since it
+# directly contradicts a Refinery identity; nothing here stops a hand-crafted
+# non-polecat environment from spoofing the rest. Closing that for real needs
+# a server-side backstop (branch protection with a Refinery-only push
+# identity), tracked separately (gt-wvp3c).
+#
+#   GT_REFINERY  - set on the tmux session env at Refinery spawn
+#                  (internal/refinery/manager.go), mirroring GT_POLECAT_PATH
+#                  for polecats.
+#   GT_ROLE      - "refinery" or the compound "<rig>/refinery" form.
+is_refinery_caller() {
+  case "${GT_ROLE:-}" in
+    polecat|*/polecats/*) return 1 ;;
+  esac
+  [[ -n "${GT_REFINERY:-}" ]] && return 0
+  case "${GT_ROLE:-}" in
+    refinery|*/refinery) return 0 ;;
+  esac
+  return 1
+}
+
 # is_polecat_main_push_allowed reports whether this particular push to the
-# default branch is one of the deliberate, gate-checked pushes a polecat
-# session is sanctioned to make. Both signals are set by gt code paths that
-# have already decided the push is legitimate - neither is a user override:
+# default branch, from a caller is_polecat_caller already flagged as a
+# polecat, is one of the two deliberate, gate-checked pushes that role is
+# sanctioned to make:
 #
 #   GT_REFINERY_MERGE=1    - the Refinery's merge (internal/refinery/batch.go,
-#                            internal/refinery/engineer.go), which owns landing
-#                            verified MRs on the default branch.
+#                            internal/refinery/engineer.go). Requires
+#                            is_refinery_caller corroboration; refused without
+#                            it (gt-9tf9).
 #   GT_DONE_DIRECT_MERGE=1 - `gt done` landing a convoy whose merge_strategy is
-#                            "direct" (internal/cmd/done.go). That strategy
-#                            skips the MR on purpose and is itself gated on the
-#                            source issue (no_merge, review_only, unchecked
-#                            acceptance criteria, merge_strategy=local).
+#                            "direct" (internal/cmd/done.go), which deliberately
+#                            runs inside a polecat's own session, so there is no
+#                            separate identity to require. It stays a bare
+#                            env-var trust boundary: a hostile or hand-typed
+#                            polecat session can still export this name and
+#                            push past `gt done`'s own eligibility checks.
+#                            Closing that gap needs a server-side backstop
+#                            (branch protection with a Refinery-only push
+#                            identity); tracked as gt-wvp3c, not fixed here.
+#
+# A legitimate call site sets exactly one of these per push, so both set at
+# once is refused rather than trusted - it doesn't stop the GT_DONE_DIRECT_MERGE
+# gap above (a caller can still set that flag alone), it only catches a
+# contradictory/hand-crafted env (gt-9tf9).
 is_polecat_main_push_allowed() {
-  [[ "${GT_REFINERY_MERGE:-0}" == "1" ]] && return 0
-  [[ "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]] && return 0
+  local refinery_flag=0 direct_flag=0
+  [[ "${GT_REFINERY_MERGE:-0}" == "1" ]] && refinery_flag=1
+  [[ "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]] && direct_flag=1
+
+  if [[ "$refinery_flag" == "1" && "$direct_flag" == "1" ]]; then
+    return 1
+  fi
+
+  if [[ "$refinery_flag" == "1" ]]; then
+    is_refinery_caller && return 0
+    return 1
+  fi
+
+  [[ "$direct_flag" == "1" ]] && return 0
+
   return 1
+}
+
+# describe_main_push_denial prints the extra diagnostic line(s) explaining WHY
+# an env var that looked like an allow signal did not grant one, so the
+# operator sees "identity mismatch" or "both flags set" instead of just
+# guessing from the generic refusal banner below.
+describe_main_push_denial() {
+  if [[ "${GT_REFINERY_MERGE:-0}" == "1" && "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]]; then
+    echo "Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 are set. No gt code path"
+    echo "sets both for the same push, so this looks tampered rather than legitimate -"
+    echo "refusing rather than guessing which one to trust (gt-9tf9)."
+    echo ""
+  elif [[ "${GT_REFINERY_MERGE:-0}" == "1" ]]; then
+    echo "GT_REFINERY_MERGE=1 was set, but this session's identity doesn't look like"
+    echo "the Refinery (GT_REFINERY=${GT_REFINERY:-<unset>}, GT_ROLE=${GT_ROLE:-<unset>})."
+    echo "The env var alone is not enough to grant this (gt-9tf9) - it must come from"
+    echo "an actual Refinery session."
+    echo ""
+  fi
 }
 
 while read local_ref local_sha remote_ref remote_sha; do
@@ -108,6 +183,7 @@ while read local_ref local_sha remote_ref remote_sha; do
     echo "The Refinery merges to $default_branch after verification."
     echo "Detected as a polecat via GT_ROLE=${GT_ROLE:-<unset>} and cwd $PWD."
     echo ""
+    describe_main_push_denial
     echo "If this push is a legitimate landing (Refinery merge, or a gt done"
     echo "direct-merge convoy) it must come from that gt code path, which sets"
     echo "GT_REFINERY_MERGE=1 / GT_DONE_DIRECT_MERGE=1 for this push."

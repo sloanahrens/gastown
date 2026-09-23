@@ -722,8 +722,13 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	}
 
 	// Push to origin. The pre-push hook refuses default-branch pushes from a
-	// polecat session unless GT_REFINERY_MERGE=1 is set (gt-ibt8), and the
-	// Refinery may itself run inside one.
+	// polecat-shaped context unless GT_REFINERY_MERGE=1 is set AND corroborated
+	// by a Refinery identity signal, GT_REFINERY=1 or GT_ROLE=*/refinery
+	// (gt-ibt8, gt-9tf9) — the Refinery may itself run inside a polecat-shaped
+	// worktree. This process inherits GT_REFINERY=1 from the tmux session env
+	// the Refinery is spawned with (internal/refinery/manager.go); a batch run
+	// outside that session (e.g. `gt mq run` from a non-Refinery session) will
+	// be refused here too, correctly, since it isn't the Refinery.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Pushing %d merged MRs to origin/%s...\n", len(stacked), target)
 	if pushErr := e.git.PushWithEnv("origin", mergePushRef(target), false, []string{git.EnvRefineryMerge}); pushErr != nil {
 		if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
