@@ -15,12 +15,14 @@ import (
 type fakeMRStore struct {
 	open      []*beads.Issue
 	findErr   error
+	findCalls int
 	closeErr  map[string]error
 	closed    []string
 	closeArgs []string
 }
 
 func (f *fakeMRStore) FindOpenMRsForIssue(string) ([]*beads.Issue, error) {
+	f.findCalls++
 	if f.findErr != nil {
 		return nil, f.findErr
 	}
@@ -214,6 +216,114 @@ func TestSupersedeOpenMRsLookupFailureIsQuiet(t *testing.T) {
 	}
 	if len(store.closed) != 0 || len(agents.calls) != 0 {
 		t.Fatalf("closed = %v, clear calls = %v, want no writes", store.closed, agents.calls)
+	}
+}
+
+// TestCarriedMRPriority is the gt-m7fm regression at the unit level: a bump
+// that lives only on the MR being superseded (or5's P0, its source issue gt-fo3h
+// being P2) must reach the replacement, and nothing else must move.
+func TestCarriedMRPriority(t *testing.T) {
+	tests := []struct {
+		name    string
+		open    []*beads.Issue
+		findErr error
+		derived int
+		want    int
+		from    string
+	}{
+		{
+			name:    "a superseded bump is carried",
+			open:    []*beads.Issue{{ID: "gt-wisp-or5", Priority: 0}},
+			derived: 2,
+			want:    0,
+			from:    "gt-wisp-or5",
+		},
+		{
+			name:    "an unbumped superseded MR leaves the source issue's priority",
+			open:    []*beads.Issue{{ID: "gt-wisp-or5", Priority: 2}},
+			derived: 2,
+			want:    2,
+		},
+		{
+			name:    "a demotion on the superseded MR is not carried",
+			open:    []*beads.Issue{{ID: "gt-wisp-or5", Priority: 3}},
+			derived: 2,
+			want:    2,
+		},
+		{
+			name:    "the best of several superseded MRs wins",
+			open:    []*beads.Issue{{ID: "gt-wisp-a", Priority: 1}, {ID: "gt-wisp-b", Priority: 0}},
+			derived: 2,
+			want:    0,
+			from:    "gt-wisp-b",
+		},
+		{
+			name:    "an unreadable queue keeps the derived priority",
+			findErr: errors.New("queue unreadable"),
+			derived: 1,
+			want:    1,
+		},
+		{
+			name:    "a negative priority is bd's unset, not a bump",
+			open:    []*beads.Issue{{ID: "gt-wisp-or5", Priority: -1}},
+			derived: 2,
+			want:    2,
+		},
+		{
+			name:    "an MR with no ID cannot be named as the source of the carry",
+			open:    []*beads.Issue{{Priority: 0}},
+			derived: 2,
+			want:    2,
+		},
+		{
+			name:    "a nil entry is skipped",
+			open:    []*beads.Issue{nil, {ID: "gt-wisp-b", Priority: 1}},
+			derived: 2,
+			want:    1,
+			from:    "gt-wisp-b",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeMRStore{open: tc.open, findErr: tc.findErr}
+			got, from := carriedMRPriority(store, "gt-8ib", tc.derived)
+			if got != tc.want || from != tc.from {
+				t.Fatalf("carriedMRPriority = (%d, %q), want (%d, %q)", got, from, tc.want, tc.from)
+			}
+		})
+	}
+}
+
+// TestCarriedMRPriorityWithoutIssueID: with nothing to look up, the derived
+// priority stands and no queue read happens.
+func TestCarriedMRPriorityWithoutIssueID(t *testing.T) {
+	store := &fakeMRStore{open: []*beads.Issue{{ID: "gt-wisp-or5", Priority: 0}}}
+
+	if got, from := carriedMRPriority(store, "", 2); got != 2 || from != "" {
+		t.Fatalf("carriedMRPriority = (%d, %q), want (2, \"\")", got, from)
+	}
+	if store.findCalls != 0 {
+		t.Fatalf("find calls = %d, want no queue read", store.findCalls)
+	}
+}
+
+// TestSupersessionCarriesABumpIntoTheReplacement pins the order both call sites
+// use (gt mq submit, gt done): read the incoming priority from the MRs about to
+// be superseded, create the replacement with it, then close them. A bump read
+// after the close would be a bump on a closed bead.
+func TestSupersessionCarriesABumpIntoTheReplacement(t *testing.T) {
+	townRoot := townWithRoute(t, "gastown", "gt")
+	old := &beads.Issue{ID: "gt-wisp-or5", Status: string(beads.StatusOpen), Priority: 0, Description: "source_issue: gt-fo3h\nrig: gastown"}
+	store := &fakeMRStore{open: []*beads.Issue{old}}
+
+	priority, from := carriedMRPriority(store, "gt-fo3h", 2) // gt-fo3h is P2
+	superseded := supersedeOpenMRsForIssue(store, &fakeAgentClearer{}, "gt-fo3h", "gt-wisp-1sab", townRoot, "gastown")
+
+	if priority != 0 || from != "gt-wisp-or5" {
+		t.Fatalf("carriedMRPriority = (%d, %q), want (0, gt-wisp-or5)", priority, from)
+	}
+	if len(superseded) != 1 || superseded[0].ID != "gt-wisp-or5" {
+		t.Fatalf("superseded = %+v, want the MR the priority was read from", superseded)
 	}
 }
 

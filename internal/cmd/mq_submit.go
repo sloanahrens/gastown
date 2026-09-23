@@ -209,10 +209,15 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 	// Get source issue for priority inheritance and dependency check
 	var priority int
+	carriedFrom := ""
 	if mqSubmitPriority >= 0 {
+		// An explicit --priority is the submitter's own intent; nothing carries
+		// over it.
 		priority = mqSubmitPriority
 	} else {
-		priority = sourceIssue.Priority
+		// A superseded MR for this issue may hold a manual bump the source issue
+		// never saw (gt-m7fm; see carriedMRPriority).
+		priority, carriedFrom = carriedMRPriority(bd, issueID, sourceIssue.Priority)
 	}
 
 	// Enforce molecule step dependencies before allowing submit.
@@ -313,6 +318,9 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 			if sup.AgentCleared {
 				fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
 			}
+		}
+		if carriedFrom != "" {
+			fmt.Printf("  %s Inherited priority P%d from %s\n", style.Dim.Render("○"), priority, carriedFrom)
 		}
 	}
 
