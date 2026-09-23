@@ -813,3 +813,57 @@ func TestRekeyNote_CoversLandedMergeCommitWhenNoteSitsOnRehearsalHead(t *testing
 		t.Fatal("the copied note is not on origin; no other clone, including the coverage check, can see the proof")
 	}
 }
+
+// TestRekeyNote_FastForwardedMultiCommitLandingNamesTheRange covers the shape
+// a `git merge --ff-only` landing leaves behind: main gains the branch's
+// commits as plain first-parent commits, and the om note proves the branch's
+// whole diff, which is no landed commit's own diff. The refusal has to name
+// the range that does match, because the remedy is re-landing the branch, not
+// another backfill (gt-nhqoa).
+func TestRekeyNote_FastForwardedMultiCommitLandingNamesTheRange(t *testing.T) {
+	f := newRekeyFixture(t)
+	base, err := f.g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-nhqoa")
+	commitFile(t, f.repoDir, "one.txt", "one\n", "first commit")
+	branchHead := commitFile(t, f.repoDir, "two.txt", "two\n", "second commit")
+
+	// The verdict sits on a rehearsal head: the branch's tree under a commit
+	// that never lands, so no landed commit carries it. Its patch-id is
+	// patch-id(base..branchHead) — the MR's diff, not either commit's own.
+	mrPatchID, err := f.g.PatchID(base, branchHead)
+	if err != nil {
+		t.Fatalf("PatchID %s..%s: %v", base, branchHead, err)
+	}
+	rehearsalHead := f.git(f.repoDir, "commit-tree", branchHead+"^{tree}", "-p", base, "-m", "rehearsal merge for om review")
+	writeMRNote(t, f.g, "gt-wisp-nhqoa", base, rehearsalHead, mrPatchID)
+
+	f.checkout("main")
+	f.git(f.repoDir, "merge", "--ff-only", "polecat/slate/gt-nhqoa")
+	landed, err := f.g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev landed: %v", err)
+	}
+	f.publish()
+	if landed != branchHead {
+		t.Fatalf("landed = %s, want the fast-forwarded branch tip %s", landed, branchHead)
+	}
+
+	_, err = RekeyNote(f.g, RekeyRequest{MR: "gt-wisp-nhqoa", Landed: landed, Target: "main", Reason: "landed before its note was copied"})
+	if err == nil {
+		t.Fatal("expected a fast-forwarded multi-commit landing to refuse the backfill")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "verdict proves the diff "+shortCommit(base)+".."+shortCommit(landed)) {
+		t.Fatalf("refusal does not name the first-parent range the verdict proves: %v", err)
+	}
+	if !strings.Contains(msg, "git merge --no-ff") {
+		t.Fatalf("refusal does not name the remedy for the next landing: %v", err)
+	}
+	if _, err := ReadNote(f.g, landed); !errors.Is(err, git.ErrNoNote) {
+		t.Fatalf("a refused backfill must not write a note; got note with err %v", err)
+	}
+}

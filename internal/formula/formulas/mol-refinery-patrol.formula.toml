@@ -1098,6 +1098,17 @@ push was never rehearsed on this tip: go back to process-branch and
 rehearse again before merging (gt-x1x3). The push rejects a stale merge as
 non-fast-forward anyway, but only after the gate was spent.
 
+The two merges move different refs. `--ff-only` brings the local *target* up
+to origin and never applies to the polecat branch; that one is always merged
+`--no-ff`. Only a merge commit's own diff from its first parent equals the MR's
+diff, which is the equality an om note's patch-id proves: the
+editorial-coverage check recomputes patch-id(commit^1..commit) for every
+first-parent commit it walks, and `gt mq rekey-note` proves that same pair
+before stamping. Fast-forwarding the branch lands its commits as plain
+first-parent commits whose own diffs are fractions of the MR, leaving main
+with commits no verdict can cover and no re-key or hand-written note able to
+repair them (gt-nhqoa).
+
 **Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
 
 Push can fail silently (network, auth, hooks). IMMEDIATELY verify:
