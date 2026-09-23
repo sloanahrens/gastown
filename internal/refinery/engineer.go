@@ -2906,6 +2906,11 @@ func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
 	return beads.FirstUnresolvedBlockerID(issue)
 }
 
+// ErrDuplicateBranchMRs is returned by ListReadyMRs when two or more open MRs
+// claim the same branch — the invariant conflict resolution must never break
+// (gt-k1qf). See duplicateBranchMRs.
+var ErrDuplicateBranchMRs = errors.New("two open MRs claim the same branch")
+
 // ListReadyMRs returns MRs that are ready for processing:
 // - Not claimed by another worker (checked via assignee field)
 // - Not blocked by unresolved dependencies
@@ -2926,6 +2931,20 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
+	}
+
+	// gt-k1qf: fail closed the moment two open MRs (ready or still blocked)
+	// claim the same branch, rather than silently handing back one of them as
+	// "ready" and leaving the other to be gated or merged too, or stranded
+	// past the normal post-merge cleanup path. supersedeOpenMRsForIssue
+	// (mr_supersede.go) is supposed to keep this from ever happening — it
+	// closes the older MR for a source issue the instant a replacement is
+	// created — but it swallows a close failure as a warning rather than
+	// failing the submission that already landed, so a Dolt hiccup at exactly
+	// the wrong moment can leave both open. This is the safety net for that
+	// residual window, not the primary fix.
+	if dups := duplicateBranchMRs(issues, e.rig.Name); len(dups) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrDuplicateBranchMRs, formatDuplicateBranchMRs(dups))
 	}
 
 	// Convert beads issues to MRInfo
@@ -3200,6 +3219,63 @@ func detectQueueAnomalies(
 	}
 
 	return anomalies
+}
+
+// duplicateBranchMR pairs one branch with every open MR ID that claims it,
+// sorted for deterministic output. len(IDs) is always >= 2.
+type duplicateBranchMR struct {
+	Branch string
+	IDs    []string
+}
+
+// duplicateBranchMRs finds branches claimed by more than one open MR in
+// issues, scoped to rigName the same way the rest of the queue is (wisps are
+// shared across all rigs — GH#2718). Two live MRs for one branch is exactly
+// the gt-k1qf failure: whichever the refinery picks up first, the other is
+// left either double-processed or stranded past the normal post-merge path
+// once the branch actually lands. supersedeOpenMRsForIssue is supposed to
+// prevent this by closing the older MR the instant a replacement is created;
+// this is the check that catches it if that ever fails silently.
+func duplicateBranchMRs(issues []*beads.Issue, rigName string) []duplicateBranchMR {
+	byBranch := map[string][]string{}
+	var order []string
+	for _, issue := range issues {
+		if issue == nil || issue.Status != "open" {
+			continue
+		}
+		fields := beads.ParseMRFields(issue)
+		if fields == nil || fields.Branch == "" {
+			continue
+		}
+		if fields.Rig != "" && !strings.EqualFold(fields.Rig, rigName) {
+			continue
+		}
+		if _, seen := byBranch[fields.Branch]; !seen {
+			order = append(order, fields.Branch)
+		}
+		byBranch[fields.Branch] = append(byBranch[fields.Branch], issue.ID)
+	}
+
+	var dups []duplicateBranchMR
+	for _, branch := range order {
+		ids := byBranch[branch]
+		if len(ids) < 2 {
+			continue
+		}
+		sort.Strings(ids)
+		dups = append(dups, duplicateBranchMR{Branch: branch, IDs: ids})
+	}
+	return dups
+}
+
+// formatDuplicateBranchMRs renders duplicateBranchMRs' findings for an error
+// message: one clause per colliding branch, naming every MR that claims it.
+func formatDuplicateBranchMRs(dups []duplicateBranchMR) string {
+	parts := make([]string, 0, len(dups))
+	for _, d := range dups {
+		parts = append(parts, fmt.Sprintf("branch %s: %s", d.Branch, strings.Join(d.IDs, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // ClaimMR claims an MR for processing by setting the assignee field.
