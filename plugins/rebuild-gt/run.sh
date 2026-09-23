@@ -247,10 +247,14 @@ blocked_defer() {
 # clear_alarms — every fingerprint this plugin owns asserts the binary is out
 # of force somewhere; once it is in force those assertions are false and the
 # producer closes them (gt-vwry). Clearing a key that is not open writes
-# nothing.
+# nothing. 'rebuild-gt:unverified' belongs here too: a binary that has just
+# verified in force refutes it, and without the key the last false positive
+# outlives its cause — it would stay open forever, and the town clears it by
+# hand (gt-b5mpe).
 clear_alarms() {
   gt escalate clear --fingerprint "rebuild-gt:starved" \
     --fingerprint "rebuild-gt:drift" --fingerprint "rebuild-gt:drift-unknown" \
+    --fingerprint "rebuild-gt:unverified" \
     --reason "rebuild-gt: the binary is in force" >/dev/null 2>&1 || true
 }
 
@@ -258,6 +262,9 @@ clear_alarms() {
 
 log "Pre-flight checks..."
 
+# The plugin runs from $TOWN_ROOT/plugins (a deployed copy, plugin.md), which
+# is not a repo, so no git command may use the plugin's cwd. Every git call in
+# this file therefore carries an explicit -C.
 if [ ! -d "$RIG_ROOT" ]; then
   log "Rig root $RIG_ROOT does not exist. Skipping."
   exit 0
@@ -390,12 +397,36 @@ fi
 log "Syncing $RIG_ROOT with origin/main..."
 git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
 if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
-  log "Local main diverged from origin/main, skipping rebuild."
-  if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
-  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
-    --title "Plugin: rebuild-gt [skipped]" \
-    --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
-  exit 0
+  # rev-list --count always prints a number, including "0", so testing it
+  # with -n is always true; that bug let this branch treat every ff-only
+  # failure as a real divergence and skipped the retry below unconditionally
+  # (gt-9jax). COUNT is local-only commits: >0 means HEAD has something
+  # origin/main lacks (a real divergence); 0 means the ff-only failed for
+  # some other reason (e.g. an untracked file the merge would overwrite),
+  # which a re-fetch+re-merge can still resolve if that reason has cleared.
+  COUNT=$(git -C "$RIG_ROOT" rev-list origin/main..HEAD --count 2>/dev/null || echo 0)
+  if [ "$COUNT" -gt 0 ]; then
+    log "Local main diverged from origin/main, skipping rebuild."
+    if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
+    gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+      --title "Plugin: rebuild-gt [skipped]" \
+      --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
+    exit 0
+  fi
+  # COUNT is 0: local HEAD has nothing origin/main lacks, so the ff-only
+  # failure is not a divergence (e.g. an untracked file the fast-forward
+  # would overwrite). Re-fetch and re-merge exactly once; if it still fails
+  # the retry didn't clear whatever blocked it and the original bail stands.
+  log "origin/main moved during sync; re-fetching and re-merging once..."
+  git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
+  if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
+    log "Local main diverged from origin/main, skipping rebuild."
+    if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
+    gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+      --title "Plugin: rebuild-gt [skipped]" \
+      --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
+    exit 0
+  fi
 fi
 
 # --- Detection ---------------------------------------------------------------
@@ -619,9 +650,18 @@ EXPECTED_COMMIT=$(git -C "$RIG_ROOT" rev-parse HEAD)
 # build_gt — the CPU-heavy half, run inside the container-gate slot when a held
 # slot is what has been blocking this rebuild (gt-kox0). Non-zero means the
 # build failed; a wait that never got the slot is a deferral, not a failure.
+#
+# It builds the pinned SHA, and SKIP_UPDATE_CHECK=1 is load-bearing: passed to
+# 'make safe-install', it disables check-up-to-date's own live fetch-and-
+# compare against origin/main (Makefile's check-up-to-date is a no-op under
+# SKIP_UPDATE_CHECK), so a merge that lands on origin/main after the ff-only
+# sync above but before safe-install runs cannot fail the check against a ref
+# that has since moved (gt-9jax). This is safe because the sync already
+# fast-forwarded HEAD to what origin/main was at sync time; check-forward-only
+# and the post-install verification below are the guards that remain.
 build_gt() {
   if [ "$RESERVE" != "1" ]; then
-    (cd "$RIG_ROOT" && make build) 2>&1 || return $?
+    (cd "$RIG_ROOT" && make SKIP_UPDATE_CHECK=1 build) 2>&1 || return $?
     return 0
   fi
   local logf rc=0
@@ -630,7 +670,7 @@ build_gt() {
   # Teed rather than captured: a build that spends the acquire budget waiting
   # would otherwise print nothing to the plugin log until it finished, and read
   # as hung (gt-kox0).
-  (cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$(reserve_remaining)s" -- make build) 2>&1 \
+  (cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$(reserve_remaining)s" -- make SKIP_UPDATE_CHECK=1 build) 2>&1 \
     | tee "$logf" || rc=$?
   # 'gt slot run' prints this the moment it holds the slot — the literal is
   # slotAcquiredFormat in internal/cmd/slot.go, pinned by
@@ -646,7 +686,7 @@ build_gt() {
 
 # The install stays outside the slot hold: it is a temp-file rename, not a CPU
 # consumer, so releasing the slot when the build ends costs the gate nothing.
-if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make safe-install) 2>&1; then
+if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make SKIP_UPDATE_CHECK=1 safe-install) 2>&1; then
   # What came into force is read from the gt the town will execute — resolved
   # through PATH, which is how the daemon and every session resolve it — not
   # from the build's stdout. An install that does not take (a shadowing gt
@@ -655,8 +695,21 @@ if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make safe-install) 2
   # while the town runs old code, and recording the wrong commit is worse than
   # recording none (gt-oqbw).
   GT_PATH=$(command -v gt 2>/dev/null || true)
-  GOT_COMMIT_SHORT=$(gt version 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@' || true)
-  if [ -z "$GOT_COMMIT_SHORT" ]; then
+  # binary_commit from 'gt stale --json' is the SHORT hash the Makefile bakes
+  # in (COMMIT := git rev-parse --short HEAD, internal/cmd.Commit) — NOT full,
+  # despite what an earlier version of this comment claimed. EXPECTED_COMMIT
+  # is always full. Comparing them directly would fail every real install
+  # (gt-b5mpe), so both this reading and the fallback below are resolved to a
+  # full hash inside RIG_ROOT before the comparison, regardless of length.
+  GOT_COMMIT=$(gt stale --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || true)
+  # A binary with no commit at all (a dev build installed by some other path)
+  # cannot be verified this way, and the fallback mirrors the production
+  # failure this replaced: 'gt version' prints no '@' from a cwd that is not a
+  # repo, which is where this plugin always runs (gt-b5mpe).
+  if [ -z "$GOT_COMMIT" ]; then
+    GOT_COMMIT=$(gt version 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@' || true)
+  fi
+  if [ -z "$GOT_COMMIT" ]; then
     log "FAILED: cannot read the installed binary's commit ($GT_PATH)"
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
       --title "Plugin: rebuild-gt [unverified]" \
@@ -665,21 +718,21 @@ if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make safe-install) 2
       --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
     exit 1
   fi
-  # 'gt version' prints the binary's build-time commit abbreviated
-  # (internal/version.ShortCommit, <=12 chars); EXPECTED_COMMIT is a full
-  # 40-character hash. Resolve the abbreviated form to a full hash inside
-  # RIG_ROOT (the one repo it's guaranteed unambiguous in) before comparing
-  # like with like (gt-oqbw).
-  GOT_COMMIT=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT_SHORT" 2>/dev/null || true)
-  if [ -z "$GOT_COMMIT" ]; then
-    log "FAILED: installed commit $GOT_COMMIT_SHORT does not resolve inside $RIG_ROOT"
+  # Resolve inside RIG_ROOT (the one repo it's guaranteed unambiguous in)
+  # before comparing like with like (gt-oqbw, gt-b5mpe). rev-parse --verify
+  # accepts a hash of any length, so this is a no-op when GOT_COMMIT is
+  # already full.
+  RESOLVED=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT" 2>/dev/null || true)
+  if [ -z "$RESOLVED" ]; then
+    log "FAILED: installed commit $GOT_COMMIT does not resolve inside $RIG_ROOT"
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
       --title "Plugin: rebuild-gt [unverified]" \
-      --description "Installed but $GOT_COMMIT_SHORT (from $GT_PATH) does not resolve to a commit in $RIG_ROOT" >/dev/null 2>&1 || true
+      --description "Installed but $GOT_COMMIT (from $GT_PATH) does not resolve to a commit in $RIG_ROOT" >/dev/null 2>&1 || true
     gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
       --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
     exit 1
   fi
+  GOT_COMMIT="$RESOLVED"
   if [ "$GOT_COMMIT" != "$EXPECTED_COMMIT" ]; then
     log "FAILED: in force is $GOT_COMMIT, built $EXPECTED_COMMIT"
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
@@ -691,19 +744,16 @@ if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make safe-install) 2
   fi
   log "Rebuilt: $BINARY_COMMIT -> $GOT_COMMIT"
 
-  # A binary install only carries new formula content — nothing copies it
-  # out to $GT_ROOT/.beads/formulas/ on its own (gt-n6c). Sync delivers it.
-  # Non-fatal: formulas are convenience content, not required for the binary
-  # to work, so a sync failure must not fail the whole rebuild.
+  # The receipt below names the commits that came into force; the syncs it
+  # depends on (formulas, this very plugin directory) run first, so a receipt
+  # that claims a rebuild also shows whether formula delivery took (gt-b5mpe).
+  # Non-fatal: sync content is convenience, not required for the binary to
+  # work, so a failure must not fail the whole rebuild.
   if SYNC_OUT=$(gt formula sync 2>&1); then
     log "$SYNC_OUT"
   else
     log "formula sync failed (non-fatal): $SYNC_OUT"
   fi
-
-  # Same problem, one directory over: $TOWN_ROOT/plugins is a deployed copy
-  # of $RIG_ROOT/plugins, and nothing else keeps it current after a merge
-  # (gt-reek). Non-fatal for the same reason as formula sync above.
   if PLUGIN_SYNC_OUT=$(gt plugin sync 2>&1); then
     log "$PLUGIN_SYNC_OUT"
   else

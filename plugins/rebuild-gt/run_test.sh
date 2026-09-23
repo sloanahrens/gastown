@@ -36,8 +36,11 @@ make_town() {
   git -C "$seed" push -q origin main
   mkdir -p "$town/gastown/mayor"
   git clone -q "$origin" "$town/gastown/mayor/rig"
-  # Fake make targets: build drops a marker so the test can see the branch taken.
-  printf 'build:\n\ttouch "$(GT_TEST_TOWN)/build.marker"\nsafe-install:\n\t@true\n' > "$town/gastown/mayor/rig/Makefile"
+  # Fake make targets: build drops a marker so the test can see the branch
+  # taken; safe-install no-ops the way the real one's atomic replace would
+  # inside a stub world. '@' suppresses Make's echo of the recipe line, so
+  # build.marker stays the sole observable of a build.
+  printf 'build:\n\t@touch "$(GT_TEST_TOWN)/build.marker"\nsafe-install:\n\t@true\n' > "$town/gastown/mayor/rig/Makefile"
   git -C "$town/gastown/mayor/rig" add Makefile
   git -C "$town/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -m makefile
   git -C "$town/gastown/mayor/rig" push -q origin main
@@ -47,7 +50,20 @@ make_town() {
 #!/usr/bin/env bash
 case "$1 $2" in
   "town root") echo "$GT_TEST_TOWN" ;;
-  "stale --json") cat "$GT_TEST_TOWN/stale.json" ;;
+  # stale.switch: what a 'stale --json' read taken AFTER the build has landed
+  # returns — installed_stale.json by default (the binary in force is now the
+  # tip the run built; gt-b5mpe verifies against exactly this reading),
+  # fresh_stale.json when the fixture names it (the binary was already at the
+  # tip, so the next run's due check sees fresh). Reads before the build
+  # always return stale.json (the pre-build due/threshold check).
+  "stale --json")
+    if [ -e "$GT_TEST_TOWN/build.marker" ]; then
+      for n in $(cat "$GT_TEST_TOWN/stale.switch" 2>/dev/null || echo installed_stale); do
+        [ -e "$GT_TEST_TOWN/$n.json" ] && { cat "$GT_TEST_TOWN/$n.json"; break; }
+      done
+    else
+      cat "$GT_TEST_TOWN/stale.json"
+    fi ;;
   # Each read is logged to its own file, not gt.log: the reserve path polls
   # this command, and the cases that assert on gt.log must not see slot reads.
   # slot.flip makes the first read (the plugin's own pre-build gate check) see
@@ -91,6 +107,9 @@ case "$1 $2" in
     # TestSlotAcquiredFormat pins the Go side of that pair (gt-kox0).
     echo "Container-gate slot acquired (role=gastown/rebuild-gt, waited 2s, slot 0/2)."
     exec "$@" ;;
+  # clear_alarms calls 'gt escalate clear' with one --fingerprint per alarm
+  # key; a key that is not open writes nothing (the real semantics).
+  "escalate clear") echo "escalate $*" >> "$GT_TEST_TOWN/gt.log"; exit 0 ;;
   "daemon restart") echo "daemon restart $*" >> "$GT_TEST_TOWN/gt.log"; echo "Daemon restarted" ;;
   "plugin record-run") echo "record-run $*" >> "$GT_TEST_TOWN/gt.log" ;;
   "plugin sync"|"formula sync") echo "synced" ;;
@@ -155,6 +174,23 @@ write_stale() {
   # mimic to reproduce the CRITICAL bug's shape (short from 'gt version' vs
   # full in stale.json's repo_commit above).
   echo "gt version $tip_short (dev: main@$tip_short)" > "$town/built_version.txt"
+  # Post-install staleness: the build replaces the in-force binary, so the
+  # binary's own commit — the one 'gt stale --json' reads back as
+  # binary_commit — becomes the tip the run built. binary_commit stays SHORT
+  # here too: it is the same Makefile-embedded 'git rev-parse --short HEAD'
+  # value whether read before or after the install, never resolved to full by
+  # 'gt stale --json' itself (that resolution is the plugin's job, gt-b5mpe).
+  # The stub flips to this fixture on the first 'stale --json' read after
+  # build.marker exists (stale.switch, mirroring the built/installed
+  # version-file switch); every read before the build still gets stale.json,
+  # which is what the pre-build due/threshold check reads (gt-b5mpe).
+  printf '{"stale": true, "forward": true, "on_main_branch": true, "safe_to_rebuild": %s, "binary_commit": "%s", "repo_commit": "%s", "compare_ref": "origin/main", "commits_behind": %s}\n' \
+    "$safe_json" "$tip_short" "$tip" "$behind" > "$town/installed_stale.json"
+  # The not-due variant for the flip: a binary at the tip reads back as
+  # fresh, so the pre-build due check of a second run sees that (used only by
+  # the no-'@' case below; every other case's flip lands on installed).
+  printf '{"stale": false, "forward": true, "on_main_branch": true, "safe_to_rebuild": true, "binary_commit": "%s", "repo_commit": "%s", "compare_ref": "origin/main", "commits_behind": 0}\n' \
+    "$tip_short" "$tip" > "$town/fresh_stale.json"
 }
 
 run_plugin() {
@@ -284,6 +320,25 @@ else
 fi
 if grep -q "makefile" "$T/gt.log"; then pass "quiet + behind: record lists the commits brought into force"; else fail "quiet + behind: record omits the commit list"; fi
 if grep -q "daemon restart" "$T/gt.log"; then pass "quiet + behind: daemon restarted"; else fail "quiet + behind: daemon not restarted: $(cat "$T/gt.log")"; fi
+# gt-b5mpe: a verified install closes this plugin's alarms — including the
+# false-positive 'rebuild-gt:unverified' that pre-dates the fix (without the
+# key the last false positive stays open forever), and the formula sync that
+# the receipt depends on has run by the time the success is recorded.
+if grep -q "escalate clear .*--fingerprint rebuild-gt:unverified" "$T/gt.log"; then
+  pass "quiet + behind: the unverified alarm key is cleared with the rest"
+else
+  fail "quiet + behind: rebuild-gt:unverified was left open: $(cat "$T/gt.log")"
+fi
+if grep -q "escalate clear" "$T/gt.log"; then
+  pass "quiet + behind: alarms cleared once the binary is in force"
+else
+  fail "quiet + behind: no clear of alarms: $(cat "$T/gt.log")"
+fi
+if grep -q "synced" "$T/run.out"; then
+  pass "quiet + behind: formula/plugin sync ran with the verified install"
+else
+  fail "quiet + behind: no sync ran: $(cat "$T/run.out")"
+fi
 
 # --- Case 8: stale but under the install threshold -> deferred, no build ---
 T=$(make_town)
@@ -332,6 +387,35 @@ else
   fail "diverged main: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
 fi
 
+# --- Case 10b: gt-9jax — the divergence count check must be able to read as
+# "not diverged" (0), not just "diverged" (>0, Case 10 above): the buggy form
+# ('[ -n "$(... --count)" ]', always true since --count prints "0") could
+# never take the retry branch below it. An untracked file the fast-forward
+# would overwrite is the one way 'merge --ff-only' fails with zero local-only
+# commits — a real divergence always has at least one (Case 10); the
+# dirty-checkout guard above excludes untracked files on purpose (gt-50k), so
+# this state reaches the sync step unblocked. ---
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+OTHER=$(mktemp -d)
+git clone -q "$T/origin.git" "$OTHER"
+echo "origin content" > "$OTHER/newfile.txt"
+git -C "$OTHER" add newfile.txt
+git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q -m "adds newfile.txt"
+git -C "$OTHER" push -q origin main
+echo "untracked, collides with the incoming commit" > "$RIG/newfile.txt"
+rc=$(run_plugin "$T")
+if grep -q "origin/main moved during sync; re-fetching and re-merging once" "$T/run.out"; then
+  pass "divergence retry: an untracked-file conflict (0 local-only commits) takes the retry path, not an immediate bail"
+else
+  fail "divergence retry: no retry attempted (count check regressed to always-true): $(cat "$T/run.out")"
+fi
+if [ "$rc" = "0" ] && ! grep -q "daemon restart" "$T/gt.log" 2>/dev/null && grep -q "diverged from origin/main" "$T/gt.log" 2>/dev/null; then
+  pass "divergence retry: still refused after the retry (the untracked file persists), not reset"
+else
+  fail "divergence retry: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+
 # --- Case 11: not safe to rebuild (binary not an ancestor of main) is
 # refused rather than deferred: waiting cannot clear it ---
 T=$(make_town)
@@ -365,6 +449,15 @@ fi
 T=$(make_town)
 write_stale "$T" 5
 cp "$T/installed_version.txt" "$T/built_version.txt"
+# Mirror the version-file switch into the stale fixture: the install left the
+# old binary in force, so binary_commit read back after the build is the
+# ancestor the pre-build fixture already names — write_stale's flip would
+# claim the tip and mask the not-take (gt-b5mpe).
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+json.dump(d, open(sys.argv[2], "w"))
+' "$T/stale.json" "$T/installed_stale.json"
 rc=$(run_plugin "$T")
 if [ "$rc" != "0" ] && grep -q "escalate .*install did not take" "$T/gt.log"; then
   pass "install that did not take: failed and escalated"
@@ -421,6 +514,17 @@ fi
 T=$(make_town)
 write_stale "$T" 5
 echo "gt version deadbee (dev: main@deadbee)" > "$T/built_version.txt"
+# The unverified case is the one where 'gt stale --json' also has no commit to
+# read (a dev build installed by some other path) — the only way the '@'
+# fallback ever runs. So clear the post-install flip's commit: the stub's
+# stale reading after the build has none either, and the plugin falls through
+# to 'gt version', which reports the unresolvable deadbee (gt-b5mpe).
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["binary_commit"] = ""
+json.dump(d, open(sys.argv[2], "w"))
+' "$T/stale.json" "$T/installed_stale.json"
 rc=$(run_plugin "$T")
 if [ "$rc" != "0" ] && grep -q "escalate .*cannot verify what came into force" "$T/gt.log"; then
   pass "unresolvable installed commit: failed and escalated as unverified"
@@ -739,6 +843,118 @@ if [ "$SENT" = "1" ]; then
 else
   fail "failed escalation: $SENT successful escalation(s): $(cat "$T/escalate.log" 2>/dev/null)"
 fi
+
+# --- gt-b5mpe: the shape of the production failure — a binary whose
+# 'gt version' output carries no '@' at all (the dev form this binary prints
+# from a cwd that is not a repo, which is where the plugin always runs) and
+# whose stale reading therefore has no binary_commit either. The 'gt version'
+# '@'-form was the only check this file had, so a correct install was the
+# unresolvable case; the commit is now read from 'gt stale --json', whose
+# binary_commit the production binary reports even though 'gt version' from
+# this cwd cannot. A no-'@' version line must not fail a verified install. ---
+T=$(make_town)
+write_stale "$T" 5
+# The in-force binary reports no commit in either reading: dev build (the
+# 'gt version' line has no '@') and an empty binary_commit in stale.json.
+echo "gt version dev" > "$T/installed_version.txt"
+echo "gt version dev" > "$T/built_version.txt"
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["binary_commit"] = ""
+json.dump(d, open(sys.argv[1], "w"))
+' "$T/stale.json"
+# The post-install flip must name the tip in the SHORT form 'gt stale --json'
+# actually reports (the Makefile-embedded 'git rev-parse --short HEAD',
+# internal/cmd.Commit) — not full. The plugin resolves it to a full hash
+# inside RIG_ROOT before comparing to EXPECTED_COMMIT; a fixture that used the
+# full hash here would hide a regression back to the un-resolved comparison
+# (gt-b5mpe).
+TIP_SHORT=$(git -C "$T/gastown/mayor/rig" rev-parse --short HEAD)
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[2]))
+d["binary_commit"] = sys.argv[1]
+json.dump(d, open(sys.argv[2], "w"))
+' "$TIP_SHORT" "$T/installed_stale.json"
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
+  pass "no-@ version + no stale commit: verified install succeeds via binary_commit"
+else
+  fail "no-@ version + no stale commit: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -q "daemon restart" "$T/gt.log" 2>/dev/null; then
+  pass "no-@ version + no stale commit: daemon restarted onto the verified binary"
+else
+  fail "no-@ version + no stale commit: daemon left on an unverifiable binary: $(cat "$T/gt.log")"
+fi
+if grep -q "escalate .*cannot verify" "$T/gt.log" 2>/dev/null; then
+  fail "no-@ version + no stale commit: a correct install escalated as unverified — the gt-b5mpe false positive"
+else
+  pass "no-@ version + no stale commit: no false-positive unverified escalation"
+fi
+
+# --- gt-9jax: a merge lands on origin/main while 'make ... build' is
+# running. The run already fast-forwarded RIG_ROOT to origin/main before the
+# build started, so the build compiles the right tree either way; what fails
+# is 'make safe-install', whose real check-up-to-date target does its OWN
+# fetch-and-compare against the now-moved origin/main. SKIP_UPDATE_CHECK=1
+# (passed to both 'make build' and 'make safe-install') is what makes
+# check-up-to-date a no-op, which is the actual fix — not a Makefile change.
+#
+# The fake Makefile below reproduces check-up-to-date's real shape (an
+# ifndef SKIP_UPDATE_CHECK-gated fetch-and-compare on safe-install), and its
+# 'build' recipe pushes a second commit to origin from another clone before
+# touching build.marker — a deterministic stand-in for a merge landing
+# during the (in production, minutes-long) build. RIG_ROOT's own checkout
+# never sees that push (only a fetch would advance it), so EXPECTED_COMMIT
+# stays pinned to what was actually built; only a live check-up-to-date can
+# be fooled by it.
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+cat > "$RIG/Makefile" <<'MK'
+check-up-to-date:
+ifndef SKIP_UPDATE_CHECK
+	@git fetch origin main --quiet; \
+	LOCAL=$$(git rev-parse HEAD); \
+	REMOTE=$$(git rev-parse origin/main); \
+	if [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then \
+	  echo "ERROR: Local branch is not up to date with origin/main"; \
+	  exit 1; \
+	fi
+endif
+build:
+	@bash "$(GT_TEST_TOWN)/land-merge.sh"
+	@touch "$(GT_TEST_TOWN)/build.marker"
+safe-install: check-up-to-date
+	@true
+MK
+git -C "$RIG" -c user.email=t@t -c user.name=t add Makefile
+git -C "$RIG" -c user.email=t@t -c user.name=t commit -q -m "makefile"
+git -C "$RIG" push -q origin main
+# Cloned AFTER the Makefile commit lands on origin, so its own push during
+# the build (below) is a clean fast-forward rather than a rejected non-ff.
+OTHER=$(mktemp -d)
+git clone -q "$T/origin.git" "$OTHER"
+cat > "$T/land-merge.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "lands mid-build"
+git -C "$OTHER" push -q origin main
+EOF
+write_stale "$T" 5
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
+  pass "merge lands mid-build: SKIP_UPDATE_CHECK skips the live re-check, install succeeds"
+else
+  fail "merge lands mid-build: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
+fi
+# The same fixture against run.sh as it stood before this fix (no
+# SKIP_UPDATE_CHECK passed to safe-install) is the regression this guards:
+# check-up-to-date's live fetch sees the moved origin/main and fails a build
+# that was otherwise correct. Confirmed by hand against origin/main's run.sh
+# (see the commit message for both runs) rather than re-run here, so this
+# file tests one version of run.sh, not two.
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all rebuild-gt tests passed"
