@@ -165,6 +165,7 @@ func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
 		{name: "checkout", run: func(g *Git) error { return g.Checkout("polecat/safety") }},
 		{name: "checkout new branch", run: func(g *Git) error { return g.CheckoutNewBranch("polecat/new", "polecat/safety") }},
 		{name: "checkout reset branch", run: func(g *Git) error { return g.CheckoutResetBranch("polecat/reset", "polecat/safety") }},
+		{name: "checkout detach force", run: func(g *Git) error { return g.CheckoutDetachForce("polecat/safety") }},
 		{name: "reset hard", run: func(g *Git) error { return g.ResetHard("polecat/safety") }},
 		{name: "clean force", run: func(g *Git) error { return g.CleanForce() }},
 	}

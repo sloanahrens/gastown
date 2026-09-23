@@ -985,6 +985,13 @@ func (g *Git) CheckoutDetach(ref string) error {
 	return err
 }
 
+// CheckoutDetachForce detaches HEAD at ref, discarding index and working-tree
+// changes that would block the switch (gt-0kk2).
+func (g *Git) CheckoutDetachForce(ref string) error {
+	_, err := g.run("checkout", "--detach", "--force", ref)
+	return err
+}
+
 // CheckoutNewBranch creates a new branch from startPoint and checks it out.
 // Equivalent to: git checkout -b <branch> <startPoint>
 func (g *Git) CheckoutNewBranch(branch, startPoint string) error {

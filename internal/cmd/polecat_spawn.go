@@ -131,6 +131,109 @@ func reclaimBrokenIdlePolecatForSling(polecatMgr *polecat.Manager) (bool, error)
 	return false, nil
 }
 
+// idlePolecatReuse is the polecat-manager surface the idle-reuse path needs.
+type idlePolecatReuse interface {
+	FindIdlePolecat() (*polecat.Polecat, error)
+	ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error)
+	Get(name string) (*polecat.Polecat, error)
+}
+
+// reuseIdlePolecatForSling reuses an idle polecat's sandbox for this sling
+// (gt-4ac), returning nil info when the caller should allocate a fresh polecat.
+// A refusal to take a branch another worktree holds stops the sling: the
+// fresh-allocation fallback attaches a worktree to that same branch by forcing
+// past git's own check, which builds the two-worktrees-one-ref state the refusal
+// detected (gt-0kk2).
+func reuseIdlePolecatForSling(
+	polecatMgr idlePolecatReuse,
+	t *tmux.Tmux,
+	r *rig.Rig,
+	townRoot, rigName string,
+	opts SlingSpawnOptions,
+	recordRespawn func(),
+) (*SpawnedPolecatInfo, error) {
+	idlePolecat, findErr := polecatMgr.FindIdlePolecat()
+	if findErr != nil || idlePolecat == nil {
+		return nil, nil
+	}
+	polecatName := idlePolecat.Name
+	fmt.Printf("Reusing idle polecat: %s\n", polecatName)
+
+	// ResumeBranch takes precedence over BaseBranch / integration auto-detection:
+	// when the user (or scheduler) wants to resume an existing PR branch, we
+	// must not start from main or an integration branch.
+	baseBranch := opts.BaseBranch
+	if opts.ResumeBranch == "" {
+		if baseBranch == "" && opts.HookBead != "" {
+			if polecatIntegrationEnabled(townRoot, rigName) {
+				repoGit, repoErr := getRigGit(r.Path)
+				if repoErr == nil {
+					bd := beads.New(r.Path)
+					detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
+					if detectErr == nil && detected != "" {
+						baseBranch = "origin/" + detected
+						fmt.Printf("  Auto-detected integration branch: %s\n", detected)
+					}
+				}
+			}
+		}
+		if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
+			baseBranch = "origin/" + baseBranch
+		}
+	}
+
+	// Reuse the idle polecat with branch-only operations (no worktree add/remove),
+	// skipping ~5s of worktree creation (persistent-polecat-pool phase 3). Any
+	// other failure allocates a fresh polecat rather than repairing this worktree
+	// destructively.
+	addOpts := polecat.AddOptions{
+		HookBead:     opts.HookBead,
+		BaseBranch:   baseBranch,
+		ResumeBranch: opts.ResumeBranch,
+	}
+	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+		// Only a resume can end up on a branch someone already holds: a fresh
+		// sling names a new branch, so its fallback cannot collide (gt-0kk2).
+		if errors.Is(err, polecat.ErrBranchHeld) && opts.ResumeBranch != "" {
+			return nil, fmt.Errorf("cannot reuse idle polecat %s: %w", polecatName, err)
+		}
+		if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
+			fmt.Printf("  Idle polecat %s needs recovery before reuse: %v; allocating new...\n", polecatName, err)
+		} else {
+			fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v; allocating new...\n", polecatName, err)
+		}
+		return nil, nil
+	}
+
+	polecatObj, err := polecatMgr.Get(polecatName)
+	if err != nil {
+		return nil, fmt.Errorf("getting idle polecat after reuse: %w", err)
+	}
+	if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
+		return nil, fmt.Errorf("worktree verification failed for reused %s: %w", polecatName, err)
+	}
+
+	polecatSessMgr := polecat.NewSessionManager(t, r)
+	sessionName := polecatSessMgr.SessionName(polecatName)
+
+	fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
+	slingSteps.step("reuse")
+	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
+	recordRespawn()
+
+	return &SpawnedPolecatInfo{
+		RigName:     rigName,
+		PolecatName: polecatName,
+		ClonePath:   polecatObj.ClonePath,
+		SessionName: sessionName,
+		Pane:        "",
+		BaseBranch:  resolveSpawnBaseBranch(baseBranch, r.DefaultBranch()),
+		Branch:      polecatObj.Branch,
+		account:     opts.Account,
+		agent:       opts.Agent,
+	}, nil
+}
+
 // SpawnPolecatForSling creates a fresh polecat and optionally starts its session.
 // This is used by gt sling when the target is a rig name.
 // The caller (sling) handles hook attachment and nudging.
@@ -258,88 +361,14 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		fmt.Println("  Allocating fresh polecat after reclaiming broken idle sandbox...")
 	}
 
-	// Persistent polecat model (gt-4ac): try to reuse an idle polecat first.
-	// Idle polecats have completed their work but kept their sandbox (worktree).
-	// Reusing avoids the overhead of creating a new worktree.
-	idlePolecat, findErr := polecatMgr.FindIdlePolecat()
-	if findErr == nil && idlePolecat != nil {
-		polecatName := idlePolecat.Name
-		fmt.Printf("Reusing idle polecat: %s\n", polecatName)
-
-		// ResumeBranch takes precedence over BaseBranch / integration auto-detection:
-		// when the user (or scheduler) wants to resume an existing PR branch, we
-		// must not start from main or an integration branch.
-		baseBranch := opts.BaseBranch
-		if opts.ResumeBranch == "" {
-			if baseBranch == "" && opts.HookBead != "" {
-				if polecatIntegrationEnabled(townRoot, rigName) {
-					repoGit, repoErr := getRigGit(r.Path)
-					if repoErr == nil {
-						bd := beads.New(r.Path)
-						detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
-						if detectErr == nil && detected != "" {
-							baseBranch = "origin/" + detected
-							fmt.Printf("  Auto-detected integration branch: %s\n", detected)
-						}
-					}
-				}
-			}
-			if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
-				baseBranch = "origin/" + baseBranch
-			}
-		}
-
-		// Reuse the idle polecat with branch-only operations (no worktree add/remove).
-		// Phase 3 of persistent-polecat-pool: eliminates ~5s worktree creation overhead.
-		// If reuse is unsafe or fails, allocate a new polecat instead of repairing
-		// this worktree destructively.
-		addOpts := polecat.AddOptions{
-			HookBead:     opts.HookBead,
-			BaseBranch:   baseBranch,
-			ResumeBranch: opts.ResumeBranch,
-		}
-		reuseOK := false
-		if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
-			if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
-				fmt.Printf("  Idle polecat %s needs recovery before reuse: %v; allocating new...\n", polecatName, err)
-			} else {
-				fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v; allocating new...\n", polecatName, err)
-			}
-		} else {
-			reuseOK = true
-		}
-
-		if reuseOK {
-			polecatObj, err := polecatMgr.Get(polecatName)
-			if err != nil {
-				return nil, fmt.Errorf("getting idle polecat after reuse: %w", err)
-			}
-			if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
-				return nil, fmt.Errorf("worktree verification failed for reused %s: %w", polecatName, err)
-			}
-
-			polecatSessMgr := polecat.NewSessionManager(t, r)
-			sessionName := polecatSessMgr.SessionName(polecatName)
-
-			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
-			slingSteps.step("reuse")
-			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
-			recordRespawn()
-
-			effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
-
-			return &SpawnedPolecatInfo{
-				RigName:     rigName,
-				PolecatName: polecatName,
-				ClonePath:   polecatObj.ClonePath,
-				SessionName: sessionName,
-				Pane:        "",
-				BaseBranch:  effectiveBranch,
-				Branch:      polecatObj.Branch,
-				account:     opts.Account,
-				agent:       opts.Agent,
-			}, nil
-		}
+	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
+	// paying for a new worktree.
+	reusedIdle, err := reuseIdlePolecatForSling(polecatMgr, t, r, townRoot, rigName, opts, recordRespawn)
+	if err != nil {
+		return nil, err
+	}
+	if reusedIdle != nil {
+		return reusedIdle, nil
 	}
 
 	// Per-rig directory cap: prevent unbounded worktree accumulation, but only

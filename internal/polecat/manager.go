@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,6 +124,10 @@ var (
 	ErrDoltUnhealthy      = errors.New("dolt health check failed")
 	ErrDoltAtCapacity     = errors.New("dolt server at connection capacity")
 	ErrDiskSpaceLow       = errors.New("insufficient disk space")
+
+	// ErrBranchHeld reports a refusal to put a worktree on a branch another
+	// worktree of the same repo has checked out (gt-0kk2).
+	ErrBranchHeld = errors.New("branch checked out in another worktree")
 )
 
 // UncommittedWorkError provides details about uncommitted work.
@@ -787,9 +792,12 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602). Make sure we have the latest tip
-		// for the named branch, then attach the worktree directly. WorktreeAddExistingForce
-		// handles the case where another worktree previously had this branch checked out.
+		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
+		// worktree directly to it.
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -985,10 +993,12 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602): attach the worktree directly to the
-		// named branch. WorktreeAddExistingForce tolerates the branch being checked
-		// out elsewhere (stale worktree), and the explicit fetch ensures we have
-		// the latest tip before checkout.
+		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
+		// worktree directly to it.
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -1616,8 +1626,13 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	_ = os.RemoveAll(tmpClonePath) // clean up any leftover temp dir
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch: fetch and attach the temp worktree directly
-		// to the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
+		// Resume an existing branch: fetch and attach the temp worktree directly to
+		// the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
+		// The worktree being repaired is exempt — it holds the branch now and is
+		// removed once the temp worktree is up (gt-0kk2).
+		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch, oldClonePath); err != nil {
+			return nil, fmt.Errorf("repairing polecat %s: %w", name, err)
+		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -1876,11 +1891,31 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, fmt.Errorf("start point %s not found — fall back to full repair", startPoint)
 	}
 
-	// GH#2536: Clean worktree state before branch switch — the worktree may have
-	// stale state from a previous dog/pool dispatch (uncommitted changes, untracked
-	// files, detached HEAD, or checked out on an old dog/alpha-* branch).
-	// Reset to the start point directly (not HEAD) to avoid "local changes would
-	// be overwritten" errors when the start point has different file content.
+	// Resolve the branch name before touching the worktree: the guard below needs
+	// it, and a refusal is only honest while nothing has been mutated.
+	branchName := m.buildBranchName(name, opts.HookBead)
+	if opts.ResumeBranch != "" {
+		branchName = opts.ResumeBranch
+	}
+
+	// gt-0kk2: this worktree must not end up on a branch another worktree holds.
+	if err := heldByOtherWorktree(polecatGit, branchName, clonePath); err != nil {
+		return nil, fmt.Errorf("refusing to reuse %s: %w\n"+
+			"That polecat is working on the branch — resume it there, or reap it if it is dead; "+
+			"to start this bead elsewhere anyway, dispatch it on a fresh branch (omit --branch)",
+			name, err)
+	}
+
+	// GH#2536: clean state left by a previous dispatch — uncommitted changes,
+	// untracked files, an old dog/alpha-* branch — by resetting to the start point
+	// rather than HEAD, so a start point with different content cannot fail on
+	// local changes.
+	//
+	// Detach first: reset --hard moves whatever branch is checked out, and in a
+	// shared .repo.git that is a ref this polecat does not own (gt-0kk2).
+	if err := polecatGit.CheckoutDetachForce("HEAD"); err != nil {
+		return nil, fmt.Errorf("detaching HEAD to clean worktree for reuse: %w", err)
+	}
 	_ = polecatGit.ResetHard(startPoint)
 	_ = polecatGit.CleanForce()
 
@@ -1893,12 +1928,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		style.PrintWarning("could not re-provision polecat CLAUDE.md on reuse: %v", err)
 	}
 
-	// Create or reset the branch tracking the start point. For resume, the branch
-	// IS opts.ResumeBranch (so pushes go back to the existing PR head). For fresh
-	// work, build a new polecat/<name>/<bead>+<ts> branch.
-	branchName := m.buildBranchName(name, opts.HookBead)
 	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
 		// CheckoutResetBranch (`git checkout -B`) creates or resets the branch to
 		// the start point. Use this instead of CheckoutNewBranch because the local
 		// branch may already exist from a prior run on this idle polecat.
@@ -1965,6 +1995,37 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
+}
+
+// heldByOtherWorktree returns ErrBranchHeld when branch is checked out in a
+// worktree other than the paths named in exempt. Polecat worktrees share one
+// .repo.git, so a branch held elsewhere is that polecat's live HEAD and not a
+// free name to switch to. An unreadable worktree list refuses too: "cannot tell"
+// must not read as "free" (gt-0kk2).
+func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
+	if branch == "" {
+		return nil
+	}
+	worktrees, err := g.WorktreeList()
+	if err != nil {
+		return fmt.Errorf("%w: cannot tell whether %s is checked out elsewhere: %v",
+			ErrBranchHeld, branch, err)
+	}
+	for _, wt := range worktrees {
+		if wt.Branch != branch {
+			continue
+		}
+		if _, err := os.Stat(wt.Path); err != nil {
+			// A deleted worktree keeps its registration, branch line and all. No
+			// directory means no HEAD there to conflict with (gt-0kk2).
+			continue
+		}
+		if slices.ContainsFunc(exempt, func(p string) bool { return sameWorktreePath(wt.Path, p) }) {
+			continue
+		}
+		return fmt.Errorf("%w: %s is already checked out at %s", ErrBranchHeld, branch, wt.Path)
+	}
+	return nil
 }
 
 // killExistingPolecatSession clears an existing tmux session before reusing or
