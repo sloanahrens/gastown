@@ -3,8 +3,12 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -72,6 +76,15 @@ type polecatInventoryEnv struct {
 	// over-admitting; the actual reuse gate (Manager.ReuseDecisionForPolecat)
 	// does probe.
 	WorktreePath string
+	// GitProbeLocalOnly drops the network from the worktree probe: branch
+	// preservation is read from the rig's local remote-tracking refs instead of
+	// an ls-remote against the remote. The list path sets it, because it pays
+	// this probe once per seat and the dashboard polls it — an ls-remote per
+	// seat is what pushed `gt polecat list --all` past 90s (gt-8q0s). Nothing
+	// else changes, and the local answer is the live one's or more
+	// conservative, so a caller that leaves this off is choosing accuracy over
+	// cost, not a different verdict vocabulary.
+	GitProbeLocalOnly bool
 	// ActiveMRSource resolves the ids the active_mr policy looks up (the MR
 	// itself and its source issue). Nil — the zero value, and what the capacity
 	// path passes — leaves the policy reading the same fail-closed
@@ -265,7 +278,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// input when no probe target is available; the source label records which
 	// of the two actually fed the decision.
 	if env.WorktreePath != "" {
-		live := polecat.ProbeLiveGitState(env.WorktreePath)
+		live := probePolecatWorktree(env.WorktreePath, env.GitProbeLocalOnly)
 		live.ApplyFacts(&facts)
 		if live.Branch != "" {
 			// A live branch supersedes the recorded one, the same way live git
@@ -338,6 +351,186 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	item.GitStateSource = item.Disposition.GitStateSource
 	item.GitStateReason = item.Disposition.GitStateReason
 	return item
+}
+
+// probePolecatWorktree measures one polecat worktree, picking the probe's
+// fidelity from the caller's cost budget. The branch is the only place the two
+// probes differ; both classify a failed probe the same way, so a caller cannot
+// get a looser verdict by asking for the cheap one — only a slower or faster
+// answer, and a local one that errs toward reporting unpreserved work.
+func probePolecatWorktree(worktreePath string, localOnly bool) polecat.LiveGitState {
+	if localOnly {
+		return polecat.ProbeLiveGitStateLocal(worktreePath)
+	}
+	return polecat.ProbeLiveGitState(worktreePath)
+}
+
+// polecatListInventoryEnv is the per-seat fact set `gt polecat list` carves
+// out of its per-rig queries. It is a named function because one field in it
+// is a performance contract rather than a verdict input, and that choice is
+// worth being able to assert on directly (see TestPolecatListInventoryEnvProbe).
+func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polecatMRIndex, activeMRSource polecat.IssueReader, spawn polecatSpawnFacts) polecatInventoryEnv {
+	return polecatInventoryEnv{
+		// The dashboard polls this command, so it must not pay a network round
+		// trip per seat: the probe reads branch preservation from the rig's
+		// local refs instead of running an ls-remote per seat (gt-8q0s).
+		GitProbeLocalOnly: true,
+		MRs:               mrIndex,
+		// The active_mr policy resolves MR ids through the index it already has
+		// and source issues through the rig's database; the counts-only
+		// capacity path passes neither.
+		ActiveMRSource: activeMRSource,
+		Spawn:          spawn,
+		// claude-41j.1 D9: probe the worktree so the listed verdict re-derives
+		// from live git rather than the recorded hint. An unresolvable path (no
+		// worktree behind the directory) leaves the probe off, and the verdict
+		// stays on the recorded hint.
+		WorktreePath: resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName),
+	}
+}
+
+// polecatSeat is one row of the list output, in output order, together with
+// the facts needed to build it. The list path collects these serially (the
+// per-rig queries are one-per-rig, not one-per-seat) and then resolves them on
+// the pool, so a seat carries its inputs rather than being built where it is
+// discovered.
+type polecatSeat struct {
+	rigName       string
+	name          string
+	fields        *beads.AgentFields
+	activeWork    *beads.Issue
+	activeWorkErr error
+	sessions      polecatSessionSet
+	env           polecatInventoryEnv
+	// decided holds a row that needs no probing at all — an orphan tmux session,
+	// which is classified from session/bead presence alone. Set means resolve
+	// returns it untouched.
+	decided *PolecatListItem
+}
+
+// resolve builds this seat's output row. It is called on the probe pool, so it
+// must not touch shared state: it reads its own captured facts and writes
+// nothing but its return value.
+func (s polecatSeat) resolve() PolecatListItem {
+	if s.decided != nil {
+		return *s.decided
+	}
+	return buildPolecatSeatItem(s.rigName, s.name, s.fields, s.activeWork, s.activeWorkErr, s.sessions, s.env)
+}
+
+// buildPolecatSeatItem assembles one polecat's list row from its agent-bead
+// facts and a live probe of its worktree. activeWorkErr is the rig-wide
+// active-work query's error, carried per seat so a rig whose work could not be
+// read reports every seat as unverified rather than as idle.
+func buildPolecatSeatItem(rigName, name string, fields *beads.AgentFields, activeWork *beads.Issue, activeWorkErr error, sessions polecatSessionSet, env polecatInventoryEnv) PolecatListItem {
+	item := buildPolecatInventoryItem(rigName, name, fields, activeWork, sessions, env)
+	if activeWorkErr != nil {
+		item = buildPolecatInventoryItemFromEvidence(rigName, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions, env)
+	}
+	disposition := item.Disposition
+	state := effectivePolecatState(PolecatListItem{
+		State:                item.State,
+		Issue:                item.Issue,
+		SessionRunning:       item.SessionRunning,
+		CountsTowardCapacity: disposition.CountsTowardCapacity,
+	}, item.Spawning)
+	return PolecatListItem{
+		Rig:                  rigName,
+		Name:                 name,
+		Agent:                item.Agent,
+		State:                state,
+		Issue:                item.Issue,
+		MRID:                 item.MRID,
+		MRStatus:             item.MRStatus,
+		CleanupStatus:        item.CleanupStatus,
+		ActiveMR:             item.ActiveMR,
+		CleanupStatusSource:  item.CleanupStatusSource,
+		GitStateSource:       item.GitStateSource,
+		GitStateReason:       item.GitStateReason,
+		Branch:               item.Branch,
+		Verdict:              disposition.Verdict,
+		Reason:               disposition.Reason,
+		Reusable:             disposition.Reusable,
+		SafeToNuke:           disposition.SafeToNuke,
+		NeedsRecovery:        disposition.NeedsRecovery,
+		NeedsMQSubmit:        disposition.NeedsMQSubmit,
+		MQStatus:             disposition.MQStatus,
+		CountsTowardCapacity: disposition.CountsTowardCapacity,
+		ReuseStatus:          disposition.ReuseStatus,
+		Blockers:             disposition.Blockers,
+		SessionRunning:       item.SessionRunning,
+		SessionName:          item.SessionName,
+	}
+}
+
+// polecatSeatPoolSize bounds how many seats are probed concurrently. Each seat
+// spawns several git subprocesses against its own worktree, so this is the
+// knob that keeps a large town from forking hundreds of git processes in one
+// burst: at 47 seats an unbounded fan-out is ~300 concurrent processes.
+//
+// The multiplier is deliberately modest. A seat's probe is mostly waiting on
+// git subprocesses rather than burning CPU, so more goroutines than cores is
+// right; but the work is a few tens of milliseconds per seat even locally, so
+// the pool only needs to overlap waves, not maximize throughput.
+func polecatSeatPoolSize() int {
+	size := runtime.GOMAXPROCS(0) * 2
+	if size < 4 {
+		size = 4
+	}
+	if size > 12 {
+		size = 12
+	}
+	return size
+}
+
+// resolvePolecatSeats builds every seat's row, probing at most
+// polecatSeatPoolSize worktrees at once. Results land in slot order, so the
+// output is byte-for-byte what a serial loop produced; only the measuring is
+// concurrent. A single seat, or a one-core host, falls back to the serial path
+// rather than paying for goroutines that cannot overlap.
+//
+// CONCURRENT-USE PRECONDITION: each seat is built on its own goroutine, so
+// everything a seat's build reaches for must tolerate concurrent use. That is
+// satisfied today by construction rather than by luck, and it is worth stating
+// because the failure would be silent: the worktree probe spawns git, and the
+// beads facts come from a shared *beads.Beads whose reads are sync.Once-guarded
+// or pure (getTownRoot, getResolvedBeadsDir) with the queries themselves
+// running as `bd` subprocesses — beads.New sets no in-process store, so Show
+// never enters the SDK storage path. Anything added here that shares mutable
+// state (an in-process store, a cached cursor) has to be made safe first.
+func resolvePolecatSeats(seats []polecatSeat) []PolecatListItem {
+	items := make([]PolecatListItem, len(seats))
+	workers := polecatSeatPoolSize()
+	if workers > len(seats) {
+		workers = len(seats)
+	}
+	if workers <= 1 {
+		for i := range seats {
+			items[i] = seats[i].resolve()
+		}
+		return items
+	}
+
+	// A shared cursor rather than a static split: seats are not uniform —
+	// probing a worktree that is mid-rebase costs more than probing a clean one
+	// — so whoever finishes first should take the next seat.
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(seats) {
+					return
+				}
+				items[i] = seats[i].resolve()
+			}
+		}()
+	}
+	wg.Wait()
+	return items
 }
 
 // MR status values reported on PolecatListItem.MRStatus. They are the
