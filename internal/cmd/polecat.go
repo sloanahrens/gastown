@@ -1473,6 +1473,13 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
+		// gt-ui2x: the bead was actually read here (fields != nil), unlike the
+		// no-agent-bead branch above — hook_bead/push_failed/mr_failed/active_mr
+		// below all came from this same read, so they're verified facts, not
+		// unread defaults. That is the precondition ResolveIgnoreCleanupStatus's
+		// agentBeadRead branch requires before a missing/unknown cleanup_status
+		// can clear on a live-clean probe.
+		facts.AgentBeadRead = true
 		facts.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
 		facts.ActiveMR = fields.ActiveMR
@@ -1537,16 +1544,18 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 		directGitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
+		liveGitProbeRan := facts.GitStateSource == polecat.GitStateSourceLive
 		if !facts.CleanupStatus.IsSafe() {
 			// claude-41j.1 D9 splits this diagnostic in two, because the record
 			// can now be ignored for either of two reasons: a live git probe
 			// answered and superseded a git-derived status, or the narrow
-			// partial-spawn/gone-worktree hatches resolved a missing one.
+			// partial-spawn/gone-worktree/agent-bead-read hatches resolved a
+			// missing one.
 			switch {
 			case !polecat.RecordedCleanupBlocks(facts.CleanupStatus, facts.GitStateSource):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s cleanup_status_source=%s git_state_source=%s live_git_supersedes=recorded", facts.CleanupStatus, polecat.CleanupStatusSourceRecorded, facts.GitStateSource))
-			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe):
-				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing))
+			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe):
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v agent_bead_read=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead))
 			}
 		}
 	}

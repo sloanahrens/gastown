@@ -225,8 +225,7 @@ esac
 
 // installMockBdMissingCleanupStatus behaves like installMockBd but omits
 // cleanup_status from the agent bead description entirely, simulating a
-// polecat whose cleanup_status was never (or not yet) reported — the exact
-// condition gt-7kr's fail-closed fix must refuse to treat as safe.
+// polecat whose cleanup_status was never (or not yet) reported.
 func installMockBdMissingCleanupStatus(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1864,15 +1863,24 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 	return "printf dirty > " + marker + "; exit 7"
 }
 
-// TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed is the
-// regression test for gt-7kr: check-recovery returned SAFE_TO_NUKE for a
-// polecat whose cleanup_status was missing, because a narrow local git check
-// (no uncommitted changes, no stash, no unpushed commits) was treated as
-// sufficient proof the missing status could be silently promoted to "clean".
-// That local check says nothing about a live session or a still-hooked bead,
-// so it must never authorize destruction on its own — missing/unknown
-// cleanup_status has to fail closed to NEEDS_RECOVERY.
-func TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed(t *testing.T) {
+// TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit
+// covers the gt-7kr -> gt-ui2x evolution of this exact scenario.
+//
+// gt-7kr found check-recovery returning SAFE_TO_NUKE for a missing
+// cleanup_status off of an ad hoc, standalone local git check that said
+// nothing about a live session or a still-hooked bead. The fix made
+// missing/unknown fail closed unconditionally (RecordedCleanupBlocks).
+//
+// gt-ui2x adds one narrow way out of that unconditional block, in
+// ResolveIgnoreCleanupStatus rather than in RecordedCleanupBlocks itself: an
+// agent bead that WAS successfully read (agentBeadRead — so hook_bead,
+// push_failed, mr_failed and active_mr below are verified facts, not unread
+// defaults) with a live-clean probe (liveGitProbeRan, gitSafe) and safe
+// hook/active-MR facts. See
+// TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed for
+// the case that must NOT take this path: an unreadable bead leaves those
+// same facts unverified, so it keeps failing closed regardless of git state.
+func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -1883,12 +1891,48 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusFailsClosed(t *testi
 
 	// Swap to a mock bd that omits cleanup_status entirely while everything
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
-	// worktree itself is locally clean — exactly the pre-fix promotion path.
+	// worktree itself is locally clean, verified by workstateInputForPolecat's
+	// own live probe (GitStateSourceLive) — not a bypass of it.
 	installMockBdMissingCleanupStatus(t)
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+	if d.Verdict != WorkstateVerdictSafeToNuke {
+		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — a verified-clean live probe plus safe hook/MR must clear a missing cleanup_status on a bead that was actually read",
+			d.Verdict, d.Reason, d.Blockers, WorkstateVerdictSafeToNuke)
+	}
+	if !d.Reusable || !d.SafeToNuke {
+		t.Fatalf("WorkstateDispositionForPolecat() Reusable=%v SafeToNuke=%v, want both true", d.Reusable, d.SafeToNuke)
+	}
+}
+
+// TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed is
+// the gt-14a regression test: an agent bead that could not be read at all
+// (GetAgentBead returns not-found as (nil, nil, nil), same as a lookup
+// error) must keep failing closed, even with a locally clean worktree.
+// Unlike the successfully-read case above, hook_bead, push_failed, mr_failed
+// and active_mr are all unverified here — there is nothing for
+// workstateInputForPolecat to have measured them from — so
+// ResolveIgnoreCleanupStatus's agentBeadRead precondition must not be met,
+// and the missing/unknown CleanupUnknown default set at the top of
+// workstateInputForPolecat must keep blocking.
+func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	_ = git.NewGit(p.ClonePath).CleanForce()
+
+	// installEmptyMockBd's `show` returns an empty result, so GetAgentBead
+	// resolves to (nil, nil, nil) — exactly the not-found shape
+	// workstateInputForPolecat must not treat as "safe to ignore the missing
+	// cleanup_status".
+	installEmptyMockBd(t)
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
 	if d.Verdict != WorkstateVerdictNeedsRecovery {
-		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — missing cleanup_status must fail closed even when local git looks clean",
+		t.Fatalf("WorkstateDispositionForPolecat() verdict = %s (reason=%s blockers=%v), want %s — an unreadable agent bead must fail closed even when local git looks clean",
 			d.Verdict, d.Reason, d.Blockers, WorkstateVerdictNeedsRecovery)
 	}
 	if d.Reusable || d.SafeToNuke {
