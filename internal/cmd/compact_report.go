@@ -400,7 +400,7 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 		"--silent",
 	}
 
-	bdCmd := exec.Command("bd", bdArgs...)
+	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
 	output, err := bdCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("creating report bead: %w\nOutput: %s", err, string(output))
@@ -414,7 +414,7 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 	// Auto-close (audit record, not work). Surface failures: if close fails,
 	// the bead stays open and findExistingCompactReport (filter status=closed)
 	// will never match, causing the digest to re-fire every patrol cycle.
-	closeCmd := exec.Command("bd", "close", beadID, "--reason=daily compaction report")
+	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", beadID, "--reason=daily compaction report")
 	if out, err := closeCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("auto-closing report bead %s: %w\nOutput: %s", beadID, err, string(out))
 	}
@@ -519,7 +519,7 @@ func runWeeklyRollup() error {
 
 // queryCompactionReports queries compaction report event beads in a date range.
 func queryCompactionReports(startDate, endDate string) ([]*compactReport, error) {
-	listCmd := exec.Command("bd", "list",
+	listCmd := beads.CommandWithEnv("", os.Environ(), "list",
 		"--type=event",
 		"--status=all",
 		"--json",
@@ -658,7 +658,7 @@ func formatWeeklyRollup(rollup *weeklyRollup) string {
 func findExistingCompactReport(dateStr string) (string, error) {
 	expectedTitle := fmt.Sprintf("Compaction Report %s", dateStr)
 
-	listCmd := exec.Command("bd", "list",
+	listCmd := beads.CommandWithEnv("", os.Environ(), "list",
 		"--type=event",
 		"--status=closed",
 		"--json",
@@ -703,7 +703,7 @@ func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
 	// The rollup audit bead is auto-closed at creation, and bd list defaults
 	// to open issues only — without --status=closed the prior rollup is
 	// invisible and a duplicate gets sent (gt-9t9).
-	listCmd := exec.Command("bd", "list",
+	listCmd := beads.CommandWithEnv("", os.Environ(), "list",
 		"--type=event",
 		"--status=closed",
 		"--json",
@@ -763,7 +763,7 @@ func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, erro
 		"--silent",
 	}
 
-	bdCmd := exec.Command("bd", bdArgs...)
+	bdCmd := beads.CommandWithEnv("", os.Environ(), bdArgs...)
 	output, err := bdCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("creating weekly rollup bead: %w\nOutput: %s", err, string(output))
@@ -776,7 +776,7 @@ func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, erro
 
 	// Auto-close (audit record, not work). Surface failures so mail is not sent
 	// without a matching audit record for future idempotency checks.
-	closeCmd := exec.Command("bd", "close", beadID, "--reason=weekly compaction rollup")
+	closeCmd := beads.CommandWithEnv("", os.Environ(), "close", beadID, "--reason=weekly compaction rollup")
 	if out, err := closeCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("auto-closing rollup bead %s: %w\nOutput: %s", beadID, err, string(out))
 	}
