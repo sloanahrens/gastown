@@ -114,5 +114,32 @@ re-filing it unchanged is noise.
 - Re-review the diff yourself when the gate is installed — om is the
   editorial authority; your job is routing its verdict.
 - Treat exit 2 as an approval by om.
-- Invoke `om` or `om-gate.sh` directly — only `gt mq review` produces a
-  durable, auditable record.
+- Invoke `om` or `om-gate.sh` directly — only `gt mq review` (or, on the
+  single-MR path, `gt mq verify` — see below) produces a durable, auditable
+  record.
+
+## Single-MR path: `gt mq verify` overlaps the suite and the review
+
+mol-refinery-patrol's verify-and-review step calls `gt mq verify`, not `gt mq
+review` directly. It runs the quality checks/test suite and, when
+`merge_queue.editorial.required` is set, the om review as two goroutines
+under one context inside the refinery engine (internal/refinery/overlap) —
+concurrently, not the suite then the review in series. Internally it still
+calls `editorial.Run` (the same code `gt mq review` calls), so the review
+itself — rehearsal-free ref-only invocation, version assertion, rubric
+guard, retry, note/receipt — is unchanged; only when it starts changed.
+
+`gt mq verify`'s own exit table (distinct from `gt mq review`'s table
+above — do not conflate the two commands' exit codes):
+
+| Exit | Meaning | Refinery action |
+|------|---------|-----------------|
+| 0 | merge: suite passed, and no review required or review approved | proceed to merge-push |
+| 1 | reject_suite: the suite failed | abort merge, FIX_NEEDED to the polecat (`Failure-Type: <tests\|build\|lint\|typecheck>`) — **any review verdict in the same result is discarded, never acted on and never sent as a second FIX_NEEDED, even if it reads as an approve** |
+| 2 | escalate_review: suite passed, review infra failure (including an overlap timeout that canceled the review before it reached a verdict — an empty exit is never an approval) | skip the MR, escalate to Witness, do NOT send FIX_NEEDED |
+| 3 | reject_review: suite passed, review requested changes | abort merge, FIX_NEEDED to the polecat (`Failure-Type: om-editorial`) |
+
+Both gates stay mandatory: exit 1 always wins over whatever the review
+decided, by construction — the join in internal/refinery/overlap discards a
+review result whenever the suite failed, so no race between the two lets a
+merge through on a partial result.

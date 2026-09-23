@@ -64,7 +64,7 @@ source of truth.
 | build_command | (empty) | Build command (e.g., `go build ./...`). Empty = skip. |
 | target_branch | main | Default target branch for merges |
 | delete_merged_branches | true | Whether to delete source branches after merge |
-| editorial_required | false | Whether merge_queue.editorial.required is set for this rig; gates whether quality-review calls gt mq review at all |
+| editorial_required | false | Whether merge_queue.editorial.required is set for this rig; gates whether verify-and-review's `gt mq verify` call starts the om editorial review at all |
 | merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
 | batch_enabled | false | Whether to batch-gate multiple ready MRs instead of processing one at a time |
@@ -82,12 +82,12 @@ resolve that placeholder with this rule:
 - FORBIDDEN: Landing integration branches to the default branch via raw git commands (`git merge`, `git push`).
   Integration branches may ONLY be landed via `gt mq integration land <epic-id>`.
   This applies regardless of `auto_land` configuration. The pre-push hook enforces this.
-- FORBIDDEN: Invoking `gt mq review` against the raw `origin/<polecat-branch>`
-  instead of the rehearsed `temp` branch. If the branch forked behind a
-  target that has since moved, an unrehearsed comparison shows the target's
-  own later merges as deletions authored by the polecat — a false "this
-  reverts X" verdict (gt-oh41). Always pass `--rehearsed temp`, the branch
-  process-branch already built.
+- FORBIDDEN: Invoking `gt mq verify` or `gt mq review` against the raw
+  `origin/<polecat-branch>` instead of the rehearsed `temp` branch. If the
+  branch forked behind a target that has since moved, an unrehearsed
+  comparison shows the target's own later merges as deletions authored by
+  the polecat — a false "this reverts X" verdict (gt-oh41). Always pass
+  `--rehearsed temp`, the branch process-branch already built.
 
 ## Step Execution Order
 
@@ -114,7 +114,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 31
+version = 32
 
 [vars]
 [vars.wisp_type]
@@ -166,7 +166,7 @@ description = "Whether to delete source branches after merge"
 default = "true"
 
 [vars.editorial_required]
-description = "Whether merge_queue.editorial.required is set for this rig (from config, resolved at prime time). Gates whether quality-review invokes gt mq review at all."
+description = "Whether merge_queue.editorial.required is set for this rig (from config, resolved at prime time). Gates whether verify-and-review's gt mq verify call starts the om editorial review at all."
 default = "false"
 
 [vars.merge_strategy]
@@ -576,13 +576,13 @@ make `temp` safe to review, not only to test the merge. Once it succeeds,
 `temp`'s merge-base with `origin/<merge-target>` IS `origin/<merge-target>`'s
 current tip, so a three-dot diff and a plain diff against `temp` agree by
 construction. The raw `origin/<polecat-branch>` — before this rehearsal —
-is NOT safe to pass to `gt mq review` directly: quality-review always
-invokes it with `--rehearsed temp`, this branch.
+is NOT safe to pass to `gt mq verify` directly: verify-and-review always
+passes `--rehearsed temp`, this branch.
 
 **Step 2: Check merge rehearsal result**
 
 The merge exits with:
-- Exit code 0: Success - proceed to run-tests
+- Exit code 0: Success - proceed to verify-and-review
 - Exit code 1 (conflicts): Conflict detected - proceed to Step 3
 
 To detect conflict state after merge fails:
@@ -595,7 +595,7 @@ git rev-parse -q --verify MERGE_HEAD >/dev/null && echo "CONFLICT_STATE"
 **Step 3: Handle conflicts (if any)**
 
 If merge rehearsal SUCCEEDED (exit code 0):
-- Skip to run-tests step (continue normal merge flow)
+- Skip to verify-and-review step (continue normal merge flow)
 
 If merge rehearsal FAILED with conflicts:
 
@@ -636,11 +636,22 @@ the original work and must be preserved for conflict resolution.
 Track: merge rehearsal result (success/conflict), conflict task ID if created."""
 
 [[steps]]
-id = "run-tests"
-title = "Run quality checks and tests"
+id = "verify-and-review"
+title = "Run quality checks/tests and the om editorial review concurrently"
 needs = ["process-branch"]
 description = """
-**⚠ FIRST CHECK: If run_tests = "false", skip this ENTIRE step. Proceed directly to the next step. Do not run any quality checks or tests.**
+`gt mq verify` runs the quality checks/test suite and, when the rig requires
+it, the om editorial review AS TWO GOROUTINES UNDER ONE CONTEXT inside the
+refinery engine (internal/refinery/overlap) — not two formula steps run one
+after the other. The review no longer waits for the suite to finish first:
+both start together against the already-rehearsed `temp` branch, and the
+command blocks until both are done (a bounded wait, not a poll), so this
+step never sees a partial result. There are no /tmp files in this join: both
+results travel back as this one command's --json output.
+
+Replaces the old separate run-tests and quality-review steps. Never invoke
+`{{test_command}}` or om directly from this formula — always go through this
+command.
 
 **Config: run_tests = {{run_tests}}**
 **Config: test_command = {{test_command}}**
@@ -648,8 +659,7 @@ description = """
 **Config: typecheck_command = {{typecheck_command}}**
 **Config: lint_command = {{lint_command}}**
 **Config: build_command = {{build_command}}**
-
-If run_tests is "false": STOP HERE. Skip everything below and proceed to the next step.
+**Config: editorial_required = {{editorial_required}}**
 
 **0. Gate load check (mayor standing rule):** Before starting — or retrying —
 a full-suite gate, check 1-minute load average:
@@ -661,130 +671,93 @@ is killed or times out under load, the result is INCONCLUSIVE — never count
 it as a failure against the branch. Wait for load to drop and retry, or
 escalate if it stays high.
 
-**1. Run quality checks (skip any that are not configured):**
-
-If setup_command is set: `{{setup_command}}`
-If typecheck_command is set: `{{typecheck_command}}`
-If lint_command is set: `{{lint_command}}`
-If build_command is set: `{{build_command}}`
-
-```bash
-{{setup_command}}           # Make sure all newly added dependencies are installed (if command set)
-{{typecheck_command}}       # Check for type errors (if command set)
-{{lint_command}}            # Check for lint errors (if command set)
-{{build_command}}           # Make sure it builds (if command set)
-```
-
-Empty commands mean "not configured for this project" — skip silently.
-
-**2. If quality checks fail:**
-
-Proceed to handle-failures step. Track which specific check failed
-(setup/typecheck/lint/build) for the failure diagnosis.
-
-**3. Run the test suite:**
-
-**Rule (gt-tuiy, shared with mol-polecat-work's pre-verify step and
-mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
-test_command through the container-gate slot only when it
-spins Docker containers (Dolt, testcontainers) for THIS rig; run it bare
-otherwise.** The slot is a townwide lock shared by every rig — wrapping a
-non-Docker rig's gate serializes it behind every other rig's Dolt/
-testcontainers suite for no reason, and (gt-tuiy attempt 2) a stopped Docker
-Desktop would fail even suites that never touch it. Wrapping IS required
-when test_command spins Dolt/testcontainers (e.g. beads, gastown's
-testcontainers-based patrol tests) — an unwrapped suite like that collides
-with any other rig's container-backed suite on the shared Docker VM even
-though `gt slot status` looked free.
-
-If {{rig}}'s test_command spins Docker containers:
-```bash
-gt slot run --role {{rig}}/refinery -- {{test_command}}
-```
-Otherwise run it bare:
-```bash
-{{test_command}}
-```
-
-**Never substitute a bare `go test ./...` for the configured
-`{{test_command}}` (gt-885g).** This rig's Makefile exports
-CGO_CPPFLAGS/CGO_LDFLAGS for keg-only icu4c; bare `go test` fails to build
-go-icu-regex with "unicode/regex.h file not found", producing ~21 packages
-"[build failed]" that reads as broken code rather than a missing env. Always
-run the exact configured test_command (e.g. `make test`), never your own
-substitute.
-
-**Run the gate in the foreground and wait for it.** One Bash call with a
-timeout of 2700000 ms (45 minutes; this role's preset allows up to
-3600000 ms, use that if the suite legitimately needs it), writing the log
-to a file so a red run stays inspectable. No pipeline: the exit code must
-come straight from the gate, and PIPESTATUS does not exist in zsh:
-
-```bash
-gt slot run --role {{rig}}/refinery -- {{test_command}} > /tmp/<mr-bead-id>-gate.log 2>&1; echo "GATE_EXIT=$?"; tail -40 /tmp/<mr-bead-id>-gate.log
-```
-
-Never run the gate in the background and sleep-poll it: the call returns
-the instant the suite exits, while a `sleep 290` poll loop leaves the
-refinery idle for up to five minutes after the suite is already done
-(measured 4m52s, 2m43s and 1m26s on three consecutive MRs on 2026-09-19).
-If the foreground call is refused because the Bash ceiling is still the
-default (preset not yet applied to this session), background it and check
-every 30 seconds at most.
-
-Track results: pass count, fail count, specific failures."""
-
-[[steps]]
-id = "quality-review"
-title = "Editorial review via gt mq review"
-needs = ["run-tests"]
-description = """
-`gt mq review` is the single invoker of om: it accepts the already-rehearsed
-`temp` branch process-branch built, asserts the harness manifest version,
-invokes the rig's editorial gate, classifies the outcome, retries once for
-transient failures, and on a verdict writes a git note and a receipt bead.
-Never invoke om directly from this formula — always go through this command.
-
-**Config: editorial_required = {{editorial_required}}**
-
-**Step 0: Skip this step entirely when the rig hasn't opted into editorial
-review**
-
-`editorial_required` reflects the rig's `merge_queue.editorial.required`
-setting, which defaults to `false`. Most rigs have never set this block.
-`gt mq review` refuses to run without `--force` on such a rig (exit 2,
-Class: config_error) — that refusal is not an infra failure, it is the
-command correctly declining an unconfigured review, and this formula never
-calls `--force`.
-
-**If `editorial_required` is not `"true"`: do NOT call `gt mq review` at
-all.** This step auto-completes with no action; continue straight to
-handle-failures exactly as if quality-review did not exist.
-
-**If `editorial_required` is `"true"`, continue with Step 1.**
-
-**Step 1: Run the review against the rehearsed branch**
-
-Determine N: this issue's current attempt number (count prior `MERGE
+**1. Determine N** (this issue's current attempt number: count prior `MERGE
 REJECTION (attempt` entries in the issue's bd notes, plus 1 — first attempt
 is N=1). Reuse this same N below in the FIX_NEEDED mail and MERGE REJECTION
 notes.
 
+**2. Decide whether test_command needs the container-gate slot** (gt-tuiy,
+shared with mol-polecat-work's pre-verify step and
+mol-polecat-work-monorepo's pre-verify step — keep all in sync): wrap
+`{{test_command}}` through the slot only when it spins Docker containers
+(Dolt, testcontainers) for THIS rig; pass it bare otherwise. The slot is a
+townwide lock shared by every rig — wrapping a non-Docker rig's gate
+serializes it behind every other rig's Dolt/testcontainers suite for no
+reason, and a stopped Docker Desktop would fail even suites that never touch
+it. Wrapping IS required when test_command spins Dolt/testcontainers (e.g.
+beads, gastown's testcontainers-based patrol tests) — an unwrapped suite
+like that collides with any other rig's container-backed suite on the
+shared Docker VM even though `gt slot status` looked free.
+
+If {{rig}}'s test_command spins Docker containers, the `--test` value below
+is `gt slot run --role {{rig}}/refinery -- {{test_command}}`; otherwise it
+is `{{test_command}}` bare. **Never substitute a bare `go test ./...` for
+the configured `{{test_command}}` (gt-885g)** — pass the exact configured
+command, never your own substitute.
+
+**3. Run the join, in the foreground, and wait.** If run_tests is "false",
+omit every `--setup`/`--typecheck`/`--lint`/`--build`/`--test` flag — an
+empty command means "not configured for this project" and gt mq verify skips
+it silently, same as the old run-tests step. If editorial_required is not
+"true", the review is not started at all; gt mq verify decides that itself
+from the rig's config, so you never pass a flag for it. One Bash call, no
+pipeline (the exit code must come straight from the command, and PIPESTATUS
+does not exist in zsh), with a timeout of 2700000 ms (45 minutes; this
+role's preset allows up to 3600000 ms, use that if the suite legitimately
+needs it):
+
 ```bash
-REVIEW_JSON=$(gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json)
-REVIEW_EXIT=$?
+VERIFY_JSON=$(gt mq verify <mr-bead-id> --rehearsed temp --attempt <N> \\
+  --setup "{{setup_command}}" --typecheck "{{typecheck_command}}" \\
+  --lint "{{lint_command}}" --build "{{build_command}}" \\
+  --test "<test-command-from-step-2>" --json)
+VERIFY_EXIT=$?
 ```
 
-Run it in the foreground and wait: a review takes about five minutes,
-well inside any Bash ceiling, so there is nothing to background. A
-`sleep 290` poll after a backgrounded review adds up to five idle minutes
-per MR for no reason.
+Never run this in the background and sleep-poll it: the call returns the
+instant both sides are done, and a poll loop after that adds pure idle time
+for no reason (measured up to 4m52s idle on three consecutive MRs before
+this design moved the join into the command itself, gt-cmcv). If the
+foreground call is refused because the Bash ceiling is still the default
+(preset not yet applied to this session), background it and check every 30
+seconds at most.
 
-**Step 2: Branch on the exit code**
+**4. Branch on `VERIFY_EXIT`** — read `$VERIFY_JSON`'s `.suite`, `.review`
+and `.decision` fields for the details each branch below needs (`jq -r
+'.decision'` also confirms the exit code you branched on):
 
-**Exit 0 — approve:** Continue to handle-failures, then merge-push, as normal.
+**Exit 0 — merge:** the suite passed and either no review was required or
+the review approved. Continue to handle-failures, then merge-push, as
+normal.
 
-**Exit 1 — request_changes:** The rehearsed branch has editorial findings.
+**Exit 1 — reject_suite:** the suite failed (`.suite.failed_step` names
+which check). **Any review verdict in `.review` is discarded — do not act on
+it, and do not send a second FIX_NEEDED for it, even if `.review.exit` is 0
+or 1.** Continue to handle-failures exactly as a test/build/lint/typecheck
+failure has always been handled — that step's branch/diagnose/FIX_NEEDED
+logic is unchanged, just fed from `.suite` instead of a bare `$GATE_EXIT`.
+
+**Exit 2 — escalate_review:** the suite passed but the review could not
+produce a verdict (binary missing, version mismatch, backend timeout, or an
+overlap timeout that canceled the review — `.review.class` names which).
+This is an infra failure, not a judgment on the branch or a suite failure.
+- Leave the MR bead open and the branch intact — do not touch either.
+- Escalate to the witness with the failure class:
+  ```bash
+  gt mail send <rig>/witness -s "HELP: gt mq verify review failed" -m "MR: <mr-bead-id>
+  Issue: <issue-id>
+  Branch: <branch>
+  failure_class: $(echo "$VERIFY_JSON" | jq -r '.review.class')"
+  ```
+- Clean up the temp branch and skip to loop-check:
+  ```bash
+  git checkout {{target_branch}}
+  git branch -D temp
+  ```
+- Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
+
+**Exit 3 — reject_review:** the suite passed but the review requested
+changes.
 - Abort the rehearsal (same cleanup as a test/build rejection):
   ```bash
   git checkout {{target_branch}}
@@ -832,41 +805,26 @@ per MR for no reason.
   which is what makes this a resubmit rather than a fresh start.
 - Archive the MERGE_READY message and skip to loop-check.
 
-**Exit 2 — execution error (never an approval):** `gt mq review` could not
-produce a verdict — binary missing, version mismatch, backend timeout, or
-similar. This is an infra failure, not a judgment on the branch. (Since Step 0
-already skips the call when `editorial_required` is not `"true"`, a
-config_error here means the rig's config changed to required mid-run, or a
-`--force` call happened elsewhere — treat it the same as any other exit 2,
-never as an approval or a skip.)
-- Read the failure class from the captured JSON:
-  ```bash
-  echo "$REVIEW_JSON" | jq -r '.Class'
-  ```
-- Leave the MR bead open and the branch intact — do not touch either.
-- Escalate to the witness with the failure class:
-  ```bash
-  gt mail send <rig>/witness -s "HELP: gt mq review failed" -m "MR: <mr-bead-id>
-  Issue: <issue-id>
-  Branch: <branch>
-  failure_class: <class from above>"
-  ```
-- Clean up the temp branch and skip to loop-check:
-  ```bash
-  git checkout {{target_branch}}
-  git branch -D temp
-  ```
-- Do NOT send FIX_NEEDED. Do NOT send MERGE_FAILED.
-
-Track: review exit code, failure class (exit 2 only), MR closed as rejected
-(exit 1 only)."""
+Track: VERIFY_EXIT, `.suite.failed_step` (exit 1 only), `.review.class`
+(exit 2 only), review score/findings (exit 3 only), MR closed as rejected
+(exit 3 only), review verdict discarded (exit 1 only, when `.review` is
+non-null)."""
 
 [[steps]]
 id = "handle-failures"
 title = "Handle quality check or test failures"
-needs = ["quality-review"]
+needs = ["verify-and-review"]
 description = """
 **VERIFICATION GATE**: This step enforces the Beads Promise.
+
+Reached only on `VERIFY_EXIT` 0 (all checks and tests passed, proceed to
+merge below) or 1 (`reject_suite`) from verify-and-review — exits 2 and 3
+are handled entirely inside that step and skip to loop-check, so this step
+never sees them. On a `VERIFY_EXIT` 1 from a rig with editorial_required
+"true", `$VERIFY_JSON`'s `.review` may be non-null: that verdict was already
+discarded by verify-and-review and must not be acted on here — do not send a
+second FIX_NEEDED for it, and do not let an approve verdict there change
+this step's diagnosis of the suite failure below.
 
 If all checks and tests PASSED: This step auto-completes. Proceed to merge.
 

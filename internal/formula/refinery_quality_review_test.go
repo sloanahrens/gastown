@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestRefineryPatrolQualityReviewUsesMQReview(t *testing.T) {
+func TestRefineryPatrolVerifyAndReviewUsesMQVerify(t *testing.T) {
 	contentBytes, err := formulasFS.ReadFile("formulas/mol-refinery-patrol.formula.toml")
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -21,9 +21,9 @@ func TestRefineryPatrolQualityReviewUsesMQReview(t *testing.T) {
 
 	f := loadRefineryPatrolFormula(t)
 
-	qualityReview := requireFormulaStep(t, f, "quality-review")
-	if !strings.Contains(qualityReview.Description, "gt mq review") {
-		t.Fatal("quality-review must invoke gt mq review")
+	verifyAndReview := requireFormulaStep(t, f, "verify-and-review")
+	if !strings.Contains(verifyAndReview.Description, "gt mq verify") {
+		t.Fatal("verify-and-review must invoke gt mq verify")
 	}
 
 	batchScan := requireFormulaStep(t, f, "batch-scan")
