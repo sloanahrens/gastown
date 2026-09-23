@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -17,6 +18,72 @@ type convoyScheduleOpts struct {
 	Force       bool
 	DryRun      bool
 	NoBoot      bool
+}
+
+// convoyCandidate is one tracked bead of a convoy queued for dispatch; both
+// manual dispatch paths walk the same list.
+type convoyCandidate struct {
+	ID      string
+	Title   string
+	RigName string
+}
+
+// convoyDispatchJob is a candidate paired with the agent it must be
+// re-dispatched with, resolved from the convoy's sling-time record.
+type convoyDispatchJob struct {
+	candidate convoyCandidate
+	agent     string
+	// agentDesc names where the agent choice came from, for the log line. The
+	// no-agent fallback is named rather than applied silently: an invisible
+	// fallback is what made the original dropped-agent defect hard to see
+	// (gt-yg24).
+	agentDesc string
+}
+
+// planConvoyDispatch resolves the agent the convoy recorded at sling time for
+// every candidate, so a dispatch path cannot omit it and let the rig default
+// override the routing decision (gt-mxyk).
+func planConvoyDispatch(candidates []convoyCandidate, convoyDescription, townRoot string) []convoyDispatchJob {
+	jobs := make([]convoyDispatchJob, 0, len(candidates))
+	for _, c := range candidates {
+		agent, agentDesc := convoyRecordedAgent(convoyDescription, townRoot, c.RigName)
+		jobs = append(jobs, convoyDispatchJob{candidate: c, agent: agent, agentDesc: agentDesc})
+	}
+	return jobs
+}
+
+// convoyRecordedAgent resolves the runtime agent a manual convoy dispatch must
+// re-dispatch one tracked bead with, plus a description of that choice for
+// logging. `gt sling <convoy>` re-dispatches beads that were already slung once,
+// so it answers to the same invariant as the automatic feeders: the recorded
+// agent is honored, or the choice is left to gt sling — never silently swapped
+// for the rig default (gt-mxyk). The decision is convoy.RedispatchAgent's, so
+// the manual and automatic paths cannot drift apart.
+func convoyRecordedAgent(convoyDescription, townRoot, rig string) (agent, description string) {
+	return convoy.RedispatchAgent(convoyDescription, townRoot, rig)
+}
+
+// convoyDescriptionByID reads a convoy's description, empty when the convoy
+// cannot be read. The sling-time agent is recorded in that description (gt-yg24).
+func convoyDescriptionByID(convoyID string) string {
+	info, err := bdShow(convoyID)
+	if err != nil {
+		return ""
+	}
+	return info.Description
+}
+
+// convoyScheduleOptionsFor builds the deferred-dispatch options for one
+// candidate. agent is the convoy's recorded agent; empty leaves the choice to
+// gt sling's own resolution.
+func convoyScheduleOptionsFor(opts convoyScheduleOpts, agent string) ScheduleOptions {
+	return ScheduleOptions{
+		Formula:     opts.Formula,
+		NoConvoy:    true, // Already tracked by this convoy
+		Force:       opts.Force,
+		HookRawBead: opts.HookRawBead,
+		Agent:       agent,
+	}
 }
 
 // runConvoyScheduleByID schedules all open tracked issues of a convoy.
@@ -41,12 +108,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 		return nil
 	}
 
-	type scheduleCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []scheduleCandidate
+	var candidates []convoyCandidate
 	skippedClosed := 0
 	skippedAssigned := 0
 	skippedScheduled := 0
@@ -84,7 +146,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 			continue
 		}
 
-		candidates = append(candidates, scheduleCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
+		candidates = append(candidates, convoyCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
 	}
 
 	if len(candidates) == 0 {
@@ -120,16 +182,15 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	fmt.Printf("%s Scheduling %d issue(s) from convoy %s...\n",
 		style.Bold.Render("📋"), len(candidates), convoyID)
 
+	// The convoy's sling-time agent record, read once for every candidate below.
+	convoyDescription := convoyDescriptionByID(convoyID)
+
 	successCount := 0
-	for _, c := range candidates {
-		err := scheduleBead(c.ID, c.RigName, ScheduleOptions{
-			Formula:     formula,
-			NoConvoy:    true, // Already tracked by this convoy
-			Force:       opts.Force,
-			HookRawBead: opts.HookRawBead,
-		})
+	for _, job := range planConvoyDispatch(candidates, convoyDescription, townRoot) {
+		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
+		err := scheduleBead(job.candidate.ID, job.candidate.RigName, convoyScheduleOptionsFor(opts, job.agent))
 		if err != nil {
-			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), c.ID, err)
+			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), job.candidate.ID, err)
 			continue
 		}
 		successCount++
@@ -172,12 +233,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		return nil
 	}
 
-	type slingCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []slingCandidate
+	var candidates []convoyCandidate
 	skippedClosed := 0
 	skippedAssigned := 0
 	skippedNoRig := 0
@@ -199,7 +255,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 				style.Dim.Render("○"), t.ID, prefix)
 			continue
 		}
-		candidates = append(candidates, slingCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
+		candidates = append(candidates, convoyCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
 	}
 
 	if len(candidates) == 0 {
@@ -211,8 +267,6 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		fmt.Println()
 		return nil
 	}
-
-	formula := opts.Formula
 
 	if opts.DryRun {
 		fmt.Printf("%s Would dispatch %d issue(s) from convoy %s:\n",
@@ -230,19 +284,28 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 	fmt.Printf("%s Dispatching %d issue(s) from convoy %s...\n",
 		style.Bold.Render("▶"), len(candidates), convoyID)
 
+	// The convoy's sling-time agent record, read once for every candidate below.
+	convoyDescription := convoyDescriptionByID(convoyID)
+
+	jobs := planConvoyDispatch(candidates, convoyDescription, townRoot)
+
 	successCount := 0
 	successfulRigs := make(map[string]bool)
-	for i, c := range candidates {
+	for i, job := range jobs {
 		if slingMaxConcurrent > 0 && i >= slingMaxConcurrent {
 			fmt.Printf("  %s Reached --max-concurrent spawn batch size (%d), remaining will be scheduled next cycle\n", style.Dim.Render("○"), slingMaxConcurrent)
 			break
 		}
 
-		fmt.Printf("\n[%d/%d] Dispatching %s → %s...\n", i+1, len(candidates), c.ID, c.RigName)
+		c := job.candidate
+		fmt.Printf("\n[%d/%d] Dispatching %s → %s...\n", i+1, len(jobs), c.ID, c.RigName)
+		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
+		// Agent carries the convoy's sling-time record: re-dispatching with the
+		// rig default instead would override the routing decision (gt-mxyk).
 		_, err := executeSling(SlingParams{
 			BeadID:        c.ID,
 			RigName:       c.RigName,
-			FormulaName:   formula,
+			FormulaName:   opts.Formula,
 			Force:         opts.Force,
 			HookRawBead:   opts.HookRawBead,
 			NoConvoy:      true, // Already tracked by this convoy
@@ -250,6 +313,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 			CallerContext: "convoy-sling",
 			TownRoot:      townRoot,
 			BeadsDir:      filepath.Join(townRoot, ".beads"),
+			Agent:         job.agent,
 
 			// Feeder replay of work already chosen for dispatch; see SlingParams.
 			SkipDuplicateCheck: true,
@@ -262,7 +326,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		successfulRigs[c.RigName] = true
 
 		// Brief delay between spawns to avoid Dolt contention
-		if i < len(candidates)-1 {
+		if i < len(jobs)-1 {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}

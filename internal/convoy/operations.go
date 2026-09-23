@@ -295,8 +295,8 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 	if convoy, err := store.GetIssue(ctx, convoyID); err == nil && convoy != nil {
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
-			convoyAgent = cf.Agent
 		}
+		convoyAgent = AgentFromConvoyDescription(convoy.Description)
 	}
 
 	// Sort by priority (lower = higher) then by ID for deterministic tie-breaking.
@@ -607,6 +607,25 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 			}
 		}
 	}
+}
+
+// AgentFromConvoyDescription returns the runtime agent a convoy recorded at sling
+// time, empty when it recorded none. It is the single parse of the 'agent:'
+// convoy field, so a re-dispatch path cannot grow its own reading of it
+// (gt-mxyk).
+func AgentFromConvoyDescription(description string) string {
+	if cf := beads.ParseConvoyFields(&beads.Issue{Description: description}); cf != nil {
+		return cf.Agent
+	}
+	return ""
+}
+
+// RedispatchAgent returns the agent to re-dispatch one bead of a convoy with,
+// given the convoy's description, plus a description of that choice for logging.
+// It is AgentFromConvoyDescription plus FeedDispatchAgent, and is the entry point
+// for a caller holding the convoy record rather than an already-parsed agent.
+func RedispatchAgent(convoyDescription, townRoot, rig string) (agent, description string) {
+	return FeedDispatchAgent(AgentFromConvoyDescription(convoyDescription), townRoot, rig)
 }
 
 // FeedDispatchAgent decides which runtime agent a convoy feeder should

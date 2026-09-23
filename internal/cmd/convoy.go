@@ -2063,7 +2063,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Owned:         isOwned,
 			Lifecycle:     lifecycle,
 			MergeStrategy: convoyMergeFromFields(convoy.Description),
-			Agent:         convoyAgentFromFields(convoy.Description),
+			Agent:         convoyops.AgentFromConvoyDescription(convoy.Description),
 			Tracked:       tracked,
 			Completed:     completed,
 			Total:         len(tracked),
@@ -2086,7 +2086,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 	if merge != "" {
 		fmt.Printf("  Merge:     %s\n", merge)
 	}
-	if agent := convoyAgentFromFields(convoy.Description); agent != "" {
+	if agent := convoyops.AgentFromConvoyDescription(convoy.Description); agent != "" {
 		fmt.Printf("  Agent:     %s\n", agent)
 	}
 	fmt.Printf("  Progress:  %d/%d completed\n", completed, len(tracked))
@@ -2408,18 +2408,6 @@ func convoyMergeFromFields(description string) string {
 		return ""
 	}
 	return fields.Merge
-}
-
-// convoyAgentFromFields returns the runtime agent recorded on a convoy at sling
-// time (empty when no --agent was requested). Reporters surface it so feeders —
-// including the deacon's mol-convoy-feed dog — re-dispatch with the same agent
-// (gt-yg24).
-func convoyAgentFromFields(description string) string {
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
-	if fields == nil {
-		return ""
-	}
-	return fields.Agent
 }
 
 // formatYesNo returns "yes" or "no" for a boolean value.

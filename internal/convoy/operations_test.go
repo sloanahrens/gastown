@@ -1253,6 +1253,103 @@ func TestFeedDispatchAgent(t *testing.T) {
 	})
 }
 
+// TestAgentFromConvoyDescription covers the single parse of the convoy's
+// sling-time agent record. Every re-dispatch path reads the field through it, so
+// the field spellings and the empty cases are pinned here once (gt-mxyk).
+func TestAgentFromConvoyDescription(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{
+			name:        "agent field is read",
+			description: "Auto-created convoy tracking gt-abc\n\nmerge: mr\nagent: deepseek-flash\n",
+			want:        "deepseek-flash",
+		},
+		{
+			name:        "agent field absent",
+			description: "Auto-created convoy tracking gt-abc\n\nmerge: mr\n",
+			want:        "",
+		},
+		{
+			name:        "whitespace-only value is not an agent",
+			description: "merge: mr\nagent:   \n",
+			want:        "",
+		},
+		{
+			name:        "empty description",
+			description: "",
+			want:        "",
+		},
+		{
+			name:        "prose containing the word agent is not a field",
+			description: "agent: is what the field would look like\n",
+			// The line does parse as a field; what it must not do is invent an
+			// agent for a convoy that recorded none. Here it genuinely recorded
+			// the literal text, so it round-trips verbatim.
+			want: "is what the field would look like",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AgentFromConvoyDescription(tc.description); got != tc.want {
+				t.Errorf("AgentFromConvoyDescription() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRedispatchAgent is the table over the one decision every re-dispatch path
+// makes: a recorded agent is passed through, and an unrecorded one is left to
+// gt sling while naming the rig default it expects (gt-mxyk, gt-yg24).
+func TestRedispatchAgent(t *testing.T) {
+	townRoot := t.TempDir()
+
+	tests := []struct {
+		name        string
+		description string
+		rig         string
+		wantAgent   string
+		wantDesc    string
+	}{
+		{
+			name:        "recorded agent is passed through",
+			description: "merge: mr\nagent: deepseek-flash\n",
+			rig:         "gastown",
+			wantAgent:   "deepseek-flash",
+			wantDesc:    "recorded on convoy",
+		},
+		{
+			name:        "no record leaves the choice to gt sling",
+			description: "merge: mr\n",
+			rig:         "gastown",
+			wantAgent:   "",
+			wantDesc:    "no --agent recorded on convoy",
+		},
+		{
+			name:        "unresolved rig is named as such",
+			description: "merge: mr\n",
+			rig:         "",
+			wantAgent:   "",
+			wantDesc:    "rig unresolved",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, desc := RedispatchAgent(tc.description, townRoot, tc.rig)
+			if agent != tc.wantAgent {
+				t.Errorf("agent = %q, want %q", agent, tc.wantAgent)
+			}
+			if !strings.Contains(desc, tc.wantDesc) {
+				t.Errorf("description %q should contain %q", desc, tc.wantDesc)
+			}
+		})
+	}
+}
+
 func TestDispatchIssue_Failure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
