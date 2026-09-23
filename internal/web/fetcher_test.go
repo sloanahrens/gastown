@@ -994,9 +994,13 @@ func TestFetchConvoys_TimedOutDetailReadKeepsConvoyCounted(t *testing.T) {
 
 	bdPath := filepath.Join(t.TempDir(), "bd")
 	// hq-cv-slow spins on its dep reads until the fetcher's deadline kills it.
-	// The spin forks nothing, so no child outlives the kill holding a copy of
-	// the stdout pipe open — the call returns at the deadline rather than
-	// waiting out a stray sleep.
+	// The spin forks nothing (kill is a shell builtin), so no child outlives
+	// the kill holding a copy of the stdout pipe open — the call returns at
+	// the deadline rather than waiting out a stray sleep. It spins only while
+	// its parent lives: if the test binary itself is killed mid-test (a suite
+	// timeout, an orphan sweep), an unconditional spin is reparented to
+	// launchd/init and burns a core forever — one ran for 10h at ~80% CPU on
+	// the gate host (2026-09-23).
 	script := `#!/bin/sh
 case "$1" in
   list)
@@ -1004,7 +1008,7 @@ case "$1" in
     ;;
   dep)
     case "$*" in
-      *hq-cv-slow*) while :; do :; done ;;
+      *hq-cv-slow*) while kill -0 "$PPID" 2>/dev/null; do :; done ;;
     esac
     echo '[{"depends_on_id":"gt-abc","type":"tracks"}]'
     ;;
