@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,27 +15,28 @@ import (
 // redirect points `go env` at an empty file under the sandbox, losing them
 // from every `go` subprocess a test spawns.
 //
-// It models the host rather than trusting the machine it runs on: it seeds
-// a go env file with sentinel flags under a stand-in HOME, calls
-// preserveGoEnv while that HOME is still current (as StartHermetic does),
-// then swaps HOME for a second, unrelated sandbox and asserts a `go`
-// subprocess under it still resolves the sentinel flags — and that the
-// flags never landed in the process environment itself, which is what let
-// buildGTBinary's brew fallback stop firing under the exported-flags
-// approach this replaced.
+// It models the host rather than trusting the machine it runs on: seeds a
+// go env file with sentinel flags under a stand-in HOME and XDG_CONFIG_HOME
+// (StartHermetic redirects both), calls preserveGoEnv while that pair is
+// still current, then swaps both to a second, unrelated sandbox and asserts
+// a `go` subprocess under it still resolves the sentinel flags — and that
+// the flags never landed in the process environment itself, which is what a
+// caller like buildGTBinary's brew fallback checks before running.
 func TestPreserveGoEnv_PinsGoEnvPastHomeRedirect(t *testing.T) {
 	withSavedEnv(t)
 	devHome := t.TempDir()
+	devConfigHome := filepath.Join(devHome, ".config")
 	os.Setenv("HOME", devHome)
 	os.Setenv("USERPROFILE", devHome)
-	os.Setenv("XDG_CONFIG_HOME", filepath.Join(devHome, ".config"))
+	os.Setenv("XDG_CONFIG_HOME", devConfigHome)
 	os.Unsetenv("GOENV")
 	for _, v := range append([]string{"CGO_CPPFLAGS", "CGO_CFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"}, goEnvCarryVars...) {
 		os.Unsetenv(v)
 	}
 
-	// The default go env file location for this stand-in HOME, resolved the
-	// same way the go tool resolves it: nothing overrides GOENV yet.
+	// The default go env file location for this stand-in HOME/XDG_CONFIG_HOME,
+	// resolved the same way the go tool resolves it: nothing overrides GOENV
+	// yet.
 	devGoEnvPath := goEnvValue(t, "GOENV")
 	seedGoEnvFile(t, devGoEnvPath, map[string]string{
 		"CGO_CPPFLAGS": "-I" + filepath.Join(devHome, "icu4c", "include"),
@@ -44,12 +44,14 @@ func TestPreserveGoEnv_PinsGoEnvPastHomeRedirect(t *testing.T) {
 		"CGO_LDFLAGS":  "-L" + filepath.Join(devHome, "icu4c", "lib"),
 	})
 
-	// The harness's sandbox: an empty HOME with no env file at all. Every
-	// test-spawned `go` invocation lands here once HOME is redirected.
+	// The harness's sandbox: an empty HOME/XDG_CONFIG_HOME with no env file
+	// at all. Every test-spawned `go` invocation lands here once HOME is
+	// redirected.
 	sandboxHome := t.TempDir()
 
-	// Half one — reproduce. Swapping HOME with nothing carried loses the
-	// flags entirely. That is the bug.
+	// Half one — reproduce. Swapping HOME (and XDG_CONFIG_HOME, which is
+	// where go env GOENV actually resolves on Linux) with nothing carried
+	// loses the flags entirely. That is the bug.
 	if got := goEnvWith(t, sandboxHome, "CGO_CPPFLAGS")["CGO_CPPFLAGS"]; got != "" {
 		t.Fatalf("precondition failed: an empty HOME resolved CGO_CPPFLAGS=%q", got)
 	}
@@ -65,6 +67,7 @@ func TestPreserveGoEnv_PinsGoEnvPastHomeRedirect(t *testing.T) {
 	// absolute path fixed before the redirect, is unaffected by it.
 	os.Setenv("HOME", sandboxHome)
 	os.Setenv("USERPROFILE", sandboxHome)
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(sandboxHome, ".config"))
 
 	// Half two — the fix. A `go` subprocess spawned under the sandbox HOME
 	// still resolves the sentinel flags, because GOENV still points at the
@@ -83,9 +86,7 @@ func TestPreserveGoEnv_PinsGoEnvPastHomeRedirect(t *testing.T) {
 
 	// The flags themselves must stay out of the process environment: a
 	// caller like buildGTBinary's brew fallback only runs when
-	// CGO_CPPFLAGS/CGO_LDFLAGS are unset, and exporting them here (rather
-	// than pinning GOENV) is the approach that disabled it (gt-mjll,
-	// d9e6fa874692).
+	// CGO_CPPFLAGS/CGO_LDFLAGS are unset (gt-mjll).
 	for _, v := range []string{"CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS"} {
 		if got := os.Getenv(v); got != "" {
 			t.Errorf("%s in the process environment after preserveGoEnv = %q, want unset", v, got)
@@ -99,17 +100,7 @@ func TestPreserveGoEnv_PinsGoEnvPastHomeRedirect(t *testing.T) {
 func TestPreserveGoEnv_FailsLoudOnGoEnvError(t *testing.T) {
 	withSavedEnv(t)
 	os.Unsetenv("GOENV")
-	binDir := t.TempDir()
-	name := "go"
-	script := "#!/bin/sh\nexit 1\n"
-	if runtime.GOOS == "windows" {
-		name = "go.bat"
-		script = "@exit /b 1\r\n"
-	}
-	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stand-in go: %v", err)
-	}
-	os.Setenv("PATH", binDir)
+	WithFailingGoOnPath(t)
 
 	if err := preserveGoEnv(); err == nil {
 		t.Fatal("preserveGoEnv with a failing `go env` = nil error, want a loud failure")
@@ -154,13 +145,18 @@ func seedGoEnvFile(t *testing.T, path string, values map[string]string) {
 	}
 }
 
-// goEnvWith runs `go env -json <names>` in a subprocess whose HOME is home
-// and which otherwise inherits the process environment. That is what a
+// goEnvWith runs `go env -json <names>` in a subprocess whose HOME (and, to
+// match StartHermetic's own redirect, XDG_CONFIG_HOME) is under home, and
+// which otherwise inherits the process environment. That is what a
 // test-spawned `go build` sees after the harness redirects HOME.
 func goEnvWith(t *testing.T, home string, names ...string) map[string]string {
 	t.Helper()
 	cmd := exec.Command(gotool(t), append([]string{"env", "-json"}, names...)...)
-	cmd.Env = envWith(map[string]string{"HOME": home, "USERPROFILE": home})
+	cmd.Env = envWith(map[string]string{
+		"HOME":            home,
+		"USERPROFILE":     home,
+		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+	})
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go env under HOME=%s: %v", home, err)

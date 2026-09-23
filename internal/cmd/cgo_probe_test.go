@@ -4,23 +4,55 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// TestVerifyCgoIncludePath_FailsLoudOnMissingIcu4c pins the loud half of
-// gt-mjll: when the configured include path cannot resolve icu4c's header,
-// the error must name the header and the offending directory — instead of
-// letting cgo report it from inside a dependency's generated C++.
+// withCleanGoEnv points GOENV at an empty temp file for the duration of the
+// test, so `go env` resolves cgo flags only from what the test sets via
+// t.Setenv — not from the developer's real go env file, which this
+// package's TestMain (testutil.HermeticMain) pins into GOENV for the whole
+// binary run so a real gt build keeps working (gt-mjll). Without this,
+// t.Setenv("CGO_CPPFLAGS", "") cannot clear a value: cmd/go treats an empty
+// variable as unset and falls back to the file.
+func withCleanGoEnv(t *testing.T) {
+	t.Helper()
+	empty := filepath.Join(t.TempDir(), "go-env")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatalf("writing empty go env file: %v", err)
+	}
+	t.Setenv("GOENV", empty)
+}
+
+// writeStubIcu4cHeader creates a throwaway include directory containing a
+// stub unicode/regex.h, so a test can assert the probe accepts a resolvable
+// path without depending on the host actually having icu4c installed.
+func writeStubIcu4cHeader(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "unicode"), 0o755); err != nil {
+		t.Fatalf("creating stub include dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "unicode", "regex.h"), []byte("// stub\n"), 0o644); err != nil {
+		t.Fatalf("writing stub header: %v", err)
+	}
+	return dir
+}
+
+// TestVerifyCgoIncludePath_FailsLoudOnMissingIcu4c: when the configured
+// include path cannot resolve icu4c's header, the error must name the
+// header and the offending directory — instead of letting cgo report it
+// from inside a dependency's generated C++.
 func TestVerifyCgoIncludePath_FailsLoudOnMissingIcu4c(t *testing.T) {
 	if !cgoCompilerPresent() {
-		t.Skip("no C compiler on this host; the include-path probe cannot run")
+		t.Skip("no C++ compiler on this host; the include-path probe cannot run")
 	}
+	withCleanGoEnv(t)
 	missing := filepath.Join(t.TempDir(), "definitely-not-icu4c")
 	t.Setenv("CGO_CPPFLAGS", "-I"+missing)
 	t.Setenv("CGO_CXXFLAGS", "")
-	t.Setenv("CGO_CFLAGS", "")
 
 	err := verifyCgoIncludePath()
 	if err == nil {
@@ -48,6 +80,7 @@ func TestVerifyCgoIncludePath_FailsLoudOnMissingIcu4c(t *testing.T) {
 // everywhere and fail every hermetic package on a machine whose icu4c sits
 // on the toolchain's default search path.
 func TestVerifyCgoIncludePath_SkipsWithoutIncludeDirs(t *testing.T) {
+	withCleanGoEnv(t)
 	t.Setenv("CGO_CPPFLAGS", "")
 	t.Setenv("CGO_CXXFLAGS", "")
 	t.Setenv("CGO_CFLAGS", "-O2 -g")
@@ -58,38 +91,65 @@ func TestVerifyCgoIncludePath_SkipsWithoutIncludeDirs(t *testing.T) {
 }
 
 // TestVerifyCgoIncludePath_AcceptsResolvableHeader is the negative control:
-// an include path that does resolve the header must not trip the check.
-// Without it, a probe that failed for any reason at all would still look
-// green.
+// an include path that does resolve the header must not trip the check. It
+// seeds a stub header rather than depending on the host's own icu4c
+// install, so it runs on exactly the keg-only hosts gt-mjll targets — where
+// the flags live in the go env file, not the process environment, and a
+// gate on os.Getenv would always skip.
 func TestVerifyCgoIncludePath_AcceptsResolvableHeader(t *testing.T) {
 	if !cgoCompilerPresent() {
-		t.Skip("no C compiler on this host; the include-path probe cannot run")
+		t.Skip("no C++ compiler on this host; the include-path probe cannot run")
 	}
-	if runtime.GOOS != "darwin" || os.Getenv("CGO_CPPFLAGS") == "" {
-		// The host's own flags are the only include path known to resolve the
-		// header here; without them there is nothing to assert on.
-		t.Skip("no host-configured icu4c include path to assert against")
-	}
+	withCleanGoEnv(t)
+	dir := writeStubIcu4cHeader(t)
+	t.Setenv("CGO_CPPFLAGS", "-I"+dir)
 	t.Setenv("CGO_CXXFLAGS", "")
 
 	if err := verifyCgoIncludePath(); err != nil {
-		t.Errorf("verifyCgoIncludePath with the host's resolvable include path = %v, want nil", err)
+		t.Errorf("verifyCgoIncludePath with a resolvable include path = %v, want nil", err)
 	}
 }
 
-// TestVerifyCgoIncludePath_FailsLoudOnUnrecognizedCompilerError pins the
-// other loud half: a compiler failure that is not a missing-header
-// diagnosis must not be swallowed as if the probe had passed.
+// TestVerifyCgoIncludePath_OverrideWinsOverStaleGoEnv pins the brew-fallback
+// half of gt-mjll: when the pinned GOENV file names a stale icu4c prefix —
+// the case an upgrade or reinstall leaves behind — an override such as
+// icuCgoEnv's brew-discovered path must still let the build through, since
+// that is the same value buildGTBinary applies to `go build` itself.
+func TestVerifyCgoIncludePath_OverrideWinsOverStaleGoEnv(t *testing.T) {
+	if !cgoCompilerPresent() {
+		t.Skip("no C++ compiler on this host; the include-path probe cannot run")
+	}
+	withCleanGoEnv(t)
+	stale := filepath.Join(t.TempDir(), "stale-prefix", "include")
+	t.Setenv("CGO_CPPFLAGS", "-I"+stale)
+	t.Setenv("CGO_CXXFLAGS", "")
+
+	if err := verifyCgoIncludePath(); err == nil {
+		if systemIcu4cResolvable(t) {
+			t.Skip("icu4c is on the toolchain's default search path, so a stale -I alone cannot fail the probe")
+		}
+		t.Fatal("precondition failed: verifyCgoIncludePath accepted the stale path with no override")
+	}
+
+	good := writeStubIcu4cHeader(t)
+	if err := verifyCgoIncludePath("CGO_CPPFLAGS=-I" + good); err != nil {
+		t.Errorf("verifyCgoIncludePath with a brew-fallback override = %v, want nil: the override should win over the stale go env value", err)
+	}
+}
+
+// TestVerifyCgoIncludePath_FailsLoudOnUnrecognizedCompilerError: a compiler
+// failure that is not a missing-header diagnosis must not be swallowed as
+// if the probe had passed.
 func TestVerifyCgoIncludePath_FailsLoudOnUnrecognizedCompilerError(t *testing.T) {
 	if !cgoCompilerPresent() {
-		t.Skip("no C compiler on this host; the include-path probe cannot run")
+		t.Skip("no C++ compiler on this host; the include-path probe cannot run")
 	}
+	withCleanGoEnv(t)
 	// An unrecognized flag makes every compiler reject the invocation before
 	// it even looks for the header, which is exactly "an error the probe
 	// does not recognize" rather than a missing-header diagnosis.
 	t.Setenv("CGO_CPPFLAGS", "-I"+t.TempDir())
 	t.Setenv("CGO_CXXFLAGS", "--this-flag-does-not-exist-anywhere")
-	t.Setenv("CGO_CFLAGS", "")
 
 	err := verifyCgoIncludePath()
 	if err == nil {
@@ -100,65 +160,35 @@ func TestVerifyCgoIncludePath_FailsLoudOnUnrecognizedCompilerError(t *testing.T)
 	}
 }
 
-// TestVerifyCgoIncludePath_FailsLoudOnGoEnvError pins the third loud half:
-// a `go env` failure while resolving the effective cgo flags must surface,
-// not be treated as "no flags configured".
+// TestVerifyCgoIncludePath_FailsLoudOnGoEnvError: a `go env` failure while
+// resolving the effective cgo flags must surface, not be treated as "no
+// flags configured".
 func TestVerifyCgoIncludePath_FailsLoudOnGoEnvError(t *testing.T) {
-	withFailingGoOnPath(t)
+	testutil.WithFailingGoOnPath(t)
 
 	if err := verifyCgoIncludePath(); err == nil {
 		t.Fatal("verifyCgoIncludePath with a failing `go env` = nil, want a loud failure")
 	}
 }
 
-// cgoCompilerPresent reports whether a C compiler the probe would use is
-// reachable, splitting CC the way the probe does.
+// cgoCompilerPresent reports whether the C++ compiler the probe would use is
+// reachable.
 func cgoCompilerPresent() bool {
-	cc := os.Getenv("CC")
-	if cc == "" {
-		cc = "cc"
-	}
-	parts := shellSplit(cc)
-	if len(parts) == 0 {
-		return false
-	}
-	_, err := exec.LookPath(parts[0])
+	_, err := probeCompiler()
 	return err == nil
 }
 
-// systemIcu4cResolvable reports whether the C toolchain finds icu4c's header
-// with no include flags at all.
+// systemIcu4cResolvable reports whether the C++ toolchain finds icu4c's
+// header with no include flags at all.
 func systemIcu4cResolvable(t *testing.T) bool {
 	t.Helper()
-	if !cgoCompilerPresent() {
+	parts, err := probeCompiler()
+	if err != nil {
 		return false
 	}
-	cc := os.Getenv("CC")
-	if cc == "" {
-		cc = "cc"
-	}
-	parts := shellSplit(cc)
-	probe := exec.Command(parts[0], "-fsyntax-only", "-x", "c", "-")
+	probe := exec.Command(parts[0], "-fsyntax-only", "-x", "c++", "-")
 	probe.Stdin = strings.NewReader("#include " + icu4cHeader + "\n")
 	return probe.Run() == nil
-}
-
-// withFailingGoOnPath points PATH at a stand-in `go` that always fails, so a
-// `go env` call inside the function under test returns an error, and
-// restores the real PATH via t.Cleanup.
-func withFailingGoOnPath(t *testing.T) {
-	t.Helper()
-	binDir := t.TempDir()
-	name := "go"
-	script := "#!/bin/sh\nexit 1\n"
-	if runtime.GOOS == "windows" {
-		name = "go.bat"
-		script = "@exit /b 1\r\n"
-	}
-	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stand-in go: %v", err)
-	}
-	t.Setenv("PATH", binDir)
 }
 
 // TestShellSplit_PinsCgoQuoting pins the quoting rules the probe relies on:

@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -507,6 +508,12 @@ var goEnvCarryVars = []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
 // `go` on PATH cannot build anything that would notice the loss, but a `go
 // env` failure with the tool present means the carry did not happen, and
 // dropping it silently resurfaces much later as an obscure compile error.
+//
+// Trade-off: pinning GOENV carries the whole file, not just the cgo flags —
+// GOFLAGS, GOPROXY, GOPRIVATE and GOTOOLCHAIN included — into every `go`
+// subprocess a test spawns, which is broader than the cache-location carry
+// it replaces. Accepted: those are the same values a developer's own shell
+// already sees outside the harness.
 func preserveGoEnv() error {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -554,6 +561,27 @@ func preserveGoEnv() error {
 		}
 	}
 	return nil
+}
+
+// WithFailingGoOnPath points PATH at a stand-in `go` that runs but always
+// exits nonzero, so a `go env` call made by code under test returns an error
+// instead of hitting the "no go on PATH" branch several callers treat as a
+// silent no-op. Restored via t.Setenv's automatic cleanup. Exported so
+// packages that pin gt-mjll's loud-failure path in their own tests (e.g.
+// internal/cmd's cgo probe) share this setup instead of reimplementing it.
+func WithFailingGoOnPath(t testing.TB) {
+	t.Helper()
+	binDir := t.TempDir()
+	name := "go"
+	script := "#!/bin/sh\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		name = "go.bat"
+		script = "@exit /b 1\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing stand-in go: %v", err)
+	}
+	t.Setenv("PATH", binDir)
 }
 
 // writeSandboxTown creates a minimal valid town (mayor/town.json marker) at

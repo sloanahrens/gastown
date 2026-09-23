@@ -77,8 +77,12 @@ func buildGTBinary() (string, error) {
 	tmpBinary := filepath.Join(os.TempDir(), binaryName)
 
 	// Dolt's go-icu-regex cgo build only reaches this point, so only this
-	// helper needs the include-path diagnosis (gt-mjll).
-	if err := verifyCgoIncludePath(); err != nil {
+	// helper needs the include-path diagnosis (gt-mjll). icuEnv is what the
+	// `go build` below adds to its own environment; the probe checks flags
+	// with the same override applied, so a stale $GOENV that icuEnv would
+	// correct does not block a build that would otherwise succeed.
+	icuEnv := icuCgoEnv()
+	if err := verifyCgoIncludePath(icuEnv...); err != nil {
 		return "", err
 	}
 
@@ -86,7 +90,7 @@ func buildGTBinary() (string, error) {
 	ldflags := "-X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1"
 	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", tmpBinary, "./cmd/gt")
 	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(), icuCgoEnv()...)
+	cmd.Env = append(os.Environ(), icuEnv...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%w\nOutput: %s", err, output)
 	}
@@ -124,11 +128,13 @@ func icuCgoEnv() []string {
 const icu4cHeader = "<unicode/regex.h>"
 
 // verifyCgoIncludePath fails loud when the cgo include flags that would
-// reach the `go build` above cannot resolve icu4c's unicode/regex.h. It asks
-// the go tool (not the process environment directly) for the effective
-// CGO_CPPFLAGS/CGO_CXXFLAGS, so a value carried only through preserveGoEnv's
-// pinned GOENV file still counts, then asks the C compiler itself whether
-// the header resolves, reporting the flags, the compiler's line, and a
+// reach the `go build` in buildGTBinary cannot resolve icu4c's
+// unicode/regex.h. It reads CGO_CPPFLAGS/CGO_CXXFLAGS from the go tool
+// (covering a value carried only through preserveGoEnv's pinned GOENV
+// file), applies overrides — buildGTBinary passes icuCgoEnv's
+// brew-discovered flags here, matching the precedence cmd/go itself gives a
+// process-env value over the go env file — then asks the C++ compiler
+// whether the header resolves under the result, reporting the flags and a
 // repair when it does not (gt-mjll).
 //
 // Skipped with a stderr notice when no include directory is configured or
@@ -136,8 +142,8 @@ const icu4cHeader = "<unicode/regex.h>"
 // so gating on any cgo flag would fire everywhere. A compiler failure that
 // is not a missing-header diagnosis still fails loud — it is not evidence
 // the header resolves, and the `go build` a moment later would hit the
-// identical failure with a worse message.
-func verifyCgoIncludePath() error {
+// same failure with a worse message.
+func verifyCgoIncludePath(overrides ...string) error {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return nil
@@ -150,28 +156,32 @@ func verifyCgoIncludePath() error {
 	if err := json.Unmarshal(out, &values); err != nil {
 		return fmt.Errorf("parsing `go env -json CGO_CPPFLAGS CGO_CXXFLAGS`: %w", err)
 	}
-	cgoFlags := splitCgoFlags(values["CGO_CPPFLAGS"] + " " + values["CGO_CXXFLAGS"])
+	for _, kv := range overrides {
+		if name, val, ok := strings.Cut(kv, "="); ok {
+			values[name] = val
+		}
+	}
+
+	cgoFlags := shellSplit(values["CGO_CPPFLAGS"] + " " + values["CGO_CXXFLAGS"])
 	if !hasIncludeDir(cgoFlags) {
 		return nil
 	}
-	cc := os.Getenv("CC")
-	if cc == "" {
-		cc = "cc"
-	}
-	// Split CC the way cmd/go does (quote-aware): "ccache clang" and
-	// "/path/to/cc -g" are valid CC values that LookPath on the whole string
-	// would read as one missing binary.
-	ccParts := shellSplit(cc)
-	if len(ccParts) == 0 {
-		fmt.Fprintf(os.Stderr, "buildGT: CC=%s does not name a compiler; skipping the icu4c include-path probe\n", cc)
+
+	cxxParts, err := probeCompiler()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "buildGT: %v; skipping the icu4c include-path probe\n", err)
 		return nil
 	}
-	if _, err := exec.LookPath(ccParts[0]); err != nil {
-		fmt.Fprintf(os.Stderr, "buildGT: no C compiler at %q; skipping the icu4c include-path probe\n", ccParts[0])
-		return nil
-	}
-	args := append(append([]string{}, cgoFlags...), "-fsyntax-only", "-x", "c", "-")
-	probe := exec.Command(ccParts[0], args...)
+
+	// -x c++ -std=c++17: go-icu-regex's own #cgo CXXFLAGS pragma (internal/icu/icu.go)
+	// requires C++17, and CGO_CXXFLAGS may carry other C++-only flags a C
+	// compile would reject before it even looked for the header. Without
+	// -std=c++17 here, a keg-only-icu4c host whose clang defaults to an
+	// older standard fails this probe on valid, buildable flags: ICU's
+	// headers use C++17 features (uversion.h, char16ptr.h) that only parse
+	// under that standard or newer.
+	args := append(append([]string{"-std=c++17"}, cgoFlags...), "-fsyntax-only", "-x", "c++", "-")
+	probe := exec.Command(cxxParts[0], args...)
 	probe.Stdin = strings.NewReader("#include " + icu4cHeader + "\n")
 	probeOut, err := probe.CombinedOutput()
 	if err == nil {
@@ -179,26 +189,45 @@ func verifyCgoIncludePath() error {
 	}
 	msg := string(probeOut)
 	if strings.Contains(msg, "file not found") || strings.Contains(msg, "No such file or directory") {
-		return fmt.Errorf(`cgo include path cannot resolve icu4c's %s, so Dolt's go-icu-regex dependency will not compile:
+		return fmt.Errorf(`buildGT: cgo include path cannot resolve icu4c's %s, so Dolt's go-icu-regex dependency will not compile:
   CGO_CPPFLAGS=%s
   CGO_CXXFLAGS=%s
   %s: %s
 icu4c installs keg-only or into a prefix the compiler does not search, and
-upgrading or reinstalling moves the prefix without updating $GOENV. Repair
-it, then re-run — or prefer the rig's own gate, which derives the flags
-itself:
+upgrading or reinstalling moves the prefix without updating $GOENV. Repair it
+with:
   go env -w CGO_CPPFLAGS="-I<icu4c-prefix>/include" CGO_LDFLAGS="-L<icu4c-prefix>/lib"`,
 			icu4cHeader, values["CGO_CPPFLAGS"], values["CGO_CXXFLAGS"],
-			strings.Join(ccParts, " "), firstLine(probeOut))
+			strings.Join(cxxParts, " "), firstLine(probeOut))
 	}
 	return fmt.Errorf("buildGT: %s failed the icu4c include-path probe with an error it does not recognize, so the cgo flags cannot be verified:\n%s",
-		strings.Join(ccParts, " "), strings.TrimSpace(msg))
+		strings.Join(cxxParts, " "), strings.TrimSpace(msg))
 }
 
-// splitCgoFlags splits cgo flag variables on the same quoting rules the go
-// tool applies, so a quoted path with spaces stays one word.
-func splitCgoFlags(s string) []string {
-	return shellSplit(s)
+// probeCompiler resolves the C++ compiler verifyCgoIncludePath's probe uses
+// — go env CXX (process env, then the go env file, then a "c++" default),
+// quote-split the way cmd/go splits CC/CXX ("ccache clang++" is one field) —
+// and confirms it is on PATH. Factored out so the probe and its tests
+// (cgoCompilerPresent, systemIcu4cResolvable in cgo_probe_test.go) agree on
+// which compiler is being exercised.
+func probeCompiler() ([]string, error) {
+	cxx := ""
+	if goBin, err := exec.LookPath("go"); err == nil {
+		if out, err := exec.Command(goBin, "env", "CXX").Output(); err == nil {
+			cxx = strings.TrimSpace(string(out))
+		}
+	}
+	if cxx == "" {
+		cxx = "c++"
+	}
+	parts := shellSplit(cxx)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("CXX=%q does not name a compiler", cxx)
+	}
+	if _, err := exec.LookPath(parts[0]); err != nil {
+		return nil, fmt.Errorf("no C++ compiler at %q", parts[0])
+	}
+	return parts, nil
 }
 
 // shellSplit splits s like cmd/go's shellQuotedSplit: runs of unquoted
