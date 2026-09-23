@@ -122,6 +122,9 @@ func TestDoMerge_EditorialRequired_ApproveMatchingNote_PushesAndPublishesNote(t 
 	branch := "polecat/test/editorial-approve"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
 	head := run(t, workDir, "git", "rev-parse", branch)
+	// gt-sda9: doMerge asserts the declared head is reachable from origin's
+	// tip before gating; push the branch so that holds.
+	run(t, workDir, "git", "push", "-u", "origin", branch)
 
 	base, err := g.MergeBase("origin/main", head)
 	if err != nil {
@@ -386,6 +389,9 @@ func TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopie
 	if rebasedHead == reviewedHead {
 		t.Fatal("amend did not change the commit SHA")
 	}
+	// gt-sda9: doMerge asserts the branch tip is reachable from origin's tip
+	// before gating; the amend moved the local tip, so push it.
+	run(t, workDir, "git", "push", "--force", "origin", branch)
 	run(t, workDir, "git", "checkout", "main")
 
 	e := newTestEngineer(t, workDir, g)
