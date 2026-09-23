@@ -21,3 +21,8 @@ ping_timeout = "30s"
 consecutive_failures = 3
 kill_cooldown = "5m"
 stuck_threshold = "1h"
+# Budget for the DEACON_SELF_PROBE ack (glossary "Self-probe"): must exceed
+# the doctor-dog interval (5m) or the check measures scheduler skew instead
+# of deacon health. Deliberately not ping_timeout, which is a 30s
+# network-ping value sized for a different kind of check.
+self_probe_budget = "15m"
