@@ -76,6 +76,9 @@ path that is not the polecat's worktree, its own polecat directory, or its
 rig's `.repo.git`. Read-only commands stay allowed anywhere, and a target the
 guard cannot resolve is blocked rather than allowed.
 
+The `polecats` and `dog` overrides deny permission prompts nobody can answer
+(`gt tap guard permission-request`, gt-8stz); attended roles carry no entry.
+
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
 on the `Bash` matcher for every role, from `DefaultBase()`. It is the town-wide
 half of the gt-6hmz close-time invariant: `gt done` applies that invariant to

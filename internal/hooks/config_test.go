@@ -942,6 +942,62 @@ func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 	return HookEntry{}, false
 }
 
+// TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings pins the
+// gt-8stz wiring end to end: DefaultOverrides declares the guard, but the
+// generated settings only carry it if merge.go actually propagates the
+// PermissionRequest event type. Merge.go's applyOverride/cloneConfig once
+// omitted PermissionRequest entirely, so DefaultOverrides' entries never
+// reached ComputeExpected's output — a regression this test would have
+// caught (gt-8stz review, finding 48f9948f3436).
+func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	const guardCommand = "tap guard permission-request"
+	for _, target := range []string{"gastown/polecats", "dog"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		if len(cfg.PermissionRequest) == 0 {
+			t.Fatalf("%s: generated settings carry no PermissionRequest entries at all", target)
+		}
+		for _, matcher := range []string{"Bash", "Edit|Write|MultiEdit|NotebookEdit"} {
+			var entry HookEntry
+			found := false
+			for _, e := range cfg.PermissionRequest {
+				if e.Matcher == matcher {
+					entry, found = e, true
+				}
+			}
+			if !found {
+				t.Fatalf("%s: PermissionRequest missing the %q matcher, have: %+v", target, matcher, cfg.PermissionRequest)
+			}
+			hasGuard := false
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, guardCommand) {
+					hasGuard = true
+				}
+			}
+			if !hasGuard {
+				t.Errorf("%s: %q matcher missing %q, got: %+v", target, matcher, guardCommand, entry.Hooks)
+			}
+		}
+	}
+
+	// Interactive roles must carry no PermissionRequest entry at all — their
+	// prompts stay with the person at the pane (gt-8stz).
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		if len(cfg.PermissionRequest) != 0 {
+			t.Errorf("%s must not receive a PermissionRequest entry, got: %+v", target, cfg.PermissionRequest)
+		}
+	}
+}
+
 func TestComputeExpectedPolecatsKeepUserPromptMailCheck(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
