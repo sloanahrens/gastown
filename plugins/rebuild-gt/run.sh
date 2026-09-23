@@ -211,7 +211,11 @@ PY
 # logged either way: it is the only place the run says which block it hit.
 NOTE_BLOCKED=0
 note_blocked() {
-  # MUTATION: no once-per-run guard
+  if [ "$NOTE_BLOCKED" = "1" ]; then
+    log "Still blocked: $1"
+    return 0
+  fi
+  NOTE_BLOCKED=1
 
   local defers age
   if ! defers=$(starve_bump "$1"); then
