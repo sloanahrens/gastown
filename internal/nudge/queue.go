@@ -52,6 +52,24 @@ const (
 	staleClaimThreshold = 5 * time.Minute
 )
 
+// Expired-nudge reporting (gt-oexm).
+const (
+	// expiredDirName is the subdirectory of a session queue that holds nudges
+	// which reached ExpiresAt undelivered. A nudge is copied there before it
+	// leaves the queue, so an expiry always leaves a record.
+	expiredDirName = "expired"
+
+	// expiredTraceRetention bounds that record's lifetime. The expiry is also
+	// mailed out, so the file is a debugging aid rather than the only copy;
+	// without a bound the directory would grow for the life of a session.
+	expiredTraceRetention = 7 * 24 * time.Hour
+
+	// expirySourceDrain and expirySourceRequeue are the ExpiryEvent.Source
+	// values, naming the path that found the expiry.
+	expirySourceDrain   = "drain"
+	expirySourceRequeue = "requeue"
+)
+
 // nudgeConfig loads nudge-specific thresholds from town settings.
 func nudgeConfig(townRoot string) *config.NudgeThresholds {
 	return config.LoadOperationalConfig(townRoot).GetNudgeConfig()
@@ -74,7 +92,30 @@ type QueuedNudge struct {
 	// reported as failed, causing a requeue. Requeue increments it and drops
 	// the nudge once it reaches the configured cap (gt-tmlu).
 	Attempts int `json:"attempts,omitempty"`
+	// ExpiredAt is stamped when the nudge reached ExpiresAt undelivered and was
+	// recorded under the queue's expired/ directory (gt-oexm).
+	ExpiredAt time.Time `json:"expired_at,omitempty"`
 }
+
+// ExpiryEvent reports one nudge that reached ExpiresAt without being delivered.
+type ExpiryEvent struct {
+	// TownRoot locates the workspace the queue belongs to.
+	TownRoot string
+	// Session is the tmux session the nudge was queued for.
+	Session string
+	// Nudge is the expired message, with ExpiredAt stamped.
+	Nudge QueuedNudge
+	// Source names the path that found the expiry: expirySourceDrain or
+	// expirySourceRequeue.
+	Source string
+	// Trace is the file the message was preserved in, empty if that copy failed.
+	Trace string
+}
+
+// ExpiryObserver receives every expiry event, installed by the command layer to
+// deliver the message by mail. This package cannot reach the mail layer itself:
+// internal/mail imports internal/nudge, not the reverse (gt-oexm).
+var ExpiryObserver func(ExpiryEvent)
 
 // queueDir returns the nudge queue directory for a given session.
 // Path: <townRoot>/.runtime/nudge_queue/<session>/
@@ -145,7 +186,8 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 
 // Requeue writes previously drained nudges back to the queue for later delivery.
 // Existing timestamps are preserved so FIFO ordering remains stable relative to
-// one another; only expired nudges are skipped.
+// one another. A nudge that has expired meanwhile is not requeued, and is
+// reported through reportExpiry rather than dropped in silence (gt-oexm).
 //
 // Requeue is bounded (gt-tmlu). A failed injection is not proof that the nudge
 // was not delivered — the delivery verification can time out on a slow or busy
@@ -166,6 +208,7 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 
 	for _, n := range nudges {
 		if !n.ExpiresAt.IsZero() && now.After(n.ExpiresAt) {
+			reportExpiry(townRoot, session, n, expirySourceRequeue)
 			continue
 		}
 
@@ -199,8 +242,9 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 // the same nudge twice: each file is atomically renamed to a .claimed suffix
 // before reading, so only one caller can claim each nudge.
 //
-// Expired nudges (past ExpiresAt) are silently discarded during drain.
-// Orphaned .claimed files from crashed drainers are swept if older than 5 minutes.
+// Nudges past ExpiresAt are not returned; each one is reported through
+// reportExpiry instead. Orphaned .claimed files from crashed drainers are swept
+// if older than 5 minutes.
 func Drain(townRoot, session string) ([]QueuedNudge, error) {
 	dir := queueDir(townRoot, session)
 
@@ -291,8 +335,11 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 			continue
 		}
 
-		// Skip expired nudges — stale messages create noise, not value.
+		// An expired nudge is not delivered — a stale message is noise. It is
+		// reported rather than dropped, so the sender's intent survives the
+		// queue entry (gt-oexm).
 		if !n.ExpiresAt.IsZero() && now.After(n.ExpiresAt) {
+			reportExpiry(townRoot, session, n, expirySourceDrain)
 			if rmErr := os.Remove(claimPath); rmErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to remove expired nudge %s: %v\n", entry.Name(), rmErr)
 			}
@@ -316,6 +363,80 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 	}
 
 	return nudges, nil
+}
+
+// reportExpiry announces a nudge that reached ExpiresAt undelivered, on three
+// channels so no delivery plane can lose it: the message is copied under the
+// queue's expired/ directory, the expiry is printed to stderr, and
+// ExpiryObserver is called to carry it on to mail. The copy is attempted first
+// so the record survives this process; the observer runs even when the copy
+// fails, because mail is then the only durable notice left (gt-oexm).
+func reportExpiry(townRoot, session string, n QueuedNudge, source string) {
+	n.ExpiredAt = time.Now()
+	trace, traceErr := writeExpiredTrace(townRoot, session, n)
+
+	detail := fmt.Sprintf("sender=%s priority=%s aged=%s attempts=%d excerpt=%q",
+		n.Sender, n.Priority, n.ExpiredAt.Sub(n.Timestamp).Round(time.Second), n.Attempts, firstLineExcerpt(n.Message))
+	if traceErr != nil {
+		fmt.Fprintf(os.Stderr, "EXPIRED NUDGE: %s for session %s (%s) could not be preserved: %v\n",
+			detail, session, source, traceErr)
+	} else {
+		fmt.Fprintf(os.Stderr, "EXPIRED NUDGE: %s for session %s (%s) reached its TTL undelivered, kept at %s\n",
+			detail, session, source, trace)
+	}
+
+	if ExpiryObserver != nil {
+		ExpiryObserver(ExpiryEvent{
+			TownRoot: townRoot,
+			Session:  session,
+			Nudge:    n,
+			Source:   source,
+			Trace:    trace,
+		})
+	}
+}
+
+// writeExpiredTrace copies an expired nudge into the session's expired/
+// directory and returns that path, pruning traces past expiredTraceRetention in
+// the same pass. The caller stamps ExpiredAt.
+func writeExpiredTrace(townRoot, session string, n QueuedNudge) (string, error) {
+	dir := filepath.Join(queueDir(townRoot, session), expiredDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("creating expired nudge dir: %w", err)
+	}
+	pruneExpiredTraces(dir)
+
+	data, err := json.MarshalIndent(n, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshaling expired nudge: %w", err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%d-%s.json", n.ExpiredAt.UnixNano(), randomSuffix()))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", fmt.Errorf("writing expired nudge trace: %w", err)
+	}
+	return path, nil
+}
+
+// pruneExpiredTraces removes traces older than expiredTraceRetention. Failures
+// are ignored: the next expiry retries, and a leftover file only costs disk.
+func pruneExpiredTraces(dir string) {
+	now := time.Now()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > expiredTraceRetention {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 // Pending returns the count of queued nudges for a session without draining.
