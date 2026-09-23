@@ -1405,7 +1405,11 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		// is intentional for flexibility (pipes, env vars, etc).
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Executing test command: %s\n", e.config.TestCommand)
 		cmd := exec.CommandContext(ctx, "sh", "-c", e.config.TestCommand) //nolint:gosec // G204: TestCommand is from trusted rig config
-		util.SetDetachedProcessGroup(cmd)
+		// SetProcessGroup, not SetDetachedProcessGroup: the group's Cancel hook
+		// is what reaches the test binary below the shell, which would
+		// otherwise outlive the deadline and compete with the retry for the
+		// same containers (gt-6t43).
+		util.SetProcessGroup(cmd)
 		cmd.Dir = e.workDir
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -1465,7 +1469,10 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 	}
 
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup, not SetDetachedProcessGroup: a gate killed at its
+	// timeout must take the children of its shell with it, or a live suite
+	// keeps the gate's pipes and its containers past the release (gt-6t43).
+	util.SetProcessGroup(cmd)
 	cmd.Dir = e.workDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1524,7 +1531,10 @@ func isGolangciLintGate(name string, gate *GateConfig) bool {
 func (e *Engineer) runGolangciLintGate(ctx context.Context, name string, gate *GateConfig, start time.Time) GateResult {
 	attempt := func() lintlock.Attempt {
 		cmd := exec.CommandContext(ctx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
-		util.SetDetachedProcessGroup(cmd)
+		// SetProcessGroup, not SetDetachedProcessGroup: retrying under a held
+		// lint lock must not leave the previous attempt's children running
+		// beside the new one (gt-6t43).
+		util.SetProcessGroup(cmd)
 		cmd.Dir = e.workDir
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout

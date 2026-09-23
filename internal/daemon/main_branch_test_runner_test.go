@@ -1106,6 +1106,11 @@ func timedOutCommand() string {
 // was green and the run had simply needed longer. The kill stays in the body,
 // named as the deadline's doing, so the underlying error is not lost to the
 // rewording.
+//
+// The signal that kill used is not pinned: SetProcessGroup escalates SIGTERM to
+// SIGKILL, so the cause is "terminated" unless the group had to be forced, and
+// the verdict is a timeout because the context's deadline expired, not because
+// of which signal the group-kill reached for (gt-6t43).
 func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 	stubHostLoad(t, hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8})
 	workDir := t.TempDir()
@@ -1135,10 +1140,10 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 		t.Errorf("expected no failure wording on a deadline kill, got: %q", firstLine)
 	}
 	for _, want := range []string{
-		"of the run's budget",                          // not presented as a plain failure
-		"still running when its deadline fired",        // that it was alive, not crashed
-		"killed by: signal: killed",                    // the raw cause, preserved
-		"this is the runner's timeout, not a crash",    // and classified
+		"of the run's budget",                       // not presented as a plain failure
+		"still running when its deadline fired",     // that it was alive, not crashed
+		"killed by: signal: ",                       // the raw cause, preserved
+		"this is the runner's timeout, not a crash", // and classified
 		"run budget: patrols.main_branch_test.timeout", // so the fix (raise it) is visible
 		"last package reported: ok  \t" + "github.com/steveyegge/gastown/internal/tmux",
 		"the killed run's transcript is green", // the all-green tail, labeled
@@ -1229,7 +1234,7 @@ func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 		t.Errorf("expected the interruption sentinel so the cycle does not count it, got: %v", err)
 	}
 	body := err.Error()
-	if strings.Contains(body, "failed: signal: killed") {
+	if strings.Contains(body, "failed: signal: ") {
 		t.Errorf("a canceled run must not read as a crash, got:\n%s", body)
 	}
 	if !strings.Contains(body, "was stopped, not failed") || !strings.Contains(body, "says nothing about main") {
