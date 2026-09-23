@@ -12,6 +12,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/workspace"
 
 	"github.com/spf13/cobra"
@@ -276,7 +277,21 @@ func checkConvoyCompletion(beadIDs []string) {
 		}
 	}
 
+	// A convoy tracks beads in other rigs, whose records this store cannot
+	// read: the continuation feed decides a dispatch hold from a bead's own
+	// record, and without the resolver it would read the town store only and
+	// skip the hold (gt-tq6l). The rig stores open on demand, so a close with
+	// no convoy tracking it pays for none of them.
+	resolver := convoy.NewOpeningStoreResolver(townRoot, func(name string) (beadsdk.Storage, error) {
+		beadsDir := doltserver.FindRigBeadsDir(townRoot, name)
+		if beadsDir == "" {
+			return nil, fmt.Errorf("no beads directory for rig %s", name)
+		}
+		return beadsdk.OpenFromConfig(ctx, beadsDir)
+	})
+	defer func() { _ = resolver.Close() }()
+
 	for _, beadID := range beadIDs {
-		convoy.CheckConvoysForIssue(ctx, store, townRoot, beadID, "Close", nil, gtPath, nil)
+		convoy.CheckConvoysForIssue(ctx, store, townRoot, beadID, "Close", nil, gtPath, nil, resolver)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	beadsRouting "github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestExtractIssueID(t *testing.T) {
@@ -1958,17 +1959,25 @@ exit 0
 	}
 }
 
-// TestFeedNextReadyIssue_SkipsHeldBead feeds through the event-driven
-// continuation path, the second feeder a close event triggers. A bead held by
-// its own record must be left alone and the next ready bead dispatched
-// (gt-tq6l).
-func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
+// TestFeedNextReadyIssue_HoldsCrossStoreBead feeds through the event-driven
+// continuation path, the second feeder a close event triggers, with the
+// resolver its production caller passes. The held bead's decision lives in a
+// rig store, while the copy the convoy's own store can see carries no hold: a
+// feeder that reads the convoy's store instead of the store the resolver
+// redirects to dispatches the bead (gt-tq6l).
+func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	// The convoy's store. GetDependenciesWithMetadata drops a tracked bead this
+	// store cannot fetch, so the convoy's dep rows need a row here to be seen
+	// at all — the projection of a bead, not its record.
+	convoyStore, convoyCleanup := setupTestStore(t)
+	defer convoyCleanup()
+	// The rig store: the bead's home, and the only place its hold is written.
+	rigStore, rigCleanup := setupTestStore(t)
+	defer rigCleanup()
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1982,14 +1991,12 @@ func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	// Sorts first (same priority, lower ID), so the feed reaches it first.
 	held := &beadsdk.Issue{
 		ID:        "test-held1",
 		Title:     "Held For The Mayor",
 		Status:    beadsdk.StatusOpen,
 		Priority:  2,
 		IssueType: beadsdk.TypeTask,
-		Notes:     "MAYOR DESIGN DECISION: route this through the deacon",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -2003,12 +2010,20 @@ func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
 		UpdatedAt: now,
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, held, ready} {
-		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
-			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+	if err := convoyStore.CreateIssue(ctx, convoy, "test"); err != nil {
+		t.Fatalf("CreateIssue convoy: %v", err)
+	}
+	for _, iss := range []*beadsdk.Issue{held, ready} {
+		if err := convoyStore.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s in convoy store: %v", iss.ID, err)
+		}
+		if err := rigStore.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s in rig store: %v", iss.ID, err)
 		}
 	}
-	if err := store.AddLabel(ctx, held.ID, "needs-mayor-review", "test"); err != nil {
+	// The decision is on the rig store's copy alone. Sorts first, so the feed
+	// reaches the held bead before the ready one.
+	if err := rigStore.AddLabel(ctx, held.ID, "needs-mayor-review", "test"); err != nil {
 		t.Fatalf("AddLabel: %v", err)
 	}
 	for _, trackedID := range []string{held.ID, ready.ID} {
@@ -2019,20 +2034,33 @@ func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
 			CreatedAt:   now,
 			CreatedBy:   "test",
 		}
-		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		if err := convoyStore.AddDependency(ctx, dep, "test"); err != nil {
 			t.Fatalf("AddDependency %s: %v", trackedID, err)
 		}
 	}
 
-	townRoot := setupTownRoot(t)
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll .beads: %v", err)
+	}
+	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+		{Prefix: "test-", Path: "testrig"},
+	})
+
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+		"hq":      convoyStore,
+		"testrig": rigStore,
+	})
+
 	gtPath, logPath := makeGTStub(t, 0)
 	logger, msgs := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, convoyStore, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, resolver)
 
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("gt stub was not called (no log file): %v", err)
+		t.Fatalf("gt stub was not called (no log file): %v\nlogger said: %v", err, *msgs)
 	}
 	logStr := string(logData)
 	if strings.Contains(logStr, held.ID) {
@@ -2044,11 +2072,184 @@ func TestFeedNextReadyIssue_SkipsHeldBead(t *testing.T) {
 
 	heldLogged := false
 	for _, m := range *msgs {
-		if strings.Contains(m, held.ID) && strings.Contains(m, "held by label needs-mayor-review") {
+		if strings.Contains(m, held.ID) && strings.Contains(m, "not dispatched: label needs-mayor-review") {
 			heldLogged = true
 		}
 	}
 	if !heldLogged {
 		t.Errorf("expected a hold log for %s, got: %v", held.ID, *msgs)
 	}
+}
+
+// TestDispatchHoldReason_ResolverRedirectsToRigStore pins the redirect the hold
+// check depends on away from the feeders: the bead's own record lives in its
+// rig store, and reading the town store the caller holds instead reports no
+// hold where there is one (gt-tq6l).
+func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townStore, townCleanup := setupTestStore(t)
+	defer townCleanup()
+	rigStore, rigCleanup := setupTestStore(t)
+	defer rigCleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	townCopy := &beadsdk.Issue{
+		ID:        "test-held1",
+		Title:     "Held",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	rigCopy := *townCopy
+	if err := townStore.CreateIssue(ctx, townCopy, "test"); err != nil {
+		t.Fatalf("CreateIssue town copy: %v", err)
+	}
+	if err := rigStore.CreateIssue(ctx, &rigCopy, "test"); err != nil {
+		t.Fatalf("CreateIssue rig copy: %v", err)
+	}
+	if err := rigStore.AddLabel(ctx, rigCopy.ID, "needs-mayor-review", "test"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll .beads: %v", err)
+	}
+	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+		{Prefix: "test-", Path: "testrig"},
+	})
+
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+		"hq":      townStore,
+		"testrig": rigStore,
+	})
+
+	if reason := DispatchHoldReason(ctx, townStore, rigCopy.ID, resolver); reason != "label needs-mayor-review" {
+		t.Errorf("with the resolver, DispatchHoldReason = %q, want %q", reason, "label needs-mayor-review")
+	}
+
+	// A bead the town store has no row for is the gt close shape: the caller
+	// holds only the town store, and the old nil resolver left the hold
+	// unread. The check has to report the record unknown, not the bead free.
+	rigOnly := &beadsdk.Issue{
+		ID:        "test-rigonly1",
+		Title:     "Rig Only",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := rigStore.CreateIssue(ctx, rigOnly, "test"); err != nil {
+		t.Fatalf("CreateIssue rig-only: %v", err)
+	}
+	if reason := DispatchHoldReason(ctx, townStore, rigOnly.ID, nil); reason == "" {
+		t.Error("a bead the caller's store cannot read must not be reported dispatchable")
+	}
+}
+
+// TestFeedNextReadyIssue_UnreadableRecordFailsClosed is the continuation feed's
+// half of the fail-closed rule: a record that cannot be read leaves the hold
+// unknown, and an unknown hold is not a licence to dispatch (gt-tq6l).
+func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-convoyunreadable",
+		Title:     "Convoy With An Unreadable Bead",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	tracked := &beadsdk.Issue{
+		ID:        "test-unreadable1",
+		Title:     "Tracked",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for _, iss := range []*beadsdk.Issue{convoy, tracked} {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+	dep := &beadsdk.Dependency{
+		IssueID:     convoy.ID,
+		DependsOnID: tracked.ID,
+		Type:        beadsdk.DependencyType("tracks"),
+		CreatedAt:   now,
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	// The resolver redirects the tracked bead to a store that refuses to hand
+	// back its record, which is what a Dolt that has gone away looks like to
+	// this path.
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll .beads: %v", err)
+	}
+	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+		{Prefix: "test-", Path: "testrig"},
+	})
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+		"hq":      store,
+		"testrig": &unreadableStorage{Storage: store},
+	})
+
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, msgs := makeLogger()
+
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, resolver)
+
+	if _, err := os.Stat(logPath); err == nil {
+		data, _ := os.ReadFile(logPath)
+		t.Errorf("expected no dispatch when the record cannot be read, got sling: %q", string(data))
+	}
+	heldLogged := false
+	for _, m := range *msgs {
+		if strings.Contains(m, tracked.ID) && strings.Contains(m, "not dispatched: record unreadable") {
+			heldLogged = true
+		}
+	}
+	if !heldLogged {
+		t.Errorf("expected an unreadable-record log for %s, got: %v", tracked.ID, *msgs)
+	}
+}
+
+// unreadableStorage wraps a store whose issue reads fail, standing in for a
+// Dolt that has gone away while its other calls still work.
+type unreadableStorage struct {
+	beadsdk.Storage
+}
+
+func (s *unreadableStorage) GetIssue(context.Context, string) (*beadsdk.Issue, error) {
+	return nil, fmt.Errorf("dolt unreachable")
+}
+
+func (s *unreadableStorage) GetIssueComments(context.Context, string) ([]*beadsdk.Comment, error) {
+	return nil, fmt.Errorf("dolt unreachable")
 }

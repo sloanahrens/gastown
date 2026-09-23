@@ -971,7 +971,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		// keep their escalation for a dead holder's unpreserved work: that
 		// warning is worth more than the earlier, quieter skip (gt-tq6l).
 		if reason := m.dispatchHoldReason(rig, issueID); reason != "" {
-			m.logger("Convoy %s: %s held by %s, skipping", c.ID, issueID, reason)
+			m.logger("Convoy %s: %s not dispatched: %s", c.ID, issueID, reason)
 			continue
 		}
 
@@ -1151,6 +1151,11 @@ func (m *ConvoyManager) resetOriginBranches() {
 // dispatchHoldReason reports why the stranded scan must not re-dispatch
 // issueID, or "" when it may (gt-tq6l). The rule lives in convoy, which the
 // event-driven continuation feed shares; this only picks the rig's store.
+//
+// A rig with no open store reports no hold, the fail-open posture the sibling
+// issueAssignee and hasRejectionMarker checks keep for the same gap: a store
+// that never opened is a town-level condition, already escalated by the store
+// alert, and blocking dispatch on it would stall every convoy feeding that rig.
 func (m *ConvoyManager) dispatchHoldReason(rig, issueID string) string {
 	m.storesMu.Lock()
 	store := m.stores[rig]

@@ -218,6 +218,35 @@ This auto-creates a convoy so all work appears in the dashboard:
 
 Even "swarm of one" gets convoy visibility.
 
+## Dispatch holds
+
+A convoy feeds its next ready bead to the rig's default agent. When a bead needs
+a different hand — a specific runtime, the mayor's ruling, or nothing at all
+until something else lands — record the decision on the bead itself. Both
+feeders read the bead's record before slinging, skip a held bead, and log the
+marker that held it.
+
+| Marker, as written | Field the feeder reads it from |
+|--------------------|-------------------------------|
+| `deferred`, `pinned` | status |
+| `needs-sonnet`, `needs-mayor-review` | label |
+| `MAYOR DESIGN DECISION`, `do not redispatch` | notes, design, or a comment |
+| `HOLD RELEASED` | a comment, to lift an earlier comment hold |
+
+A decision holds only where it is asserted: at the start of a line, past any
+`#`, `>`, `-`, or `*` in front of it. Prose that mentions the wording — a review
+note quoting it back, a bead describing this rule — does not hold the bead.
+
+Release a hold by editing the field that carries it. Comments are append-only,
+so a hold recorded in one is lifted by a later comment with `HOLD RELEASED` at
+the start of a line; every other field is replaced in place.
+
+A record the feeder cannot read holds the bead too — an unknown hold is not a
+licence to dispatch, and the read failure is logged with the reason. The one
+exception is a rig whose store never opened: that is a town-level gap the store
+alert already reports, and the feeder still dispatches there, as it does for a
+bead with no record to read.
+
 ## Cross-Rig Tracking
 
 Convoys live in town-level beads (`hq-cv-*` prefix) and can track issues from any rig:
