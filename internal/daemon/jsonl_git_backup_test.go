@@ -470,8 +470,10 @@ func TestSpikeThreshold(t *testing.T) {
 
 func TestFormatSpikeReport(t *testing.T) {
 	spikes := []spikeInfo{
-		{DB: "prod_beads", File: "prod_beads/issues.jsonl", Previous: 100, Current: 150, Delta: 0.50},
-		{DB: "dev_beads", File: "dev_beads/issues.jsonl", Previous: 200, Current: 50, Delta: 0.75},
+		{DB: "prod_beads", File: "prod_beads/issues.jsonl", Previous: 100, Current: 150, Delta: 0.50,
+			Baseline: "prod_beads: 100 (HEAD), 90 (HEAD~1)"},
+		{DB: "dev_beads", File: "dev_beads/issues.jsonl", Previous: 200, Current: 50, Delta: 0.75,
+			Baseline: "dev_beads: 200 (cached)"},
 	}
 	report := formatSpikeReport(spikes)
 	if report == "" {
@@ -487,12 +489,26 @@ func TestFormatSpikeReport(t *testing.T) {
 	if !contains(report, "DROP") {
 		t.Errorf("report should mention DROP for decrease: %s", report)
 	}
+	// Both counts' sources must be named, so a reviewer can tell where the
+	// previous level came from without re-deriving the baseline (gt-tj-he).
+	for _, want := range []string{
+		"previous 100 from prod_beads: 100 (HEAD), 90 (HEAD~1)",
+		"current  150 from prod_beads/issues.jsonl",
+		"previous 200 from dev_beads: 200 (cached)",
+		"prod_beads/issues.jsonl",
+	} {
+		if !contains(report, want) {
+			t.Errorf("report missing %q: %s", want, report)
+		}
+	}
 }
 
 func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
-	// A brand-new repo: no backup commits, no cache. recomputeSpikeBaseline
-	// finds nothing, so verifyExportCounts must fail loud instead of silently
-	// treating the export as a first export (gt-tj-he).
+	// Commits exist but none carry per-database counts, and there is no cache —
+	// history this detector cannot read. verifyExportCounts must fail loud
+	// instead of silently treating the export as a first export (gt-tj-he).
+	// (A repo with NO commits at all is a different case: see
+	// TestVerifyExportCounts_FreshRepoBootstraps.)
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 
@@ -504,6 +520,96 @@ func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 	}
 	if !errors.Is(err, errNoSpikeBaseline) {
 		t.Errorf("expected errNoSpikeBaseline, got %v", err)
+	}
+}
+
+func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
+	// A freshly initialized backup repo has no commits at all (what
+	// ensureGitRepoInitialized leaves behind: `git init`, no seed commit).
+	// There is no level to compare against and no spike is possible without
+	// one, so this is a bootstrap — not errNoSpikeBaseline, which would halt
+	// the first run and thereby prevent the very commit that seeds history
+	// (gt-tj-he).
+	gitRepo := t.TempDir()
+	initEmptyGitRepo(t, gitRepo)
+
+	sb, err := recomputeSpikeBaseline(gitRepo)
+	if !errors.Is(err, errSpikeBaselineBootstrap) {
+		t.Fatalf("expected errSpikeBaselineBootstrap, got sb=%+v err=%v", sb, err)
+	}
+}
+
+func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
+	// First run on a fresh town must not be blocked: with no baseline, halting
+	// leaves the patrol permanently inert (no baseline → no commit → never a
+	// baseline). The run proceeds and its commit seeds the next run's baseline.
+	gitRepo := t.TempDir()
+	initEmptyGitRepo(t, gitRepo)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50)
+	if err != nil {
+		t.Fatalf("fresh repo must bootstrap, got error: %v", err)
+	}
+	if len(spikes) != 0 {
+		t.Fatalf("expected no spikes on the first run, got %v", spikes)
+	}
+
+	// The run commits (that is what bootstrapping unblocks), and the next run
+	// derives its baseline from that commit.
+	os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755)
+	commitBackup(t, gitRepo, "hq", 1271)
+
+	sb, err := recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n, ok := spikeBaselineCount(sb, "hq"); !ok || n != 1271 {
+		t.Errorf("baseline after the bootstrap commit = %d (ok=%v), want 1271", n, ok)
+	}
+}
+
+func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
+	// Steady state: recompute rewrites the cache every tick, so it is warm on
+	// essentially every run while history carries the newest commit. A cached
+	// level must never shadow a committed one — an earlier revision seeded the
+	// cache at age 0 and appended the commit entry beside it, so the stale
+	// cached level won the sort and the baseline sat one cycle behind forever
+	// (gt-tj-he).
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+	os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755)
+	commitBackup(t, gitRepo, "hq", 1266)
+	commitBackup(t, gitRepo, "hq", 1271)
+
+	// Cache as written by the previous run, i.e. before the 1271 commit landed.
+	stale := &spikeBaseline{
+		Window:   defaultSpikeBaselineWindow,
+		Computed: time.Now().Format(time.RFC3339),
+		Counts: map[string][]spikeCommit{
+			"hq": {{Db: "hq", N: 1266, Age: 0, Source: spikeSourceCommit}},
+		},
+	}
+	if err := saveSpikeBaselineHistory(gitRepo, stale); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+
+	sb, err := recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n, ok := spikeBaselineCount(sb, "hq"); !ok || n != 1271 {
+		t.Fatalf("baseline = %d (ok=%v), want the committed 1271, not the cached 1266", n, ok)
+	}
+	entries := sb.Counts["hq"]
+	if len(entries) != 2 {
+		t.Fatalf("expected both commits in the window, got %d entries: %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if e.Source == spikeSourceCache {
+			t.Errorf("a readable commit history must contribute no cached entries, got %+v", e)
+		}
 	}
 }
 
@@ -674,22 +780,26 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	// Commit the new level — the next backup commit records db=400.
 	commitBackup(t, gitRepo, "testdb", 400)
 
-	// Second run: same count (400). The baseline is re-derived from history
-	// and now tracks the committed 400 → stable, no spike. Without the
-	// re-derivation this would re-halt against the stale 1000 forever.
-	// Drop the gitignored cache first: a fresh daemon process has none, so
-	// the window is re-derived purely from committed history — the true
-	// "baseline refreshed, no re-halt" guarantee. (A warm cache seeding the
-	// same level is covered by TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt.)
-	if err := os.Remove(filepath.Join(gitRepo, spikeBaselineCacheFile)); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("remove cache: %v", err)
-	}
+	// Second run: same count (400), with the cache left exactly as the first
+	// run wrote it (that is the steady state — recompute rewrites the cache
+	// every tick, so it is warm on the next run). The baseline is re-derived
+	// from history and now tracks the committed 400 → stable, no spike.
+	// Without the re-derivation this re-halts against the stale 1000 forever.
 	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(spikes) != 0 {
-		t.Errorf("expected no spikes after the new level is committed, got %v", spikes)
+		t.Fatalf("expected no spikes after the new level is committed, got %v", spikes)
+	}
+	// Pin the level that made it stable: the committed 400, not the stale
+	// cached 1000 the halted run wrote.
+	sb, err := recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n, ok := spikeBaselineCount(sb, "testdb"); !ok || n != 400 {
+		t.Errorf("baseline = %d (ok=%v), want the committed 400", n, ok)
 	}
 }
 
@@ -753,8 +863,10 @@ func TestRecomputeSpikeBaseline_RollingWindow(t *testing.T) {
 }
 
 func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
-	// No committed history for the db, but a cache written by an earlier run
-	// seeds the window — this is the one-cycle gap a spike halt leaves
+	// History exists but carries no counts (a repo whose count-bearing commits
+	// were reset), while a cache written by an earlier run holds the last known
+	// levels. The cache is the only remaining source, so it seeds the window
+	// instead of leaving the patrol halted with nothing to compare against
 	// (gt-tj-he).
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
@@ -777,6 +889,56 @@ func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
 	n, ok := spikeBaselineCount(sb, "db1")
 	if !ok || n != 1271 {
 		t.Errorf("expected cached level 1271, got %d (ok=%v)", n, ok)
+	}
+}
+
+func TestCachedSpikeBaseline_RelabelsDedupesAndTrims(t *testing.T) {
+	// The cache is untrusted input: a truncated or hand-edited file must not be
+	// able to make "the newest level" depend on sort internals. Entries come
+	// back re-labeled as cache-sourced, re-based so the newest is age 0,
+	// de-duplicated by age, and trimmed to the window depth (gt-tj-he).
+	dir := t.TempDir()
+	cache := &spikeBaseline{
+		Window:   3,
+		Computed: "2026-01-01T00:00:00Z",
+		Counts: map[string][]spikeCommit{
+			"db1": {
+				{Db: "db1", N: 1000, Age: 5},
+				{Db: "db1", N: 900, Age: 6},
+				{Db: "db1", N: 1, Age: 6}, // duplicate age: dropped, first wins
+				{Db: "db1", N: 800, Age: 7},
+				{Db: "db1", N: 700, Age: 8}, // past the window depth: trimmed
+			},
+		},
+	}
+	if err := saveSpikeBaselineHistory(dir, cache); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+
+	sb := cachedSpikeBaseline(dir)
+	if sb == nil {
+		t.Fatal("expected a window built from the cache")
+	}
+	entries := sb.Counts["db1"]
+	want := []spikeCommit{
+		{Db: "db1", N: 1000, Age: 0, Source: spikeSourceCache},
+		{Db: "db1", N: 900, Age: 1, Source: spikeSourceCache},
+		{Db: "db1", N: 800, Age: 2, Source: spikeSourceCache},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("expected %d entries, got %d: %+v", len(want), len(entries), entries)
+	}
+	for i, w := range want {
+		if entries[i].N != w.N || entries[i].Age != w.Age || entries[i].Source != w.Source {
+			t.Errorf("entry %d = %+v, want N=%d Age=%d Source=%s", i, entries[i], w.N, w.Age, w.Source)
+		}
+	}
+	if n, ok := spikeBaselineCount(sb, "db1"); !ok || n != 1000 {
+		t.Errorf("baseline head = %d (ok=%v), want 1000", n, ok)
+	}
+
+	if sb := cachedSpikeBaseline(t.TempDir()); sb != nil {
+		t.Errorf("expected nil for a repo with no cache, got %+v", sb)
 	}
 }
 
@@ -817,7 +979,7 @@ func TestParseCommitCounts(t *testing.T) {
 	}
 }
 
-func TestSpikeBaselineHistorySaveLoadRemove(t *testing.T) {
+func TestSpikeBaselineHistorySaveLoad(t *testing.T) {
 	dir := t.TempDir()
 
 	// No cache file → nil.
@@ -852,12 +1014,6 @@ func TestSpikeBaselineHistorySaveLoadRemove(t *testing.T) {
 	if git, _ := os.ReadFile(filepath.Join(dir, ".gitignore")); !strings.Contains(string(git), spikeBaselineCacheFile) {
 		t.Errorf("expected .gitignore to mention %s, got %q", spikeBaselineCacheFile, git)
 	}
-
-	// Remove.
-	removeSpikeBaselineHistory(dir)
-	if sb := loadSpikeBaselineHistory(dir); sb != nil {
-		t.Errorf("expected nil after remove, got %+v", sb)
-	}
 }
 
 func TestSpikeHistoryDetail(t *testing.T) {
@@ -878,6 +1034,21 @@ func TestSpikeHistoryDetail(t *testing.T) {
 	}
 	if s := spikeHistoryDetail(nil, "db1"); s != "" {
 		t.Errorf("nil baseline should render empty, got %q", s)
+	}
+
+	// A cache-sourced entry carries no position in the current commit graph, so
+	// it must not be labeled with a HEAD offset (gt-tj-he).
+	cached := &spikeBaseline{
+		Window: 3,
+		Counts: map[string][]spikeCommit{
+			"db1": {
+				{Db: "db1", N: 1271, Age: 0, Source: spikeSourceCache},
+				{Db: "db1", N: 1266, Age: 1, Source: spikeSourceCache},
+			},
+		},
+	}
+	if got, want := spikeHistoryDetail(cached, "db1"), "db1: 1271 (cached), 1266 (cached)"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -975,8 +1146,21 @@ func containsHelper(s, substr string) bool {
 
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
+	initEmptyGitRepo(t, dir)
+	// Need at least one commit for HEAD to exist.
+	readme := filepath.Join(dir, "README")
+	os.WriteFile(readme, []byte("init\n"), 0644)
+	commitAll(t, dir, "init")
+}
+
+// initEmptyGitRepo initializes a git repo with no commits — what
+// ensureGitRepoInitialized leaves behind on a fresh town. recomputeSpikeBaseline
+// treats that state as a bootstrap, so tests must be able to produce it
+// (gt-tj-he).
+func initEmptyGitRepo(t *testing.T, dir string) {
+	t.Helper()
 	cmds := [][]string{
-		{"git", "init"},
+		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test"},
 	}
@@ -987,10 +1171,6 @@ func initGitRepo(t *testing.T, dir string) {
 			t.Fatalf("git init failed: %v: %s", err, out)
 		}
 	}
-	// Need at least one commit for HEAD to exist.
-	readme := filepath.Join(dir, "README")
-	os.WriteFile(readme, []byte("init\n"), 0644)
-	commitAll(t, dir, "init")
 }
 
 func commitAll(t *testing.T, dir, msg string) {
