@@ -1097,8 +1097,17 @@ func TestProcessBatch_SingleSurvivorGateFailure_RestoresTargetToOrigin(t *testin
 	run(t, workDir, "git", "commit", "-m", "main: add shared.txt")
 	run(t, workDir, "git", "push", "origin", "main")
 
-	createConflictingBranch(t, workDir, "feature-conflict", "shared.txt", "conflicting version\n")
-	createFeatureBranch(t, workDir, "feature-bad", "FAIL_MARKER", "fail\n")
+	// feature-bad stacks cleanly (it's first in the batch) but fails gates.
+	run(t, workDir, "git", "checkout", "-b", "feature-bad", "main")
+	writeFile(t, workDir, "shared.txt", "version A\n")
+	writeFile(t, workDir, "FAIL_MARKER", "fail\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: bad change")
+	run(t, workDir, "git", "checkout", "main")
+
+	// feature-conflict changes the same file from the same base, so once
+	// feature-bad's change is stacked, stacking this one on top conflicts.
+	createConflictingBranch(t, workDir, "feature-conflict", "shared.txt", "version B\n")
 
 	e := newTestEngineer(t, workDir, g)
 	e.config.Gates = map[string]*GateConfig{
@@ -1108,8 +1117,8 @@ func TestProcessBatch_SingleSurvivorGateFailure_RestoresTargetToOrigin(t *testin
 	originMain := run(t, workDir, "git", "rev-parse", "origin/main")
 
 	batch := []*MRInfo{
-		makeMR("mr-conflict", "feature-conflict", "main"),
 		makeMR("mr-bad", "feature-bad", "main"),
+		makeMR("mr-conflict", "feature-conflict", "main"),
 	}
 
 	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
