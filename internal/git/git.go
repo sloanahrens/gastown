@@ -3803,15 +3803,38 @@ type UncommittedWorkStatus struct {
 	ModifiedFiles  []string
 	UntrackedFiles []string
 	UnmergedFiles  []string
-	// IndexSkewFiles is the subset of ModifiedFiles that are staged-only
-	// (GitStatus.StagedOnly) AND whose content already matches origin's
-	// default branch or the local default branch. This is the shared-.repo.git
-	// checkout-skew pattern from gt-ui2x: a dormant checkout's index describes
-	// a commit that moved out from under it, not real unsaved work. Only
-	// CleanExcludingRuntimeAndIndexSkew treats these as non-blocking — every
-	// other consumer (HasUncommittedChanges, Clean, gt done) is unaffected, so
-	// real staged-but-uncommitted work still blocks everywhere it always has.
-	IndexSkewFiles []string
+	// StagedOnly lists paths whose index differs from HEAD but whose working
+	// tree matches the index (GitStatus.StagedOnly) — candidates for the
+	// checkout-skew classification IndexSkewFiles performs. Kept as raw paths
+	// here because classifying them costs several extra git subprocesses
+	// (classifyIndexSkew); every CheckUncommittedWork caller gets this slice
+	// for free, but only a caller that actually asks via IndexSkewFiles pays
+	// for the classification (gt-8q0s: gt done and the other non-reuse
+	// consumers never do).
+	StagedOnly []string
+
+	indexSkewComputed bool
+	indexSkewFiles    []string
+}
+
+// IndexSkewFiles is the subset of StagedOnly whose content already matches
+// origin's default branch or the local default branch. This is the
+// shared-.repo.git checkout-skew pattern from gt-ui2x: a dormant checkout's
+// index describes a commit that moved out from under it, not real unsaved
+// work. Only CleanExcludingRuntimeAndIndexSkew treats these as non-blocking —
+// every other consumer (HasUncommittedChanges, Clean, gt done) is unaffected,
+// so real staged-but-uncommitted work still blocks everywhere it always has.
+//
+// The classification runs several git subprocesses (classifyIndexSkew), so it
+// is computed lazily on first call and memoized — a caller that never asks
+// (gt done and the other CheckUncommittedWork consumers) never pays for it,
+// and a reuse-gate caller that asks more than once only pays once (gt-8q0s).
+func (s *UncommittedWorkStatus) IndexSkewFiles(g *Git) []string {
+	if !s.indexSkewComputed {
+		s.indexSkewFiles = g.classifyIndexSkew(s.StagedOnly)
+		s.indexSkewComputed = true
+	}
+	return s.indexSkewFiles
 }
 
 // Clean returns true if there is no uncommitted work.
@@ -3928,9 +3951,10 @@ func (s *UncommittedWorkStatus) NonRuntimePaths() []string {
 // IndexSkewFiles) also removed. Used to size the diagnostic message when
 // CleanExcludingRuntimeAndIndexSkew reports dirt, so the reported count
 // reflects only the files actually blocking reuse.
-func (s *UncommittedWorkStatus) NonRuntimeNonSkewPaths() []string {
-	skew := make(map[string]bool, len(s.IndexSkewFiles))
-	for _, f := range s.IndexSkewFiles {
+func (s *UncommittedWorkStatus) NonRuntimeNonSkewPaths(g *Git) []string {
+	skewFiles := s.IndexSkewFiles(g)
+	skew := make(map[string]bool, len(skewFiles))
+	for _, f := range skewFiles {
 		skew[f] = true
 	}
 	var paths []string
@@ -3979,13 +4003,14 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 // elsewhere, not real unsaved work (gt-ui2x). gt done and every other
 // uncommitted-work consumer keep using CleanExcludingRuntime unchanged, so
 // this relaxation is scoped to reuse eligibility only.
-func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew() bool {
+func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew(g *Git) bool {
 	if len(s.UnmergedFiles) > 0 {
 		return false
 	}
 
-	skew := make(map[string]bool, len(s.IndexSkewFiles))
-	for _, f := range s.IndexSkewFiles {
+	skewFiles := s.IndexSkewFiles(g)
+	skew := make(map[string]bool, len(skewFiles))
+	for _, f := range skewFiles {
 		skew[f] = true
 	}
 
@@ -4206,7 +4231,7 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.ModifiedFiles = append(status.ModifiedFiles, gitStatus.Deleted...)
 	status.UntrackedFiles = gitStatus.Untracked
 	status.UnmergedFiles = gitStatus.Unmerged
-	status.IndexSkewFiles = g.classifyIndexSkew(gitStatus.StagedOnly)
+	status.StagedOnly = gitStatus.StagedOnly
 
 	// Check stashes
 	stashCount, err := g.StashCount()

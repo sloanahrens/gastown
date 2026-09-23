@@ -112,9 +112,9 @@ func probeLiveGitState(worktreePath string, checkUncommittedWork func(*git.Git) 
 		UnpushedCommits: status.UnpushedCommits,
 		Source:          GitStateSourceLive,
 	}
-	if !status.CleanExcludingRuntimeAndIndexSkew() {
+	if !status.CleanExcludingRuntimeAndIndexSkew(g) {
 		state.Dirty = true
-		state.DirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(status.NonRuntimeNonSkewPaths()))
+		state.DirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(status.NonRuntimeNonSkewPaths(g)))
 	}
 	return state
 }
