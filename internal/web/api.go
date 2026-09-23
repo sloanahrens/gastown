@@ -194,6 +194,7 @@ func NewAPIHandler(defaultRunTimeout, maxRunTimeout time.Duration, csrfToken str
 		defaultRunTimeout: defaultRunTimeout,
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		userCmdSem:        make(chan struct{}, userCommandConcurrency),
 		csrfToken:         csrfToken,
 		dashboardHashCh:   make(chan struct{}),
 	}
@@ -298,9 +299,10 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Sanitize args
 	args = SanitizeArgs(args)
 
-	// Execute command
+	// Execute command. User-driven runs are long-lived (up to maxRunTimeout),
+	// so they run under the user-command pool, not the short-read cmdSem.
 	start := time.Now()
-	output, err := h.runGtCommand(r.Context(), timeout, args)
+	output, err := h.runUserGtCommand(r.Context(), timeout, args)
 	duration := time.Since(start)
 
 	resp := CommandResponse{
@@ -336,7 +338,30 @@ func (h *APIHandler) handleCommands(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// runGtCommand executes a gt command with the given args.
+// acquireUserCmdSlot acquires a userCmdSem slot, or fails on ctx deadline.
+// A nil pool (struct-literal test handlers) means unbounded, mirroring
+// acquireCmdSlot.
+func (h *APIHandler) acquireUserCmdSlot(ctx context.Context) error {
+	return acquireCmdSlot(ctx, h.userCmdSem)
+}
+
+// runUserGtCommand executes a user-driven gt command under the long-command
+// pool (userCommandConcurrency), so /api/run children cannot hold slots the
+// dashboard's short bd/gt reads draw from (gt-d5xr).
+func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	// The slot wait has its own budget, so timeout bounds only execution.
+	waitCtx, cancelWait := context.WithTimeout(ctx, slotWaitBudget)
+	err := h.acquireUserCmdSlot(waitCtx)
+	cancelWait()
+	if err != nil {
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	defer releaseCmdSlot(h.userCmdSem)
+
+	return h.runGtCommand(ctx, timeout, args)
+}
+
+// runGtCommand executes a short internal gt command under cmdSem.
 func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
 	// Apply timeout first so it bounds both semaphore wait and command execution.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -1488,7 +1513,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Acquire semaphore slot — shared with runGtCommand/runGhCommand.
+	// Acquire a cmdSem slot, bounding the handler's short bd reads.
 	select {
 	case h.cmdSem <- struct{}{}:
 		defer func() { <-h.cmdSem }()
@@ -1761,18 +1786,20 @@ func (h *APIHandler) handlePRShow(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// runGhCommand executes a gh command with the given args.
+// runGhCommand executes a gh command with the given args. gh latency is
+// network-bound, not Dolt-bound, so it rides the long-command pool with the
+// user-driven gt runs (gt-d5xr).
 func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, slotWaitBudget)
+	if err := h.acquireUserCmdSlot(waitCtx); err != nil {
+		cancelWait()
+		return "", fmt.Errorf("command slot unavailable: %w", err)
+	}
+	cancelWait()
+	defer releaseCmdSlot(h.userCmdSem)
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Acquire semaphore slot — shared with runGtCommand/runBdCommand.
-	select {
-	case h.cmdSem <- struct{}{}:
-		defer func() { <-h.cmdSem }()
-	case <-ctx.Done():
-		return "", fmt.Errorf("command slot unavailable: %w", ctx.Err())
-	}
 
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	if h.workDir != "" {
@@ -2634,7 +2661,7 @@ func (h *APIHandler) handleRigAdd(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	output, err := h.runGtCommand(ctx, 55*time.Second, []string{"rig", "add", req.Name, repoURL})
+	output, err := h.runUserGtCommand(ctx, 55*time.Second, []string{"rig", "add", req.Name, repoURL})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

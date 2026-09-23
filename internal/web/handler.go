@@ -520,15 +520,15 @@ func NewDashboardMux(fetcher ConvoyFetcher, webCfg *config.WebTimeoutsConfig) (h
 	// dashboard-hash probe (computeDashboardHash) reuses its batched,
 	// in-process calls instead of shelling out to "gt status --json" (gt-978i).
 	apiHandler.fetcher = fetcher
-	// Share the fetcher's subprocess semaphore too, replacing APIHandler's own
-	// independent pool. Without this, fetchAndRender's fetchers, the
-	// background merge-queue/polecat refreshes, and api.go's own command
-	// runners (handleOptions, computeDashboardHash) each drew from a separate
-	// allowance, so the total number of concurrent bd/gt children stayed
-	// unbounded even though every individual site looked capped (gt-d5xr).
-	if lf, ok := fetcher.(*LiveConvoyFetcher); ok && lf.cmdSem != nil {
-		apiHandler.cmdSem = lf.cmdSem
-	}
+	// The subprocess pools are deliberately not shared between the two
+	// handlers: the fetcher's cmdSem bounds the dashboard's bd reads
+	// (subprocessConcurrency) while apiHandler's cmdSem bounds its short
+	// internal gt/bd reads (maxConcurrentCommands), and the long-running
+	// children — /api/run, gh, the background polecat refresh — draw from
+	// the userCommandConcurrency pools instead. One shared pool would let
+	// four slow /api/runs hold every slot and starve the render, and the
+	// per-handler pools' allowances summing keeps each shape individually
+	// bounded (gt-d5xr).
 
 	// Create static file server from embedded files
 	staticFS, err := fs.Sub(staticFiles, "static")
