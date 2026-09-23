@@ -204,13 +204,16 @@ description = """
 
 First, clean up CLOSED wisps from previous cycles:
 ```bash
-bd mol wisp gc --closed --force --exclude-type chore
+bd mol wisp gc --closed --force --exclude-type chore,molecule
 ```
 
-> **Warning (gt-0ok):** `--exclude-type chore` is REQUIRED on the closed-wisp
-> pass. Plugin-run receipts are ephemeral `chore`-type beads closed
-> immediately after creation — unscoped `--closed --force` deletes every
-> receipt town-wide each cycle, permanently opening all cooldown gates.
+> **Warning (gt-0ok):** `--exclude-type chore,molecule` is REQUIRED on the
+> closed-wisp pass. Plugin-run receipts are ephemeral `chore`-type beads closed
+> immediately after creation, and a patrol root is a `molecule`-type wisp that
+> `gt patrol report` closes to record each completed cycle (patrol_watchdog
+> reads that closed root as proof the cycle happened, hq-3h7ac). Unscoped
+> `--closed --force` deletes every such wisp town-wide each cycle, permanently
+> opening all cooldown gates and reading this refinery as never-patrolled.
 
 > **Warning (gt-xciy):** Do not run unscoped age-based wisp GC (`bd mol wisp
 > gc --age ...`) from inside this patrol. It has no hook-awareness — it

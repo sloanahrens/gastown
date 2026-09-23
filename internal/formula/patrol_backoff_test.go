@@ -181,6 +181,12 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 // `bd mol wisp gc --closed --force` deleted every receipt town-wide each
 // patrol cycle, so cooldown gates (which query closed receipts) never saw a
 // prior run and read permanently open.
+//
+// The same flag must exclude `molecule` (hq-3h7ac): a patrol root is a
+// molecule-type wisp, and `gt patrol report` closes it to record the cycle it
+// just finished. witness.LastCompletedPatrol reads that closed root as the
+// proof a cycle happened, so deleting it makes patrol_watchdog report every
+// healthy role as never having patrolled.
 func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
@@ -211,9 +217,11 @@ func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
 				t.Fatalf("%s: inbox-check step not found or has empty description", name)
 			}
 
-			if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force --exclude-type chore") {
-				t.Errorf("%s inbox-check step's closed-wisp GC must exclude chore-type wisps\n"+
-					"(--exclude-type chore) to protect plugin-run receipts. See gt-0ok.",
+			if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force --exclude-type chore,molecule") {
+				t.Errorf("%s inbox-check step's closed-wisp GC must exclude chore- and\n"+
+					"molecule-type wisps (--exclude-type chore,molecule): chore protects\n"+
+					"plugin-run receipts (gt-0ok), molecule protects the closed patrol root\n"+
+					"that patrol_watchdog reads as the completion ledger (hq-3h7ac).",
 					name)
 			}
 		})

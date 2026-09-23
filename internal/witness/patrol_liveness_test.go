@@ -253,9 +253,16 @@ func TestLastCompletedPatrol_NoneFound_Fails(t *testing.T) {
 		return `[]`, nil
 	})
 
-	_, result := LastCompletedPatrol(bd, "/tmp/rig", "gastown/refinery", "mol-refinery-patrol")
+	_, result := LastCompletedPatrol(bd, "/tmp/town", "gastown/refinery", "mol-refinery-patrol")
 	if !result.IsFail() {
 		t.Fatalf("expected Fail when bd confirms no closed patrol wisp exists, got %s", result)
+	}
+	// The Fail message must name the directory queried. A query aimed at the
+	// wrong database returns the same bare [] as a genuine "never patrolled"
+	// (hq-3h7ac), so the escalation text is the only place an operator can
+	// tell the two apart.
+	if err := result.Err(); err == nil || !strings.Contains(err.Error(), "/tmp/town") {
+		t.Fatalf("expected the Fail reason to name the queried directory, got %v", err)
 	}
 }
 

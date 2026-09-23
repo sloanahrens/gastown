@@ -117,7 +117,7 @@ description = """
 
 First, clean up CLOSED wisps from previous cycles:
 ```bash
-bd mol wisp gc --closed --force --exclude-type chore
+bd mol wisp gc --closed --force --exclude-type chore,molecule
 ```
 
 > **Warning (hq-3pp):** Do not run unscoped age-based wisp GC from inside
@@ -126,12 +126,16 @@ bd mol wisp gc --closed --force --exclude-type chore
 > complete early. Use closed-only cleanup here; stale open-wisp cleanup belongs
 > outside active patrol molecules.
 
-> **Warning (gt-0ok):** `--exclude-type chore` is REQUIRED. Plugin-run
+> **Warning (gt-0ok):** `--exclude-type chore,molecule` is REQUIRED. Plugin-run
 > receipts (internal/plugin/recording.go RecordRun) are ephemeral `chore`-type
 > beads that are closed immediately after creation — they ARE closed wisps.
-> Unscoped `--closed --force` deletes every receipt town-wide each cycle,
+> A patrol root (`mol-deacon-patrol`) is a `molecule`-type wisp that
+> `gt patrol report` closes to record each completed cycle, and patrol_watchdog
+> reads that closed root as proof the cycle happened (hq-3h7ac).
+> Unscoped `--closed --force` deletes every such wisp town-wide each cycle,
 > so cooldown gates (which query closed receipts via CountRunsSince) never
-> see a prior run and read permanently open. Receipts must outlive the
+> see a prior run and read permanently open, AND the watchdog reads this
+> deacon as never having patrolled. Receipts must outlive the
 > longest gate duration (24h today); do not drop this flag.
 
 Then handle callbacks from agents.
