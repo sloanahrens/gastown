@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-changed test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -76,28 +76,10 @@ desktop-run:
 	go run ./cmd/gt-desktop
 
 check-up-to-date:
-ifndef SKIP_UPDATE_CHECK
-	@# Skip check on detached HEAD (tag checkouts, CI builds)
-	@if ! git symbolic-ref HEAD >/dev/null 2>&1; then exit 0; fi
-	@# Use the current branch's tracking ref (works for main, carry/operational, etc.)
-	@UPSTREAM=$$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null); \
-	if [ -z "$$UPSTREAM" ]; then \
-		echo "Warning: no upstream tracking branch set, skipping update check"; \
-		exit 0; \
-	fi; \
-	REMOTE_NAME=$$(echo "$$UPSTREAM" | cut -d/ -f1); \
-	REMOTE_BRANCH=$$(echo "$$UPSTREAM" | cut -d/ -f2-); \
-	git fetch "$$REMOTE_NAME" "$$REMOTE_BRANCH" --quiet 2>/dev/null || true; \
-	LOCAL=$$(git rev-parse HEAD 2>/dev/null); \
-	REMOTE=$$(git rev-parse "$$UPSTREAM" 2>/dev/null); \
-	if [ -n "$$REMOTE" ] && [ "$$LOCAL" != "$$REMOTE" ]; then \
-		echo "ERROR: Local branch is not up to date with $$UPSTREAM"; \
-		echo "  Local:  $$(git rev-parse --short HEAD)"; \
-		echo "  Remote: $$(git rev-parse --short $$UPSTREAM)"; \
-		echo "Run 'git pull' first, or use SKIP_UPDATE_CHECK=1 to override"; \
-		exit 1; \
-	fi
-endif
+	@# Deploy merged code only (gt-o848l): HEAD must be in origin/main with no
+	@# tracked edits outside .beads/. ALLOW_UNMERGED=1 overrides loudly;
+	@# SKIP_UPDATE_CHECK=1 only skips the fetch (gt-9jax). See the script.
+	@bash $(CURDIR)/scripts/check-deploy-source.sh
 
 # check-forward-only: Ensure HEAD is a descendant of the currently installed binary's commit.
 # Prevents rebuilding to an older or diverged commit, which caused a crash loop where
@@ -111,6 +93,17 @@ ifndef SKIP_FORWARD_CHECK
 			echo "Binary is already at HEAD, nothing to do"; \
 			exit 1; \
 		fi; \
+	fi
+endif
+	@$(MAKE) --no-print-directory check-no-downgrade
+
+# check-no-downgrade: refuse a build whose commit is not a descendant of the
+# installed binary's. Shared by install and safe-install (install had no such
+# guard before gt-o848l).
+check-no-downgrade:
+ifndef SKIP_FORWARD_CHECK
+	@BINARY_COMMIT=$$($(INSTALL_DIR)/$(BINARY) version --verbose 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@'); \
+	if [ -n "$$BINARY_COMMIT" ] && [ "$$BINARY_COMMIT" != "unknown" ]; then \
 		if ! git merge-base --is-ancestor "$$BINARY_COMMIT" HEAD 2>/dev/null; then \
 			echo "ERROR: HEAD ($$(git rev-parse --short HEAD)) is NOT a descendant of installed binary ($$BINARY_COMMIT)"; \
 			echo "This would be a DOWNGRADE. Refusing to rebuild."; \
@@ -131,7 +124,7 @@ check-install-path:
 		echo '  export PATH="$(INSTALL_DIR):$$PATH"'; \
 	fi
 
-install: check-up-to-date build
+install: check-up-to-date check-no-downgrade build
 	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:
 	# that leaves the live path missing or holding a partial binary, and
 	# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
@@ -145,6 +138,10 @@ install: check-up-to-date build
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 	@$(MAKE) --no-print-directory check-install-path
+	@# Restart only a running daemon: `gt daemon status` exits non-zero when
+	@# it is not running (gt-o848l), so a deliberately stopped town stays
+	@# stopped. It used to exit 0 either way, and this step started a stopped
+	@# daemon mid-shutdown.
 	@# Restart daemon so it picks up the new binary: a stale daemon is a
 	@# recurring source of bugs (wrong session prefixes, etc.). Through the
 	@# supervisor ('gt daemon restart' = launchctl kickstart -k), never
@@ -257,6 +254,7 @@ test-changed: test-makefile
 test-makefile:
 	bash scripts/check-install-path_test.sh
 	bash scripts/install-binary_test.sh
+	bash scripts/check-deploy-source_test.sh
 	bash -n plugins/stuck-agent-dog/run.sh
 	bash -n plugins/stuck-agent-dog/run_test.sh
 	bash plugins/stuck-agent-dog/run_test.sh

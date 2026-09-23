@@ -815,3 +815,28 @@ func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }
+
+// gt-o848l: `gt daemon status` is the "is it running?" probe for the
+// Makefile's install restart and mol-gastown-boot's `status || start`. It
+// exited 0 either way, so make install STARTED a deliberately stopped daemon
+// and the boot formula never started a missing one. Not running exits 3
+// (LSB "program is not running"); running exits 0.
+func TestRunDaemonStatus_ExitCodeReportsRunning(t *testing.T) {
+	town := t.TempDir()
+	chdirTown(t, town)
+	stubSupervisorState(t, templates.SupervisorState{})
+
+	stubDaemonRunning(t, 0)
+	var err error
+	_ = captureStdout(t, func() { err = runDaemonStatus(nil, nil) })
+	var silent *SilentExitError
+	if !errors.As(err, &silent) || silent.Code != 3 {
+		t.Errorf("status with no daemon: err = %v, want SilentExitError code 3", err)
+	}
+
+	stubDaemonRunning(t, 4242)
+	_ = captureStdout(t, func() { err = runDaemonStatus(nil, nil) })
+	if err != nil {
+		t.Errorf("status with a running daemon: err = %v, want nil", err)
+	}
+}

@@ -87,6 +87,9 @@ var daemonStatusCmd = &cobra.Command{
 Displays whether the daemon is running, its PID, uptime, heartbeat
 count, and whether the binary has been rebuilt since the daemon started.
 
+Exits 0 when the daemon is running and 3 when it is not, so scripts can
+use it as a running check (for example: gt daemon status || gt daemon start).
+
 Examples:
   gt daemon status`,
 	RunE: runDaemonStatus,
@@ -392,6 +395,10 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			"not running")
 		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatusLine(townRoot, 0, supervisorStateFor))
 		fmt.Printf("\nStart with: %s\n", style.Dim.Render("gt daemon start"))
+		// Exit 3 (LSB "program is not running") so scripts can use status as
+		// the running probe: make install restarts only a running daemon and
+		// mol-gastown-boot runs `status || start` (gt-o848l).
+		return NewSilentExit(3)
 	}
 
 	return nil
