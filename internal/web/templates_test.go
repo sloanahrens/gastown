@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -359,6 +360,53 @@ func TestDashboardScript_HasIdempotencyGuard(t *testing.T) {
 	if !(iifeStart < guardIdx && guardIdx < firstRealStatement) {
 		t.Error("the __gtDashboardBooted guard must run before any other work in the IIFE " +
 			"(e.g. before CSRF fetch patching), or a re-execution still does damage before bailing out")
+	}
+}
+
+// TestConvoyTemplate_ServesNoExternalAssets guards gt-iav5: the dashboard is a
+// local ops tool that must render with outbound network blocked, so htmx and
+// the idiomorph morph extension are vendored under /static/vendor instead of
+// loaded from a CDN. Any remote asset in the rendered page is a failure mode:
+// if unpkg is unreachable the page loads but the htmx refresh never binds,
+// which is worse than not loading at all.
+func TestConvoyTemplate_ServesNoExternalAssets(t *testing.T) {
+	tmpl, err := LoadTemplates()
+	if err != nil {
+		t.Fatalf("LoadTemplates() error = %v", err)
+	}
+
+	data := ConvoyData{
+		Convoys: []ConvoyRow{
+			{ID: "hq-cv-test", Title: "Test", Status: "open"},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	output := buf.String()
+
+	const re = `href="http|src="http|href='http|src='http`
+	if match := regexp.MustCompile(re).FindAllString(output, -1); len(match) > 0 {
+		t.Errorf("rendered page references external asset(s) %v (gt-iav5): every script and stylesheet must be served from /static", match)
+	}
+
+	// The two refresh-critical libraries must come from the local vendor dir.
+	for _, want := range []string{
+		`<script src="/static/vendor/htmx.min.js"></script>`,
+		`<script src="/static/vendor/idiomorph-ext.min.js"></script>`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("rendered page must load %q from the local vendor dir (gt-iav5)", want)
+		}
+	}
+
+	// Vendored files must exist on disk where the dashboard serves them from.
+	for _, name := range []string{"htmx.min.js", "idiomorph-ext.min.js"} {
+		if _, err := os.ReadFile("static/vendor/" + name); err != nil {
+			t.Errorf("static/vendor/%s is missing — /static/vendor would serve a 404 (gt-iav5)", name)
+		}
 	}
 }
 

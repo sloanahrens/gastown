@@ -5,16 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="dashboard-token" content="{{.CSRFToken}}">
     <title>Gas Town Control Center</title>
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"></script>
+    <!-- htmx + idiomorph morph extension are vendored under /static/vendor (pinned
+         versions, see internal/web/static/vendor/NOTICE.md) so the dashboard runs
+         with no outbound network access (gt-iav5). -->
+    <script src="/static/vendor/htmx.min.js"></script>
+    <script src="/static/vendor/idiomorph-ext.min.js"></script>
     <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
     <!-- Custom event is namespaced "gt:" (not "sse:") because "sse:" is reserved by
          htmx's SSE extension and silently fails to bind without an sse-connect source. -->
     <!-- hx-select scopes the swap to this div's own markup in the response. Without it,
-         htmx's morph:outerHTML swap takes the WHOLE response body — including the CDN
-         htmx/idiomorph <script> tags in <head> and /static/dashboard.js at the end of
+         htmx's morph:outerHTML swap takes the WHOLE response body — including the
+         vendored htmx/idiomorph <script> tags in <head> and /static/dashboard.js at the end of
          <body> — as the new content, and (allowScriptTags defaults true) re-executes
          dashboard.js on every swap: a fresh EventSource, panel loaders and
          htmx:afterSwap listener each time, until they exhaust WebKit's per-host
