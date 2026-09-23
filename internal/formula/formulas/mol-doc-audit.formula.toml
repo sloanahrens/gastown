@@ -498,6 +498,10 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 `gt done` will reject zero-commit branches for polecats.
 
+**While gt done runs — do not touch it (gt-7dxw):**
+
+gt done may sit silently for up to 20-30 minutes waiting for the container-gate slot. That is normal. Do not interrupt it, do not close the bead, do not retry. It will print a slot-acquire timeout if it gives up. **Never poll the slot, and never script a retry around gt done** — no `for`/`while`/`until` loop, no watcher, no generated retry script that re-runs `gt done` or reads `gt slot status` (the dangerous-command guard refuses it). If it fails on the test-verify slot cap or the run budget: do NOT retry, poll, or script; add a bead comment with the error and the verify-log path, then `gt escalate -s medium` asking the mayor for a one-shot `--skip-verify` ruling, and wait (gt-pnkd). **Do not run container suites yourself. Run the non-container packages, then gt done** — its own gate runs the container suites for you.
+
 **Run gt done:**
 ```bash
 # For code tasks (gt done lints and tests your changed non-container packages,

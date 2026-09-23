@@ -596,6 +596,35 @@ shipped is equivalent. Exit criterion: `bd show {{issue}}` no longer asserts
 anything the work disproved, because the title becomes the merged commit
 subject and the next reader's premise (gt-3t2).
 
+**While gt done runs — do not touch it (gt-7dxw, gt-pnkd):**
+
+gt done may sit silently for up to 20-30 minutes waiting for the container-gate slot. That is normal. Do not interrupt it, do not close the bead, do not retry. It will print a slot-acquire timeout if it gives up.
+
+Between its progress lines the pane is quiet, and a held gate is the ordinary
+reason: it prints `still waiting for the container-gate slot …` every couple of
+minutes while it waits, and the wait is capped by the rig's
+`merge_queue.test_verify_slot_timeout` (60m by default).
+
+**Never poll the slot, and never script a retry around gt done.** No
+`for`/`while`/`until` loop, no `while true`, no watcher, no generated retry
+script that re-runs `gt done` or reads `gt slot status`. A polling loop holds
+the container-gate slot every other agent is queued behind, one pass at a time,
+while its own result is a coin flip — a gt-pnkd polecat did exactly that
+(/tmp/gtpnkd-retry.sh, 300 passes) and the mayor had to kill it. The
+dangerous-command guard now refuses the loop before it starts. Run it once.
+
+**If gt done fails on the test-verify slot cap or the run budget:** do NOT
+retry, poll, or script. Add a bead comment with the error and the verify-log
+path, then `gt escalate -s medium` asking the mayor for a one-shot
+`--skip-verify` ruling, and wait (gt-pnkd). Do not reach for `--pre-verified`
+instead: that flag is refinery/mayor only and re-runs the same gate set under
+the same slot cap.
+
+**Do not run container suites yourself. Run the non-container packages, then
+gt done** — its own default test-verify gate runs the container suites for you.
+If you must run one locally, take the slot explicitly:
+`gt slot run --role <rig>/<your-name> -- <command>`.
+
 **Run gt done:**
 ```bash
 # For code tasks (gt done lints and tests your changed non-container packages,

@@ -576,6 +576,15 @@ func cwdPackagePath(dir string) (pkg string, ok bool) {
 // printContainerSuiteBlock prints the standard block banner to stderr,
 // naming the wrapped form the guard wants instead (gt-e2rs: "message names
 // the wrapped form").
+//
+// The wrapped form is only ONE of the sanctioned paths, and a refusal that
+// names only the hardest one is what drove six of six local polecats to
+// improvise on 2026-09-17 — granite's spiral to a direct main push started at
+// this banner (overseer hq-wisp-32rsm). So the two lighter paths are printed
+// too: run the non-container packages directly (a filtered or bare run skips
+// the container tests and needs no slot at all), or run neither and let
+// `gt done` gate the containers, whose default test-verify gate does exactly
+// that for you. The banner is the one place a polecat reads all three.
 func printContainerSuiteBlock(reason, originalCommand string, matched []string) {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
@@ -591,6 +600,9 @@ func printContainerSuiteBlock(reason, originalCommand string, matched []string) 
 	fmt.Fprintln(os.Stderr, "║  VM. Running it bare can collide with another rig's suite.      ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintf(os.Stderr, "  Run it wrapped instead: %s\n", containerSuiteWrap(originalCommand))
+	fmt.Fprintln(os.Stderr, "  Or run the non-container packages directly (they need no slot, and they are")
+	fmt.Fprintln(os.Stderr, "  where your change usually lives) — or run neither and let `gt done` gate the")
+	fmt.Fprintln(os.Stderr, "  container suites for you: its default test-verify gate runs them once you submit.")
 	fmt.Fprintln(os.Stderr, "")
 }
 
