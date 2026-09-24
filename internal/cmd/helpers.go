@@ -14,6 +14,23 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// requireRealCurrentBranch refuses a branch value of "HEAD" — what
+// git.CurrentBranch() (git rev-parse --abbrev-ref HEAD) prints for a
+// detached-HEAD worktree instead of failing outright. gt done and gt mq
+// submit both record their caller's CurrentBranch() verbatim as the MR's
+// branch field; a detached capture there silently loses the real work
+// branch, and gt mq post-merge later trusts that field verbatim when it
+// deletes the branch — a false "cleaned up" report that leaves the real
+// branch orphaned (gt-1p1i). command names the CLI invocation in the error
+// so the operator knows which one to re-run after checking out a real
+// branch.
+func requireRealCurrentBranch(branch, command string) error {
+	if strings.TrimSpace(branch) != "HEAD" {
+		return nil
+	}
+	return fmt.Errorf("cannot determine current branch: worktree is in detached HEAD state — check out your work branch before running %s", command)
+}
+
 // inferRigFromCwd tries to determine the rig from the current directory.
 func inferRigFromCwd(townRoot string) (string, error) {
 	cwd, err := filepath.Abs(".")

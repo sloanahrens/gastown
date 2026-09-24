@@ -1390,6 +1390,19 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		cleanup.NoBranch = true
 		return cleanup, nil
 	}
+	// "HEAD" is what git rev-parse --abbrev-ref HEAD prints for a detached
+	// worktree instead of failing outright; a stray second gt done can record
+	// it as the MR's branch field while leaving commit_sha untouched, so the
+	// merge itself looks unaffected. Trusting it here verbatim is exactly the
+	// degraded-record bug this guards against (gt-1p1i): "HEAD" is not a ref
+	// under refs/heads, so ls-remote --heads finds nothing for it and the
+	// caller below would report the real, still-orphaned work branch as
+	// already gone — a false success that skips its actual cleanup. Refuse
+	// instead of guessing; the real branch name was lost and needs a human
+	// (or the orphan-branch reaper) to find and delete it.
+	if cleanup.Branch == "HEAD" {
+		return cleanup, fmt.Errorf("remote branch delete: MR %s records the literal ref %q as its branch, not a real branch name (a detached-HEAD gt done capture, see gt-1p1i); the actual work branch was never recorded and needs manual cleanup", mr.ID, cleanup.Branch)
+	}
 	if skipBranchDelete {
 		cleanup.Skipped = true
 		return cleanup, nil
