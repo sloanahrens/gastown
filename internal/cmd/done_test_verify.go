@@ -140,7 +140,7 @@ type testVerifyResult struct {
 	// opt-in on runs its whole suite with those tests skipping, so it takes no
 	// slot and never queues behind the town's one gate.
 	slotUsed bool
-	// containersOptedOut is true when the gate forced the container opt-in off
+	// containersOptedOut is true when the gate wrote the container opt-in off
 	// for its run, which is what makes slotUsed false on a Go rig. Recorded
 	// (and written to the log header) so a reader can tell a gate that
 	// deliberately skipped the Docker suite apart from one whose rig never had
@@ -565,55 +565,72 @@ func containerOptInRequested(commands ...string) bool {
 	return false
 }
 
-// gateNeedsSlot reports whether the default test-verify gate must hold a
-// container-gate slot for the run it is about to make (gt-wx53).
+// containerSwitch is the gate's container opt-in decision for the run it is
+// about to make: the value written into the run's environment, and whether that
+// value means the gate must hold the town-wide container-gate slot (gt-wx53).
 //
-// The slot is town-wide and one suite wide, so taking it for a run that cannot
-// start a container makes every `gt done` in the town queue behind the daemon's
-// main-branch patrol and the refinery's batch gate — mica's gt done on gt-jqif
-// waited out the full 20m cap for a gate that never ran a test (gt-pnkd). The
-// gate therefore takes the slot only when its run can actually start a
-// container-backed suite: a non-Go rig (whose test_command is opaque), or a Go
-// rig whose command turns the opt-in on. Everything else runs the rig's whole
-// suite with the opt-in off: the container-backed tests skip, and the
-// refinery's gate (which does hold a slot) runs them once per submission
-// (gt-yihz, operator decision 14:44 2026-09-17).
+// The two travel together (gt-0hbm): what decides whether a container starts is
+// the environment the child reads, so the gate writes the value it decided into
+// that environment (verifyGateEnv) instead of scanning for a slot and letting
+// whatever the session exported reach the child.
+type containerSwitch struct {
+	// value is the GT_TEST_DOCKER value the gate writes into the run's
+	// environment, "0" or "1". Empty leaves the rig's own environment alone.
+	value string
+	// slot is true when the run can start a container-backed suite, and so
+	// must hold the container-gate slot.
+	slot bool
+}
+
+// optedOut reports whether the gate's run is made with the container opt-in
+// written off — the case the log header and the MR bead call "containers opted
+// out" (gt-wx53).
+func (s containerSwitch) optedOut() bool { return s.value == "0" }
+
+// resolveContainerSwitch decides the container opt-in for the gate's run from
+// the rig's own command text, never from this process's ambient value.
 //
-// The *ambient* opt-in is deliberately not consulted, even though the
-// container-suite guard reads it that way. The guard can only inspect the
-// command it is shown; this gate builds its child's environment, so the same
-// input would otherwise decide differently depending on who invoked `gt done`
-// (a polecat spawned by a suite inherits GT_TEST_DOCKER=1 and would take the
-// town-wide slot back; the integration harness sets it too, so the same gate
-// would behave two ways in one test binary). Reading the rig's own command
-// keeps the answer a property of the rig's configuration, which is what an
-// operator can reason about — and overriding an inherited opt-in is safe in
-// the only direction that matters: the run cannot start a container it did not
-// take a slot for.
-func gateNeedsSlot(isGoRig bool, commands ...string) bool {
+// gt-wx53: the slot is town-wide and one suite wide, so taking it for a run
+// that cannot start a container makes every `gt done` in the town queue behind
+// the daemon's main-branch patrol and the refinery's batch gate — mica's gt
+// done on gt-jqif waited out the full 20m cap for a gate that never ran a test
+// (gt-pnkd). A Go rig asks for containers in its own command or not at all; the
+// rest run the rig's whole suite with the switch written off, their
+// container-backed tests skipping, and the refinery's slot-holding gate runs
+// those once per submission (gt-yihz, operator decision 14:44 2026-09-17). A
+// non-Go rig's command is opaque, so it keeps the slot: the conservative
+// direction.
+//
+// The ambient value stays out of the decision (gt-0hbm) because it does not
+// describe this run: the Makefile's test recipe defaults GT_TEST_DOCKER to 1,
+// so every process under `make test` — the daemon's patrol and the integration
+// suite, which hold the slot themselves, included — carries =1 without anyone
+// asking for containers, and reading it would put the gate behind a slot its
+// own ancestor holds. Writing the resolved value into the run's environment is
+// what keeps the gate and the child's reading of the switch in step.
+func resolveContainerSwitch(isGoRig bool, commands ...string) containerSwitch {
 	if !isGoRig {
-		return true
+		return containerSwitch{slot: true}
 	}
-	return containerOptInRequested(commands...)
+	if containerOptInRequested(commands...) {
+		return containerSwitch{value: "1", slot: true}
+	}
+	return containerSwitch{value: "0"}
 }
 
 // verifyGateEnv builds the child environment for the gate's lint and suite
 // runs: this process's environment, then the rig's test_command env prefix
-// (gt-fa3s), then — when the run must not start containers — an explicit
-// opt-out.
+// (gt-fa3s), then the gate's resolved container switch (gt-0hbm).
 //
-// The opt-out is *appended after filtering every inherited and rig-supplied
-// value of the same name*, because a duplicate entry in a child's environment
-// is resolved differently by different readers (Go's os.Getenv takes the
-// first, a shell's assignment takes the last), and this value is what decides
-// whether a container starts outside the container-gate slot.
-//
-// A rig whose command turns the opt-in on is never opted out here: the rig
-// wins (see gateNeedsSlot), and the gate takes a slot for it.
-func verifyGateEnv(envPrefix []string, optOutContainers bool) []string {
+// Every inherited and rig-supplied value of the switch's name is dropped before
+// the resolved one is appended, rather than left for the child to resolve: a
+// duplicate entry is read differently by different readers (Go's os.Getenv
+// takes the last, a libc getenv the first), and this value decides whether a
+// container starts outside the container-gate slot.
+func verifyGateEnv(envPrefix []string, switchValue string) []string {
 	env := make([]string, 0, len(os.Environ())+len(envPrefix)+1)
 	keep := func(kv string) bool {
-		return !optOutContainers || !strings.HasPrefix(kv, dockerTestsEnv+"=")
+		return switchValue == "" || !strings.HasPrefix(kv, dockerTestsEnv+"=")
 	}
 	for _, kv := range os.Environ() {
 		if keep(kv) {
@@ -625,8 +642,8 @@ func verifyGateEnv(envPrefix []string, optOutContainers bool) []string {
 			env = append(env, kv)
 		}
 	}
-	if optOutContainers {
-		env = append(env, dockerTestsEnv+"=0")
+	if switchValue != "" {
+		env = append(env, dockerTestsEnv+"="+switchValue)
 	}
 	return env
 }
@@ -904,10 +921,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// every `gt done` in the town queue for a town-wide, one-suite-wide
 	// resource, sometimes for longer than the suite it was queueing behind.
 	// So the gate either runs the rig's whole suite with the container opt-in
-	// forced off (container-backed tests skip, no slot needed) or, when the
-	// rig's own command asks for containers, runs it unchanged inside a slot.
-	needsSlot := gateNeedsSlot(isGoRig, mq.TestCommand, mq.TestVerifyCommand)
-	containersOptedOut := !needsSlot
+	// written off (container-backed tests skip, no slot needed) or, when the
+	// rig's own command asks for containers, runs it inside a slot.
+	cswitch := resolveContainerSwitch(isGoRig, mq.TestCommand, mq.TestVerifyCommand)
+	needsSlot := cswitch.slot
+	containersOptedOut := cswitch.optedOut()
 
 	budgets := resolveTestVerifyBudgets(mq)
 
@@ -969,13 +987,15 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// answer used to be an unconditional yes, stated nowhere).
 	if containersOptedOut {
 		fmt.Fprintf(logFile, "containers: opted out (%s=0) — container-backed tests skip here and run once per submission in the refinery's gate, so this gate takes no container-gate slot\n", dockerTestsEnv)
+	} else if cswitch.value == "" {
+		fmt.Fprintf(logFile, "containers: enabled — a non-Go rig's command does not say whether it starts Docker, so this gate takes a container-gate slot\n")
 	} else {
-		fmt.Fprintf(logFile, "containers: enabled — this run may start container-backed suites, so it takes a container-gate slot\n")
+		fmt.Fprintf(logFile, "containers: enabled (the rig's command turns %s=1 on) — this run may start container-backed suites, so it takes a container-gate slot\n", dockerTestsEnv)
 	}
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))
 
-	env := verifyGateEnv(envPrefix, containersOptedOut)
+	env := verifyGateEnv(envPrefix, cswitch.value)
 
 	// Lint first: cheap, slot-free, and a lint failure should not cost a
 	// suite run. The rig's lint_command is the same one the batch gate runs.

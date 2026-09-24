@@ -228,6 +228,63 @@ func containsEnv(env []string, want string) bool {
 	return false
 }
 
+// gt-0hbm: the slot decision and the environment it is made for have to be one
+// fact, so for a Go rig the switch the gate resolves and the switch value the
+// run's environment ends up carrying must always agree — including when the
+// session's own value says the opposite.
+func TestResolveContainerSwitchStatesTheSlotDecision(t *testing.T) {
+	cases := []struct {
+		name     string
+		isGoRig  bool
+		commands []string
+		ambient  string
+		want     string // the switch value the run's environment must carry
+		slot     bool
+	}{
+		{"Go rig that asks nothing", true, []string{"GOFLAGS=-p=8 make test"}, "", "0", false},
+		{"Go rig asking inline", true, []string{dockerTestsEnv + "=1 go test ./..."}, "", "1", true},
+		{"Go rig asking after the packages token", true, []string{"make test", dockerTestsEnv + "=1 go test {packages}"}, "", "1", true},
+		{"Go rig that asks nothing, with the session's opt-in on", true, []string{"GOFLAGS=-p=8 make test"}, "1", "0", false},
+		{"Go rig that asks inline, with the session's opt-in off", true, []string{dockerTestsEnv + "=1 go test ./..."}, "0", "1", true},
+		{"Go rig explicitly opting out, with the session's opt-in on", true, []string{dockerTestsEnv + "=0 go test ./..."}, "1", "0", false},
+		{"non-Go rig, opaque command", false, []string{"npm test"}, "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(dockerTestsEnv, tc.ambient)
+			got := resolveContainerSwitch(tc.isGoRig, tc.commands...)
+			if got.value != tc.want || got.slot != tc.slot {
+				t.Errorf("resolveContainerSwitch = %+v, want value %q slot %t", got, tc.want, tc.slot)
+			}
+			// The run's environment is built from the same decision, and the
+			// rig prefix deliberately disagrees with it: the environment is
+			// the value the child reads, so the leak a pass-through would
+			// leave here is the hole gt-0hbm closed.
+			env := verifyGateEnv([]string{"GOFLAGS=-p=8", dockerTestsEnv + "=0"}, got.value)
+			var seen []string
+			for _, kv := range env {
+				if strings.HasPrefix(kv, dockerTestsEnv+"=") {
+					seen = append(seen, strings.TrimPrefix(kv, dockerTestsEnv+"="))
+				}
+			}
+			if tc.want == "" {
+				// A non-Go rig's environment is left alone: the gate cannot
+				// know what the switch means to a command it cannot read.
+				if !containsEnv(env, dockerTestsEnv+"=0") || containsEnv(env, dockerTestsEnv+"=1") {
+					t.Errorf("non-Go rig env carries %v, want the rig's own value untouched and no switch the gate invented", seen)
+				}
+				return
+			}
+			if len(seen) != 1 || seen[0] != tc.want {
+				t.Errorf("run env carries %v, want exactly [%s]: the value the child reads is the value the slot decision was made for", seen, tc.want)
+			}
+			if got.slot != (seen[0] == "1") {
+				t.Errorf("slot=%t but the run's environment says %s — a container could start outside the slot, or a slot be held for nothing", got.slot, seen[0])
+			}
+		})
+	}
+}
+
 func runGitIn(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
