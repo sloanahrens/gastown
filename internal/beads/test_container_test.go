@@ -1,0 +1,281 @@
+package beads
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// useTestContainerInitSlots swaps this process's init pool for one of
+// capacity n for the length of one test and returns it. The pool is process
+// state, so a caller must not be t.Parallel.
+func useTestContainerInitSlots(t *testing.T, n int) *initSlots {
+	t.Helper()
+	s := newInitSlots(n)
+	prev := testContainerInitSlots.Swap(s)
+	t.Cleanup(func() { testContainerInitSlots.Store(prev) })
+	return s
+}
+
+// TestProcessInitPoolStartsFull pins the property both failed gt-elvf4 patches
+// lacked: the channel holds its tokens before anyone acquires, so the first
+// acquire returns instead of blocking forever.
+func TestProcessInitPoolStartsFull(t *testing.T) {
+	s := testContainerInitSlots.Load()
+	if s == nil {
+		t.Fatal("process init pool is nil; package init did not build it")
+	}
+	if cap(s.tokens) < 1 {
+		t.Fatalf("process init pool capacity = %d, want >= 1", cap(s.tokens))
+	}
+	if len(s.tokens) != cap(s.tokens) {
+		t.Fatalf("process init pool holds %d of %d tokens at rest, want all of them", len(s.tokens), cap(s.tokens))
+	}
+}
+
+func TestParseTestDoltInitConcurrency(t *testing.T) {
+	tests := []struct {
+		raw      string
+		want     int
+		wantWarn bool
+	}{
+		{raw: "", want: 4},
+		{raw: "1", want: 1},
+		{raw: "8", want: 8},
+		{raw: " 2 ", want: 2},
+		{raw: "64", want: 64}, // no upper clamp
+		{raw: "0", want: 4, wantWarn: true},
+		{raw: "-3", want: 4, wantWarn: true},
+		{raw: "abc", want: 4, wantWarn: true},
+		{raw: "2.5", want: 4, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%q", tt.raw), func(t *testing.T) {
+			got, warning := parseTestDoltInitConcurrency(tt.raw)
+			if got != tt.want {
+				t.Errorf("parseTestDoltInitConcurrency(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+			if !tt.wantWarn {
+				if warning != "" {
+					t.Errorf("parseTestDoltInitConcurrency(%q) warned %q, want no warning", tt.raw, warning)
+				}
+				return
+			}
+			if !strings.Contains(warning, testDoltInitConcurrencyEnv) || !strings.Contains(warning, "using 4") {
+				t.Errorf("warning %q should name %s and the fallback", warning, testDoltInitConcurrencyEnv)
+			}
+			if strings.Contains(warning, "\n") {
+				t.Errorf("warning %q should be one line", warning)
+			}
+		})
+	}
+}
+
+func TestInitSlotsAdmitCapacityThenBlock(t *testing.T) {
+	s := newInitSlots(2)
+	var held []func()
+	for i := 0; i < 2; i++ {
+		release, err := s.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d of 2: %v", i+1, err)
+		}
+		held = append(held, release)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := s.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("third acquire on a full pool = %v, want a deadline error", err)
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		release, err := s.acquire(context.Background())
+		if err == nil {
+			release()
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		t.Fatalf("a waiter got through a full pool (err=%v)", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	held[0]()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("waiter after a release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never received the released slot")
+	}
+	held[1]()
+	if len(s.tokens) != 2 {
+		t.Fatalf("pool holds %d tokens after every release, want 2", len(s.tokens))
+	}
+}
+
+// TestInitSlotsFourHoldersTwelveWaiters is the no-deadlock pin: run it under
+// -race. Four holders fill the pool, twelve waiters queue, none gets through
+// until a holder lets go, and then every one finishes with never more than
+// four in flight.
+func TestInitSlotsFourHoldersTwelveWaiters(t *testing.T) {
+	const holders, waiters = 4, 12
+	s := newInitSlots(holders)
+	held := make([]func(), 0, holders)
+	for i := 0; i < holders; i++ {
+		release, err := s.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("holder %d: %v", i+1, err)
+		}
+		held = append(held, release)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var admitted, inFlight, peak atomic.Int32
+	var wg sync.WaitGroup
+	errs := make(chan error, waiters)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release, err := s.acquire(ctx)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer release()
+			admitted.Add(1)
+			n := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+			inFlight.Add(-1)
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if n := admitted.Load(); n != 0 {
+		t.Fatalf("%d waiters got through while all %d slots were held", n, holders)
+	}
+	for _, release := range held {
+		release()
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("waiters did not all finish: the pool deadlocked")
+	}
+	close(errs)
+	for err := range errs {
+		t.Errorf("waiter failed: %v", err)
+	}
+	if n := admitted.Load(); n != waiters {
+		t.Errorf("admitted %d waiters, want %d", n, waiters)
+	}
+	if p := peak.Load(); p > holders {
+		t.Errorf("peak in flight = %d, want <= %d", p, holders)
+	}
+	if len(s.tokens) != holders {
+		t.Errorf("pool holds %d tokens after every release, want %d", len(s.tokens), holders)
+	}
+}
+
+func TestInitSlotsCancelledContextTakesNoToken(t *testing.T) {
+	s := newInitSlots(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.acquire(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire with a cancelled context = %v, want context.Canceled", err)
+	}
+	if err.Error() != "test Dolt init slot: context canceled" {
+		t.Errorf("error = %q, want it to name the slot", err.Error())
+	}
+	if len(s.tokens) != 1 {
+		t.Errorf("a failed acquire consumed a token: %d left, want 1", len(s.tokens))
+	}
+}
+
+func TestInitSlotsReleaseIsIdempotent(t *testing.T) {
+	s := newInitSlots(1)
+	release, err := s.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	release()
+	release()
+	if len(s.tokens) != 1 {
+		t.Fatalf("pool holds %d tokens after a double release, want 1", len(s.tokens))
+	}
+	second, err := s.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	defer second()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a double release grew the pool: second concurrent acquire = %v, want a deadline error", err)
+	}
+}
+
+func TestInitSlotsPanicReleases(t *testing.T) {
+	s := newInitSlots(1)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the panic to propagate to this recover")
+			}
+		}()
+		release, err := s.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		defer release()
+		panic("bd init blew up")
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	release, err := s.acquire(ctx)
+	if err != nil {
+		t.Fatalf("slot not returned after a panic: %v", err)
+	}
+	release()
+}
+
+func TestAcquireTestContainerInitSlotUsesProcessPool(t *testing.T) {
+	s := useTestContainerInitSlots(t, 1)
+	release, err := AcquireTestContainerInitSlot(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireTestContainerInitSlot: %v", err)
+	}
+	if len(s.tokens) != 0 {
+		t.Fatalf("process pool holds %d tokens while one is taken, want 0", len(s.tokens))
+	}
+	release()
+	if len(s.tokens) != 1 {
+		t.Fatalf("process pool holds %d tokens after release, want 1", len(s.tokens))
+	}
+}
+
+func TestTestContainerEnv(t *testing.T) {
+	got := testContainerEnv()
+	if len(got) != 1 || got[0] != "BD_ALLOW_REMOTE_MIGRATE=1" {
+		t.Fatalf("testContainerEnv() = %q, want [BD_ALLOW_REMOTE_MIGRATE=1]", got)
+	}
+}
