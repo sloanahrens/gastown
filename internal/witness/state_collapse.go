@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -432,24 +434,46 @@ func normalizeBranchRef(branch string) string {
 // pendingMRFromCloseReason returns the MR id named by a "pending_mr: <id>"
 // close reason (beads.PendingMergeCloseReason, the reason gt done writes
 // when it self-closes a source issue immediately after submitting its MR),
-// or "" for any other reason.
+// or "" for any other reason. gt done writes nothing after the id but the
+// "(attempt N)" suffix (beads.PendingMergeCloseReason), so that is the only
+// continuation this accepts; any other prose means the reason is not a gt
+// done self-close and must not be matched.
 func pendingMRFromCloseReason(closeReason string) string {
 	const prefix = "pending_mr:"
 	trimmed := strings.TrimSpace(closeReason)
 	if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
 		return ""
 	}
-	// Only a bare id: gt done writes nothing after it, so interior prose or a
-	// second line means this is not that shape and must not be matched.
-	// Surrounding whitespace is trimmed, which keeps the parse equivalent to
-	// beads.IsPendingMergeCloseReason's exact-equality test (that one trims
-	// the whole reason before comparing).
-	mrID := strings.TrimSpace(trimmed[len(prefix):])
+	rest := trimmed[len(prefix):]
+	// The "(attempt N)" suffix, when present, bounds the id: everything up to
+	// it is the id. Everything after it must be a whitespace-terminated
+	// digit — a stray "(attempt x)" later in prose must not end the id there
+	// (the same prose-after-id rejection the old bare-id rule enforced).
+	if idx := strings.Index(strings.ToLower(rest), "(attempt "); idx >= 0 {
+		// The writer pins the number to the end of the reason, so the tail
+		// from the paren on must be "(attempt N)" and nothing else — a
+		// stray "(attempt x)" in prose after the id must not end the id
+		// there (the same rejection the old bare-id rule enforced).
+		if !closureAttemptSuffixRe.MatchString(strings.ToLower(rest[idx:])) {
+			return ""
+		}
+		rest = rest[:idx]
+	}
+	mrID := strings.TrimSpace(rest)
 	if mrID == "" || strings.IndexFunc(mrID, unicode.IsSpace) >= 0 {
 		return ""
 	}
 	return mrID
 }
+
+// closureAttemptSuffixRe is the "(attempt N)" tail at the end of a
+// "pending_mr:" close reason (beads.PendingMergeCloseReason). It is
+// unanchored on purpose: callers match it either at the tail of the whole
+// reason (after the MR id) or against the reason as a whole, so the
+// "(attempt N)" sits mid-string. $ and the closing paren pin the number to
+// the reason's end, which is the contract that keeps a stray "(attempt x)"
+// in prose from being read as the suffix.
+var closureAttemptSuffixRe = regexp.MustCompile(`\(attempt\s+(\d+)\)\s*$`)
 
 // DefaultBranchRefSource returns a BranchRefSource backed by a real git
 // remote, rooted at repoPath (the rig's canonical clone, e.g.
@@ -769,26 +793,145 @@ func beadStringField(obj map[string]json.RawMessage, name string) (string, error
 }
 
 // supersededByRecord reports whether the issue's own record already adjudicates
-// this branch as a rejected attempt rather than an unnoticed strand (gt-hsum):
-// a merge-rejection record naming the branch, plus a closure through the merge
-// queue afterwards.
+// this branch's attempt as rejected rather than the fix ever being lost
+// (gt-hsum): a merge-rejection record for the newest rejection attempt that the
+// closure through the merge queue attests, naming this branch.
 //
 // Both halves are load-bearing. A rejection alone can still leave a collapse —
 // the attempt failed and the issue sits closed with nothing in force — so it
 // suppresses only when the close reason shows the issue went back through the
-// merge queue. The pair is the system's own record of "this branch was passed
+// merge queue. The pair is the system's own record of "this attempt was passed
 // over"; deriving that verdict from git state instead is the false positive
 // this closes.
+//
+// The queue half is the newest rejection the closure attests (the attempt
+// number gt done writes into the close reason, "pending_mr: <id> (attempt
+// N)"). The polecat branch is reused for every attempt of an issue — the
+// refinery's dead-worker recovery keeps it and the rework is pushed to the
+// same ref — so the issue's notes accumulate one rejection block per attempt
+// on that one branch name. The rejection that adjudicates a closure is the
+// newest one the closure's attempt reached, never an older one on the same
+// name: an older rejection is exactly what an attempt re-enters the queue to
+// fix, so matching by branch alone (pre-attempt-number shape) lets attempt 1's
+// rejection hide a genuinely stranded attempt 2 (gt-0cp3).
 //
 // The record is read rather than the MR because MR beads are purged on merge,
 // so a landed MR cannot be looked up once its fix is in force — exactly the
 // state being suppressed.
 func supersededByRecord(record beadRecord, branch string) bool {
-	if pendingMRFromCloseReason(record.CloseReason) == "" {
+	closureAttempt := closureAttemptFromCloseReason(record.CloseReason)
+	rejected, _ := rejectedBranchAttemptFromNotes(record.Notes, branch)
+	if rejected <= 0 {
 		return false
 	}
-	return rejectedBranchFromNotes(record.Notes, branch)
+	if closureAttempt <= 0 {
+		// A pending_mr closure predating the attempt suffix names no attempt.
+		// No live writer produces that shape (gt done always writes the
+		// number), so such a closure cannot attest to any rejection — the
+		// branch stays reportable rather than suppressed on an
+		// unverifiable pairing.
+		return false
+	}
+	return rejected >= closureAttempt
 }
+
+// closureAttemptFromCloseReason returns the attempt number the pending_mr
+// closure attests to, or 0 when the reason is not the gt done shape or its
+// attempt field is absent/unreadable. gt done writes
+// "pending_mr: <id> (attempt N)"; the MR id keeps the strict bare-id shape
+// pendingMRFromCloseReason enforces — prose after the id is not a gt done
+// closure.
+func closureAttemptFromCloseReason(closeReason string) int {
+	if pendingMRFromCloseReason(closeReason) == "" {
+		return 0
+	}
+	return attemptNumberFromCloseReason(closeReason)
+}
+
+// attemptNumberFromCloseReason reads the "(attempt N)" field of a close
+// reason: the number the attempt that wrote the closure was (gt done writes
+// it, the refinery's dead-worker recovery puts the same number in the
+// rejection note it appends, so the two records name the same attempt). The
+// writer pins the number to the end of the reason, so it is the digit run
+// between "(attempt " and the closing paren — parsing past the paren (the
+// reason's final byte) reads "1)" and yields 0. 0 when absent or
+// unparseable.
+func attemptNumberFromCloseReason(closeReason string) int {
+	m := closureAttemptSuffixRe.FindStringSubmatch(strings.ToLower(closeReason))
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// rejectedBranchAttemptFromNotes reports whether the issue's notes carry a
+// merge-rejection record naming branch, and returns the attempt number the
+// rejection that names it was recorded as (0, false when none does).
+//
+// The record is the refinery's merge-rejection note
+// (refinery.MergeRejectionNoteMarker), whose header carries the attempt
+// ("MERGE REJECTION (attempt N):") and whose "Branch:" line names the
+// rejected branch. The polecat work formula's resume path already greps for
+// that marker, so the field is an existing contract rather than one this
+// scan invents. Both the attempt and the branch are compared by value, so
+// unrelated prose in the notes cannot suppress a finding.
+func rejectedBranchAttemptFromNotes(notes, branch string) (int, bool) {
+	want := normalizeBranchRef(branch)
+	if want == "" || !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
+		return 0, false
+	}
+	best := 0
+	// Notes accumulate one record per attempt, so only the text following a
+	// marker can belong to a rejection.
+	for _, block := range strings.Split(notes, refinery.MergeRejectionNoteMarker)[1:] {
+		attempt := attemptFromRejectionBlock(block)
+		for _, line := range strings.Split(block, "\n") {
+			key, value, found := strings.Cut(line, ":")
+			if !found || !strings.EqualFold(strings.TrimSpace(key), "branch") {
+				continue
+			}
+			if normalizeBranchRef(value) == want && attempt > best {
+				best = attempt
+			}
+		}
+	}
+	return best, best > 0
+}
+
+// attemptFromRejectionBlock reads the attempt number from a merge-rejection
+// note block. The block is the text after the marker up to the next marker or
+// the end of the notes, so its first line is the note's header minus the
+// marker itself — " (attempt N): failure - error" (the refinery's
+// formatMergeRejectionNote puts the number in parentheses right after
+// "MERGE REJECTION"). noteField collapses the failure type and error onto that
+// line, so the header cannot wrap; the value is compared by value below, so
+// prose that merely mentions the number cannot forge it. 0 when the header
+// carries no attempt.
+func attemptFromRejectionBlock(block string) int {
+	header := block
+	if i := strings.IndexByte(header, '\n'); i >= 0 {
+		header = header[:i]
+	}
+	m := attemptHeaderRe.FindStringSubmatch(strings.TrimSpace(header))
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// attemptHeaderRe matches the attempt at the start of a merge-rejection note
+// header: "(attempt N)". The block handed to attemptFromRejectionBlock is the
+// text AFTER the marker, so the header begins with the parentheses, not with
+// "MERGE REJECTION" — matching the marker text here could never hit (gt-0cp3).
+var attemptHeaderRe = regexp.MustCompile(`^\(attempt\s+(\d+)\)`)
 
 // supersededIssueFromCloseReason returns the later issue (or MR) id a close
 // reason names as carrying the fix forward ("Superseded by <id>: ...", case
@@ -819,36 +962,6 @@ func supersededIssueFromCloseReason(closeReason string) string {
 		rest = rest[:end]
 	}
 	return strings.TrimRight(rest, ".")
-}
-
-// rejectedBranchFromNotes reports whether the issue's notes carry a
-// merge-rejection record naming branch.
-//
-// The record is the refinery's merge-rejection note
-// (refinery.MergeRejectionNoteMarker), whose "Branch:" line names the rejected
-// branch. The polecat work formula's resume path already greps for that
-// marker, so the field is an existing contract rather than one this scan
-// invents. The line is compared against the candidate by value, so unrelated
-// prose in the notes cannot suppress a finding.
-func rejectedBranchFromNotes(notes, branch string) bool {
-	want := normalizeBranchRef(branch)
-	if want == "" || !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
-		return false
-	}
-	// Notes accumulate one record per attempt, so only the text following a
-	// marker can belong to a rejection.
-	for _, block := range strings.Split(notes, refinery.MergeRejectionNoteMarker)[1:] {
-		for _, line := range strings.Split(block, "\n") {
-			key, value, found := strings.Cut(line, ":")
-			if !found || !strings.EqualFold(strings.TrimSpace(key), "branch") {
-				continue
-			}
-			if normalizeBranchRef(value) == want {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // reportBranchStrand persists a branch-strand finding to the source issue

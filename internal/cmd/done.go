@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -3330,7 +3331,21 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 				// check (recheckMRSourceStillMergeable) can tell this
 				// ordinary self-close apart from a source issue a human
 				// closed for real abandonment (gt-di2t).
-				if err := hookBd.CloseWithReason(beads.PendingMergeCloseReason(pendingMRID), hookedBeadID); err != nil {
+				//
+				// The attempt the closure carries counts the merge-rejection
+				// records this closure supersedes on the issue (the refinery
+				// appends one "MERGE REJECTION (attempt N)" note per rejected
+				// attempt of a reused branch) plus this submission: the
+				// witness's stranded-branch scan adjudicates a superseded
+				// branch by comparing the newest rejection a closure attests
+				// against the closure's own attempt (gt-0cp3). The substring
+				// counted is exactly the one mol-refinery-patrol's reject step
+				// derives its own attempt number from, so the note that step
+				// writes for this submission names the attempt this closure
+				// does; a bare marker followed by anything else is not a
+				// rejection record to either reader.
+				attempt := 1 + strings.Count(hookedBead.Notes, refinery.MergeRejectionNoteMarker+" (attempt")
+				if err := hookBd.CloseWithReason(beads.PendingMergeCloseReason(pendingMRID, attempt), hookedBeadID); err != nil {
 					// Non-fatal: warn but continue
 					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
 				}
