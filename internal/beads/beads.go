@@ -981,6 +981,10 @@ func (b *Beads) forIssueID(id string) *Beads {
 // test gets a fresh database with no prior identity to conflict with, while
 // still reusing the one shared container (see the testdb_/doctest_ naming
 // convention orphan-cleanup already recognizes in jsonl_git_backup.go).
+//
+// A retried init gets a freshly minted name too, and the workspace the failed
+// attempt wrote into cleared, because a half-written .beads answers as a legacy
+// one (bdInitRetryReset, gt-o8i9f).
 func (b *Beads) Init(prefix string) error {
 	args := []string{"init"}
 	if prefix != "" {
