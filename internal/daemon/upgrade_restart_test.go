@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -433,5 +434,48 @@ func TestIsAncestorFnRealGit(t *testing.T) {
 	}
 	if got := mergedAtFn(repo, "0123456789abcdef0123456789abcdef01234567"); got != "" {
 		t.Fatalf("mergedAtFn(missing) = %q, want empty", got)
+	}
+}
+
+// The run loop's exit after a heartbeat (both the initial heartbeat and the
+// ticker): no request, no shutdown; a request runs shutdown without stopping
+// Dolt and yields ErrRestartForUpgrade for Run to return.
+func TestExitForUpgradeIfRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		requested    bool
+		wantErr      bool
+		wantShutdown bool
+	}{
+		{"not requested", false, false, false},
+		{"requested", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stops := 0
+			d := upgradeTestDaemon(t)
+			d.doltServer = &DoltServerManager{
+				config:   &DoltServerConfig{Enabled: true},
+				townRoot: d.config.TownRoot,
+				logger:   func(string, ...interface{}) {},
+				stopFn:   func() { stops++ },
+			}
+			d.upgradeRestartRequested.Store(tc.requested)
+			state := &State{Running: true}
+
+			err := d.exitForUpgradeIfRequested(state)
+
+			if got := errors.Is(err, ErrRestartForUpgrade); got != tc.wantErr || (!tc.wantErr && err != nil) {
+				t.Fatalf("err = %v, want ErrRestartForUpgrade=%v", err, tc.wantErr)
+			}
+			// shutdown marks the state stopped; it is the observable proof it ran.
+			if ranShutdown := !state.Running; ranShutdown != tc.wantShutdown {
+				t.Fatalf("shutdown ran = %v, want %v", ranShutdown, tc.wantShutdown)
+			}
+			// Unrequested: no shutdown at all (an ordinary shutdown would stop
+			// Dolt once). Requested: shutdown ran but left Dolt running.
+			if stops != 0 {
+				t.Fatalf("Dolt stop calls = %d, want 0", stops)
+			}
+		})
 	}
 }

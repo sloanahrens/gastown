@@ -968,10 +968,8 @@ func (d *Daemon) Run() (err error) {
 	// Initial heartbeat
 	d.heartbeat(state)
 	startupComplete = true
-	if d.upgradeRestartRequested.Load() {
-		d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
-		_ = d.shutdown(state)
-		return ErrRestartForUpgrade
+	if err := d.exitForUpgradeIfRequested(state); err != nil {
+		return err
 	}
 
 	for {
@@ -1126,10 +1124,8 @@ func (d *Daemon) Run() (err error) {
 
 		case <-timer.C:
 			d.heartbeat(state)
-			if d.upgradeRestartRequested.Load() {
-				d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
-				_ = d.shutdown(state)
-				return ErrRestartForUpgrade
+			if err := d.exitForUpgradeIfRequested(state); err != nil {
+				return err
 			}
 
 			// Fixed recovery interval (no activity-based backoff)

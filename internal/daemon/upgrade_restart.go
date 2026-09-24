@@ -321,3 +321,16 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	d.upgradeRestartRequested.Store(true)
 	return true
 }
+
+// exitForUpgradeIfRequested is the run loop's exit after a heartbeat: nil when
+// no upgrade restart was requested; otherwise it runs the normal shutdown
+// (which leaves Dolt running) and returns ErrRestartForUpgrade for Run to
+// return, which the caller maps to exit code 75.
+func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
+	if !d.upgradeRestartRequested.Load() {
+		return nil
+	}
+	d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
+	_ = d.shutdown(state)
+	return ErrRestartForUpgrade
+}
