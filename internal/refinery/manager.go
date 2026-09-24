@@ -994,6 +994,12 @@ type RejectionRecord struct {
 	// here, so the note header and the reason agree. Zero means the caller has
 	// no attempt of its own and the MR's retry count is used instead.
 	Attempt int
+
+	// FailureType is what this rejection was actually about, in the vocabulary
+	// ClassifyRejectionFailureType accepts. Empty means the caller did not
+	// classify it, and the rejection is recorded and reported with no class
+	// rather than with a defaulted one (gt-1jig).
+	FailureType string
 }
 
 // rejectionRequest is the record of a rejection, in the one shape both its
@@ -1014,7 +1020,7 @@ func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRe
 		SourceIssue:   mr.IssueID,
 		Worker:        mr.Worker,
 		RigName:       rigName,
-		FailureType:   "editorial",
+		FailureType:   rejectionFailureType(rec),
 		ErrorMsg:      reason,
 		AttemptNumber: rejectionAttempt(mr, rec),
 		// The reason doubles as the RECOVERED_BEAD mail's Rejection-Summary
@@ -1028,6 +1034,23 @@ func rejectionRequest(mr *MergeRequest, rigName, reason string, rec *RejectionRe
 	return req
 }
 
+// rejectionFailureType is the class a caller's rejection record states, or ""
+// when it states none. A value outside the vocabulary is dropped: the CLI
+// refuses one before anything is rejected (ClassifyRejectionFailureType), so a
+// value reaching here is an internal caller's typo, and omitting the class is
+// the honest record of a rejection nobody classified. Defaulting it instead is
+// what put "editorial" on test failures and compile breaks alike (gt-1jig).
+func rejectionFailureType(rec *RejectionRecord) string {
+	if rec == nil {
+		return ""
+	}
+	class, err := ClassifyRejectionFailureType(rec.FailureType)
+	if err != nil {
+		return ""
+	}
+	return class
+}
+
 // RejectMR manually rejects a merge request.
 // It closes the MR with rejected status and optionally notifies the worker.
 // noRecover skips dead-worker recovery of the source bead entirely — set it
@@ -1038,11 +1061,11 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool, noReco
 	return m.rejectMR(idOrBranch, reason, notify, noRecover, nil)
 }
 
-// RejectMRRecording is RejectMR for a rejection that carries an om verdict:
-// rec's findings are recorded on the source bead's notes whatever happens to
-// dead-worker recovery, so the next attempt reads back what this one was
-// rejected for even when the caller redispatching the bead itself passed
-// noRecover.
+// RejectMRRecording is RejectMR for a rejection the caller has a record of —
+// an om verdict's findings, or at least its failure class: rec's record is
+// written to the source bead's notes whatever happens to dead-worker recovery,
+// so the next attempt reads back what this one was rejected for even when the
+// caller redispatching the bead itself passed noRecover.
 //
 // An error with a non-nil MR means the MR was rejected but the verdict's
 // durable record was not written. An error with a nil MR means nothing was
@@ -1114,11 +1137,11 @@ func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noReco
 		}
 	}
 
-	// The verdict's durable record. Recovery already wrote it when it ran —
+	// The caller's durable record. Recovery already wrote it when it ran —
 	// the same note through the same writer, so appendRejectionNote finds it
 	// and stops. When recovery did not run (--no-recover, or the worker still
-	// holds the bead) this is the only writer, and a rejection with no
-	// findings on the bead is one the next attempt re-merges (gt-s4f6).
+	// holds the bead) this is the only writer, and a rejection with nothing
+	// on the bead is one the next attempt re-merges (gt-s4f6).
 	var recordErr error
 	if rec != nil && !closeResult.AlreadyTerminal && strings.TrimSpace(mr.IssueID) != "" {
 		recordErr = m.RecordRejectionFindings(mr, reason, *rec)

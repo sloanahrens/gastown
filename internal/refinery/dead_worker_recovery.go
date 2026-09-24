@@ -20,6 +20,55 @@ import (
 // reuse the surviving branch. Keep the marker and the formula in sync (gt-tc0).
 const MergeRejectionNoteMarker = "MERGE REJECTION"
 
+// Rejection failure classes: what a rejection was actually about, the
+// vocabulary `gt mq reject --failure-type` accepts. These are strings rather
+// than refinery.FailureType because that type classifies what the merge
+// machinery did (checkout, push, conflict) while these classify what the
+// reviewer found wrong with the branch.
+//
+// A rejection's class is durable history a later reader triages by, so it is
+// never defaulted: a caller that cannot say what broke records no class
+// (gt-1jig).
+const (
+	FailureTypeEditorial = "editorial"
+	FailureTypeTests     = "tests"
+	FailureTypeBuild     = "build"
+	FailureTypeLint      = "lint"
+	FailureTypeTypecheck = "typecheck"
+)
+
+// failureTypeAliases maps the spellings other parts of the system use for a
+// class onto the canonical one, so one class cannot become two entries in a
+// bead's history. mol-refinery-patrol's FIX_NEEDED bodies write "om-editorial".
+var failureTypeAliases = map[string]string{
+	"om-editorial": FailureTypeEditorial,
+}
+
+// failureTypes is the accepted vocabulary, in the order help and error text
+// list it.
+var failureTypes = []string{
+	FailureTypeTests, FailureTypeBuild, FailureTypeLint, FailureTypeTypecheck, FailureTypeEditorial,
+}
+
+// ClassifyRejectionFailureType normalizes a caller-supplied failure class,
+// returning "" for an empty one (the caller cannot classify this rejection)
+// and an error for a value outside the vocabulary.
+func ClassifyRejectionFailureType(class string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	if normalized == "" {
+		return "", nil
+	}
+	if canonical, ok := failureTypeAliases[normalized]; ok {
+		return canonical, nil
+	}
+	for _, known := range failureTypes {
+		if normalized == known {
+			return known, nil
+		}
+	}
+	return "", fmt.Errorf("unknown failure type %q: want one of %s", class, strings.Join(failureTypes, ", "))
+}
+
 // deadWorkerRecoveryRequest describes a branch-caused merge rejection whose
 // worker polecat may no longer have a live session.
 type deadWorkerRecoveryRequest struct {
@@ -29,9 +78,14 @@ type deadWorkerRecoveryRequest struct {
 	SourceIssue   string
 	Worker        string // as recorded on the MR, e.g. "polecats/nux"
 	RigName       string
-	FailureType   string
 	ErrorMsg      string
 	AttemptNumber int
+
+	// FailureType is what this rejection was actually about, in the vocabulary
+	// ClassifyRejectionFailureType accepts. Empty means the caller did not
+	// classify it: the note and the RECOVERED_BEAD mail then omit the class
+	// rather than carry a defaulted one (gt-1jig).
+	FailureType string
 
 	// Findings carries the om editorial findings behind this rejection, when
 	// it came from an om review (`gt mq review`) rather than a plain
@@ -167,9 +221,15 @@ func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
 	if attempt < 1 {
 		attempt = 1
 	}
-	note := fmt.Sprintf("%s (attempt %d): %s - %s\nBranch: %s\nTarget: %s\nMR: %s",
-		MergeRejectionNoteMarker, attempt, noteField(req.FailureType), noteField(req.ErrorMsg),
-		req.Branch, req.Target, req.MRID)
+	// The class stands in the header only when the caller classified it, so an
+	// unclassified rejection reads as one instead of naming a subsystem that
+	// had nothing to do with it (gt-1jig).
+	header := fmt.Sprintf("%s (attempt %d): ", MergeRejectionNoteMarker, attempt)
+	if class := noteField(req.FailureType); class != "" {
+		header += class + " - "
+	}
+	note := header + noteField(req.ErrorMsg) +
+		fmt.Sprintf("\nBranch: %s\nTarget: %s\nMR: %s", req.Branch, req.Target, req.MRID)
 	for _, f := range req.Findings {
 		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s",
 			noteField(f.ID), noteField(f.Severity), noteField(f.Path), f.Line, noteField(f.Title))
@@ -416,6 +476,14 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 		}
 	}
 
+	// The class is a line only when the caller classified it: a recipient
+	// triages by this field, so one naming a failure nobody established is
+	// worse than one that admits it does not know (gt-1jig).
+	failureLine := ""
+	if class := strings.TrimSpace(req.FailureType); class != "" {
+		failureLine = fmt.Sprintf("Failure-Type: %s\n", class)
+	}
+
 	msg := &mail.Message{
 		From:     req.RigName + "/refinery",
 		To:       "deacon/",
@@ -427,14 +495,13 @@ Bead: %s
 Polecat: %s/polecats/%s
 MR: %s
 Branch: %s
-Failure-Type: %s
-Attempt: %d
+%sAttempt: %d
 %s
 The source bead has been reopened with %s notes.
 Please re-dispatch. The branch survives on origin, so the next polecat
 can check it out and make a targeted fix instead of starting over.`,
 			req.SourceIssue, req.RigName, polecatName, req.MRID, req.Branch,
-			req.FailureType, req.AttemptNumber, rejectionLines.String(), MergeRejectionNoteMarker),
+			failureLine, req.AttemptNumber, rejectionLines.String(), MergeRejectionNoteMarker),
 	}
 	if err := sendMail(msg); err != nil {
 		logf("[Engineer] Warning: failed to send RECOVERED_BEAD for %s: %v\n", req.SourceIssue, err)

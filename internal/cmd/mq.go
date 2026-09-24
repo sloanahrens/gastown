@@ -41,7 +41,8 @@ var (
 	mqRejectStdin     bool // Read reason from stdin
 	mqRejectNoRecover bool // Skip dead-worker recovery of the source bead
 	mqRejectFindings  string
-	mqRejectAttempt   int // Attempt this rejection IS, when the caller numbers them
+	mqRejectAttempt   int    // Attempt this rejection IS, when the caller numbers them
+	mqRejectFailure   string // Failure class of this rejection; empty records none
 
 	// List command flags
 	mqListReady  bool
@@ -450,6 +451,7 @@ func init() {
 	mqRejectCmd.Flags().BoolVar(&mqRejectNoRecover, "no-recover", false, "Do not reopen the source bead for redispatch (use for superseded/duplicate/already-merged work)")
 	mqRejectCmd.Flags().StringVar(&mqRejectFindings, "findings-json", "", "Path to a 'gt mq review --json' result (or - for stdin): its findings are recorded on the source bead's notes in the format the next attempt parses, even with --no-recover")
 	mqRejectCmd.Flags().IntVar(&mqRejectAttempt, "attempt", 0, "Attempt number this rejection is, when the caller numbers them: the recorded note names it, so it matches the attempt in --reason")
+	mqRejectCmd.Flags().StringVar(&mqRejectFailure, "failure-type", "", "What this rejection was actually about (tests|build|lint|typecheck|editorial): recorded in the source bead's note and the RECOVERED_BEAD mail, which carry no class at all when this is unset. Defaulted to editorial only by --findings-json, whose input is an om verdict")
 
 	// Status flags
 	mqStatusCmd.Flags().BoolVar(&mqStatusJSON, "json", false, "Output as JSON")
@@ -617,6 +619,42 @@ func readRejectFindings(path string) (refinery.RejectionRecord, error) {
 	}, nil
 }
 
+// rejectRecord resolves the record a rejection carries from the two flags that
+// describe one: --findings-json, an om verdict whose findings and receipt the
+// next attempt reads back, and --failure-type, what actually broke. Both
+// refusals — an unreadable findings file, a class outside the vocabulary —
+// happen here, before anything is rejected, and are split out from runMQReject
+// so they are testable without a rig, the way rejectReason is.
+//
+// --findings-json classifies its own rejection as editorial, its input being
+// an om review verdict. --failure-type overrides that, for the caller who read
+// the verdict and knows the branch's real defect was something the verdict
+// only described in prose (gt-1jig).
+func rejectRecord(findingsPath, failureType string, attempt int) (refinery.RejectionRecord, error) {
+	var rec refinery.RejectionRecord
+	if findingsPath != "" {
+		var err error
+		rec, err = readRejectFindings(findingsPath)
+		if err != nil {
+			return refinery.RejectionRecord{}, err
+		}
+		// A result carrying no note is an infra failure, not a verdict — it
+		// says nothing about the branch, so it classifies nothing either.
+		if rec.Receipt != nil || len(rec.Findings) > 0 {
+			rec.FailureType = refinery.FailureTypeEditorial
+		}
+	}
+	if failureType != "" {
+		class, err := refinery.ClassifyRejectionFailureType(failureType)
+		if err != nil {
+			return refinery.RejectionRecord{}, fmt.Errorf("--failure-type: %w", err)
+		}
+		rec.FailureType = class
+	}
+	rec.Attempt = attempt
+	return rec, nil
+}
+
 // rejectReason resolves the reject reason and rejects the flag combinations
 // that would read it from two places at once. It runs before anything is
 // rejected — and is split out from runMQReject so both refusals are testable
@@ -669,17 +707,14 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 	}
 	mqRejectReason = reason
 
-	// Parse --findings-json before rejecting anything: a missing or malformed
-	// file must fail while nothing has changed yet, not after the MR is closed
-	// and recovery has run (gt-s4f6).
-	var rec refinery.RejectionRecord
-	if mqRejectFindings != "" {
-		rec, err = readRejectFindings(mqRejectFindings)
-		if err != nil {
-			return err
-		}
+	// Resolve the record before rejecting anything: a missing or malformed
+	// findings file, or a failure class outside the vocabulary, must fail
+	// while nothing has changed yet, not after the MR is closed and recovery
+	// has run (gt-s4f6, gt-1jig).
+	rec, err := rejectRecord(mqRejectFindings, mqRejectFailure, mqRejectAttempt)
+	if err != nil {
+		return err
 	}
-	rec.Attempt = mqRejectAttempt
 
 	rigName := args[0]
 	mrIDOrBranch := args[1]
@@ -689,13 +724,18 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// The verdict's findings go onto the source bead's notes as the parseable
-	// lines the next attempt reads back. RejectMRRecording does that whatever
-	// --no-recover says: a caller that redispatches the bead itself leaves the
-	// record, and one that lets recovery run gets the identical note from
-	// there (gt-s4f6).
+	// The verdict's findings, and the failure class, go onto the source bead's
+	// notes as the lines the next attempt reads back. RejectMRRecording does
+	// that whatever --no-recover says: a caller that redispatches the bead
+	// itself leaves the record, and one that lets recovery run gets the
+	// identical note from there (gt-s4f6).
+	//
+	// Either flag means this call has a record to carry, so either one routes
+	// through RejectMRRecording — the route that reaches the note and the
+	// RECOVERED_BEAD mail. A rejection whose note someone else writes passes
+	// neither, so one rejection keeps exactly one writer of its note.
 	var result *refinery.MergeRequest
-	if mqRejectFindings != "" {
+	if mqRejectFindings != "" || mqRejectFailure != "" {
 		result, err = mgr.RejectMRRecording(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover, rec)
 	} else {
 		result, err = mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify, mqRejectNoRecover)
