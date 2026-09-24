@@ -1072,6 +1072,18 @@ const bdSubprocessTimeout = 60 * time.Second
 // waiting out a wedged init.
 const bdInitSubprocessTimeout = 5 * time.Minute
 
+// bdContainerSubprocessTimeout is the budget for every bd command other than
+// init against a test Dolt container (targetsTestDoltContainer). A single
+// query answered by a container whose host port is shared with the rest of the
+// gate's parallel packages can stall for longer than the steady-state 60s
+// without anything being wrong with the command: the gt-wisp-mlhp gate log
+// (gt-elvf4) shows refinery's bd create and a plain git-config bd call dying
+// at 1m0s while its package's container answered inits in the minutes. The
+// same five-minute ceiling as bdInitSubprocessTimeout is the budget a
+// contended-but-alive container needs, and one that keeps a dead container's
+// failure inside the retry window's terms.
+const bdContainerSubprocessTimeout = 5 * time.Minute
+
 // bdTimeoutEnvVar overrides every subprocess budget, bdInitSubprocessTimeout
 // included, so tests and unusual workloads can shorten one command's budget.
 const bdTimeoutEnvVar = "GT_BD_TIMEOUT_SEC"
@@ -1110,6 +1122,24 @@ func subprocessTimeoutFor(args []string) time.Duration {
 	}
 	if len(args) > 0 && args[0] == "init" {
 		return bdInitSubprocessTimeout
+	}
+	return bdSubprocessTimeout
+}
+
+// subprocessTimeoutForClient is the budget for the client's own run paths:
+// subprocessTimeoutFor's per-command budgets with the test Dolt container's
+// load applied on top (bdContainerSubprocessTimeout for any command but init,
+// which already gets bdInitSubprocessTimeout). runBdOnce is a method, so the
+// client's scoping reaches the budget here rather than in the function above.
+func (b *Beads) subprocessTimeoutForClient(args []string) time.Duration {
+	if d, ok := parseBdTimeoutOverride(); ok {
+		return d
+	}
+	if len(args) > 0 && args[0] == "init" {
+		return bdInitSubprocessTimeout
+	}
+	if b.targetsTestDoltContainer() {
+		return bdContainerSubprocessTimeout
 	}
 	return bdSubprocessTimeout
 }
@@ -1193,7 +1223,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry.
-	timeout := subprocessTimeoutFor(args)
+	timeout := b.subprocessTimeoutForClient(args)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

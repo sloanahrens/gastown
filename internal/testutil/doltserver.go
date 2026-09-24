@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,7 @@ var (
 	doltCtrOnce sync.Once
 	doltCtrErr  error
 	doltCtrPort string
+	doltCtrSlot chan struct{}
 	dockerOnce  sync.Once
 	dockerAvail bool
 )
@@ -126,6 +128,53 @@ func isDockerAvailable() bool {
 		dockerAvail = exec.Command("docker", "info").Run() == nil
 	})
 	return dockerAvail
+}
+
+// doltContainerConcurrencyEnv overrides doltContainerConcurrencyDefault with
+// a positive integer.
+const doltContainerConcurrencyEnv = "GT_TEST_DOLT_CONCURRENCY"
+
+// doltContainerConcurrencyDefault caps how many Dolt containers one host may
+// run at once. The Docker VM every container shares is small (the town's
+// 7.6GiB exhaustion, gt-p98h), and the gate runs up to eight packages in
+// parallel, one container each: eight Dolt servers' worth of memory on that
+// VM is the pressure that makes each of them slow enough for another's
+// database work to be misread (gt-elvf4). Four keeps the memory share inside
+// the VM while the extra packages wait their turn for a slot instead of
+// slowing the VM down.
+// doltContainerConcurrencyDefault is the cap doltContainerSlots initializes
+// to when the env var is absent or invalid.
+const doltContainerConcurrencyDefault = 4
+
+// doltContainerSlots is the one host-wide cap on running Dolt containers,
+// sized from the env var once. A var so a test can shrink it without editing
+// the default.
+var doltContainerSlots = make(chan struct{}, doltContainerConcurrency())
+
+// doltContainerConcurrency is the size doltContainerSlots is filled with:
+// doltContainerConcurrencyDefault unless doltContainerConcurrencyEnv names a
+// positive integer.
+func doltContainerConcurrency() int {
+	if v := os.Getenv(doltContainerConcurrencyEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return doltContainerConcurrencyDefault
+}
+
+// requireDockerSlot waits for a free one of doltContainerSlots and returns it,
+// so at most doltContainerConcurrency containers run at once on this host.
+// Both container shapes (the shared per-package one and a per-test isolated
+// one) take a slot here: a cap on only one would let the other re-create the
+// contention the cap exists for.
+func requireDockerSlot(ctx context.Context) (chan struct{}, error) {
+	select {
+	case <-doltContainerSlots:
+		return doltContainerSlots, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // isReaperRemovingErr returns true if the error is a transient "removing"
@@ -302,23 +351,34 @@ func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error)
 }
 
 // startSharedDoltContainer starts the shared Dolt container and sets
-// GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
+// GT_DOLT_PORT and BEADS_DOLT_PORT process-wide. It holds one
+// doltContainerSlots until TerminateDoltContainer releases it: the shared
+// container lives to the end of its process's tests, and it counts against the
+// same host cap as the per-test isolated containers (gt-elvf4).
 func startSharedDoltContainer() {
 	ctx := context.Background()
+	slot, err := requireDockerSlot(ctx)
+	if err != nil {
+		doltCtrErr = fmt.Errorf("waiting for a Dolt container slot: %w", err)
+		return
+	}
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
+		slot <- struct{}{}
 		doltCtrErr = fmt.Errorf("starting Dolt container: %w", err)
 		return
 	}
 
 	p, err := waitForMappedPort(ctx, doltPortLookup(ctr))
 	if err != nil {
-		doltCtrErr = containerStartError(ctx, ctr, fmt.Errorf("getting mapped port: %w", err))
 		_ = testcontainers.TerminateContainer(ctr)
+		slot <- struct{}{}
+		doltCtrErr = containerStartError(ctx, ctr, fmt.Errorf("getting mapped port: %w", err))
 		return
 	}
 
 	doltCtr = ctr
+	doltCtrSlot = slot
 	doltCtrPort = p
 	os.Setenv("GT_DOLT_PORT", doltCtrPort)    //nolint:tenv // intentional process-wide env
 	os.Setenv("BEADS_DOLT_PORT", doltCtrPort) //nolint:tenv // intentional process-wide env
@@ -346,8 +406,15 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	}
 
 	ctx := context.Background()
+	slot, err := requireDockerSlot(ctx)
+	if err != nil {
+		t.Fatalf("waiting for a Dolt container slot: %v", err)
+	}
+	release := func() { slot <- struct{}{} }
+	t.Cleanup(release)
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
+		release()
 		if isDockerUnavailableErr(err) {
 			t.Skipf("Dolt container unavailable: %v", err)
 		}
@@ -437,5 +504,9 @@ func TerminateDoltContainer() error {
 	}
 	err := testcontainers.TerminateContainer(doltCtr)
 	doltCtr = nil
+	if doltCtrSlot != nil {
+		doltCtrSlot <- struct{}{} // return the slot the shared container held
+		doltCtrSlot = nil
+	}
 	return err
 }

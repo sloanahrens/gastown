@@ -235,6 +235,13 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// was a documented but dead opt-out (gt-yav3 MR1 bounce).
 	allowLiveTmux := os.Getenv(AllowLiveTmuxEnv) == "1"
 
+	// Same reason as allowLiveTmux: scrubProcessEnv removes GT_* variables
+	// (this one is on its keep list, but it is read after the scrub, where the
+	// harness may legitimately have unset it), and the cap's slot pool is
+	// sized from it once at package load. Capturing it here, before the scrub,
+	// sizes the cap for the caller's dial instead of the scrubbed default.
+	doltConcurrency := os.Getenv(doltContainerConcurrencyEnv)
+
 	// Same reason as allowLiveTmux: scrubInheritedTmuxVars removes this, and
 	// the tripwire in Finish compares against the server the test process was
 	// itself launched inside. Captured here, before the scrub.
@@ -246,6 +253,11 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	if allowLiveTmux {
 		if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
 			return nil, fmt.Errorf("restoring %s: %w", AllowLiveTmuxEnv, err)
+		}
+	}
+	if doltConcurrency != "" {
+		if err := os.Setenv(doltContainerConcurrencyEnv, doltConcurrency); err != nil {
+			return nil, fmt.Errorf("restoring %s: %w", doltContainerConcurrencyEnv, err)
 		}
 	}
 
@@ -462,13 +474,13 @@ func scrubProcessEnv(keepDolt bool) {
 			_ = os.Setenv(k, v)
 		}
 	}()
-	// DockerTestsEnv is the caller's opt-in to container-backed tests, not
-	// live-town context; it is a GT_* variable only by naming convention.
-	// Without this, `GT_TEST_DOCKER=1 go test` would be wiped here before
-	// the WithDolt option or any RequireDoltContainer call could read it,
-	// and the opt-in would be a documented but dead switch (same shape as
-	// the AllowLiveTmuxEnv bounce, gt-yav3).
-	keep := map[string]bool{DockerTestsEnv: true}
+	// DockerTestsEnv is the caller's opt-in to container-backed tests, and
+	// doltContainerConcurrencyEnv sizes the cap that gates how many of them
+	// may run at once: neither is live-town context, both are GT_* variables
+	// only by naming convention, and a scrub that wipes either turns the
+	// documented dial into a dead switch (same shape as the AllowLiveTmuxEnv
+	// bounce, gt-yav3).
+	keep := map[string]bool{DockerTestsEnv: true, doltContainerConcurrencyEnv: true}
 	if keepDolt {
 		for _, k := range doltPassthroughVars {
 			keep[k] = true

@@ -16,17 +16,23 @@ import (
 // 60s; an explicit GT_BD_TIMEOUT_SEC still wins over both (gt-824d).
 func TestSubprocessTimeoutForBudget(t *testing.T) {
 	tests := []struct {
-		name   string
-		args   []string
-		envVal string
-		envSet bool
-		want   time.Duration
+		name       string
+		args       []string
+		isolated   bool
+		serverPort int
+		envVal     string
+		envSet     bool
+		want       time.Duration
 	}{
 		{name: "init takes the init budget", args: []string{"init", "--prefix", "gt"}, want: bdInitSubprocessTimeout},
 		{name: "list takes the default budget", args: []string{"list", "--json"}, want: bdSubprocessTimeout},
 		{name: "override shortens init", args: []string{"init"}, envSet: true, envVal: "2", want: 2 * time.Second},
 		{name: "override shortens list", args: []string{"list"}, envSet: true, envVal: "2", want: 2 * time.Second},
 		{name: "invalid override leaves init on the init budget", args: []string{"init"}, envSet: true, envVal: "abc", want: bdInitSubprocessTimeout},
+		{name: "create against the test container takes the container budget", args: []string{"create", "--title", "x"}, isolated: true, serverPort: 55491, want: bdContainerSubprocessTimeout},
+		{name: "init against the test container keeps the init budget", args: []string{"init", "--prefix", "gt"}, isolated: true, serverPort: 55491, want: bdInitSubprocessTimeout},
+		{name: "list against the test container takes the container budget", args: []string{"list", "--json"}, isolated: true, serverPort: 55491, want: bdContainerSubprocessTimeout},
+		{name: "override shortens a container call", args: []string{"create", "--title", "x"}, isolated: true, serverPort: 55491, envSet: true, envVal: "2", want: 2 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -35,8 +41,9 @@ func TestSubprocessTimeoutForBudget(t *testing.T) {
 			} else {
 				_ = os.Unsetenv(bdTimeoutEnvVar)
 			}
-			if got := subprocessTimeoutFor(tt.args); got != tt.want {
-				t.Errorf("subprocessTimeoutFor(%q) = %v, want %v", tt.args, got, tt.want)
+			b := &Beads{isolated: tt.isolated, serverPort: tt.serverPort}
+			if got := b.subprocessTimeoutForClient(tt.args); got != tt.want {
+				t.Errorf("subprocessTimeoutForClient(%q) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
 	}
