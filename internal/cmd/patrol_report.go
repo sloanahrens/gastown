@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -52,6 +53,17 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("detecting role: %w", err)
 	}
 
+	return runPatrolReportFor(os.Stdout, roleInfo, patrolReportSummary, patrolReportSteps, true)
+}
+
+// runPatrolReportFor closes roleInfo's active patrol with summary and pours
+// the next cycle. It is shared by `gt patrol report` and the refinery's
+// unit cycle (completeUnitAndCycle). All output goes to out, never directly
+// to os.Stdout, so a caller that respawns its own pane right after can
+// capture or discard it. When drainNudges is false, queued nudges are left
+// in place for the caller to surface after its own next step, instead of
+// being drained and printed here.
+func runPatrolReportFor(out io.Writer, roleInfo RoleInfo, summary, steps string, drainNudges bool) error {
 	roleName := string(roleInfo.Role)
 
 	// Build config based on role
@@ -73,7 +85,7 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 		if changed, err := witness.NormalizePatrolCounter(roleInfo.TownRoot, roleInfo.Rig); err != nil {
 			style.PrintWarning("could not bound witness patrol counter: %v", err)
 		} else if changed {
-			fmt.Printf("%s Bounded witness patrol counter (reset patrol_count to 0)\n", style.Success.Render("✓"))
+			fmt.Fprintf(out, "%s Bounded witness patrol counter (reset patrol_count to 0)\n", style.Success.Render("✓"))
 		}
 	}
 
@@ -109,7 +121,7 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 		if seedErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", seedErr.Error())
 		}
-		fmt.Printf("%s No active patrol for %s — seeded %s and continuing the cycle\n",
+		fmt.Fprintf(out, "%s No active patrol for %s — seeded %s and continuing the cycle\n",
 			style.Success.Render("✓"), cfg.RoleName, patrolID)
 	}
 
@@ -120,10 +132,10 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build step audit checklist
-	stepAudit := buildStepAudit(cfg.PatrolMolName, patrolReportSteps)
+	stepAudit := buildStepAudit(cfg.PatrolMolName, steps)
 
 	// Update the description with the patrol summary and step audit
-	desc := fmt.Sprintf("Patrol report: %s\n\n%s", patrolReportSummary, stepAudit)
+	desc := fmt.Sprintf("Patrol report: %s\n\n%s", summary, stepAudit)
 	if err := b.Update(patrolID, beads.UpdateOptions{
 		Description: &desc,
 	}); err != nil {
@@ -131,7 +143,7 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print the step audit for visibility
-	fmt.Println(stepAudit)
+	fmt.Fprintln(out, stepAudit)
 
 	// Close all descendant wisps first (recursive), then the patrol root.
 	// Without this, every patrol cycle leaks ~10 orphan wisps into the DB.
@@ -142,26 +154,26 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Close the patrol root
-	if err := b.ForceCloseWithReason("patrol cycle complete: "+patrolReportSummary, patrolID); err != nil {
+	if err := b.ForceCloseWithReason("patrol cycle complete: "+summary, patrolID); err != nil {
 		return fmt.Errorf("closing patrol %s: %w", patrolID, err)
 	}
 
-	fmt.Printf("%s Closed patrol %s\n", style.Success.Render("✓"), patrolID)
+	fmt.Fprintf(out, "%s Closed patrol %s\n", style.Success.Render("✓"), patrolID)
 
 	// Start next cycle
 	newPatrolID, err := autoSpawnPatrol(cfg)
 	if err != nil {
 		if newPatrolID != "" {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", err.Error())
-			fmt.Printf("New patrol: %s\n", newPatrolID)
+			fmt.Fprintf(out, "New patrol: %s\n", newPatrolID)
 			return nil
 		}
 		return fmt.Errorf("starting next patrol cycle: %w", err)
 	}
 
-	fmt.Printf("%s Started new patrol: %s\n", style.Success.Render("✓"), newPatrolID)
+	fmt.Fprintf(out, "%s Started new patrol: %s\n", style.Success.Render("✓"), newPatrolID)
 	if cfg.RoleName == "deacon" {
-		stampDeaconHeartbeatOnReport(cfg.BeadsDir, patrolReportSummary)
+		stampDeaconHeartbeatOnReport(cfg.BeadsDir, summary)
 	}
 
 	// Surface any nudges queued for this session (gt-saz7a). patrol report
@@ -169,8 +181,12 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	// it is a step boundary a long-running patrol turn actually passes
 	// through — unlike the UserPromptSubmit hook, which only fires between
 	// turns and never reaches a session that stays in one turn for hours.
-	if drained := drainSessionNudges(roleInfo.TownRoot); len(drained) > 0 {
-		fmt.Print(nudge.FormatForInjection(drained))
+	// The refinery's unit cycle passes drainNudges=false so queued nudges
+	// survive its pane respawn instead of being drained and discarded here.
+	if drainNudges {
+		if drained := drainSessionNudges(roleInfo.TownRoot); len(drained) > 0 {
+			_, _ = fmt.Fprint(out, nudge.FormatForInjection(drained))
+		}
 	}
 
 	return nil

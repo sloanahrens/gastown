@@ -1471,3 +1471,35 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 		t.Errorf("role_agents.crew must not capture a re-resolved worker mapping\ncmd: %s", changed)
 	}
 }
+
+func TestLastHandoffAge(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := lastHandoffAge(dir); ok {
+		t.Fatal("lastHandoffAge reported a handoff in an empty dir")
+	}
+	recordHandoffTimeIn(dir)
+	age, ok := lastHandoffAge(dir)
+	if !ok {
+		t.Fatal("lastHandoffAge found no handoff after recordHandoffTimeIn")
+	}
+	if age < 0 || age > 5*time.Second {
+		t.Fatalf("age = %v, want a fresh timestamp", age)
+	}
+}
+
+func TestWriteHandoffMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeHandoffMarker(dir, "gt-refinery", "unit-cycle")
+	got, err := os.ReadFile(filepath.Join(dir, constants.DirRuntime, constants.FileHandoffMarker))
+	if err != nil {
+		t.Fatalf("marker not written: %v", err)
+	}
+	if string(got) != "gt-refinery\nunit-cycle" {
+		t.Fatalf("marker = %q, want session\\nreason", got)
+	}
+	writeHandoffMarker(dir, "gt-refinery", "")
+	got, _ = os.ReadFile(filepath.Join(dir, constants.DirRuntime, constants.FileHandoffMarker))
+	if string(got) != "gt-refinery" {
+		t.Fatalf("marker without reason = %q, want bare session", got)
+	}
+}
