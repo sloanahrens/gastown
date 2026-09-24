@@ -6,22 +6,35 @@ import (
 	"testing"
 )
 
-func TestContainerCapacityCheck_ReportsVMSize(t *testing.T) {
+func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
 	orig := dockerInfoCPUMem
 	defer func() { dockerInfoCPUMem = orig }()
+	dockerInfoCPUMem = func() (int, int64, error) { return 24, 8211824640, nil } // Docker Desktop at 8092 MiB
 
-	dockerInfoCPUMem = func() (int, int64, error) {
-		return 12, 8092 * 1024 * 1024, nil
+	result := NewContainerCapacityCheck().Run(&CheckContext{})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning for an ~8 GiB VM", result.Status)
 	}
-
-	check := NewContainerCapacityCheck()
-	result := check.Run(&CheckContext{})
-
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK", result.Status)
+	if !strings.Contains(result.Message, "24 vCPU") || !strings.Contains(result.Message, "7831 MiB") {
+		t.Errorf("Message = %q, want the measured size", result.Message)
 	}
-	if !strings.Contains(result.Message, "12 vCPU") || !strings.Contains(result.Message, "8092 MiB") {
-		t.Fatalf("Message = %q, want it to report 12 vCPU / 8092 MiB", result.Message)
+	if !strings.Contains(result.FixHint, "16 GiB") {
+		t.Errorf("FixHint = %q, want the remedy (>= 16 GiB)", result.FixHint)
+	}
+	if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, "2026-09-24-test-suite-concurrency-design.md") {
+		t.Errorf("Details = %q, want the design doc reference", joined)
+	}
+}
+
+func TestContainerCapacityCheck_LargeVMIsOK(t *testing.T) {
+	orig := dockerInfoCPUMem
+	defer func() { dockerInfoCPUMem = orig }()
+	// A 16384 MiB setting reports ~1% under; it must not warn.
+	dockerInfoCPUMem = func() (int, int64, error) { return 24, 16_600_000_000, nil }
+
+	if got := NewContainerCapacityCheck().Run(&CheckContext{}).Status; got != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK for a 16 GiB setting", got)
 	}
 }
 
