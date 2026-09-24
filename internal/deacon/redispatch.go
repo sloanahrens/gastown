@@ -2,8 +2,10 @@
 package deacon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -486,7 +488,16 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
 
 	// Re-dispatch via gt sling
-	if err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
+	if refusal, err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
+		// A capacity refusal (full polecat pool) is the town queueing, not
+		// the bead failing: no attempt is recorded and no cooldown starts, so
+		// the retry budget and the REDISPATCH_FAILED escalation stay reserved
+		// for real failures. The bead is left open and ready (gt-xdaq).
+		if refusal != "" {
+			result.Action = "deferred"
+			result.Message = "not re-dispatched, retry later: " + refusal
+			return result
+		}
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
 
@@ -816,7 +827,12 @@ func resolveAgentForRedispatch(townRoot, targetRig string, beadState *BeadRedisp
 
 // slingBead dispatches a bead to a rig via gt sling.
 // If agent is non-empty, passes --agent <agent> to override the rig's default.
-func slingBead(townRoot, beadID, rig, agent string) error {
+//
+// When the sling fails with a capacity refusal (dispatch.SlingRefusalMarker),
+// refusal carries the guard's sentence so the caller can defer rather than
+// count a failure; it is "" for every other outcome. Stderr is still streamed
+// to the deacon's own stderr as before.
+func slingBead(townRoot, beadID, rig, agent string) (refusal string, err error) {
 	args := []string{"sling", beadID, rig, "--force", "--no-convoy"}
 	if agent != "" {
 		args = append(args, "--agent", agent)
@@ -826,8 +842,13 @@ func slingBead(townRoot, beadID, rig, agent string) error {
 	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	if err := cmd.Run(); err != nil {
+		reason, _ := dispatch.SlingRefusalReason(stderr.String())
+		return reason, err
+	}
+	return "", nil
 }
 
 // escalateToMayor sends an escalation mail to the Mayor about a repeatedly-failing bead.

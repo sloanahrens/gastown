@@ -15,6 +15,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -885,7 +886,7 @@ type poolBackpressureError struct {
 }
 
 func (e *poolBackpressureError) Error() string {
-	return "sling refused: " + e.Reason + "; raise polecat_pool.max_local/max_overflow to spawn"
+	return dispatch.SlingRefusalMarker + " " + e.Reason + "; raise polecat_pool.max_local/max_overflow to spawn"
 }
 
 func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }

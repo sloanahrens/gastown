@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -42,7 +43,7 @@ type queueBackpressureError struct {
 }
 
 func (e *queueBackpressureError) Error() string {
-	return fmt.Sprintf("sling refused: %s has %d ready MRs (> %d); pass --force or label the bead rework",
+	return fmt.Sprintf(dispatch.SlingRefusalMarker+" %s has %d ready MRs (> %d); pass --force or label the bead rework",
 		e.Rig, e.Ready, e.Max)
 }
 

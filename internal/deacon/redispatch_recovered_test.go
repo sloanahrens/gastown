@@ -354,3 +354,75 @@ func TestRedispatchRecoveredBead_NoOperatorHoldStillSlings(t *testing.T) {
 		t.Errorf("no sling without a hold; calls: %v", calls())
 	}
 }
+
+// poolFullStderr is what `gt sling --force` prints when every seat the bead
+// could take is at its cap (internal/cmd/sling_pool.go poolBackpressureError),
+// wrapped the way cobra and the spawn path report it.
+const poolFullStderr = "Error: spawning polecat: sling refused: every local seat is taken (2/2); raise polecat_pool.max_local/max_overflow to spawn\n"
+
+// TestRedispatch_PoolFullRefusalIsNotAnAttempt is gt-xdaq: a full pool
+// refusing the sling is the town at capacity, not a failed redispatch. It
+// must not burn the retry budget, start the cooldown, or march the bead
+// toward a false REDISPATCH_FAILED escalation.
+func TestRedispatch_PoolFullRefusalIsNotAnAttempt(t *testing.T) {
+	calls := stubDispatchToolsSlinging(t, poolFullStderr, 1)
+	townRoot := t.TempDir()
+
+	// One attempt short of the cap: counting this refusal would escalate
+	// the bead on the next RECOVERED_BEAD.
+	state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+		"gt-queued": {BeadID: "gt-queued", AttemptCount: 2},
+	}}
+	if err := SaveRedispatchState(townRoot, state); err != nil {
+		t.Fatalf("SaveRedispatchState: %v", err)
+	}
+
+	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
+
+	if result.Action != "deferred" {
+		t.Fatalf("Action = %q, want %q (message: %s, err: %v)", result.Action, "deferred", result.Message, result.Error)
+	}
+	if !strings.Contains(result.Message, "sling refused:") {
+		t.Errorf("Message = %q, want it to carry the pool's refusal", result.Message)
+	}
+	if call := callInvoking(calls(), "gt", "sling gt-queued gastown"); call == "" {
+		t.Errorf("the sling was never attempted; calls: %v", calls())
+	}
+
+	after, err := LoadRedispatchState(townRoot)
+	if err != nil {
+		t.Fatalf("LoadRedispatchState: %v", err)
+	}
+	got := after.Beads["gt-queued"]
+	if got.AttemptCount != 2 {
+		t.Errorf("AttemptCount = %d, want 2 — a capacity refusal was counted", got.AttemptCount)
+	}
+	if !got.LastAttemptTime.IsZero() {
+		t.Errorf("LastAttemptTime = %v — a capacity refusal started the cooldown", got.LastAttemptTime)
+	}
+
+	// The next RECOVERED_BEAD retries rather than escalating.
+	again := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
+	if again.Action == "escalated" {
+		t.Errorf("a bead queued behind a full pool was escalated: %s", again.Message)
+	}
+}
+
+// TestRedispatch_GenuineSlingFailureStillCounts keeps the budget honest: a
+// sling that broke for any other reason is still an attempt.
+func TestRedispatch_GenuineSlingFailureStillCounts(t *testing.T) {
+	stubDispatchToolsSlinging(t, "Error: bead gt-broken: worktree add failed\n", 1)
+	townRoot := t.TempDir()
+
+	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-broken", "gastown", 3, 0)
+	if result.Action != "error" {
+		t.Fatalf("Action = %q, want error (message: %s)", result.Action, result.Message)
+	}
+	after, err := LoadRedispatchState(townRoot)
+	if err != nil {
+		t.Fatalf("LoadRedispatchState: %v", err)
+	}
+	if got := after.Beads["gt-broken"].AttemptCount; got != 1 {
+		t.Errorf("AttemptCount = %d, want 1 — a real failure must count", got)
+	}
+}
