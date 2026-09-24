@@ -16,9 +16,10 @@ import (
 const (
 	// bdContainerRetryAttempts bounds how many times one bd command is retried
 	// against a test Dolt container. Five attempts sleep 500ms+1s+2s+4s ≈ 7.5s
-	// in total, which is small beside the per-command subprocess budget (60s,
-	// bdSubprocessTimeout) and the per-package gate budget (20m, Makefile), but
-	// wide enough to ride out a contention burst on the Docker VM.
+	// in total, which is small beside the per-command subprocess budget (3m,
+	// bdContainerSubprocessTimeout; 5m for init) and the per-package gate
+	// budget (20m, Makefile), but wide enough to ride out a contention burst
+	// on the Docker VM.
 	bdContainerRetryAttempts = 5
 
 	// bdContainerRetryBaseBackoff is the delay before the second attempt. Each
@@ -33,9 +34,9 @@ const (
 // bdContainerRetryWindow caps the wall clock the whole retry sequence may
 // spend. The attempt count alone does not bound it: each attempt runs its own
 // subprocess, and one that stalls against a dead container can take most of
-// bdSubprocessTimeout to fail, so five attempts could cost five minutes.
-// Matching the single-command budget means a container that is gone rather than
-// busy reports in roughly twice the wait it would have cost without any retry.
+// its budget (bdContainerSubprocessTimeout) to fail. The window is checked
+// only between attempts, so once one attempt has spent it no further attempt
+// starts: a container that is gone rather than busy costs one budget, not five.
 // A var so tests can collapse the window and pin that bound.
 var bdContainerRetryWindow = 60 * time.Second
 

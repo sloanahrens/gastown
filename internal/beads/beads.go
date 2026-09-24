@@ -1019,6 +1019,10 @@ func (b *Beads) forIssueID(id string) *Beads {
 // A retried init gets a freshly minted name too, and the workspace the failed
 // attempt wrote into cleared, because a half-written .beads answers as a legacy
 // one (bdInitRetryReset, gt-o8i9f).
+//
+// Against the test container an init first takes one of this process's init
+// slots (AcquireTestContainerInitSlot), so a package's parallel tests cannot
+// all migrate a fresh database on the one shared server at once (gt-elvf4).
 func (b *Beads) Init(prefix string) error {
 	args := []string{"init"}
 	if prefix != "" {
@@ -1027,6 +1031,19 @@ func (b *Beads) Init(prefix string) error {
 	args = append(args, "--quiet")
 	if b.serverPort > 0 {
 		args = append(args, "--database", testDatabaseName(), "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
+	}
+	if b.targetsTestDoltContainer() {
+		// One slot for the whole init, retries included: b.run reaches
+		// runBdWithRetry, whose gt-o8i9f loop re-mints and re-runs inside
+		// this one acquisition (gt-elvf4). Init has no context, so the wait
+		// is bounded by testContainerInitSlotWait.
+		ctx, cancel := context.WithTimeout(context.Background(), testContainerInitSlotWait)
+		release, err := AcquireTestContainerInitSlot(ctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 	_, err := b.run(args...)
 	return err
@@ -1102,16 +1119,28 @@ func resolveBdSubprocessTimeout() time.Duration {
 
 // subprocessTimeoutFor returns the subprocess budget for one bd command. args
 // is the caller's argv before --allow-stale/--flat injection, so args[0] is
-// the command word. An explicit GT_BD_TIMEOUT_SEC wins over every per-command
-// budget, so tests can shorten a slow command without waiting it out.
-func subprocessTimeoutFor(args []string) time.Duration {
+// the command word; testContainer is whether the call targets testutil's
+// ephemeral Dolt container (targetsTestDoltContainer). An explicit
+// GT_BD_TIMEOUT_SEC wins over every per-command budget, so tests can shorten
+// a slow command without waiting it out; after it, init keeps the init budget
+// wherever it runs, other test-container calls get the container budget
+// (gt-elvf4), and everything else gets the steady-state 60s.
+func subprocessTimeoutFor(args []string, testContainer bool) time.Duration {
 	if d, ok := parseBdTimeoutOverride(); ok {
 		return d
 	}
 	if len(args) > 0 && args[0] == "init" {
 		return bdInitSubprocessTimeout
 	}
+	if testContainer {
+		return bdContainerSubprocessTimeout
+	}
 	return bdSubprocessTimeout
+}
+
+// subprocessTimeout is subprocessTimeoutFor for this wrapper's target.
+func (b *Beads) subprocessTimeout(args []string) time.Duration {
+	return subprocessTimeoutFor(args, b.targetsTestDoltContainer())
 }
 
 // SubprocessFailureError names the cause of a bd failure that the exec error
@@ -1193,7 +1222,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry.
-	timeout := subprocessTimeoutFor(args)
+	timeout := b.subprocessTimeout(args)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -1305,7 +1334,7 @@ func (b *Beads) buildRunEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
-			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=")
+			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=", allowRemoteMigrateEnv+"=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
@@ -1316,6 +1345,9 @@ func (b *Beads) buildRunEnv() []string {
 			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
 			// server, or use test helpers in internal/storage/dolt/testserver".
 			env = append(env, "BEADS_TEST_SERVER=1")
+			// Resume, don't refuse, a testdb_ an interrupted init left
+			// half-migrated (gt-elvf4; testContainerEnv).
+			env = append(env, testContainerEnv()...)
 		}
 		return SuppressBDSideEffects(env)
 	}
@@ -1334,7 +1366,7 @@ func (b *Beads) buildRoutingEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
-			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=")
+			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=", allowRemoteMigrateEnv+"=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
@@ -1345,6 +1377,9 @@ func (b *Beads) buildRoutingEnv() []string {
 			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
 			// server, or use test helpers in internal/storage/dolt/testserver".
 			env = append(env, "BEADS_TEST_SERVER=1")
+			// Resume, don't refuse, a testdb_ an interrupted init left
+			// half-migrated (gt-elvf4; testContainerEnv).
+			env = append(env, testContainerEnv()...)
 		}
 		return SuppressBDSideEffects(env)
 	}

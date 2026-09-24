@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // extractJSON finds the first JSON object in output that may contain non-JSON warnings.
@@ -83,11 +85,10 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
 		bdInitArgs = append(bdInitArgs, "--server", "--server-port", p)
 	}
-	cmd := exec.Command("bd", bdInitArgs...)
-	cmd.Dir = path
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs, nil); err != nil {
 		t.Fatalf("bd init failed: %v\nOutput: %s", err, output)
 	}
+	var cmd *exec.Cmd
 
 	// Create issues
 	for i := 1; i <= numIssues; i++ {
@@ -474,11 +475,10 @@ func createTrackedBeadsRepoWithNoIssues(t *testing.T, path, prefix string) {
 	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
 		bdInitArgs2 = append(bdInitArgs2, "--server", "--server-port", p)
 	}
-	cmd := exec.Command("bd", bdInitArgs2...)
-	cmd.Dir = path
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs2, nil); err != nil {
 		t.Fatalf("bd init failed: %v\nOutput: %s", err, output)
 	}
+	var cmd *exec.Cmd
 
 	// Ensure .beads is committed (bd init may auto-commit in newer versions).
 	cmd = exec.Command("git", "add", ".beads")
