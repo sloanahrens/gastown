@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/channelevents"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -109,6 +110,13 @@ type AwaitEventResult struct {
 	Events      []EventFile   `json:"events,omitempty"`      // event files found
 	IdleCycles  int           `json:"idle_cycles,omitempty"` // current idle cycle count
 	EffortLevel string        `json:"effort_level"`          // "full" or "abbreviated"
+	// Nudges holds any nudges queued for this session and drained while
+	// awaiting the event. await-event is the refinery/deacon patrol's wake
+	// mechanism, called every cycle regardless of how long the previous gate
+	// took — a step boundary a long-running patrol turn actually passes
+	// through, unlike the UserPromptSubmit hook, which never fires mid-turn
+	// (gt-saz7a).
+	Nudges []nudge.QueuedNudge `json:"nudges,omitempty"`
 }
 
 // EventFile represents a single event file.
@@ -307,6 +315,11 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		result.EffortLevel = "abbreviated"
 	}
 
+	// Drain nudges queued for this session (gt-saz7a). Included in the JSON
+	// result so a --json caller doesn't lose them; printed as a
+	// system-reminder block below for the normal (human-readable) path.
+	result.Nudges = drainSessionNudges(townRoot)
+
 	// Output
 	if moleculeJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -347,6 +360,13 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n%s Run full patrol.\n",
 				style.Bold.Render("EFFORT: full"))
 		}
+	}
+
+	// Surface drained nudges unconditionally — even under --quiet — so a
+	// long-running patrol turn sees them as soon as it reaches this step
+	// boundary rather than losing them to a suppressed progress message.
+	if len(result.Nudges) > 0 {
+		fmt.Print(nudge.FormatForInjection(result.Nudges))
 	}
 
 	return nil
