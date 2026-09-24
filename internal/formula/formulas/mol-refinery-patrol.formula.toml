@@ -1393,6 +1393,15 @@ a line for each:
   you passed `--landed-commit` (a failure there prints `✗ attestation
   comment failed on <id>: ...`; there is no separate success line)
 
+It also reports the source branch: `✓ Deleted remote branch: <b>` for a
+polecat/integration branch, or `○ remote branch <b> left for its owner (not a
+polecat/integration branch)` for a crew or other branch — the refinery never
+deletes those, and the `○` line needs no action. If a polecat/integration
+branch delete fails, post-merge prints `✗ remote branch cleanup failed: …`,
+escalates it to the operator itself, and still finishes the unit (post-merge
+command, chores, respawn) with exit 0: do NOT re-run post-merge and do NOT
+delete the branch by hand for that line.
+
 Any real failure prints `✗` (a failed MERGED send, a MERGE_READY that could
 not be archived or an unreadable inbox, a temp branch that could not be
 deleted); `○` lines never need action. If a line shows `✗`, do that one
@@ -1411,7 +1420,9 @@ it prints `○ session kept: <cause>`; continue to loop-check yourself, same
 as today, and keep your own patrol wisp.
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
-- [x] Post-merge completed (MR closed, source issue closed, branch deleted)
+- [x] Post-merge completed (MR closed, source issue closed, branch deleted
+  or left for its owner; a `✗ remote branch cleanup failed` is already
+  escalated)
 - [x] No chore line shows `✗`, or you did that ✗ chore by hand (`✓` and `○`
   lines, e.g. `○ no MERGE_READY mail` or `○ no temp branch to delete`, pass)
 

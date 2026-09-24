@@ -72,6 +72,27 @@ var errNoTempBranch = errors.New("no temp branch")
 // escalation fires mostly when Dolt is down, and must not hang post-merge.
 const unitEscalateTimeout = 30 * time.Second
 
+// runBoundedEscalate runs `gt escalate` best-effort, bounded by
+// unitEscalateTimeout: it is called after a merge has already landed, when a
+// hung escalation must not hang post-merge. A failure is warned, never
+// returned.
+func runBoundedEscalate(reason, source, fingerprint, severity, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), unitEscalateTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "gt", "escalate",
+		"--severity", severity,
+		"--reason", reason,
+		"--source", source,
+		"--fingerprint", fingerprint,
+		msg)
+	if err := c.Run(); err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("timed out after %v: %w", unitEscalateTimeout, err)
+		}
+		style.PrintWarning("escalation %s failed: %v", fingerprint, err)
+	}
+}
+
 type unitCycleReport struct {
 	Respawned bool
 	SkipCause string // why the patrol and/or respawn steps did not run; empty when the pane respawned
@@ -311,20 +332,7 @@ func defaultUnitCycleDeps(townRoot, beadsPath, workDir, refinerySession string, 
 			return respawnOwnPane(t, refinerySession, pane, restartCmd)
 		},
 		Escalate: func(fp, sev, msg string) {
-			ctx, cancel := context.WithTimeout(context.Background(), unitEscalateTimeout)
-			defer cancel()
-			c := exec.CommandContext(ctx, "gt", "escalate",
-				"--severity", sev,
-				"--reason", "refinery-unit-cycle",
-				"--source", "refinery:unit-cycle",
-				"--fingerprint", fp,
-				msg)
-			if err := c.Run(); err != nil {
-				if ctx.Err() != nil {
-					err = fmt.Errorf("timed out after %v: %w", unitEscalateTimeout, err)
-				}
-				style.PrintWarning("escalation %s failed: %v", fp, err)
-			}
+			runBoundedEscalate("refinery-unit-cycle", "refinery:unit-cycle", fp, sev, msg)
 		},
 		RecordCycle: func() {
 			recordHandoffTimeIn(workDir)
