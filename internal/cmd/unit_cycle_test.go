@@ -28,23 +28,43 @@ type fakeUnitCycle struct {
 	hasHandoff  bool
 	env         map[string]string
 	calls       []string // order of the cycle-phase side effects
+	seq         []string // order of send / wait / cycle-phase side effects
+	waited      int
+	inboxErr    error
+	archiveErr  error
+	tempErr     error
 }
 
 func (f *fakeUnitCycle) deps(out *bytes.Buffer) unitCycleDeps {
 	return unitCycleDeps{
-		Send:       func(m *mail.Message) error { f.sent = append(f.sent, m); return f.sendErr },
-		ListInbox:  func() ([]*mail.Message, error) { return f.inbox, nil },
-		Archive:    func(id string) error { f.archived = append(f.archived, id); return nil },
+		Send: func(m *mail.Message) error {
+			f.seq = append(f.seq, "send")
+			f.sent = append(f.sent, m)
+			return f.sendErr
+		},
+		WaitSent:   func() { f.seq = append(f.seq, "wait"); f.waited++ },
+		ListInbox:  func() ([]*mail.Message, error) { return f.inbox, f.inboxErr },
+		Archive:    func(id string) error { f.archived = append(f.archived, id); return f.archiveErr },
 		AddComment: func(id, text string) error { f.comments = append(f.comments, id+": "+text); return nil },
-		DeleteTemp: func(dir string) error { f.tempDeleted = append(f.tempDeleted, dir); return nil },
+		DeleteTemp: func(dir string) error { f.tempDeleted = append(f.tempDeleted, dir); return f.tempErr },
 		ClosePatrol: func(summary string) error {
+			f.seq = append(f.seq, "patrol")
 			f.calls = append(f.calls, "patrol")
 			f.patrolSum = append(f.patrolSum, summary)
 			return f.patrolErr
 		},
-		Respawn:     func() error { f.calls = append(f.calls, "respawn"); f.respawned++; return f.respawnErr },
-		Escalate:    func(fp, sev, msg string) { f.escalations = append(f.escalations, fp+"|"+sev) },
-		RecordCycle: func() { f.calls = append(f.calls, "record"); f.recorded++ },
+		Respawn: func() error {
+			f.seq = append(f.seq, "respawn")
+			f.calls = append(f.calls, "respawn")
+			f.respawned++
+			return f.respawnErr
+		},
+		Escalate: func(fp, sev, msg string) { f.escalations = append(f.escalations, fp+"|"+sev) },
+		RecordCycle: func() {
+			f.seq = append(f.seq, "record")
+			f.calls = append(f.calls, "record")
+			f.recorded++
+		},
 		PaneSession: func() (string, error) { return f.paneSession, nil },
 		HandoffAge:  func() (time.Duration, bool) { return f.handoffAge, f.hasHandoff },
 		Getenv:      func(k string) string { return f.env[k] },
@@ -209,6 +229,10 @@ func TestCompleteUnitAndCycle_KeptSessionKeepsItsPatrolWisp(t *testing.T) {
 			func(p *unitCycleParams, f *fakeUnitCycle) { p.Mode = unitBatch; p.BatchErrored = true },
 			"batch had errors; the session stays to recover the failed members",
 		},
+		"no-cycle": {
+			func(p *unitCycleParams, f *fakeUnitCycle) { p.CycleSuppressed = true },
+			"cycle suppressed (--no-cycle)",
+		},
 		"cooldown": {
 			func(p *unitCycleParams, f *fakeUnitCycle) { f.hasHandoff = true; f.handoffAge = 30 * time.Second },
 			"last handoff 30s ago (< 2m0s); the next unit cycles",
@@ -305,5 +329,83 @@ func TestCompleteUnitAndCycle_BatchIsOneUnit(t *testing.T) {
 	completeUnitAndCycle(p, f.deps(&bytes.Buffer{}))
 	if len(f.patrolSum) != 1 || f.respawned != 1 {
 		t.Fatalf("3-member batch closed %d patrols and respawned %d times, want 1 and 1", len(f.patrolSum), f.respawned)
+	}
+}
+
+// I1: batch recovery runs `gt mq post-merge --no-cycle` so the first
+// recovered member cannot respawn the session mid-recovery.
+func TestCompleteUnitAndCycle_NoCycleRunsChoresButNeverCycles(t *testing.T) {
+	f := refineryFake()
+	p := singleParams()
+	p.CycleSuppressed = true
+	var out bytes.Buffer
+	rep := completeUnitAndCycle(p, f.deps(&out))
+	if len(f.sent) != 1 || len(f.archived) != 1 || len(f.tempDeleted) != 1 {
+		t.Fatalf("chores skipped under --no-cycle: sent=%d archived=%d temp=%d", len(f.sent), len(f.archived), len(f.tempDeleted))
+	}
+	if len(f.patrolSum) != 0 || f.respawned != 0 || f.recorded != 0 || rep.Respawned {
+		t.Fatalf("--no-cycle closed the patrol or respawned: calls=%v", f.calls)
+	}
+	if rep.SkipCause != "cycle suppressed (--no-cycle)" {
+		t.Fatalf("SkipCause = %q", rep.SkipCause)
+	}
+}
+
+// I2: the witness wake-up nudge is delivered in the background by Send; the
+// unit must wait for it before the process can exit or respawn.
+func TestCompleteUnitAndCycle_WaitsForNotificationsBeforeCycling(t *testing.T) {
+	f := refineryFake()
+	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
+	if got := strings.Join(f.seq, ","); got != "send,wait,patrol,record,respawn" {
+		t.Fatalf("side-effect order = %s, want send,wait,patrol,record,respawn", got)
+	}
+}
+
+func TestCompleteUnitAndCycle_WaitsForNotificationsWhenKeptOrSendFails(t *testing.T) {
+	f := refineryFake()
+	f.sendErr = errors.New("dolt down")
+	p := singleParams()
+	p.CycleEnabled = false
+	completeUnitAndCycle(p, f.deps(&bytes.Buffer{}))
+	if got := strings.Join(f.seq, ","); got != "send,wait" {
+		t.Fatalf("side-effect order = %s, want send,wait", got)
+	}
+}
+
+func TestCompleteUnitAndCycle_NoWaitWithoutSend(t *testing.T) {
+	f := refineryFake()
+	p := singleParams()
+	p.Mode = unitBatch
+	completeUnitAndCycle(p, f.deps(&bytes.Buffer{}))
+	if f.waited != 0 {
+		t.Fatalf("waited %d times with nothing sent", f.waited)
+	}
+}
+
+// M4: a real chore failure prints ✗ (the formula's fallback trigger); ○ is
+// only for nothing-to-do.
+func TestCompleteUnitAndCycle_ChoreFailuresPrintCross(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(f *fakeUnitCycle)
+		want   string
+	}{
+		"archive fails": {func(f *fakeUnitCycle) { f.archiveErr = errors.New("locked") }, "✗ MERGE_READY hq-m1 not archived: locked"},
+		"inbox fails":   {func(f *fakeUnitCycle) { f.inboxErr = errors.New("dolt down") }, "✗ MERGE_READY not archived for gt-mr1: inbox unreadable: dolt down"},
+		"temp fails":    {func(f *fakeUnitCycle) { f.tempErr = errors.New("checked out") }, "✗ temp branch not deleted: checked out"},
+		"temp absent":   {func(f *fakeUnitCycle) { f.tempErr = errNoTempBranch }, "○ no temp branch to delete"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := refineryFake()
+			tc.mutate(f)
+			var out bytes.Buffer
+			completeUnitAndCycle(singleParams(), f.deps(&out))
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out.String())
+			}
+			if name == "temp absent" && strings.Contains(out.String(), "✗") {
+				t.Fatalf("absent temp printed ✗:\n%s", out.String())
+			}
+		})
 	}
 }

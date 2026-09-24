@@ -185,6 +185,7 @@ Examples:
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
 var mqPostMergeLandedCommit string
+var mqPostMergeNoCycle bool
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id-or-branch>",
@@ -231,9 +232,16 @@ distinguishes evidence recovered at close time from a head recorded at
 submission. When the branch is already gone there is nothing left to
 recover from, and the command refuses with the recovery step named.
 
+After cleanup it does the per-MR chores (MERGED to the witness, MERGE_READY
+archive, temp branch delete) and, on a rig with
+merge_queue.cycle_session_after_merge on, may close the refinery's patrol
+cycle and respawn its session. --no-cycle keeps the chores but never cycles:
+batch recovery passes it so the session survives to recover every member.
+
 Examples:
   gt mq post-merge gastown gt-mr-abc123
   gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete
+  gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete --no-cycle
   gt mq post-merge gastown gt-mr-abc123 --landed-commit 2bb0bf7f
   gt mq post-merge gastown polecat/Nux/gt-xyz    # orphaned branch, MR bead gone`,
 	Args: cobra.ExactArgs(2),
@@ -466,6 +474,7 @@ func init() {
 	mqCmd.AddCommand(mqListCmd)
 	mqCmd.AddCommand(mqRejectCmd)
 	mqCmd.AddCommand(mqStatusCmd)
+	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeNoCycle, "no-cycle", false, "Do the per-MR chores but never close the patrol cycle or respawn the refinery session (batch recovery)")
 	mqCmd.AddCommand(mqPostMergeCmd)
 	mqCmd.AddCommand(mqConflictCmd)
 
@@ -830,6 +839,7 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		MergeCommit:          resolvePostMergeSHA(workDir, result.MR.MergeCommit, result.MR.TargetBranch),
 		LandedCommitAttested: mqPostMergeLandedCommit != "",
 		CycleEnabled:         mqCfg != nil && mqCfg.CycleSessionAfterMerge,
+		CycleSuppressed:      mqPostMergeNoCycle,
 	}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, os.Stdout))
 	if rep.SkipCause != "" {
 		fmt.Printf("  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)

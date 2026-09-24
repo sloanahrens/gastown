@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +41,7 @@ type unitCycleParams struct {
 	MergeCommit          string
 	LandedCommitAttested bool // --landed-commit was passed
 	CycleEnabled         bool // merge_queue.cycle_session_after_merge
+	CycleSuppressed      bool // gt mq post-merge --no-cycle: chores only, never close the patrol or respawn
 	BatchErrored         bool // batch mode: the batch landed but result.Error is set; never cycle
 }
 
@@ -46,6 +49,7 @@ type unitCycleParams struct {
 // never touch real mail, beads, git, patrol wisps or tmux.
 type unitCycleDeps struct {
 	Send        func(*mail.Message) error
+	WaitSent    func()                          // blocks until Send's recipient notifications are delivered (bounded)
 	ListInbox   func() ([]*mail.Message, error) // the refinery's own inbox
 	Archive     func(id string) error
 	AddComment  func(beadID, text string) error
@@ -59,6 +63,14 @@ type unitCycleDeps struct {
 	Getenv      func(string) string
 	Out         io.Writer
 }
+
+// errNoTempBranch is what DeleteTemp returns when there is no temp branch to
+// delete: nothing to do, not a failure.
+var errNoTempBranch = errors.New("no temp branch")
+
+// unitEscalateTimeout bounds the `gt escalate` exec: the MERGED-failure
+// escalation fires mostly when Dolt is down, and must not hang post-merge.
+const unitEscalateTimeout = 30 * time.Second
 
 type unitCycleReport struct {
 	Respawned bool
@@ -83,10 +95,12 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 
 	// 1. Chores. Always run: a human running post-merge by hand still wants them.
 	inbox, inboxErr := d.ListInbox()
+	sends := 0
 	for _, mr := range p.MRs {
 		if p.Mode == unitSingle && strings.HasPrefix(mr.Branch, "polecat/") {
 			polecat := strings.TrimPrefix(mr.Worker, "polecats/")
 			msg := protocol.NewMergedMessage(p.Rig, polecat, mr.Branch, mr.SourceIssue, mr.Target, p.MergeCommit)
+			sends++
 			if err := d.Send(msg); err != nil {
 				fmt.Fprintf(d.Out, "  %s MERGED not sent for %s: %v\n", style.Error.Render("✗"), mr.ID, err)
 				d.Escalate("refinery-unit-chore:"+p.Rig, "medium",
@@ -96,7 +110,7 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 			}
 		}
 		if inboxErr != nil {
-			fmt.Fprintf(d.Out, "  %s MERGE_READY not archived for %s: %v\n", style.Dim.Render("○"), mr.ID, inboxErr)
+			fmt.Fprintf(d.Out, "  %s MERGE_READY not archived for %s: inbox unreadable: %v\n", style.Error.Render("✗"), mr.ID, inboxErr)
 		} else {
 			archiveMergeReady(mr, inbox, d)
 		}
@@ -107,9 +121,18 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 			}
 		}
 	}
+	// Send delivers the witness's wake-up nudge in the background; wait for
+	// it (bounded by the router's idle timeout) before this process can exit
+	// or respawn, or the nudge is lost and the witness sees MERGED only on
+	// its next patrol pass.
+	if sends > 0 && d.WaitSent != nil {
+		d.WaitSent()
+	}
 	if p.Mode == unitSingle {
-		if err := d.DeleteTemp(p.WorkDir); err != nil {
-			fmt.Fprintf(d.Out, "  %s temp branch not deleted: %v\n", style.Dim.Render("○"), err)
+		if err := d.DeleteTemp(p.WorkDir); errors.Is(err, errNoTempBranch) {
+			fmt.Fprintf(d.Out, "  %s no temp branch to delete\n", style.Dim.Render("○"))
+		} else if err != nil {
+			fmt.Fprintf(d.Out, "  %s temp branch not deleted: %v\n", style.Error.Render("✗"), err)
 		} else {
 			fmt.Fprintf(d.Out, "  %s temp branch deleted\n", style.Success.Render("✓"))
 		}
@@ -147,6 +170,9 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 func unitCycleSkipCause(p unitCycleParams, d unitCycleDeps) string {
 	if cause := unitCycleCallerMismatch(p, d); cause != "" {
 		return cause
+	}
+	if p.CycleSuppressed {
+		return "cycle suppressed (--no-cycle)"
 	}
 	if !p.CycleEnabled {
 		return "cycle disabled (merge_queue.cycle_session_after_merge off)"
@@ -192,7 +218,7 @@ func archiveMergeReady(mr unitMR, inbox []*mail.Message, d unitCycleDeps) {
 			}
 			found = true
 			if err := d.Archive(m.ID); err != nil {
-				fmt.Fprintf(d.Out, "  %s MERGE_READY %s not archived: %v\n", style.Dim.Render("○"), m.ID, err)
+				fmt.Fprintf(d.Out, "  %s MERGE_READY %s not archived: %v\n", style.Error.Render("✗"), m.ID, err)
 			} else {
 				fmt.Fprintf(d.Out, "  %s MERGE_READY archived: %s\n", style.Success.Render("✓"), m.ID)
 			}
@@ -227,7 +253,8 @@ func defaultUnitCycleDeps(townRoot, beadsPath, workDir, refinerySession string, 
 		return getMailbox(addr)
 	}
 	return unitCycleDeps{
-		Send: router.Send,
+		Send:     router.Send,
+		WaitSent: router.WaitPendingNotifications,
 		ListInbox: func() ([]*mail.Message, error) {
 			mb, err := refineryMailbox()
 			if err != nil {
@@ -245,6 +272,17 @@ func defaultUnitCycleDeps(townRoot, beadsPath, workDir, refinerySession string, 
 		},
 		AddComment: func(id, text string) error { return beads.New(beadsPath).AddComment(id, text) },
 		DeleteTemp: func(dir string) error {
+			// Absent temp (merged-pr-sweep, a clean batch recovery) is
+			// nothing to do, not a failure: rev-parse --quiet exits 1.
+			probe := exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/heads/temp")
+			probe.Dir = dir
+			if err := probe.Run(); err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return errNoTempBranch
+				}
+				return fmt.Errorf("checking for temp branch: %w", err)
+			}
 			// -D, not -d: temp is the disposable rehearsal branch and is never
 			// itself merged, so -d can refuse it as "not fully merged".
 			c := exec.Command("git", "branch", "-D", "temp")
@@ -273,13 +311,18 @@ func defaultUnitCycleDeps(townRoot, beadsPath, workDir, refinerySession string, 
 			return respawnOwnPane(t, refinerySession, pane, restartCmd)
 		},
 		Escalate: func(fp, sev, msg string) {
-			c := exec.Command("gt", "escalate",
+			ctx, cancel := context.WithTimeout(context.Background(), unitEscalateTimeout)
+			defer cancel()
+			c := exec.CommandContext(ctx, "gt", "escalate",
 				"--severity", sev,
 				"--reason", "refinery-unit-cycle",
 				"--source", "refinery:unit-cycle",
 				"--fingerprint", fp,
 				msg)
 			if err := c.Run(); err != nil {
+				if ctx.Err() != nil {
+					err = fmt.Errorf("timed out after %v: %w", unitEscalateTimeout, err)
+				}
 				style.PrintWarning("escalation %s failed: %v", fp, err)
 			}
 		},
