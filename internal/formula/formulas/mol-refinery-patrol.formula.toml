@@ -247,11 +247,13 @@ A polecat's work is ready for merge. Extract details and track for processing.
 # - MR bead ID (REQUIRED for closing after merge)
 ```
 
-**IMPORTANT**: You MUST track the polecat name, MR bead ID, AND message ID - you will need them
-in merge-push step to send MERGED notification, close the MR bead, and archive the mail.
+**IMPORTANT**: You MUST track the polecat name, MR bead ID, AND message ID. On a
+merge, `gt mq post-merge` sends MERGED, closes the MR bead and archives this mail
+itself, printing ✓/○/✗ for each chore; you redo only a chore that printed ✗.
+On a reject or skip path you archive the mail yourself.
 
 Mark as read. The work will be processed in queue-scan/process-branch.
-**Do NOT archive yet** - archive after merge/reject decision in merge-push step.
+**Do NOT archive yet** - it is archived after the merge/reject decision.
 
 **PATROL: Wake up**:
 Witness detected MRs waiting but refinery idle. Acknowledge and archive:
@@ -349,7 +351,9 @@ For each queued MR:
   gt mq post-merge <rig> <mr-id> --skip-branch-delete
   ```
   Post-merge sends MERGED and archives MERGE_READY itself (claude-7fc); verify
-  its ✓ lines and do only a ✗ chore by hand.
+  its ✓ lines and do only a ✗ chore by hand. It may also print `🔄 unit
+  complete, respawning …` and end this session: that is expected, and the
+  fresh successor re-runs this sweep and continues with the MRs still queued.
 - If `PR_STATE=OPEN`: leave it for the normal process-branch/merge-push path.
 - If `PR_STATE=CLOSED`: do NOT send MERGED; leave it for manual rejection/supersede review.
 - If `PR_STATE=NOT_FOUND`: leave it open; do not close as "Branch no longer exists".
@@ -451,7 +455,14 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
   `.conflicts[]` and `.error` from `/tmp/<rig>-batch-result.json`, then
   answer two questions in this order, whatever the exit code:
 
-  1. What landed? `.merged[]` lists only members whose post-merge cleanup
+  1. Did the run fail before or beside the landing? A non-zero exit whose
+     `.error` does not start with `post-merge cleanup proof failed for` (the
+     exact prefix the cleanup failures below carry) is an infra failure (push
+     refused, slot, editorial precondition, eligibility recheck): escalate
+     it observably exactly as handle-failures does for a single MR (`.error`
+     text, mail the mayor) FIRST, before any recovery below, so the same
+     failure is not silently retried one MR at a time.
+  2. What landed? `.merged[]` lists only members whose post-merge cleanup
      succeeded; every one of them is on {{target_branch}} and the batch run
      already sent its Witness mail as part of that cleanup (gt-9gjl) — do
      NOT send it again. A member can also have landed WITHOUT appearing there —
@@ -461,18 +472,14 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
      one with
      `grep -E 'Post-merge (proof|cleanup) failed for' /tmp/<rig>-batch.json`
      and run the verified cleanup for each, never a manual close:
-     `gt mq post-merge <rig> <mr-id> --skip-branch-delete` re-runs the
-     post-merge proof and closes MR and source issue together (the tool
-     merged-pr-sweep uses for the same case). Proof fails again → it did NOT
-     land, leave it queued for process-branch. Proof passes → post-merge
-     sends MERGED itself; do not send it a second time.
-  2. Did the run fail before or beside that? A non-zero exit whose `.error`
-     does not start with `post-merge cleanup proof failed for` (the exact
-     prefix the cleanup failures above carry) is an infra failure (push
-     refused, slot, editorial precondition, eligibility recheck): escalate
-     it observably exactly as handle-failures does for a single MR (`.error`
-     text, mail the mayor) before going to Step 6, so the same failure is
-     not silently retried one MR at a time.
+     `gt mq post-merge <rig> <mr-id> --skip-branch-delete --no-cycle` re-runs
+     the post-merge proof and closes MR and source issue together (the tool
+     merged-pr-sweep uses for the same case). `--no-cycle` is REQUIRED here:
+     without it the first recovered member could respawn this session and
+     abandon the rest; with it post-merge prints `○ session kept: cycle
+     suppressed (--no-cycle)`. Proof fails again → it did NOT land, leave it
+     queued for process-branch. Proof passes → post-merge sends MERGED
+     itself; do not send it a second time.
   `NO_JSON` with a non-zero exit is the same kind of infra failure earlier
   in the run (candidate listing, gate-slot wait): nothing was landed;
   escalate it the same way (tail of `/tmp/<rig>-batch.err`, mail the mayor)
@@ -509,7 +516,9 @@ batch had no error, and the handoff cooldown is clear. When it happens, `gt
 mq batch run` prints `🔄 unit complete, respawning <session> for the next
 unit` and your session ends there by design — a fresh successor starts the
 next patrol cycle. Otherwise it prints `○ session kept: <cause>`; continue
-to Step 6 (the single-MR path) in this session, same as today.
+to Step 6 (the single-MR path) in this session, same as today. An errored
+batch always keeps the session, and the Step 3 recovery post-merges pass
+`--no-cycle`, so recovery never respawns you mid-way.
 
 **Step 5: Leave culprits and conflicts alone**
 
@@ -1222,7 +1231,8 @@ Error: $FAILURE_OUTPUT
 Attempt-Number: 1
 BODY
 ```
-Then skip to Step 4 (archive mail) and continue patrol.
+Then archive the MERGE_READY mail (`gt mail archive <id>`), delete temp
+(`git branch -D temp`), and skip to loop-check.
 
 **If CI checks PASS:**
 
@@ -1377,12 +1387,16 @@ a line for each:
 - `✓ MERGED sent to <rig>/witness` — polecat branches only
 - `✓ MERGE_READY archived: <id>`, or `○ no MERGE_READY mail for <id>` when
   none matched — either line means the chore ran, there is nothing to redo
-- `✓ temp branch deleted`
+- `✓ temp branch deleted`, or `○ no temp branch to delete` when there was
+  none — either line means the chore ran, there is nothing to redo
 - the landed-commit attestation comment on the MR bead, added silently when
   you passed `--landed-commit` (a failure there prints `✗ attestation
   comment failed on <id>: ...`; there is no separate success line)
 
-If a line shows `✗` instead, do that one chore by hand
+Any real failure prints `✗` (a failed MERGED send, a MERGE_READY that could
+not be archived or an unreadable inbox, a temp branch that could not be
+deleted); `○` lines never need action. If a line shows `✗`, do that one
+chore by hand
 (`gt mail send <rig>/witness -s "MERGED <polecat-name>" …`,
 `gt mail archive <id>`, `git branch -D temp`). Do NOT repeat a chore that
 printed `✓` — a second MERGED is a duplicate mail.
@@ -1398,8 +1412,8 @@ as today, and keep your own patrol wisp.
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
 - [x] Post-merge completed (MR closed, source issue closed, branch deleted)
-- [x] Its MERGED / MERGE_READY / temp lines are ✓ (or MERGE_READY's `○ no
-  MERGE_READY mail` line), or you did a ✗ chore by hand
+- [x] No chore line shows `✗`, or you did that ✗ chore by hand (`✓` and `○`
+  lines, e.g. `○ no MERGE_READY mail` or `○ no temp branch to delete`, pass)
 
 If a chore printed `✗` and you have not done it by hand yet, GO BACK AND DO IT NOW.
 
@@ -1459,13 +1473,13 @@ description = """
 Summarize this patrol cycle.
 
 **VERIFICATION**: Before generating summary, confirm for each merged branch:
-- [ ] `gt mq post-merge` completed verified cleanup
-- [ ] MERGED mail was sent to witness
-- [ ] MERGE_READY mail archived
+- [ ] `gt mq post-merge` (or `gt mq batch run`) completed verified cleanup
+- [ ] none of its chore lines showed `✗`, or you redid that ✗ chore by hand
 
 If verified cleanup was missed, run `gt mq post-merge`; never manually close
-MR/source issues outside verified cleanup. If notifications or archiving were
-missed, do them now.
+MR/source issues outside verified cleanup. Post-merge sends MERGED, archives
+MERGE_READY and deletes temp itself and reports ✓/○/✗ for each; redo only a
+chore that printed ✗ — never re-send a MERGED that printed ✓.
 
 Include in summary:
 - Branches merged (count, names)

@@ -44,3 +44,48 @@ func TestRefineryPatrolPostMergeOwnsPerMRChores(t *testing.T) {
 		t.Fatal("merge-push lost its post-merge invocation")
 	}
 }
+
+// MR-B final review (I1, M1, M3, M4): batch recovery must not respawn the
+// session, no step may point at the deleted merge-push "Step 4 (archive
+// mail)", no step may tell the agent to redo post-merge's chores by hand
+// except as the ✗ fallback, and the gate must accept post-merge's ○ lines.
+func TestRefineryPatrolUnitCycleReviewFixes(t *testing.T) {
+	f := loadRefineryPatrolFormula(t)
+
+	all := ""
+	for _, s := range f.Steps {
+		all += s.Description + "\n"
+	}
+	for _, stale := range []string{
+		"Step 4 (archive mail)",
+		"to send MERGED notification",
+		"MERGED mail was sent to witness",
+		"If notifications or archiving were\nmissed, do them now",
+	} {
+		if strings.Contains(all, stale) {
+			t.Errorf("formula still contains stale chore text %q", stale)
+		}
+	}
+
+	batchScan := requireFormulaStep(t, f, "batch-scan").Description
+	if !strings.Contains(batchScan, "gt mq post-merge <rig> <mr-id> --skip-branch-delete --no-cycle") {
+		t.Error("batch-scan recovery post-merge does not pass --no-cycle; the first recovered member could respawn the session")
+	}
+	escalate := strings.Index(batchScan, "mail the mayor) FIRST")
+	recoverAt := strings.Index(batchScan, "--skip-branch-delete --no-cycle")
+	if escalate < 0 || recoverAt < 0 || escalate > recoverAt {
+		t.Error("batch-scan must escalate an infra .error to the mayor before the recovery post-merges")
+	}
+
+	mergedSweep := requireFormulaStep(t, f, "merged-pr-sweep").Description
+	if !strings.Contains(mergedSweep, "successor re-runs this sweep") {
+		t.Error("merged-pr-sweep does not say a respawn there is expected and the successor continues")
+	}
+
+	mergePush := requireFormulaStep(t, f, "merge-push").Description
+	for _, want := range []string{"○ no temp branch to delete", "`○` lines never need action"} {
+		if !strings.Contains(mergePush, want) {
+			t.Errorf("merge-push does not accept post-merge's %q", want)
+		}
+	}
+}
