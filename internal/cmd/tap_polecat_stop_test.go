@@ -298,6 +298,24 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 			expect: true,
 		},
 		{
+			name:   "a backgrounded gt done still running in the pane",
+			argv:   "gt done",
+			want:   "gt done",
+			expect: true,
+		},
+		{
+			name:   "gt done at the absolute path it was exec'd with",
+			argv:   "/usr/local/bin/gt done",
+			want:   "gt done",
+			expect: true,
+		},
+		{
+			name:   "gt done inside a background wrapper",
+			argv:   `/bin/zsh -c source /Users/sloan/gt/.claude-town/shell-snapshots/snapshot-zsh-1790075016638-nti8n3.sh 2>/dev/null || true && eval 'gt done' < /dev/null && pwd -P >| /tmp/claude-fac2-cwd`,
+			want:   "gt done",
+			expect: true,
+		},
+		{
 			name:   "make test as a shell -c body",
 			argv:   `sh -c 'GOFLAGS=-p=8 make test'`,
 			want:   "make test",
@@ -337,6 +355,11 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 		{
 			name:   "a grep for the slot wrapper stays data",
 			argv:   `grep -rn "gt slot run" internal/`,
+			expect: false,
+		},
+		{
+			name:   "a grep for gt done stays data",
+			argv:   `grep -rn "gt done" internal/`,
 			expect: false,
 		},
 	}
