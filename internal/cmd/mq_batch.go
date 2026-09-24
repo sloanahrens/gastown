@@ -514,7 +514,8 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 			WorkDir:         workDir,
 			MRs:             mrs,
 			MergeCommit:     result.MergeCommit,
-			CycleEnabled:    mq != nil && mq.CycleSessionAfterMerge && result.Error == nil,
+			CycleEnabled:    mq != nil && mq.CycleSessionAfterMerge,
+			BatchErrored:    result.Error != nil,
 		}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, errOut))
 		if rep.SkipCause != "" {
 			fmt.Fprintf(errOut, "  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)

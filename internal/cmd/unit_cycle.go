@@ -38,7 +38,8 @@ type unitCycleParams struct {
 	MRs                  []unitMR
 	MergeCommit          string
 	LandedCommitAttested bool // --landed-commit was passed
-	CycleEnabled         bool // merge_queue.cycle_session_after_merge (batch: and the batch had no error)
+	CycleEnabled         bool // merge_queue.cycle_session_after_merge
+	BatchErrored         bool // batch mode: the batch landed but result.Error is set; never cycle
 }
 
 // unitCycleDeps holds every side effect completeUnitAndCycle has, so tests
@@ -65,9 +66,10 @@ type unitCycleReport struct {
 }
 
 // completeUnitAndCycle ends a landed unit (one MR, or one batch): it does the
-// per-MR chores the refinery formula used to leave to the agent, then, when
-// the caller is this rig's refinery, closes the patrol cycle and respawns the
-// refinery pane in place so the next unit starts in a fresh session.
+// per-MR chores the refinery formula used to leave to the agent, then, only
+// when the session will actually cycle (this rig's refinery in its own pane,
+// flag on, batch clean, outside the cooldown), closes the patrol cycle and
+// respawns the refinery pane in place so the next unit starts fresh.
 // Every step is best-effort: a landed merge is never failed from here.
 //
 // Deliberately not called: cleanupMoleculeOnHandoff (it would close the
@@ -113,10 +115,11 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 		}
 	}
 
-	// 2 and 3 run only for this rig's refinery, inside its own pane: from any
-	// other caller they would close the refinery's live patrol or kill the
-	// caller's own pane.
-	if cause := unitCycleCallerMismatch(p, d); cause != "" {
+	// Steps 2 and 3 run together or not at all, and every gate is decided
+	// before either starts. Closing the patrol wisp without respawning would
+	// leave the live session holding a closed wisp id, so when the session
+	// is kept it keeps its own patrol wisp, exactly as without this step.
+	if cause := unitCycleSkipCause(p, d); cause != "" {
 		return unitCycleReport{SkipCause: cause}
 	}
 
@@ -127,13 +130,6 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 	}
 
 	// 3. Respawn in place.
-	if !p.CycleEnabled {
-		return unitCycleReport{SkipCause: "cycle disabled (merge_queue.cycle_session_after_merge off, or the batch errored)"}
-	}
-	if age, ok := d.HandoffAge(); ok && age < constants.MinHandoffCooldown {
-		return unitCycleReport{SkipCause: fmt.Sprintf("last handoff %v ago (< %v); the next unit cycles",
-			age.Round(time.Second), constants.MinHandoffCooldown)}
-	}
 	fmt.Fprintf(d.Out, "  %s unit complete, respawning %s for the next unit\n", style.Bold.Render("🔄"), p.RefinerySession)
 	d.RecordCycle()
 	if err := d.Respawn(); err != nil {
@@ -143,6 +139,26 @@ func completeUnitAndCycle(p unitCycleParams, d unitCycleDeps) unitCycleReport {
 		return unitCycleReport{SkipCause: "respawn failed: " + err.Error()}
 	}
 	return unitCycleReport{Respawned: true}
+}
+
+// unitCycleSkipCause returns why this unit must not close the patrol wisp and
+// respawn, or "" when it should. The role and pane guards come first: from
+// any other caller a respawn would kill the caller's own pane.
+func unitCycleSkipCause(p unitCycleParams, d unitCycleDeps) string {
+	if cause := unitCycleCallerMismatch(p, d); cause != "" {
+		return cause
+	}
+	if !p.CycleEnabled {
+		return "cycle disabled (merge_queue.cycle_session_after_merge off)"
+	}
+	if p.Mode == unitBatch && p.BatchErrored {
+		return "batch had errors; the session stays to recover the failed members"
+	}
+	if age, ok := d.HandoffAge(); ok && age < constants.MinHandoffCooldown {
+		return fmt.Sprintf("last handoff %v ago (< %v); the next unit cycles",
+			age.Round(time.Second), constants.MinHandoffCooldown)
+	}
+	return ""
 }
 
 // unitCycleCallerMismatch returns why the caller is not this rig's refinery

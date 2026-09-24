@@ -27,19 +27,24 @@ type fakeUnitCycle struct {
 	handoffAge  time.Duration
 	hasHandoff  bool
 	env         map[string]string
+	calls       []string // order of the cycle-phase side effects
 }
 
 func (f *fakeUnitCycle) deps(out *bytes.Buffer) unitCycleDeps {
 	return unitCycleDeps{
-		Send:        func(m *mail.Message) error { f.sent = append(f.sent, m); return f.sendErr },
-		ListInbox:   func() ([]*mail.Message, error) { return f.inbox, nil },
-		Archive:     func(id string) error { f.archived = append(f.archived, id); return nil },
-		AddComment:  func(id, text string) error { f.comments = append(f.comments, id+": "+text); return nil },
-		DeleteTemp:  func(dir string) error { f.tempDeleted = append(f.tempDeleted, dir); return nil },
-		ClosePatrol: func(summary string) error { f.patrolSum = append(f.patrolSum, summary); return f.patrolErr },
-		Respawn:     func() error { f.respawned++; return f.respawnErr },
+		Send:       func(m *mail.Message) error { f.sent = append(f.sent, m); return f.sendErr },
+		ListInbox:  func() ([]*mail.Message, error) { return f.inbox, nil },
+		Archive:    func(id string) error { f.archived = append(f.archived, id); return nil },
+		AddComment: func(id, text string) error { f.comments = append(f.comments, id+": "+text); return nil },
+		DeleteTemp: func(dir string) error { f.tempDeleted = append(f.tempDeleted, dir); return nil },
+		ClosePatrol: func(summary string) error {
+			f.calls = append(f.calls, "patrol")
+			f.patrolSum = append(f.patrolSum, summary)
+			return f.patrolErr
+		},
+		Respawn:     func() error { f.calls = append(f.calls, "respawn"); f.respawned++; return f.respawnErr },
 		Escalate:    func(fp, sev, msg string) { f.escalations = append(f.escalations, fp+"|"+sev) },
-		RecordCycle: func() { f.recorded++ },
+		RecordCycle: func() { f.calls = append(f.calls, "record"); f.recorded++ },
 		PaneSession: func() (string, error) { return f.paneSession, nil },
 		HandoffAge:  func() (time.Duration, bool) { return f.handoffAge, f.hasHandoff },
 		Getenv:      func(k string) string { return f.env[k] },
@@ -187,26 +192,63 @@ func TestCompleteUnitAndCycle_GuardsSkipPatrolAndRespawnButKeepChores(t *testing
 	}
 }
 
-func TestCompleteUnitAndCycle_FlagOffOrCooldownClosesPatrolButNoRespawn(t *testing.T) {
-	for name, mutate := range map[string]func(p *unitCycleParams, f *fakeUnitCycle){
-		"flag off": func(p *unitCycleParams, f *fakeUnitCycle) { p.CycleEnabled = false },
-		"cooldown": func(p *unitCycleParams, f *fakeUnitCycle) { f.hasHandoff = true; f.handoffAge = 30 * time.Second },
-	} {
+func TestCompleteUnitAndCycle_KeptSessionKeepsItsPatrolWisp(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(p *unitCycleParams, f *fakeUnitCycle)
+		cause  string
+	}{
+		"single flag off": {
+			func(p *unitCycleParams, f *fakeUnitCycle) { p.CycleEnabled = false },
+			"cycle disabled (merge_queue.cycle_session_after_merge off)",
+		},
+		"batch flag off": {
+			func(p *unitCycleParams, f *fakeUnitCycle) { p.Mode = unitBatch; p.CycleEnabled = false },
+			"cycle disabled (merge_queue.cycle_session_after_merge off)",
+		},
+		"batch errored": {
+			func(p *unitCycleParams, f *fakeUnitCycle) { p.Mode = unitBatch; p.BatchErrored = true },
+			"batch had errors; the session stays to recover the failed members",
+		},
+		"cooldown": {
+			func(p *unitCycleParams, f *fakeUnitCycle) { f.hasHandoff = true; f.handoffAge = 30 * time.Second },
+			"last handoff 30s ago (< 2m0s); the next unit cycles",
+		},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := refineryFake()
 			p := singleParams()
-			mutate(&p, f)
+			tc.mutate(&p, f)
 			rep := completeUnitAndCycle(p, f.deps(&bytes.Buffer{}))
-			if len(f.patrolSum) != 1 {
-				t.Fatalf("patrol not closed: %v", f.patrolSum)
+			if len(f.archived) == 0 {
+				t.Fatal("chores skipped; chores always run")
 			}
-			if f.respawned != 0 || rep.Respawned || f.recorded != 0 {
-				t.Fatal("respawned despite flag off / cooldown")
+			if len(f.calls) != 0 || rep.Respawned {
+				t.Fatalf("cycle phase ran %v; a kept session keeps its own patrol wisp", f.calls)
 			}
-			if rep.SkipCause == "" {
-				t.Fatal("skip left SkipCause empty")
+			if rep.SkipCause != tc.cause {
+				t.Fatalf("SkipCause = %q, want %q", rep.SkipCause, tc.cause)
 			}
 		})
+	}
+}
+
+func TestCompleteUnitAndCycle_SingleSkipCauseNeverMentionsBatch(t *testing.T) {
+	f := refineryFake()
+	p := singleParams()
+	p.CycleEnabled = false
+	p.BatchErrored = true // ignored outside batch mode
+	rep := completeUnitAndCycle(p, f.deps(&bytes.Buffer{}))
+	if strings.Contains(rep.SkipCause, "batch") {
+		t.Fatalf("single-MR SkipCause mentions a batch: %q", rep.SkipCause)
+	}
+}
+
+func TestCompleteUnitAndCycle_CyclePhaseOrder(t *testing.T) {
+	f := refineryFake()
+	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
+	if got := strings.Join(f.calls, ","); got != "patrol,record,respawn" {
+		t.Fatalf("cycle phase order = %s, want patrol,record,respawn", got)
 	}
 }
 
