@@ -189,7 +189,7 @@ refinery merge (single MR: runMQPostMerge │ batch: once, after result.MergeCom
         → gt formula sync, gt plugin sync
         → write daemon/restart-pending.json → append daemon/install-receipts.jsonl
 [Go daemon] heartbeat, BEFORE dispatching plugins: marker present and daemon idle
-              → Run returns errRestartForUpgrade → runDaemonRun os.Exit(75) → launchd restarts it
+              → Run returns ErrRestartForUpgrade → runDaemonRun os.Exit(75) → launchd restarts it
             startup: marker.commit == own commit → clear marker, append "daemon_restarted" receipt
             marker older than 30m and never idle → escalate once
 [rebuild-gt] threshold 1; after its deferral checks it delegates the WHOLE job
@@ -321,7 +321,7 @@ heartbeat and startup.
 - **When the marker is present, its commit is newer than the daemon's own
   build commit, and the daemon is idle,** the daemon cancels its context,
   runs the normal shutdown, and returns a sentinel error,
-  `errRestartForUpgrade`, from `Run`. `runDaemonRun`
+  `ErrRestartForUpgrade`, from `Run`. `runDaemonRun`
   (`internal/cmd/daemon.go:487`) matches the error and calls `os.Exit(75)`.
   launchd starts it again on the new binary.
 - **At startup** the same covered-marker check runs first.
@@ -519,7 +519,7 @@ written through a temp file and a rename.
   rebuild-gt's backstop reads it.
 - **Dolt is untouched by an upgrade restart.** Today the live town doesn't
   manage Dolt through the daemon; launchd runs `gt dolt start`. The shutdown
-  for `errRestartForUpgrade` skips stopping a daemon-managed Dolt anyway, and
+  for `ErrRestartForUpgrade` skips stopping a daemon-managed Dolt anyway, and
   the new daemon adopts the running server (`dolt.go:375-409`).
   The last writer wins. It is written only after the smoke test passes.
 - **`install-receipts.jsonl`**: one JSON object per event, with these fields:
@@ -557,7 +557,7 @@ gate already runs close to its 10-minute budget, so every test must stay fast.
   cleared and writes a receipt, both at startup and at a heartbeat. This is
   the race from item 8.
 - A newer marker while busy: no exit.
-- A newer marker while idle: `Run` returns `errRestartForUpgrade`, and
+- A newer marker while idle: `Run` returns `ErrRestartForUpgrade`, and
   `runDaemonRun` maps it to 75. The exit function is injected, so no test
   process exits.
 - The idle check runs before plugin dispatch within one heartbeat.
