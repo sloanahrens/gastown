@@ -693,6 +693,13 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 	if gotReq.MRID != mrIssue.ID {
 		t.Errorf("MRID = %q, want %q", gotReq.MRID, mrIssue.ID)
 	}
+	// gt-1jig: a manual reject that classified nothing must carry no class —
+	// an unconditional "editorial" is what put the same stamp on test
+	// failures and compile breaks, sending the next reader to the wrong
+	// subsystem. The caller states a class when it has one (--failure-type).
+	if gotReq.FailureType != "" {
+		t.Errorf("FailureType = %q, want empty for a reject that classified nothing", gotReq.FailureType)
+	}
 	// gt-j6ez: a manual gt mq reject has no om verdict behind it, so its
 	// recovery request must not fabricate a Receipt (that would make
 	// RedispatchEditorial gate on a nonexistent score) — but the human's

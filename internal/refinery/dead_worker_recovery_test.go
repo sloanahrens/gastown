@@ -779,3 +779,55 @@ func TestHandleMRInfoFailure_SlotTimeout_NoRecovery(t *testing.T) {
 		t.Fatal("slot timeout must not trigger dead-worker recovery")
 	}
 }
+
+// TestRecoverRejectedMRDeadWorker_MailCarriesOnlyAStatedClass is gt-1jig on the
+// RECOVERED_BEAD mail the deacon triages by: the Failure-Type line appears only
+// when the rejection was actually classified, and an unclassified one carries
+// no class rather than a defaulted one. The line the mail's other readers use
+// (Polecat:, the Attempt count) must survive either way.
+func TestRecoverRejectedMRDeadWorker_MailCarriesOnlyAStatedClass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		class string
+	}{
+		{name: "classified", class: FailureTypeBuild},
+		{name: "unclassified", class: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := &fakeRejectedBeads{issue: &beads.Issue{ID: "gt-src1", Status: "closed"}}
+			var sent []*mail.Message
+			sendMail := func(m *mail.Message) error {
+				sent = append(sent, m)
+				return nil
+			}
+			req := deadWorkerReq()
+			req.FailureType = tc.class
+
+			if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, nil, req) {
+				t.Fatal("expected recovery")
+			}
+			if len(sent) != 1 {
+				t.Fatalf("expected 1 mail, got %d", len(sent))
+			}
+			body := sent[0].Body
+
+			if tc.class == "" {
+				if strings.Contains(body, "Failure-Type:") {
+					t.Errorf("unclassified rejection's mail names a class:\n%s", body)
+				}
+			} else if !strings.Contains(body, "Failure-Type: "+tc.class+"\n") {
+				t.Errorf("mail body missing the rejection's class:\n%s", body)
+			}
+			// The class sits on the line before Attempt:, so an omitted one
+			// must not swallow the line the attempt count is read from.
+			if !strings.Contains(body, "\nAttempt: 1\n") {
+				t.Errorf("mail body lost its Attempt line:\n%s", body)
+			}
+			if !strings.Contains(body, "Polecat: testrig/polecats/nux") {
+				t.Errorf("mail body lost the Polecat line the deacon reads the rig from:\n%s", body)
+			}
+		})
+	}
+}
