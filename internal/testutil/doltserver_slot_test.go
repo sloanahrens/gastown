@@ -3,8 +3,10 @@
 package testutil
 
 import (
+	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestHostContainerSlotCaps pins the host-wide Dolt container cap's one
@@ -46,6 +48,28 @@ func TestHostContainerSlotCaps(t *testing.T) {
 	}
 	if got := len(doltContainerSlots); got != 0 {
 		t.Fatalf("after releasing all %d slots, len = %d, want 0", want, got)
+	}
+}
+
+// TestRequireDockerSlotBounded_TimesOutRatherThanHangs pins the fix for the
+// deadlock the first attempt at gt-elvf4 was rejected for: a pool with no
+// free slot must not block its caller forever (see doltContainerSlotWait).
+// The pool starts empty (no token to hand out, matching an exhausted cap)
+// and doltContainerSlotWait is shrunk so the test proves the deadline fires
+// without spending the real 5 minutes.
+func TestRequireDockerSlotBounded_TimesOutRatherThanHangs(t *testing.T) {
+	origSlots := doltContainerSlots
+	origWait := doltContainerSlotWait
+	t.Cleanup(func() {
+		doltContainerSlots = origSlots
+		doltContainerSlotWait = origWait
+	})
+	doltContainerSlots = make(chan struct{}, 1) // empty: no free slot
+	doltContainerSlotWait = 20 * time.Millisecond
+
+	_, err := requireDockerSlotBounded(context.Background())
+	if err == nil {
+		t.Fatal("requireDockerSlotBounded() on an exhausted pool returned nil error, want a bounded timeout")
 	}
 }
 

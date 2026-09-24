@@ -163,6 +163,22 @@ func doltContainerConcurrency() int {
 	return doltContainerConcurrencyDefault
 }
 
+// doltContainerSlotWait bounds how long a start waits for a free
+// doltContainerSlots token. An unbounded wait here can deadlock: under
+// GOFLAGS=-p=8, once doltContainerConcurrency (4) packages each hold the one
+// slot their whole-run shared container needs, a test in each of those same
+// packages asking for one more slot to start an isolated per-test container
+// blocks on a pool that is already fully held — by them. None can free a
+// slot without first getting one, so all four wait forever and the packages
+// behind them queue on a cap that never opens (gt-elvf4; confirmed live: 7-8
+// test binaries frozen, CPU flat, 20m+ gate hang, blocked queue). Bounding
+// the wait turns that hang into a clear timeout: the stuck tests fail, their
+// package finishes, and its slot is returned for the next one in line.
+//
+// A var (not a const) so a test can shrink it rather than spend the real 5
+// minutes proving the deadline fires.
+var doltContainerSlotWait = 5 * time.Minute
+
 // requireDockerSlot waits for a free one of doltContainerSlots and returns it,
 // so at most doltContainerConcurrency containers run at once on this host.
 // Both container shapes (the shared per-package one and a per-test isolated
@@ -175,6 +191,19 @@ func requireDockerSlot(ctx context.Context) (chan struct{}, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// requireDockerSlotBounded waits up to doltContainerSlotWait for a free slot,
+// rather than the caller's own (often unbounded) context: see
+// doltContainerSlotWait for why an indefinite wait here is unsafe.
+func requireDockerSlotBounded(ctx context.Context) (chan struct{}, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, doltContainerSlotWait)
+	defer cancel()
+	slot, err := requireDockerSlot(waitCtx)
+	if err != nil {
+		return nil, fmt.Errorf("waiting for a Dolt container slot: %w", err)
+	}
+	return slot, nil
 }
 
 // isReaperRemovingErr returns true if the error is a transient "removing"
@@ -357,9 +386,9 @@ func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error)
 // same host cap as the per-test isolated containers (gt-elvf4).
 func startSharedDoltContainer() {
 	ctx := context.Background()
-	slot, err := requireDockerSlot(ctx)
+	slot, err := requireDockerSlotBounded(ctx)
 	if err != nil {
-		doltCtrErr = fmt.Errorf("waiting for a Dolt container slot: %w", err)
+		doltCtrErr = err
 		return
 	}
 	ctr, err := runDoltContainerWithRetry(ctx)
@@ -406,9 +435,9 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	}
 
 	ctx := context.Background()
-	slot, err := requireDockerSlot(ctx)
+	slot, err := requireDockerSlotBounded(ctx)
 	if err != nil {
-		t.Fatalf("waiting for a Dolt container slot: %v", err)
+		t.Fatalf("%v", err)
 	}
 	release := func() { slot <- struct{}{} }
 	t.Cleanup(release)
