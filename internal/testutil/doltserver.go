@@ -28,6 +28,14 @@ const DoltDockerImage = "dolthub/dolt-sql-server:2.0.7"
 // every lookup in this file asks Docker to map.
 const doltContainerPort = "3306/tcp"
 
+// DoltTmpfsEnv opts a run out of the tmpfs data dir ("0" = keep data on the
+// VM disk), for a Docker runtime that cannot mount tmpfs over the image's
+// declared volume.
+const DoltTmpfsEnv = "GT_TEST_DOLT_TMPFS"
+
+// doltDataDir is the image's data directory (its declared VOLUME).
+const doltDataDir = "/var/lib/dolt"
+
 const (
 	// startupAttempts is how many containers one startup may burn before its
 	// failure is reported. A failed attempt is replaced rather than waited on:
@@ -153,10 +161,22 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 		}
 	}()
 
-	return dolt.Run(ctx, DoltDockerImage,
-		dolt.WithDatabase("gt_test"),
+	return dolt.Run(ctx, DoltDockerImage, doltContainerOpts()...)
+}
+
+// doltContainerOpts is every option a test Dolt container starts with. The
+// data dir is tmpfs by default: each bd init DOLT_COMMITs 66 migrations, and
+// on the Docker Desktop VM disk every commit's fsync reaches the host SSD
+// (claude-yfj). A container's data is ~18 MB; the 2g cap bounds a runaway.
+func doltContainerOpts() []testcontainers.ContainerCustomizer {
+	opts := []testcontainers.ContainerCustomizer{
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
-	)
+		dolt.WithDatabase("gt_test"),
+	}
+	if os.Getenv(DoltTmpfsEnv) != "0" {
+		opts = append(opts, testcontainers.WithTmpfs(map[string]string{doltDataDir: "rw,size=2g"}))
+	}
+	return opts
 }
 
 // isPortNotMappedErr reports whether err is the inspect-backed port lookup
