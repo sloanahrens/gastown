@@ -12,9 +12,9 @@ import (
 // TestDeliberateStopMarkerCoordinatesAreTheDetectorGate pins the one thing
 // gt session stop and the witness zombie detector have to agree on (gt-fojqs):
 // the marker file. The detector's pauseGateSkip reads
-// agentpause.PauseGate(townRoot, rigName, polecat, polecatName); the writer
-// must land on exactly that path, or the operator's stop records nothing and
-// the detector restarts the session anyway.
+// agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName);
+// the writer must land on exactly that path, or the operator's stop records
+// nothing and the detector restarts the session anyway.
 func TestDeliberateStopMarkerCoordinatesAreTheDetectorGate(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName, polecatName := "gastown", "garnet"
