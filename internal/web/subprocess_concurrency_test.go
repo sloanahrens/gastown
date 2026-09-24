@@ -63,6 +63,19 @@ func TestNewDashboardMux_PartitionsSubprocessPools(t *testing.T) {
 	}
 }
 
+// userCmdExecBudget bounds a fake gt stub's execution in these tests. It only
+// costs time when the stub is truly wedged, so it is sized for a loaded gate
+// host, not for how fast the stub usually runs.
+const userCmdExecBudget = 30 * time.Second
+
+// userSlotWaitBudget bounds the userCmdSem wait in the partition tests. Not
+// shorter: acquireCmdSlot selects over the slot send and ctx.Done(), so a
+// goroutine descheduled past the budget between context.WithTimeout and the
+// select finds both ready, and select picks at random — a spurious "command
+// slot unavailable" on a free pool. 5s still fails a cmdSem regression far
+// sooner than the 30s default.
+const userSlotWaitBudget = 5 * time.Second
+
 // TestUserCommandPoolDoesNotStarveFetcherBD is the behavioral proof of the
 // partition, driving both handlers it claims are independent: with the
 // APIHandler's cmdSem completely full — as a burst of options/mail/ready
@@ -84,10 +97,17 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 		t.Fatalf("write fake gt binary: %v", err)
 	}
 
+	// slotWaitBudget (userSlotWaitBudget) is bounded so a regression that
+	// draws cmdSem fails with "command slot unavailable" well before the 30s
+	// default. The exec budget (userCmdExecBudget) is
+	// generous: a 1s budget timed the trivial gt stub out on a loaded gate
+	// host while the bd herd below was forking ("command timed out after
+	// 1s") — that measured the host, not the pool partition.
 	h := &APIHandler{
-		gtPath:     gtPath,
-		cmdSem:     make(chan struct{}, maxConcurrentCommands),
-		userCmdSem: make(chan struct{}, userCommandConcurrency),
+		gtPath:         gtPath,
+		cmdSem:         make(chan struct{}, maxConcurrentCommands),
+		userCmdSem:     make(chan struct{}, userCommandConcurrency),
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	// Fill the short-read pool completely, as a burst of API reads would.
 	for i := 0; i < maxConcurrentCommands; i++ {
@@ -95,7 +115,7 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	}
 
 	f := &LiveConvoyFetcher{
-		cmdTimeout: 10 * time.Second,
+		cmdTimeout: 30 * time.Second,
 		bdBin:      bdPath,
 		cmdSem:     make(chan struct{}, subprocessConcurrency),
 	}
@@ -120,7 +140,7 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	// A user-driven command must succeed concurrently with the bd herd
 	// above, even though every cmdSem slot is taken — it never touches
 	// cmdSem (gt-d5xr).
-	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+	out, err := h.runUserGtCommand(context.Background(), userCmdExecBudget, []string{"rig", "add"})
 
 	wg.Wait()
 	close(stop)
@@ -156,13 +176,14 @@ func TestRunUserGtCommand_DoesNotDrawCmdSemSlot(t *testing.T) {
 	}
 
 	h := &APIHandler{
-		gtPath:     gtPath,
-		cmdSem:     make(chan struct{}, 1),
-		userCmdSem: make(chan struct{}, 1),
+		gtPath:         gtPath,
+		cmdSem:         make(chan struct{}, 1),
+		userCmdSem:     make(chan struct{}, 1),
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	h.cmdSem <- struct{}{} // held for the whole test; never released
 
-	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+	out, err := h.runUserGtCommand(context.Background(), userCmdExecBudget, []string{"rig", "add"})
 	if err != nil {
 		t.Fatalf("runUserGtCommand with cmdSem's only slot held: %v", err)
 	}
@@ -186,14 +207,17 @@ func TestRunGhCommand_UsesUserPoolNotCmdSem(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
 
+	// Expected success with userCmdSem free: userSlotWaitBudget and
+	// userCmdExecBudget, not a few ms — with a free slot, a wait budget that
+	// expires before the select runs lets select pick the timeout at random.
 	h := &APIHandler{
 		cmdSem:         make(chan struct{}, 1),
 		userCmdSem:     make(chan struct{}, 1),
-		slotWaitBudget: 20 * time.Millisecond,
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	h.cmdSem <- struct{}{} // full short-read pool must not block gh
 
-	out, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"})
+	out, err := h.runGhCommand(context.Background(), userCmdExecBudget, []string{"pr", "list"})
 	if err != nil {
 		t.Fatalf("runGhCommand with cmdSem full: %v", err)
 	}
@@ -202,8 +226,10 @@ func TestRunGhCommand_UsesUserPoolNotCmdSem(t *testing.T) {
 	}
 
 	// But the user pool does bound it: with userCmdSem also full, it must
-	// fail waiting for a slot rather than run unbounded.
+	// fail waiting for a slot rather than run unbounded. Expected timeout:
+	// the send can never be ready, so a short budget is deterministic.
 	h.userCmdSem <- struct{}{}
+	h.slotWaitBudget = 20 * time.Millisecond
 	if _, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"}); err == nil {
 		t.Fatal("runGhCommand succeeded with userCmdSem full, want a slot-wait error")
 	}
@@ -419,10 +445,11 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 		townRoot:   town,
 		cmdTimeout: 10 * time.Second,
 		cmdSem:     make(chan struct{}, 1),
-		// The pool-full case below only needs to prove the seam waits on
-		// this pool, not that it waits realistically long — a short
-		// override keeps the case fast (gt-d5xr).
-		slotWaitBudget: 20 * time.Millisecond,
+		// The pool-drained case must succeed in acquiring, so it gets
+		// userSlotWaitBudget: with a free slot, a few-ms budget that expires
+		// before the select runs lets select pick the timeout at random.
+		// The pool-full case below switches to a short budget.
+		slotWaitBudget: userSlotWaitBudget,
 	}
 
 	// A failing lister: no bd subprocess to observe, but it proves whether
@@ -443,7 +470,10 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 
 	// Pool full: the seam must fail without ever running the list —
 	// evidence it is acquiring against the shared pool, not escaping it.
+	// Expected timeout: the send can never be ready, so a short budget is
+	// deterministic and keeps the case fast (gt-d5xr).
 	f.cmdSem <- struct{}{}
+	f.slotWaitBudget = 20 * time.Millisecond
 	if _, err := f.townMergeQueueSnapshot(); err == nil {
 		t.Fatal("snapshot succeeded with the pool full, want the slot-wait failure")
 	}

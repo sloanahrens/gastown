@@ -136,6 +136,11 @@ func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
 	}
 	beadspkg.ResetBdAllowStaleCacheForTest()
 	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
+	// The --allow-stale probe fails closed at 10s. On a loaded gate host the
+	// stub's probe took longer, was cached as unsupported, and purge ran
+	// without --allow-stale ("unexpected args: purge --json --force", 16s
+	// test). The stub always answers, so a long bound costs nothing here.
+	t.Cleanup(beadspkg.SetBdAllowStaleProbeTimeoutForTest(2 * time.Minute))
 
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, "gastown", ".beads")
@@ -231,6 +236,11 @@ func TestPurgeClosedEphemeralsDryRunOmitsForce(t *testing.T) {
 	}
 	beadspkg.ResetBdAllowStaleCacheForTest()
 	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
+	// The --allow-stale probe fails closed at 10s. On a loaded gate host the
+	// stub's probe took longer, was cached as unsupported, and purge ran
+	// without --allow-stale ("unexpected args: purge --json --force", 16s
+	// test). The stub always answers, so a long bound costs nothing here.
+	t.Cleanup(beadspkg.SetBdAllowStaleProbeTimeoutForTest(2 * time.Minute))
 
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, "gastown", ".beads")

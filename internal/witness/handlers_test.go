@@ -2017,6 +2017,24 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	witCfg := &config.WitnessThresholds{HeartbeatStartupGrace: "1ms"}
 
+	// Pin the gt-gx2v liveness cross-check to "quiet". This test is about
+	// the gate admitting agent_state=spawning with no hook_bead; the real
+	// cross-check reads tmux's window_activity, which pane output advances
+	// and which has one-second resolution. NewSessionWithCommand starts the
+	// login shell first and respawns the pane with the command after, so the
+	// shell's prompt is written asynchronously. When that write landed in the
+	// second after session_created (likelier on a loaded host), it postdated
+	// createdAt+1ms grace and read as fresh work, so the session was judged
+	// working and not flagged (found=false). The cross-check has its own
+	// tests (TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence
+	// and the classifyNeverHeartbeatedLiveness cases). Not parallel: it
+	// swaps a package seam.
+	old := neverHeartbeatedLiveness
+	t.Cleanup(func() { neverHeartbeatedLiveness = old })
+	neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time) neverHeartbeatedEvidence {
+		return neverHeartbeatedEvidence{Detail: "gate-slot=none, transcript=none, pane-output=none"}
+	}
+
 	bd, _ := fakeBd()
 	snap := &agentBeadSnapshot{
 		AgentState: "spawning",
