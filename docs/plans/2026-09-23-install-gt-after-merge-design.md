@@ -152,7 +152,7 @@ rebuild-gt receipts; `.events.jsonl`):
 | # | Decision |
 |---|---|
 | 1 | The install runs synchronously inside the merge's post-merge step, in deterministic Go, on both the single-MR and batch paths. It never fails the merge. |
-| 2 | The trigger is a denylist. Skip only when every changed path is `*_test.go`, `*.md`, `docs/**` or `.beads/**`. Unknown paths install. |
+| 2 | The trigger is a denylist. Skip only when every changed path is `*_test.go`, `*.md` outside `internal/` and `plugins/`, `docs/**` or `.beads/**`. Markdown under `internal/` is embedded in the binary and `plugins/*/plugin.md` is deployed by plugin sync, so both install. Unknown paths install. |
 | 3 | Keep one previous binary (`gt.prev`). Run a smoke test after install; if it fails, roll back automatically and escalate. |
 | 4 | Long-lived `gt` processes (nudge-pollers, heartbeat-poller, dashboard) and loaded formula text are out of scope; they get a follow-up bead. |
 | 5 | Every install writes a receipt that records the latency from merge to install. |
@@ -302,6 +302,8 @@ heartbeat and startup.
     around the slot wait. Killing a run that is waiting is safe, because an
     interrupted run already counts as no verdict (gt-59yz). Without this the
     daemon would seldom be idle while the refinery gates back to back.
+  - `daemon/install-gt.lock` is not held (a non-blocking flock probe), so
+    the daemon never restarts onto a binary whose install is still in flight;
   - `pourDoctorMolecule` and the Dolt goroutines are not counted: they are
     short or restartable.
 - **The check runs at the top of the heartbeat, before the heartbeat
@@ -579,6 +581,7 @@ directories, with stub `make` and `gt` on `PATH`. Cases:
 **Shell: `install-after-merge` denylist.**
 
 - Only `_test.go` or `.md` files changed: skip.
+- A `.md` file under `internal/` or `plugins/` changed: install.
 - Any `.go` file changed: install.
 - An unknown path changed: install.
 - The installed commit can't be read: install.
