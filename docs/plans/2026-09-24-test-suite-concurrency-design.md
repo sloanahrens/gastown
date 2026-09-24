@@ -158,12 +158,15 @@ runtime that cannot mount tmpfs over the image's declared volume.
 **Tests.**
 - Unit, no Docker: `doltContainerOpts()` includes the tmpfs mount by default
   and omits it when `GT_TEST_DOLT_TMPFS=0`.
-- Integration, opt-in (`doltserver_optin_test.go`): run
-  `stat -f -c %T /var/lib/dolt` through `ctr.Exec` and expect `tmpfs`.
+- Integration, opt-in (`GT_TEST_DOCKER=1`, new `doltserver_tmpfs_test.go`):
+  start and terminate its own container, run `stat -f -c %T /var/lib/dolt`
+  through `ctr.Exec`, and expect `tmpfs`.
 
 **Doctor warning.** `ContainerCapacityCheck` returns `StatusWarning` when VM
-memory is below `minContainerVMMemBytes` (16 GiB). The message names the fix
-(raise Docker Desktop memory) and this document. It keeps `StatusSkipped` when
+memory is below `minContainerVMMemBytes`. The remedy is a 16 GiB Docker
+Desktop setting; the VM reports about 1% under its setting, so the check
+compares against 15 GiB reported. `FixHint` names the fix (raise Docker
+Desktop memory) and `Details` cite this document. It keeps `StatusSkipped` when
 Docker cannot be queried. Tests use the existing `dockerInfoCPUMem` fake to
 cover below-threshold, at-threshold and error cases.
 
