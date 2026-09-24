@@ -301,6 +301,16 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: max_ready_for_dispatch must be non-negative", ErrMissingField)
 	}
 
+	if c.PostMergeTimeout != "" {
+		dur, err := time.ParseDuration(c.PostMergeTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid post_merge_timeout: %w", err)
+		}
+		if dur <= 0 {
+			return fmt.Errorf("post_merge_timeout must be positive, got %v", dur)
+		}
+	}
+
 	return nil
 }
 
