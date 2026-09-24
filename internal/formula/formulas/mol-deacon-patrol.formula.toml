@@ -1084,21 +1084,30 @@ town-level mayor tree does not match `~/gt/*/mayor`.
 
 **Handling a finding** - report the path, its mtime, and the owning agent
 (the agent name in the path), then neutralize it with the mayor-approved
-action (removal is NOT approved):
+action. A found binary is evidence: read its path and mtime, never execute
+it — a `bd` run is what migrates a database:
+
+- Regular file: `chmod 644 <path>`
+- Symlink: `rm <path>` — removal of the link itself. `chmod` follows
+  symlinks, and a link named `bd` can point at the town's shared release
+  binary; chmod-through would strip its execute bit and break bd
+  town-wide (gt-19zn). Only the link is removed; the target is untouched.
 
 ```bash
+# regular file
 chmod 644 <path>
-```
 
-A found binary is evidence: read its path and mtime, never execute it, and
-neutralize it — a `bd` run is what migrates a database.
+# symlink (test the path, not its target)
+[ -L <path> ] && rm <path>
+```
 
 ```bash
-gt mail send mayor/ -s "ROGUE_BD <path>" -m "Rogue executable bd: <path> (mtime <mtime>, owner <agent>). Neutralized (chmod 644). Please file a root-cause bead."
+gt mail send mayor/ -s "ROGUE_BD <path>" -m "Rogue executable bd: <path> (mtime <mtime>, owner <agent>). Neutralized (<chmod 644 | symlink removed>). Please file a root-cause bead."
 ```
 
-**Exit criteria:** The check ran, and every hit is reported, neutralized,
-and mailed to the Mayor - or the run logged `clean` with `fail=0`."""
+**Exit criteria:** The check ran, and every hit is reported, neutralized
+(matching the file's kind), and mailed to the Mayor - or the run logged
+`clean` with `fail=0`."""
 
 [[steps]]
 id = "session-gc"
