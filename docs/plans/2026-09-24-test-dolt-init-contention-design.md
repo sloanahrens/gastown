@@ -44,6 +44,8 @@ Full research: claude-z34 bead notes and the research file linked there.
 
 ## Components
 
+**Corrections after planning:** the pool is held in an `atomic.Pointer[initSlots]`, not a plain channel; the direct bd-init sites are six, across five integration-tagged files (`dolt_test_helpers_test.go` has no bd init, unlike the "four helpers" below); the concurrency knob is read at package `init()` because the hermetic test harness scrubs `GT_*` vars before `TestMain` runs; and measurement uses `go test -json -count=1`. See the plan (`2026-09-24-test-dolt-init-contention-plan.md`) for detail.
+
 ### 1. `internal/beads/test_container.go` (new)
 
 The one place that knows what a test-container bd call needs.
@@ -155,6 +157,7 @@ All unit tests are hermetic: no Docker.
 - A host-wide or cross-package container cap.
 - Lowering `-p` for Dolt packages.
 - The beads-side fixes themselves (filed, not done here).
+- The daemon-package failure seen live is a different mechanism than the one this design fixes: it comes from `createTestDB` (`internal/daemon/dolt_remotes_test.go:53-67`), a raw SQL `CREATE DATABASE` with a 15 s context, 6 call sites — not from `setupTestStore`, which opens an embedded store on `t.TempDir()` and never touches the container. The slot pool here doesn't apply to it. Follow-up: a bead to be filed by the controller, naming `createTestDB`.
 
 ## Appendix: measurement (2026-09-24)
 
@@ -167,7 +170,7 @@ Runs: `gt slot run --role gastown/crew/sloan-z34 --nice 0 -- env GOFLAGS=-p=8 GT
   - branch-1: 4.68/4.49/8.17 -> 14.84/13.16/11.17 (no refinery slot overlap; a first branch-1 attempt was aborted mid-run because it started the same minute the live refinery began gating an unrelated MR, to avoid double `-p=8` load and to not starve the refinery's retry; this is the retry, gated on the refinery MR closing, no refinery holder, and load < 20)
   - branch-2: 9.48/11.85/10.87 -> 24.07/21.86/15.97 (no refinery slot overlap)
 
-| run | package | result | elapsed s | failed tests | retry notices | refusing | init root | bd timeouts | setup failed | resumed migrations |
+| run | package | result | elapsed s | failed tests | retry notices | refusing | init root | bd timeouts | setup failed | resumed migrations (not observable: stderr discarded on success) |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | base-1 | internal/beads | pass | 77.933 | 0 | 22 | 2 | 8 | 0 | 0 | 0 |
 | base-1 | internal/cmd | pass | 305.03 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -234,7 +237,9 @@ Pass bar:
 3. **Retry notices down ≥ 80%, excluding internal/beads** — PASS. Baseline sum 112 -> branch sum 2, a 98.2% reduction (well past the ≥80% bar, which required ≤ 22.4).
 4. **Wall ≤ baseline + 10%** — PASS. Baseline mean (366+315)/2 = 340.5s; branch mean (308+318)/2 = 313s = 91.9% of baseline.
 
-**Resumed migrations** is 0 in every run, including both branch runs — the env var's resume path never actually fired even though `refusing` (excl. beads) dropped to 0 and retry notices (excl. beads) dropped 98%. The contention relief the branch shows is real and large, but its mechanism doesn't match the "each non-zero resumed-migration count is a would-have-been refusal" story anticipated in the design; worth a closer look as a follow-up, not chased down here.
+**Resumed migrations** is not observable by construction, not zero. bd's env-var branch prints its resume warning ("Warning: applying N pending schema migration(s)...", `remote_migrate_gate.go:519-527` @ beads 8a1eeb9) on bd's stderr and returns success; gastown's `runBdOnce` only reads bd's stderr inside `wrapError` on failure, and discards it on a successful call. A resumed init succeeds, so its warning never reaches the go test log the metrics script greps — the column is blind to a real resume, not evidence that one didn't happen.
+
+`refusing` (excl. beads) dropping to 0 is not independent evidence either: with `BD_ALLOW_REMOTE_MIGRATE=1` set, bd's env check at `remote_migrate_gate.go:519` runs before every refusal return, including the one the baseline hit, so refusing = 0 is guaranteed by the env var being wired in, not by the cap removing contention. Whether the var actually fired a resume during these runs is unknown, not zero; it is kept because it is bd's documented escape hatch for a bd init interrupted mid-migration, which the per-process cap cannot fully prevent (bd runs the gate inside its own store-open retry loop, `store.go` ~2699-2735). The cap's own evidence is the init-root drop (7/8 -> 1/1 in internal/refinery, excl. beads) and the non-refusal share of the retry-notice drop.
 
 **Verdict: PASS.** All four criteria hold. Zero Dolt-related FAILs; refusing and retry-notice reduction both clear their bars once `internal/beads`'s own stub-retry unit-test noise is excluded per the controller's ruling; wall time is within the +10% budget.
 
@@ -260,6 +265,10 @@ markers=(
   'Dolt container setup failed'                                # testutil container start
   'Warning: applying [0-9]* pending schema migration'          # bd resumed under the env var
 )
+# Note: the resumed-migration marker only sees a bd call that FAILS after
+# printing it (its own retry/error path echoes stderr); a successful resume's
+# warning lives on bd's stderr, which gastown's runBdOnce discards on success,
+# so this count is a floor, not the true resume count.
 [[ -s "$log" ]] || { echo "dolt-gate-metrics: empty or missing log: $log" >&2; exit 2; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
@@ -271,7 +280,7 @@ counts() { # <file>: the marker counts, " | "-joined
   printf '%s' "${out# | }"
 }
 
-echo '| run | package | result | elapsed s | failed tests | retry notices | refusing | init root | bd timeouts | setup failed | resumed migrations |'
+echo '| run | package | result | elapsed s | failed tests | retry notices | refusing | init root | bd timeouts | setup failed | resumed migrations (not observable: stderr discarded on success) |'
 echo '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|'
 for p in "${pkgs[@]}"; do
   pf="$tmp/pkg"
