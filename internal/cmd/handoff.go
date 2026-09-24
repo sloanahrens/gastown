@@ -325,31 +325,15 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// Agent liveness is observable from tmux - no need to record it in bead.
 	// "Discover, don't track" principle: reality is truth, state is derived.
 
-	// Clear scrollback history before respawn (resets copy-mode from [0/N] to [0/0])
-	if err := t.ClearHistory(pane); err != nil {
-		// Non-fatal - continue with respawn even if clear fails
-		style.PrintWarning("could not clear history: %v", err)
-	}
-
 	// Write handoff marker for successor detection (prevents handoff loop bug).
 	// The marker is cleared by gt prime after it outputs the warning.
 	// This tells the new session "you're post-handoff, don't re-run /handoff"
 	if cwd, err := os.Getwd(); err == nil {
-		runtimeDir := filepath.Join(cwd, constants.DirRuntime)
-		_ = os.MkdirAll(runtimeDir, 0755)
-		markerPath := filepath.Join(runtimeDir, constants.FileHandoffMarker)
-		_ = os.WriteFile(markerPath, []byte(currentSession), 0644)
+		writeHandoffMarker(cwd, currentSession, "")
 	}
 
 	// Record handoff time for cooldown enforcement (gt-058d).
 	recordHandoffTime()
-
-	// Set remain-on-exit so the pane survives process death during handoff.
-	// Without this, killing processes causes tmux to destroy the pane before
-	// we can respawn it. This is essential for tmux session reuse.
-	if err := t.SetRemainOnExit(pane, true); err != nil {
-		style.PrintWarning("could not set remain-on-exit: %v", err)
-	}
 
 	// NOTE: For self-handoff, we do NOT call KillPaneProcesses here.
 	// That would kill the gt handoff process itself before it can call RespawnPane,
@@ -360,21 +344,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// For orphan prevention, we rely on respawn-pane -k which sends SIGHUP/SIGTERM.
 	// If orphans still occur, the solution is to adjust the restart command to
 	// kill orphans at startup, not to kill ourselves before respawning.
-
-	// Check if pane's working directory exists (may have been deleted)
-	paneWorkDir, _ := t.GetPaneWorkDir(currentSession)
-	if paneWorkDir != "" {
-		if _, err := os.Stat(paneWorkDir); err != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				style.PrintWarning("pane working directory deleted, using town root")
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
-			}
-		}
-	}
-
-	// Use respawn-pane -k to atomically kill current process and start new one
-	// Note: respawn-pane automatically resets remain-on-exit to off
-	return t.RespawnPane(pane, restartCmd)
+	return respawnOwnPane(t, currentSession, pane, restartCmd)
 }
 
 // runHandoffAuto saves state without cycling the session.
@@ -536,14 +506,7 @@ func runHandoffCycle() error {
 	// to detect compaction-triggered cycles and use a lighter continuation
 	// directive instead of full re-initialization. (GH#1965)
 	if cwd, err := os.Getwd(); err == nil {
-		runtimeDir := filepath.Join(cwd, constants.DirRuntime)
-		_ = os.MkdirAll(runtimeDir, 0755)
-		markerPath := filepath.Join(runtimeDir, constants.FileHandoffMarker)
-		markerContent := currentSession
-		if handoffReason != "" {
-			markerContent += "\n" + handoffReason
-		}
-		_ = os.WriteFile(markerPath, []byte(markerContent), 0644)
+		writeHandoffMarker(cwd, currentSession, handoffReason)
 	}
 
 	// Record handoff time for cooldown enforcement (gt-058d).
@@ -577,28 +540,8 @@ func runHandoffCycle() error {
 	// agent the pane is about to run (gt-di8p).
 	updateSessionEnvForHandoff(t, currentSession)
 
-	// Set remain-on-exit so the pane survives process death during handoff
-	if err := t.SetRemainOnExit(pane, true); err != nil {
-		style.PrintWarning("could not set remain-on-exit: %v", err)
-	}
-
-	// Clear scrollback history before respawn
-	if err := t.ClearHistory(pane); err != nil {
-		style.PrintWarning("could not clear history: %v", err)
-	}
-
-	// Check if pane's working directory exists (may have been deleted)
-	paneWorkDir, _ := t.GetPaneWorkDir(currentSession)
-	if paneWorkDir != "" {
-		if _, err := os.Stat(paneWorkDir); err != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
-			}
-		}
-	}
-
 	// Respawn pane — this atomically kills current process and starts fresh
-	return t.RespawnPane(pane, restartCmd)
+	return respawnOwnPane(t, currentSession, pane, restartCmd)
 }
 
 // getCurrentTmuxSession returns the current tmux session name.
@@ -622,11 +565,7 @@ func getCurrentTmuxSession() (string, error) {
 	if pane == "" {
 		return "", fmt.Errorf("TMUX_PANE not set")
 	}
-	out, err := tmux.BuildCommand("display-message", "-t", pane, "-p", "#{session_name}").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return tmuxSessionForPane(pane)
 }
 
 // resolveRoleToSession converts a role name or path to a tmux session name.
@@ -1867,15 +1806,9 @@ func enforceHandoffCooldown() {
 		return
 	}
 
-	tsPath := filepath.Join(cwd, constants.DirRuntime, constants.FileLastHandoffTS)
-	info, err := os.Stat(tsPath)
-	if err != nil {
-		return // No previous handoff recorded — first handoff, no cooldown
-	}
-
-	age := time.Since(info.ModTime())
-	if age >= constants.MinHandoffCooldown {
-		return // Enough time has passed
+	age, ok := lastHandoffAge(cwd)
+	if !ok || age >= constants.MinHandoffCooldown {
+		return
 	}
 
 	remaining := constants.MinHandoffCooldown - age
@@ -1888,15 +1821,72 @@ func enforceHandoffCooldown() {
 // recordHandoffTime writes the current timestamp to the handoff cooldown file.
 // Called before respawning to establish the baseline for the next cooldown check.
 func recordHandoffTime() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
+	if cwd, err := os.Getwd(); err == nil {
+		recordHandoffTimeIn(cwd)
 	}
+}
 
-	runtimeDir := filepath.Join(cwd, constants.DirRuntime)
+// lastHandoffAge reports how long ago the last handoff recorded in dir was.
+// ok is false when none has been recorded there.
+func lastHandoffAge(dir string) (age time.Duration, ok bool) {
+	info, err := os.Stat(filepath.Join(dir, constants.DirRuntime, constants.FileLastHandoffTS))
+	if err != nil {
+		return 0, false
+	}
+	return time.Since(info.ModTime()), true
+}
+
+// recordHandoffTimeIn writes the handoff cooldown timestamp under dir.
+func recordHandoffTimeIn(dir string) {
+	runtimeDir := filepath.Join(dir, constants.DirRuntime)
 	_ = os.MkdirAll(runtimeDir, 0755)
-	tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
-	_ = os.WriteFile(tsPath, []byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
+	_ = os.WriteFile(filepath.Join(runtimeDir, constants.FileLastHandoffTS),
+		[]byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
+}
+
+// writeHandoffMarker tells the successor's gt prime it is post-handoff.
+// Format "session\nreason"; see isCompactResume (prime.go:513).
+func writeHandoffMarker(dir, session, reason string) {
+	runtimeDir := filepath.Join(dir, constants.DirRuntime)
+	_ = os.MkdirAll(runtimeDir, 0755)
+	content := session
+	if reason != "" {
+		content += "\n" + reason
+	}
+	_ = os.WriteFile(filepath.Join(runtimeDir, constants.FileHandoffMarker), []byte(content), 0644)
+}
+
+// respawnOwnPane replaces the caller's own pane process with restartCmd.
+// It must not kill pane processes first: that kills this process before
+// respawn-pane runs (gh#859). respawn-pane -k does the kill atomically.
+func respawnOwnPane(t *tmux.Tmux, currentSession, pane, restartCmd string) error {
+	if err := t.SetRemainOnExit(pane, true); err != nil {
+		style.PrintWarning("could not set remain-on-exit: %v", err)
+	}
+	if err := t.ClearHistory(pane); err != nil {
+		style.PrintWarning("could not clear history: %v", err)
+	}
+	paneWorkDir, _ := t.GetPaneWorkDir(currentSession)
+	if paneWorkDir != "" {
+		if _, err := os.Stat(paneWorkDir); err != nil {
+			if townRoot := detectTownRootFromCwd(); townRoot != "" {
+				style.PrintWarning("pane working directory deleted, using town root")
+				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
+			}
+		}
+	}
+	return t.RespawnPane(pane, restartCmd)
+}
+
+// tmuxSessionForPane returns the session that owns pane. Unlike
+// getCurrentTmuxSession it never consults GT_ROLE, so it tells where the
+// process really runs.
+func tmuxSessionForPane(pane string) (string, error) {
+	out, err := tmux.BuildCommand("display-message", "-t", pane, "-p", "#{session_name}").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // isPatrolRole returns true if the role runs a patrol loop (refinery, witness, deacon).

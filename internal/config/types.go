@@ -1516,6 +1516,12 @@ type MergeQueueConfig struct {
 	// at a time. Zero or unset defaults to 4.
 	BatchMinCount int `json:"batch_min_count,omitempty"`
 
+	// CycleSessionAfterMerge makes `gt mq post-merge` / `gt mq batch run`
+	// respawn the rig's refinery session in place after each landed unit
+	// (one MR or one batch), so every unit starts in a fresh context.
+	// Off by default; opt in per rig.
+	CycleSessionAfterMerge bool `json:"cycle_session_after_merge,omitempty"`
+
 	// MaxReadyForDispatch is the ready-MR ceiling above which a new dispatch
 	// is refused: the merge queue, not the pool, is the real limit on how
 	// much work the town can absorb, so `gt sling` stops feeding it while the

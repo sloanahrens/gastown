@@ -493,6 +493,35 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	// stderr, not stdout: --json mode's stdout must stay a single JSON document.
 	runBatchPostMergeCommand(townRoot, rigName, r.Path, mq, result, target, cmd.ErrOrStderr())
 
+	// One landed batch is one unit. A batch whose push landed but whose
+	// cleanup errored still archives its members' MERGE_READY, but keeps the
+	// session: the agent must stay alive to recover the failed members.
+	if result.MergeCommit != "" && len(result.Merged) > 0 {
+		errOut := cmd.ErrOrStderr()
+		sess := refinerySessionFor(r.Name)
+		workDir := refineryWorkDir(r.Path)
+		mrs := make([]unitMR, 0, len(result.Merged))
+		for _, m := range result.Merged {
+			if m == nil {
+				continue
+			}
+			mrs = append(mrs, unitMR{ID: m.ID, Branch: m.Branch, Worker: m.Worker, SourceIssue: m.SourceIssue, Target: m.Target})
+		}
+		rep := completeUnitAndCycle(unitCycleParams{
+			Rig:             r.Name,
+			Mode:            unitBatch,
+			RefinerySession: sess,
+			WorkDir:         workDir,
+			MRs:             mrs,
+			MergeCommit:     result.MergeCommit,
+			CycleEnabled:    mq != nil && mq.CycleSessionAfterMerge,
+			BatchErrored:    result.Error != nil,
+		}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, errOut))
+		if rep.SkipCause != "" {
+			fmt.Fprintf(errOut, "  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)
+		}
+	}
+
 	if result.Error != nil {
 		return fmt.Errorf("batch processing error: %w", result.Error)
 	}
