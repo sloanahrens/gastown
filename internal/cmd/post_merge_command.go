@@ -143,3 +143,21 @@ func runMRPostMergeCommand(townRoot, rigName, rigPath string, mq *config.MergeQu
 		postMergeCommandFn(p)
 	}
 }
+
+// runBatchPostMergeCommand runs the post-merge command once for a landed
+// batch, at the batch's final pushed SHA. A batch whose push landed runs it
+// even when some members' cleanup failed; a batch that pushed nothing doesn't.
+func runBatchPostMergeCommand(townRoot, rigName, rigPath string, mq *config.MergeQueueConfig, result *refinery.BatchResult, target string, out io.Writer) {
+	if result == nil || strings.TrimSpace(result.MergeCommit) == "" {
+		return
+	}
+	ids := make([]string, 0, len(result.Merged))
+	for _, mr := range result.Merged {
+		if mr != nil {
+			ids = append(ids, mr.ID)
+		}
+	}
+	if p, ok := postMergeCommandFor(townRoot, rigName, rigPath, mq, result.MergeCommit, target, ids, out); ok {
+		postMergeCommandFn(p)
+	}
+}

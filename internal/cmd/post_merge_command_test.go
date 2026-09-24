@@ -222,3 +222,39 @@ func TestRunMRPostMergeCommand_CallsOnceWithMRFields(t *testing.T) {
 		t.Errorf("unconfigured rig: calls = %d, want still 1", len(*calls))
 	}
 }
+
+func TestRunBatchPostMergeCommand_OncePerLandedBatch(t *testing.T) {
+	calls := capturePostMergeCommandCalls(t)
+	mq := &config.MergeQueueConfig{PostMergeCommand: "scripts/install-after-merge.sh"}
+	result := &refinery.BatchResult{
+		Merged:      []*refinery.MRInfo{{ID: "gt-a"}, {ID: "gt-b"}, {ID: "gt-c"}},
+		MergeCommit: "tip123",
+		Error:       errors.New("cleanup failed for gt-c"),
+	}
+
+	runBatchPostMergeCommand("/town", "gastown", "/town/gastown", mq, result, "main", io.Discard)
+
+	if len(*calls) != 1 {
+		t.Fatalf("calls = %d, want exactly 1 per batch", len(*calls))
+	}
+	got := (*calls)[0]
+	if got.MergedSHA != "tip123" {
+		t.Errorf("MergedSHA = %q, want the batch tip", got.MergedSHA)
+	}
+	if strings.Join(got.MRIDs, ",") != "gt-a,gt-b,gt-c" {
+		t.Errorf("MRIDs = %v, want every merged member", got.MRIDs)
+	}
+}
+
+func TestRunBatchPostMergeCommand_SkipsWhenNothingLanded(t *testing.T) {
+	calls := capturePostMergeCommandCalls(t)
+	mq := &config.MergeQueueConfig{PostMergeCommand: "scripts/install-after-merge.sh"}
+
+	runBatchPostMergeCommand("/town", "gastown", "/town/gastown", mq, nil, "main", io.Discard)
+	runBatchPostMergeCommand("/town", "gastown", "/town/gastown", mq, &refinery.BatchResult{Error: errors.New("gate red")}, "main", io.Discard)
+	runBatchPostMergeCommand("/town", "gastown", "/town/gastown", &config.MergeQueueConfig{}, &refinery.BatchResult{MergeCommit: "tip123"}, "main", io.Discard)
+
+	if len(*calls) != 0 {
+		t.Fatalf("calls = %d, want 0 (nothing landed, or no command configured)", len(*calls))
+	}
+}
