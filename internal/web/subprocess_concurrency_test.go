@@ -264,7 +264,7 @@ func watchPeakConcurrency(runsDir string, stop <-chan struct{}) (peak *int64, do
 // finishing sooner (gt-05vk measured this directly).
 //
 // Both subtests fire the same 17 concurrent calls — matching
-// fetchAndRender's wg.Add(17) — through the same runBdCmd path; only cmdSem
+// fetchAndRender's producer count — through the same runBdCmd path; only cmdSem
 // differs. The unbounded case is the pre-fix control: it proves the herd is
 // real (many run at once) rather than an artifact of the harness. A test
 // that only checked the bounded case could pass vacuously if, say, the
