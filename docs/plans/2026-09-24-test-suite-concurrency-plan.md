@@ -19,7 +19,7 @@
 - Stage 1 starts only after claude-z34 (gt-elvf4) has merged to `origin/main`.
 - The Docker Desktop change (stage 2) is done only when the preconditions hold. Back up `settings-store.json` first.
 - The tmpfs mount is `/var/lib/dolt` with `rw,size=2g`. The opt-out is `GT_TEST_DOLT_TMPFS=0`.
-- The doctor warning threshold is a 16 GiB Docker Desktop setting. The VM reports about 1% less than it was configured with (8092 MiB configured → 8,211,824,640 B reported), so compare against 15 GiB reported.
+- The doctor warning threshold is a 16 GiB Docker Desktop setting. The VM reports about 3% less than it was configured with (8092 MiB configured → 8,211,824,640 B reported), so compare against 15 GiB reported.
 - Work happens in `~/gt/gastown/crew/sloan-yfj` on branch `crew/sloan/claude-yfj-suite-concurrency`. Push with `git push origin crew/sloan/claude-yfj-suite-concurrency`. Merge through the refinery. Never sling.
 - No AI attribution or `Co-Authored-By` trailers in commits. After each commit, run `bd comments add claude-yfj "commit: <hash> — <summary>"` from `~/.claude`.
 - Use `grep -a` on `go test -json` logs (they can classify as binary).

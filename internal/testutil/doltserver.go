@@ -170,6 +170,8 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 // (claude-yfj). A container's data is ~18 MB; the 2g cap bounds a runaway.
 func doltContainerOpts() []testcontainers.ContainerCustomizer {
 	opts := []testcontainers.ContainerCustomizer{
+		// WithEnv must precede dolt.WithDatabase: dolt.WithDatabase writes
+		// req.Env without a nil check, so it needs the map already set.
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
 		dolt.WithDatabase("gt_test"),
 	}

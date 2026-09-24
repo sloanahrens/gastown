@@ -26,7 +26,9 @@ preconditions() {
 preconditions
 (( check )) && exit 0
 
-mkdir -p "$out"
+# out must be absolute: run-gate.sh below runs its suite after `cd "$wt"`,
+# so a relative out would resolve under the worktree instead of here.
+mkdir -p "$out" && out="$(cd "$out" && pwd)"
 before="$(docker ps -q --filter label=org.testcontainers.sessionId | sort)"
 pids=(); sampler=""; abnormal=0
 
@@ -46,6 +48,8 @@ sweep_containers() {
   [[ -n "$new" ]] || return 0
   for id in $new; do
     sess="$(docker inspect -f '{{index .Config.Labels "org.testcontainers.sessionId"}}' "$id")"
+    # Sessions observed since $before was captured, not proven to be this
+    # run's: another suite starting mid-run can land here too.
     echo "$sess" >> "$out/$label.sessions"
     new_ids+=("$id"); new_sess+=("$sess")
   done

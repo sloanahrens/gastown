@@ -38,6 +38,28 @@ func TestContainerCapacityCheck_LargeVMIsOK(t *testing.T) {
 	}
 }
 
+func TestContainerCapacityCheck_Boundary(t *testing.T) {
+	orig := dockerInfoCPUMem
+	defer func() { dockerInfoCPUMem = orig }()
+
+	cases := []struct {
+		name     string
+		memBytes int64
+		want     CheckStatus
+	}{
+		{"at threshold is OK", 15 << 30, StatusOK},
+		{"one byte under threshold warns", 15<<30 - 1, StatusWarning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dockerInfoCPUMem = func() (int, int64, error) { return 24, tc.memBytes, nil }
+			if got := NewContainerCapacityCheck().Run(&CheckContext{}).Status; got != tc.want {
+				t.Fatalf("Status = %v, want %v for memBytes=%d", got, tc.want, tc.memBytes)
+			}
+		})
+	}
+}
+
 func TestContainerCapacityCheck_DockerUnavailableIsSkipped(t *testing.T) {
 	orig := dockerInfoCPUMem
 	defer func() { dockerInfoCPUMem = orig }()

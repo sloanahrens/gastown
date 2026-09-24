@@ -52,9 +52,9 @@ var dockerInfoCPUMem = func() (ncpu int, memBytes int64, err error) {
 
 // minContainerVMMemBytes is the smallest Docker VM that runs two full -p=8
 // suites at once: one suite starts ~11 Dolt servers at 140-400 MiB each
-// (claude-yfj). The VM reports ~1% less than its Docker Desktop setting, so
-// 15 GiB here means "set at least 16 GiB". A var so tests can move it.
-var minContainerVMMemBytes int64 = 15 << 30
+// (claude-yfj). The VM reports ~3% less than its Docker Desktop setting, so
+// 15 GiB here means "set at least 16 GiB".
+const minContainerVMMemBytes int64 = 15 << 30
 
 // Run reports the Docker VM's CPU/memory bound. It cannot distinguish
 // "Docker isn't installed" from "Docker is installed but errored" — either

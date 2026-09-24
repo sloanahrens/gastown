@@ -115,10 +115,13 @@ can reproduce a measurement:
 and `gt slot status` shows no unwrapped containers. The operator session tells
 the mayor before each batch.
 
-**Abort safety.** A `trap` on INT, TERM and EXIT kills each `go test` process
-group, then removes only the containers whose `org.testcontainers.sessionId`
-label was recorded for this run at start. It never matches by image or name
-pattern. On exit it re-checks `gt slot status` for unwrapped containers and
+**Abort safety.** On INT/TERM a `trap` kills each `go test` process group. It
+never removes containers automatically on any exit path. On abnormal exit
+(INT/TERM) it prints, for each container of a testcontainers session new
+since the run started, the id, session id, and created time, plus the exact
+`docker rm -f <id>` command — for the operator to run after confirming that
+container belongs to this run (it never matches by image or name pattern).
+On exit it also re-checks `gt slot status` for unwrapped containers and
 prints them if any remain.
 
 **Runs per stage.** One single-suite run and three paired runs, all on the
@@ -164,7 +167,7 @@ runtime that cannot mount tmpfs over the image's declared volume.
 
 **Doctor warning.** `ContainerCapacityCheck` returns `StatusWarning` when VM
 memory is below `minContainerVMMemBytes`. The remedy is a 16 GiB Docker
-Desktop setting; the VM reports about 1% under its setting, so the check
+Desktop setting; the VM reports about 3% under its setting, so the check
 compares against 15 GiB reported. `FixHint` names the fix (raise Docker
 Desktop memory) and `Details` cite this document. It keeps `StatusSkipped` when
 Docker cannot be queried. Tests use the existing `dockerInfoCPUMem` fake to

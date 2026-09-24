@@ -11,9 +11,13 @@ if [[ "${1:-}" == "--inner" ]]; then
   exit "$rc"
 fi
 wt="${1:?worktree}"; out="${2:?outdir}"; label="${3:?label}"
+# out must be absolute: the --inner suite below runs after `cd "$wt"` (in a
+# subshell that execs a new bash for --inner), so a relative out would
+# resolve under the worktree instead of the original cwd.
+mkdir -p "$out" && out="$(cd "$out" && pwd)"
 role="${GT_CAPACITY_ROLE:-gastown/crew/sloan-yfj}"
 self="$(cd "$(dirname "$0")" && pwd)/run-gate.sh"
-mkdir -p "$out"; log="$out/$label.json"
+log="$out/$label.json"
 { date '+start %Y-%m-%dT%H:%M:%S%z'; sysctl -n vm.loadavg; gt slot status 2>&1; git -C "$wt" rev-parse HEAD; } > "$out/$label.meta"
 ( cd "$wt" && exec gt slot run --role "$role" --nice 0 -- bash "$self" --inner "$log" ) 2> "$out/$label.stderr"
 rc=$?
