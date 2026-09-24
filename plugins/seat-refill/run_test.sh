@@ -63,6 +63,25 @@ assert_not_contains() {
   return 0
 }
 
+# --- Fake timeout ---------------------------------------------------------
+# Records the bound run.sh puts on each command, then runs the command — or,
+# with $TEST_STATE/timeout_expires present, exits 124 as coreutils timeout does
+# when the bound fires, without running it. The real `timeout` never runs, so
+# no case waits on a clock.
+write_fake_timeout() {
+  local bin_dir="$1"
+  cat > "$bin_dir/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$1" "$2" >> "$TEST_STATE/timeout.log"
+if [ -f "$TEST_STATE/timeout_expires" ]; then
+  exit 124
+fi
+shift
+exec "$@"
+SH
+  chmod +x "$bin_dir/timeout"
+}
+
 # --- Fake town ------------------------------------------------------------
 # Four gt calls, each backed by a fixture file so a case is pure data:
 #   polecat list --all --json   $TEST_STATE/polecats.json   (absent -> [])
@@ -175,6 +194,7 @@ JSON
   : > "$TEST_STATE/unexpected.log"
 
   write_fake_gt "$TEST_STATE/bin"
+  write_fake_timeout "$TEST_STATE/bin"
   export PATH="$TEST_STATE/bin:$ORIGINAL_PATH"
   export TEST_STATE
   export GT_TOWN_ROOT="$CASE_DIR"
@@ -417,6 +437,44 @@ rm -f "$TEST_STATE/nudge_fails"
 run_plugin 13000320
 assert_eq "$(jq -r '.episodes.local.last_nudge' "$GT_SEAT_REFILL_STATE")" "13000320" \
   "failed nudge: the next run retries immediately instead of after 15m"
+
+# --- Case 17: the nudge bound outlasts gt nudge's own wait-idle budget -----
+# gt nudge in wait-idle mode polls for idle for 15s, queues, then watches for
+# idle for up to 60s (internal/cmd/nudge.go waitIdleTimeout,
+# idleWatcherTimeout). A bound at or under 75s kills a nudge that is working
+# normally against a busy mayor and reports it as lost (gt-hen4o).
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+: > "$TEST_STATE/timeout.log"
+run_plugin 14000000
+run_plugin 14000300
+assert_eq "$(nudges)" "1" "nudge bound: the nudge ran"
+bound=$(awk -F'|' '$2 == "gt" { print $1 }' "$TEST_STATE/timeout.log" | tail -1)
+bound_seconds=${bound%s}
+if [[ "$bound_seconds" =~ ^[0-9]+$ ]] && [ "$bound_seconds" -gt 75 ]; then
+  record_pass "nudge bound: ${bound} exceeds gt nudge's 15s+60s wait-idle budget"
+else
+  record_fail "nudge bound: ${bound:-<none>} does not exceed gt nudge's 15s+60s wait-idle budget"
+fi
+
+# --- Case 18: a nudge killed by the bound says so, not "was not reported" ---
+# Past its whole budget gt nudge is wedged, so this is still a failure — but
+# wait-idle queues before it watches, so the message must not claim the seat
+# went unreported.
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 15000000
+touch "$TEST_STATE/timeout_expires"
+run_plugin 15000300
+assert_eq "$EXIT" "1" "nudge bound fired: still exits nonzero"
+assert_contains "$TEST_STATE/stderr.log" "timed out" "nudge bound fired: the failure names the timeout"
+assert_not_contains "$TEST_STATE/stderr.log" "was not reported" \
+  "nudge bound fired: does not claim the seat went unreported"
+assert_eq "$(jq -r '.episodes.local.last_nudge' "$GT_SEAT_REFILL_STATE")" "0" \
+  "nudge bound fired: unconfirmed delivery is not recorded as sent"
+rm -f "$TEST_STATE/timeout_expires"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
