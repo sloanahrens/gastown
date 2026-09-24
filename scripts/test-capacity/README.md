@@ -11,8 +11,9 @@ unwrapped containers exist. Tell the mayor before each batch.
 
 On normal completion (both suites exit on their own) it removes nothing — tests clean up their own
 containers; it only records and reports containers from testcontainers sessions that are new since the
-run started. On interrupt (INT/TERM) or if it has to kill a suite, those new-session containers are
-removed by exact container id, and only if `gt slot status` shows no slot held by any role other than
-ours — otherwise they are left running with an operator notice. It never matches containers by image or
-name pattern. Results: `<outdir>/<label>.md`; append them to the design doc. Set GT_CAPACITY_ROLE if you
-are not gastown/crew/sloan-yfj.
+run started. On interrupt (INT/TERM, which is the only way it kills a suite) it still removes nothing
+automatically: a suite that never took a gt slot could own one of those new-session containers, so it
+prints each candidate's id, session id, created time, and the exact `docker rm -f <id>` command for the
+operator to confirm and run by hand. It never matches containers by image or name pattern. Results:
+`<outdir>/<label>.md`; append them to the design doc. Set GT_CAPACITY_ROLE if you are not
+gastown/crew/sloan-yfj.

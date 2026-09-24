@@ -7,7 +7,6 @@ set -uo pipefail
 check=0; [[ "${1:-}" == "--check" ]] && { check=1; shift; }
 out="${1:?outdir}"; label="${2:?label}"; wta="${3:?worktree-a}"; wtb="${4:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
-role="${GT_CAPACITY_ROLE:-gastown/crew/sloan-yfj}"
 
 refuse() { echo "paired-run: REFUSED: $*" >&2; exit 3; }
 preconditions() {
@@ -34,12 +33,14 @@ pids=(); sampler=""; abnormal=0
 # Containers whose testcontainers session did not exist at start. On normal
 # completion (suites exited on their own) we remove nothing — tests clean up
 # their own containers; we only report and record the session id. On
-# abnormal exit (we received INT/TERM, or killed the suites ourselves) we
-# remove them by exact container id, but only if no other role currently
-# holds a slot — an active refinery gate or another suite must not lose its
-# containers. Never match by image or name pattern.
+# abnormal exit (we received INT/TERM) we ALSO never remove anything
+# automatically: a suite that never took a gt slot can still own one of these
+# sessions, so a global before/after diff is not enough to prove a container
+# is ours. We only print each candidate (id, session, created time) plus the
+# exact `docker rm -f` command, for the operator to confirm and run by hand.
+# Never match by image or name pattern.
 sweep_containers() {
-  local after new id sess new_ids=() new_sess=()
+  local after new id sess created new_ids=() new_sess=()
   after="$(docker ps -q --filter label=org.testcontainers.sessionId | sort)"
   new="$(comm -13 <(echo "$before") <(echo "$after"))"
   [[ -n "$new" ]] || return 0
@@ -55,16 +56,13 @@ sweep_containers() {
     done
     return 0
   fi
-  local st other
-  st="$(gt slot status 2>&1)"
-  other="$(grep -o 'held by [^ ]*' <<<"$st" | grep -v -F "held by $role" || true)"
-  if [[ -n "$other" ]]; then
-    echo "paired-run: left for operator: another holder is active ($(tr '\n' ',' <<<"$other")) — not removing: ${new_ids[*]}"
-    return 0
-  fi
+  echo "paired-run: abnormal exit — confirm each container below belongs to this run (no live go test owns it) before removing anything:"
   local i
   for i in "${!new_ids[@]}"; do
-    docker rm -f "${new_ids[$i]}" >/dev/null && echo "paired-run: removed leftover ${new_ids[$i]} (session ${new_sess[$i]})"
+    id="${new_ids[$i]}"; sess="${new_sess[$i]}"
+    created="$(docker inspect -f '{{.Created}}' "$id" 2>/dev/null || echo '?')"
+    echo "  id=$id session=$sess created=$created"
+    echo "    docker rm -f $id"
   done
 }
 cleanup() {
