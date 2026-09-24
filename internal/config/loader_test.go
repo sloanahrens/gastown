@@ -1493,7 +1493,10 @@ func TestBuildAgentStartupCommand(t *testing.T) {
 
 	// Test without rig config (uses defaults)
 	// New signature: (role, rig, townRoot, rigPath, prompt)
-	cmd := BuildAgentStartupCommand("witness", "gastown", "", "", "")
+	cmd, err := BuildAgentStartupCommand("witness", "gastown", "", "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// Should contain environment variables (via 'exec env') and claude command
 	if !strings.Contains(cmd, "exec env") {
@@ -1543,7 +1546,10 @@ func TestExtractSimpleRole(t *testing.T) {
 
 func TestBuildPolecatStartupCommand(t *testing.T) {
 	t.Parallel()
-	cmd := BuildPolecatStartupCommand("gastown", "toast", "", "")
+	cmd, err := BuildPolecatStartupCommand("gastown", "toast", "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	if !strings.Contains(cmd, "GT_ROLE=gastown/polecats/toast") {
 		t.Error("expected GT_ROLE=gastown/polecats/toast in command")
@@ -1561,7 +1567,10 @@ func TestBuildPolecatStartupCommand(t *testing.T) {
 
 func TestBuildCrewStartupCommand(t *testing.T) {
 	t.Parallel()
-	cmd := BuildCrewStartupCommand("gastown", "max", "", "")
+	cmd, err := BuildCrewStartupCommand("gastown", "max", "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	if !strings.Contains(cmd, "GT_ROLE=gastown/crew/max") {
 		t.Error("expected GT_ROLE=gastown/crew/max in command")
@@ -1854,7 +1863,10 @@ func TestBuildStartupCommand_UsesRigAgentWhenRigPathProvided(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": "witness"}, rigPath, "")
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": "witness"}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 	if !strings.Contains(cmd, "codex") {
 		t.Fatalf("expected rig agent (codex) in command: %q", cmd)
 	}
@@ -1895,7 +1907,7 @@ func TestBuildStartupCommand_ClearsBDTargetSelectors(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(map[string]string{
+	cmd, err := BuildStartupCommand(map[string]string{
 		"GT_ROLE":                    constants.RoleWitness,
 		"BEADS_DIR":                  "/caller/beads",
 		"BEADS_DOLT_DATA_DIR":        "/caller/data",
@@ -1904,6 +1916,9 @@ func TestBuildStartupCommand_ClearsBDTargetSelectors(t *testing.T) {
 		"GT_DOLT_PORT":               "1444",
 		"GT_DOLT_HOST":               "caller-host",
 	}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error for a witness with plain-string env: %v", err)
+	}
 
 	for _, key := range bdTargetSelectorEnvVars {
 		if !strings.Contains(cmd, key+"=") {
@@ -1967,28 +1982,40 @@ func TestBuildStartupCommand_UsesRoleAgentsFromTownSettings(t *testing.T) {
 	}
 
 	t.Run("refinery role gets gemini from role_agents", func(t *testing.T) {
-		cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleRefinery}, rigPath, "")
+		cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleRefinery}, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if !strings.Contains(cmd, "gemini") {
 			t.Fatalf("expected gemini for refinery role, got: %q", cmd)
 		}
 	})
 
 	t.Run("witness role gets codex from role_agents", func(t *testing.T) {
-		cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+		cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if !strings.Contains(cmd, "codex") {
 			t.Fatalf("expected codex for witness role, got: %q", cmd)
 		}
 	})
 
 	t.Run("crew role falls back to default_agent (not in role_agents)", func(t *testing.T) {
-		cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleCrew}, rigPath, "")
+		cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleCrew}, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if !strings.Contains(cmd, "claude") {
 			t.Fatalf("expected claude fallback for crew role, got: %q", cmd)
 		}
 	})
 
 	t.Run("no role falls back to default resolution", func(t *testing.T) {
-		cmd := BuildStartupCommand(map[string]string{}, rigPath, "")
+		cmd, err := BuildStartupCommand(map[string]string{}, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if !strings.Contains(cmd, "claude") {
 			t.Fatalf("expected claude for no role, got: %q", cmd)
 		}
@@ -2020,7 +2047,10 @@ func TestBuildStartupCommand_RigRoleAgentsOverridesTownRoleAgents(t *testing.T) 
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 	if !strings.Contains(cmd, "codex") {
 		t.Fatalf("expected codex from rig role_agents override, got: %q", cmd)
 	}
@@ -2052,7 +2082,10 @@ func TestBuildAgentStartupCommand_UsesRoleAgents(t *testing.T) {
 	}
 
 	// BuildAgentStartupCommand passes role via GT_ROLE env var (compound format)
-	cmd := BuildAgentStartupCommand(constants.RoleRefinery, "testrig", townRoot, rigPath, "")
+	cmd, err := BuildAgentStartupCommand(constants.RoleRefinery, "testrig", townRoot, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildAgentStartupCommand returned an error: %v", err)
+	}
 	if !strings.Contains(cmd, "codex") {
 		t.Fatalf("expected codex for refinery role, got: %q", cmd)
 	}
@@ -2084,7 +2117,10 @@ func TestBuildAgentStartupCommand_DogUsesRoleAgents(t *testing.T) {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
 
-	cmd := BuildAgentStartupCommand("dog", "", townRoot, "", "")
+	cmd, err := BuildAgentStartupCommand("dog", "", townRoot, "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 	if !strings.Contains(cmd, "GT_ROLE=dog") {
 		t.Fatalf("expected GT_ROLE=dog in command, got: %q", cmd)
 	}
@@ -2128,7 +2164,10 @@ func TestBuildAgentStartupCommand_DogCustomClaudePreset(t *testing.T) {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
 
-	cmd := BuildAgentStartupCommand("dog", "", townRoot, "", "")
+	cmd, err := BuildAgentStartupCommand("dog", "", townRoot, "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	if !strings.Contains(cmd, "--model ollama-local-coder") {
 		t.Fatalf("expected custom dog preset model in startup command, got: %q", cmd)
@@ -2376,7 +2415,10 @@ func TestBuildStartupCommand_WorkerAgentsViaCrew(t *testing.T) {
 			"GT_ROLE": constants.RoleCrew,
 			"GT_CREW": "denali",
 		}
-		cmd := BuildStartupCommand(envVars, rigPath, "")
+		cmd, err := BuildStartupCommand(envVars, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if !strings.Contains(cmd, "codex") {
 			t.Errorf("expected codex for crew worker denali, got: %q", cmd)
 		}
@@ -2387,7 +2429,10 @@ func TestBuildStartupCommand_WorkerAgentsViaCrew(t *testing.T) {
 			"GT_ROLE": constants.RoleCrew,
 			"GT_CREW": "glacier",
 		}
-		cmd := BuildStartupCommand(envVars, rigPath, "")
+		cmd, err := BuildStartupCommand(envVars, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if strings.Contains(cmd, "codex") {
 			t.Errorf("expected non-codex for crew worker glacier (not in worker_agents), got: %q", cmd)
 		}
@@ -2397,7 +2442,10 @@ func TestBuildStartupCommand_WorkerAgentsViaCrew(t *testing.T) {
 		envVars := map[string]string{
 			"GT_ROLE": constants.RoleCrew,
 		}
-		cmd := BuildStartupCommand(envVars, rigPath, "")
+		cmd, err := BuildStartupCommand(envVars, rigPath, "")
+		if err != nil {
+			t.Fatalf("BuildStartupCommand returned an error: %v", err)
+		}
 		if strings.Contains(cmd, "codex") {
 			t.Errorf("expected non-codex when GT_CREW not set, got: %q", cmd)
 		}
@@ -5518,11 +5566,14 @@ func TestBuildStartupCommand_SetsGTProcessNames(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(
+	cmd, err := BuildStartupCommand(
 		map[string]string{"GT_ROLE": constants.RoleWitness},
 		rigPath,
 		"",
 	)
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// Default agent is claude — GT_PROCESS_NAMES should include node,claude
 	if !strings.Contains(cmd, "GT_PROCESS_NAMES=") {
@@ -5641,7 +5692,10 @@ func TestBuildStartupCommand_RoleAgentsSetGTAgent(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildPolecatStartupCommand("testrig", "furiosa", rigPath, "do work")
+	cmd, err := BuildPolecatStartupCommand("testrig", "furiosa", rigPath, "do work")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// GT_AGENT must be set to "opencode" so IsAgentAlive detects the process
 	if !strings.Contains(cmd, "GT_AGENT=opencode") {
@@ -5672,7 +5726,10 @@ func TestBuildStartupCommand_RoleAgentsCustomAgentSetGTAgent(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildPolecatStartupCommand("testrig", "furiosa", rigPath, "do work")
+	cmd, err := BuildPolecatStartupCommand("testrig", "furiosa", rigPath, "do work")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// GT_AGENT must be set to the custom agent name "codex"
 	if !strings.Contains(cmd, "GT_AGENT=codex") {
@@ -5708,7 +5765,10 @@ func TestBuildStartupCommand_UsesGTRootFromEnvVars(t *testing.T) {
 		"GT_ROLE": constants.RoleDeacon,
 		"GT_ROOT": townRoot,
 	}
-	cmd := BuildStartupCommand(envVars, "", "")
+	cmd, err := BuildStartupCommand(envVars, "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	if !strings.Contains(cmd, "--model sonnet") {
 		t.Errorf("expected --model sonnet from role_agents[deacon], got: %q", cmd)
@@ -6159,7 +6219,10 @@ func TestBuildStartupCommand_ExecWrapper(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": "polecat"}, rigPath, "hello")
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": "polecat"}, rigPath, "hello")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// Must contain exec wrapper tokens
 	if !strings.Contains(cmd, "exitbox run --profile=gastown-polecat --") {
@@ -6449,7 +6512,10 @@ func TestBuildStartupCommand_GroqCompoundResolvesKeyReference(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error with GROQ_API_KEY set: %v", err)
+	}
 
 	if !strings.Contains(cmd, "ANTHROPIC_API_KEY="+liveKey) {
 		t.Errorf("startup command does not export the resolved key: %q", cmd)
@@ -6513,7 +6579,10 @@ func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing
 			got, "${GROQ_API_KEY}")
 	}
 
-	cmd := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error with GROQ_API_KEY set: %v", err)
+	}
 
 	if !strings.Contains(cmd, "ANTHROPIC_API_KEY="+liveKey) {
 		t.Errorf("startup command does not export the resolved key: %q", cmd)
@@ -6554,5 +6623,72 @@ func TestBuildStartupCommand_StopsOnUnsetEnvReference(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "GT_TEST_UNSET_TOKEN") {
 		t.Errorf("error should name the unset variable, got: %v", err)
+	}
+}
+
+// The plain BuildStartupCommand path (crew restart in `gt start`) reports an
+// unset reference as an error instead of expanding it to an empty credential
+// that would only fail once the agent is already running (gt-yih1). No command
+// comes back with the error, so the caller has nothing to type into the live
+// pane and holds the session instead (gt-wisp-jsm).
+func TestBuildStartupCommand_PlainPathErrorsOnUnsetEnvReference(t *testing.T) {
+	t.Setenv("GT_TEST_UNSET_TOKEN", "")
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	townSettings.RoleAgents = map[string]string{constants.RoleWitness: "proxied-agent"}
+	townSettings.Agents["proxied-agent"] = &RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"ANTHROPIC_AUTH_TOKEN": "${GT_TEST_UNSET_TOKEN}"},
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	if err == nil {
+		t.Fatalf("BuildStartupCommand returned a command for an unset reference: %q", cmd)
+	}
+	if !strings.Contains(err.Error(), "GT_TEST_UNSET_TOKEN") {
+		t.Errorf("error should name the unset variable, got: %v", err)
+	}
+	if cmd != "" {
+		t.Errorf("no command should be returned alongside the error, got: %q", cmd)
+	}
+}
+
+// Happy path: when the referenced variable is set, the plain path returns the
+// command with the resolved value (gt-wisp-jsm).
+func TestBuildStartupCommand_PlainPathReturnsCommandWhenEnvSet(t *testing.T) {
+	const liveKey = "plain_path_key_0001"
+	t.Setenv("GT_TEST_UNSET_TOKEN", liveKey)
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	townSettings.RoleAgents = map[string]string{constants.RoleWitness: "proxied-agent"}
+	townSettings.Agents["proxied-agent"] = &RuntimeConfig{
+		Command: "claude",
+		Env:     map[string]string{"ANTHROPIC_AUTH_TOKEN": "${GT_TEST_UNSET_TOKEN}"},
+	}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error with the variable set: %v", err)
+	}
+	if !strings.Contains(cmd, liveKey) {
+		t.Errorf("startup command does not export the resolved key: %q", cmd)
 	}
 }

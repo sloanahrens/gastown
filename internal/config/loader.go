@@ -2369,7 +2369,12 @@ func ExtractSimpleRole(gtRole string) string {
 // If envVars contains GT_ROLE, the function uses role-based agent resolution
 // (ResolveRoleAgentConfig) to select the appropriate agent for the role.
 // This enables per-role model selection via role_agents in settings.
-func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) string {
+//
+// An unset ${VAR} reference in the resolved agent's env returns an error and no
+// command, so a caller that restarts a live session in place leaves that
+// session alone rather than typing an empty credential into its pane
+// (gt-wisp-jsm).
+func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (string, error) {
 	var rc *RuntimeConfig
 	var townRoot string
 
@@ -2444,7 +2449,17 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
 	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
 	// resolving any ${VAR} reference here rather than at config load so it
-	// reads the environment of the process doing the spawning.
+	// reads the environment of the process doing the spawning. An unresolved
+	// reference is an error, not an empty export: this is the only check an
+	// agent resolved out of settings passes (gt-yih1).
+	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+		name := rc.ResolvedAgent
+		if name == "" {
+			name = rc.Provider
+		}
+		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
+			name, strings.Join(missing, ", "))
+	}
 	for k, v := range ExpandEnvRefs(rc.Env) {
 		resolvedEnv[k] = v
 	}
@@ -2530,7 +2545,7 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 		}
 	}
 
-	return cmd
+	return cmd, nil
 }
 
 // SanitizeAgentEnv clears environment variables that are known to break agent
@@ -2810,11 +2825,12 @@ func BuildStartupCommandFromConfig(cfg AgentEnvConfig, rigPath, prompt, agentOve
 	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
 }
 
-// BuildAgentStartupCommand is a convenience function for starting agent sessions.
-// It uses AgentEnv to set all standard environment variables.
+// BuildAgentStartupCommand is a convenience function for starting agent
+// sessions. It uses AgentEnv to set all standard environment variables.
 // For rig-level roles (witness, refinery), pass the rig name and rigPath.
-// For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but provide townRoot.
-func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) string {
+// For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but
+// provide townRoot.
+func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) (string, error) {
 	envVars := AgentEnv(AgentEnvConfig{
 		Role:     role,
 		Rig:      rig,
@@ -2837,7 +2853,7 @@ func BuildAgentStartupCommandWithAgentOverride(role, rig, townRoot, rigPath, pro
 
 // BuildPolecatStartupCommand builds the startup command for a polecat.
 // Sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
-func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) string {
+func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) (string, error) {
 	var townRoot string
 	if rigPath != "" {
 		townRoot = filepath.Dir(rigPath)
@@ -2870,7 +2886,7 @@ func BuildPolecatStartupCommandWithAgentOverride(rigName, polecatName, rigPath, 
 
 // BuildCrewStartupCommand builds the startup command for a crew member.
 // Sets GT_ROLE, GT_RIG, GT_CREW, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
-func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) string {
+func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) (string, error) {
 	var townRoot string
 	if rigPath != "" {
 		townRoot = filepath.Dir(rigPath)
