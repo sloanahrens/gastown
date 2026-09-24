@@ -167,6 +167,32 @@ func TestBdInitRetryClearsTheWorkspaceTheFailedAttemptLeft(t *testing.T) {
 	}
 }
 
+// TestBdInitRetryClearsACallerMadeEmptyWorkspace is the same failure for the two
+// container-backed callers that make <dir>/.beads empty and let bd init fill it
+// (internal/mail/router_test.go, internal/polecat/manager_test.go): an empty
+// directory is not a workspace, but attempt 1 writes a Dolt root into it and
+// dies before the config, so it needs the same repair an absent one does.
+func TestBdInitRetryClearsACallerMadeEmptyWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installHalfWrittenBdInitStub(t)
+	zeroRetryBackoff(t)
+
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, ".beads"), 0755); err != nil {
+		t.Fatalf("create the caller's workspace: %v", err)
+	}
+
+	b := NewIsolatedWithPort(workDir, 55069)
+	if err := b.Init("pt13dd3b6a"); err != nil {
+		t.Fatalf("Init after a failed attempt half-wrote into a caller-made .beads: %v", err)
+	}
+	if got := stub.calls(t); got != 2 {
+		t.Errorf("bd invocations = %d, want 2 (the race, then the attempt the reset made possible)", got)
+	}
+}
+
 // TestBdInitRetryLeavesAPreexistingWorkspaceAlone is that reset's safety
 // property: only a .beads the loop watched appear is ever cleared. A workspace
 // that was already there is its owner's, so Init keeps the behavior of retrying
@@ -723,12 +749,12 @@ func installFlakyCatalogRaceBDStub(t *testing.T, failUntil int) *flakyBdStub {
 	return installFlakyBdStub(t, failUntil, observedCatalogRaceStderr)
 }
 
-// installHalfWrittenBdInitStub writes the fake bd gt-o8i9f's sequence needs: an
-// attempt that writes .beads/dolt and dies on the catalog race, bd refusing a
-// .beads already on disk the way its legacy guard does, and an attempt that
-// succeeds against a directory with none. So an init only gets past attempt 1 if
-// the workspace that attempt left is gone by the time the next one runs — which
-// is the behavior under test, not an artifact of the stub.
+// installHalfWrittenBdInitStub writes the fake bd gt-o8i9f's sequence needs: a
+// first attempt that writes .beads/dolt and dies on the catalog race, and after
+// that bd refusing to open a .beads with a Dolt root in it the way its legacy
+// guard does. So an init only gets past attempt 1 if the workspace that attempt
+// wrote is gone by the time the next one runs — the behavior under test, not an
+// artifact of the stub.
 func installHalfWrittenBdInitStub(t *testing.T) *flakyBdStub {
 	t.Helper()
 	return installBdStub(t, fmt.Sprintf(`#!/bin/sh
@@ -741,7 +767,7 @@ count=0
 count=$((count + 1))
 echo "$count" > __COUNT__
 echo "$*" >> __ARGS__
-if [ -d .beads ]; then
+if [ -d .beads/dolt ]; then
   echo %q >&2
   exit 1
 fi

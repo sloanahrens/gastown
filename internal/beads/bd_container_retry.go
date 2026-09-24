@@ -327,27 +327,32 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 // argv, so the attempt cannot land on the half-made database the failed one left
 // on the server either. Nothing else about the command changes.
 //
-// The snapshot is the safety property: only a .beads this reset watched appear
-// is ever removed. A workspace that was already there belongs to whoever put it
-// there, and deleting it is not this loop's business — that case keeps the
-// behavior of retrying a directory no retry can fix.
+// The snapshot is the safety property: only a .beads that was absent or empty
+// when the sequence started is ever cleared. A workspace with content in it
+// belongs to whoever put it there — clearing one is not this loop's business —
+// and that case keeps the behavior of retrying a directory no retry can fix. An
+// empty directory is not a workspace; it is the shape two callers leave for bd
+// init to fill (internal/mail/router_test.go and
+// internal/polecat/manager_test.go), it meets the same failure, and bd init
+// recreates it on the way through.
 type bdInitRetryReset struct {
 	dir string // the <workDir>/.beads this loop may clear between attempts
 }
 
 // newBdInitRetryReset returns the reset for one retry sequence, or nil when the
 // command is not the one shape it applies to: not an init of a minted testdb_
-// name, not against the test container, no retry to make, or a workspace that
-// was already there. A nil *bdInitRetryReset is the no-op state and next() is
-// safe to call on it, which is how every other command reaches this loop
-// unchanged.
+// name, no retry to make, or a .beads holding something that is not the failed
+// attempt's. A nil *bdInitRetryReset is the no-op state and next() is safe to
+// call on it, which is how every other command reaches this loop unchanged.
 func newBdInitRetryReset(b *Beads, attempts int, args []string) *bdInitRetryReset {
+	// Fewer than two attempts is every wrapper not pointed at the test
+	// container, which is the same case the retry itself excludes.
 	if attempts < 2 || !bdInitOnTestDatabase(args) {
 		return nil
 	}
 	// The path bd init writes to, derived exactly as the run path derives
 	// BEADS_DIR. Anything else — a redirected workspace, a beadsDir pointed at
-	// another directory — is not this loop's to delete, and neither is one under
+	// another directory — is not this loop's to clear, and neither is one under
 	// the harness-forbidden live town.
 	dir := b.getResolvedBeadsDir()
 	if dir != filepath.Join(b.workDir, ".beads") {
@@ -356,17 +361,23 @@ func newBdInitRetryReset(b *Beads, attempts int, args []string) *bdInitRetryRese
 	if err := workspace.GuardForbiddenRoot("bd init retry workspace reset", dir); err != nil {
 		return nil
 	}
-	if _, err := os.Stat(dir); err == nil {
-		return nil // pre-existing workspace: its owner's, not the failed attempt's
-	} else if !os.IsNotExist(err) {
-		return nil
+	info, err := os.Lstat(dir)
+	switch {
+	case os.IsNotExist(err):
+		return &bdInitRetryReset{dir: dir}
+	case err != nil || !info.IsDir():
+		return nil // a .beads bd init did not leave: a file, a symlink, unreadable
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return nil // a workspace with content: its owner's, not the failed attempt's
 	}
 	return &bdInitRetryReset{dir: dir}
 }
 
 // next returns the argv for the attempt after a failure: the workspace the
-// failed attempt created is cleared and the minted database name is replaced, so
-// the next attempt starts from the state attempt 1 did.
+// failed attempt wrote into is cleared and the minted database name is replaced,
+// so the next attempt starts from the state attempt 1 did.
 func (r *bdInitRetryReset) next(args []string) []string {
 	if r == nil {
 		return args
@@ -381,9 +392,14 @@ func (r *bdInitRetryReset) next(args []string) []string {
 }
 
 // remintTestDatabase returns args with Init's minted testdb_ name replaced by a
-// fresh one. Both flag spellings bdInitOnTestDatabase accepts are rewritten, so
-// the predicate and the rewrite cannot disagree about which argv they mean.
+// fresh one, and args of any other shape unchanged: only bdInitOnTestDatabase
+// reaches the rewrite, and the check is repeated here so the predicate and the
+// rewrite cannot disagree about which argv they mean. Both flag spellings are
+// rewritten, for the same reason.
 func remintTestDatabase(args []string) []string {
+	if !bdInitOnTestDatabase(args) {
+		return args
+	}
 	out := make([]string, len(args))
 	copy(out, args)
 	for i, arg := range args {
