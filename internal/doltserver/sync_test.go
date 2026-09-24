@@ -203,7 +203,7 @@ exit 2
 	log := string(data)
 	for _, want := range []string{
 		"args=--allow-stale version",
-		"args=--allow-stale purge --json",
+		"args=--allow-stale purge --json --force",
 		"BEADS_DIR=" + beadsDir,
 		"BEADS_DOLT_SERVER_DATABASE=gastown",
 		"BEADS_DOLT_SERVER_HOST=127.0.0.2",
@@ -219,6 +219,69 @@ exit 2
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("stale env leaked via %q:\n%s", forbidden, log)
 		}
+	}
+}
+
+// TestPurgeClosedEphemeralsDryRunOmitsForce verifies that a dry-run purge
+// passes --dry-run (preview only) and never --force, so gt maintain's
+// preview paths can never delete data.
+func TestPurgeClosedEphemeralsDryRunOmitsForce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess test in short mode")
+	}
+	beadspkg.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
+
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, "gastown", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"gastown","dolt_server_host":"metadata-host","dolt_server_port":3307}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "bd.log")
+	stubPath := filepath.Join(stubDir, "bd")
+	script := `#!/bin/sh
+printf 'args=%s\n' "$*" >> "$MOCK_BD_LOG"
+if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
+  printf 'bd version\n'
+  exit 0
+fi
+if [ "$1" = "--allow-stale" ] && [ "$2" = "purge" ]; then
+  printf '{"purged_count":0}\n'
+  exit 0
+fi
+printf 'unexpected args: %s\n' "$*" >&2
+exit 2
+`
+	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_LOG", logPath)
+
+	purged, err := PurgeClosedEphemerals(townRoot, "gastown", true)
+	if err != nil {
+		t.Fatalf("PurgeClosedEphemerals: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "args=--allow-stale purge --json --dry-run") {
+		t.Fatalf("bd log missing dry-run args:\n%s", log)
+	}
+	if strings.Contains(log, "--force") {
+		t.Fatalf("dry-run purge must never pass --force:\n%s", log)
 	}
 }
 
