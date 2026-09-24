@@ -1,10 +1,10 @@
 package witness
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/patrolstate"
 )
 
 // patrolStateFileName is the witness's agent-managed state file. Unlike the
@@ -49,74 +49,10 @@ func WitnessStatePath(townRoot, rig string) string {
 //
 // A missing file is a no-op. An unreadable or unparseable file is an error and
 // is left untouched — a state file we cannot parse is not one to overwrite.
+//
+// The read/zero/atomic-write mechanics are shared with the deacon's own
+// counter reset (internal/deacon.ResetPatrolCount, gt-wdv9) via
+// internal/patrolstate, so this function only owns the witness's path and key.
 func NormalizePatrolCounter(townRoot, rig string) (bool, error) {
-	path := WitnessStatePath(townRoot, rig)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("reading %s: %w", path, err)
-	}
-
-	// Raw messages, not a struct: this file is the witness's own and carries
-	// fields Go knows nothing about, which must survive the rewrite.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return false, fmt.Errorf("parsing %s: %w", path, err)
-	}
-
-	count, ok := fields[patrolCountKey]
-	if !ok {
-		// No counter to bound — nothing to do, and adding one would be a
-		// field the witness never asked for.
-		return false, nil
-	}
-
-	var current int
-	if err := json.Unmarshal(count, &current); err != nil {
-		return false, fmt.Errorf("parsing %s in %s: %w", patrolCountKey, path, err)
-	}
-	if current == 0 {
-		return false, nil // already normalized; do not touch the file
-	}
-
-	fields[patrolCountKey] = json.RawMessage("0")
-	out, err := json.MarshalIndent(fields, "", "  ")
-	if err != nil {
-		return false, fmt.Errorf("encoding %s: %w", path, err)
-	}
-	out = append(out, '\n')
-
-	// Preserve the file mode the witness gave it.
-	mode := os.FileMode(0600)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-
-	// Write-then-rename: the witness may be writing this file concurrently, and
-	// a reader must never see a half-written state file.
-	tmp, err := os.CreateTemp(filepath.Dir(path), patrolStateFileName+".tmp-*")
-	if err != nil {
-		return false, fmt.Errorf("creating temp file for %s: %w", path, err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
-
-	if _, err := tmp.Write(out); err != nil {
-		_ = tmp.Close()
-		return false, fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return false, fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		return false, fmt.Errorf("setting mode on %s: %w", tmpName, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return false, fmt.Errorf("replacing %s: %w", path, err)
-	}
-
-	return true, nil
+	return patrolstate.ResetCounter(WitnessStatePath(townRoot, rig), patrolCountKey)
 }

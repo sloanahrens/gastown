@@ -585,9 +585,15 @@ func isCompactResume() bool {
 //
 // Only a fresh session qualifies. Compaction and resume continue the session
 // that owns the counter, and a bare `gt prime` (no --hook) is a context read,
-// not a session start.
-func primeResetsDeaconPatrolState(role Role, hookMode bool, source string) bool {
-	if !hookMode || role != RoleDeacon {
+// not a session start. handoffReason == "compaction" is checked separately
+// from source: isCompactResume/primeContinuationMode treat it as
+// continuation even when source == "startup" (a compaction-triggered handoff
+// cycle can report source=startup with the marker's reason carrying
+// "compaction" — GH#1965), and useCompactResumePath's fast path only catches
+// that combination when staticDelivered is false, so a plain source check
+// here would reset the counter on some compaction restarts.
+func primeResetsDeaconPatrolState(role Role, hookMode bool, source, handoffReason string) bool {
+	if !hookMode || role != RoleDeacon || handoffReason == "compaction" {
 		return false
 	}
 	return source == "startup" || source == "clear"
@@ -598,7 +604,7 @@ func primeResetsDeaconPatrolState(role Role, hookMode bool, source string) bool 
 // did nothing. Failures are reported, never fatal: a state file we cannot
 // read must not stop a deacon from starting.
 func resetDeaconPatrolState(ctx RoleContext) string {
-	if primeDryRun || !primeResetsDeaconPatrolState(ctx.Role, primeHookMode, primeHookSource) {
+	if primeDryRun || !primeResetsDeaconPatrolState(ctx.Role, primeHookMode, primeHookSource, primeHandoffReason) {
 		return ""
 	}
 	if ctx.TownRoot == "" {
@@ -607,12 +613,12 @@ func resetDeaconPatrolState(ctx RoleContext) string {
 
 	changed, err := deacon.ResetPatrolCount(ctx.TownRoot)
 	if err != nil {
-		return fmt.Sprintf("[prime] deacon patrol state not reset: %v", err)
+		return formatPrimeStatusLine(fmt.Sprintf("deacon patrol state not reset: %v", err))
 	}
 	if !changed {
 		return ""
 	}
-	return "[prime] deacon patrol_count reset to 0 for this session"
+	return formatPrimeStatusLine("deacon patrol_count reset to 0 for this session")
 }
 
 // warnRoleMismatch outputs a prominent warning if GT_ROLE disagrees with cwd detection.

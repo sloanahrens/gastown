@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/deacon"
@@ -31,26 +32,36 @@ func writePrimeDeaconState(t *testing.T, townRoot, contents string) string {
 // or "clear", for RoleDeacon, counts as a fresh session. Resume and
 // compaction continue the session that owns the counter, and a bare `gt
 // prime` (no --hook) is a context read, not a session start.
+//
+// handoffReason == "compaction" is pinned separately from source: a
+// compaction-triggered handoff cycle can report source == "startup" (the
+// handoff marker, not the hook source, carries "compaction" — GH#1965, see
+// isCompactResume/primeContinuationMode), and useCompactResumePath only takes
+// its fast path for that combination when the static role text has not been
+// delivered. This predicate must not reset on that combination either way.
 func TestPrimeResetsDeaconPatrolState_FreshSessionOnly(t *testing.T) {
 	cases := []struct {
-		name     string
-		role     Role
-		hookMode bool
-		source   string
-		want     bool
+		name          string
+		role          Role
+		hookMode      bool
+		source        string
+		handoffReason string
+		want          bool
 	}{
-		{"fresh startup", RoleDeacon, true, "startup", true},
-		{"fresh clear", RoleDeacon, true, "clear", true},
-		{"resume does not reset", RoleDeacon, true, "resume", false},
-		{"compact does not reset", RoleDeacon, true, "compact", false},
-		{"no hook mode does not reset", RoleDeacon, false, "startup", false},
-		{"witness role does not reset via deacon path", RoleWitness, true, "startup", false},
+		{"fresh startup", RoleDeacon, true, "startup", "", true},
+		{"fresh clear", RoleDeacon, true, "clear", "", true},
+		{"resume does not reset", RoleDeacon, true, "resume", "", false},
+		{"compact does not reset", RoleDeacon, true, "compact", "", false},
+		{"no hook mode does not reset", RoleDeacon, false, "startup", "", false},
+		{"witness role does not reset via deacon path", RoleWitness, true, "startup", "", false},
+		{"compaction reason blocks reset even with source=startup", RoleDeacon, true, "startup", "compaction", false},
+		{"compaction reason blocks reset even with source=clear", RoleDeacon, true, "clear", "compaction", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := primeResetsDeaconPatrolState(tc.role, tc.hookMode, tc.source); got != tc.want {
-				t.Errorf("primeResetsDeaconPatrolState(%v, %v, %q) = %v, want %v",
-					tc.role, tc.hookMode, tc.source, got, tc.want)
+			if got := primeResetsDeaconPatrolState(tc.role, tc.hookMode, tc.source, tc.handoffReason); got != tc.want {
+				t.Errorf("primeResetsDeaconPatrolState(%v, %v, %q, %q) = %v, want %v",
+					tc.role, tc.hookMode, tc.source, tc.handoffReason, got, tc.want)
 			}
 		})
 	}
@@ -64,14 +75,17 @@ func TestResetDeaconPatrolState_FreshSessionResetsCounterAndPreservesOtherFields
   "last_patrol": "2026-09-24T20:20:00Z"
 }`)
 
-	origHookMode, origSource := primeHookMode, primeHookSource
-	primeHookMode, primeHookSource = true, "startup"
-	t.Cleanup(func() { primeHookMode, primeHookSource = origHookMode, origSource })
+	origHookMode, origSource, origReason := primeHookMode, primeHookSource, primeHandoffReason
+	primeHookMode, primeHookSource, primeHandoffReason = true, "startup", ""
+	t.Cleanup(func() { primeHookMode, primeHookSource, primeHandoffReason = origHookMode, origSource, origReason })
 
 	ctx := RoleContext{Role: RoleDeacon, TownRoot: townRoot}
 	msg := resetDeaconPatrolState(ctx)
 	if msg == "" {
 		t.Fatal("resetDeaconPatrolState returned no status line for a changed counter")
+	}
+	if !strings.HasPrefix(msg, "[prime] ") {
+		t.Errorf("resetDeaconPatrolState = %q, want the normal [prime] prefix outside structured output", msg)
 	}
 
 	data, err := os.ReadFile(path)
@@ -102,9 +116,9 @@ func TestResetDeaconPatrolState_ResumeAndCompactionDoNotReset(t *testing.T) {
 			townRoot := t.TempDir()
 			path := writePrimeDeaconState(t, townRoot, `{"patrol_count": 29}`)
 
-			origHookMode, origSource := primeHookMode, primeHookSource
-			primeHookMode, primeHookSource = true, source
-			t.Cleanup(func() { primeHookMode, primeHookSource = origHookMode, origSource })
+			origHookMode, origSource, origReason := primeHookMode, primeHookSource, primeHandoffReason
+			primeHookMode, primeHookSource, primeHandoffReason = true, source, ""
+			t.Cleanup(func() { primeHookMode, primeHookSource, primeHandoffReason = origHookMode, origSource, origReason })
 
 			ctx := RoleContext{Role: RoleDeacon, TownRoot: townRoot}
 			if msg := resetDeaconPatrolState(ctx); msg != "" {
@@ -134,9 +148,11 @@ func TestResetDeaconPatrolState_DryRunDoesNotWrite(t *testing.T) {
 	townRoot := t.TempDir()
 	path := writePrimeDeaconState(t, townRoot, `{"patrol_count": 29}`)
 
-	origHookMode, origSource, origDryRun := primeHookMode, primeHookSource, primeDryRun
-	primeHookMode, primeHookSource, primeDryRun = true, "startup", true
-	t.Cleanup(func() { primeHookMode, primeHookSource, primeDryRun = origHookMode, origSource, origDryRun })
+	origHookMode, origSource, origDryRun, origReason := primeHookMode, primeHookSource, primeDryRun, primeHandoffReason
+	primeHookMode, primeHookSource, primeDryRun, primeHandoffReason = true, "startup", true, ""
+	t.Cleanup(func() {
+		primeHookMode, primeHookSource, primeDryRun, primeHandoffReason = origHookMode, origSource, origDryRun, origReason
+	})
 
 	ctx := RoleContext{Role: RoleDeacon, TownRoot: townRoot}
 	if msg := resetDeaconPatrolState(ctx); msg != "" {
@@ -157,5 +173,60 @@ func TestResetDeaconPatrolState_DryRunDoesNotWrite(t *testing.T) {
 	}
 	if count != 29 {
 		t.Errorf("patrol_count = %d, want unchanged 29 under --dry-run", count)
+	}
+}
+
+// A compaction-triggered handoff cycle can report source == "startup" while
+// the handoff marker's reason carries "compaction" (GH#1965); that must not
+// reset the counter even though source alone would look like a fresh session.
+func TestResetDeaconPatrolState_CompactionReasonDoesNotReset(t *testing.T) {
+	townRoot := t.TempDir()
+	path := writePrimeDeaconState(t, townRoot, `{"patrol_count": 29}`)
+
+	origHookMode, origSource, origReason := primeHookMode, primeHookSource, primeHandoffReason
+	primeHookMode, primeHookSource, primeHandoffReason = true, "startup", "compaction"
+	t.Cleanup(func() { primeHookMode, primeHookSource, primeHandoffReason = origHookMode, origSource, origReason })
+
+	ctx := RoleContext{Role: RoleDeacon, TownRoot: townRoot}
+	if msg := resetDeaconPatrolState(ctx); msg != "" {
+		t.Errorf("resetDeaconPatrolState with handoffReason=compaction returned %q, want no-op", msg)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("parse back: %v", err)
+	}
+	var count int
+	if err := json.Unmarshal(fields["patrol_count"], &count); err != nil {
+		t.Fatalf("parse patrol_count: %v", err)
+	}
+	if count != 29 {
+		t.Errorf("patrol_count = %d, want unchanged 29 with handoffReason=compaction", count)
+	}
+}
+
+// Structured SessionStart output (Codex) must not see a status line starting
+// with '[' — see formatPrimeStatusLine / formatSessionMetadataLine.
+func TestResetDeaconPatrolState_StructuredSessionStartOutputDropsLeadingBracket(t *testing.T) {
+	townRoot := t.TempDir()
+	writePrimeDeaconState(t, townRoot, `{"patrol_count": 29}`)
+
+	origHookMode, origSource, origStructured := primeHookMode, primeHookSource, primeStructuredSessionStartOutput
+	primeHookMode, primeHookSource, primeStructuredSessionStartOutput = true, "startup", true
+	t.Cleanup(func() {
+		primeHookMode, primeHookSource, primeStructuredSessionStartOutput = origHookMode, origSource, origStructured
+	})
+
+	ctx := RoleContext{Role: RoleDeacon, TownRoot: townRoot}
+	msg := resetDeaconPatrolState(ctx)
+	if msg == "" {
+		t.Fatal("resetDeaconPatrolState returned no status line for a changed counter")
+	}
+	if strings.HasPrefix(msg, "[") {
+		t.Errorf("resetDeaconPatrolState under structured SessionStart output = %q, want no leading '['", msg)
 	}
 }
