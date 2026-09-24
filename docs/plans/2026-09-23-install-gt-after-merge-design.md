@@ -238,7 +238,10 @@ config.
 
 **`merge_queue.post_merge_command` / `merge_queue.post_merge_timeout`
 (config, new).** Two new fields on the existing `merge_queue` struct
-(`internal/config/types.go:744`). The command is empty by default. The
+(`MergeQueueConfig`, `internal/config/types.go:1384`). **`post_merge_command`
+is read only from the rig's root `config.json`.** `MergeSettingsCommand`
+excludes it from the repo and local settings overlays, so content merged into
+the repo can never choose the command the refinery runs. The command is empty by default. The
 timeout defaults to 20m: that covers the 5m lock wait plus a cold-cache build
 with room to spare, and the refinery's shell tool allows 45m.
 
@@ -419,8 +422,22 @@ It does the following, in order:
 
 A human or crew member running `gt mq post-merge` by hand therefore never
 kills their own pane. Within `MinHandoffCooldown` (2 min) of the last handoff,
-step 3 is **skipped**, not slept on: the next unit cycles instead. Steps 1–2
-always run.
+step 3 is **skipped**, not slept on: the next unit cycles instead.
+
+Step 1 (the chores) runs for any caller. Step 2 (the patrol wisp) is guarded
+by role and pane like step 3, but not by the config flag, so a human running
+post-merge never closes the live refinery's patrol wisp.
+`cleanupMoleculeOnHandoff` is not called, because it would close the wisp step
+2 just poured.
+
+In batch mode:
+- MERGED is skipped, because Go already sends it for each member;
+- each member's MERGE_READY is archived;
+- there is no attestation and no `temp` branch;
+- the wisp is closed and the pane respawned once per batch.
+
+Duplicate MERGED mail does no harm: the witness's `HandleMerged` is
+idempotent (`internal/witness/handlers.go:435-477`).
 
 **Batch path.** `gt mq batch run` runs in the background under the agent's
 tool. Respawning the pane at its end kills the agent that is waiting on it,
@@ -491,7 +508,19 @@ No failure in any row below changes the result of a merge.
 All files are under `~/gt/daemon/` unless stated otherwise. Every file is
 written through a temp file and a rename.
 
-- **`restart-pending.json`**: `{"commit": "<full sha>", "requested_at": "<UTC RFC3339>", "source": "post-merge|rebuild-gt"}`.
+- **`restart-pending.json`**: `{"commit": "<full sha>", "requested_at": "<UTC RFC3339>", "source": "post-merge|rebuild-gt", "repo": "<abs build checkout>"}`.
+  - The daemon runs its ancestry checks in `repo`.
+  - Before exiting, the daemon records `attempted_from`, its own commit. If
+    it comes back on that same commit, the upgrade had no effect, so it
+    escalates once (`daemon:restart-pending-no-effect`) instead of looping.
+- **`state.json`** (existing) gains `"commit"`: the daemon's running build
+  commit, written at startup and on every heartbeat save. It may be the short
+  ldflags SHA, so readers compare by git ancestry, never by string equality.
+  rebuild-gt's backstop reads it.
+- **Dolt is untouched by an upgrade restart.** Today the live town doesn't
+  manage Dolt through the daemon; launchd runs `gt dolt start`. The shutdown
+  for `errRestartForUpgrade` skips stopping a daemon-managed Dolt anyway, and
+  the new daemon adopts the running server (`dolt.go:375-409`).
   The last writer wins. It is written only after the smoke test passes.
 - **`install-receipts.jsonl`**: one JSON object per event, with these fields:
   - `ts`
@@ -565,7 +594,8 @@ closer and a fake respawner.
 - **The patrol step** closes the current wisp and pours the next one.
 - **The respawn guards:** no respawn when the role is wrong, when not inside
   the refinery pane, when the config flag is off, or within the cooldown. In
-  every one of those cases steps 1–2 still run.
+  every one of those cases step 1 still runs. Step 2 runs only with a
+  matching role and pane.
 - **The call sites:** the batch path calls it once per batch, not once per
   member; the single-MR path calls it after the install hook.
 - **The respawn helper factored out of `handoff.go`:** existing handoff tests
