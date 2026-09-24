@@ -137,9 +137,15 @@ refuse() {
   exit 2
 }
 
+# git fetch/merge can fork a detached 'gc --auto' or 'maintenance --auto' that
+# inherits the lock fd ($^F above keeps it open across exec) and would hold the
+# install lock long after this run ends; rebuild-gt closes fd 9 for the same
+# reason. Disable auto maintenance on the calls that can trigger it.
+GIT_NO_AUTO_GC=(-c gc.auto=0 -c maintenance.auto=false)
+
 # --- Resolve the target ---------------------------------------------------------
 [ -d "$RIG_DIR/.git" ] || [ -f "$RIG_DIR/.git" ] || { log "No build checkout at $RIG_DIR"; result_line failed "$SHA" "" no-rig; exit 1; }
-git -C "$RIG_DIR" fetch origin --quiet 2>/dev/null || log "WARNING: fetch failed; using local refs"
+git -C "$RIG_DIR" "${GIT_NO_AUTO_GC[@]}" fetch origin --quiet 2>/dev/null || log "WARNING: fetch failed; using local refs"
 FULL_SHA=$(igt_resolve "$RIG_DIR" "$SHA")
 [ -n "$FULL_SHA" ] || refuse unknown-commit "$SHA is not a commit in $RIG_DIR"
 MERGED_AT=$(git -C "$RIG_DIR" log -1 --format=%ct "$FULL_SHA")
@@ -161,7 +167,7 @@ fi
 BRANCH=$(git -C "$RIG_DIR" branch --show-current 2>/dev/null || true)
 [ "$BRANCH" = "main" ] || refuse wrong-branch "$RIG_DIR is on '$BRANCH', not main"
 # ff-only, never reset: a real divergence is a human's call (gt-4g1m).
-git -C "$RIG_DIR" merge --ff-only "$FULL_SHA" --quiet 2>/dev/null || refuse diverged "local main cannot fast-forward to $FULL_SHA"
+git -C "$RIG_DIR" "${GIT_NO_AUTO_GC[@]}" merge --ff-only "$FULL_SHA" --quiet 2>/dev/null || refuse diverged "local main cannot fast-forward to $FULL_SHA"
 if [ "$(git -C "$RIG_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)" -gt 0 ]; then
   refuse diverged "local main has commits origin/main lacks"
 fi

@@ -296,5 +296,26 @@ rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
 grep -q -- "-s high .*--fingerprint install-gt:marker-write-failed" "$T/gt.log" \
   && pass "marker-write fails: HIGH escalation" || fail "marker-write fails: gt.log $(cat "$T/gt.log" 2>/dev/null)"
 
+# --- Case 16: git fetch/merge run with auto gc/maintenance off, so no
+# detached 'gc --auto' inherits the lock fd and holds install-gt.lock. ---
+T=$(make_world)
+REAL_GIT=$(command -v git)
+cat > "$T/stubs/git" <<GIT
+#!/usr/bin/env bash
+echo "git \$*" >> "\$T_WORLD/git.log"
+exec "$REAL_GIT" "\$@"
+GIT
+chmod +x "$T/stubs/git"
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
+[ "$rc" = "0" ] && pass "no auto gc: exit 0" || fail "no auto gc: exit $rc: $(cat "$T/run.out")"
+for sub in fetch merge; do
+  line=$(grep -a " $sub " "$T/git.log" | head -1 || true)
+  case "$line" in
+    *"-c gc.auto=0 -c maintenance.auto=false $sub "*) pass "no auto gc: $sub disables auto gc/maintenance" ;;
+    *) fail "no auto gc: $sub line: '$line'" ;;
+  esac
+done
+
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
