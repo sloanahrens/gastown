@@ -173,7 +173,7 @@ rebuild-gt receipts; `.events.jsonl`):
 refinery merge (single MR: runMQPostMerge │ batch: once, after result.MergeCommit = tipSHA)
   └─▶ [Go] runPostMergeCommand(rig, mergedSHA)            shared by both paths
         reads rig config merge_queue.post_merge_command (empty = off),
-              merge_queue.post_merge_timeout (default 10m)
+              merge_queue.post_merge_timeout (default 20m)
         runs it in <rig>/refinery/rig (so the script is the MERGED version)
         env: GT_MERGED_SHA, GT_RIG, GT_TOWN_ROOT, GT_MR_IDS
         nonzero / timeout → log + gt escalate; never fails the merge
@@ -219,6 +219,9 @@ refinery merge (single MR: runMQPostMerge │ batch: once, after result.MergeCom
 - **Resumed merges:** `resumeLandedMerge` (`resume_landed_merge.go:69`) can
   hand it a merge commit that is already installed. `install-gt.sh` treats
   that as a no-op.
+- **Orphan-branch merges:** `runMQPostMerge` returns on its orphan-branch path
+  before the rubric hook (`mq.go:763-766`), so those merges never reach the
+  hook. The rebuild-gt backstop installs them; that is accepted, not fixed.
 
 Behaviour:
 
@@ -235,7 +238,9 @@ config.
 
 **`merge_queue.post_merge_command` / `merge_queue.post_merge_timeout`
 (config, new).** Two new fields on the existing `merge_queue` struct
-(`internal/config/types.go:744`). Both are empty by default.
+(`internal/config/types.go:744`). The command is empty by default. The
+timeout defaults to 20m: that covers the 5m lock wait plus a cold-cache build
+with room to spare, and the refinery's shell tool allows 45m.
 
 **`scripts/install-after-merge.sh` (new).**
 
@@ -251,7 +256,9 @@ docs-only merge can't hide an earlier runtime install that failed.
 **`scripts/install-gt.sh` (new, shared).** Arguments: `--sha <commit>` and
 `--source post-merge|rebuild-gt`. The steps, in order:
 
-1. Take the flock.
+1. Take the flock, waiting up to 5 min. If it isn't free by then, exit 3
+   (busy): the binary is untouched and a `refused` receipt is written with
+   reason `lock-busy`.
 2. If the installed commit is `<sha>` or a descendant of it, write a `noop`
    receipt and exit 0.
 3. `git fetch origin`, then fast-forward `mayor/rig` to `<sha>`. With
@@ -265,6 +272,15 @@ docs-only merge can't hide an earlier runtime install that failed.
    the install.
 8. Write the restart marker.
 9. Append an `installed` receipt.
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | installed, no-op or skipped |
+| 1 | failed (build, smoke test or rollback) |
+| 2 | refused (dirty, wrong branch, diverged) |
+| 3 | lock busy |
 
 It never restarts the daemon itself. The install directory, the `daemon/`
 directory, and `make` and `gt` are resolved through overridable variables so
@@ -288,15 +304,24 @@ heartbeat and startup.
 - **The check runs at the top of the heartbeat, before the heartbeat
   dispatches plugins.** Otherwise each heartbeat would start a script and make
   itself busy.
+- **Comparing a marker with the daemon's own build commit** uses git ancestry,
+  checked in `mayor/rig` (`merge-base --is-ancestor`), not string equality:
+  - **Newer** means the daemon's commit is a strict ancestor of the marker's
+    commit.
+  - **Covered** means the marker's commit equals the daemon's commit or is an
+    ancestor of it.
+- **At every heartbeat, not only at startup,** a covered marker is deleted and
+  a `daemon_restarted` receipt is appended. That handles a race: the daemon
+  exits for marker X, and launchd restarts it on binary Y before install-gt
+  writes marker Y. Marker Y then equals the daemon's own commit and would never
+  clear.
 - **When the marker is present, its commit is newer than the daemon's own
   build commit, and the daemon is idle,** the daemon cancels its context,
   runs the normal shutdown, and returns a sentinel error,
   `errRestartForUpgrade`, from `Run`. `runDaemonRun`
   (`internal/cmd/daemon.go:487`) matches the error and calls `os.Exit(75)`.
   launchd starts it again on the new binary.
-- **At startup,** a marker whose commit equals the daemon's own commit is
-  deleted and a `daemon_restarted` receipt is appended. A marker older than
-  the daemon's own commit is deleted.
+- **At startup** the same covered-marker check runs first.
 - **A marker that has waited more than 30 min without the daemon going idle**
   escalates once and keeps waiting.
 - **Exit code 75 is deliberate.** A clean exit 0 would leave the daemon down.
@@ -315,9 +340,19 @@ heartbeat and startup.
     in-flight plugins, itself included.
 - `install-gt.sh` takes an optional `--slot-role <role>`. rebuild-gt passes it
   to keep its existing rule of building inside a gate slot; the post-merge
-  hook doesn't. rebuild-gt maps the script's exit codes onto its own daemon
-  contract: 0 stays 0, a refusal (2) becomes rebuild-gt's own refusal (exit 0
-  with a skipped receipt), and a failure (1) stays 1.
+  hook doesn't.
+- rebuild-gt maps the script's exit codes onto its own daemon contract:
+
+  | install-gt.sh exits | rebuild-gt exits |
+  |---|---|
+  | 0 | 0 |
+  | 1 | 1 |
+  | 2 (refused) | its own refusal: 0 with a skipped receipt |
+  | 3 (lock busy) | 3, deferred: retry at the next heartbeat, write no receipt, don't start the cooldown |
+
+  Exit 3 already means "deferred" to the daemon because rebuild-gt's
+  `plugin.md` sets `allow_deferred_exit = true` (`plugin_script.go:40-64`,
+  :133-135).
 - New backstop check: if the marker is more than 30 min old, or the daemon's
   running commit differs from the installed binary's commit for more than
   30 min, it escalates.
@@ -437,7 +472,8 @@ No failure in any row below changes the result of a merge.
 | Go hook | no `post_merge_command` | does nothing | none |
 | Go hook | nonzero exit, or timeout (process group killed) | logs it; the merge stands | `post-merge-command:<rig>`, MEDIUM |
 | install-after-merge | installed commit can't be read | installs anyway | none |
-| install-gt | lock wait times out; `mayor/rig` dirty, on the wrong branch or diverged | refuses, exit 2, binary untouched; rebuild-gt retries later | `install-gt:refused`, MEDIUM |
+| install-gt | lock wait times out | exit 3, binary untouched; rebuild-gt defers to the next heartbeat; the hook escalates | `post-merge-command:<rig>`, MEDIUM (hook only) |
+| install-gt | `mayor/rig` dirty, on the wrong branch or diverged | refuses, exit 2, binary untouched; rebuild-gt retries after its cooldown | `install-gt:refused`, MEDIUM |
 | install-gt | `<sha>` is already installed, or an ancestor of the installed commit | does nothing, exit 0 | none |
 | install-gt | `make build` or `safe-install` fails | binary untouched, exit 1 | `install-gt:build-failed`, MEDIUM |
 | install-gt | smoke test fails | `gt.prev` moved back into place atomically, exit 1, no marker | `install-gt:smoke-failed`, HIGH |
@@ -486,12 +522,17 @@ gate already runs close to its 10-minute budget, so every test must stay fast.
 
 **Go: daemon restart-pending handling.**
 
-- The idle predicate, as a table test over the in-flight flags.
-- A marker older than the daemon's commit is deleted.
-- A marker matching the daemon's commit at startup is cleared and writes a
-  receipt.
+- The idle predicate, as a table test over the in-flight flags. It includes
+  a main-branch test that is waiting for a slot, which counts as idle.
+- A covered marker (equal to the daemon's commit or an ancestor of it) is
+  cleared and writes a receipt, both at startup and at a heartbeat. This is
+  the race from item 8.
+- A newer marker while busy: no exit.
+- A newer marker while idle: `Run` returns `errRestartForUpgrade`, and
+  `runDaemonRun` maps it to 75. The exit function is injected, so no test
+  process exits.
+- The idle check runs before plugin dispatch within one heartbeat.
 - A marker stuck for 30 min escalates exactly once.
-- The exit function is injected, so no test process exits.
 
 **Shell: `scripts/install_gt_test.sh`.** Temporary install and `daemon/`
 directories, with stub `make` and `gt` on `PATH`. Cases:
@@ -500,7 +541,8 @@ directories, with stub `make` and `gt` on `PATH`. Cases:
   marker is written.
 - The commit is already installed, or is an ancestor of the installed commit:
   nothing happens.
-- The lock is held and the wait times out.
+- The lock is held and the wait times out: exit 3 and a `lock-busy` receipt.
+  The wait is shortened through an env override.
 - Each refusal case.
 - The marker is written only after the smoke test passes.
 - Receipts have the expected shape.
