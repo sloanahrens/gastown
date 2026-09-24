@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
@@ -424,6 +425,13 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 
 	var buf bytes.Buffer
 	for _, row := range result.Rows {
+		if table == "events" {
+			capped, err := capEventRowValues(row, eventValueBackupCap)
+			if err != nil {
+				return 0, fmt.Errorf("capping events row: %w", err)
+			}
+			row = capped
+		}
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, row); err != nil {
 			return 0, fmt.Errorf("compacting JSON row: %w", err)
@@ -441,6 +449,52 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 	}
 
 	return len(result.Rows), nil
+}
+
+// eventValueBackupCap bounds the old_value and new_value of each events row in
+// the offsite backup. An "updated" event stores the whole prior issue and the
+// whole changed field, so every edit of a bead with long notes writes two copies
+// of those notes: on 2026-09-23 two such beads put 102 MB of hq/events.jsonl
+// into the backup and GitHub refused the push (100 MB per-file limit), which
+// stopped the offsite backup for every database. The issues themselves are
+// exported whole in issues.jsonl; only this edit history is shortened, and
+// Dolt keeps the full values.
+const eventValueBackupCap = 8 * 1024
+
+// capEventRowValues returns row with old_value and new_value cut to at most
+// limit bytes plus a marker naming how much was dropped. Other fields, and
+// values already within the limit, pass through unchanged.
+func capEventRowValues(row json.RawMessage, limit int) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, err
+	}
+	changed := false
+	for _, key := range []string{"old_value", "new_value"} {
+		raw, ok := fields[key]
+		if !ok || len(raw) <= limit {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil || len(value) <= limit {
+			continue // not a string, or its escaping alone crossed the limit
+		}
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(value[cut]) {
+			cut--
+		}
+		value = value[:cut] + fmt.Sprintf("...[truncated %d bytes in backup; full value in Dolt]", len(value)-cut)
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		fields[key] = encoded
+		changed = true
+	}
+	if !changed {
+		return row, nil
+	}
+	return json.Marshal(fields)
 }
 
 // commitAndPushJsonlBackup stages, commits, and pushes JSONL files if changed.
