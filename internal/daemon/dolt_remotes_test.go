@@ -41,6 +41,16 @@ func testDoltRemotesDaemon(t *testing.T) *Daemon {
 	return d
 }
 
+// testDoltSQLTimeout bounds the SQL these tests issue themselves against the
+// package's container (createTestDB's CREATE and DROP DATABASE, and each
+// test's setup and verification statements). Dolt DDL and commits are
+// fsync-bound and serialized on the server, and the container shares the
+// Docker VM's disk with every other package's container during a -p=8 gate:
+// a 15s bound failed 'create database: context deadline exceeded' at host
+// load ~59 (gt-81fp6). It guards only a disposable local container, so it
+// costs time only when that container is truly wedged.
+const testDoltSQLTimeout = 2 * time.Minute
+
 // createTestDB creates a fresh Dolt database on the shared server and
 // returns its name, guaranteed not to collide with the "test"/"beads_t"/
 // "beads_pt"/"doctest_" prefixes pushDatabase refuses to touch — several
@@ -60,26 +70,28 @@ func createTestDB(t *testing.T, d *Daemon) string {
 	}
 
 	dbName := fmt.Sprintf("dolt_remotes_check_%d", time.Now().UnixNano())
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
-		admin.Close()
-		t.Fatalf("create database: %v", err)
-	}
 
 	// admin must stay open until this Cleanup runs at the end of the test —
 	// not closed here via a plain defer, which would fire as soon as
 	// createTestDB returns and leave the DROP below running on a closed
 	// *sql.DB, silently skipped and leaking dolt_remotes-prefixed databases
-	// on whatever server the test reached.
+	// on whatever server the test reached. Registered before the CREATE: a
+	// CREATE whose client context expires can still complete server-side,
+	// and DROP ... IF EXISTS cleans that up too.
 	t.Cleanup(func() {
 		defer admin.Close()
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
 		defer dropCancel()
 		if _, err := admin.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)); err != nil {
 			t.Logf("drop database %s: %v", dbName, err)
 		}
 	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
+	defer cancel()
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
 
 	return dbName
 }
@@ -109,7 +121,7 @@ func TestDatabaseHasRemote_Configured(t *testing.T) {
 	}
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
 	defer cancel()
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_REMOTE('add', 'origin', 'file:///nonexistent/dolt-remote')"); err != nil {
 		t.Fatalf("CALL DOLT_REMOTE add: %v", err)
@@ -139,7 +151,7 @@ func TestHasStagedChanges(t *testing.T) {
 	}
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
 	defer cancel()
 
 	staged, err := d.hasStagedChanges(ctx, conn)
@@ -231,7 +243,7 @@ func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect to %s: %v", dbName, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
 	defer cancel()
 	if _, err := conn.ExecContext(ctx, "CREATE TABLE probe (id INT PRIMARY KEY)"); err != nil {
 		conn.Close()
