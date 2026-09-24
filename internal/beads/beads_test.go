@@ -1134,12 +1134,17 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 }
 
 func TestPendingMergeCloseReason(t *testing.T) {
-	if got, want := PendingMergeCloseReason("gt-mr-1"), "pending_mr: gt-mr-1"; got != want {
+	if got, want := PendingMergeCloseReason("gt-mr-1", 1), "pending_mr: gt-mr-1 (attempt 1)"; got != want {
 		t.Fatalf("PendingMergeCloseReason() = %q, want %q", got, want)
+	}
+	// attempt <= 0 writes no suffix — the legacy shape a closure from before
+	// the attempt number is recorded in (gt-0cp3).
+	if got, want := PendingMergeCloseReason("gt-mr-1", 0), "pending_mr: gt-mr-1"; got != want {
+		t.Fatalf("PendingMergeCloseReason() with attempt 0 = %q, want %q", got, want)
 	}
 	// Trims incidental whitespace on the MR ID rather than baking it into
 	// the reason string.
-	if got, want := PendingMergeCloseReason("  gt-mr-1  "), "pending_mr: gt-mr-1"; got != want {
+	if got, want := PendingMergeCloseReason("  gt-mr-1  ", 2), "pending_mr: gt-mr-1 (attempt 2)"; got != want {
 		t.Fatalf("PendingMergeCloseReason() with whitespace = %q, want %q", got, want)
 	}
 }
@@ -1153,7 +1158,13 @@ func TestIsPendingMergeCloseReason(t *testing.T) {
 	}{
 		{name: "matches exact MR", reason: "pending_mr: gt-mr-1", mrID: "gt-mr-1", want: true},
 		{name: "matches with surrounding whitespace", reason: "  pending_mr: gt-mr-1  ", mrID: "gt-mr-1", want: true},
+		{name: "matches with attempt suffix", reason: "pending_mr: gt-mr-1 (attempt 1)", mrID: "gt-mr-1", want: true},
+		{name: "matches attempt suffix, prefix case folded", reason: "PENDING_MR: gt-mr-1 (attempt 3)", mrID: "gt-mr-1", want: true},
 		{name: "different MR", reason: "pending_mr: gt-mr-2", mrID: "gt-mr-1", want: false},
+		{name: "different MR with attempt suffix", reason: "pending_mr: gt-mr-2 (attempt 1)", mrID: "gt-mr-1", want: false},
+		{name: "longer id sharing a prefix", reason: "pending_mr: gt-mr-1x (attempt 1)", mrID: "gt-mr-1", want: false},
+		{name: "attempt suffix but id continues with digit", reason: "pending_mr: gt-mr-12", mrID: "gt-mr-1", want: false},
+		{name: "prose after the id", reason: "pending_mr: gt-mr-1 (later re-opened by hand)", mrID: "gt-mr-1", want: false},
 		{name: "empty reason", reason: "", mrID: "gt-mr-1", want: false},
 		{name: "empty mrID", reason: "pending_mr: gt-mr-1", mrID: "", want: false},
 		{name: "unrelated close reason", reason: "duplicate", mrID: "gt-mr-1", want: false},

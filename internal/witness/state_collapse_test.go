@@ -777,7 +777,7 @@ func TestDetectStrandedBranches_SupersededAttemptNotFlagged(t *testing.T) {
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
-				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw","notes":` +
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw (attempt 1)","notes":` +
 					jsonString(supersededNotes) + `}]`, nil
 			}
 			return "[]", nil
@@ -786,7 +786,8 @@ func TestDetectStrandedBranches_SupersededAttemptNotFlagged(t *testing.T) {
 	)
 
 	// om-wisp-wlw is absent from the queue — the landing MR was purged after
-	// merging, which is what made this recur.
+	// merging, which is what made this recur. The closure attests attempt 1,
+	// the same attempt the note rejects, so the pairing holds (gt-0cp3).
 	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
 		{ID: "om-wisp-unrelated", SourceIssue: "om-something-else"},
 	})
@@ -907,15 +908,15 @@ func TestSupersededIssueFromCloseReason(t *testing.T) {
 }
 
 // TestDetectStrandedBranches_RejectionOfAnotherBranchStillFlagged keeps the
-// suppression branch-scoped: a rejection record for a different attempt of
-// the same issue explains nothing about this branch.
+// suppression branch-scoped: a rejection record that names a different branch
+// explains nothing about this one, however well the attempts line up.
 func TestDetectStrandedBranches_RejectionOfAnotherBranchStillFlagged(t *testing.T) {
 	t.Parallel()
 	branch := "polecat/opal/om-i0p+mu9vzh49"
 	bd, _ := mockBd(
 		func(args []string) (string, error) {
 			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
-				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw","notes":` +
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw (attempt 1)","notes":` +
 					jsonString(strings.Replace(supersededNotes, branch, "polecat/opal/om-i0p+othereattempt", 1)) + `}]`, nil
 			}
 			return "[]", nil
@@ -963,7 +964,7 @@ func TestDetectStrandedBranches_RejectionWithoutQueueClosureStillFlagged(t *test
 	}
 }
 
-func TestRejectedBranchFromNotes(t *testing.T) {
+func TestRejectedBranchAttemptFromNotes(t *testing.T) {
 	t.Parallel()
 	branch := "polecat/opal/om-i0p+mu9vzh49"
 
@@ -974,27 +975,147 @@ Branch: polecat/opal/om-i0p+secondattempt
 Target: main
 MR: om-wisp-xyz`
 
+	bothAttempts := supersededNotes + `
+
+MERGE REJECTION (attempt 2): tests - FAILED: gate red.
+Branch: ` + branch + `
+Target: main
+MR: om-wisp-xyz`
+
 	cases := []struct {
 		name   string
 		notes  string
 		branch string
-		want   bool
+		want   int
+		wantOK bool
 	}{
-		{"record naming the branch", supersededNotes, branch, true},
-		{"refs/heads prefix on either side", supersededNotes, "refs/heads/" + branch, true},
-		{"padding around the value", strings.Replace(supersededNotes, "Branch: ", "branch:   ", 1), branch, true},
-		{"later attempt names the branch", secondAttempt, "polecat/opal/om-i0p+secondattempt", true},
-		{"record for another branch", supersededNotes, "polecat/opal/om-other+xyz", false},
-		{"no rejection record", "just some notes about the fix", branch, false},
-		{"marker without a branch line", "MERGE REJECTION (attempt 1): see thread above", branch, false},
+		{"record naming the branch", supersededNotes, branch, 1, true},
+		{"refs/heads prefix on either side", supersededNotes, "refs/heads/" + branch, 1, true},
+		{"padding around the value", strings.Replace(supersededNotes, "Branch: ", "branch:   ", 1), branch, 1, true},
+		{"later attempt names another branch", secondAttempt, "polecat/opal/om-i0p+secondattempt", 2, true},
+		{"record for another branch", supersededNotes, "polecat/opal/om-other+xyz", 0, false},
+		{"no rejection record", "just some notes about the fix", branch, 0, false},
+		{"marker without a branch line", "MERGE REJECTION (attempt 1): see thread above", branch, 0, false},
 		{"branch named only in prose", "MERGE REJECTION (attempt 1): unlike " + branch +
-			" this one kept the probe\ntarget: main", branch, false},
-		{"empty notes", "", branch, false},
+			" this one kept the probe\ntarget: main", branch, 0, false},
+		{"empty notes", "", branch, 0, false},
+		{"newest rejection for the branch wins", bothAttempts, branch, 2, true},
 	}
 	for _, c := range cases {
-		if got := rejectedBranchFromNotes(c.notes, c.branch); got != c.want {
-			t.Errorf("%s: rejectedBranchFromNotes(...) = %v, want %v", c.name, got, c.want)
+		attempt, ok := rejectedBranchAttemptFromNotes(c.notes, c.branch)
+		if got := ok; got != c.wantOK {
+			t.Errorf("%s: rejectedBranchAttemptFromNotes(...) ok = %v, want %v", c.name, got, c.wantOK)
 		}
+		if got := attempt; got != c.want {
+			t.Errorf("%s: rejectedBranchAttemptFromNotes(...) = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDetectStrandedBranches_OlderRejectionDoesNotHideNewerAttempt is the
+// gt-0cp3 defect: the polecat branch is reused across every attempt of an
+// issue, so attempt 1's rejection note names the same branch as a later
+// attempt. The closure gt done writes for the later attempt names a HIGHER
+// attempt number; pairing the closure with only the older rejection then
+// suppresses a branch that was never rejected — a genuine strand read as a
+// superseded attempt. The newest rejection the closure's attempt reached is
+// the one that adjudicates it, and when the closure outruns every recorded
+// rejection the branch stays reportable.
+func TestDetectStrandedBranches_OlderRejectionDoesNotHideNewerAttempt(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw (attempt 2)","notes":` +
+					jsonString(supersededNotes) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Superseded) != 0 {
+		t.Errorf("Superseded = %+v, want none — attempt 2's closure outruns attempt 1's rejection", result.Superseded)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+}
+
+// TestDetectStrandedBranches_NewerRejectionSupersedesTheClosure is the
+// complementary gt-0cp3 case: the refinery reopens the issue on rejection and
+// the polecat's transient self-close writes the closure BEFORE the refinery
+// appends the rejection note for that same attempt, so the issue ends closed
+// with a rejection note on an attempt the closure itself attested. The
+// rejection lands by the time of the scan, and it is the one that adjudicates
+// the closure — the pairing holds on the newest rejection, not the first.
+func TestDetectStrandedBranches_NewerRejectionSupersedesTheClosure(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bothNotes := supersededNotes + `
+
+MERGE REJECTION (attempt 2): editorial - REJECTED: still fails the boundary probe.
+Branch: ` + branch + `
+Target: main
+MR: om-wisp-second`
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw (attempt 2)","notes":` +
+					jsonString(bothNotes) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// The landing MRs are both absent from the queue: attempt 1's was purged
+	// after merging, attempt 2's was rejected — exactly the state where the
+	// record, not git, is the only adjudication.
+	refs := fakeBranchRefSourceWithMRs([]string{branch}, nil, []OpenMRRef{
+		{ID: "om-wisp-unrelated", SourceIssue: "om-something-else"},
+	})
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Findings) != 0 {
+		t.Errorf("expected no finding when the closure's own attempt is the rejected one, got %+v", result.Findings)
+	}
+	if len(result.Superseded) != 1 {
+		t.Fatalf("Superseded = %d, want 1: %+v", len(result.Superseded), result.Superseded)
+	}
+}
+
+// TestDetectStrandedBranches_LegacyClosureShapeStillFlagged: a pending_mr
+// closure written before the attempt suffix exists attests to no attempt. It
+// cannot pair with any rejection — not even one it postdates — so the branch
+// stays reportable rather than suppressed on an unverifiable pairing
+// (gt-0cp3).
+func TestDetectStrandedBranches_LegacyClosureShapeStillFlagged(t *testing.T) {
+	t.Parallel()
+	branch := "polecat/opal/om-i0p+mu9vzh49"
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "om-i0p" {
+				return `[{"status":"closed","close_reason":"pending_mr: om-wisp-wlw","notes":` +
+					jsonString(supersededNotes) + `}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	refs := fakeBranchRefSource([]string{branch}, nil)
+	result := DetectStrandedBranches(bd, refs, "/work", "om", "main", nil)
+
+	if len(result.Superseded) != 0 {
+		t.Errorf("Superseded = %+v, want none — the closure attests no attempt", result.Superseded)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(result.Findings), result.Findings)
 	}
 }
 
