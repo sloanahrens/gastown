@@ -22,6 +22,24 @@ func ownerLabels(pid int, host, session string) map[string]string {
 	return l
 }
 
+// withStart returns labels with the owner start-time label set.
+func withStart(labels map[string]string, start string) map[string]string {
+	labels[OwnerStartLabel] = start
+	return labels
+}
+
+// stubStartTokens stages the start time each live pid reports now; a pid not
+// in the map is unreadable. Call after stubOwnerProbe, which resets it.
+func stubStartTokens(t *testing.T, starts map[int]string) {
+	t.Helper()
+	prev := ownerStartToken
+	ownerStartToken = func(pid int) (string, bool) {
+		s, ok := starts[pid]
+		return s, ok
+	}
+	t.Cleanup(func() { ownerStartToken = prev })
+}
+
 // stubOwnerProbe fixes this host's name and which owner pids are gone, so no
 // test here probes the real process table.
 func stubOwnerProbe(t *testing.T, gone ...int) {
@@ -56,6 +74,9 @@ func TestTestContainerOwnerLabels(t *testing.T) {
 	if labels[OwnerHostLabel] != host {
 		t.Errorf("%s = %q, want %q", OwnerHostLabel, labels[OwnerHostLabel], host)
 	}
+	if want, ok := processStartToken(os.Getpid()); ok && labels[OwnerStartLabel] != want {
+		t.Errorf("%s = %q, want %q", OwnerStartLabel, labels[OwnerStartLabel], want)
+	}
 	for k := range labels {
 		if strings.Contains(strings.ToLower(k), "session") {
 			t.Errorf("label %q would be read as a testcontainers session id by SessionID()", k)
@@ -68,12 +89,18 @@ func TestClassify_OwnerLabels(t *testing.T) {
 	window := 30 * time.Minute
 	young := now.Add(-4 * time.Minute)
 	hoursOld := now.Add(-5 * time.Hour)
-	const deadPID, livePID = 4242, 5151
+	const deadPID, livePID, reusedPID, unreadablePID = 4242, 5151, 6161, 7171
 	stubOwnerProbe(t, deadPID)
+	stubStartTokens(t, map[int]string{
+		livePID:   "1790000000.100",
+		reusedPID: "1790009999.555", // a different, later process now owns this pid
+	})
+	liveRyuk := GateContainer{ID: "r", Image: "testcontainers/ryuk:0.13.0", Name: "reaper", Created: young, Labels: sessionLabels("s-ryuk")}
 
 	tests := []struct {
 		name      string
 		c         GateContainer
+		others    []GateContainer
 		want      Verdict
 		ownerGone bool
 		reasonIn  string
@@ -87,14 +114,46 @@ func TestClassify_OwnerLabels(t *testing.T) {
 			reasonIn:  "pid 4242",
 		},
 		{
-			name:     "old container whose owner is alive is a live suite",
-			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "slow_suite", Created: hoursOld, Labels: ownerLabels(livePID, testHost, "s1")},
-			want:     VerdictLive,
-			reasonIn: "still running",
+			name:      "reused pid, start time differs: owner gone, debris at any age",
+			c:         GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Created: young, Labels: withStart(ownerLabels(reusedPID, testHost, "s1"), "1790000000.100")},
+			want:      VerdictDebris,
+			ownerGone: true,
+			reasonIn:  "now names a process started",
 		},
 		{
-			name:     "owner alive, age unknown: live, not unknown",
-			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Labels: ownerLabels(livePID, testHost, "s1")},
+			name:     "reused pid check: start time matches, old, no ryuk: confirmed live",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "slow_suite", Created: hoursOld, Labels: withStart(ownerLabels(livePID, testHost, "s1"), "1790000000.100")},
+			want:     VerdictLive,
+			reasonIn: "started 1790000000.100",
+		},
+		{
+			name:     "old container, pid alive, start unverifiable, no ryuk: age rules apply (debris, not owner-gone)",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Created: hoursOld, Labels: ownerLabels(unreadablePID, testHost, "s1")},
+			want:     VerdictDebris,
+			reasonIn: "no reaper running",
+		},
+		{
+			name:     "old container, recorded start but live start unreadable: age rules apply",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Created: hoursOld, Labels: withStart(ownerLabels(unreadablePID, testHost, "s1"), "1790000000.100")},
+			want:     VerdictDebris,
+			reasonIn: "no reaper running",
+		},
+		{
+			name:     "old container, pid alive, start unverifiable, ryuk live: age rules keep it live",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Created: hoursOld, Labels: ownerLabels(unreadablePID, testHost, "s-ryuk")},
+			others:   []GateContainer{liveRyuk},
+			want:     VerdictLive,
+			reasonIn: "reaper",
+		},
+		{
+			name:     "young container, owner looks alive (start unverifiable): live",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Created: young, Labels: ownerLabels(unreadablePID, testHost, "s1")},
+			want:     VerdictLive,
+			reasonIn: "start time unverified",
+		},
+		{
+			name:     "owner looks alive, age unknown: live, not unknown",
+			c:        GateContainer{ID: "a", Image: "dolthub/dolt-sql-server:2.0.7", Name: "x", Labels: ownerLabels(unreadablePID, testHost, "s1")},
 			want:     VerdictLive,
 			reasonIn: "still running",
 		},
@@ -125,7 +184,7 @@ func TestClassify_OwnerLabels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Classify([]GateContainer{tt.c}, now, window)[0]
+			got := Classify(append([]GateContainer{tt.c}, tt.others...), now, window)[0]
 			if got.Verdict != tt.want {
 				t.Fatalf("Verdict = %q (%s), want %q", got.Verdict, got.Reason, tt.want)
 			}
@@ -136,6 +195,22 @@ func TestClassify_OwnerLabels(t *testing.T) {
 				t.Errorf("Reason = %q, want it to mention %q", got.Reason, tt.reasonIn)
 			}
 		})
+	}
+}
+
+// processStartToken is what tells a reused pid apart, so it is pinned against
+// real processes, read-only: this process's token is readable and stable.
+func TestProcessStartToken(t *testing.T) {
+	a, ok := processStartToken(os.Getpid())
+	if !ok {
+		t.Skip("no start-time reader on this platform")
+	}
+	b, _ := processStartToken(os.Getpid())
+	if a == "" || a != b {
+		t.Errorf("start token = %q then %q, want a stable non-empty value", a, b)
+	}
+	if _, ok := processStartToken(-1); ok {
+		t.Error("start token readable for pid -1")
 	}
 }
 
@@ -197,22 +272,58 @@ func TestAcquire_RemovesContainersWhoseOwnerIsGone(t *testing.T) {
 	}
 }
 
-// A container whose owner is alive is never removed and still holds the gate,
-// even with no ryuk and past the staleness window.
+// A container whose owner is alive is never removed and still holds the gate:
+// a young one on the pid alone, and an old one (no ryuk) when the start time
+// confirms the owner is the process that started it.
 func TestAcquire_KeepsContainersWhoseOwnerIsAlive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		created time.Duration
+		labels  map[string]string
+		starts  map[int]string
+	}{
+		{"young container, live owner", 3 * time.Minute, ownerLabels(5151, testHost, "s1"), nil},
+		{"old container, owner confirmed by start time", 2 * time.Hour, withStart(ownerLabels(5151, testHost, "s1"), "1790000000.100"), map[int]string{5151: "1790000000.100"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			stubOwnerProbe(t) // nothing is gone
+			stubStartTokens(t, tc.starts)
+			removed, _ := stubRemoveContainer(t)
+			stubGateContainers(t,
+				dockerPSLine("id-live", "dolthub/dolt-sql-server:2.0.7", "suite", time.Now().Add(-tc.created), tc.labels),
+			)
+			timeout := DefaultPollInterval + 500*time.Millisecond
+			if _, err := Acquire(townRoot, "gastown/refinery", timeout); err == nil {
+				t.Fatal("Acquire granted while a live owner's container was running unwrapped")
+			}
+			if len(*removed) != 0 {
+				t.Errorf("removed = %v, want nothing removed while the owner lives", *removed)
+			}
+		})
+	}
+}
+
+// A dead owner's pid reused by an unrelated long-lived process must not wedge
+// the gate (gt-ehlga review): the start time exposes the reuse, Acquire grants
+// and removes the orphan.
+func TestAcquire_RemovesOrphanWhosePIDWasReused(t *testing.T) {
 	townRoot := t.TempDir()
-	stubOwnerProbe(t) // nothing is gone
+	stubOwnerProbe(t) // the pid exists...
+	stubStartTokens(t, map[int]string{6161: "1790009999.555"}) // ...as a different process
+	captureDebris(t)
 	removed, _ := stubRemoveContainer(t)
 	stubGateContainers(t,
-		dockerPSLine("id-live", "dolthub/dolt-sql-server:2.0.7", "slow_suite", time.Now().Add(-2*time.Hour), ownerLabels(5151, testHost, "s1")),
+		dockerPSLine("id-orphan", "dolthub/dolt-sql-server:2.0.7", "x", time.Now().Add(-3*time.Minute),
+			withStart(ownerLabels(6161, testHost, "s1"), "1790000000.100")),
 	)
-
-	timeout := DefaultPollInterval + 500*time.Millisecond
-	if _, err := Acquire(townRoot, "gastown/refinery", timeout); err == nil {
-		t.Fatal("Acquire granted while a live owner's container was running unwrapped")
+	h, err := Acquire(townRoot, "gastown/refinery", 30*time.Second)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
 	}
-	if len(*removed) != 0 {
-		t.Errorf("removed = %v, want nothing removed while the owner lives", *removed)
+	defer h.Release()
+	if strings.Join(*removed, ",") != "id-orphan" {
+		t.Errorf("removed = %v, want the reused-pid orphan", *removed)
 	}
 }
 
@@ -283,11 +394,12 @@ func TestStatus_OwnerGoneIsDebrisAndNotRemoved(t *testing.T) {
 func TestReap_UsesOwnerLabels(t *testing.T) {
 	townRoot := t.TempDir()
 	stubOwnerProbe(t, 4242)
+	stubStartTokens(t, map[int]string{5151: "1790000000.100"})
 	removed, _ := stubRemoveContainer(t)
 	now := time.Now()
 	stubGateContainers(t,
 		dockerPSLine("young-orphan", "dolthub/dolt-sql-server:2.0.7", "a", now.Add(-time.Minute), ownerLabels(4242, testHost, "s")),
-		dockerPSLine("old-live", "dolthub/dolt-sql-server:2.0.7", "b", now.Add(-3*time.Hour), ownerLabels(5151, testHost, "t")),
+		dockerPSLine("old-live", "dolthub/dolt-sql-server:2.0.7", "b", now.Add(-3*time.Hour), withStart(ownerLabels(5151, testHost, "t"), "1790000000.100")),
 	)
 	report, err := Reap(townRoot, ReapOptions{})
 	if err != nil {

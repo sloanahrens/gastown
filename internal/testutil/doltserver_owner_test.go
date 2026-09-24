@@ -4,6 +4,7 @@ package testutil
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -25,6 +26,13 @@ func TestDoltContainerOpts_LabelsOwnerProcess(t *testing.T) {
 	}
 	if got := req.Labels[slot.OwnerHostLabel]; got != host {
 		t.Errorf("Labels[%s] = %q, want %q", slot.OwnerHostLabel, got, host)
+	}
+	// On darwin and linux the owner's start time is readable, and it is what
+	// tells a reused pid apart from the owner.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if req.Labels[slot.OwnerStartLabel] == "" {
+			t.Errorf("Labels[%s] is empty, want the test process's start time", slot.OwnerStartLabel)
+		}
 	}
 	if req.Env["DOLT_ROOT_HOST"] != "%" {
 		t.Errorf("labels displaced the env: DOLT_ROOT_HOST = %q", req.Env["DOLT_ROOT_HOST"])

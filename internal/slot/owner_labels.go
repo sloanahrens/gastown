@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Owner labels bind a test container to the process that started it
@@ -15,10 +16,15 @@ import (
 // they were younger than the 30m staleness window.
 //
 // internal/testutil stamps these labels on every Dolt container it starts,
-// naming the test binary's own pid and host. Classify then reads a container
-// whose owner is certainly gone as debris at any age, and one whose owner is
-// alive as a live suite at any age; a container without the labels, or
-// labeled on another host, is judged by the older evidence exactly as before.
+// naming the test binary's own pid, host and start time. Classify then reads a
+// container whose owner is certainly gone — no such pid, or the pid now names a
+// process with a different start time — as debris at any age, and one whose
+// owner is confirmed alive (same pid, same start time) as a live suite at any
+// age. When the owner only looks alive (the start time cannot be compared) the
+// labels decide only while the container is younger than the staleness
+// window; past it the age/reaper rules decide, so a dead owner's reused pid
+// cannot hold the gate forever. A container without the labels, or labeled on
+// another host, is judged by the older evidence exactly as before.
 const (
 	// OwnerPIDLabel carries the pid of the test process that started the
 	// container.
@@ -28,6 +34,10 @@ const (
 	// another host (a remote docker, a devcontainer sharing the socket) is not
 	// judged by this host's process table.
 	OwnerHostLabel = "gastown.test.owner-host"
+	// OwnerStartLabel carries the owner's process start time as the kernel
+	// reports it (processStartToken). A pid is reused once its process dies;
+	// a start time is not, so the pair names one process for good.
+	OwnerStartLabel = "gastown.test.owner-start"
 )
 
 // TestContainerOwnerLabels returns the owner labels for a container the
@@ -39,10 +49,16 @@ func TestContainerOwnerLabels() map[string]string {
 	if err != nil || host == "" {
 		return nil
 	}
-	return map[string]string{
+	labels := map[string]string{
 		OwnerPIDLabel:  strconv.Itoa(os.Getpid()),
 		OwnerHostLabel: host,
 	}
+	// Without a start time the owner can still be judged, only less strongly:
+	// see ownerVerdict.
+	if start, ok := ownerStartToken(os.Getpid()); ok {
+		labels[OwnerStartLabel] = start
+	}
+	return labels
 }
 
 // OwnerProcess returns the pid and host the container's owner labels name; ok is
@@ -65,24 +81,43 @@ var localHostname = os.Hostname
 // deleting the pid's containers. A process owned by another user (EPERM), any
 // other probe error, and a platform with no such probe all answer false —
 // the container is then judged by the older evidence instead. A reused pid
-// also answers false, which keeps a container rather than removing one.
+// also answers false here; ownerStartToken is what tells a reused pid apart.
 // Declared as a var so tests never probe the real process table.
 var ownerProcessGone = processGone
+
+// ownerStartToken reads a live pid's start time (processStartToken); ok is
+// false when it cannot be read. A var so tests can stage a reused pid.
+var ownerStartToken = processStartToken
 
 // SetOwnerProcessProbeForTest overrides ownerProcessGone and localHostname for
 // tests in other packages that drive Acquire, Status or Reap over fake
 // labeled containers. Returns a restore func the caller must invoke.
+//
+// The start-time probe is set to "unreadable", so owner verdicts use the
+// weaker, age-bounded reading unless a test stages start times itself.
 func SetOwnerProcessProbeForTest(gone func(pid int) bool, hostname string) (restore func()) {
-	prevGone, prevHost := ownerProcessGone, localHostname
+	prevGone, prevHost, prevStart := ownerProcessGone, localHostname, ownerStartToken
 	ownerProcessGone = gone
 	localHostname = func() (string, error) { return hostname, nil }
-	return func() { ownerProcessGone, localHostname = prevGone, prevHost }
+	ownerStartToken = func(int) (string, bool) { return "", false }
+	return func() { ownerProcessGone, localHostname, ownerStartToken = prevGone, prevHost, prevStart }
 }
 
 // ownerVerdict judges a container by its owner labels. ok is false when the
-// labels cannot decide — absent, malformed, or naming another host — and the
+// labels cannot decide — absent, malformed, naming another host, or an owner
+// that only looks alive on a container past the staleness window — and the
 // caller falls back to the age/reaper rules.
-func ownerVerdict(c GateContainer) (verdict ContainerVerdict, ok bool) {
+//
+// "Gone" is certain in two ways: the pid does not exist (ESRCH), or it exists
+// with a start time other than the one recorded at container creation — the
+// original process died and its pid was reused. "Alive" is certain only when
+// the start times match; then the container is live at any age, because its
+// owner is provably the process that started it. When either start time is
+// unavailable the pid alone cannot rule out reuse, so it counts as alive only
+// while the container is younger than window: past that, the age/ryuk rules
+// decide as they did before owner labels existed, and a reused pid can never
+// hold the gate for longer than it could before (gt-ehlga review).
+func ownerVerdict(c GateContainer, now time.Time, window time.Duration) (verdict ContainerVerdict, ok bool) {
 	pid, host, labeled := c.OwnerProcess()
 	if !labeled {
 		return ContainerVerdict{}, false
@@ -91,18 +126,33 @@ func ownerVerdict(c GateContainer) (verdict ContainerVerdict, ok bool) {
 	if err != nil || local != host {
 		return ContainerVerdict{}, false
 	}
+	gone := func(reason string) (ContainerVerdict, bool) {
+		return ContainerVerdict{Container: c, Verdict: VerdictDebris, Reason: reason, OwnerGone: true}, true
+	}
 	if ownerProcessGone(pid) {
+		return gone("its owning test process (pid " + strconv.Itoa(pid) + " on " + host + ") is gone")
+	}
+	recorded := c.Labels[OwnerStartLabel]
+	current, readable := ownerStartToken(pid)
+	if recorded != "" && readable {
+		if current != recorded {
+			return gone(fmt.Sprintf("its owning test process (pid %d on %s, started %s) is gone; pid %d now names a process started %s",
+				pid, host, recorded, pid, current))
+		}
 		return ContainerVerdict{
 			Container: c,
-			Verdict:   VerdictDebris,
-			Reason:    "its owning test process (pid " + strconv.Itoa(pid) + " on " + host + ") is gone",
-			OwnerGone: true,
+			Verdict:   VerdictLive,
+			Reason:    fmt.Sprintf("its owning test process (pid %d, started %s) is still running", pid, recorded),
 		}, true
+	}
+	// Start time unverifiable: the pid may have been reused.
+	if age, known := c.Age(now); known && age >= window {
+		return ContainerVerdict{}, false
 	}
 	return ContainerVerdict{
 		Container: c,
 		Verdict:   VerdictLive,
-		Reason:    "its owning test process (pid " + strconv.Itoa(pid) + ") is still running",
+		Reason:    "its owning test process (pid " + strconv.Itoa(pid) + ") is still running (start time unverified)",
 	}, true
 }
 

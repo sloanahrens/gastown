@@ -263,9 +263,10 @@ func debrisLogger() func(ContainerVerdict) {
 // classification exists to clear.
 //
 // Owner labels outrank all of that (gt-ehlga, see owner_labels.go): a
-// container whose labeled owner process on this host is gone is debris at
-// any age, and one whose owner is still running is live at any age. Only a
-// container the labels cannot decide is judged by age and reaper.
+// container whose labeled owner process on this host is certainly gone is
+// debris at any age, and one whose owner is confirmed alive (same pid and
+// start time) is live at any age. An owner that only looks alive decides only
+// inside the window. Everything else is judged by age and reaper.
 func Classify(containers []GateContainer, now time.Time, window time.Duration) []ContainerVerdict {
 	if window <= 0 {
 		window = StaleContainerWindow
@@ -289,7 +290,7 @@ func Classify(containers []GateContainer, now time.Time, window time.Duration) [
 
 	out := make([]ContainerVerdict, 0, len(containers))
 	for _, c := range containers {
-		if verdict, ok := ownerVerdict(c); ok {
+		if verdict, ok := ownerVerdict(c, now, window); ok {
 			out = append(out, verdict)
 			continue
 		}

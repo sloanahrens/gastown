@@ -170,7 +170,7 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 // on the Docker Desktop VM disk every commit's fsync reaches the host SSD
 // (claude-yfj). A container's data is ~18 MB; the 2g cap bounds a runaway.
 //
-// Every container is labeled with this test process's pid and host
+// Every container is labeled with this test process's pid, host and start time
 // (slot.TestContainerOwnerLabels, gt-ehlga), so the container-gate can tell a
 // container a killed or failed run left behind from a live suite's by
 // ownership instead of by age, and remove it before the next gate waits on it.
