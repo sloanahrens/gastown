@@ -1,6 +1,6 @@
 # gt doctor check triage: cadence / occasional / delete
 
-> Measured 2026-09-23/24 against `internal/doctor/*.go` on `main`, not estimated. Source: [[gt-0bp42]].
+> Measured 2026-09-23/24 against `internal/doctor/*.go` on `main`, not estimated. Source: gt-0bp42.
 
 gt doctor registers named checks (`CheckName` literals in `internal/doctor/*.go`), but the town runs the full sweep only occasionally (session-gc, town-shutdown, boot prose) and the deacon patrol explicitly refuses to run it inline because a full `gt doctor -v` sweep takes 60+ seconds and blocks the patrol loop (`mol-deacon-patrol.formula.toml`). That leaves most checks with no recurring consumer: a hard-failing check is invisible until a human happens to run `gt doctor` by hand — this is exactly how `deacon-self-probe` sat broken unnoticed on 2026-09-23.
 
