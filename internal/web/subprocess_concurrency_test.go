@@ -207,14 +207,17 @@ func TestRunGhCommand_UsesUserPoolNotCmdSem(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
 
+	// Expected success with userCmdSem free: userSlotWaitBudget and
+	// userCmdExecBudget, not a few ms — with a free slot, a wait budget that
+	// expires before the select runs lets select pick the timeout at random.
 	h := &APIHandler{
 		cmdSem:         make(chan struct{}, 1),
 		userCmdSem:     make(chan struct{}, 1),
-		slotWaitBudget: 20 * time.Millisecond,
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	h.cmdSem <- struct{}{} // full short-read pool must not block gh
 
-	out, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"})
+	out, err := h.runGhCommand(context.Background(), userCmdExecBudget, []string{"pr", "list"})
 	if err != nil {
 		t.Fatalf("runGhCommand with cmdSem full: %v", err)
 	}
@@ -223,8 +226,10 @@ func TestRunGhCommand_UsesUserPoolNotCmdSem(t *testing.T) {
 	}
 
 	// But the user pool does bound it: with userCmdSem also full, it must
-	// fail waiting for a slot rather than run unbounded.
+	// fail waiting for a slot rather than run unbounded. Expected timeout:
+	// the send can never be ready, so a short budget is deterministic.
 	h.userCmdSem <- struct{}{}
+	h.slotWaitBudget = 20 * time.Millisecond
 	if _, err := h.runGhCommand(context.Background(), time.Second, []string{"pr", "list"}); err == nil {
 		t.Fatal("runGhCommand succeeded with userCmdSem full, want a slot-wait error")
 	}
@@ -440,10 +445,11 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 		townRoot:   town,
 		cmdTimeout: 10 * time.Second,
 		cmdSem:     make(chan struct{}, 1),
-		// The pool-full case below only needs to prove the seam waits on
-		// this pool, not that it waits realistically long — a short
-		// override keeps the case fast (gt-d5xr).
-		slotWaitBudget: 20 * time.Millisecond,
+		// The pool-drained case must succeed in acquiring, so it gets
+		// userSlotWaitBudget: with a free slot, a few-ms budget that expires
+		// before the select runs lets select pick the timeout at random.
+		// The pool-full case below switches to a short budget.
+		slotWaitBudget: userSlotWaitBudget,
 	}
 
 	// A failing lister: no bd subprocess to observe, but it proves whether
@@ -464,7 +470,10 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 
 	// Pool full: the seam must fail without ever running the list —
 	// evidence it is acquiring against the shared pool, not escaping it.
+	// Expected timeout: the send can never be ready, so a short budget is
+	// deterministic and keeps the case fast (gt-d5xr).
 	f.cmdSem <- struct{}{}
+	f.slotWaitBudget = 20 * time.Millisecond
 	if _, err := f.townMergeQueueSnapshot(); err == nil {
 		t.Fatal("snapshot succeeded with the pool full, want the slot-wait failure")
 	}
