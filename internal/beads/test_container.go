@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Test Dolt container init capacity (gt-elvf4).
@@ -118,3 +119,15 @@ func AcquireTestContainerInitSlot(ctx context.Context) (release func(), err erro
 func testContainerEnv() []string {
 	return []string{allowRemoteMigrateEnv + "=1"}
 }
+
+// bdContainerSubprocessTimeout is the budget for a non-init bd call against
+// testutil's Dolt container. The shared container stalls calls under gate
+// load well past the steady-state 60s (gt-elvf4: a refinery test failed on a
+// 60s bd create); init keeps its own, larger bdInitSubprocessTimeout.
+const bdContainerSubprocessTimeout = 3 * time.Minute
+
+// testContainerInitSlotWait bounds how long an init waits for a slot before
+// failing with "test Dolt init slot: context deadline exceeded" rather than
+// hanging. It is the init budget, so a queued init waits no longer than one
+// init may run. A var so tests can collapse it.
+var testContainerInitSlotWait = bdInitSubprocessTimeout

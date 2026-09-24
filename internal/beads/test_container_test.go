@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -277,5 +281,202 @@ func TestTestContainerEnv(t *testing.T) {
 	got := testContainerEnv()
 	if len(got) != 1 || got[0] != "BD_ALLOW_REMOTE_MIGRATE=1" {
 		t.Fatalf("testContainerEnv() = %q, want [BD_ALLOW_REMOTE_MIGRATE=1]", got)
+	}
+}
+
+// TestTestContainerEnvOnlyOnTestContainerCalls pins decision 2: the env
+// escape hatch reaches bd only from a wrapper aimed at the test Dolt
+// container, once, whatever the parent process had set.
+func TestTestContainerEnvOnlyOnTestContainerCalls(t *testing.T) {
+	t.Setenv(allowRemoteMigrateEnv, "0") // inherited: must be replaced, not duplicated, on container calls
+	dir := t.TempDir()
+
+	container := NewIsolatedWithPort(dir, 45678)
+	for name, env := range map[string][]string{
+		"run":     container.buildRunEnv(),
+		"routing": container.buildRoutingEnv(),
+	} {
+		if got := countEnvPrefix(env, allowRemoteMigrateEnv+"="); got != 1 {
+			t.Errorf("container %s env has %d %s entries, want 1", name, got, allowRemoteMigrateEnv)
+		}
+		if !containsEnv(env, allowRemoteMigrateEnv+"=1") {
+			t.Errorf("container %s env lacks %s=1", name, allowRemoteMigrateEnv)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		b    *Beads
+	}{
+		{name: "isolated without a port", b: NewIsolated(dir)},
+		{name: "real town", b: New(dir)},
+		{name: "real town with beads dir", b: NewWithBeadsDir(dir, filepath.Join(dir, ".beads"))},
+	} {
+		for name, env := range map[string][]string{
+			"run":     tc.b.buildRunEnv(),
+			"routing": tc.b.buildRoutingEnv(),
+		} {
+			if containsEnv(env, allowRemoteMigrateEnv+"=1") {
+				t.Errorf("%s %s env carries %s=1; only test-container calls may", tc.name, name, allowRemoteMigrateEnv)
+			}
+		}
+	}
+}
+
+// installSucceedingBdStub is a fake bd that answers the --allow-stale probe,
+// counts and records every other call, and succeeds.
+func installSucceedingBdStub(t *testing.T) *flakyBdStub {
+	t.Helper()
+	return installBdStub(t, `#!/bin/sh
+if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+count=0
+[ -f __COUNT__ ] && count=$(cat __COUNT__)
+count=$((count + 1))
+echo "$count" > __COUNT__
+echo "$*" >> __ARGS__
+mkdir -p .beads
+echo "initialized"
+exit 0
+`)
+}
+
+// readBdCallCount reads a stub's counter without failing on a torn read: the
+// stub may be mid-write while a test polls it.
+func readBdCallCount(stub *flakyBdStub) int {
+	raw, err := os.ReadFile(stub.countFile)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// shortenInitSlotWait collapses the slot-wait budget for one test.
+func shortenInitSlotWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := testContainerInitSlotWait
+	testContainerInitSlotWait = d
+	t.Cleanup(func() { testContainerInitSlotWait = prev })
+}
+
+func TestInitWaitsForATestContainerInitSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	slots := useTestContainerInitSlots(t, 1)
+	stub := installSucceedingBdStub(t)
+	b := NewIsolatedWithPort(t.TempDir(), 45678)
+
+	release, err := slots.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("take the only slot: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.Init("gt") }()
+
+	time.Sleep(300 * time.Millisecond)
+	if n := readBdCallCount(stub); n != 0 {
+		t.Fatalf("Init ran bd %d times while the only slot was held", n)
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Init after the slot freed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Init never proceeded after the slot freed")
+	}
+	if n := stub.calls(t); n != 1 {
+		t.Fatalf("bd init calls = %d, want 1", n)
+	}
+	if len(slots.tokens) != 1 {
+		t.Fatalf("Init kept its slot: pool holds %d tokens, want 1", len(slots.tokens))
+	}
+}
+
+func TestInitSlotWaitIsBounded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	slots := useTestContainerInitSlots(t, 1)
+	shortenInitSlotWait(t, 100*time.Millisecond)
+	stub := installSucceedingBdStub(t)
+
+	release, err := slots.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("take the only slot: %v", err)
+	}
+	defer release()
+
+	err = NewIsolatedWithPort(t.TempDir(), 45678).Init("gt")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Init with no free slot = %v, want a deadline error", err)
+	}
+	if !strings.Contains(err.Error(), "test Dolt init slot") {
+		t.Errorf("error %q should name the slot", err)
+	}
+	if n := stub.calls(t); n != 0 {
+		t.Errorf("bd ran %d times without a slot", n)
+	}
+}
+
+// TestInitOutsideTheContainerTakesNoSlot pins that only test-container inits
+// queue: the only slot is held and an isolated, port-less Init still runs.
+func TestInitOutsideTheContainerTakesNoSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	slots := useTestContainerInitSlots(t, 1)
+	shortenInitSlotWait(t, 100*time.Millisecond)
+	stub := installSucceedingBdStub(t)
+	release, err := slots.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("take the only slot: %v", err)
+	}
+	defer release()
+
+	if err := NewIsolated(t.TempDir()).Init("gt"); err != nil {
+		t.Fatalf("port-less Init: %v", err)
+	}
+	if n := stub.calls(t); n != 1 {
+		t.Fatalf("bd init calls = %d, want 1", n)
+	}
+}
+
+// TestInitRetriesInsideOneSlot pins that the slot wraps the whole gt-o8i9f
+// retry loop. With one slot, an init that fails twice on the catalog race and
+// then succeeds must finish: a per-attempt acquire nested inside Init's would
+// deadlock here, and a released-between-attempts slot would show as tokens.
+func TestInitRetriesInsideOneSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	slots := useTestContainerInitSlots(t, 1)
+	shortenInitSlotWait(t, 2*time.Second)
+	zeroRetryBackoff(t)
+	stub := installFlakyCatalogRaceBDStub(t, 2)
+
+	done := make(chan error, 1)
+	go func() { done <- NewIsolatedWithPort(t.TempDir(), 45678).Init("gt") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Init with two retried failures: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Init did not finish: the retry loop re-acquired a slot it already held")
+	}
+	if n := stub.calls(t); n != 3 {
+		t.Fatalf("bd init calls = %d, want 3 (two failures, one success)", n)
+	}
+	if len(slots.tokens) != 1 {
+		t.Fatalf("pool holds %d tokens after Init, want 1", len(slots.tokens))
 	}
 }
