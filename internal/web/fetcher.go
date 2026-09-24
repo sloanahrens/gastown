@@ -134,7 +134,11 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	cancelWait()
 	defer releaseCmdSlot(f.cmdSem)
 
-	ctx, cancel := context.WithTimeout(context.Background(), f.cmdTimeout)
+	timeout := f.cmdTimeout
+	if f.bdTimeoutFor != nil {
+		timeout = f.bdTimeoutFor(args)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	bin := f.bdBin
@@ -148,7 +152,7 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("bd timed out after %v", f.cmdTimeout)
+			return nil, fmt.Errorf("bd timed out after %v", timeout)
 		}
 		// If we got some output, return it anyway (bd may exit non-zero with warnings)
 		if stdout.Len() > 0 {
@@ -311,6 +315,13 @@ type LiveConvoyFetcher struct {
 	// acquire this fetcher makes. Zero (the default) means "use the call's own
 	// exec timeout"; tests set it short so a full-pool case resolves fast.
 	slotWaitBudget time.Duration
+
+	// bdTimeoutFor overrides cmdTimeout's execution deadline per bd call.
+	// Nil (the default) means every call gets cmdTimeout. Test seam: a test
+	// that proves one call's timeout path can give that call a short
+	// deadline while its fast neighbors keep a generous one, instead of one
+	// shared budget tight enough that a loaded host kills the fast calls too.
+	bdTimeoutFor func(args []string) time.Duration
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.

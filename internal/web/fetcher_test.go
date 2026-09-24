@@ -1024,7 +1024,24 @@ esac
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 300 * time.Millisecond, bdBin: bdPath}
+	// Only hq-cv-slow's dep read gets the short deadline it exists to blow.
+	// The list/show/dep calls around it keep a generous budget: one shared
+	// 300ms cmdTimeout killed the trivially fast list call on a loaded gate
+	// host ("listing convoys: bd timed out after 300ms"), failing the test
+	// before it reached the timeout path it is about. The slow call spins
+	// until killed, so its deadline is always the thing that ends it, however
+	// loaded the host is.
+	f := &LiveConvoyFetcher{
+		townRoot:   t.TempDir(),
+		cmdTimeout: 30 * time.Second,
+		bdBin:      bdPath,
+		bdTimeoutFor: func(args []string) time.Duration {
+			if len(args) > 0 && args[0] == "dep" && strings.Contains(strings.Join(args, " "), "hq-cv-slow") {
+				return 300 * time.Millisecond
+			}
+			return 30 * time.Second
+		},
+	}
 
 	rows, err := f.FetchConvoys()
 	if err != nil {
