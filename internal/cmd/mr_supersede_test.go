@@ -63,6 +63,14 @@ func mrFixture(id, description string) *beads.Issue {
 	return &beads.Issue{ID: id, Status: string(beads.StatusOpen), Description: description}
 }
 
+// keepMR builds the "just submitted" MR passed as supersedeOpenMRsForIssue's
+// keep argument. Its CreatedAt is later than any zero-value mrFixture, so
+// mrIsNewer treats it as the winner the way a real submission — always
+// younger than what it's replacing — would.
+func keepMR(id string) *beads.Issue {
+	return &beads.Issue{ID: id, CreatedAt: "2030-01-01T00:00:00Z"}
+}
+
 // townWithRoute writes the town-level routes file GetPrefixForRig reads, so
 // the worker-derived agent bead id is exercised for real.
 func townWithRoute(t *testing.T, rig, prefix string) string {
@@ -79,6 +87,42 @@ func townWithRoute(t *testing.T, rig, prefix string) string {
 	return townRoot
 }
 
+// TestSupersedeOpenMRsBreaksAMutualSupersessionCycle is the gt-2x9sc
+// regression: two `gt done` processes race to submit for the same issue (seen
+// in production as a polecat's Stop hook auto-running a second `gt done`
+// while the first was still finishing). Both MRs land in the same second, so
+// each process's supersede call sees the other's MR as "old" — with no
+// ordering check both directions would close, leaving two CLOSED MRs pointing
+// at each other and nothing open for the issue. Simulating both racing calls
+// against the same open-MR snapshot must produce exactly one closure, always
+// in the same direction, regardless of which call runs "first" here.
+func TestSupersedeOpenMRsBreaksAMutualSupersessionCycle(t *testing.T) {
+	townRoot := townWithRoute(t, "gastown", "gt")
+	const sameInstant = "2026-09-24T14:29:44Z"
+	mr2tj := &beads.Issue{ID: "gt-wisp-2tj", CreatedAt: sameInstant, Description: "source_issue: gt-hmzr\nrig: gastown\nworker: marble"}
+	mr4g8 := &beads.Issue{ID: "gt-wisp-4g8", CreatedAt: sameInstant, Description: "source_issue: gt-hmzr\nrig: gastown\nworker: marble"}
+	openSnapshot := []*beads.Issue{mr2tj, mr4g8}
+
+	storeA := &fakeMRStore{open: openSnapshot}
+	gotA := supersedeOpenMRsForIssue(storeA, &fakeAgentClearer{}, "gt-hmzr", mr2tj, townRoot, "gastown")
+
+	storeB := &fakeMRStore{open: openSnapshot}
+	gotB := supersedeOpenMRsForIssue(storeB, &fakeAgentClearer{}, "gt-hmzr", mr4g8, townRoot, "gastown")
+
+	if gotA != nil {
+		t.Fatalf("2tj-as-keep superseded = %+v, want none (2tj loses the tiebreak to 4g8)", gotA)
+	}
+	if len(gotB) != 1 || gotB[0].ID != "gt-wisp-2tj" {
+		t.Fatalf("4g8-as-keep superseded = %+v, want exactly gt-wisp-2tj closed", gotB)
+	}
+	if len(storeA.closed) != 0 {
+		t.Fatalf("storeA closed = %v, want no writes from the losing direction", storeA.closed)
+	}
+	if len(storeB.closed) != 1 || storeB.closed[0] != "gt-wisp-2tj" {
+		t.Fatalf("storeB closed = %v, want exactly [gt-wisp-2tj]", storeB.closed)
+	}
+}
+
 // TestSupersedeOpenMRsClearsSupersededWorkersActiveMR is the gt-c5uv
 // regression: a newer submission closes the old MR *and* clears the active_mr
 // pointer on the agent bead of the polecat that submitted it — a different
@@ -91,7 +135,7 @@ func TestSupersedeOpenMRsClearsSupersededWorkersActiveMR(t *testing.T) {
 	}}
 	agents := &fakeAgentClearer{pointers: map[string]string{"gt-gastown-polecat-furiosa": "gt-wisp-old"}}
 
-	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", townRoot, "gastown")
+	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), townRoot, "gastown")
 
 	if len(got) != 1 || got[0].ID != "gt-wisp-old" {
 		t.Fatalf("superseded = %+v, want exactly gt-wisp-old", got)
@@ -120,7 +164,7 @@ func TestSupersedeOpenMRsDerivesAgentBeadFromWorker(t *testing.T) {
 	}}
 	agents := &fakeAgentClearer{pointers: map[string]string{"gt-gastown-polecat-furiosa": "gt-wisp-old"}}
 
-	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", townRoot, "gastown")
+	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), townRoot, "gastown")
 
 	if len(got) != 1 || got[0].AgentBead != "gt-gastown-polecat-furiosa" || !got[0].AgentCleared {
 		t.Fatalf("superseded = %+v, want furiosa's derived bead cleared", got)
@@ -137,7 +181,7 @@ func TestSupersedeOpenMRsFallsBackToTheMRsOwnRig(t *testing.T) {
 	}}
 	agents := &fakeAgentClearer{pointers: map[string]string{"el-elsewhere-polecat-furiosa": "gt-wisp-old"}}
 
-	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", townRoot, "gastown")
+	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), townRoot, "gastown")
 
 	if len(got) != 1 || got[0].AgentBead != "el-elsewhere-polecat-furiosa" || !got[0].AgentCleared {
 		t.Fatalf("superseded = %+v, want el-elsewhere-polecat-furiosa cleared", got)
@@ -153,7 +197,7 @@ func TestSupersedeOpenMRsLeavesAMovedPointerAlone(t *testing.T) {
 	}}
 	agents := &fakeAgentClearer{pointers: map[string]string{"gt-gastown-polecat-furiosa": "gt-wisp-newer"}}
 
-	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", "", "gastown")
+	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), "", "gastown")
 
 	if len(got) != 1 || got[0].AgentCleared {
 		t.Fatalf("superseded = %+v, want the stale pointer left for its owner to fix", got)
@@ -169,7 +213,7 @@ func TestSupersedeOpenMRsWithoutReplacementClosesNothing(t *testing.T) {
 	store := &fakeMRStore{open: []*beads.Issue{mrFixture("gt-wisp-old", "source_issue: gt-8ib\nworker: furiosa")}}
 	agents := &fakeAgentClearer{pointers: map[string]string{"gt-gastown-polecat-furiosa": "gt-wisp-old"}}
 
-	if got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "", "", "gastown"); got != nil {
+	if got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", nil, "", "gastown"); got != nil {
 		t.Fatalf("superseded = %+v, want none", got)
 	}
 	if len(store.closed) != 0 || len(agents.calls) != 0 {
@@ -192,7 +236,7 @@ func TestSupersedeOpenMRsSurvivesCloseAndClearFailures(t *testing.T) {
 	}
 	agents := &fakeAgentClearer{err: errors.New("dolt unreachable")}
 
-	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", townRoot, "gastown")
+	got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), townRoot, "gastown")
 
 	if len(got) != 1 || got[0].ID != "gt-wisp-old" || got[0].AgentCleared {
 		t.Fatalf("superseded = %+v, want only gt-wisp-old with no clear", got)
@@ -211,7 +255,7 @@ func TestSupersedeOpenMRsLookupFailureIsQuiet(t *testing.T) {
 	store := &fakeMRStore{findErr: errors.New("queue unreadable")}
 	agents := &fakeAgentClearer{}
 
-	if got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", "gt-wisp-new", "", "gastown"); got != nil {
+	if got := supersedeOpenMRsForIssue(store, agents, "gt-8ib", keepMR("gt-wisp-new"), "", "gastown"); got != nil {
 		t.Fatalf("superseded = %+v, want none", got)
 	}
 	if len(store.closed) != 0 || len(agents.calls) != 0 {
@@ -317,7 +361,7 @@ func TestSupersessionCarriesABumpIntoTheReplacement(t *testing.T) {
 	store := &fakeMRStore{open: []*beads.Issue{old}}
 
 	priority, from := carriedMRPriority(store, "gt-fo3h", 2) // gt-fo3h is P2
-	superseded := supersedeOpenMRsForIssue(store, &fakeAgentClearer{}, "gt-fo3h", "gt-wisp-1sab", townRoot, "gastown")
+	superseded := supersedeOpenMRsForIssue(store, &fakeAgentClearer{}, "gt-fo3h", keepMR("gt-wisp-1sab"), townRoot, "gastown")
 
 	if priority != 0 || from != "gt-wisp-or5" {
 		t.Fatalf("carriedMRPriority = (%d, %q), want (0, gt-wisp-or5)", priority, from)
