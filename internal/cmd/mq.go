@@ -810,7 +810,30 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	printMQPostMergeResult(result, branchCleanup)
 
 	townRoot := filepath.Dir(r.Path)
-	runMRPostMergeCommand(townRoot, r.Name, r.Path, rig.ResolveMergeQueueConfig(townRoot, r.Name), result.MR, os.Stdout)
+	mqCfg := rig.ResolveMergeQueueConfig(townRoot, r.Name)
+	runMRPostMergeCommand(townRoot, r.Name, r.Path, mqCfg, result.MR, os.Stdout)
+
+	// Last: the respawn it may do replaces this process, so everything the
+	// post-merge command owes its caller (closes, ✓ lines, the install hook)
+	// has already happened.
+	sess := refinerySessionFor(r.Name)
+	workDir := refineryWorkDir(r.Path)
+	rep := completeUnitAndCycle(unitCycleParams{
+		Rig:             r.Name,
+		Mode:            unitSingle,
+		RefinerySession: sess,
+		WorkDir:         workDir,
+		MRs: []unitMR{{
+			ID: result.MR.ID, Branch: result.MR.Branch, Worker: result.MR.Worker,
+			SourceIssue: result.SourceIssueID, Target: result.MR.TargetBranch,
+		}},
+		MergeCommit:          resolvePostMergeSHA(workDir, result.MR.MergeCommit, result.MR.TargetBranch),
+		LandedCommitAttested: mqPostMergeLandedCommit != "",
+		CycleEnabled:         mqCfg != nil && mqCfg.CycleSessionAfterMerge,
+	}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, os.Stdout))
+	if rep.SkipCause != "" {
+		fmt.Printf("  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)
+	}
 	return nil
 }
 
