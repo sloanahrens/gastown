@@ -34,7 +34,7 @@ type supersededMR struct {
 	AgentCleared bool
 }
 
-// supersedeOpenMRsForIssue closes every open MR for issueID except keepMRID,
+// supersedeOpenMRsForIssue closes every open MR for issueID older than keep,
 // the submission just created, and clears the superseded worker's agent-bead
 // active_mr pointer. It prints nothing about successes; callers report what it
 // returns (failures warn here, since the submission itself succeeded).
@@ -51,8 +51,18 @@ type supersededMR struct {
 //
 // A no-op when there is no replacement MR: superseding without one would leave
 // the issue with nothing in the queue.
-func supersedeOpenMRsForIssue(store mrSupersedeStore, agents agentActiveMRClearer, issueID, keepMRID, townRoot, rigName string) []supersededMR {
-	if issueID == "" || keepMRID == "" {
+//
+// gt-2x9sc: two `gt done` processes can race to submit for the same issue —
+// observed when a polecat's Stop hook auto-ran a second `gt done` while the
+// first was still finishing. Each process's submission sees the other's MR as
+// "old" and, with no ordering check, both closed each other as "superseded" in
+// the same instant: two CLOSED MRs pointing at each other, neither open, the
+// verified work gone from the queue. mrSupersedes gives every caller the same
+// answer for the same pair regardless of which one asks, so only the
+// direction where keep is actually newer (by created_at, then id as a
+// tiebreak) ever closes anything — the cycle can't form.
+func supersedeOpenMRsForIssue(store mrSupersedeStore, agents agentActiveMRClearer, issueID string, keep *beads.Issue, townRoot, rigName string) []supersededMR {
+	if issueID == "" || keep == nil || keep.ID == "" {
 		return nil
 	}
 	oldMRs, err := store.FindOpenMRsForIssue(issueID)
@@ -62,10 +72,13 @@ func supersedeOpenMRsForIssue(store mrSupersedeStore, agents agentActiveMRCleare
 
 	var superseded []supersededMR
 	for _, old := range oldMRs {
-		if old == nil || old.ID == "" || old.ID == keepMRID {
+		if old == nil || old.ID == "" || old.ID == keep.ID {
 			continue // keep the one just submitted
 		}
-		reason := fmt.Sprintf("superseded by %s", keepMRID)
+		if !mrSupersedes(keep, old) {
+			continue // old wins the tiebreak; leave it open for its own supersede call to close keep
+		}
+		reason := fmt.Sprintf("superseded by %s", keep.ID)
 		if closeErr := store.CloseWithReason(reason, old.ID); closeErr != nil {
 			style.PrintWarning("could not supersede old MR %s: %v", old.ID, closeErr)
 			continue
@@ -82,6 +95,30 @@ func supersedeOpenMRsForIssue(store mrSupersedeStore, agents agentActiveMRCleare
 		superseded = append(superseded, entry)
 	}
 	return superseded
+}
+
+// mrSupersedes reports whether a should supersede b: a strictly later
+// CreatedAt, or, on a tie (the same second, unparseable, or both empty), a
+// strictly greater ID. ID is a stand-in total order for creation order the
+// database doesn't expose once two MRs land in the same second — which is
+// exactly when two racing `gt done` processes each need the same answer.
+//
+// This differs from mrIsNewerThan (polecat_inventory.go), which leaves a
+// timestamp tie to the incumbent: fine for picking one MR to *display*, but
+// unusable here, since two racing processes each see the other as the
+// "incumbent" and neither would supersede the other — the queue keeps both,
+// silently doubling every raced submission instead of resolving it.
+//
+// The property that matters: mrSupersedes(a, b) and mrSupersedes(b, a) never
+// both return true, so two racing calls computing it for the same pair, in
+// either order, agree on which one wins — a mutual-close cycle (gt-2x9sc)
+// can't form.
+func mrSupersedes(a, b *beads.Issue) bool {
+	at, bt := beads.ParseIssueTime(a.CreatedAt), beads.ParseIssueTime(b.CreatedAt)
+	if !at.Equal(bt) {
+		return at.After(bt)
+	}
+	return a.ID > b.ID
 }
 
 // carriedMRPriority returns the priority a replacement MR should carry for

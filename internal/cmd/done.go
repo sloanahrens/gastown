@@ -2526,7 +2526,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// what keeps the superseded worker out of a permanent
 			// idle-pr-open/reusable=false state — nothing downstream does it. See
 			// supersedeOpenMRsForIssue.
-			for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrID, townRoot, rigName) {
+			for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrIssue, townRoot, rigName) {
 				fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), sup.ID)
 				if sup.AgentCleared {
 					fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)

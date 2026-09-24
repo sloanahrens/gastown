@@ -313,7 +313,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		//
 		// Leave superseded remote branches intact. Branch deletion belongs to
 		// verified post-merge cleanup, not submit-time queue maintenance.
-		for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrIssue.ID, townRoot, rigName) {
+		for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrIssue, townRoot, rigName) {
 			fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), sup.ID)
 			if sup.AgentCleared {
 				fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
