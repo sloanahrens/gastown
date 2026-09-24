@@ -131,7 +131,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `beads-binary` | Infrastructure | occasional | Infrastructure install/version check (binary present & version, not liveness); changes only when the tool is upgraded. |
 | `boot-health` | Infrastructure | occasional | Vet-mode check on the Boot watchdog; by name and purpose this is boot-time, not a recurring patrol. |
 | `claude-binary` | Infrastructure | occasional | Infrastructure install/version check (binary present & version, not liveness); changes only when the tool is upgraded. |
-| `container-capacity` | Infrastructure | occasional | Diagnostic/informational (prints the Docker VM's CPU/memory bound); not a pass/fail alarm, so it belongs in setup/diagnosis, not a patrol loop. |
+| `container-capacity` | Infrastructure | occasional | Prints the Docker VM's CPU/memory bound; warns (StatusWarning, non-fatal) when it reports under 15 GiB (a 16 GiB Docker Desktop setting), informational otherwise — belongs in setup/diagnosis, not a patrol loop. |
 | `dolt-binary` | Infrastructure | occasional | Infrastructure install/version check (binary present & version, not liveness); changes only when the tool is upgraded. |
 | `groq-compound-json` | Infrastructure | occasional | Makes a live network probe to an external agent for JSON-compliance; too slow/flaky for a fast cadence, occasional/diagnostic use. |
 | `identity-collision` | Infrastructure | occasional | MEASURED at 9.4s standalone -- scans all agent lock files town-wide; too expensive for the fast loop. Same slower-cadence candidate as stalled-polecats. |
