@@ -371,6 +371,12 @@ file_age_minutes() {
 }
 
 LAG=""
+# IN_FORCE is set only by a positive healthy reading: no marker pending, and
+# condition 2 actually evaluated with the daemon's commit a descendant of the
+# installed binary's. A reading that could not be taken (gt stale failed,
+# state.json has no commit, a commit does not resolve) is neither lag nor
+# health, so it leaves an open escalation alone instead of flapping it.
+IN_FORCE=""
 MARKER_AGE=$(marker_age_minutes)
 if [ -n "$MARKER_AGE" ] && [ "$MARKER_AGE" -ge "$DAEMON_LAG_MINUTES" ]; then
   LAG="a restart-pending marker has waited ${MARKER_AGE}m for the daemon to restart"
@@ -380,8 +386,11 @@ elif [ "$DRIFT_READ" = "1" ]; then
   DCF=$( [ -n "$DC" ] && git -C "$RIG_ROOT" rev-parse --verify --quiet "$DC^{commit}" 2>/dev/null || true )
   BCF=$( [ -n "$BC" ] && git -C "$RIG_ROOT" rev-parse --verify --quiet "$BC^{commit}" 2>/dev/null || true )
   GT_BIN=$(command -v gt 2>/dev/null || true)
-  if [ -n "$DCF" ] && [ -n "$BCF" ] && [ -n "$GT_BIN" ] \
-    && ! git -C "$RIG_ROOT" merge-base --is-ancestor "$BCF" "$DCF" 2>/dev/null; then
+  if [ -z "$DCF" ] || [ -z "$BCF" ] || [ -z "$GT_BIN" ]; then
+    log "Daemon-in-force check skipped: cannot resolve the daemon's commit ('$DC') or the binary's ('$BC')."
+  elif git -C "$RIG_ROOT" merge-base --is-ancestor "$BCF" "$DCF" 2>/dev/null; then
+    [ -e "${TOWN_ROOT}/daemon/restart-pending.json" ] || IN_FORCE=1
+  else
     BIN_AGE=$(file_age_minutes "$GT_BIN")
     if [ "$BIN_AGE" -ge "$DAEMON_LAG_MINUTES" ]; then
       LAG="the daemon runs $DC but $BC has been installed for ${BIN_AGE}m"
@@ -395,10 +404,15 @@ if [ -n "$LAG" ]; then
     mkdir -p "$(dirname "$LAG_FLAG")" 2>/dev/null || true
     touch "$LAG_FLAG" 2>/dev/null || true
   fi
-elif [ -e "$LAG_FLAG" ]; then
-  gt escalate clear --fingerprint "rebuild-gt:daemon-not-in-force" \
-    --reason "rebuild-gt: the daemon runs the installed binary" >/dev/null 2>&1 || true
-  rm -f "$LAG_FLAG"
+elif [ -n "$IN_FORCE" ] && [ -e "$LAG_FLAG" ]; then
+  # The flag goes only once the clear landed: a failed clear keeps it, so the
+  # next healthy run retries instead of leaving the alert with no closer.
+  if gt escalate clear --fingerprint "rebuild-gt:daemon-not-in-force" \
+    --reason "rebuild-gt: the daemon runs the installed binary" >/dev/null 2>&1; then
+    rm -f "$LAG_FLAG"
+  else
+    log "WARNING: could not clear rebuild-gt:daemon-not-in-force; will retry next run."
+  fi
 fi
 
 if [ "$DRIFT_STALE" = "True" ]; then

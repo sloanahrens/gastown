@@ -120,7 +120,11 @@ case "$1 $2" in
     exec "$@" ;;
   # clear_alarms calls 'gt escalate clear' with one --fingerprint per alarm
   # key; a key that is not open writes nothing (the real semantics).
-  "escalate clear") echo "escalate $*" >> "$GT_TEST_TOWN/gt.log"; exit 0 ;;
+  # clear_refuse makes the clear fail the way a Dolt outage does.
+  "escalate clear")
+    echo "escalate $*" >> "$GT_TEST_TOWN/gt.log"
+    [ -e "$GT_TEST_TOWN/clear_refuse" ] && exit 1
+    exit 0 ;;
   "daemon restart") echo "daemon restart $*" >> "$GT_TEST_TOWN/gt.log"; echo "Daemon restarted" ;;
   "plugin record-run") echo "record-run $*" >> "$GT_TEST_TOWN/gt.log" ;;
   "plugin sync"|"formula sync") echo "synced" ;;
@@ -1043,15 +1047,73 @@ printf '{"running": true, "commit": "%s"}\n' "$OLD" > "$T/daemon/state.json"
 rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
 if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "daemon behind a fresh install: escalated early"; else pass "daemon behind a fresh install: quiet"; fi
 
+# Case 31c: the daemon records the FULL form of the binary's short commit (the
+# daemon resolves its own commit; the binary reports --short) -> the same
+# commit, no escalation even on a binary installed an hour ago.
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+mkdir -p "$T/daemon"
+printf '{"running": true, "commit": "%s"}\n' "$(git -C "$RIG" rev-parse HEAD~1)" > "$T/daemon/state.json"
+python3 -c 'import os,sys,time; t=time.time()-3600; os.utime(sys.argv[1], (t, t))' "$T/bin/gt"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "daemon at the binary's commit (full form): escalated"; else pass "daemon at the binary's commit (full form): quiet"; fi
+
+# Case 31d: the daemon runs a descendant of the installed binary's commit
+# (restarted onto a newer build) -> no escalation.
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+mkdir -p "$T/daemon"
+printf '{"running": true, "commit": "%s"}\n' "$(git -C "$RIG" rev-parse HEAD)" > "$T/daemon/state.json"
+python3 -c 'import os,sys,time; t=time.time()-3600; os.utime(sys.argv[1], (t, t))' "$T/bin/gt"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "daemon descends from the binary: escalated"; else pass "daemon descends from the binary: quiet"; fi
+
+# in_force_state TOWN -> state.json whose daemon commit descends from the
+# binary's, and no marker: a positive healthy reading.
+in_force_state() {
+  mkdir -p "$1/daemon"
+  printf '{"running": true, "commit": "%s"}\n' "$(git -C "$1/gastown/mayor/rig" rev-parse HEAD)" > "$1/daemon/state.json"
+}
+
 # Case 32: the condition clears -> the open escalation is cleared, once.
 T=$(make_town)
-mkdir -p "$T/daemon"; touch "$T/daemon/rebuild-gt-daemon-lag"
+in_force_state "$T"; touch "$T/daemon/rebuild-gt-daemon-lag"
 rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
 if grep -q "escalate clear .*--fingerprint rebuild-gt:daemon-not-in-force" "$T/gt.log" && [ ! -e "$T/daemon/rebuild-gt-daemon-lag" ]; then
   pass "daemon in force again: escalation cleared"
 else
   fail "daemon in force again: $(cat "$T/gt.log" 2>/dev/null)"
 fi
+
+# Case 32b: an episode is open but the reading is unavailable (state.json has
+# no commit) -> neither lag nor health: no clear, the flag stays.
+T=$(make_town)
+mkdir -p "$T/daemon"; touch "$T/daemon/rebuild-gt-daemon-lag"
+printf '{"running": true}\n' > "$T/daemon/state.json"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then
+  fail "reading unavailable: touched the escalation: $(cat "$T/gt.log")"
+else
+  pass "reading unavailable: no clear"
+fi
+[ -e "$T/daemon/rebuild-gt-daemon-lag" ] && pass "reading unavailable: flag kept" || fail "reading unavailable: flag removed"
+
+# Case 32c: a healthy reading whose clear fails keeps the flag for a retry.
+T=$(make_town)
+in_force_state "$T"; touch "$T/daemon/rebuild-gt-daemon-lag" "$T/clear_refuse"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "escalate clear .*--fingerprint rebuild-gt:daemon-not-in-force" "$T/gt.log" && [ -e "$T/daemon/rebuild-gt-daemon-lag" ]; then
+  pass "failed clear: flag kept for the next run"
+else
+  fail "failed clear: gt.log=$(cat "$T/gt.log" 2>/dev/null) flag=$([ -e "$T/daemon/rebuild-gt-daemon-lag" ] && echo kept || echo gone)"
+fi
+
+# Case 32d: a healthy daemon but a young marker still pending -> no clear yet.
+T=$(make_town)
+in_force_state "$T"; touch "$T/daemon/rebuild-gt-daemon-lag"
+age_marker "$T" 5
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "marker pending: cleared or escalated: $(cat "$T/gt.log")"; else pass "marker pending: no clear"; fi
 
 # --- claude-7fc: rebuild-gt's own fetch + fast-forward of mayor/rig is a write
 # to it, so it runs under install-gt's lock. Another install holding the lock
