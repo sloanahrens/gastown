@@ -125,6 +125,9 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("getting current branch: %w", err)
 		}
+		if err := requireRealCurrentBranch(branch, "gt mq submit"); err != nil {
+			return err
+		}
 	}
 
 	// Get configured default branch for this rig

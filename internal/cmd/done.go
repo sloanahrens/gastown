@@ -1145,6 +1145,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
 	}
+	if err := requireRealCurrentBranch(branch, "gt done"); err != nil {
+		return err
+	}
 
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
