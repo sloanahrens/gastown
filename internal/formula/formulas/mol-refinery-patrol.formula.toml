@@ -344,15 +344,12 @@ branch-only `gh pr list --limit 1`, retries, or broad fallback searches.
 
 For each queued MR:
 - If lookup errors or reports ambiguity: leave the MR open and continue to the next MR.
-- If `PR_STATE=MERGED`: run post-merge cleanup with branch deletion skipped, then send MERGED to Witness:
+- If `PR_STATE=MERGED`: run post-merge cleanup with branch deletion skipped:
   ```bash
   gt mq post-merge <rig> <mr-id> --skip-branch-delete
-  gt mail send <rig>/witness -s "MERGED <polecat-name>" -m "Branch: <branch>
-  Issue: <issue-id>
-  PR: ${PR_URL}
-  MR: <mr-id>"
-  gt mail archive <merge-ready-message-id>
   ```
+  Post-merge sends MERGED and archives MERGE_READY itself (claude-7fc); verify
+  its ✓ lines and do only a ✗ chore by hand.
 - If `PR_STATE=OPEN`: leave it for the normal process-branch/merge-push path.
 - If `PR_STATE=CLOSED`: do NOT send MERGED; leave it for manual rejection/supersede review.
 - If `PR_STATE=NOT_FOUND`: leave it open; do not close as "Branch no longer exists".
@@ -455,8 +452,9 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
   answer two questions in this order, whatever the exit code:
 
   1. What landed? `.merged[]` lists only members whose post-merge cleanup
-     succeeded; every one of them is on {{target_branch}} and owes Step 4's
-     Witness mail. A member can also have landed WITHOUT appearing there —
+     succeeded; every one of them is on {{target_branch}} and the batch run
+     already sent its Witness mail as part of that cleanup (gt-9gjl) — do
+     NOT send it again. A member can also have landed WITHOUT appearing there —
      its commits pushed, its cleanup failed, its MR bead and branch left
      behind (`.error` records only the first such failure, and a batch that
      shrank to one member reports it with an empty `.merged[]`). Find every
@@ -466,8 +464,8 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
      `gt mq post-merge <rig> <mr-id> --skip-branch-delete` re-runs the
      post-merge proof and closes MR and source issue together (the tool
      merged-pr-sweep uses for the same case). Proof fails again → it did NOT
-     land, leave it queued for process-branch. Proof passes → send its
-     Witness mail like any other merged entry.
+     land, leave it queued for process-branch. Proof passes → post-merge
+     sends MERGED itself; do not send it a second time.
   2. Did the run fail before or beside that? A non-zero exit whose `.error`
      does not start with `post-merge cleanup proof failed for` (the exact
      prefix the cleanup failures above carry) is an infra failure (push
@@ -496,20 +494,22 @@ The command stacks the eligible MRs via ancestry-preserving merges,
 enforces the push precondition described in Step 2, runs the configured gate
 commands once, and either fast-forwards the whole batch to {{target_branch}}
 or bisects to isolate a red MR and lands the rest. It also
-runs the same post-merge cleanup as a single-MR merge (closes MR + source
-beads, deletes branches, nudges mayor) for every MR in `.merged[]` — but it
-does NOT send MERGED mail to Witness. You must do that yourself in Step 4.
+runs the same post-merge cleanup as a single-MR merge for every MR in
+`.merged[]` — closes MR + source beads, deletes branches, nudges mayor,
+sends MERGED to the witness for polecat branches (gt-9gjl), and archives
+each MR's MERGE_READY (claude-7fc). Post-merge sends MERGED itself; do NOT
+send it yourself.
 
-**Step 4: Notify Witness for every merged MR (REQUIRED)**
+**Step 4: Expect a possible respawn**
 
-For each entry in the command's `.merged[]` array:
-```bash
-gt mail send <rig>/witness -s "MERGED <worker>" -m "Branch: <branch>
-Issue: <source-issue>
-Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-```
-using that entry's `.Worker`, `.Branch`, and `.SourceIssue` fields. Without
-this, polecat worktrees for batched MRs never get nuked.
+Closing this patrol cycle and respawning your session happens only when you
+are this rig's refinery running in your own pane,
+`merge_queue.cycle_session_after_merge` is on (rig-root config.json), the
+batch had no error, and the handoff cooldown is clear. When it happens, `gt
+mq batch run` prints `🔄 unit complete, respawning <session> for the next
+unit` and your session ends there by design — a fresh successor starts the
+next patrol cycle. Otherwise it prints `○ session kept: <cause>`; continue
+to Step 6 (the single-MR path) in this session, same as today.
 
 **Step 5: Leave culprits and conflicts alone**
 
@@ -1352,15 +1352,6 @@ fi
 gt mq post-merge <rig> <mr-bead-id> $LANDED_FLAG $SKIP_FLAG
 ```
 
-When the attestation was used, record it on the MR bead so the closed MR
-carries the SHA that landed rather than an unexplained merge_commit:
-
-```bash
-if [ -n "$LANDED_FLAG" ]; then
-  bd comments add <mr-bead-id> "post-merge: attested --landed-commit $LANDED_SHA (conflict-resolved rebase via $CONFLICT_TASK)"
-fi
-```
-
 The MR bead ID was in the MERGE_READY message or find via:
 ```bash
 bd list --type=merge-request --status=open | grep <polecat-name>
@@ -1376,48 +1367,39 @@ The branch is deleted by `gt mq post-merge` after merge proof passes, not by
 `gh pr merge`. The `--skip-branch-delete` flag (gas-fk4) prevents branch deletion
 when an open PR is detected in direct merge mode.
 
-**Step 3: Send MERGED Notification (REQUIRED - ONLY AFTER CLEANUP SUCCEEDS)**
+**Step 3: Verify post-merge finished the unit (REQUIRED)**
 
-After `gt mq post-merge` succeeds, send MERGED mail to Witness.
+`gt mq post-merge` now does the per-MR chores itself (claude-7fc) and prints
+a line for each:
 
-**If merge_strategy = "direct":**
-```bash
-gt mail send <rig>/witness -s "MERGED <polecat-name>" -m "Branch: <branch>
-Issue: <issue-id>
-Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-```
+- `✓ MERGED sent to <rig>/witness` — polecat branches only
+- `✓ MERGE_READY archived: <id>`, or `○ no MERGE_READY mail for <id>` when
+  none matched — either line means the chore ran, there is nothing to redo
+- `✓ temp branch deleted`
+- the landed-commit attestation comment on the MR bead, added silently when
+  you passed `--landed-commit` (a failure there prints `✗ attestation
+  comment failed on <id>: ...`; there is no separate success line)
 
-**If merge_strategy = "pr":**
-```bash
-gt mail send <rig>/witness -s "MERGED <polecat-name>" -m "Branch: <branch>
-Issue: <issue-id>
-PR: ${PR_URL}
-Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-```
+If a line shows `✗` instead, do that one chore by hand
+(`gt mail send <rig>/witness -s "MERGED <polecat-name>" …`,
+`gt mail archive <id>`, `git branch -D temp`). Do NOT repeat a chore that
+printed `✓` — a second MERGED is a duplicate mail.
 
-Note: In PR mode, MERGED is only sent AFTER `gh pr merge` succeeds and
-`gt mq post-merge` verifies the target contains the submitted head.
-
-This signals the Witness to nuke the polecat worktree. WITHOUT THIS NOTIFICATION,
-POLECAT WORKTREES ACCUMULATE INDEFINITELY AND THE LIFECYCLE BREAKS.
-
-**Step 4: Archive the MERGE_READY mail (REQUIRED)**
-```bash
-gt mail archive <merge-ready-message-id>
-```
-The message ID was tracked when you processed inbox-check.
-
-**Step 5: Cleanup temp branch**
-```bash
-git branch -d temp
-```
+**Expect a possible respawn.** Closing this patrol cycle and respawning your
+session happens only when you are this rig's refinery running in your own
+pane, `merge_queue.cycle_session_after_merge` is on (rig-root config.json),
+and the handoff cooldown is clear. When it happens, post-merge prints `🔄
+unit complete, respawning <session> for the next unit` and your session ends
+there by design — a fresh successor starts the next patrol cycle at
+loop-check. Otherwise it prints `○ session kept: <cause>`; continue to
+loop-check yourself, same as today, and keep your own patrol wisp.
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
-- [x] Post-merge cleanup completed (MR closed, source issue closed, branch deleted)
-- [x] MERGED mail sent to witness (with PR URL if merge_strategy=pr)
-- [x] MERGE_READY mail archived
+- [x] Post-merge completed (MR closed, source issue closed, branch deleted)
+- [x] Its MERGED / MERGE_READY / temp lines are ✓ (or MERGE_READY's `○ no
+  MERGE_READY mail` line), or you did a ✗ chore by hand
 
-If you skipped notifications or archiving, GO BACK AND DO THEM NOW.
+If a chore printed `✗` and you have not done it by hand yet, GO BACK AND DO IT NOW.
 
 Target branch has moved. Any remaining branches need rebasing on new baseline."""
 
