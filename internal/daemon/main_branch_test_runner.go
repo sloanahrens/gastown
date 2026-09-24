@@ -1088,7 +1088,9 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	// this runner's role, so a refinery gate or 'gt done' verify suite
 	// descending from it queues behind this hold instead of skipping its
 	// lock (gt-off9, see acquireMainBranchTestSlot).
+	d.mainBranchTestWaitingSlot.Store(true)
 	h, err := acquireMainBranchTestSlot(d.config.TownRoot, rigName)
+	d.mainBranchTestWaitingSlot.Store(false)
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
 	}

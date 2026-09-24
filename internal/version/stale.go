@@ -57,6 +57,13 @@ func resolveCommitHash() string {
 	return ""
 }
 
+// BuildCommit returns the commit this binary was built from: the ldflag value
+// (short, see Makefile COMMIT) or the module's vcs.revision. Empty when neither
+// is available. Compare it with git ancestry, not string equality.
+func BuildCommit() string {
+	return resolveCommitHash()
+}
+
 // Describe returns a one-line, human-readable staleness summary for a stale
 // binary, using subject as the leading noun so callers can vary it
 // ("Binary" for gt doctor, "gt binary" for the startup warning):

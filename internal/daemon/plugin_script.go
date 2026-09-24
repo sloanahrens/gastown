@@ -104,6 +104,17 @@ func (r *scriptRunner) finish(name string) {
 	delete(r.running, name)
 }
 
+// runningCount reports how many script plugins are in flight. Safe on a nil
+// runner: the daemon creates it lazily (scriptsOnce).
+func (r *scriptRunner) runningCount() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.running)
+}
+
 // scriptResult is what one run.sh execution produced.
 type scriptResult struct {
 	exitCode int

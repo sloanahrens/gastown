@@ -246,6 +246,12 @@ type Daemon struct {
 	// cycle is still running is skipped rather than piling up concurrently.
 	mainBranchTestRunning atomic.Bool
 
+	// mainBranchTestWaitingSlot is true only while a main_branch_test run is
+	// blocked in acquireMainBranchTestSlot. Killing a run in that state costs
+	// nothing (an interrupted run is a non-verdict, gt-59yz), so
+	// isIdleForUpgrade treats it as idle.
+	mainBranchTestWaitingSlot atomic.Bool
+
 	// gateBusySince records, per rig, when its current unbroken run of
 	// main_branch_test gate-busy skips began — the clock
 	// patrols.main_branch_test.gate_busy_starve_after is measured on. Guarded
@@ -658,6 +664,7 @@ func (d *Daemon) Run() (err error) {
 		Running:   true,
 		PID:       os.Getpid(),
 		StartedAt: time.Now(),
+		Commit:    d.resolveOwnCommit(),
 	}
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
