@@ -39,6 +39,9 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 		return errors.New("--all and --unread are mutually exclusive")
 	}
 
+	// gt-dekkl: drain queued nudges at a per-cycle touch point.
+	printSessionNudges()
+
 	// Determine which inbox to check (priority: --identity flag, positional arg, auto-detect)
 	address := ""
 	if mailInboxIdentity != "" {
