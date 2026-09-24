@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -72,7 +74,12 @@ var sessionStopCmd = &cobra.Command{
 	Long: `Stop a running polecat session.
 
 Attempts graceful shutdown first (Ctrl-C), then kills the tmux session.
-Use --force to skip graceful shutdown.`,
+Use --force to skip graceful shutdown.
+
+The stop is recorded as a deliberate one, so the witness zombie detector
+and the stuck-agent dog leave the polecat alone instead of restarting it
+and reporting a crash the operator asked for. The polecat stays stopped
+until gt session start (or gt agent resume) clears the record.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSessionStop,
 }
@@ -323,8 +330,14 @@ func runSessionStart(cmd *cobra.Command, args []string) error {
 		style.Bold.Render("✓"),
 		style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
 
+	// An explicit start is an explicit resume (gt-fojqs).
+	townRoot, _ := workspace.FindFromCwd()
+	if clearParkedSession(townRoot, rigName, polecatName) {
+		fmt.Print(pauseClearedNotice)
+	}
+
 	// Log wake event
-	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+	if townRoot != "" {
 		agent := fmt.Sprintf("%s/%s", rigName, polecatName)
 		logger := townlog.NewLogger(townRoot)
 		_ = logger.Log(townlog.EventWake, agent, sessionIssue)
@@ -344,19 +357,43 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	townRoot, _ := workspace.FindFromCwd()
+
 	if sessionForce {
 		fmt.Printf("Force stopping session for %s/%s...\n", rigName, polecatName)
 	} else {
 		fmt.Printf("Stopping session for %s/%s...\n", rigName, polecatName)
 	}
+
+	// Record the stop before killing the session: a patrol reading between
+	// the two would see a session-dead polecat with no record that the stop
+	// was deliberate, and restart it (gt-fojqs).
+	markerWritten := false
+	if polecatMgr.HasPolecat(polecatName) {
+		wrote, werr := writeDeliberateStopMarker(townRoot, rigName, polecatName)
+		if werr != nil {
+			style.PrintWarning("could not record the stop for %s/%s: %v (the witness may restart it)", rigName, polecatName, werr)
+		}
+		markerWritten = wrote
+	}
+
 	if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
+		// Nothing was stopped, so nothing is parked: withdraw a marker this
+		// run wrote rather than leave the polecat looking deliberately stopped.
+		if markerWritten {
+			clearParkedSession(townRoot, rigName, polecatName)
+		}
 		return fmt.Errorf("stopping session: %w", err)
 	}
 
 	fmt.Printf("%s Session stopped.\n", style.Bold.Render("✓"))
+	if markerWritten {
+		fmt.Printf("  Recorded as a deliberate stop — the witness will not restart it.\n")
+		fmt.Printf("  Resume with: %s\n", style.Dim.Render("gt session start "+rigName+"/"+polecatName))
+	}
 
 	// Log kill event
-	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+	if townRoot != "" {
 		agent := fmt.Sprintf("%s/%s", rigName, polecatName)
 		reason := "gt session stop"
 		if sessionForce {
@@ -367,6 +404,70 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// deliberateSessionStopReason is the pause-marker reason gt session stop
+// writes. Reasons are shown verbatim by gt status and by scanner logs, so it
+// names the command that wrote it.
+const deliberateSessionStopReason = "deliberate stop (gt session stop)"
+
+// pauseClearedNotice is printed by the two starts that clear a parked
+// session's pause marker: gt session start and gt session restart.
+const pauseClearedNotice = "  Cleared the pause marker — the witness will restart this session if it dies again.\n"
+
+// polecatSessionParked reports whether an operator parked this polecat's
+// session — gt agent pause, or the deliberate stop gt session stop records —
+// so every gate in this package reads one coordinate (gt-fojqs).
+func polecatSessionParked(townRoot, rigName, polecatName string) bool {
+	if townRoot == "" {
+		return false
+	}
+	paused, _, _ := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName)
+	return paused
+}
+
+// writeDeliberateStopMarker records an operator-initiated stop as a pause
+// marker, the choke point the witness zombie detector and the stuck-agent dog
+// already honor (gt-ahik). Without it the detector restarts the polecat the
+// operator just stopped and alerts on it as if it had crashed (gt-fojqs).
+//
+// Reports whether it wrote. It writes nothing when a marker is already there,
+// so a polecat parked by gt agent pause keeps its own reason.
+func writeDeliberateStopMarker(townRoot, rigName, polecatName string) (bool, error) {
+	if townRoot == "" {
+		// The marker path is built from the town root; without one it would
+		// land under the current directory, where no scanner looks.
+		return false, fmt.Errorf("no Gas Town workspace found from %s", rigName)
+	}
+	if polecatSessionParked(townRoot, rigName, polecatName) {
+		return false, nil
+	}
+	actor := agentActor()
+	if actor == "" {
+		actor = "human operator"
+	}
+	// No prior agent state is recorded: the stop does not mirror the bead
+	// (gt agent pause owns that), and killing a runaway session must not wait
+	// on a Dolt read first.
+	err := agentpause.Pause(townRoot, rigName, constants.RolePolecat, polecatName,
+		deliberateSessionStopReason, actor, "")
+	return err == nil, err
+}
+
+// clearParkedSession drops the pause marker that parked a polecat's session —
+// written by gt session stop or gt agent pause — because an explicit start
+// runs the polecat again, and the detectors should watch it again (gt-fojqs).
+// Reports whether a marker was cleared. A marker that cannot be removed is
+// warned about rather than silently left: it keeps the detectors away.
+func clearParkedSession(townRoot, rigName, polecatName string) bool {
+	if !polecatSessionParked(townRoot, rigName, polecatName) {
+		return false
+	}
+	if err := agentpause.Resume(townRoot, rigName, constants.RolePolecat, polecatName); err != nil {
+		style.PrintWarning("could not clear the pause marker for %s/%s: %v (the detectors will leave it alone)", rigName, polecatName, err)
+		return false
+	}
+	return true
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) error {
@@ -598,6 +699,12 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Session restarted. Attach with: %s\n",
 		style.Bold.Render("✓"),
 		style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
+
+	// An explicit restart is an explicit resume (gt-fojqs).
+	townRoot, _ := workspace.FindFromCwd()
+	if clearParkedSession(townRoot, rigName, polecatName) {
+		fmt.Print(pauseClearedNotice)
+	}
 	return nil
 }
 

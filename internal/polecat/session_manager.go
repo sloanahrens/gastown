@@ -283,6 +283,13 @@ func (m *SessionManager) ensureCanonicalSessionBranch(g *git.Git, polecat string
 	return newBranch
 }
 
+// HasPolecat reports whether a polecat directory exists for name — the same
+// source the witness zombie detector walks when it decides which polecats it
+// may recover (gt-fojqs).
+func (m *SessionManager) HasPolecat(polecat string) bool {
+	return m.hasPolecat(polecat)
+}
+
 // hasPolecat checks if the polecat exists in this rig.
 func (m *SessionManager) hasPolecat(polecat string) bool {
 	polecatPath := m.polecatDir(polecat)

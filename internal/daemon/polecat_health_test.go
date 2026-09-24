@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -150,6 +152,52 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 	}
 	if !strings.Contains(string(eventsData), events.TypeSessionDeath) {
 		t.Errorf("events file missing session_death event: %q", eventsData)
+	}
+}
+
+// TestCheckPolecatHealth_SkipsParkedPolecat pins the daemon's side of
+// gt-fojqs. A dead session with an open hook is the crash signature, but on a
+// polecat the operator deliberately stopped (gt session stop) or parked
+// (gt agent pause) it is the state they asked for. The pause marker is the
+// choke point every scanner honors (gt-ahik); without this gate the daemon
+// raises CRASH DETECTED and a session_death event for an intentional stop.
+// TestCheckPolecatHealth_DetectsCrashedPolecat is the control: same fakes,
+// no marker, crash reported.
+func TestCheckPolecatHealth_SkipsParkedPolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "working", "working", "gt-xyz", recentTime)
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	if err := agentpause.Pause(townRoot, "myr", constants.RolePolecat, "mycat", "deliberate stop (gt session stop)", "overseer", ""); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("parked polecat must not trigger CRASH DETECTED, got: %q", got)
+	}
+	if !strings.Contains(got, "parked") {
+		t.Errorf("expected log to say the polecat is parked, got: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, events.EventsFile)); err == nil {
+		t.Error("a parked polecat must not emit a session_death event")
 	}
 }
 
