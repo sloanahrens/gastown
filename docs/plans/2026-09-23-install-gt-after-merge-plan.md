@@ -1,3 +1,5 @@
+> Status: MR-A (Tasks 1–7) implemented and in review (2026-09-24); MR-B (Tasks 8–11) and operator steps (Task 12) pending. Design: `2026-09-23-install-gt-after-merge-design.md`. Tracked in claude-7fc.
+
 # Install gt after each refinery merge, with a fresh refinery session per unit — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
