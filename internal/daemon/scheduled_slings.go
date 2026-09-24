@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -307,6 +308,14 @@ func (d *Daemon) triggerScheduledSlings() bool {
 
 func (d *Daemon) runScheduledSlings() {
 	if !d.isPatrolActive("scheduled_slings") {
+		return
+	}
+	// The operator's town-wide hold parks this patrol like every other
+	// automatic dispatcher (gt-ifijm). It is not a failure: no run bead is
+	// created, the failure counters are untouched, and the first tick after
+	// the hold lifts dispatches whatever is due.
+	if reason := dispatch.OperatorHold(d.config.TownRoot); reason != "" {
+		d.logger.Printf("scheduled_slings: not dispatching: %s", reason)
 		return
 	}
 	cfg := d.patrolConfig.Patrols.ScheduledSlings

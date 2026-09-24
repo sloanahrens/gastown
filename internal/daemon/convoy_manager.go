@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -910,6 +911,14 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 // even when some issues target unavailable rigs.
 func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	if len(c.ReadyIssues) == 0 {
+		return
+	}
+
+	// The operator's town-wide hold parks every automatic dispatcher
+	// (gt-ifijm). The convoy stays stranded and ready, so the first scan after
+	// the hold lifts feeds it.
+	if reason := dispatch.OperatorHold(m.townRoot); reason != "" {
+		m.logger("Convoy %s: not feeding %d ready issue(s): %s", c.ID, len(c.ReadyIssues), reason)
 		return
 	}
 

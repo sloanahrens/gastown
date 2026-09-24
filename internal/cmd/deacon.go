@@ -298,7 +298,9 @@ handles the re-dispatch:
 Exit codes:
   0 - Bead successfully re-dispatched or escalated
   1 - Error occurred
-  2 - Bead in cooldown (try again later)
+  2 - Bead in cooldown, or deferred by the operator's dispatch hold
+      (<town>/seat-refill.hold, ESTOP) or a full polecat pool (try again later;
+      no attempt is counted)
   3 - Bead skipped (already claimed or non-open status)
 
 Examples:
@@ -1699,7 +1701,7 @@ func runDeaconRedispatch(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s %s\n", style.Dim.Render("○"), result.Message)
 		return nil
 
-	case "cooldown":
+	case "cooldown", "deferred":
 		fmt.Printf("%s %s\n", style.Dim.Render("○"), result.Message)
 		return NewSilentExit(2)
 

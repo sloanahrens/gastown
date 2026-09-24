@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -170,7 +171,7 @@ const ModelEscalationConfigPath = ".gastown/model-escalation.json"
 // RedispatchResult describes the outcome of a re-dispatch attempt.
 type RedispatchResult struct {
 	BeadID    string `json:"bead_id"`
-	Action    string `json:"action"` // "redispatched", "cooldown", "escalated", "already-escalated", "skipped", "error"
+	Action    string `json:"action"` // "redispatched", "cooldown", "deferred", "escalated", "already-escalated", "skipped", "error"
 	TargetRig string `json:"target_rig,omitempty"`
 	Attempts  int    `json:"attempts"`
 	Message   string `json:"message,omitempty"`
@@ -440,6 +441,19 @@ func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, max
 // failure (gt-j6ez).
 func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, state *RedispatchState, beadState *BeadRedispatchState, onDispatched func()) *RedispatchResult {
 	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
+
+	// The operator's town-wide hold outranks the re-sling: this path passes
+	// --force, so nothing downstream would stop it (gt-ifijm, where gt-elvf4
+	// was force-slung during a hold). It is checked here, at the one tail both
+	// engines share, so an escalation the attempt count already earned still
+	// reaches the mayor — escalating is not dispatching. No attempt is
+	// recorded: the bead did not fail, the town is paused, and it stays open
+	// for whoever dispatches after the hold lifts.
+	if reason := dispatch.OperatorHold(townRoot); reason != "" {
+		result.Action = "deferred"
+		result.Message = "not re-dispatched: " + reason
+		return result
+	}
 
 	// Determine target rig
 	targetRig := sourceRig

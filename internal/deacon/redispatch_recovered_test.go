@@ -21,12 +21,24 @@ import (
 // town. The returned function reads the log back as one line per invocation.
 func stubDispatchTools(t *testing.T) func() []string {
 	t.Helper()
+	return stubDispatchToolsSlinging(t, "", 0)
+}
+
+// stubDispatchToolsSlinging is stubDispatchTools with a `gt sling` that writes
+// slingStderr to stderr and exits slingExit, so a test can play back what a
+// real sling reports when it refuses or fails.
+func stubDispatchToolsSlinging(t *testing.T, slingStderr string, slingExit int) func() []string {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows - shell stubs")
 	}
 
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "calls.log")
+	stderrPath := filepath.Join(binDir, "sling.stderr")
+	if err := os.WriteFile(stderrPath, []byte(slingStderr), 0644); err != nil {
+		t.Fatalf("write sling stderr: %v", err)
+	}
 
 	// One line per invocation, with any newline in an argument folded to a
 	// space: `gt mail send` bodies are multi-line, and a raw log would split
@@ -39,6 +51,10 @@ printf '%s ' "$@" | tr '\n' ' ' >> "` + logPath + `"
 printf '\n' >> "` + logPath + `"
 if [ "$TOOL" = "bd" ] && [ "$1" = "show" ]; then
   printf '%s\n' '[{"id":"gt-stubbed","status":"open"}]'
+fi
+if [ "$TOOL" = "gt" ] && [ "$1" = "sling" ]; then
+  cat "` + stderrPath + `" >&2
+  exit ` + fmt.Sprint(slingExit) + `
 fi
 exit 0
 `
@@ -264,5 +280,77 @@ func TestRedispatchRecoveredBead_NonEditorialRejectionTakesPlainPath(t *testing.
 	}
 	if call := callResembling(logged, "needs_human"); call != "" {
 		t.Errorf("a non-editorial rejection was handled as editorial: %s", call)
+	}
+}
+
+// holdTown returns a temp town root carrying the operator's town-wide
+// dispatch hold (seat-refill.hold) — never the real town's.
+func holdTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, "seat-refill.hold"), nil, 0644); err != nil {
+		t.Fatalf("write hold: %v", err)
+	}
+	return townRoot
+}
+
+// TestRedispatchRecoveredBead_OperatorHoldRefusesSling is gt-ifijm: the
+// operator's town-wide hold stops the deacon's --force re-sling. gt-elvf4 was
+// force-slung during a hold because only the bead's own record was consulted.
+// Both routes — the plain attempt count and the editorial convergence gate —
+// must refuse, leave the retry budget untouched, and say why.
+func TestRedispatchRecoveredBead_OperatorHoldRefusesSling(t *testing.T) {
+	cases := map[string]string{
+		"plain":     "MERGE REJECTION (attempt 1): build - go build failed",
+		"editorial": editorialRejectionNotes(0.9, ""),
+	}
+	for name, notes := range cases {
+		t.Run(name, func(t *testing.T) {
+			calls := stubDispatchTools(t)
+			townRoot := holdTown(t)
+
+			state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+				"gt-onhold": {BeadID: "gt-onhold", AttemptCount: 1, LastReceipt: &ReceiptSummary{Score: 0.6}},
+			}}
+			if err := SaveRedispatchState(townRoot, state); err != nil {
+				t.Fatalf("SaveRedispatchState: %v", err)
+			}
+
+			result := RedispatchRecoveredBead(RecoveredBeadRecord{Notes: notes}, townRoot, "gt-onhold", "gastown", 0, 0)
+
+			if result.Action != "deferred" {
+				t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "deferred", result.Message)
+			}
+			if !strings.Contains(result.Message, "seat-refill.hold") {
+				t.Errorf("Message = %q, want it to name the hold file", result.Message)
+			}
+			if call := callInvoking(calls(), "gt", "sling "); call != "" {
+				t.Errorf("re-slung during an operator hold: %s", call)
+			}
+
+			after, err := LoadRedispatchState(townRoot)
+			if err != nil {
+				t.Fatalf("LoadRedispatchState: %v", err)
+			}
+			got := after.Beads["gt-onhold"]
+			if got.AttemptCount != 1 || !got.LastAttemptTime.IsZero() {
+				t.Errorf("hold recorded an attempt: count=%d last=%v", got.AttemptCount, got.LastAttemptTime)
+			}
+		})
+	}
+}
+
+// TestRedispatchRecoveredBead_NoOperatorHoldStillSlings guards the other
+// side: the hold check must not turn every redispatch into a deferral.
+func TestRedispatchRecoveredBead_NoOperatorHoldStillSlings(t *testing.T) {
+	calls := stubDispatchTools(t)
+	townRoot := t.TempDir()
+
+	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-free", "gastown", 0, 0)
+	if result.Action != "redispatched" {
+		t.Fatalf("Action = %q, want redispatched (message: %s)", result.Action, result.Message)
+	}
+	if call := callInvoking(calls(), "gt", "sling gt-free gastown --force"); call == "" {
+		t.Errorf("no sling without a hold; calls: %v", calls())
 	}
 }
