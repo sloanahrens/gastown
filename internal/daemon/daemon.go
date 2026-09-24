@@ -252,6 +252,16 @@ type Daemon struct {
 	// isIdleForUpgrade treats it as idle.
 	mainBranchTestWaitingSlot atomic.Bool
 
+	// upgradeRestartRequested is set by checkUpgradeRestart; the run loop
+	// then shuts down (leaving Dolt running) and Run returns
+	// ErrRestartForUpgrade.
+	upgradeRestartRequested atomic.Bool
+	// upgradeWait* track the pending restart marker for the stuck and
+	// no-effect alarms. Run-loop goroutine only (startup and heartbeat).
+	upgradeWaitCommit    string
+	upgradeWaitSince     time.Time
+	upgradeWaitEscalated bool
+
 	// gateBusySince records, per rig, when its current unbroken run of
 	// main_branch_test gate-busy skips began — the clock
 	// patrols.main_branch_test.gate_busy_starve_after is measured on. Guarded
@@ -670,6 +680,11 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
 
+	// Clear a restart marker this binary already covers (the daemon may have
+	// been restarted onto it by launchd or an operator). Covered-only: startup
+	// never exits for an upgrade; a newer marker waits for the heartbeat.
+	d.clearCoveredRestartMarker(time.Now())
+
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, daemonSignals()...)
@@ -953,6 +968,11 @@ func (d *Daemon) Run() (err error) {
 	// Initial heartbeat
 	d.heartbeat(state)
 	startupComplete = true
+	if d.upgradeRestartRequested.Load() {
+		d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
+		_ = d.shutdown(state)
+		return ErrRestartForUpgrade
+	}
 
 	for {
 		select {
@@ -1106,6 +1126,11 @@ func (d *Daemon) Run() (err error) {
 
 		case <-timer.C:
 			d.heartbeat(state)
+			if d.upgradeRestartRequested.Load() {
+				d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
+				_ = d.shutdown(state)
+				return ErrRestartForUpgrade
+			}
 
 			// Fixed recovery interval (no activity-based backoff)
 			timer.Reset(d.recoveryHeartbeatInterval())
@@ -1146,6 +1171,20 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
+	// Before any dispatch: a heartbeat that starts plugins first would make
+	// the daemon busy and never let it restart for an upgrade.
+	if d.checkUpgradeRestart(time.Now()) {
+		return
+	}
+	heartbeatWorkFn(d, state)
+}
+
+// heartbeatWorkFn is the body of a heartbeat; a test seam.
+var heartbeatWorkFn = (*Daemon).heartbeatWork
+
+// heartbeatWork is the recovery work of one heartbeat, run after the
+// shutdown, E-stop and upgrade-restart guards in heartbeat.
+func (d *Daemon) heartbeatWork(state *State) {
 	d.metrics.recordHeartbeat(d.ctx)
 	d.logger.Println("Heartbeat starting (recovery-focused)")
 
@@ -2883,8 +2922,13 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	// pushDoltRemotesBounded).
 	d.pushDoltRemotesBounded()
 
-	// Stop Dolt server if we're managing it
-	if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {
+	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
+	// running: the server is detached and the next daemon adopts it via
+	// dolt.pid + port probe (isRunning). Bouncing the data plane several
+	// times an hour for a binary swap is not safe.
+	if d.upgradeRestartRequested.Load() {
+		d.logger.Println("Upgrade restart: leaving Dolt server running for the next daemon to adopt")
+	} else if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {
 		if err := d.doltServer.Stop(); err != nil {
 			d.logger.Printf("Warning: failed to stop Dolt server: %v", err)
 		} else {

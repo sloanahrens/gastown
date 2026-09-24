@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -95,5 +98,28 @@ func TestReadDaemonStartupFailure_MissingPIDReturnsEmpty(t *testing.T) {
 
 	if got := readDaemonStartupFailure(townRoot, 222); got != "" {
 		t.Fatalf("readDaemonStartupFailure() = %q, want empty string", got)
+	}
+}
+
+func TestDaemonRunExitMapsUpgradeTo75(t *testing.T) {
+	var code = -1
+	orig := daemonExit
+	daemonExit = func(c int) { code = c }
+	t.Cleanup(func() { daemonExit = orig })
+
+	if err := daemonRunExit(fmt.Errorf("wrapped: %w", daemon.ErrRestartForUpgrade)); err != nil {
+		t.Fatalf("daemonRunExit(upgrade) = %v, want nil", err)
+	}
+	if code != 75 {
+		t.Fatalf("exit code = %d, want 75", code)
+	}
+
+	code = -1
+	other := errors.New("boom")
+	if err := daemonRunExit(other); err != other {
+		t.Fatalf("daemonRunExit(other) = %v, want passthrough", err)
+	}
+	if err := daemonRunExit(nil); err != nil || code != -1 {
+		t.Fatalf("daemonRunExit(nil) = %v, code %d; want nil and no exit", err, code)
 	}
 }
