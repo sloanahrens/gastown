@@ -455,7 +455,8 @@ func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *syn
 // startOrRestartCrewMember starts or restarts a single crew member and returns a status message.
 // Uses IsAgentAlive for robust zombie detection (checks pane command + descendant processes),
 // and delegates zombie cleanup to crewMgr.Start() which kills the zombie session and recreates
-// it with fresh env vars and runtime settings.
+// it with fresh env vars and runtime settings. A restart whose agent env does not validate
+// (an unset ${VAR} reference) keeps the existing session and reports the reason.
 func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot string) (msg string, started bool) {
 	sessionID := crewSessionName(r.Name, crewName)
 	if running, _ := t.HasSession(sessionID); running {
@@ -471,7 +472,14 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 				Sender:    "human",
 				Topic:     "restart",
 			})
-			agentCmd := config.BuildCrewStartupCommand(r.Name, crewName, r.Path, beacon)
+			agentCmd, err := config.BuildCrewStartupCommand(r.Name, crewName, r.Path, beacon)
+			if err != nil {
+				// The empty credential would surface only once the agent was
+				// running, and crewMgr.Start resolves this same env and so
+				// refuses the same restart. Hold the session and report why
+				// (gt-wisp-jsm).
+				return fmt.Sprintf("  %s %s/%s restart held: %v; session preserved\n", style.Dim.Render("○"), r.Name, crewName, err), false
+			}
 			if err := t.SendKeys(sessionID, agentCmd); err != nil {
 				return fmt.Sprintf("  %s %s/%s restart failed: %v\n", style.Dim.Render("○"), r.Name, crewName, err), false
 			}

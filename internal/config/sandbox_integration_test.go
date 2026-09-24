@@ -353,10 +353,13 @@ echo "DONE"
 	}
 
 	// Build the startup command (this is what session_manager would do)
-	startupCmd := BuildStartupCommand(
+	startupCmd, err := BuildStartupCommand(
 		map[string]string{"GT_ROLE": "testrig/polecats/test"},
 		rigPath, "",
 	)
+	if err != nil {
+		t.Fatalf("BuildStartupCommand returned an error: %v", err)
+	}
 
 	// Verify the command structure
 	if !strings.Contains(startupCmd, "sandbox-exec") {
