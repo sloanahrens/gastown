@@ -499,6 +499,14 @@ func polecatStopVerificationArgv(argv string, gates []stopCheckGate) (string, bo
 	if i := findInvocation(tokens, "gt", "slot"); i >= 0 && i+2 < len(tokens) && tokens[i+2] == "run" {
 		return "gt slot run", true
 	}
+	// A backgrounded gt done clears the slot, pane-child, and grace-period
+	// checks the moment its own gate finishes (GT_TEST_DOCKER=0 holds no
+	// slot) while the process itself is still running — the next Stop event
+	// then races it with a second gt done (gt-h3zjo). Its own submission is
+	// the pending work this check would otherwise resubmit.
+	if findInvocation(tokens, "gt", "done") >= 0 {
+		return "gt done", true
+	}
 	for _, gate := range gates {
 		if stopCheckGateMatches(tokens, gate) {
 			return strings.TrimSpace(gate.Program + " " + gate.Target), true
