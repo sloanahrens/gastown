@@ -8,8 +8,13 @@
 # Merged is not in force until something installs: the daemon and every
 # session it spawns keep executing the binary at their install path, so a
 # stale binary leaves merged fixes inert for as long as detection goes
-# unrepaired (gt-oqbw). So this plugin installs, then verifies what came into
-# force.
+# unrepaired (gt-oqbw). So this plugin installs — through scripts/install-gt.sh,
+# the same locked path the refinery's post-merge hook uses (claude-7fc) — and
+# leaves the daemon restart to the daemon: install-gt.sh writes
+# restart-pending.json and the daemon exits for launchd at its idle point, so
+# no install kills in-flight plugins. It is the backstop: the post-merge hook
+# installs most merges first, and this plugin also escalates when the daemon
+# has not come into force (rebuild-gt:daemon-not-in-force).
 #
 # Exit codes are this script's contract with the daemon (plugin.md sets
 # [execution] allow_deferred_exit = true, without which the daemon reads exit
@@ -18,8 +23,8 @@
 # (recorded as success or skipped); 3 DEFERRED — nothing accomplished, so
 # deliberately no run record, because a record satisfies the cooldown gate and
 # a run that accomplished nothing must not buy an hour before the retry;
-# 1 FAILED — build failed, or the install could not be verified as in force
-# (recorded as failure and escalated under a stable fingerprint). Before
+# 1 FAILED — install-gt.sh failed (it escalates its own failure under
+# install-gt:*), or the rig has no install-gt.sh (recorded as failure). Before
 # changing that contract, read plugins/rebuild-gt/plugin.md and
 # internal/daemon/plugin_script.go.
 #
@@ -254,7 +259,8 @@ blocked_defer() {
 clear_alarms() {
   gt escalate clear --fingerprint "rebuild-gt:starved" \
     --fingerprint "rebuild-gt:drift" --fingerprint "rebuild-gt:drift-unknown" \
-    --fingerprint "rebuild-gt:unverified" \
+    --fingerprint "rebuild-gt:unverified" --fingerprint "rebuild-gt:no-installer" \
+    --fingerprint "rebuild-gt:install-failed" \
     --reason "rebuild-gt: the binary is in force" >/dev/null 2>&1 || true
 }
 
@@ -288,15 +294,13 @@ fi
 # meaningful here even though the checks below may bail on that same
 # worktree being dirty or on the wrong branch.
 MAX_COMMITS_BEHIND=${REBUILD_GT_MAX_COMMITS_BEHIND:-20}
-# A merged commit that is not in force is a live defect, not a rounding error:
-# gt-ww20 (a batch path that bypassed the editorial gate, so 4 MRs landed
-# unreviewed) and gt-rbfj (composer-stall recovery typing the literal text
-# 'C-x C-s' into the composer, the cause of both refinery stalls that day)
-# were each merged while the town kept running a binary without them
-# (gt-oqbw). So the install does not wait for a large delta: past this many
-# commits, install at the first quiet moment. Raise it to trade inert fixes
-# for fewer daemon restarts.
-THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-5}
+# A merged commit that is not in force is a live defect, not a rounding error
+# (gt-oqbw, gt-ww20, gt-rbfj): one commit behind is due. The post-merge hook
+# (scripts/install-after-merge.sh) normally installs first; this plugin is the
+# backstop for merges that bypass it (direct pushes, orphan-path merges, a
+# failed hook), so waiting for a batch of commits only lengthens the inert
+# window (claude-7fc).
+THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-1}
 
 # DUE is read from this same unconditional staleness call, before any bail
 # below can leave the binary out of force. Every path that then declines to
@@ -333,6 +337,82 @@ print(v if v is not None else 'unknown')
       -s medium \
       --source "plugin:rebuild-gt" \
       --fingerprint "rebuild-gt:drift" 2>/dev/null || true
+  fi
+fi
+
+# --- Daemon in force (backstop, claude-7fc) -------------------------------------
+#
+# Installs no longer restart the daemon: install-gt.sh writes
+# daemon/restart-pending.json and the daemon exits for a launchd restart at its
+# own idle point. Two readings say that did not happen: a marker that has
+# waited past the limit (the daemon never went idle, or never read it), or a
+# daemon whose recorded commit (state.json "commit", possibly short) is not a
+# descendant of the installed binary's while that binary has been in place past
+# the limit (a crash loop, or an install by some path that wrote no marker).
+# Each run that sees the lag re-sends the HIGH escalation under one
+# fingerprint, which the town dedupes into one bead per episode; the flag file
+# is what lets a later healthy run close it, so a healthy run with no episode
+# open writes nothing.
+DAEMON_LAG_MINUTES=${REBUILD_GT_DAEMON_LAG_MINUTES:-30}
+LAG_FLAG="${TOWN_ROOT}/daemon/rebuild-gt-daemon-lag"
+
+marker_age_minutes() {
+  python3 - "${TOWN_ROOT}/daemon/restart-pending.json" <<'PY' 2>/dev/null || true
+import datetime, json, sys, time
+m = json.load(open(sys.argv[1]))
+t = datetime.datetime.strptime(m["requested_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print(int((time.time() - t.timestamp()) // 60))
+PY
+}
+daemon_state_commit() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit") or "")' "${TOWN_ROOT}/daemon/state.json" 2>/dev/null || true
+}
+file_age_minutes() {
+  python3 -c 'import os,sys,time; print(int((time.time() - os.path.getmtime(sys.argv[1])) // 60))' "$1" 2>/dev/null || echo 0
+}
+
+LAG=""
+# IN_FORCE is set only by a positive healthy reading: no marker pending, and
+# condition 2 actually evaluated with the daemon's commit a descendant of the
+# installed binary's. A reading that could not be taken (gt stale failed,
+# state.json has no commit, a commit does not resolve) is neither lag nor
+# health, so it leaves an open escalation alone instead of flapping it.
+IN_FORCE=""
+MARKER_AGE=$(marker_age_minutes)
+if [ -n "$MARKER_AGE" ] && [ "$MARKER_AGE" -ge "$DAEMON_LAG_MINUTES" ]; then
+  LAG="a restart-pending marker has waited ${MARKER_AGE}m for the daemon to restart"
+elif [ "$DRIFT_READ" = "1" ]; then
+  DC=$(daemon_state_commit)
+  BC=$(echo "$DRIFT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || true)
+  DCF=$( [ -n "$DC" ] && git -C "$RIG_ROOT" rev-parse --verify --quiet "$DC^{commit}" 2>/dev/null || true )
+  BCF=$( [ -n "$BC" ] && git -C "$RIG_ROOT" rev-parse --verify --quiet "$BC^{commit}" 2>/dev/null || true )
+  GT_BIN=$(command -v gt 2>/dev/null || true)
+  if [ -z "$DCF" ] || [ -z "$BCF" ] || [ -z "$GT_BIN" ]; then
+    log "Daemon-in-force check skipped: cannot resolve the daemon's commit ('$DC') or the binary's ('$BC')."
+  elif git -C "$RIG_ROOT" merge-base --is-ancestor "$BCF" "$DCF" 2>/dev/null; then
+    [ -e "${TOWN_ROOT}/daemon/restart-pending.json" ] || IN_FORCE=1
+  else
+    BIN_AGE=$(file_age_minutes "$GT_BIN")
+    if [ "$BIN_AGE" -ge "$DAEMON_LAG_MINUTES" ]; then
+      LAG="the daemon runs $DC but $BC has been installed for ${BIN_AGE}m"
+    fi
+  fi
+fi
+if [ -n "$LAG" ]; then
+  log "Daemon not in force: $LAG."
+  if gt escalate "rebuild-gt: $LAG" -s high --source "plugin:rebuild-gt" \
+    --fingerprint "rebuild-gt:daemon-not-in-force" >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$LAG_FLAG")" 2>/dev/null || true
+    touch "$LAG_FLAG" 2>/dev/null || true
+  fi
+elif [ -n "$IN_FORCE" ] && [ -e "$LAG_FLAG" ]; then
+  # The flag goes only once the clear landed: a failed clear keeps it, so the
+  # next healthy run retries instead of leaving the alert with no closer.
+  if gt escalate clear --fingerprint "rebuild-gt:daemon-not-in-force" \
+    --reason "rebuild-gt: the daemon runs the installed binary" >/dev/null 2>&1; then
+    rm -f "$LAG_FLAG"
+  else
+    log "WARNING: could not clear rebuild-gt:daemon-not-in-force; will retry next run."
   fi
 fi
 
@@ -394,9 +474,50 @@ fi
 # stale local tip — checking staleness first lets it read as "fresh" and the
 # fetch/pull never runs. Syncing first means the staleness check that
 # follows sees a caught-up local main.
+#
+# The sync is a write to mayor/rig, and every write to mayor/rig happens under
+# install-gt.sh's flock (claude-7fc), so it cannot move the tree under a build
+# the post-merge hook is running. The lock is released right after the sync,
+# before install-gt.sh runs and takes it again itself. A lock that stays busy
+# means an install is running right now: defer to the next heartbeat, as
+# install-gt's own exit 3 does.
+INSTALL_LOCK="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT}/daemon}/install-gt.lock"
+LOCK_WAIT=${REBUILD_GT_LOCK_WAIT:-30}
+# What install-gt.sh itself waits for the same lock (seconds); see the call.
+INSTALL_LOCK_WAIT=${REBUILD_GT_INSTALL_LOCK_WAIT:-60}
+
+# install_lock_take — flock the install lock on fd 9, waiting up to
+# $LOCK_WAIT seconds; false when it stays busy. perl locks the shell's own open
+# file description (macOS has no flock(1)), so the lock outlives perl and is
+# held until fd 9 closes: install_lock_release, or this process exiting.
+install_lock_take() {
+  mkdir -p "$(dirname "$INSTALL_LOCK")" 2>/dev/null || true
+  exec 9>>"$INSTALL_LOCK" || return 1
+  if ! perl -e '
+    use Fcntl qw(:flock);
+    open(my $fh, ">&=", 9) or exit 1;
+    my $deadline = time + $ARGV[0];
+    until (flock($fh, LOCK_EX | LOCK_NB)) {
+      exit 1 if time >= $deadline;
+      select(undef, undef, undef, 0.5);
+    }
+    exit 0;
+  ' "$LOCK_WAIT"; then
+    exec 9>&-
+    return 1
+  fi
+}
+install_lock_release() { exec 9>&-; }
+
+if ! install_lock_take; then
+  if [ -n "$DUE" ]; then note_blocked "another install holds the install lock"; fi
+  defer "another install holds the install lock ($INSTALL_LOCK) past ${LOCK_WAIT}s; not syncing $RIG_ROOT"
+fi
+# Every git call under the lock closes fd 9 (9>&-): git can fork a detached
+# 'gc --auto' that would otherwise inherit the lock and hold it past this run.
 log "Syncing $RIG_ROOT with origin/main..."
-git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
-if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
+git -C "$RIG_ROOT" fetch origin --quiet 9>&- 2>/dev/null || true
+if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 9>&- 2>/dev/null; then
   # rev-list --count always prints a number, including "0", so testing it
   # with -n is always true; that bug let this branch treat every ff-only
   # failure as a real divergence and skipped the retry below unconditionally
@@ -404,8 +525,9 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
   # origin/main lacks (a real divergence); 0 means the ff-only failed for
   # some other reason (e.g. an untracked file the merge would overwrite),
   # which a re-fetch+re-merge can still resolve if that reason has cleared.
-  COUNT=$(git -C "$RIG_ROOT" rev-list origin/main..HEAD --count 2>/dev/null || echo 0)
+  COUNT=$(git -C "$RIG_ROOT" rev-list origin/main..HEAD --count 9>&- 2>/dev/null || echo 0)
   if [ "$COUNT" -gt 0 ]; then
+    install_lock_release
     log "Local main diverged from origin/main, skipping rebuild."
     if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
@@ -418,8 +540,9 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
   # would overwrite). Re-fetch and re-merge exactly once; if it still fails
   # the retry didn't clear whatever blocked it and the original bail stands.
   log "origin/main moved during sync; re-fetching and re-merging once..."
-  git -C "$RIG_ROOT" fetch origin --quiet 2>/dev/null || true
-  if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
+  git -C "$RIG_ROOT" fetch origin --quiet 9>&- 2>/dev/null || true
+  if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 9>&- 2>/dev/null; then
+    install_lock_release
     log "Local main diverged from origin/main, skipping rebuild."
     if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
@@ -428,6 +551,7 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
     exit 0
   fi
 fi
+install_lock_release
 
 # --- Detection ---------------------------------------------------------------
 
@@ -446,10 +570,9 @@ import json, sys
 v = json.load(sys.stdin).get('commits_behind')
 print(v if v is not None else 'unknown')
 " 2>/dev/null || echo "unknown")
-# repo_commit is deliberately not read here: it would only be used to verify
-# what came into force after the build, and that comparison needs EXPECTED_COMMIT
-# instead (read fresh from RIG_ROOT right before the build, below) — this
-# field can move past what was actually built (gt-oqbw).
+# repo_commit is deliberately not read here: it can move past what was
+# actually built (gt-oqbw), so install-gt.sh verifies against the rig's HEAD
+# at build time instead. BINARY_COMMIT is the receipt's fallback "from".
 BINARY_COMMIT=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || echo "")
 
 if [ "$IS_STALE" != "True" ]; then
@@ -506,9 +629,7 @@ except Exception:
 }
 
 # install_requires_quiet [WARN] — return when no merge is in flight, defer when
-# one is. Called twice: before the build, and again immediately before the
-# install, because the build takes minutes and a merge that was not in flight
-# when the run started can be in flight by the time it finishes (gt-kox0).
+# one is. Called before the build.
 install_requires_quiet() {
   local n
   n=$(in_flight_count)
@@ -591,7 +712,8 @@ reserve_remaining() {
 }
 
 # The town must also have nothing in flight (gt-oqbw): an MR a refinery is
-# mid-merge on is work this restart would interrupt. An MR merely ready in the
+# mid-merge on is running a gate suite the build would compete with (the
+# install itself no longer restarts anything, claude-7fc). An MR merely ready in the
 # queue is NOT a reason to wait — it consumes nothing, and at this town's
 # merge rate the queue is never empty, so requiring that would leave the
 # install waiting forever. An unreadable Docker status is not a reason either:
@@ -636,166 +758,113 @@ if [ "$RESERVE" = "1" ]; then
   wait_for_gate_free || blocked_defer "waited $RESERVE_WAIT for the container-gate slot and did not get it"
 fi
 
-log "Rebuilding gt from $RIG_ROOT ($BEHIND commits behind)..."
+log "Installing gt from $RIG_ROOT ($BEHIND commits behind) through scripts/install-gt.sh..."
 
-# What was actually built is RIG_ROOT's HEAD at build time — not the
-# repo_commit read earlier from 'gt stale --json'. That call does its own
-# independent fetch (CheckStaleBinaryFresh) and can therefore report a
-# repo_commit that has already moved past what this checkout's HEAD (and thus
-# this build) contains (gt-oqbw). Reading it fresh from RIG_ROOT
-# immediately before the build ties the expectation to the tree actually
-# compiled.
-EXPECTED_COMMIT=$(git -C "$RIG_ROOT" rev-parse HEAD)
-
-# build_gt — the CPU-heavy half, run inside the container-gate slot when a held
-# slot is what has been blocking this rebuild (gt-kox0). Non-zero means the
-# build failed; a wait that never got the slot is a deferral, not a failure.
-#
-# It builds the pinned SHA, and SKIP_UPDATE_CHECK=1 is load-bearing: passed to
-# 'make safe-install', it disables check-up-to-date's own live fetch-and-
-# compare against origin/main (Makefile's check-up-to-date is a no-op under
-# SKIP_UPDATE_CHECK), so a merge that lands on origin/main after the ff-only
-# sync above but before safe-install runs cannot fail the check against a ref
-# that has since moved (gt-9jax). This is safe because the sync already
-# fast-forwarded HEAD to what origin/main was at sync time; check-forward-only
-# and the post-install verification below are the guards that remain.
-build_gt() {
-  if [ "$RESERVE" != "1" ]; then
-    (cd "$RIG_ROOT" && make SKIP_UPDATE_CHECK=1 build) 2>&1 || return $?
-    return 0
-  fi
-  local logf rc=0
-  logf=$(mktemp) || return 1
-  log "Building inside the container-gate slot (acquire budget $(reserve_remaining)s)."
-  # Teed rather than captured: a build that spends the acquire budget waiting
-  # would otherwise print nothing to the plugin log until it finished, and read
-  # as hung (gt-kox0).
-  (cd "$RIG_ROOT" && gt slot run --role gastown/rebuild-gt --timeout "$(reserve_remaining)s" -- make SKIP_UPDATE_CHECK=1 build) 2>&1 \
-    | tee "$logf" || rc=$?
-  # 'gt slot run' prints this the moment it holds the slot — the literal is
-  # slotAcquiredFormat in internal/cmd/slot.go, pinned by
-  # TestSlotAcquiredFormat. Without it the build never started, so nothing was
-  # built: the retry belongs on the next heartbeat, not in an escalation.
-  if ! grep -q "Container-gate slot acquired" "$logf"; then
-    rm -f "$logf"
-    blocked_defer "waited for the container-gate slot and did not get it"
-  fi
-  rm -f "$logf"
-  return "$rc"
-}
-
-# The install stays outside the slot hold: it is a temp-file rename, not a CPU
-# consumer, so releasing the slot when the build ends costs the gate nothing.
-if build_gt && install_requires_quiet && (cd "$RIG_ROOT" && make SKIP_UPDATE_CHECK=1 safe-install) 2>&1; then
-  # What came into force is read from the gt the town will execute — resolved
-  # through PATH, which is how the daemon and every session resolve it — not
-  # from the build's stdout. An install that does not take (a shadowing gt
-  # earlier in PATH, an INSTALL_DIR that is not the one assumed, a replacement
-  # that silently went elsewhere) leaves every log line saying "installed"
-  # while the town runs old code, and recording the wrong commit is worse than
-  # recording none (gt-oqbw).
-  GT_PATH=$(command -v gt 2>/dev/null || true)
-  # binary_commit from 'gt stale --json' is the SHORT hash the Makefile bakes
-  # in (COMMIT := git rev-parse --short HEAD, internal/cmd.Commit) — NOT full,
-  # despite what an earlier version of this comment claimed. EXPECTED_COMMIT
-  # is always full. Comparing them directly would fail every real install
-  # (gt-b5mpe), so both this reading and the fallback below are resolved to a
-  # full hash inside RIG_ROOT before the comparison, regardless of length.
-  GOT_COMMIT=$(gt stale --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('binary_commit') or '')" 2>/dev/null || true)
-  # A binary with no commit at all (a dev build installed by some other path)
-  # cannot be verified this way, and the fallback mirrors the production
-  # failure this replaced: 'gt version' prints no '@' from a cwd that is not a
-  # repo, which is where this plugin always runs (gt-b5mpe).
-  if [ -z "$GOT_COMMIT" ]; then
-    GOT_COMMIT=$(gt version 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@' || true)
-  fi
-  if [ -z "$GOT_COMMIT" ]; then
-    log "FAILED: cannot read the installed binary's commit ($GT_PATH)"
-    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-      --title "Plugin: rebuild-gt [unverified]" \
-      --description "Installed but the commit in force could not be read from $GT_PATH" >/dev/null 2>&1 || true
-    gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
-      --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
-    exit 1
-  fi
-  # Resolve inside RIG_ROOT (the one repo it's guaranteed unambiguous in)
-  # before comparing like with like (gt-oqbw, gt-b5mpe). rev-parse --verify
-  # accepts a hash of any length, so this is a no-op when GOT_COMMIT is
-  # already full.
-  RESOLVED=$(git -C "$RIG_ROOT" rev-parse --verify --quiet "$GOT_COMMIT" 2>/dev/null || true)
-  if [ -z "$RESOLVED" ]; then
-    log "FAILED: installed commit $GOT_COMMIT does not resolve inside $RIG_ROOT"
-    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-      --title "Plugin: rebuild-gt [unverified]" \
-      --description "Installed but $GOT_COMMIT (from $GT_PATH) does not resolve to a commit in $RIG_ROOT" >/dev/null 2>&1 || true
-    gt escalate "rebuild-gt: installed a build but cannot verify what came into force" -s medium \
-      --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:unverified" 2>/dev/null || true
-    exit 1
-  fi
-  GOT_COMMIT="$RESOLVED"
-  if [ "$GOT_COMMIT" != "$EXPECTED_COMMIT" ]; then
-    log "FAILED: in force is $GOT_COMMIT, built $EXPECTED_COMMIT"
-    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-      --title "Plugin: rebuild-gt [install did not take]" \
-      --description "Built $EXPECTED_COMMIT but the gt on PATH ($GT_PATH) reports $GOT_COMMIT" >/dev/null 2>&1 || true
-    gt escalate "rebuild-gt: the install did not take — gt on PATH reports $GOT_COMMIT, built $EXPECTED_COMMIT" \
-      -s medium --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:not-in-force" 2>/dev/null || true
-    exit 1
-  fi
-  log "Rebuilt: $BINARY_COMMIT -> $GOT_COMMIT"
-
-  # The receipt below names the commits that came into force; the syncs it
-  # depends on (formulas, this very plugin directory) run first, so a receipt
-  # that claims a rebuild also shows whether formula delivery took (gt-b5mpe).
-  # Non-fatal: sync content is convenience, not required for the binary to
-  # work, so a failure must not fail the whole rebuild.
-  if SYNC_OUT=$(gt formula sync 2>&1); then
-    log "$SYNC_OUT"
-  else
-    log "formula sync failed (non-fatal): $SYNC_OUT"
-  fi
-  if PLUGIN_SYNC_OUT=$(gt plugin sync 2>&1); then
-    log "$PLUGIN_SYNC_OUT"
-  else
-    log "plugin sync failed (non-fatal): $PLUGIN_SYNC_OUT"
-  fi
-
-  # The commits in this range were merged and not running until now: that
-  # list is the inert window, recorded so "was gt-ww20 ever in force, and
-  # when" is answered by the receipt instead of reconstructed from merge
-  # timestamps.
-  SUBJECTS=$(git -C "$RIG_ROOT" log --no-decorate --oneline "$BINARY_COMMIT..$GOT_COMMIT" 2>/dev/null | head -20 || true)
-  gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
-    --title "rebuild-gt: in force $BINARY_COMMIT -> $GOT_COMMIT ($BEHIND commits)" \
-    --description "Brought into force $BINARY_COMMIT..$GOT_COMMIT ($BEHIND commits):
-$SUBJECTS" >/dev/null 2>&1 || true
-
-  # Nothing is blocked any more: the same fact that makes the receipt above a
-  # success is what closes the block this file was counting and every alarm
-  # keyed to the binary being out of force (gt-kox0).
-  starve_clear "installed $GOT_COMMIT" >/dev/null
-  clear_alarms
-
-  # The restart is last because it terminates the process running this script;
-  # the receipt above is already written. 'gt daemon restart' is launchctl
-  # kickstart -k, and it is what puts the new binary in force for the daemon
-  # itself, which runs this and every other script plugin in-process. A stop
-  # followed by a start is not the pair to use: stop unloads the launchd job,
-  # so a failure in between leaves the town with no daemon and no loaded job
-  # (gt-sq9e).
-  if gt daemon restart >/dev/null 2>&1; then
-    log "Daemon restarted on $GOT_COMMIT."
-  else
-    log "WARNING: daemon restart failed; it is still running the previous binary."
-    gt escalate "rebuild-gt: installed $GOT_COMMIT but the daemon did not restart" \
-      -s medium --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:restart-failed" 2>/dev/null || true
-  fi
-else
-  ERROR="make build/safe-install failed"
-  log "FAILED: $ERROR"
+# One install path for the town (claude-7fc): the rig's own install-gt.sh builds,
+# installs, verifies (rolling back on a failed smoke check), syncs formulas and
+# plugins, and writes the restart-pending marker; the daemon restarts itself at
+# its idle point, so nothing here kills in-flight plugins — this one included.
+# It runs under the install lock, which the post-merge hook takes too, so the two
+# can never build into one output. What it builds is RIG_ROOT's HEAD, which the
+# sync above fast-forwarded to origin/main (SKIP_UPDATE_CHECK stays inside it,
+# gt-9jax).
+INSTALLER="$RIG_ROOT/scripts/install-gt.sh"
+if [ ! -f "$INSTALLER" ]; then
+  log "FAILED: $INSTALLER is missing (the rig checkout is older than this plugin)"
   gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
-    --title "Plugin: rebuild-gt [failure]" \
-    --description "Build failed: $ERROR" >/dev/null 2>&1 || true
-  gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
+    --title "Plugin: rebuild-gt [no installer]" \
+    --description "$INSTALLER does not exist" >/dev/null 2>&1 || true
+  gt escalate "rebuild-gt: $INSTALLER is missing, so nothing can install gt" -s medium \
+    --source "plugin:rebuild-gt" --fingerprint "rebuild-gt:no-installer" 2>/dev/null || true
   exit 1
 fi
+TARGET=$(git -C "$RIG_ROOT" rev-parse HEAD)
+INSTALL_ARGS=(--sha "$TARGET" --source rebuild-gt)
+if [ "$RESERVE" = "1" ]; then
+  INSTALL_ARGS+=(--slot-role gastown/rebuild-gt --slot-timeout "$(reserve_remaining)")
+fi
+
+# Teed, not captured: a build waiting on the slot would otherwise print nothing
+# to the plugin log until it finished, and read as hung (gt-kox0).
+INSTALL_LOG=$(mktemp)
+set +e
+# INSTALL_GT_LOCK_WAIT: a post-merge install holding the lock means one is
+# running right now; wait a minute, not install-gt's default 5, then defer
+# (exit 3). Waiting longer only keeps this plugin running, which keeps the
+# daemon non-idle and delays its upgrade restart.
+INSTALL_GT_LOCK_WAIT="$INSTALL_LOCK_WAIT" INSTALL_GT_RIG_DIR="$RIG_ROOT" \
+  bash "$INSTALLER" "${INSTALL_ARGS[@]}" 2>&1 | tee "$INSTALL_LOG"
+INSTALL_RC=${PIPESTATUS[0]}
+set -e
+RESULT=$(grep -a '^install-gt: RESULT ' "$INSTALL_LOG" | tail -1 || true)
+rm -f "$INSTALL_LOG"
+# install-gt: RESULT <event> <commit> <prev> <reason>
+R_EVENT="" R_COMMIT="" R_PREV="" R_REASON=""
+read -r _ _ R_EVENT R_COMMIT R_PREV R_REASON <<<"$RESULT" || true
+# igt_result writes "-" for an absent field.
+[ "$R_COMMIT" = "-" ] && R_COMMIT=""
+[ "$R_PREV" = "-" ] && R_PREV=""
+[ "$R_REASON" = "-" ] && R_REASON=""
+
+case "$INSTALL_RC" in
+  0)
+    if [ "$R_EVENT" = "noop" ]; then
+      log "Binary already contains $TARGET."
+      starve_clear "binary is fresh" >/dev/null
+      clear_alarms
+      gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+        --title "rebuild-gt: binary is fresh" >/dev/null 2>&1 || true
+      exit 0
+    fi
+    FROM="${R_PREV:-$BINARY_COMMIT}"
+    TO="${R_COMMIT:-$TARGET}"
+    # The commits in this range were merged and not running until now: that
+    # list is the inert window, so "was gt-ww20 ever in force, and when" is
+    # answered by the receipt instead of reconstructed from merge timestamps.
+    SUBJECTS=$(git -C "$RIG_ROOT" log --no-decorate --oneline "$FROM..$TO" 2>/dev/null | head -20 || true)
+    gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+      --title "rebuild-gt: in force $FROM -> $TO ($BEHIND commits)" \
+      --description "Brought into force $FROM..$TO ($BEHIND commits); the daemon restarts at its idle point:
+$SUBJECTS" >/dev/null 2>&1 || true
+    starve_clear "installed $TO" >/dev/null
+    clear_alarms
+    log "In force: $FROM -> $TO. Restart marker written; the daemon restarts when idle."
+    exit 0
+    ;;
+  2)
+    log "install-gt refused: ${R_REASON:-unknown}"
+    if [ -n "$DUE" ]; then note_blocked "install-gt refused: ${R_REASON:-unknown}"; fi
+    gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+      --title "Plugin: rebuild-gt [skipped]" \
+      --description "Skipped: install-gt refused (${R_REASON:-unknown})" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  3)
+    if [ "$R_REASON" = "slot-busy" ]; then
+      blocked_defer "waited for the container-gate slot and did not get it"
+    fi
+    blocked_defer "another install holds the install lock"
+    ;;
+  *)
+    log "FAILED: install-gt exited $INSTALL_RC (${R_REASON:-no result line})"
+    # install-gt escalates these reasons itself (install-gt:build-failed,
+    # :smoke-failed, :rollback-failed, :marker-write-failed). Anything else —
+    # its 'unexpected' trap, no-rig, or no RESULT line at all — reached nobody,
+    # and the failure record starts a cooldown, so escalate it here.
+    case "$R_REASON" in
+      build-failed|smoke-failed|rollback-failed|marker-write)
+        ESCALATED_BY="escalated by install-gt" ;;
+      *)
+        ESCALATED_BY="escalated by rebuild-gt"
+        gt escalate "rebuild-gt: install-gt failed (${R_REASON:-no result line}, exit $INSTALL_RC) installing $TARGET" \
+          -s medium --source "plugin:rebuild-gt" \
+          --fingerprint "rebuild-gt:install-failed" >/dev/null 2>&1 \
+          || { log "WARNING: escalation rebuild-gt:install-failed did not reach the town"; ESCALATED_BY="escalation failed"; }
+        ;;
+    esac
+    gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
+      --title "Plugin: rebuild-gt [failure]" \
+      --description "install-gt failed: ${R_REASON:-exit $INSTALL_RC} ($ESCALATED_BY)" >/dev/null 2>&1 || true
+    exit 1
+    ;;
+esac

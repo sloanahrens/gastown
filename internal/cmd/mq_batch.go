@@ -485,6 +485,14 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// The gate is done; don't hold its slot through the post-merge install.
+	// Release is idempotent, so the deferred Release above stays harmless.
+	if h != nil {
+		_ = h.Release()
+	}
+	// stderr, not stdout: --json mode's stdout must stay a single JSON document.
+	runBatchPostMergeCommand(townRoot, rigName, r.Path, mq, result, target, cmd.ErrOrStderr())
+
 	if result.Error != nil {
 		return fmt.Errorf("batch processing error: %w", result.Error)
 	}

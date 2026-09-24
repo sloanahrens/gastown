@@ -255,6 +255,11 @@ test-makefile:
 	bash scripts/check-install-path_test.sh
 	bash scripts/install-binary_test.sh
 	bash scripts/check-deploy-source_test.sh
+	bash -n scripts/install-gt.sh
+	bash -n scripts/lib/install-gt-lib.sh
+	bash scripts/install-gt_test.sh
+	bash -n scripts/install-after-merge.sh
+	bash scripts/install-after-merge_test.sh
 	bash -n plugins/stuck-agent-dog/run.sh
 	bash -n plugins/stuck-agent-dog/run_test.sh
 	bash plugins/stuck-agent-dog/run_test.sh

@@ -1529,6 +1529,18 @@ type MergeQueueConfig struct {
 	// no tier has set an editorial block; Required defaults to false so
 	// rigs that never configure it keep upstream (pre-gate) behavior.
 	Editorial *EditorialConfig `json:"editorial,omitempty"`
+
+	// PostMergeCommand runs after every landed merge (single MR, or once per
+	// batch) in <rig>/refinery/rig, with GT_MERGED_SHA, GT_RIG, GT_TOWN_ROOT
+	// and GT_MR_IDS set. Best-effort: a failure or timeout escalates and never
+	// fails the merge. Honored only from the rig-root config.json:
+	// MergeSettingsCommand deliberately does not overlay it from the repo or
+	// local tiers, so merged repo content cannot choose the command.
+	PostMergeCommand string `json:"post_merge_command,omitempty"`
+
+	// PostMergeTimeout bounds PostMergeCommand (e.g. "20m"). Empty defaults to
+	// DefaultPostMergeTimeout. Rig-root tier only, like PostMergeCommand.
+	PostMergeTimeout string `json:"post_merge_timeout,omitempty"`
 }
 
 // EditorialConfig controls the om editorial gate for a rig's merge queue:
@@ -1704,6 +1716,23 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 		return 0
 	}
 	return c.MaxReadyForDispatch
+}
+
+// DefaultPostMergeTimeout covers the install script's 5m lock wait plus a
+// cold-cache build, well under the refinery shell tool's 45m ceiling.
+const DefaultPostMergeTimeout = 20 * time.Minute
+
+// GetPostMergeTimeout returns the post-merge command timeout. Nil-safe; an
+// empty, unparsable or non-positive value yields DefaultPostMergeTimeout.
+func (c *MergeQueueConfig) GetPostMergeTimeout() time.Duration {
+	if c == nil || c.PostMergeTimeout == "" {
+		return DefaultPostMergeTimeout
+	}
+	d, err := time.ParseDuration(c.PostMergeTimeout)
+	if err != nil || d <= 0 {
+		return DefaultPostMergeTimeout
+	}
+	return d
 }
 
 // HasAnyGateCommand reports whether at least one of the five gate commands

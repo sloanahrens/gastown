@@ -808,6 +808,9 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	handlePostMergeRubricChange(r.Path, r.Name, rigGit, result.MR, branchCleanup.SubmittedHead)
 
 	printMQPostMergeResult(result, branchCleanup)
+
+	townRoot := filepath.Dir(r.Path)
+	runMRPostMergeCommand(townRoot, r.Name, r.Path, rig.ResolveMergeQueueConfig(townRoot, r.Name), result.MR, os.Stdout)
 	return nil
 }
 

@@ -61,6 +61,11 @@ type State struct {
 
 	// HeartbeatCount is how many heartbeats have completed.
 	HeartbeatCount int64 `json:"heartbeat_count"`
+
+	// Commit is the build commit of the running daemon, fully resolved when
+	// the gastown source repo is available (see resolveOwnCommit). rebuild-gt
+	// reads it to tell whether the daemon is running the installed binary.
+	Commit string `json:"commit,omitempty"`
 }
 
 // StateFile returns the path to the state file.

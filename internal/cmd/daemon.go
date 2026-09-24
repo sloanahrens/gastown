@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -484,7 +485,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating daemon: %w", err)
 	}
 
-	return d.Run()
+	return daemonRunExit(d.Run())
 }
 
 func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
@@ -582,4 +583,18 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// daemonExit is os.Exit; a test seam.
+var daemonExit = os.Exit
+
+// daemonRunExit maps daemon.ErrRestartForUpgrade to exit code 75 so launchd
+// (KeepAlive SuccessfulExit=false) restarts the daemon on the installed
+// binary. A plain nil return would exit 0 and leave the daemon down.
+func daemonRunExit(err error) error {
+	if errors.Is(err, daemon.ErrRestartForUpgrade) {
+		daemonExit(75)
+		return nil
+	}
+	return err
 }
