@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -403,6 +404,87 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 	}
 	if _, statErr := os.Stat(testMarker); statErr == nil {
 		t.Error("tests ran despite the lint never finishing")
+	}
+}
+
+// TestRunDefaultTestVerification_LintFindingAfterContention pins gt-1g9n's
+// finding where it can still go wrong: a contended lint is retried, so the
+// attempt that decides the verdict is not always the first one, and the gate
+// must read that attempt's output rather than the log it shares with the
+// attempts before it. Reading the whole log reports a real finding as
+// contention — "nothing was linted; re-run", about the log the message cites —
+// the misreport a retry count produces (om major on gt-wisp-bob, gt-1g9n;
+// policy fixed under gt-ijqw).
+//
+// Both of gt done's lint gates share one log across attempts; only this one
+// acts on the verdict the byte offset decides — the --pre-verified gate reports
+// the failing gate's name and exit code and drops it, and the refinery's gate
+// buffers each attempt separately. The sibling shapes in
+// done_test_verify_lint_test.go cannot catch the offset going wrong (each
+// prints the marker on every attempt, or runs a single attempt), and they are
+// behind the integration tag, which `make test` does not pass. This test needs
+// no real suite run — the lint refuses first — so it runs in the gate the merge
+// queue runs.
+//
+// Serial because stubLintLockRetryDelay swaps lintlock's retry schedule and
+// restores it (gt-k317).
+func TestRunDefaultTestVerification_LintFindingAfterContention(t *testing.T) {
+	stubNoContainers(t)
+	townRoot := t.TempDir()
+	stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+
+	dir, _ := initVerifyTestGoRepo(t)
+	changePkga(t, dir)
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
+
+	// Attempt 1 loses golangci-lint's lock and analyses nothing; attempt 2 gets
+	// it and reports one real finding. The counter is both the switch between
+	// the two attempts and the attempt count the assertions below read.
+	counter := filepath.Join(dir, "lint-attempts")
+	lint := fmt.Sprintf(`echo x >> %q; `+
+		`if [ "$(wc -l < %q)" -lt 2 ]; then echo 'Error: parallel golangci-lint is running' >&2; exit 2; fi; `+
+		`echo 'pkga/a.go:1:1: something is wrong (fakelint)'; exit 1`, counter, counter)
+
+	testMarker := filepath.Join(dir, "tests-ran")
+	mq := &config.MergeQueueConfig{
+		TestCommand:       "go test ./...",
+		LintCommand:       lint,
+		TestVerifyCommand: "echo ran > '" + testMarker + "'",
+	}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-finding-after-contention-role")
+	if err == nil {
+		t.Fatalf("expected a lint refusal, got result=%+v", result)
+	}
+	for _, want := range []string{
+		"lint-verify failed",
+		"exit 1",
+		"fakelint",
+		"fix the lint findings",
+		"no tests were run",
+		// The first attempt's marker really is in the log the refusal quotes,
+		// so the assertion below is about the verdict, not about the marker
+		// having gone missing from the gate's output.
+		"parallel golangci-lint is running",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error is missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "held the lock") {
+		t.Errorf("a finding reported by the retry was attributed to lock contention: %v", err)
+	}
+	if result.lintRan {
+		t.Errorf("the lint was recorded as having run: %+v", result)
+	}
+	if got, readErr := os.ReadFile(counter); readErr != nil {
+		t.Errorf("reading the lint attempt counter %s: %v", counter, readErr)
+	} else if got := strings.Count(string(got), "\n"); got != 2 {
+		t.Errorf("lint attempts = %d, want 2 (the collision, then the attempt that found something)", got)
+	}
+	if _, statErr := os.Stat(testMarker); statErr == nil {
+		t.Error("tests ran despite the lint refusing the submission")
 	}
 }
 
