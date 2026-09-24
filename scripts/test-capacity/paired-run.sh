@@ -94,6 +94,6 @@ pids=()
 for s in a b; do
   [[ -s "$out/$label-$s.json" ]] && "$here/dolt-gate-metrics.sh" "$out/$label-$s.json" "$label-$s" >> "$out/$label.md"
 done
-awk -F'\t' 'NR>1{ if($2>l)l=$2; u=$3-$4; if(u>m)m=u; s=$5-$6; if(s>w)w=s } END{ printf "| %s | peak load %.1f | peak VM used %.1f GiB | peak swap %.2f GiB |\n", lbl, l, m/1048576, w/1048576 }' lbl="$label" "$out/$label/capacity.tsv" >> "$out/$label.md"
+awk -F'\t' 'NR>1{ if($2>l)l=$2; u=$3-$4; if(u>m)m=u; s=$5-$6; if(s>w)w=s; if($9>c)c=$9 } END{ printf "| %s | peak load %.1f | peak VM used %.1f GiB | peak swap %.2f GiB | peak ctr CPU %.1f cores |\n", lbl, l, m/1048576, w/1048576, c/100 }' lbl="$label" "$out/$label/capacity.tsv" >> "$out/$label.md"
 cat "$out/$label.md"
 exit "$rc"

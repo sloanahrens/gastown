@@ -30,7 +30,7 @@ func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
 func TestContainerCapacityCheck_LargeVMIsOK(t *testing.T) {
 	orig := dockerInfoCPUMem
 	defer func() { dockerInfoCPUMem = orig }()
-	// A 16384 MiB setting reports ~1% under; it must not warn.
+	// A 16384 MiB setting reports ~3% under; it must not warn.
 	dockerInfoCPUMem = func() (int, int64, error) { return 24, 16_600_000_000, nil }
 
 	if got := NewContainerCapacityCheck().Run(&CheckContext{}).Status; got != StatusOK {

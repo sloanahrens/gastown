@@ -15,7 +15,7 @@
 - Pass criterion: every paired run has 0 FAIL and both suites ≤ 8 min, and the single run is ≤ 6.5 min.
 - One single-suite run and three paired runs per stage, all on one commit.
 - Never measure while a `gastown/refinery` slot holder exists, load ≥ 20, the gastown merge queue is non-empty, or `gt slot status` shows unwrapped containers. Tell the mayor before each batch (`gt nudge mayor "..."`).
-- Measurement cleanup removes only containers whose `org.testcontainers.sessionId` was recorded for this run. Never remove containers by image or name pattern.
+- Measurement scripts never remove containers automatically; on abnormal exit they print exact `docker rm -f <id>` commands for the operator. Never remove containers by image or name pattern.
 - Stage 1 starts only after claude-z34 (gt-elvf4) has merged to `origin/main`.
 - The Docker Desktop change (stage 2) is done only when the preconditions hold. Back up `settings-store.json` first.
 - The tmpfs mount is `/var/lib/dolt` with `rw,size=2g`. The opt-out is `GT_TEST_DOLT_TMPFS=0`.
