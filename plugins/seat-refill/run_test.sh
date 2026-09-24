@@ -341,8 +341,22 @@ assert_eq "$(nudges)" "0" \
   "uncapped: a closed local tier and an uncapped overflow mean no seat can be empty"
 assert_contains "$TEST_STATE/stdout.log" "[plugin-result skipped]" "uncapped: skipped, not a failure"
 
-# --- Case 12: the sonnet seat fires only on work that asks for it ----------
+# --- Case 12: the sonnet seat is off by default, and when turned on fires ---
+# --- only on work that asks for it ---------------------------------------
 setup_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"Design work","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 8500000
+run_plugin 8500600
+assert_eq "$(nudges_of 'seat sonnet')" "0" \
+  "sonnet seat: off by default, even with needs-sonnet work ready"
+
+setup_case
+export GT_SEAT_REFILL_SONNET_MAX=1
 write_polecats "$LIVE_NONE"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[

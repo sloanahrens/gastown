@@ -68,7 +68,7 @@ EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_EMPTY_SECONDS:-}" 300)
 NUDGE_SECONDS=$(int_or_default "${GT_SEAT_REFILL_NUDGE_SECONDS:-}" 900)
 MAX_PRIORITY=$(int_or_default "${GT_SEAT_REFILL_MAX_PRIORITY:-}" 2)
 TOP_CANDIDATES=$(int_or_default "${GT_SEAT_REFILL_TOP_CANDIDATES:-}" 3)
-SONNET_MAX=$(int_or_default "${GT_SEAT_REFILL_SONNET_MAX:-}" 1)
+SONNET_MAX=$(int_or_default "${GT_SEAT_REFILL_SONNET_MAX:-}" 0)
 SONNET_AGENT="${GT_SEAT_REFILL_SONNET_AGENT:-claude-sonnet}"
 SONNET_LABEL="${GT_SEAT_REFILL_SONNET_LABEL:-needs-sonnet}"
 CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
@@ -99,9 +99,13 @@ fi
 # admits max_overflow. A third class — claude-sonnet, which reaches a seat only
 # through an explicit `gt sling --agent claude-sonnet` — is not expressible in
 # polecat_pool today (gt-xmsqb), so the mayor's policy of holding itself to one
-# live sonnet is modeled here as a seat of its own. Set
-# GT_SEAT_REFILL_SONNET_MAX=0 to drop it when that policy changes, or when
-# gt-xmsqb gives the pool N tiers for this to read instead.
+# live sonnet is modeled here as a seat of its own. It is off by default
+# (the town has run 0 sonnet polecats since 2026-09-23); set
+# GT_SEAT_REFILL_SONNET_MAX=1 to turn it on when that policy changes, or when
+# gt-xmsqb gives the pool N tiers for this to read instead. The daemon's
+# environment comes from the launchd plist, rendered from settings/daemon.env
+# only at supervisor provisioning, so a daemon.env edit alone does not reach
+# this script.
 
 SEATS=""
 add_seat() { SEATS+="$1|$2|$3|$4"$'\n'; }
