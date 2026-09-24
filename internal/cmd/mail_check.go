@@ -11,7 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -100,15 +99,8 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 		}
 
 		// Also drain queued nudges (from --mode=queue or --mode=wait-idle fallback).
-		// The nudge queue is per-session; detect our session name.
-		sessionName := tmux.CurrentSessionName()
-		if sessionName != "" {
-			queuedNudges, drainErr := nudge.Drain(workDir, sessionName)
-			if drainErr != nil {
-				fmt.Fprintf(os.Stderr, "gt mail check: nudge queue drain error: %v\n", drainErr)
-			} else if len(queuedNudges) > 0 {
-				fmt.Print(nudge.FormatForInjection(queuedNudges))
-			}
+		if queuedNudges := drainSessionNudges(workDir); len(queuedNudges) > 0 {
+			fmt.Print(nudge.FormatForInjection(queuedNudges))
 		}
 
 		return nil
