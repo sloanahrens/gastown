@@ -22,6 +22,7 @@ import (
 
 	"github.com/gofrs/flock"
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
 	"github.com/steveyegge/gastown/internal/channelevents"
@@ -3221,6 +3222,17 @@ func listPolecatWorktrees(polecatsDir string) ([]string, error) {
 // checkPolecatHealth checks a single polecat's session health.
 // If the polecat has work-on-hook but the tmux session is dead, it's restarted.
 func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
+	// A polecat the operator parked — gt agent pause, or the deliberate stop
+	// gt session stop records (gt-fojqs) — has a dead session on purpose.
+	// The marker is the choke point every scanner honors (gt-ahik); without
+	// this gate the crash signature below raises CRASH DETECTED and a
+	// session_death event for a stop the operator asked for.
+	if paused, st, _ := agentpause.PauseGate(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); paused {
+		d.logger.Printf("Skipping crash detection for %s/%s: agent is parked (%s)",
+			rigName, polecatName, agentpause.Reason(st))
+		return
+	}
+
 	// Build the expected tmux session name
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 

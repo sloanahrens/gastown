@@ -163,6 +163,16 @@ func TestHasPolecat(t *testing.T) {
 	if m.hasPolecat("Unknown") {
 		t.Error("expected hasPolecat(Unknown) = false")
 	}
+
+	// The exported form is what gt session stop gates its deliberate-stop
+	// marker on (gt-fojqs): a marker written for a name that is not a polecat
+	// directory would park nothing and mislead gt status.
+	if !m.HasPolecat("Toast") {
+		t.Error("expected HasPolecat(Toast) = true")
+	}
+	if m.HasPolecat("Unknown") {
+		t.Error("expected HasPolecat(Unknown) = false")
+	}
 }
 
 func TestStartPolecatNotFound(t *testing.T) {

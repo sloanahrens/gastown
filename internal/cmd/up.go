@@ -944,6 +944,16 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 		polecatName := entry.Name()
 		polecatPath := filepath.Join(polecatsDir, polecatName)
 
+		// A polecat the operator parked — gt agent pause, or the deliberate
+		// stop gt session stop records (gt-fojqs) — stays parked across a
+		// town restart: the marker is the choke point those stops rely on
+		// (gt-ahik), and starting the session here would undo the stop.
+		if polecatSessionParked(townRoot, rigName, polecatName) {
+			fmt.Printf("  %s %s/%s is parked; not starting it (resume with gt session start)\n",
+				style.Dim.Render("○"), rigName, polecatName)
+			continue
+		}
+
 		// Check if this polecat has a pinned bead (work attached)
 		agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		b := beads.New(polecatPath)
