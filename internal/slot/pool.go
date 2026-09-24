@@ -293,6 +293,10 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	// poll of the wait.
 	logDebrisOnce := debrisLogger()
 
+	// Likewise one removal attempt per orphan per Acquire call: a removal that
+	// failed is logged once, not retried on every poll.
+	removeOrphanOnce := orphanRemover()
+
 	// Likewise once per Acquire call, and for the same reason: the wait can
 	// outlast several polls.
 	logInconclusiveOnce := inconclusiveLogger()
@@ -382,6 +386,14 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 						continue
 					}
 					logDebrisOnce(verdict)
+					// A container whose labeled owner is certainly gone is
+					// removed here rather than left for 'gt slot reap': it is
+					// what a killed or failed suite leaves behind, and no live
+					// process can be using it (gt-ehlga). Age-only debris
+					// stays the reaper's call.
+					if verdict.OwnerGone {
+						removeOrphanOnce(verdict)
+					}
 				}
 				if len(blocking) == 0 {
 					return grant(i, unlock), nil

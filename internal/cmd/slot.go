@@ -93,7 +93,15 @@ var slotReapCmd = &cobra.Command{
 	Short: "Delete stale gate containers and the owner files dead suites left behind",
 	Long: `Removes the container-gate's debris: containers the gate matches that are older
 than the staleness window with no live testcontainers ryuk reaper for their
-session, and owner metadata files whose slot nobody holds anymore.
+session, containers whose owner labels name a test process on this host that
+no longer exists (at any age), and owner metadata files whose slot nobody
+holds anymore.
+
+Test containers started by internal/testutil carry gastown.test.owner-pid and
+gastown.test.owner-host labels. A labeled container whose owner is still
+running is never debris, whatever its age; one whose owner is gone is removed
+by the next 'gt slot run' / slot acquisition on its own, so a failed or killed
+gate no longer blocks the next one for the staleness window (gt-ehlga).
 
 A container-backed suite that dies uncleanly leaves its containers running. The
 gate used to read any matching container as a live suite, so a single hours-old
@@ -483,9 +491,9 @@ func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
 	}
 
 	if len(report.Debris) == 0 {
-		fmt.Fprintf(out, "No gate debris older than %s.\n", report.OlderThan)
+		fmt.Fprintf(out, "No gate debris older than %s, and no container whose owning test process is gone.\n", report.OlderThan)
 	} else {
-		fmt.Fprintf(out, "%s %d gate container(s) older than %s with no live reaper:\n", verb, len(report.Debris), report.OlderThan)
+		fmt.Fprintf(out, "%s %d gate container(s) that are debris (older than %s with no live reaper, or their owning test process is gone):\n", verb, len(report.Debris), report.OlderThan)
 		for _, v := range report.Debris {
 			fmt.Fprintf(out, "  %s — %s; labels: %s\n", v.Container.Display(), v.Reason, v.Container.LabelSummary())
 		}
