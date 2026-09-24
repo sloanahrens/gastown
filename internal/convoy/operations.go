@@ -351,6 +351,13 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
+		// A per-rig ESTOP holds this rig's issues; the town hold was
+		// answered at the top (gt-ifijm).
+		if reason := dispatch.RigHold(townRoot, rig); reason != "" {
+			logger("%s: convoy %s: not feeding %s: %s", caller, convoyID, issue.ID, reason)
+			continue
+		}
+
 		// A hold recorded on the bead takes it off this path too: the
 		// continuation feed would sling it with the rig default agent, which is
 		// what a routing label or a keep-off decision forbids (gt-tq6l).

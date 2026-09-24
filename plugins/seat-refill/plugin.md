@@ -117,11 +117,18 @@ plugin stops firing; delete it to resume. The gate stays untouched, so the hold
 is visible in `gt plugin history` as skipped runs rather than as a plugin that
 went quiet. A town-wide or per-rig `ESTOP` is respected the same way.
 
-The same file is the town's automatic-dispatch hold. The deacon's
-RECOVERED_BEAD redispatch, the daemon's convoy feeders, and the
-`scheduled_slings` patrol all refuse to sling while it exists and log why
-(`internal/dispatch`). An explicit `gt sling` typed by the operator or the
-mayor still works.
+The same file is the town's automatic-dispatch hold. The following all refuse
+to sling while it exists and log why (`internal/dispatch`):
+
+- the deacon's RECOVERED_BEAD redispatch and its convoy feed dogs
+- the gated-molecule step in the deacon patrol
+- the daemon's convoy feeders
+- the daemon's `gt scheduler run` heartbeat step
+- the `scheduled_slings` patrol
+
+`GT_SEAT_REFILL_HOLD` relocates the file for all of them. A rig's
+`ESTOP.<rig>` holds only that rig's dispatch. An explicit `gt sling` typed by
+the operator or the mayor still works.
 
 **Disabling the gate.** `gt plugin` has no pause; a plugin whose gate is a
 cooldown runs whenever that cooldown has elapsed. To stop it for longer than a

@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -65,7 +66,7 @@ type FeedResult struct {
 	// Closed is the number of empty convoys auto-closed.
 	Closed int `json:"closed"`
 
-	// Skipped is the number of convoys skipped (cooldown).
+	// Skipped is the number of convoys skipped (cooldown, operator hold).
 	Skipped int `json:"skipped"`
 
 	// NeedsAttention is the number of convoys with tracked issues but no ready
@@ -83,7 +84,7 @@ type FeedResult struct {
 // FeedConvoyResult describes the outcome for a single convoy.
 type FeedConvoyResult struct {
 	ConvoyID     string `json:"convoy_id"`
-	Action       string `json:"action"` // "fed", "closed", "cooldown", "error", "limit", "needs_attention"
+	Action       string `json:"action"` // "fed", "closed", "cooldown", "held", "error", "limit", "needs_attention"
 	Message      string `json:"message"`
 	TrackedCount int    `json:"tracked_count,omitempty"` // Raw data for agent inspection
 	ReadyCount   int    `json:"ready_count,omitempty"`   // Raw data for agent inspection
@@ -243,6 +244,11 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 
 	fedCount := 0
 
+	// The feed dog slings the convoy's ready issues, so dispatching it during
+	// the operator's town-wide hold is dispatching the work (gt-ifijm). Empty
+	// convoys are still closed below: that is bookkeeping, not dispatch.
+	holdReason := dispatch.OperatorHold(townRoot)
+
 	for _, convoy := range stranded {
 		// Handle convoys with no ready issues.
 		if convoy.ReadyCount == 0 {
@@ -277,6 +283,16 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 					Message:  "auto-closed empty convoy (0 tracked issues)",
 				})
 			}
+			continue
+		}
+
+		if holdReason != "" {
+			result.Skipped++
+			result.Details = append(result.Details, FeedConvoyResult{
+				ConvoyID: convoy.ID,
+				Action:   "held",
+				Message:  "feed dog not dispatched: " + holdReason,
+			})
 			continue
 		}
 

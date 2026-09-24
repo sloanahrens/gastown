@@ -143,6 +143,10 @@ type ConvoyManager struct {
 	wg           sync.WaitGroup
 	logger       func(format string, args ...interface{})
 
+	// holdLatch remembers the operator dispatch hold the feeder last saw, so a
+	// hold is logged once per state change rather than on every scan.
+	holdLatch dispatch.HoldLatch
+
 	// stores maps store names to beads stores for event polling.
 	// Key "hq" is the town-level store (used for convoy lookups).
 	// Other keys are rig names (e.g., "gastown", "beads", "shippercrm").
@@ -917,8 +921,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	// The operator's town-wide hold parks every automatic dispatcher
 	// (gt-ifijm). The convoy stays stranded and ready, so the first scan after
 	// the hold lifts feeds it.
-	if reason := dispatch.OperatorHold(m.townRoot); reason != "" {
-		m.logger("Convoy %s: not feeding %d ready issue(s): %s", c.ID, len(c.ReadyIssues), reason)
+	reason := dispatch.OperatorHold(m.townRoot)
+	if m.holdLatch.Changed(reason) {
+		if reason != "" {
+			m.logger("Convoy feed: not feeding stranded convoys (first held: %s): %s", c.ID, reason)
+		} else {
+			m.logger("Convoy feed: operator dispatch hold lifted; feeding resumes")
+		}
+	}
+	if reason != "" {
 		return
 	}
 
@@ -937,6 +948,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		if m.isRigParked(rig) {
 			m.logger("Convoy %s: rig %s is parked, skipping %s", c.ID, rig, issueID)
+			continue
+		}
+
+		// A per-rig ESTOP holds this rig's issues; the town hold was
+		// answered above (gt-ifijm).
+		if reason := dispatch.RigHold(m.townRoot, rig); reason != "" {
+			m.logger("Convoy %s: not feeding %s: %s", c.ID, issueID, reason)
 			continue
 		}
 

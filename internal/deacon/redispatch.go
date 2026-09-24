@@ -469,6 +469,14 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	}
 	result.TargetRig = targetRig
 
+	// A per-rig ESTOP on the target rig defers the same way the town hold
+	// does: no attempt, no cooldown (gt-ifijm).
+	if reason := dispatch.RigHold(townRoot, targetRig); reason != "" {
+		result.Action = "deferred"
+		result.Message = "not re-dispatched: " + reason
+		return result
+	}
+
 	// Verify bead is still open (not already claimed or closed).
 	// Only proceed when status is explicitly "open". Empty status (query
 	// failure) is treated as "not open" to avoid re-dispatching closed
