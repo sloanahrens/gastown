@@ -228,19 +228,28 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 		t.Fatalf("starting helper process: %v", err)
 	}
 
-	// Wait for the helper to actually acquire the slot before killing it.
-	deadline := time.Now().Add(5 * time.Second)
+	// Wait for the helper to finish its grant before killing it: the flock
+	// held AND the grant's history entry written. Status().Held reads the
+	// flock alone, which the grant takes before it writes the owner file and
+	// the history entry (see grant in AcquirePool). Killing on Held alone
+	// raced that write: under load the SIGKILL landed first and the entry
+	// never existed ("the SIGKILLed holder left no history entry", gt-6920e).
+	// Waiting for the entry keeps what this test proves — the helper never
+	// releases, so its entry can only be the grant-time record, and it must
+	// survive the kill with its hold left open. The deadline stays under the
+	// helper's 30s sleep and only costs time when the helper is truly stuck.
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		rep, err := Status(townRoot)
 		if err != nil {
 			t.Fatalf("Status while waiting for helper: %v", err)
 		}
-		if rep.Held {
+		if rep.Held && helperGrantRecorded(t, townRoot) {
 			break
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
-			t.Fatal("helper process never acquired the slot")
+			t.Fatalf("helper process never acquired the slot and recorded its grant (held=%v)", rep.Held)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -280,6 +289,23 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 	}
 }
 
+// helperGrantRecorded reports whether the history ring holds the helper's
+// grant-time entry. History reads under the ring's own lock, so a partial
+// write is never observed.
+func helperGrantRecorded(t *testing.T, townRoot string) bool {
+	t.Helper()
+	history, err := History(townRoot)
+	if err != nil {
+		t.Fatalf("History while waiting for helper: %v", err)
+	}
+	for _, e := range history {
+		if e.Role == "helper" {
+			return true
+		}
+	}
+	return false
+}
+
 // TestHelperHoldSlotUntilKilled is not a real test; it is spawned as a
 // subprocess by TestAcquire_KernelReleasesOnProcessDeath to hold the slot
 // until SIGKILLed, with no Release() call in its shutdown path. It stubs
@@ -291,7 +317,9 @@ func TestHelperHoldSlotUntilKilled(t *testing.T) {
 	}
 	stubNoContainers(t)
 	townRoot := os.Getenv("GT_SLOT_TOWN_ROOT")
-	if _, err := Acquire(townRoot, "helper", time.Second); err != nil {
+	// The parent's Status polls probe the same flock, so a try can lose to a
+	// probe and wait a poll interval; 15s only costs time if truly stuck.
+	if _, err := Acquire(townRoot, "helper", 15*time.Second); err != nil {
 		t.Fatalf("helper failed to acquire: %v", err)
 	}
 	time.Sleep(30 * time.Second) // outlived by the parent's SIGKILL
