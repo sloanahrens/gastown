@@ -38,9 +38,9 @@ several exit-0 and exit-1 cases differ in what they escalate).
 
 | exit | when | recorded | escalates |
 |------|------|----------|-----------|
-| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
-| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check) — retry next heartbeat | no | the same starvation clock |
-| 1 | failed: `make build`/`make safe-install` failed, or the install could not be verified as in force | yes, as failure | yes, under a stable fingerprint |
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, install-gt refused (exit 2), no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
+| 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check, the install lock or the container-gate slot not free — install-gt exit 3, or the lock busy before this plugin's own sync) — retry next heartbeat | no | the same starvation clock |
+| 1 | failed: install-gt.sh failed (build, install, or smoke check — it rolls back and escalates under `install-gt:*`), or the rig has no `scripts/install-gt.sh` | yes, as failure | install-gt's own fingerprint, or `rebuild-gt:no-installer` |
 
 Exit 3 means deferral only because this plugin's `[execution]` block sets
 `allow_deferred_exit = true`; a script plugin without that opt-in has exit 3
@@ -114,10 +114,11 @@ block is marked escalated, so a call that never reached the town is retried
 next run rather than lost for the rest of the block.
 
 When the container-gate slot is what blocks, the run waits for it and then
-builds inside it:
+has `install-gt.sh` build inside it (`--slot-role gastown/rebuild-gt`), which
+runs:
 
 ```bash
-gt slot run --role gastown/rebuild-gt --timeout "$REBUILD_GT_RESERVE_WAIT" -- make build
+gt slot run --role gastown/rebuild-gt --timeout "<what is left of REBUILD_GT_RESERVE_WAIT>s" -- make build
 ```
 
 The waiting is the point: `gt slot run` alone does not queue behind a gate on
@@ -125,9 +126,9 @@ a pool with more than one slot — it takes a free slot, and the build starts
 beside the load-sensitive suite the yield exists to avoid (gt-htx3). So the
 run polls `gt slot status` until no gate-class role holds a slot, and acquires
 after that. `REBUILD_GT_RESERVE_WAIT` (default 10m) bounds the two together,
-which is why `[execution] timeout` is 25m. The install is a temp-file rename:
-outside the hold, waiting for any merge that is mid-push. A wait that gets
-nothing defers — nothing was built, so nothing failed.
+which is why `[execution] timeout` is 25m. The install is a temp-file rename
+outside the hold. A wait that gets nothing defers — nothing was built, so
+nothing failed.
 
 Reaching force — a fresh binary, or a completed install — closes the block and
 clears the keys this plugin owns, under `gt escalate clear` (gt-vwry). So does
@@ -149,10 +150,12 @@ Parse the JSON output and check these fields:
   binary commit (would be a downgrade).
 - If `"safe_to_rebuild": true` → continue
 
-At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 5), install
+At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 1), install
 at the first quiet moment: a merged commit that is not in force is a live
 defect, not a rounding error (gt-oqbw, gt-ww20, gt-rbfj). Under the threshold
-(strictly fewer commits behind than it), defer.
+(strictly fewer commits behind than it), defer. The refinery's post-merge hook
+(`scripts/install-after-merge.sh`) installs most merges within a minute of
+landing; this plugin is the backstop for merges that bypass it.
 
 An unknown `commits_behind` here is treated as *at* the threshold, not under
 it — proceed with the install rather than defer. Reading "unknown" as "0
@@ -192,6 +195,13 @@ git merge --ff-only origin/main --quiet
 record a skip wisp with reason "local main diverged from origin/main" —
 **never** `git reset --hard` to force it.
 
+The fetch and fast-forward are writes to `mayor/rig`, so they run under
+`install-gt.sh`'s flock (`daemon/install-gt.lock`, claude-7fc) and cannot move
+the tree under a build the post-merge hook is running. The plugin waits up to
+`REBUILD_GT_LOCK_WAIT` seconds (default 30) for it; a lock still busy means an
+install is running right now, so the run defers (exit 3). The lock is released
+before `install-gt.sh` runs, which takes it again itself.
+
 ## Quiet gate
 
 `make build` competes for CPU with a gate suite whose tests are load-sensitive
@@ -205,9 +215,9 @@ record a skip wisp with reason "local main diverged from origin/main" —
 Under `REBUILD_GT_STARVE_MINUTES` either reading defers the run; past it the
 first is waited out (Starvation above).
 
-The second reading is taken again immediately before the install: a merge that
-was not in flight when the run started can be by the time the build ends, and
-the install waits for the next heartbeat rather than landing under it.
+There is no second reading before the install. It existed because the install
+ended in a daemon restart; `install-gt.sh` only renames the binary and leaves
+the restart to the daemon's idle point (claude-7fc).
 
 Two readings that are deliberately not deferrals. An MR merely ready in the
 queue consumes nothing, and at this town's merge rate the queue is never
@@ -217,50 +227,35 @@ is down runs no suite for a build to compete with.
 
 ## Action
 
-Install through `scripts/install-binary.sh` (temp file plus rename, atomic;
-never `cp` over the running binary — a partial one is SIGKILLed on exec by
-macOS, gt-0het), then verify what came into force.
+Run the rig's own `scripts/install-gt.sh --sha <HEAD> --source rebuild-gt`
+(plus `--slot-role gastown/rebuild-gt` past the starvation threshold), the one
+install path the refinery's post-merge hook also uses. Under one flock it
+builds, installs atomically (`scripts/install-binary.sh`, gt-0het), keeps the
+previous binary as `gt.prev`, and verifies the commit in force the way this
+plugin used to — the short commit the binary reports is resolved to a full
+hash inside the rig before comparing (gt-oqbw, gt-b5mpe). On a failed check it
+restores `gt.prev` and escalates (`install-gt:smoke-failed`,
+`install-gt:rollback-failed`). Then `gt formula sync` and `gt plugin sync`
+(non-fatal), then `daemon/restart-pending.json`.
 
-Verification reads the commit embedded in the `gt` the town will execute,
-resolved through PATH, and requires it to equal the commit built. `gt version`
-only ever prints that commit abbreviated; the expected commit (read fresh from
-the rig's HEAD immediately before the build, not from the earlier staleness
-check — see below) is the full 40-character hash. Comparing those two forms
-directly as strings never matches, so the abbreviated form is resolved to a
-full hash inside the rig checkout first — the one repo it's guaranteed
-unambiguous in — before the two are compared (gt-oqbw).
+The daemon is **not** restarted here. It reads the marker at each heartbeat
+and exits (code 75, restarted by launchd) at a moment with no plugin, dog or
+main-branch gate in flight, so an install never kills in-flight work.
 
-The expected commit is deliberately not the `repo_commit` field from the
-staleness check earlier in the run: `gt stale --json` does its own
-independent fetch and can report a `repo_commit` that has since moved past
-what the rig checkout's HEAD — and therefore this build — actually contains.
-Reading it fresh from the rig immediately before `make build` ties the
-expectation to the tree that was actually compiled.
+## Daemon in force (backstop)
 
-An install that does not take — a shadowing `gt` earlier in PATH, an
-`INSTALL_DIR` that is not the one assumed, a replacement that went elsewhere —
-fails the run and escalates (`rebuild-gt:not-in-force`) instead of recording a
-success over it. A commit that cannot be read, or that cannot be resolved to a
-real commit in the rig checkout, fails the run the same way
-(`rebuild-gt:unverified`).
-
-Then sync — `gt formula sync`, then `gt plugin sync`, both non-fatal — and
-restart the daemon last, through `gt daemon restart` (launchctl kickstart -k),
-which terminates the process running this script. `gt daemon stop` followed by
-a start is not the pair to use: stop unloads the launchd job, so a failure in
-between leaves the town with no daemon and no loaded job to bring one back
-(gt-sq9e). A refusal leaves the daemon alone, because there is nothing new for
-it to run.
+Each run also checks that the daemon came into force: a restart-pending
+marker older than `REBUILD_GT_DAEMON_LAG_MINUTES` (default 30), or a daemon
+whose `state.json` commit is not a descendant of the installed binary's while
+that binary has been in place that long, escalates
+`rebuild-gt:daemon-not-in-force` (HIGH). It clears once both readings are
+healthy.
 
 ## Record Result
 
 The receipt names the commits brought into force — `in force <old> -> <new>
-(N commits)` plus their subjects — so "was gt-ww20 ever in force, and when" is
-answered by the record instead of reconstructed from merge timestamps.
-
-Failures escalate under a stable fingerprint each (`rebuild-gt:build-failed`,
-`:not-in-force`, `:unverified`, `:restart-failed`), so a persisting state
-alarms once. A refusal escalates only through the starvation check's
-`rebuild-gt:starved` (Exit codes above), and reaching force — or a run that
-finds the binary not due — clears `:starved`, `:drift` and `:drift-unknown`
-together.
+(N commits)` plus their subjects. install-gt also appends a line to
+`daemon/install-receipts.jsonl`. A refusal escalates only through the
+starvation check's `rebuild-gt:starved`; reaching force — or a run that finds
+the binary not due — clears `:starved`, `:drift`, `:drift-unknown`,
+`:unverified` and `:no-installer` together.

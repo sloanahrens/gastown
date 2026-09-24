@@ -7,12 +7,13 @@
 # accomplished nothing exits 3 so the next heartbeat retries it (a run record
 # would spend the whole cooldown), the install is verified against the gt the
 # town will actually execute, the commits brought into force are recorded, and
-# the daemon is restarted last. Refusals (dirty checkout, diverged main, not
+# the daemon was restarted last (claude-7fc: install-gt.sh now writes a
+# restart marker and the daemon restarts itself at its idle point). Refusals (dirty checkout, diverged main, not
 # safe to rebuild) exit 0 and do not escalate on the run that first hits them —
 # they usually clear by themselves — but a due binary one of them leaves out of
 # force escalates under the starvation clock like any other block. Failures
-# (build failed, install did not take, installed commit unverifiable, daemon
-# restart failed) exit 1 and escalate under their own fingerprints.
+# (build failed, install did not take, installed commit unverifiable) exit 1
+# and escalate under their own fingerprints.
 # gt-kox0: a block that repeats must not stay silent. The defer path counts the
 # block and escalates past the threshold; past it a build blocked BY the gate
 # waits for the gate to release the slot and then builds inside it, while an
@@ -36,6 +37,16 @@ make_town() {
   git -C "$seed" push -q origin main
   mkdir -p "$town/gastown/mayor"
   git clone -q "$origin" "$town/gastown/mayor/rig"
+  # The plugin delegates the build and install to the rig's own
+  # scripts/install-gt.sh (claude-7fc), so the fake rig carries the real one.
+  # Committed before the Makefile so the Makefile commit stays the tip and the
+  # "commits brought into force" range (HEAD~1..HEAD) names it.
+  mkdir -p "$town/gastown/mayor/rig/scripts/lib"
+  cp "$SCRIPT_DIR/../../scripts/install-gt.sh" "$town/gastown/mayor/rig/scripts/"
+  cp "$SCRIPT_DIR/../../scripts/lib/install-gt-lib.sh" "$town/gastown/mayor/rig/scripts/lib/"
+  git -C "$town/gastown/mayor/rig" add scripts
+  git -C "$town/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -m installer
+  git -C "$town/gastown/mayor/rig" push -q origin main
   # Fake make targets: build drops a marker so the test can see the branch
   # taken; safe-install no-ops the way the real one's atomic replace would
   # inside a stub world. '@' suppresses Make's echo of the recipe line, so
@@ -204,7 +215,13 @@ run_plugin() {
   # in ~/.local/bin and must be unreachable, so a stub miss fails loudly
   # ("gt: command not found") instead of writing a real plugin-run receipt
   # into the town's beads (one such stray receipt was seen on 2026-09-19).
-  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" PATH="$town/bin:/opt/homebrew/bin:/usr/bin:/bin" "$@"; bash "$RUN_SH" ) > "$town/run.out" 2>&1 || rc=$?
+  #
+  # The INSTALL_GT_* overrides point install-gt.sh (which the plugin delegates
+  # to) at the stub world: its default BIN_DIR is the REAL ~/.local/bin, and
+  # its default lock wait is 5 minutes. HOME is the temp town as a second
+  # guard, so a missed override still cannot reach the real ~/.local/bin.
+  ( export GT_TEST_TOWN="$town" GT_TOWN_ROOT="$town" HOME="$town" PATH="$town/bin:/opt/homebrew/bin:/usr/bin:/bin" \
+      INSTALL_GT_BIN_DIR="$town/bin" INSTALL_GT_DAEMON_DIR="$town/daemon" INSTALL_GT_LOCK_WAIT=5 "$@"; bash "$RUN_SH" ) > "$town/run.out" 2>&1 || rc=$?
   echo "$rc"
 }
 
@@ -308,7 +325,7 @@ else
 fi
 
 # --- Case 7: quiet and past the threshold -> build, verify, record the
-# commits that came into force, restart the daemon ---
+# commits that came into force, write the restart marker (no restart) ---
 T=$(make_town)
 rc=$(run_plugin "$T")
 if [ "$rc" != "0" ]; then fail "quiet + behind: exit $rc: $(cat "$T/run.out")"; else pass "quiet + behind: exit 0"; fi
@@ -319,7 +336,15 @@ else
   fail "quiet + behind: no in-force record: $(cat "$T/gt.log")"
 fi
 if grep -q "makefile" "$T/gt.log"; then pass "quiet + behind: record lists the commits brought into force"; else fail "quiet + behind: record omits the commit list"; fi
-if grep -q "daemon restart" "$T/gt.log"; then pass "quiet + behind: daemon restarted"; else fail "quiet + behind: daemon not restarted: $(cat "$T/gt.log")"; fi
+# '^daemon restart' is the stub's own log line for the command; the run's
+# success text ("the daemon restarts at its idle point") must not match it.
+if grep -q "^daemon restart" "$T/gt.log" 2>/dev/null; then fail "quiet + behind: restarted the daemon (install-gt leaves that to the daemon)"; else pass "quiet + behind: no daemon restart"; fi
+TIP=$(git -C "$T/gastown/mayor/rig" rev-parse HEAD)
+if python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["commit"]==sys.argv[2] and m["source"]=="rebuild-gt"' "$T/daemon/restart-pending.json" "$TIP" 2>/dev/null; then
+  pass "quiet + behind: restart marker names the installed tip"
+else
+  fail "quiet + behind: marker missing or wrong: $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+fi
 # gt-b5mpe: a verified install closes this plugin's alarms — including the
 # false-positive 'rebuild-gt:unverified' that pre-dates the fix (without the
 # key the last false positive stays open forever), and the formula sync that
@@ -343,13 +368,24 @@ fi
 # --- Case 8: stale but under the install threshold -> deferred, no build ---
 T=$(make_town)
 write_stale "$T" 2
-rc=$(run_plugin "$T")
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=5)
 if [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ]; then pass "under threshold: deferred"; else fail "under threshold: rc=$rc: $(cat "$T/run.out")"; fi
-# ...and the threshold is configurable.
+# ...and the threshold is configurable. Invoked directly rather than through
+# run_plugin, so it carries run_plugin's install-gt overrides itself: without
+# INSTALL_GT_BIN_DIR the delegated install would write the REAL
+# ~/.local/bin/gt.prev and run the real gt.
 T=$(make_town)
 write_stale "$T" 2
-rc=$( ( export GT_TEST_TOWN="$T" GT_TOWN_ROOT="$T" REBUILD_GT_INSTALL_THRESHOLD=1 PATH="$T/bin:/opt/homebrew/bin:/usr/bin:/bin"; bash "$RUN_SH" ) > "$T/run.out" 2>&1; echo $? )
+rc=$( ( export GT_TEST_TOWN="$T" GT_TOWN_ROOT="$T" HOME="$T" REBUILD_GT_INSTALL_THRESHOLD=1 PATH="$T/bin:/opt/homebrew/bin:/usr/bin:/bin" \
+    INSTALL_GT_BIN_DIR="$T/bin" INSTALL_GT_DAEMON_DIR="$T/daemon" INSTALL_GT_LOCK_WAIT=5; bash "$RUN_SH" ) > "$T/run.out" 2>&1; echo $? )
 if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "threshold override: build ran at 2 behind with a threshold of 1"; else fail "threshold override: rc=$rc: $(cat "$T/run.out")"; fi
+
+# --- Case 8b: the default threshold is 1 commit — a single merge is due
+# (claude-7fc: a lone urgent fix was never due under the old default of 5) ---
+T=$(make_town)
+write_stale "$T" 1
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "default threshold: 1 behind installs"; else fail "default threshold: rc=$rc $(cat "$T/run.out")"; fi
 
 # --- Case 9: a grubby checkout is refused: skip recorded, no build, no alarm
 # on the run that first hits it — a refusal clears itself, and an alarm here
@@ -474,6 +510,8 @@ if grep -q "daemon restart" "$T/gt.log" 2>/dev/null; then
 else
   pass "install that did not take: daemon left alone"
 fi
+if [ -e "$T/daemon/restart-pending.json" ]; then fail "install that did not take: wrote a restart marker"; else pass "install that did not take: no marker"; fi
+if grep -q -- "--fingerprint install-gt:smoke-failed" "$T/gt.log"; then pass "install that did not take: install-gt fingerprint"; else fail "install that did not take: fingerprint $(cat "$T/gt.log")"; fi
 
 # --- Case 14: binary already fresh -> recorded, no build, no restart ---
 T=$(make_town)
@@ -593,7 +631,7 @@ fi
 # exit 3 (deferred, no record): Case 8's under-threshold defer.
 T=$(make_town)
 write_stale "$T" 2
-rc=$(run_plugin "$T")
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=5)
 if [ "$rc" = "3" ] && [ ! -s "$T/gt.log" ]; then
   pass "contract exit 3 (deferred): rc=3, nothing recorded"
 else
@@ -669,8 +707,8 @@ if grep -q "escalate .* --fingerprint rebuild-gt:starved" "$T/gt.log" 2>/dev/nul
 else
   fail "starvation: no loud escalation: $(cat "$T/gt.log" 2>/dev/null)"
 fi
-if grep -q -- "--result success" "$T/gt.log" 2>/dev/null && grep -q "daemon restart" "$T/gt.log"; then
-  pass "starvation: the reserved rebuild installed and restarted the daemon"
+if grep -q -- "--result success" "$T/gt.log" 2>/dev/null && [ -e "$T/daemon/restart-pending.json" ]; then
+  pass "starvation: the reserved rebuild installed and marked for restart"
 else
   fail "starvation: nothing installed: $(cat "$T/gt.log" 2>/dev/null)"
 fi
@@ -759,22 +797,18 @@ else
   fail "starvation: $FIRINGS escalations for one block: $(cat "$T/gt.log" 2>/dev/null)"
 fi
 
-# Case 25: an install never lands under a merge that is mid-push — a merge that
-# goes in flight while the build runs holds the install back to the next
-# heartbeat even though the build itself was fine (gt-kox0).
+# Case 25: a merge that goes in flight while the build runs no longer holds
+# the install back. The re-check existed because the install ended in a daemon
+# restart that killed in-flight work; install-gt only renames the binary and
+# leaves the restart to the daemon's idle point (claude-7fc).
 T=$(make_town)
 echo '[{"id": "gt-wisp-z", "status": "in_progress", "title": "Merge: gt-z"}]' > "$T/mq.busy.json"
 touch "$T/mq.flip"
 rc=$(run_plugin "$T")
-if [ "$rc" = "3" ] && [ -e "$T/build.marker" ]; then
-  pass "merge mid-push: the build ran, the install waited"
+if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
+  pass "merge goes in flight mid-build: the install still lands"
 else
-  fail "merge mid-push: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"
-fi
-if grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
-  fail "merge mid-push: installed under a merge that was mid-push"
-else
-  pass "merge mid-push: recorded no install"
+  fail "merge goes in flight mid-build: rc=$rc $(cat "$T/run.out")"
 fi
 
 # Case 26: a refusal past the threshold escalates like any other block. A
@@ -883,10 +917,10 @@ if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; the
 else
   fail "no-@ version + no stale commit: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null)"
 fi
-if grep -q "daemon restart" "$T/gt.log" 2>/dev/null; then
-  pass "no-@ version + no stale commit: daemon restarted onto the verified binary"
+if [ -e "$T/daemon/restart-pending.json" ]; then
+  pass "no-@ version + no stale commit: restart marker written for the verified binary"
 else
-  fail "no-@ version + no stale commit: daemon left on an unverifiable binary: $(cat "$T/gt.log")"
+  fail "no-@ version + no stale commit: no marker: $(cat "$T/run.out")"
 fi
 if grep -q "escalate .*cannot verify" "$T/gt.log" 2>/dev/null; then
   fail "no-@ version + no stale commit: a correct install escalated as unverified — the gt-b5mpe false positive"
@@ -955,6 +989,114 @@ fi
 # that was otherwise correct. Confirmed by hand against origin/main's run.sh
 # (see the commit message for both runs) rather than re-run here, so this
 # file tests one version of run.sh, not two.
+
+# --- claude-7fc: backstop — the daemon must come into force after an install ---
+# age_marker TOWN MINUTES -> a restart-pending marker requested MINUTES ago
+age_marker() {
+  mkdir -p "$1/daemon"
+  python3 -c '
+import datetime, json, sys, time
+t = datetime.datetime.fromtimestamp(time.time() - int(sys.argv[2]) * 60, datetime.timezone.utc)
+json.dump({"commit": "0" * 40, "requested_at": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "post-merge", "repo": "/x"}, open(sys.argv[1], "w"))
+' "$1/daemon/restart-pending.json" "$2"
+}
+
+# Case 29: a marker older than 30m escalates HIGH, once per condition.
+T=$(make_town)
+age_marker "$T" 40
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "escalate .*-s high .*--fingerprint rebuild-gt:daemon-not-in-force" "$T/gt.log" 2>/dev/null; then
+  pass "marker 40m old: escalated daemon-not-in-force"
+else
+  fail "marker 40m old: no escalation: $(cat "$T/gt.log" 2>/dev/null) $(cat "$T/run.out")"
+fi
+[ -e "$T/daemon/rebuild-gt-daemon-lag" ] && pass "marker 40m old: lag recorded" || fail "marker 40m old: lag not recorded"
+
+# Case 30: a fresh marker is the daemon working as designed: no escalation.
+T=$(make_town)
+age_marker "$T" 5
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "marker 5m old: escalated early"; else pass "marker 5m old: quiet"; fi
+
+# Case 31: no marker, but the daemon's recorded commit is behind the installed
+# binary and the binary has been in place for over 30m -> escalate.
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+OLD=$(git -C "$RIG" rev-parse --short HEAD~2)
+mkdir -p "$T/daemon"
+printf '{"running": true, "commit": "%s"}\n' "$OLD" > "$T/daemon/state.json"
+python3 -c 'import os,sys,time; t=time.time()-3600; os.utime(sys.argv[1], (t, t))' "$T/bin/gt"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q -- "--fingerprint rebuild-gt:daemon-not-in-force" "$T/gt.log" 2>/dev/null; then
+  pass "daemon behind installed binary: escalated"
+else
+  fail "daemon behind installed binary: $(cat "$T/gt.log" 2>/dev/null) $(cat "$T/run.out")"
+fi
+
+# Case 31b: the same daemon lag on a binary installed moments ago is the
+# daemon's idle-point restart still pending: no escalation yet.
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+OLD=$(git -C "$RIG" rev-parse --short HEAD~2)
+mkdir -p "$T/daemon"
+printf '{"running": true, "commit": "%s"}\n' "$OLD" > "$T/daemon/state.json"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "daemon-not-in-force" "$T/gt.log" 2>/dev/null; then fail "daemon behind a fresh install: escalated early"; else pass "daemon behind a fresh install: quiet"; fi
+
+# Case 32: the condition clears -> the open escalation is cleared, once.
+T=$(make_town)
+mkdir -p "$T/daemon"; touch "$T/daemon/rebuild-gt-daemon-lag"
+rc=$(run_plugin "$T" REBUILD_GT_INSTALL_THRESHOLD=99)
+if grep -q "escalate clear .*--fingerprint rebuild-gt:daemon-not-in-force" "$T/gt.log" && [ ! -e "$T/daemon/rebuild-gt-daemon-lag" ]; then
+  pass "daemon in force again: escalation cleared"
+else
+  fail "daemon in force again: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# --- claude-7fc: rebuild-gt's own fetch + fast-forward of mayor/rig is a write
+# to it, so it runs under install-gt's lock. Another install holding the lock
+# defers the run (as install-gt's exit 3 does): no sync, no build, no record.
+# That the plugin releases the lock before delegating is what every install
+# case above already shows — install-gt would otherwise wait out its own lock
+# and exit 3. ---
+# Case 33
+T=$(make_town)
+RIG="$T/gastown/mayor/rig"
+BEFORE=$(git -C "$RIG" rev-parse HEAD)
+OTHER=$(mktemp -d)
+git clone -q "$T/origin.git" "$OTHER"
+git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "lands while the lock is held"
+git -C "$OTHER" push -q origin main
+mkdir -p "$T/daemon"
+perl -e '
+  use Fcntl qw(:flock);
+  open(my $fh, ">>", $ARGV[0]) or die "open: $!";
+  flock($fh, LOCK_EX) or die "flock: $!";
+  open(my $r, ">", $ARGV[1]) or die; close($r);
+  sleep 60;
+' "$T/daemon/install-gt.lock" "$T/lock.held" &
+HOLDER=$!
+for _ in $(seq 1 50); do [ -e "$T/lock.held" ] && break; sleep 0.1; done
+rc=$(run_plugin "$T" REBUILD_GT_LOCK_WAIT=1)
+kill "$HOLDER" 2>/dev/null || true
+wait "$HOLDER" 2>/dev/null || true
+if [ ! -e "$T/lock.held" ]; then
+  fail "install lock busy: the test never took the lock"
+elif [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ] && grep -q "install lock" "$T/run.out"; then
+  pass "install lock busy: deferred before syncing mayor/rig"
+else
+  fail "install lock busy: rc=$rc $(cat "$T/run.out")"
+fi
+if [ "$(git -C "$RIG" rev-parse HEAD)" = "$BEFORE" ]; then
+  pass "install lock busy: mayor/rig not fast-forwarded without the lock"
+else
+  fail "install lock busy: mayor/rig moved while another install held the lock"
+fi
+if grep -q "record-run" "$T/gt.log" 2>/dev/null; then
+  fail "install lock busy: recorded a run, which would spend the cooldown"
+else
+  pass "install lock busy: no run record"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all rebuild-gt tests passed"
