@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/state"
@@ -221,6 +222,17 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return runPrimeCompactResume(ctx)
 	}
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
+
+	// A fresh deacon session must not inherit its predecessor's patrol_count
+	// (gt-wdv9, the deacon's counterpart to gt-oabl's witness fix). This runs
+	// in the SessionStart hook path, the only funnel every deacon session
+	// passes through — a handoff respawns the pane, and the daemon restarts
+	// sessions, without going through any other single entry point. It runs
+	// before session setup so a failure later in this prime still leaves the
+	// counter cleared for the session it starts.
+	if msg := resetDeaconPatrolState(ctx); msg != "" {
+		fmt.Println(msg)
+	}
 
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
@@ -552,6 +564,55 @@ func signalAgentReady() {
 // causing the agent to re-initialize instead of continuing. (GH#1965)
 func isCompactResume() bool {
 	return primeHookSource == "compact" || primeHookSource == "resume" || primeHandoffReason == "compaction"
+}
+
+// primeResetsDeaconPatrolState reports whether this prime is the SessionStart
+// hook of a fresh deacon session.
+//
+// The deacon's loop-or-exit step hands off once its patrol_count reaches the
+// ceiling in the rendered role prompt (deacon.md.tmpl: 20 loops), and nothing
+// else ever resets that counter, so a value inherited from a predecessor
+// makes every new session hand off after a single cycle without ever running
+// `gt patrol report` — eight deacon handoff+session_start pairs landed in 26
+// minutes on 2026-09-24 with no incident behind any of them (gt-wdv9).
+// Session start is the one moment where "patrols this session" is well
+// defined, so it is where the reset belongs — mirroring the witness's
+// original fresh-session reset (primeResetsWitnessPatrolState, since
+// superseded: the witness's own counter is now purely informational and
+// bounded at patrol-report time instead, because its role template dropped
+// the loop-count handoff trigger entirely (gt-oabl); the deacon keeps a real
+// ceiling, so it still needs this).
+//
+// Only a fresh session qualifies. Compaction and resume continue the session
+// that owns the counter, and a bare `gt prime` (no --hook) is a context read,
+// not a session start.
+func primeResetsDeaconPatrolState(role Role, hookMode bool, source string) bool {
+	if !hookMode || role != RoleDeacon {
+		return false
+	}
+	return source == "startup" || source == "clear"
+}
+
+// resetDeaconPatrolState clears a fresh deacon session's inherited patrol
+// counter and returns a status line for the agent's context, or "" when it
+// did nothing. Failures are reported, never fatal: a state file we cannot
+// read must not stop a deacon from starting.
+func resetDeaconPatrolState(ctx RoleContext) string {
+	if primeDryRun || !primeResetsDeaconPatrolState(ctx.Role, primeHookMode, primeHookSource) {
+		return ""
+	}
+	if ctx.TownRoot == "" {
+		return ""
+	}
+
+	changed, err := deacon.ResetPatrolCount(ctx.TownRoot)
+	if err != nil {
+		return fmt.Sprintf("[prime] deacon patrol state not reset: %v", err)
+	}
+	if !changed {
+		return ""
+	}
+	return "[prime] deacon patrol_count reset to 0 for this session"
 }
 
 // warnRoleMismatch outputs a prominent warning if GT_ROLE disagrees with cwd detection.
