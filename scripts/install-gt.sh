@@ -11,7 +11,11 @@
 #   1  failed: build/install failed, or the smoke check failed (rolled back)
 #   2  refused: mayor/rig dirty, off main, diverged, not forward, unknown commit
 #   3  busy: the install lock or the container-gate slot was not free in time
-# The last stdout line is always "install-gt: RESULT <event> <commit> <prev> <reason>".
+# The last stdout line is always "install-gt: RESULT <event> <commit> <prev> <reason>",
+# and the exit code is always 0-3 — an EXIT trap (below) guarantees both even
+# on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard, perl
+# dying on the lock for a reason other than the timeout, cp/mv of gt.prev
+# failing under `set -e`, ...): it reports "failed ... unexpected" and exits 1.
 #
 # It never restarts the daemon: it writes daemon/restart-pending.json and the
 # daemon exits for a launchd restart once nothing is in flight.
@@ -21,6 +25,30 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 # shellcheck source=lib/install-gt-lib.sh
 . "$SCRIPT_DIR/lib/install-gt-lib.sh"
+
+# --- Exit contract -------------------------------------------------------------
+# Every deliberate exit below goes through result_line (never igt_result
+# directly), so RESULT_EMITTED marks that the last-line contract was met. The
+# EXIT trap catches everything else — including exit codes bash's own guards
+# produce (a `${TOWN_ROOT:?...}` abort, `set -e` killing the script mid cp/mv
+# or mid python-write) and a perl exit status that was never meant to be a
+# contract value (only 75, the lock-wait timeout, is; anything else perl
+# returns — e.g. it couldn't even open the lock file — must not leak through
+# as a bare exit code outside 0-3). It is intentionally conservative: it does
+# not call escalate() (GT/BIN_DIR may not be resolved yet this early) and
+# only attempts a receipt when DAEMON_DIR is already known.
+RESULT_EMITTED=0
+result_line() { RESULT_EMITTED=1; igt_result "$@"; }
+on_exit() {
+  local ec=$?
+  [ "$RESULT_EMITTED" = "1" ] && exit "$ec"
+  if [ -n "${DAEMON_DIR:-}" ]; then
+    igt_receipt failed "${EXPECTED:-${FULL_SHA:-${SHA:-}}}" "${PREV:-}" unexpected "${MERGED_AT:-}" "${START:-}" || true
+  fi
+  igt_result failed "${EXPECTED:-${FULL_SHA:-${SHA:-}}}" "${PREV:-}" unexpected
+  exit 1
+}
+trap on_exit EXIT
 
 ORIG_ARGS=("$@")
 SHA="" SOURCE="" SLOT_ROLE="" SLOT_TIMEOUT=600
@@ -56,27 +84,48 @@ escalate() {
 # flock(2) through perl (macOS has no flock(1)). The script re-execs itself with
 # the lock fd inherited ($^F keeps it open across exec), so the kernel drops
 # the lock if this process dies — a mkdir-lock would outlive a crash.
+#
+# perl's exec() replaces a CHILD process (the one bash forked to run perl),
+# never this shell, so on the happy path this outer bash and the re-exec'd
+# "bash $SCRIPT_PATH" that does the real work are two separate processes —
+# RESULT_EMITTED in one is invisible to the other. A MARKER file tells this
+# outer instance which happened: perl unlinks it immediately before exec, so
+# if it still exists once the subprocess returns, exec was never reached
+# (perl died first — e.g. it could not even open the lock file) and this
+# instance's own EXIT trap should print the fallback RESULT line below; if it
+# is gone, the re-exec'd instance ran to completion and already printed its
+# own — RESULT_EMITTED is set here too, purely to stop this instance's trap
+# from printing a second one on top of it.
 if [ -z "${INSTALL_GT_LOCKED:-}" ]; then
   mkdir -p "$DAEMON_DIR"
+  MARKER="$DAEMON_DIR/.install-gt.pre-exec.$$"
+  : > "$MARKER"
   rc=0
   INSTALL_GT_LOCKED=1 perl -e '
     use Fcntl qw(:flock);
     $^F = 255;
-    my ($lock, $wait, @cmd) = @ARGV;
+    my ($lock, $wait, $marker, @cmd) = @ARGV;
     open(my $fh, ">>", $lock) or die "install-gt: cannot open $lock: $!\n";
     my $deadline = time + $wait;
     until (flock($fh, LOCK_EX | LOCK_NB)) {
       exit 75 if time >= $deadline;
       select(undef, undef, undef, 0.5);
     }
+    unlink($marker);
     exec @cmd or die "install-gt: exec failed: $!\n";
-  ' "$DAEMON_DIR/install-gt.lock" "$LOCK_WAIT" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" || rc=$?
+  ' "$DAEMON_DIR/install-gt.lock" "$LOCK_WAIT" "$MARKER" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" || rc=$?
   if [ "$rc" = "75" ]; then
+    rm -f "$MARKER"
     log "Another install held the lock for ${LOCK_WAIT}s; not installing $SHA."
     igt_receipt refused "$SHA" "" lock-busy "" "$START"
-    igt_result refused "$SHA" "" lock-busy
+    result_line refused "$SHA" "" lock-busy
     exit 3
   fi
+  if [ -e "$MARKER" ]; then
+    rm -f "$MARKER"
+    exit "$rc"
+  fi
+  RESULT_EMITTED=1
   exit "$rc"
 fi
 
@@ -84,12 +133,12 @@ fi
 refuse() {
   log "Refused: $2"
   igt_receipt refused "${FULL_SHA:-$SHA}" "${PREV:-}" "$1" "${MERGED_AT:-}" "$START"
-  igt_result refused "${FULL_SHA:-$SHA}" "${PREV:-}" "$1"
+  result_line refused "${FULL_SHA:-$SHA}" "${PREV:-}" "$1"
   exit 2
 }
 
 # --- Resolve the target ---------------------------------------------------------
-[ -d "$RIG_DIR/.git" ] || [ -f "$RIG_DIR/.git" ] || { log "No build checkout at $RIG_DIR"; igt_result failed "$SHA" "" no-rig; exit 1; }
+[ -d "$RIG_DIR/.git" ] || [ -f "$RIG_DIR/.git" ] || { log "No build checkout at $RIG_DIR"; result_line failed "$SHA" "" no-rig; exit 1; }
 git -C "$RIG_DIR" fetch origin --quiet 2>/dev/null || log "WARNING: fetch failed; using local refs"
 FULL_SHA=$(igt_resolve "$RIG_DIR" "$SHA")
 [ -n "$FULL_SHA" ] || refuse unknown-commit "$SHA is not a commit in $RIG_DIR"
@@ -100,7 +149,7 @@ PREV=$(igt_resolve "$RIG_DIR" "$(igt_binary_commit_raw "$GT" "$RIG_DIR")")
 if [ -n "$PREV" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PREV" 2>/dev/null; then
   log "Installed $PREV already contains $FULL_SHA; nothing to do."
   igt_receipt noop "$FULL_SHA" "$PREV" already-installed "$MERGED_AT" "$START"
-  igt_result noop "$FULL_SHA" "$PREV" already-installed
+  result_line noop "$FULL_SHA" "$PREV" already-installed
   exit 0
 fi
 
@@ -146,13 +195,13 @@ fail_install() {
     else
       escalate critical install-gt:rollback-failed "$2; and restoring $BIN_DIR/gt.prev FAILED — the town may be running a broken gt"
       igt_receipt failed "$EXPECTED" "$PREV" rollback-failed "$MERGED_AT" "$START"
-      igt_result failed "$EXPECTED" "$PREV" rollback-failed
+      result_line failed "$EXPECTED" "$PREV" rollback-failed
       exit 1
     fi
   fi
   escalate "$3" "$4" "$2"
   igt_receipt "$5" "$EXPECTED" "$PREV" "$1" "$MERGED_AT" "$START"
-  igt_result "$5" "$EXPECTED" "$PREV" "$1"
+  result_line "$5" "$EXPECTED" "$PREV" "$1"
   exit 1
 }
 
@@ -171,7 +220,7 @@ if [ -n "$SLOT_ROLE" ]; then
     rm -f "$SLOT_LOG"
     log "Did not get the container-gate slot within ${SLOT_TIMEOUT}s."
     igt_receipt refused "$EXPECTED" "$PREV" slot-busy "$MERGED_AT" "$START"
-    igt_result refused "$EXPECTED" "$PREV" slot-busy
+    result_line refused "$EXPECTED" "$PREV" slot-busy
     exit 3
   fi
   rm -f "$SLOT_LOG"
@@ -189,7 +238,7 @@ if [ "$INSTALL_RC" != "0" ]; then
   # only when the installed commit could not be read above.
   if printf '%s\n' "$INSTALL_OUT" | grep -q "already at HEAD"; then
     igt_receipt noop "$EXPECTED" "$PREV" already-installed "$MERGED_AT" "$START"
-    igt_result noop "$EXPECTED" "$PREV" already-installed
+    result_line noop "$EXPECTED" "$PREV" already-installed
     exit 0
   fi
   fail_install build-failed "make safe-install failed for $EXPECTED" medium install-gt:build-failed failed
@@ -213,7 +262,12 @@ if OUT=$( (cd "$RIG_DIR" && "$GT" formula sync) 2>&1 ); then log "$OUT"; else lo
 if OUT=$( (cd "$RIG_DIR" && "$GT" plugin sync) 2>&1 ); then log "$OUT"; else log "plugin sync failed (non-fatal): $OUT"; fi
 
 # --- Restart marker, receipt ---------------------------------------------------------
-python3 - "$DAEMON_DIR/restart-pending.json" "$EXPECTED" "$SOURCE" "$(cd "$RIG_DIR" && pwd)" <<'PY'
+# The new binary is already installed and smoke-verified at this point: a
+# failure writing the marker is not a build/install/smoke failure, and must
+# never trigger fail_install's rollback of a binary that is good. It is its
+# own reason (marker-write) so the receipt and escalation say plainly that
+# the binary is in force but the daemon was not told to restart into it.
+if ! python3 - "$DAEMON_DIR/restart-pending.json" "$EXPECTED" "$SOURCE" "$(cd "$RIG_DIR" && pwd)" <<'PY'
 import datetime, json, os, sys
 path, commit, source, repo = sys.argv[1:5]
 m = {"commit": commit,
@@ -225,8 +279,14 @@ with open(tmp, "w") as f:
     json.dump(m, f, indent=2, sort_keys=True)
 os.replace(tmp, path)
 PY
+then
+  escalate high install-gt:marker-write-failed "$EXPECTED is installed and verified at $GT, but writing $DAEMON_DIR/restart-pending.json failed — the binary stays installed; the daemon needs a manual restart to pick it up"
+  igt_receipt failed "$EXPECTED" "$PREV" marker-write "$MERGED_AT" "$START"
+  result_line failed "$EXPECTED" "$PREV" marker-write
+  exit 1
+fi
 igt_receipt installed "$EXPECTED" "$PREV" "" "$MERGED_AT" "$START"
 "$GT" escalate clear --fingerprint install-gt:build-failed --fingerprint install-gt:smoke-failed \
   --reason "install-gt: $EXPECTED is in force" >/dev/null 2>&1 || true
 log "In force: ${PREV:-unknown} -> $EXPECTED. The daemon restarts itself when idle."
-igt_result installed "$EXPECTED" "$PREV" ""
+result_line installed "$EXPECTED" "$PREV" ""

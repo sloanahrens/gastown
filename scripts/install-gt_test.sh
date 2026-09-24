@@ -255,5 +255,46 @@ chmod u+w "$T/bin"
 [ "$rc" = "1" ] && grep -q -- "-s critical .*--fingerprint install-gt:rollback-failed" "$T/gt.log" \
   && pass "rollback fails: CRITICAL" || fail "rollback fails: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
 
+# --- Case 13: bad arguments -> the RESULT-line/exit-0-3 contract holds even
+# on a path that never reaches DAEMON_DIR (fix round 1: these used to be a
+# bare `exit 1` with no RESULT line at all). ---
+T=$(make_world)
+rc=$(run_install "$T" --source post-merge)
+[ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed - - unexpected" ] \
+  && pass "bad args (missing --sha): exit 1, RESULT line" || fail "bad args (missing --sha): rc=$rc $(cat "$T/run.out")"
+
+T=$(make_world)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source bogus)
+[ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $(cat "$T/c2") - unexpected" ] \
+  && pass "bad args (bad --source): exit 1, RESULT line" || fail "bad args (bad --source): rc=$rc $(cat "$T/run.out")"
+
+# --- Case 14: perl itself dies before it ever reaches exec (the lock path is
+# a pre-existing directory, so 'open >>' fails) -> its die() exit code (not
+# necessarily 75, and not necessarily outside 0-3) must never leak through as
+# a bare exit status with no RESULT line. DAEMON_DIR is left writable so this
+# exercises perl's own failure, not a bash-level permission error. ---
+T=$(make_world)
+mkdir -p "$T/daemon/install-gt.lock"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+[ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $(cat "$T/c2") - unexpected" ] \
+  && pass "lock file unopenable: mapped to exit 1 with a RESULT line" || fail "lock file unopenable: rc=$rc $(cat "$T/run.out")"
+
+# --- Case 15: the new binary is installed and smoke-verified, but writing
+# restart-pending.json fails (path is a directory) -> failed/marker-write,
+# exit 1, HIGH escalation, and — unlike a build/smoke failure — no rollback:
+# the good binary stays in force. ---
+T=$(make_world)
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+mkdir -p "$T/daemon/restart-pending.json"
+rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
+[ "$rc" = "1" ] && pass "marker-write fails: exit 1" || fail "marker-write fails: rc=$rc $(cat "$T/run.out")"
+[ "$(reported "$T")" = "$(cat "$T/c2")" ] && pass "marker-write fails: binary stays installed" || fail "marker-write fails: in force $(reported "$T")"
+[ "$(last_receipt "$T" event)" = "failed" ] && [ "$(last_receipt "$T" reason)" = "marker-write" ] \
+  && pass "marker-write fails: failed/marker-write receipt" || fail "marker-write fails: receipt $(last_receipt "$T" event)/$(last_receipt "$T" reason)"
+[ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $C2_FULL $(git -C "$T/rig" rev-parse HEAD~1) marker-write" ] \
+  && pass "marker-write fails: RESULT line" || fail "marker-write fails: RESULT line $(tail -1 "$T/run.out")"
+grep -q -- "-s high .*--fingerprint install-gt:marker-write-failed" "$T/gt.log" \
+  && pass "marker-write fails: HIGH escalation" || fail "marker-write fails: gt.log $(cat "$T/gt.log" 2>/dev/null)"
+
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
