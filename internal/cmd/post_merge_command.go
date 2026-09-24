@@ -33,7 +33,12 @@ type postMergeCommandParams struct {
 var (
 	postMergeCommandFn = runPostMergeCommand
 	postMergeEscalate  = escalatePostMergeCommand
+	postMergeClear     = clearPostMergeCommandEscalation
 )
+
+// postMergeClearTimeout bounds the best-effort escalation clear, so a slow
+// `gt escalate clear` under Dolt load cannot stall the post-merge step.
+const postMergeClearTimeout = 30 * time.Second
 
 // runPostMergeCommand runs the rig's post-merge command best-effort. The merge
 // has already landed, so nothing here may fail it: a nonzero exit or timeout
@@ -73,6 +78,9 @@ func runPostMergeCommand(p postMergeCommandParams) {
 	err := cmd.Run()
 	if err == nil {
 		fmt.Fprintf(out, "%s post-merge command finished in %s\n", style.Bold.Render("✓"), time.Since(start).Round(time.Second))
+		// A success closes any alert an earlier failure (or lock-busy
+		// collision) left open, so the next real failure is not ignored.
+		postMergeClear(p.RigName)
 		return
 	}
 	reason := err.Error()
@@ -90,11 +98,30 @@ func escalatePostMergeCommand(rigName, msg string) {
 		"--severity", "medium",
 		"--reason", "post-merge-command",
 		"--source", "refinery:post-merge",
-		"--fingerprint", "post-merge-command:"+rigName,
+		"--fingerprint", postMergeFingerprint(rigName),
 		msg)
 	if err := cmd.Run(); err != nil {
 		style.PrintWarning("post-merge command escalation failed: %v", err)
 	}
+}
+
+// clearPostMergeCommandEscalation closes the rig's open post-merge-command
+// escalation after a successful run. Best-effort and bounded: clearing a key
+// that matches nothing exits 0, and any failure only warns.
+func clearPostMergeCommandEscalation(rigName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), postMergeClearTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "escalate", "clear",
+		"--fingerprint", postMergeFingerprint(rigName),
+		"--reason", "post-merge command succeeded")
+	if err := cmd.Run(); err != nil {
+		style.PrintWarning("post-merge command escalation clear failed: %v", err)
+	}
+}
+
+// postMergeFingerprint is the alert key shared by the escalate and the clear.
+func postMergeFingerprint(rigName string) string {
+	return "post-merge-command:" + rigName
 }
 
 // postMergeCommandFor builds the run for a rig's configured post-merge

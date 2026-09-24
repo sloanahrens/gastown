@@ -22,11 +22,69 @@ import (
 // t.Parallel.
 func capturePostMergeEscalations(t *testing.T) *[]string {
 	t.Helper()
-	var got []string
-	orig := postMergeEscalate
+	esc, _ := capturePostMergeAlerts(t)
+	return esc
+}
+
+// capturePostMergeAlerts swaps both alert seams, the escalate and the clear,
+// so no test ever execs a real gt. It returns the escalations and the rigs
+// whose escalation was cleared.
+func capturePostMergeAlerts(t *testing.T) (*[]string, *[]string) {
+	t.Helper()
+	var got, clears []string
+	origEsc, origClear := postMergeEscalate, postMergeClear
 	postMergeEscalate = func(rigName, msg string) { got = append(got, rigName+": "+msg) }
-	t.Cleanup(func() { postMergeEscalate = orig })
-	return &got
+	postMergeClear = func(rigName string) { clears = append(clears, rigName) }
+	t.Cleanup(func() { postMergeEscalate, postMergeClear = origEsc, origClear })
+	return &got, &clears
+}
+
+func TestRunPostMergeCommand_SuccessClearsEscalation(t *testing.T) {
+	esc, clears := capturePostMergeAlerts(t)
+	runPostMergeCommand(postMergeCommandParams{
+		RigName: "gastown",
+		WorkDir: t.TempDir(),
+		Timeout: 10 * time.Second,
+		Output:  io.Discard,
+		Command: "true",
+	})
+	if len(*esc) != 0 {
+		t.Errorf("success escalated: %v", *esc)
+	}
+	if len(*clears) != 1 || (*clears)[0] != "gastown" {
+		t.Fatalf("clears = %v, want exactly [gastown]", *clears)
+	}
+}
+
+func TestRunPostMergeCommand_FailureEscalatesWithoutClear(t *testing.T) {
+	esc, clears := capturePostMergeAlerts(t)
+	runPostMergeCommand(postMergeCommandParams{
+		RigName: "gastown",
+		WorkDir: t.TempDir(),
+		Timeout: 10 * time.Second,
+		Output:  io.Discard,
+		Command: "exit 3",
+	})
+	if len(*esc) != 1 {
+		t.Fatalf("escalations = %v, want exactly 1", *esc)
+	}
+	if len(*clears) != 0 {
+		t.Fatalf("failure cleared the escalation: %v", *clears)
+	}
+}
+
+func TestRunPostMergeCommand_EmptyCommandNeitherEscalatesNorClears(t *testing.T) {
+	esc, clears := capturePostMergeAlerts(t)
+	runPostMergeCommand(postMergeCommandParams{RigName: "gastown", WorkDir: t.TempDir(), Output: io.Discard})
+	if len(*esc) != 0 || len(*clears) != 0 {
+		t.Fatalf("empty command: escalations=%v clears=%v, want none", *esc, *clears)
+	}
+}
+
+func TestPostMergeFingerprintSharedByEscalateAndClear(t *testing.T) {
+	if got := postMergeFingerprint("gastown"); got != "post-merge-command:gastown" {
+		t.Fatalf("fingerprint = %q", got)
+	}
 }
 
 func capturePostMergeCommandCalls(t *testing.T) *[]postMergeCommandParams {
