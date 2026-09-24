@@ -78,6 +78,27 @@ rc=$(run_hook "$T" "$SHA")
 [ "$rc" = "0" ] && grep -q "install-gt --sha $SHA --source post-merge" "$T/called.log" \
   && pass "runtime .go: install-gt called" || fail "runtime .go: rc=$rc $(cat "$T/called.log" 2>/dev/null)"
 
+# --- Markdown compiled into the binary (go:embed under internal/) -> installs ---
+T=$(make_world)
+SHA=$(land "$T" internal/templates/x.md)
+rc=$(run_hook "$T" "$SHA")
+[ "$rc" = "0" ] && grep -q "install-gt --sha $SHA" "$T/called.log" 2>/dev/null \
+  && pass "internal/ markdown: installs" || fail "internal/ markdown: rc=$rc not installed $(cat "$T/run.out")"
+
+# --- Plugin markdown (frontmatter deployed by plugin sync) -> installs ---
+T=$(make_world)
+SHA=$(land "$T" plugins/foo/plugin.md)
+rc=$(run_hook "$T" "$SHA")
+[ "$rc" = "0" ] && grep -q "install-gt --sha $SHA" "$T/called.log" 2>/dev/null \
+  && pass "plugins/ markdown: installs" || fail "plugins/ markdown: rc=$rc not installed $(cat "$T/run.out")"
+
+# --- Top-level markdown alone -> skipped ---
+T=$(make_world)
+SHA=$(land "$T" README.md)
+rc=$(run_hook "$T" "$SHA")
+[ "$rc" = "0" ] && [ ! -e "$T/called.log" ] && [ "$(last_event "$T")" = "skipped" ] \
+  && pass "README.md only: skipped" || fail "README.md only: rc=$rc called=$(cat "$T/called.log" 2>/dev/null)"
+
 # --- An unknown path changed -> install (fail toward installing) ---
 T=$(make_world)
 SHA=$(land "$T" weird/thing.bin)

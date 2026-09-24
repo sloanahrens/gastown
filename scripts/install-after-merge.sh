@@ -34,7 +34,11 @@ if [ -n "$INSTALLED" ] && git merge-base --is-ancestor "$INSTALLED" "$GT_MERGED_
   RUNTIME=""
   while IFS= read -r f; do
     case "$f" in
-      *_test.go|*.md|docs/*|.beads/*) ;;
+      *_test.go|docs/*|.beads/*) ;;
+      # Markdown under internal/ is go:embed'ed into the binary; plugins/*/*.md
+      # carries plugin frontmatter deployed by plugin sync. Both are runtime.
+      internal/*|plugins/*) RUNTIME="$f"; break ;;
+      *.md) ;;
       *) RUNTIME="$f"; break ;;
     esac
   done < <(git diff --name-only "$INSTALLED" "$GT_MERGED_SHA")
