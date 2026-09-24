@@ -384,6 +384,17 @@ func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string
 		}})
 		return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 	}
+	// Ensure a nudge-poller is running so the queue still drains after this
+	// process exits. watchAndDeliver below only watches synchronously for
+	// idleWatcherTimeout; a session that stays busy longer than that (a
+	// long-running patrol turn, say) needs the background poller to pick the
+	// queue back up. The poller is normally started at session launch, but if
+	// it crashed or was never started for this session, nudges would queue up
+	// and never be delivered (gt-9le0e). StartPoller is idempotent — it
+	// no-ops if a poller is already alive for this session.
+	if _, pollerErr := nudge.StartPoller(townRoot, sessionName); pollerErr != nil {
+		fmt.Fprintf(os.Stderr, "wait-idle: could not start nudge poller for %s: %v\n", sessionName, pollerErr)
+	}
 	// Run watcher synchronously: polls for idle over a longer window.
 	// The UserPromptSubmit hook drains the queue on agent input, but an
 	// idle agent receives no input — so queued nudges are lost without
