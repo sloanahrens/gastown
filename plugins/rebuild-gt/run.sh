@@ -260,6 +260,7 @@ clear_alarms() {
   gt escalate clear --fingerprint "rebuild-gt:starved" \
     --fingerprint "rebuild-gt:drift" --fingerprint "rebuild-gt:drift-unknown" \
     --fingerprint "rebuild-gt:unverified" --fingerprint "rebuild-gt:no-installer" \
+    --fingerprint "rebuild-gt:install-failed" \
     --reason "rebuild-gt: the binary is in force" >/dev/null 2>&1 || true
 }
 
@@ -482,6 +483,8 @@ fi
 # install-gt's own exit 3 does.
 INSTALL_LOCK="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT}/daemon}/install-gt.lock"
 LOCK_WAIT=${REBUILD_GT_LOCK_WAIT:-30}
+# What install-gt.sh itself waits for the same lock (seconds); see the call.
+INSTALL_LOCK_WAIT=${REBUILD_GT_INSTALL_LOCK_WAIT:-60}
 
 # install_lock_take — flock the install lock on fd 9, waiting up to
 # $LOCK_WAIT seconds; false when it stays busy. perl locks the shell's own open
@@ -785,7 +788,12 @@ fi
 # to the plugin log until it finished, and read as hung (gt-kox0).
 INSTALL_LOG=$(mktemp)
 set +e
-INSTALL_GT_RIG_DIR="$RIG_ROOT" bash "$INSTALLER" "${INSTALL_ARGS[@]}" 2>&1 | tee "$INSTALL_LOG"
+# INSTALL_GT_LOCK_WAIT: a post-merge install holding the lock means one is
+# running right now; wait a minute, not install-gt's default 5, then defer
+# (exit 3). Waiting longer only keeps this plugin running, which keeps the
+# daemon non-idle and delays its upgrade restart.
+INSTALL_GT_LOCK_WAIT="$INSTALL_LOCK_WAIT" INSTALL_GT_RIG_DIR="$RIG_ROOT" \
+  bash "$INSTALLER" "${INSTALL_ARGS[@]}" 2>&1 | tee "$INSTALL_LOG"
 INSTALL_RC=${PIPESTATUS[0]}
 set -e
 RESULT=$(grep -a '^install-gt: RESULT ' "$INSTALL_LOG" | tail -1 || true)
@@ -839,9 +847,24 @@ $SUBJECTS" >/dev/null 2>&1 || true
     ;;
   *)
     log "FAILED: install-gt exited $INSTALL_RC (${R_REASON:-no result line})"
+    # install-gt escalates these reasons itself (install-gt:build-failed,
+    # :smoke-failed, :rollback-failed, :marker-write-failed). Anything else —
+    # its 'unexpected' trap, no-rig, or no RESULT line at all — reached nobody,
+    # and the failure record starts a cooldown, so escalate it here.
+    case "$R_REASON" in
+      build-failed|smoke-failed|rollback-failed|marker-write)
+        ESCALATED_BY="escalated by install-gt" ;;
+      *)
+        ESCALATED_BY="escalated by rebuild-gt"
+        gt escalate "rebuild-gt: install-gt failed (${R_REASON:-no result line}, exit $INSTALL_RC) installing $TARGET" \
+          -s medium --source "plugin:rebuild-gt" \
+          --fingerprint "rebuild-gt:install-failed" >/dev/null 2>&1 \
+          || { log "WARNING: escalation rebuild-gt:install-failed did not reach the town"; ESCALATED_BY="escalation failed"; }
+        ;;
+    esac
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
       --title "Plugin: rebuild-gt [failure]" \
-      --description "install-gt failed: ${R_REASON:-exit $INSTALL_RC} (escalated by install-gt)" >/dev/null 2>&1 || true
+      --description "install-gt failed: ${R_REASON:-exit $INSTALL_RC} ($ESCALATED_BY)" >/dev/null 2>&1 || true
     exit 1
     ;;
 esac

@@ -516,6 +516,13 @@ else
 fi
 if [ -e "$T/daemon/restart-pending.json" ]; then fail "install that did not take: wrote a restart marker"; else pass "install that did not take: no marker"; fi
 if grep -q -- "--fingerprint install-gt:smoke-failed" "$T/gt.log"; then pass "install that did not take: install-gt fingerprint"; else fail "install that did not take: fingerprint $(cat "$T/gt.log")"; fi
+# install-gt escalated this itself, so rebuild-gt must not double it.
+if grep -q -- "--fingerprint rebuild-gt:install-failed" "$T/gt.log"; then
+  fail "install that did not take: rebuild-gt escalated a failure install-gt already escalated"
+else
+  pass "install that did not take: no second escalation from rebuild-gt"
+fi
+if grep -q "record-run .*(escalated by install-gt)" "$T/gt.log"; then pass "install that did not take: record says install-gt escalated"; else fail "install that did not take: record $(grep record-run "$T/gt.log")"; fi
 
 # --- Case 14: binary already fresh -> recorded, no build, no restart ---
 T=$(make_town)
@@ -1158,6 +1165,60 @@ if grep -q "record-run" "$T/gt.log" 2>/dev/null; then
   fail "install lock busy: recorded a run, which would spend the cooldown"
 else
   pass "install lock busy: no run record"
+fi
+
+# --- claude-7fc: rebuild-gt's own escalation for install-gt failures that
+# install-gt did not escalate, and the lock wait it hands install-gt. ---
+# stub_installer TOWN BODY — commit BODY as the rig's scripts/install-gt.sh and
+# push it, so the rig stays clean and on origin/main; refresh the staleness
+# fixture for the new tip. The stub records the env it was given.
+stub_installer() {
+  local rig="$1/gastown/mayor/rig"
+  { echo '#!/usr/bin/env bash'
+    echo 'echo "INSTALL_GT_LOCK_WAIT=${INSTALL_GT_LOCK_WAIT:-unset}" > "$GT_TEST_TOWN/installer.env"'
+    printf '%s\n' "$2"; } > "$rig/scripts/install-gt.sh"
+  git -C "$rig" add scripts/install-gt.sh
+  git -C "$rig" -c user.email=t@t -c user.name=t commit -q -m "stub installer"
+  git -C "$rig" push -q origin main
+  write_stale "$1" 5
+}
+
+# Case 34: install-gt fails through its 'unexpected' trap (it escalates
+# nothing) -> rebuild-gt escalates rebuild-gt:install-failed and says so.
+T=$(make_town)
+stub_installer "$T" 'echo "install-gt: RESULT failed - - unexpected"; exit 1'
+rc=$(run_plugin "$T")
+[ "$rc" = "1" ] && pass "install-gt unexpected: exit 1" || fail "install-gt unexpected: rc=$rc $(cat "$T/run.out")"
+if grep -a -q "escalate .*-s medium .*--fingerprint rebuild-gt:install-failed" "$T/gt.log" 2>/dev/null; then
+  pass "install-gt unexpected: rebuild-gt escalated"
+else
+  fail "install-gt unexpected: no escalation: $(cat "$T/gt.log" 2>/dev/null)"
+fi
+if grep -a -q "record-run .*(escalated by rebuild-gt)" "$T/gt.log" && ! grep -a -q "escalated by install-gt" "$T/gt.log"; then
+  pass "install-gt unexpected: record names rebuild-gt's escalation"
+else
+  fail "install-gt unexpected: record $(grep -a record-run "$T/gt.log")"
+fi
+grep -a -q "^INSTALL_GT_LOCK_WAIT=60$" "$T/installer.env" 2>/dev/null \
+  && pass "install-gt gets INSTALL_GT_LOCK_WAIT=60" || fail "install-gt lock wait: $(cat "$T/installer.env" 2>/dev/null)"
+
+# Case 35: install-gt dies without a RESULT line -> also escalated here.
+T=$(make_town)
+stub_installer "$T" 'exit 1'
+rc=$(run_plugin "$T")
+if [ "$rc" = "1" ] && grep -a -q -- "--fingerprint rebuild-gt:install-failed" "$T/gt.log" 2>/dev/null; then
+  pass "install-gt no RESULT line: escalated"
+else
+  fail "install-gt no RESULT line: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
+fi
+
+# Case 36: a success clears rebuild-gt:install-failed with the other alarms.
+T=$(make_town)
+rc=$(run_plugin "$T")
+if [ "$rc" = "0" ] && grep -a -q "escalate clear .*--fingerprint rebuild-gt:install-failed" "$T/gt.log"; then
+  pass "install success: clears rebuild-gt:install-failed"
+else
+  fail "install success: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi

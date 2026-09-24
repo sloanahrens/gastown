@@ -125,9 +125,12 @@ The waiting is the point: `gt slot run` alone does not queue behind a gate on
 a pool with more than one slot — it takes a free slot, and the build starts
 beside the load-sensitive suite the yield exists to avoid (gt-htx3). So the
 run polls `gt slot status` until no gate-class role holds a slot, and acquires
-after that. `REBUILD_GT_RESERVE_WAIT` (default 10m) bounds the two together,
-which is why `[execution] timeout` is 25m. The install is a temp-file rename
-outside the hold. A wait that gets nothing defers — nothing was built, so
+after that. `REBUILD_GT_RESERVE_WAIT` (default 10m) bounds the poll and the
+slot wait together. The 25m `[execution] timeout` has to cover that wait, the
+two lock waits (this plugin's own `REBUILD_GT_LOCK_WAIT`, 30s, and
+install-gt's, passed as `INSTALL_GT_LOCK_WAIT` from
+`REBUILD_GT_INSTALL_LOCK_WAIT`, 60s), and the build itself, which nothing here
+bounds. The install is a temp-file rename outside the hold. A wait that gets nothing defers — nothing was built, so
 nothing failed.
 
 Reaching force — a fresh binary, or a completed install — closes the block and
@@ -200,7 +203,11 @@ The fetch and fast-forward are writes to `mayor/rig`, so they run under
 the tree under a build the post-merge hook is running. The plugin waits up to
 `REBUILD_GT_LOCK_WAIT` seconds (default 30) for it; a lock still busy means an
 install is running right now, so the run defers (exit 3). The lock is released
-before `install-gt.sh` runs, which takes it again itself.
+before `install-gt.sh` runs, which takes it again itself, waiting
+`REBUILD_GT_INSTALL_LOCK_WAIT` seconds (default 60, passed as
+`INSTALL_GT_LOCK_WAIT`) rather than install-gt's own 5 minutes; still busy, it
+exits 3 and the run defers. A long wait would only keep this plugin running,
+and a running plugin keeps the daemon from its idle-point upgrade restart.
 
 ## Quiet gate
 
@@ -235,7 +242,9 @@ previous binary as `gt.prev`, and verifies the commit in force the way this
 plugin used to — the short commit the binary reports is resolved to a full
 hash inside the rig before comparing (gt-oqbw, gt-b5mpe). On a failed check it
 restores `gt.prev` and escalates (`install-gt:smoke-failed`,
-`install-gt:rollback-failed`). Then `gt formula sync` and `gt plugin sync`
+`install-gt:rollback-failed`). A failure install-gt does not escalate itself —
+its `unexpected` trap, `no-rig`, or no RESULT line at all — is escalated here
+as `rebuild-gt:install-failed` (MEDIUM). Then `gt formula sync` and `gt plugin sync`
 (non-fatal), then `daemon/restart-pending.json`.
 
 The daemon is **not** restarted here. It reads the marker at each heartbeat
@@ -249,7 +258,10 @@ marker older than `REBUILD_GT_DAEMON_LAG_MINUTES` (default 30), or a daemon
 whose `state.json` commit is not a descendant of the installed binary's while
 that binary has been in place that long, escalates
 `rebuild-gt:daemon-not-in-force` (HIGH). It clears once both readings are
-healthy.
+healthy: no marker pending and the daemon's commit a descendant of the
+installed binary's. A reading that could not be taken (no `gt stale`, no
+commit in `state.json`, a commit that does not resolve) leaves the alert as it
+is.
 
 ## Record Result
 
@@ -258,4 +270,4 @@ The receipt names the commits brought into force — `in force <old> -> <new>
 `daemon/install-receipts.jsonl`. A refusal escalates only through the
 starvation check's `rebuild-gt:starved`; reaching force — or a run that finds
 the binary not due — clears `:starved`, `:drift`, `:drift-unknown`,
-`:unverified` and `:no-installer` together.
+`:unverified`, `:no-installer` and `:install-failed` together.
