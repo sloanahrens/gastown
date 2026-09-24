@@ -62,6 +62,51 @@ func TestBeadsInfraTypesList(t *testing.T) {
 	}
 }
 
+func TestNonDispatchableBeadWispTypes(t *testing.T) {
+	got := NonDispatchableBeadWispTypes()
+	// Every entry must be one of the durable types, "wisp" excluded (the wisp
+	// scan walks the wisps table, where every row is a wisp), and order kept.
+	for i, typ := range got {
+		found := false
+		for _, want := range NonDispatchableBeadTypes {
+			if want == typ {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("NonDispatchableBeadWispTypes()[%d] = %q, not in NonDispatchableBeadTypes", i, typ)
+		}
+		if typ == "wisp" {
+			t.Errorf("NonDispatchableBeadWispTypes() includes %q, want it excluded from the wisp scan", typ)
+		}
+	}
+	if want := len(NonDispatchableBeadTypes) - 1; len(got) != want {
+		t.Errorf("NonDispatchableBeadWispTypes() returned %d items, want %d", len(got), want)
+	}
+}
+
+func TestNonDispatchableBeadTypesLabels(t *testing.T) {
+	// The representative mail case: a mail bead is typed "task" and distinguished
+	// only by its "gt:message" label, so both halves must carry the message
+	// family.
+	if !containsString(NonDispatchableBeadTypes, "message") {
+		t.Error("NonDispatchableBeadTypes missing \"message\"")
+	}
+	if !containsString(NonDispatchableBeadLabels, "gt:message") {
+		t.Error("NonDispatchableBeadLabels missing \"gt:message\"")
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestMayorRigsPath(t *testing.T) {
 	got := MayorRigsPath("/town")
 	expect := "/town/mayor/rigs.json"

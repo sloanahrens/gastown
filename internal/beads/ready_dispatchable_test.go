@@ -76,6 +76,70 @@ exit 0
 	}
 }
 
+// TestReady_ExcludesBookkeepingServerSide is the gt-0q80 regression test:
+// Ready() must send the same --exclude-label/--exclude-type flags
+// ReadyDispatchable sends, so the in-process store path and the CLI path
+// answer the same question. The stub mirrors the gt-b9wq gap — it only
+// omits the mail-shaped issue when it observes the exclusion flags.
+func TestReady_ExcludesBookkeepingServerSide(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(ResetBdAllowStaleCacheForTest)
+
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "bd.log")
+	stubScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$MOCK_BD_LOG"
+case "$1" in
+  --allow-stale) exit 0 ;;
+esac
+case "$*" in
+  *"--exclude-label"*"gt:message"*"--exclude-type"*"message"*)
+    printf '[{"id":"gt-real","title":"Fix the flaky slot test","status":"open","priority":2,"issue_type":"task"}]\n'
+    ;;
+  *)
+    printf '[{"id":"gt-real","title":"Fix the flaky slot test","status":"open","priority":2,"issue_type":"task"},{"id":"hq-mail","title":"Re: something","status":"open","priority":2,"issue_type":"task"}]\n'
+    ;;
+esac
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_LOG", logPath)
+
+	b := NewIsolated(t.TempDir())
+	issues, err := b.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+
+	if len(issues) != 1 || issues[0].ID != "gt-real" {
+		ids := make([]string, len(issues))
+		for i, issue := range issues {
+			ids[i] = issue.ID
+		}
+		t.Fatalf("Ready = %v, want only [gt-real]", ids)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock bd log: %v", err)
+	}
+	logOutput := string(logData)
+	if !strings.Contains(logOutput, "--exclude-label") || !strings.Contains(logOutput, "gt:message") {
+		t.Fatalf("Ready did not send --exclude-label with gt:message:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "--exclude-type") || !strings.Contains(logOutput, "message") {
+		t.Fatalf("Ready did not send --exclude-type with message:\n%s", logOutput)
+	}
+}
+
 // TestReadyDispatchable_FallsBackOnUnknownFlag guards an older bd that
 // rejects --exclude-label/--exclude-type as unknown: ReadyDispatchable must
 // still return the unfiltered Ready() result rather than error out, leaving
