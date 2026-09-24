@@ -122,6 +122,29 @@ func parseGateContainer(line string) GateContainer {
 	return GateContainer{Image: image, Name: strings.TrimSpace(name)}
 }
 
+// GateContainers lists the gate containers running right now, parsed. It is
+// the same `docker ps` cross-check Status performs, in per-container form, for
+// a caller that needs the individual containers rather than a busy/free
+// verdict — gt done's container watch (gt-0ss4), which diffs the listing
+// against the one it took when its slot-free run started to tell a container
+// THAT RUN started from one that was already there.
+//
+// A non-nil error means the check could not be performed and must be read as
+// "unknown", never as "no containers running". Goes through the same
+// runningGateContainers var Acquire and Status use, so tests substitute it
+// with SetContainerListerForTest.
+func GateContainers() ([]GateContainer, error) {
+	lines, err := runningGateContainers()
+	if err != nil {
+		return nil, err
+	}
+	containers := make([]GateContainer, 0, len(lines))
+	for _, line := range lines {
+		containers = append(containers, parseGateContainer(line))
+	}
+	return containers, nil
+}
+
 // parseDockerCreatedAt parses docker's start-time string, returning the zero
 // time for anything it does not recognize.
 func parseDockerCreatedAt(s string) time.Time {

@@ -986,7 +986,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// the first thing a reader of a slow or refused gate needs (gt-wx53: the
 	// answer used to be an unconditional yes, stated nowhere).
 	if containersOptedOut {
-		fmt.Fprintf(logFile, "containers: opted out (%s=0) — container-backed tests skip here and run once per submission in the refinery's gate, so this gate takes no container-gate slot\n", dockerTestsEnv)
+		fmt.Fprintf(logFile, "containers: opted out (%s=0) — container-backed tests skip here and run once per submission in the refinery's gate, so this gate takes no container-gate slot; a container that starts anyway fails this run (gt-0ss4)\n", dockerTestsEnv)
 	} else if cswitch.value == "" {
 		fmt.Fprintf(logFile, "containers: enabled — a non-Go rig's command does not say whether it starts Docker, so this gate takes a container-gate slot\n")
 	} else {
@@ -1066,10 +1066,25 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 
 	ctx, cancel := context.WithTimeout(context.Background(), budgets.runTimeout)
 	defer cancel()
+	// The run gets its own cancellable context so the container watch can end
+	// it the moment it sees a container this run started (gt-0ss4), without
+	// touching the budget: ctx still distinguishes a timeout from a kill, and
+	// the watch's finding is reported as itself rather than as either.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	// The gate ran slot-free because the rig's command does not ask for
+	// containers. That text is a proxy for "this suite starts no container",
+	// so watch the thing itself: a container that appears while no slot is
+	// held is one this run started outside the slot (gt-0ss4).
+	var watch *containerWatch
+	if !needsSlot {
+		watch = startGateContainerWatch(runCtx, cancelRun, townRoot, logFile)
+	}
 
 	runStart := time.Now()
 	_, runErr := runWithProgress(testVerifyProgressInterval, func() error {
-		return runVerifySuite(ctx, worktree, testCmd, env, logFile)
+		return runVerifySuite(runCtx, worktree, testCmd, env, logFile)
 	}, func(elapsed time.Duration) {
 		logBytes := int64(-1)
 		if fi, statErr := logFile.Stat(); statErr == nil {
@@ -1080,9 +1095,25 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	})
 	runElapsed := time.Since(runStart)
 	timedOut := ctx.Err() == context.DeadlineExceeded
+	if watch != nil {
+		watch.stop()
+	}
 
 	result.slotWait = slotWait
 	result.runElapsed = runElapsed
+
+	// The watch's finding outranks the run's own outcome: the watch killed the
+	// run, so its exit status is not a test result (gt-0ss4). A watch that
+	// found nothing writes the observation that says the slot-free decision
+	// held for this run — or why it was not checked.
+	if watch != nil {
+		if stray := watch.strayContainers(); len(stray) > 0 {
+			return testVerifyResult{}, fmt.Errorf(
+				"gt done: the default test-verify gate ran this rig's suite WITHOUT a container-gate slot (its command asks for no containers), but a container appeared during the run and no slot holder owns it: %s. The Docker VM is shared by the whole town and only a slot holder may use it (gt-wx53, gt-0ss4), so the gate killed the run — its exit status is not a test result. Either this rig's command starts containers without declaring the opt-in — declare it (merge_queue.test_command \"%s=1 make test\") so the gate takes a slot before it runs, or make the container-backed tests honor %s=0, which a recipe reading $${%s:-1} does — or another suite is running unwrapped, which `gt slot status` reports for the town. Full log: %s",
+				strings.Join(stray, ", "), dockerTestsEnv, dockerTestsEnv, dockerTestsEnv, logPath)
+		}
+		reportVerifyProgress(logFile, watch.summary())
+	}
 
 	if timedOut {
 		fmt.Fprintf(logFile, "=== test-verify timed out after %s ===\n", humanDuration(budgets.runTimeout))

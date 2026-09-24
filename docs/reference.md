@@ -177,7 +177,15 @@ to inheritance, so the slot decision and the environment the suite reads are one
 `make test` defaults the variable to 1 and reading it would queue the gate behind a slot
 its own tree already holds. The gate's value only wins if the rig's recipe reads the
 variable rather than hardcoding it — gastown's `make test` defaults it
-(`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason.
+(`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason, and
+`TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
+
+That command text is a proxy for the thing the rule is about — a container
+starting — so a slot-free gate run is watched while it runs: a container that
+appears with no slot holder owning it is the run's, and the gate fails on it
+instead of letting a suite that ignored its own opt-out run beside the rest of
+the town (gt-0ss4). The gate's log records what the watch saw, so a slot-free
+run that started nothing says so.
 
 Run `gt done` **once**, then leave it alone. Its gate waits for the slot before
 it runs the container suites, printing a `still waiting for the container-gate
