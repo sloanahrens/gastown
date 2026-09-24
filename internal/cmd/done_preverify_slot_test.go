@@ -89,7 +89,9 @@ func TestResolvePreVerifyTestSlot(t *testing.T) {
 		{"Go module with testcontainers, make test defaults the opt-in on: slot", "tc", "GOFLAGS=-p=8 make test", true},
 		{"Go module with testcontainers, explicit opt-in: slot", "tc", "GT_TEST_DOCKER=1 go test ./...", true},
 		{"Go module with testcontainers, explicit opt-out: no slot", "tc", "GT_TEST_DOCKER=0 make test", false},
-		{"opt-out then opt-in: the last assignment wins", "tc", "export GT_TEST_DOCKER=0; GT_TEST_DOCKER=1 make test", true},
+		{"opt-out then opt-in: any opt-in takes a slot", "tc", "export GT_TEST_DOCKER=0; GT_TEST_DOCKER=1 make test", true},
+		{"opt-in then opt-out: still a slot (conservative)", "tc", "export GT_TEST_DOCKER=1; GT_TEST_DOCKER=0 make test", true},
+		{"quoted opt-out", "tc", "GT_TEST_DOCKER='0' make test", false},
 		{"empty value is not an opt-out (make's :-1 default applies)", "tc", "GT_TEST_DOCKER= make test", true},
 	}
 	for _, tc := range cases {

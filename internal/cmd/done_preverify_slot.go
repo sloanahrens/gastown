@@ -52,7 +52,7 @@ type preVerifySlotDecision struct {
 //   - a Go module that does not require testcontainers-go cannot start a
 //     testcontainers container, so it takes none (om's `make test`, say);
 //   - a Go module that does require it takes a slot unless the command itself
-//     writes GT_TEST_DOCKER=0. `make test` defaults the opt-in on
+//     writes GT_TEST_DOCKER=0 and never writes =1. `make test` defaults the opt-in on
 //     (GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}), so a command that says nothing
 //     starts containers. The ambient value is not read, for the reason
 //     resolveContainerSwitch gives (gt-0hbm): it does not describe this run.
@@ -69,27 +69,15 @@ func resolvePreVerifyTestSlot(worktree, testCmd string) preVerifySlotDecision {
 	case !strings.Contains(string(data), testcontainersModule):
 		return preVerifySlotDecision{false, "the Go module does not require " + testcontainersModule + ", so its suite starts no containers"}
 	}
-	if v, ok := inlineDockerTestsValue(testCmd); ok && v == "0" {
+	// Shares the container-suite guard's parser (commandSetsDockerTests). An
+	// explicit opt-out counts only when the command does not also opt in
+	// anywhere: a command that does both is read as wanting containers, the
+	// direction that costs a slot wait rather than an unwrapped suite.
+	tokens := shellTokenize(testCmd)
+	if commandSetsDockerTests(tokens, "0") && !commandEnablesDockerTests(tokens) {
 		return preVerifySlotDecision{false, fmt.Sprintf("the test command writes %s=0, so its container-backed tests skip", dockerTestsEnv)}
 	}
 	return preVerifySlotDecision{true, fmt.Sprintf("the Go module requires %s and the test command does not write %s=0 (make test defaults it on)", testcontainersModule, dockerTestsEnv)}
-}
-
-// inlineDockerTestsValue returns the last value the command text assigns to
-// the container opt-in (GT_TEST_DOCKER=<v>, bare, quoted, or via env/export),
-// and whether it assigns one at all. The last assignment is the one a shell
-// running the command would leave in effect.
-func inlineDockerTestsValue(command string) (string, bool) {
-	prefix := dockerTestsEnv + "="
-	value, found := "", false
-	for _, tok := range shellTokenize(command) {
-		i := strings.Index(tok, prefix)
-		if i < 0 || (i > 0 && tok[i-1] != ' ') {
-			continue
-		}
-		value, found = strings.Trim(tok[i+len(prefix):], `"'`), true
-	}
-	return value, found
 }
 
 // hold takes the container-gate slot for the test gate when
