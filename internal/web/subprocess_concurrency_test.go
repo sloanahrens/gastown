@@ -63,6 +63,11 @@ func TestNewDashboardMux_PartitionsSubprocessPools(t *testing.T) {
 	}
 }
 
+// userCmdExecBudget bounds a fake gt stub's execution in these tests. It only
+// costs time when the stub is truly wedged, so it is sized for a loaded gate
+// host, not for how fast the stub usually runs.
+const userCmdExecBudget = 30 * time.Second
+
 // TestUserCommandPoolDoesNotStarveFetcherBD is the behavioral proof of the
 // partition, driving both handlers it claims are independent: with the
 // APIHandler's cmdSem completely full — as a burst of options/mail/ready
@@ -84,10 +89,16 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 		t.Fatalf("write fake gt binary: %v", err)
 	}
 
+	// slotWaitBudget is short so a regression that draws cmdSem fails fast
+	// with "command slot unavailable". The exec budget (userCmdExecBudget) is
+	// generous: a 1s budget timed the trivial gt stub out on a loaded gate
+	// host while the bd herd below was forking ("command timed out after
+	// 1s") — that measured the host, not the pool partition.
 	h := &APIHandler{
-		gtPath:     gtPath,
-		cmdSem:     make(chan struct{}, maxConcurrentCommands),
-		userCmdSem: make(chan struct{}, userCommandConcurrency),
+		gtPath:         gtPath,
+		cmdSem:         make(chan struct{}, maxConcurrentCommands),
+		userCmdSem:     make(chan struct{}, userCommandConcurrency),
+		slotWaitBudget: 50 * time.Millisecond,
 	}
 	// Fill the short-read pool completely, as a burst of API reads would.
 	for i := 0; i < maxConcurrentCommands; i++ {
@@ -95,7 +106,7 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	}
 
 	f := &LiveConvoyFetcher{
-		cmdTimeout: 10 * time.Second,
+		cmdTimeout: 30 * time.Second,
 		bdBin:      bdPath,
 		cmdSem:     make(chan struct{}, subprocessConcurrency),
 	}
@@ -120,7 +131,7 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 	// A user-driven command must succeed concurrently with the bd herd
 	// above, even though every cmdSem slot is taken — it never touches
 	// cmdSem (gt-d5xr).
-	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+	out, err := h.runUserGtCommand(context.Background(), userCmdExecBudget, []string{"rig", "add"})
 
 	wg.Wait()
 	close(stop)
@@ -156,13 +167,14 @@ func TestRunUserGtCommand_DoesNotDrawCmdSemSlot(t *testing.T) {
 	}
 
 	h := &APIHandler{
-		gtPath:     gtPath,
-		cmdSem:     make(chan struct{}, 1),
-		userCmdSem: make(chan struct{}, 1),
+		gtPath:         gtPath,
+		cmdSem:         make(chan struct{}, 1),
+		userCmdSem:     make(chan struct{}, 1),
+		slotWaitBudget: 50 * time.Millisecond,
 	}
 	h.cmdSem <- struct{}{} // held for the whole test; never released
 
-	out, err := h.runUserGtCommand(context.Background(), time.Second, []string{"rig", "add"})
+	out, err := h.runUserGtCommand(context.Background(), userCmdExecBudget, []string{"rig", "add"})
 	if err != nil {
 		t.Fatalf("runUserGtCommand with cmdSem's only slot held: %v", err)
 	}
