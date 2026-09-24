@@ -382,6 +382,66 @@ func TestEnqueueQueueDepthLimit(t *testing.T) {
 	}
 }
 
+// TestEnqueuePrunesExpiredWhenFull reproduces gt-9le0e: a queue whose drainer
+// stopped running (dead poller) fills with nudges that have since passed
+// their own TTL. Enqueue must not treat that as a permanently full queue —
+// it should prune the stale entries before rejecting a new one.
+func TestEnqueuePrunesExpiredWhenFull(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-expired-full"
+
+	// Fill the queue with already-expired nudges — nothing ever drained them.
+	for i := 0; i < MaxQueueDepth; i++ {
+		n := QueuedNudge{
+			Sender:    "sender",
+			Message:   "stale",
+			Timestamp: time.Now().Add(-time.Hour),
+			ExpiresAt: time.Now().Add(-time.Minute), // already expired
+		}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue expired %d: %v", i, err)
+		}
+	}
+
+	// A fresh, still-live nudge should not be rejected as "full" — the queue
+	// is really full of garbage, which Enqueue should prune first.
+	fresh := QueuedNudge{Sender: "sender", Message: "operational instruction"}
+	if err := Enqueue(townRoot, session, fresh); err != nil {
+		t.Fatalf("Enqueue after queue full of expired entries should succeed: %v", err)
+	}
+
+	nudges, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 1 || nudges[0].Message != "operational instruction" {
+		t.Fatalf("Drain after prune = %+v, want only the fresh nudge", nudges)
+	}
+}
+
+// TestEnqueueStillRejectsWhenFullOfLiveNudges confirms pruning doesn't make
+// the depth cap toothless: a queue full of still-live nudges must keep
+// rejecting new ones, same as before gt-9le0e.
+func TestEnqueueStillRejectsWhenFullOfLiveNudges(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-live-full"
+
+	for i := 0; i < MaxQueueDepth; i++ {
+		n := QueuedNudge{Sender: "sender", Message: "msg"}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	err := Enqueue(townRoot, session, QueuedNudge{Sender: "sender", Message: "overflow"})
+	if err == nil {
+		t.Fatal("expected error when queue is genuinely full of live nudges")
+	}
+	if !strings.Contains(err.Error(), "is full") {
+		t.Errorf("got error %q, want to contain 'is full'", err.Error())
+	}
+}
+
 func TestDrainSweepsOrphanedClaims(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-test-orphans"

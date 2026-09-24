@@ -68,6 +68,10 @@ const (
 	// values, naming the path that found the expiry.
 	expirySourceDrain   = "drain"
 	expirySourceRequeue = "requeue"
+	// expirySourcePrune is the ExpiryEvent.Source value for expired entries
+	// found by pruneExpired, i.e. while a queue is at capacity with no active
+	// drainer (gt-9le0e).
+	expirySourcePrune = "prune"
 )
 
 // nudgeConfig loads nudge-specific thresholds from town settings.
@@ -146,7 +150,16 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	maxDepth := nudgeConfig(townRoot).MaxQueueDepthV()
 	pending, _ := Pending(townRoot, session)
 	if pending >= maxDepth {
-		return fmt.Errorf("nudge queue for %s is full (%d/%d pending)", session, pending, maxDepth)
+		// The cap may be satisfied entirely by stale entries from a drainer
+		// that stopped running — a dead poller, or an agent that never goes
+		// idle. Without this, a queue full of garbage past its own TTL stays
+		// full forever and rejects every new nudge (gt-9le0e: gt-witness sat
+		// at 50/50 with 41 expired entries). Prune before trusting the count.
+		pruneExpired(townRoot, session)
+		pending, _ = Pending(townRoot, session)
+		if pending >= maxDepth {
+			return fmt.Errorf("nudge queue for %s is full (%d/%d pending)", session, pending, maxDepth)
+		}
 	}
 
 	if nudge.Timestamp.IsZero() {
@@ -363,6 +376,64 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 	}
 
 	return nudges, nil
+}
+
+// pruneExpired removes queued nudges that have already passed their
+// ExpiresAt, leaving live entries untouched. Enqueue calls this once a queue
+// looks full, so a drainer that stopped running (dead poller, or an agent
+// that never goes idle) cannot leave the queue permanently rejecting new
+// nudges on the strength of garbage that expired long ago (gt-9le0e).
+//
+// Uses the same claim-then-check dance as Drain so a concurrent Drain or
+// prune can't double-process the same file; unlike Drain, a live entry is
+// unclaimed and put back rather than returned to a caller.
+func pruneExpired(townRoot, session string) {
+	dir := queueDir(townRoot, session)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		claimPath := path + ".claimed." + randomSuffix()
+		if err := os.Rename(path, claimPath); err != nil {
+			// Lost the race with a concurrent Drain/prune, or already gone.
+			continue
+		}
+
+		data, err := os.ReadFile(claimPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				_ = os.Rename(claimPath, path) // best-effort unclaim
+			}
+			continue
+		}
+
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			// Malformed — leave it for Drain's orphan/malformed handling.
+			_ = os.Rename(claimPath, path)
+			continue
+		}
+
+		if n.ExpiresAt.IsZero() || !now.After(n.ExpiresAt) {
+			// Still live — put it back untouched.
+			_ = os.Rename(claimPath, path)
+			continue
+		}
+
+		reportExpiry(townRoot, session, n, expirySourcePrune)
+		if rmErr := os.Remove(claimPath); rmErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove expired nudge %s: %v\n", entry.Name(), rmErr)
+		}
+	}
 }
 
 // reportExpiry announces a nudge that reached ExpiresAt undelivered, on three
