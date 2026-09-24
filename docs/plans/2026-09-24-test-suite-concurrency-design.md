@@ -230,3 +230,28 @@ hide the signal the measurements need.
   Mitigated by the preconditions and by telling the mayor.
 - **Docker restart kills running containers.** Only done when the
   preconditions hold.
+
+## Results (2026-09-24)
+
+Measured with `scripts/test-capacity/` under `gt slot run`. Stages 1-2 ran on
+origin/main a5df766 (before gt-elvf4/z34); stage 3 ran on this branch. The
+operator trimmed the protocol to one run per stage: history already showed paired
+gates failing at load 55-59, and the question per stage was whether the change
+made two suites fit. Raw logs: `~/.claude/docs/research/claude-yfj/stage{1,2,3}/`.
+
+| stage | VM | runs | wall s | FAIL | peak VM used | peak swap | peak load | peak Dolt ctr CPU |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 7.65 GiB | single | 312 | 0 | 7.0 GiB | 0.06 GiB | 46 | — |
+| 2 | 31.3 GiB | paired | 480 / 478 | 0 / 0 | 12.7 GiB | 0 | 67 | 23.1 cores |
+| 3 | 31.3 GiB + tmpfs | paired | 465 / 464 | 0 / 1* | 13.4 GiB | 0 | 68 | 26.3 cores |
+
+\* `internal/witness` `TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat`,
+a known tmux timing flake (gt-94gie) with no Dolt involvement; it passed in the
+other five runs.
+
+**Reading.** Memory was the wall: one suite alone filled the old VM, and two
+suites need about 13 GiB. At 32 GiB both suites meet the ≤ 8 min goal. tmpfs
+adds about 3%. The remaining limit is CPU: the Dolt containers peak at the whole
+VM (24 vCPU) while the host sits at load 67-68. Much of refinery's Dolt work is
+migration retries ("refusing to auto-apply"), which gt-elvf4 removes. Stage 4
+(template database, suite-aware slot cap) is not needed now.
