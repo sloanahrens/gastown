@@ -2,13 +2,11 @@ package cmd
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
@@ -328,6 +326,12 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	return patrolID, nil
 }
 
+// renderPatrolWispDescription renders the wisp body. It derives the role vars
+// itself from cfg.Assignee so it renders correctly for a caller that built
+// PatrolConfig by hand (bypassing patrolConfigForRole); cfg.ExtraVars is
+// appended after, so a caller that already carries the same vars (every real
+// caller does, via patrolConfigForRole) safely overrides with identical
+// values, and an explicit override (e.g. a test rig= override) still wins.
 func renderPatrolWispDescription(cfg PatrolConfig) (string, error) {
 	rigName := patrolRigName(cfg)
 	ctx := RoleContext{TownRoot: cfg.BeadsDir, Rig: rigName}
@@ -363,49 +367,35 @@ func updatePatrolWispDescription(cfg PatrolConfig, resolvedBeadsDir, patrolID, d
 		Run()
 }
 
-// outputPatrolContext is the main function that handles patrol display logic.
-// It finds or creates a patrol and outputs the status and work loop.
-func outputPatrolContext(cfg PatrolConfig) {
+// outputPatrolContext renders the patrol status and work loop from a status
+// prime already resolved via ensurePrimePatrol; it does not re-run discovery
+// or seeding itself (gt-e1ie).
+func outputPatrolContext(cfg PatrolConfig, status primePatrolStatus) {
 	fmt.Println()
 	fmt.Printf("%s\n\n", style.Bold.Render(fmt.Sprintf("## %s %s", cfg.HeaderEmoji, cfg.HeaderTitle)))
 
-	// Try to find an active patrol
-	patrolID, patrolLine, hasPatrol, findErr := findActivePatrol(cfg)
-
-	if findErr != nil {
-		// Discovery failed — do NOT auto-spawn to avoid creating duplicates
-		style.PrintWarning("patrol discovery failed: %v", findErr)
+	if status.Uncertain != "" && status.PatrolID == "" {
+		// Discovery could not be confirmed and nothing was seeded — do not
+		// guess at a patrol that may not exist.
+		style.PrintWarning("patrol state uncertain: %s", status.Uncertain)
 		fmt.Println("Status: **Discovery failed** — cannot determine patrol state")
 		fmt.Println(style.Dim.Render("Check bd connectivity and retry. Not spawning new patrol to avoid duplicates."))
 		return
 	}
 
-	if !hasPatrol {
-		// No active patrol - auto-spawn one
-		fmt.Printf("Status: **No active patrol** - creating %s...\n", cfg.PatrolMolName)
-		fmt.Println()
-
-		var err error
-		patrolID, err = autoSpawnPatrol(cfg)
-		if err != nil {
-			if errors.Is(err, refinery.ErrSafetyStopped) {
-				fmt.Println(style.Dim.Render(err.Error()))
-				return
-			}
-			if patrolID != "" {
-				fmt.Printf("⚠ %s\n", err.Error())
-			} else {
-				fmt.Println(style.Dim.Render(err.Error()))
-				fmt.Println(style.Dim.Render("Run `" + cli.Name() + " formula list` to troubleshoot."))
-				return
-			}
-		} else {
-			fmt.Printf("✓ Created and hooked patrol wisp: %s\n", patrolID)
-		}
-	} else {
-		// Has active patrol - show status
+	switch {
+	case status.Seeded:
+		fmt.Printf("Status: **No active patrol** - creating %s...\n\n", cfg.PatrolMolName)
+		fmt.Printf("✓ Created and hooked patrol wisp: %s\n", status.PatrolID)
+	case status.Uncertain != "":
+		fmt.Printf("⚠ %s\n", status.Uncertain)
+	default:
 		fmt.Println("Status: **Patrol Active**")
-		fmt.Printf("Patrol: %s\n", strings.TrimSpace(patrolLine))
+		line := status.PatrolLine
+		if line == "" {
+			line = status.PatrolID
+		}
+		fmt.Printf("Patrol: %s\n", strings.TrimSpace(line))
 		// The id can name a wisp a previous cycle already burned: spawn burns
 		// the old wisps but this line is whatever the agent still has hooked.
 		// Three refinery sessions read that as a broken hook and replaced a
@@ -420,9 +410,9 @@ func outputPatrolContext(cfg PatrolConfig) {
 		fmt.Printf("%d. %s\n", i+1, step)
 	}
 
-	if patrolID != "" {
+	if status.PatrolID != "" {
 		fmt.Println()
-		fmt.Printf("Current patrol ID: %s\n", patrolID)
+		fmt.Printf("Current patrol ID: %s\n", status.PatrolID)
 	}
 }
 

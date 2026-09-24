@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 var patrolNewRole string
@@ -47,31 +46,9 @@ func runPatrolNew(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build config based on role
-	var cfg PatrolConfig
-	switch Role(roleName) {
-	case RoleDeacon:
-		cfg = PatrolConfig{
-			RoleName:      "deacon",
-			PatrolMolName: constants.MolDeaconPatrol,
-			BeadsDir:      roleInfo.TownRoot,
-			Assignee:      patrolAssignee("deacon", ""),
-		}
-	case RoleWitness:
-		cfg = PatrolConfig{
-			RoleName:      "witness",
-			PatrolMolName: constants.MolWitnessPatrol,
-			BeadsDir:      roleInfo.TownRoot,
-			Assignee:      patrolAssignee("witness", roleInfo.Rig),
-		}
-	case RoleRefinery:
-		cfg = PatrolConfig{
-			RoleName:      "refinery",
-			PatrolMolName: constants.MolRefineryPatrol,
-			BeadsDir:      roleInfo.TownRoot,
-			Assignee:      patrolAssignee("refinery", roleInfo.Rig),
-			ExtraVars:     buildRefineryPatrolVars(roleInfo),
-		}
-	default:
+	roleInfo.Role = Role(roleName)
+	cfg, ok := patrolConfigForRole(roleInfo)
+	if !ok {
 		return fmt.Errorf("unsupported role for patrol: %q (expected deacon, witness, or refinery)", roleName)
 	}
 

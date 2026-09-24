@@ -10,9 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -330,8 +328,11 @@ func truncateDescription(desc string, maxLen int) string {
 	return desc
 }
 
-// outputMoleculeContext checks if the agent is working on a molecule step and shows progress.
-func outputMoleculeContext(ctx RoleContext) {
+// outputMoleculeContext checks if the agent is working on a molecule step and
+// shows progress. patrolStatus is the result of prime's own ensurePrimePatrol
+// call (empty for a dry run, which skips it); the patrol branches render from
+// it instead of re-running discovery and seeding a second time (gt-e1ie).
+func outputMoleculeContext(ctx RoleContext, patrolStatus primePatrolStatus) {
 	// Applies to polecats, crew workers, deacon, witness, and refinery
 	if ctx.Role != RolePolecat && ctx.Role != RoleCrew && ctx.Role != RoleDeacon && ctx.Role != RoleWitness && ctx.Role != RoleRefinery {
 		return
@@ -339,19 +340,19 @@ func outputMoleculeContext(ctx RoleContext) {
 
 	// For Deacon, use special patrol molecule handling
 	if ctx.Role == RoleDeacon {
-		outputDeaconPatrolContext(ctx)
+		outputDeaconPatrolContext(ctx, patrolStatus)
 		return
 	}
 
 	// For Witness, use special patrol molecule handling (auto-bonds on startup)
 	if ctx.Role == RoleWitness {
-		outputWitnessPatrolContext(ctx)
+		outputWitnessPatrolContext(ctx, patrolStatus)
 		return
 	}
 
 	// For Refinery, use special patrol molecule handling (auto-bonds on startup)
 	if ctx.Role == RoleRefinery {
-		outputRefineryPatrolContext(ctx)
+		outputRefineryPatrolContext(ctx, patrolStatus)
 		return
 	}
 
@@ -363,84 +364,72 @@ func outputMoleculeContext(ctx RoleContext) {
 // outputDeaconPatrolContext shows patrol molecule status for the Deacon.
 // Deacon uses wisps (Wisp:true issues in main .beads/) for patrol cycles.
 // Deacon is a town-level role, so it uses town root beads (not rig beads).
-func outputDeaconPatrolContext(ctx RoleContext) {
-	// Check if Deacon is paused - if so, output PAUSED message and skip patrol context
-	paused, state, err := deacon.IsPaused(ctx.TownRoot)
-	if err == nil && paused {
-		outputDeaconPausedMessage(state)
+func outputDeaconPatrolContext(ctx RoleContext, status primePatrolStatus) {
+	if status.Role == "" {
 		return
 	}
-
-	cfg := PatrolConfig{
-		RoleName:      "deacon",
-		PatrolMolName: constants.MolDeaconPatrol,
-		BeadsDir:      ctx.TownRoot, // Town-level role uses town root beads
-		Assignee:      patrolAssignee("deacon", ""),
-		HeaderEmoji:   "🔄",
-		HeaderTitle:   "Patrol Status (Wisp-based)",
-		WorkLoopSteps: []string{
-			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Deacon patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
-		},
+	if status.Suspended != "" || status.PrecheckUncertain {
+		outputPatrolSuspended(status)
+		return
 	}
-	outputPatrolContext(cfg)
+	cfg := status.Config
+	cfg.HeaderEmoji = "🔄"
+	cfg.HeaderTitle = "Patrol Status (Wisp-based)"
+	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
+	outputPatrolContext(cfg, status)
 	showFormulaStepsFull(constants.MolDeaconPatrol, ctx.TownRoot, ctx.Rig)
 }
 
 // outputWitnessPatrolContext shows patrol molecule status for the Witness.
 // Witness AUTO-BONDS its patrol molecule on startup if one isn't already running.
-func outputWitnessPatrolContext(ctx RoleContext) {
-	if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
-		fmt.Printf("\n⏸️  Rig %s is %s — skipping patrol wisp generation.\n", ctx.Rig, reason)
+func outputWitnessPatrolContext(ctx RoleContext, status primePatrolStatus) {
+	if status.Role == "" {
 		return
 	}
-	extraVars := buildWitnessPatrolVars(ctx)
-	cfg := PatrolConfig{
-		RoleName:      "witness",
-		PatrolMolName: constants.MolWitnessPatrol,
-		BeadsDir:      ctx.TownRoot,
-		Assignee:      patrolAssignee("witness", ctx.Rig),
-		HeaderEmoji:   constants.EmojiWitness,
-		HeaderTitle:   "Witness Patrol Status",
-		ExtraVars:     extraVars,
-		WorkLoopSteps: []string{
-			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Witness patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
-		},
+	if status.Suspended != "" || status.PrecheckUncertain {
+		outputPatrolSuspended(status)
+		return
 	}
-	outputPatrolContext(cfg)
-	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, extraVars)
+	cfg := status.Config
+	cfg.HeaderEmoji = constants.EmojiWitness
+	cfg.HeaderTitle = "Witness Patrol Status"
+	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
+	outputPatrolContext(cfg, status)
+	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
 }
 
 // outputRefineryPatrolContext shows patrol molecule status for the Refinery.
 // Refinery AUTO-BONDS its patrol molecule on startup if one isn't already running.
-func outputRefineryPatrolContext(ctx RoleContext) {
-	if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
-		fmt.Printf("\n⏸️  Rig %s is %s — skipping patrol wisp generation.\n", ctx.Rig, reason)
+func outputRefineryPatrolContext(ctx RoleContext, status primePatrolStatus) {
+	if status.Role == "" {
 		return
 	}
-	if stop, err := refinery.ActiveSafetyStop(ctx.TownRoot, ctx.Rig); err != nil {
-		style.PrintWarning("could not check refinery safety stop: %v", err)
-		return
-	} else if stop != nil {
-		fmt.Printf("\nRefinery %s is %s; skipping patrol wisp generation.\n", ctx.Rig, stop.Reason())
+	if status.Suspended != "" || status.PrecheckUncertain {
+		outputPatrolSuspended(status)
 		return
 	}
-	cfg := PatrolConfig{
-		RoleName:      "refinery",
-		PatrolMolName: constants.MolRefineryPatrol,
-		BeadsDir:      ctx.TownRoot,
-		Assignee:      patrolAssignee("refinery", ctx.Rig),
-		HeaderEmoji:   "🔧",
-		HeaderTitle:   "Refinery Patrol Status",
-		ExtraVars:     buildRefineryPatrolVars(ctx),
-		WorkLoopSteps: []string{
-			"Work through each patrol step in sequence (see checklist below)",
-			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Refinery patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
-		},
-	}
-	outputPatrolContext(cfg)
+	cfg := status.Config
+	cfg.HeaderEmoji = "🔧"
+	cfg.HeaderTitle = "Refinery Patrol Status"
+	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
+	outputPatrolContext(cfg, status)
 	showFormulaStepsFull(constants.MolRefineryPatrol, ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
+}
+
+// outputPatrolSuspended reports an operator stop, or an operator-stop check
+// that itself could not be confirmed (PrecheckUncertain) — both withhold the
+// checklist: whether a patrol should even run is unknown in either case, not
+// just whether one already exists.
+func outputPatrolSuspended(status primePatrolStatus) {
+	if status.Pause != nil {
+		outputDeaconPausedMessage(status.Pause)
+		return
+	}
+	if status.PrecheckUncertain {
+		fmt.Printf("\n❓ Patrol state unknown — %s. Not seeding until this clears; retry `%s prime`.\n", status.Uncertain, cli.Name())
+		return
+	}
+	fmt.Printf("\n⏸️  %s — skipping patrol wisp generation.\n", status.Suspended)
 }
 
 // buildWitnessPatrolVars returns --var key=value strings for the witness

@@ -288,6 +288,7 @@ func captureOutput(fn func()) string {
 // A nil part is skipped.
 type primeParts struct {
 	session     func() string
+	patrol      func() string
 	hookedWork  func() string
 	molecule    func() string
 	directives  func() string
@@ -313,6 +314,10 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 		return f()
 	}
 	p.add("session", 0, true, call(parts.session))
+	// The patrol line is kept, not budgeted: it is the only statement that
+	// survives a dropped molecule section to tell a patrol role which patrol it
+	// is on (gt-e1ie).
+	p.add("patrol", 0, true, call(parts.patrol))
 	p.add("hooked-work", 1, true, call(parts.hookedWork))
 	if includeStatic {
 		p.add("role", 1, true, staticText)
