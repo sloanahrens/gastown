@@ -511,19 +511,6 @@ func (b *Beads) storeClose(reason, session string, ids ...string) error {
 	return nil
 }
 
-// storeReady implements Ready using the in-process store.
-func (b *Beads) storeReady() ([]*Issue, error) {
-	ctx, cancel := storeCtx()
-	defer cancel()
-
-	sdkIssues, err := b.store.GetReadyWork(ctx, beadsdk.WorkFilter{})
-	if err != nil {
-		return nil, fmt.Errorf("store ready: %w", err)
-	}
-
-	return sdkIssuesToIssues(sdkIssues), nil
-}
-
 // storeReadyWithFilter implements Ready with a WorkFilter using the in-process store.
 func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error) {
 	ctx, cancel := storeCtx()

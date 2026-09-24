@@ -1,51 +1,10 @@
 package beads
 
-import "strings"
+import (
+	"strings"
 
-// nonDispatchableIssueLabels are the bead families that carry a priority but no
-// owner a polecat can take work from: an escalation waits on the mayor or the
-// operator, a message on its recipient, an agent bead is a polecat's own
-// identity, and a merge request is the refinery's queue.
-//
-// One list rather than one per caller, because the callers ask the same
-// question and drifted while the lists were separate (gt-b9wq): the Ready panel
-// offered Sling on mail beads and on the refinery's merge slot while the
-// dashboard's Work panel filtered both.
-var nonDispatchableIssueLabels = []string{
-	"gt:agent",
-	"gt:convoy",
-	"gt:escalation",
-	"gt:formula",
-	"gt:handoff",
-	"gt:keep",
-	"gt:merge-request",
-	"gt:merge-slot",
-	"gt:message",
-	"gt:queue",
-	"gt:rig",
-	"gt:role",
-	"gt:standing-orders",
-	"gt:wisp",
-}
-
-// nonDispatchableIssueTypes are the issue types that record town runtime rather
-// than work — a message, a handoff note, an agent identity, and the deacon's
-// event records (a compaction report, a reaper run).
-//
-// "event" is held here instead of in InternalIssueType because
-// ConcreteWorkIssueRejectReason reads that predicate for a different question,
-// where the answer for an event bead need not change.
-var nonDispatchableIssueTypes = []string{
-	"wisp",
-	"message",
-	"handoff",
-	"merge-request",
-	"agent",
-	"queue",
-	"convoy",
-	"formula",
-	"event",
-}
+	"github.com/steveyegge/gastown/internal/constants"
+)
 
 // nonDispatchableTitlePrefixes are the unlabelled families, matched on title
 // because no label distinguishes them. Titles are the weaker signal; a bead
@@ -74,13 +33,13 @@ func IsNonDispatchableBead(issue *Issue) bool {
 		return false
 	}
 
-	for _, skip := range nonDispatchableIssueTypes {
+	for _, skip := range constants.NonDispatchableBeadTypes {
 		if strings.EqualFold(strings.TrimSpace(issue.Type), skip) {
 			return true
 		}
 	}
 	for _, label := range issue.Labels {
-		for _, skip := range nonDispatchableIssueLabels {
+		for _, skip := range constants.NonDispatchableBeadLabels {
 			if strings.EqualFold(strings.TrimSpace(label), skip) {
 				return true
 			}

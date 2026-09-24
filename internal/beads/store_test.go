@@ -8,6 +8,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // mockStorage implements beadsdk.Storage for unit testing the store integration layer.
@@ -30,6 +31,7 @@ type mockStorage struct {
 	addDepErr       error
 	removeDepErr    error
 	getLabelsErr    error
+	readyFilter     *beadsdk.WorkFilter // last WorkFilter handed to GetReadyWork
 }
 
 func newMockStorage() *mockStorage {
@@ -277,6 +279,7 @@ func (m *mockStorage) GetLabels(_ context.Context, issueID string) ([]string, er
 }
 
 func (m *mockStorage) GetReadyWork(_ context.Context, filter beadsdk.WorkFilter) ([]*beadsdk.Issue, error) {
+	m.readyFilter = &filter
 	// Return all open issues (simplified: no real blocking logic)
 	var result []*beadsdk.Issue
 	for _, issue := range m.issues {
@@ -292,6 +295,77 @@ func (m *mockStorage) GetReadyWork(_ context.Context, filter beadsdk.WorkFilter)
 }
 
 func (m *mockStorage) Close() error { return nil }
+
+// TestReadyStorePathSendsBookkeepingExclusions is the gt-0q80 regression test
+// for the in-process store path: Ready() must hand the same bookkeeping
+// exclusions to GetReadyWork server-side that the CLI path sends as
+// --exclude-label/--exclude-type, instead of filtering client-side against a
+// WorkFilter the SDK never promised would apply.
+func TestReadyStorePathSendsBookkeepingExclusions(t *testing.T) {
+	store := newMockStorage()
+	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "real work"}, "test")
+	b := newTestBeads(store)
+
+	if _, err := b.Ready(); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+
+	if store.readyFilter == nil {
+		t.Fatal("Ready did not call GetReadyWork")
+	}
+	if !containsListString(store.readyFilter.ExcludeLabels, "gt:message") {
+		t.Errorf("Ready's WorkFilter.ExcludeLabels missing \"gt:message\": %v", store.readyFilter.ExcludeLabels)
+	}
+	if !containsIssueType(store.readyFilter.ExcludeTypes, beadsdk.IssueType("message")) {
+		t.Errorf("Ready's WorkFilter.ExcludeTypes missing \"message\": %v", store.readyFilter.ExcludeTypes)
+	}
+	// The labels the filter sends are exactly the shared constants list — the
+	// exclusion is defined once and cannot drift between the store and the CLI.
+	if len(store.readyFilter.ExcludeLabels) != len(constants.NonDispatchableBeadLabels) {
+		t.Errorf("Ready's WorkFilter.ExcludeLabels has %d entries, want %d (the full shared list)",
+			len(store.readyFilter.ExcludeLabels), len(constants.NonDispatchableBeadLabels))
+	}
+}
+
+// TestReadyDispatchableStorePathSendsBookkeepingExclusions pins that
+// ReadyDispatchable sends the identical filter on the store path — both
+// methods must answer the same question there (gt-0q80).
+func TestReadyDispatchableStorePathSendsBookkeepingExclusions(t *testing.T) {
+	store := newMockStorage()
+	b := newTestBeads(store)
+
+	if _, err := b.ReadyDispatchable(); err != nil {
+		t.Fatalf("ReadyDispatchable: %v", err)
+	}
+
+	if store.readyFilter == nil {
+		t.Fatal("ReadyDispatchable did not call GetReadyWork")
+	}
+	if !containsListString(store.readyFilter.ExcludeLabels, "gt:message") {
+		t.Errorf("ReadyDispatchable's WorkFilter.ExcludeLabels missing \"gt:message\": %v", store.readyFilter.ExcludeLabels)
+	}
+	if !containsIssueType(store.readyFilter.ExcludeTypes, beadsdk.IssueType("message")) {
+		t.Errorf("ReadyDispatchable's WorkFilter.ExcludeTypes missing \"message\": %v", store.readyFilter.ExcludeTypes)
+	}
+}
+
+func containsListString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIssueType(list []beadsdk.IssueType, want beadsdk.IssueType) bool {
+	for _, it := range list {
+		if it == want {
+			return true
+		}
+	}
+	return false
+}
 
 // --- Tests ---
 

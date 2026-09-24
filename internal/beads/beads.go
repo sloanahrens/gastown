@@ -18,6 +18,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/util"
@@ -1937,13 +1938,17 @@ func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
 	return nil, nil
 }
 
-// Ready returns issues that are ready to work (not blocked).
+// Ready returns issues that are ready to work (not blocked). Bookkeeping
+// families (mail, escalations, identity, merge queue, event records) are
+// excluded server-side by the same WorkFilter / --exclude flags
+// ReadyDispatchable sends, so the ready query answers the same question on
+// every path (gt-0q80).
 func (b *Beads) Ready() ([]*Issue, error) {
 	if b.store != nil {
-		return b.storeReady()
+		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	out, err := b.run("ready", "--json")
+	out, err := b.run(readyCliArgs()...)
 	if err != nil {
 		return nil, err
 	}
@@ -1958,37 +1963,29 @@ func (b *Beads) Ready() ([]*Issue, error) {
 
 // ReadyDispatchable returns ready issues with the town's bookkeeping
 // families (mail, escalations, identity, merge queue, event records)
-// excluded server-side via bd's own --exclude-label/--exclude-type filters.
-//
-// A caller that instead fetches with Ready() and filters client-side with
-// IsNonDispatchableBead depends on labels surviving into whatever response
-// it receives — true for the in-process store, not guaranteed for every bd
-// CLI release's `ready --json` shape. Passing the same exclusion to bd
-// itself removes that dependency: the family is gone before bd ever builds
-// the response (gt-b9wq).
+// excluded server-side by the same filter Ready sends (gt-0q80): the
+// WorkFilter to the in-process store, the --exclude-label/--exclude-type
+// flags to bd. The exclusion travels with the query, so it holds no matter
+// which table a bead's labels live in at scan time and whether they were
+// hydrated into the response — a filterless fetch followed by a
+// client-side IsNonDispatchableBead pass did not hold (gt-b9wq).
 //
 // On a bd build old enough to reject the exclude flags, this falls back to
-// the unfiltered Ready() result; the caller's own IsNonDispatchableBead pass
-// remains the backstop in that case, same as before this method existed.
+// the unfiltered ready query; the caller's own IsNonDispatchableBead pass
+// remains the backstop in that case.
 func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 	if b.store != nil {
-		return b.storeReadyWithFilter(beadsdk.WorkFilter{
-			ExcludeLabels: nonDispatchableIssueLabels,
-			ExcludeTypes:  nonDispatchableIssueTypesSDK(),
-		})
+		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	args := []string{
-		"ready", "--json",
-		"--exclude-label", strings.Join(nonDispatchableIssueLabels, ","),
-		"--exclude-type", strings.Join(nonDispatchableIssueTypes, ","),
-	}
-	out, err := b.run(args...)
+	out, err := b.run(readyCliArgs()...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown flag") {
-			return b.Ready()
+			out, err = b.run(readyBaseArgs()...)
 		}
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var issues []*Issue
@@ -1999,11 +1996,36 @@ func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 	return issues, nil
 }
 
-// nonDispatchableIssueTypesSDK converts nonDispatchableIssueTypes to the SDK's
+// readyWorkFilter is the WorkFilter every in-process store ready query sends:
+// the bookkeeping-family exclusions (gt-0q80).
+func readyWorkFilter() beadsdk.WorkFilter {
+	return beadsdk.WorkFilter{
+		ExcludeLabels: constants.NonDispatchableBeadLabels,
+		ExcludeTypes:  nonDispatchableIssueTypesSDK(),
+	}
+}
+
+// readyCliArgs is the bd invocation that carries the same exclusion:
+// "ready --json" plus the exclude flags.
+func readyCliArgs() []string {
+	return []string{
+		"ready", "--json",
+		"--exclude-label", strings.Join(constants.NonDispatchableBeadLabels, ","),
+		"--exclude-type", strings.Join(constants.NonDispatchableBeadTypes, ","),
+	}
+}
+
+// readyBaseArgs is the unfiltered "ready --json" invocation, the fallback for
+// a bd build old enough to reject the exclude flags.
+func readyBaseArgs() []string {
+	return []string{"ready", "--json"}
+}
+
+// nonDispatchableIssueTypesSDK converts the bookkeeping types to the SDK's
 // IssueType for WorkFilter.ExcludeTypes.
 func nonDispatchableIssueTypesSDK() []beadsdk.IssueType {
-	types := make([]beadsdk.IssueType, len(nonDispatchableIssueTypes))
-	for i, t := range nonDispatchableIssueTypes {
+	types := make([]beadsdk.IssueType, len(constants.NonDispatchableBeadTypes))
+	for i, t := range constants.NonDispatchableBeadTypes {
 		types[i] = beadsdk.IssueType(t)
 	}
 	return types
