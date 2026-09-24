@@ -84,6 +84,25 @@ func ResetBdAllowStaleCacheForTest() {
 	bdAllowStaleMu.Unlock()
 }
 
+// SetBdAllowStaleProbeTimeoutForTest overrides the capability-probe timeout
+// and returns a func restoring the previous value (pass it to t.Cleanup). It
+// exists for other packages' tests whose bd stub must be probed as
+// supporting --allow-stale: the probe fails closed, so on a loaded host a
+// stub that answers after the production bound is cached as unsupported and
+// the call under test drops --allow-stale. Not for parallel tests: the
+// override is process-wide.
+func SetBdAllowStaleProbeTimeoutForTest(d time.Duration) (restore func()) {
+	bdAllowStaleMu.Lock()
+	prev := bdAllowStaleProbeTimeout
+	bdAllowStaleProbeTimeout = d
+	bdAllowStaleMu.Unlock()
+	return func() {
+		bdAllowStaleMu.Lock()
+		bdAllowStaleProbeTimeout = prev
+		bdAllowStaleMu.Unlock()
+	}
+}
+
 // BdSupportsAllowStale returns true if the installed bd binary accepts --allow-stale.
 func BdSupportsAllowStale() bool {
 	return BdSupportsAllowStaleWithEnv(nil)
