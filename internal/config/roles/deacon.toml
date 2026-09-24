@@ -21,8 +21,11 @@ ping_timeout = "30s"
 consecutive_failures = 3
 kill_cooldown = "5m"
 stuck_threshold = "1h"
-# Budget for the DEACON_SELF_PROBE ack (glossary "Self-probe"): must exceed
-# the doctor-dog interval (5m) or the check measures scheduler skew instead
-# of deacon health. Deliberately not ping_timeout, which is a 30s
-# network-ping value sized for a different kind of check.
-self_probe_budget = "15m"
+# Budget for the DEACON_SELF_PROBE ack (glossary "Self-probe"). The patrol
+# acks a probe when it reaches its ack-probes step, so what this has to cover
+# is a patrol CYCLE — the cycle's work plus the loop-or-exit backoff (capped at
+# 15m) — not the 5m interval the probes are sent on. Sizing it off the send
+# interval made a healthy patrol fail every probe (hq-90m15). Deliberately not
+# ping_timeout, which is a 30s network-ping value sized for a different kind of
+# check.
+self_probe_budget = "45m"

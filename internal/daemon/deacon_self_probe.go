@@ -29,16 +29,21 @@ const DeaconSelfProbeSubjectPrefix = constants.DeaconSelfProbeSubjectPrefix
 
 // defaultDeaconSelfProbeBudget is used when the deacon role's
 // self_probe_budget cannot be loaded, matching config/roles/deacon.toml's
-// built-in default. Sized for an agent patrol loop (minutes), not the 30s
-// ping_timeout value, which is a network health-check timeout and measures
-// something else entirely — a probe judged against it looks fixed once the
-// deacon can ack at all, then flips to "acked late" and stays a permanent
-// Error nobody can meet.
-const defaultDeaconSelfProbeBudget = 15 * time.Minute
+// built-in default. It bounds the patrol CYCLE the ack has to wait out, not
+// the doctor-dog send interval: a probe is acked when the patrol reaches its
+// ack-probes step, which is at most one cycle away (hq-90m15).
+const defaultDeaconSelfProbeBudget = 45 * time.Minute
+
+// deaconSelfProbeMissedCycleFactor sizes the ceiling on an unacked probe that
+// no ack-probes run has covered: past this multiple of the budget, the patrol
+// stopped reaching its ack step rather than merely missing this one probe
+// (hq-90m15). Generous because a dead session is already caught in minutes by
+// heartbeat staleness (deacon.HeartbeatVeryStaleThreshold) — this ceiling is
+// for a session that is alive but not cycling.
+const deaconSelfProbeMissedCycleFactor = 2
 
 // deaconSelfProbeErrorThreshold is the number of consecutive Error verdicts
-// (~45 minutes at the default 15m budget) before recordDeaconSelfProbeVerdict
-// escalates to the mayor.
+// before recordDeaconSelfProbeVerdict escalates to the mayor.
 const deaconSelfProbeErrorThreshold = 3
 
 // deaconSelfProbeAlertKey is the escalation fingerprint for an unacked or
@@ -73,6 +78,41 @@ type deaconInboxLister interface {
 
 func deaconSelfProbeStatePath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "deacon-self-probe.json")
+}
+
+// deaconAckProbesRun is the runtime record of the patrol's last
+// `gt deacon ack-probes` run — the ack step's own heartbeat, which dates the
+// first moment the probe could have been acked.
+type deaconAckProbesRun struct {
+	LastRun time.Time `json:"last_run,omitempty"`
+}
+
+func deaconAckProbesRunPath(townRoot string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "deacon-ack-probes.json")
+}
+
+// RecordDeaconAckProbesRun records that the deacon patrol's ack-probes step ran
+// now, so a probe the patrol never had the chance to ack is not read as a
+// missed one (hq-90m15). Called even when no probe is pending: the step running
+// at all is the signal.
+func RecordDeaconAckProbesRun(townRoot string) error {
+	return writeDeaconAckProbesRun(deaconAckProbesRunPath(townRoot), deaconAckProbesRun{LastRun: time.Now()})
+}
+
+func writeDeaconAckProbesRun(path string, run deaconAckProbesRun) error {
+	return atomicfile.EnsureDirAndWriteJSON(path, run)
+}
+
+func readDeaconAckProbesRun(townRoot string) (time.Time, bool) {
+	data, err := os.ReadFile(deaconAckProbesRunPath(townRoot))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var run deaconAckProbesRun
+	if err := json.Unmarshal(data, &run); err != nil || run.LastRun.IsZero() {
+		return time.Time{}, false
+	}
+	return run.LastRun, true
 }
 
 // deaconSelfProbeBudget returns the deacon role's configured
@@ -213,10 +253,7 @@ func evaluateDeaconSelfProbeWith(reader deaconInboxLister, townRoot string) Deac
 				Message: fmt.Sprintf("deacon patrol has not yet acked the probe sent %s ago (budget %s)", elapsed.Round(time.Second), budget),
 			}
 		}
-		return DeaconSelfProbeVerdict{
-			Verdict: deaconSelfProbeVerdictError,
-			Message: fmt.Sprintf("deacon patrol did not ack the probe sent %s ago (budget %s)", elapsed.Round(time.Second), budget),
-		}
+		return deaconSelfProbeUnackedPastBudgetVerdict(townRoot, baseline.SentAt, elapsed, budget)
 	}
 
 	latency := found.DeliveryAckedAt.Sub(baseline.SentAt)
@@ -230,6 +267,35 @@ func evaluateDeaconSelfProbeWith(reader deaconInboxLister, townRoot string) Deac
 	return DeaconSelfProbeVerdict{
 		Verdict: deaconSelfProbeVerdictOK,
 		Message: fmt.Sprintf("deacon patrol acked the probe in %s (budget %s)", latency.Round(time.Second), budget),
+	}
+}
+
+// deaconSelfProbeUnackedPastBudgetVerdict judges a probe still unacked after
+// its budget. The patrol acks only on reaching its ack-probes step, so the
+// probe is evidence of failure only once an ack-probes run has covered it and
+// left it behind; a patrol that never reached the step has not had its chance
+// yet (hq-90m15). Past the missed-cycle ceiling the step is not being reached
+// at all, which is the failure the probe exists to catch.
+func deaconSelfProbeUnackedPastBudgetVerdict(townRoot string, sentAt time.Time, elapsed, budget time.Duration) DeaconSelfProbeVerdict {
+	ackRun, ran := readDeaconAckProbesRun(townRoot)
+	if ran && !ackRun.Before(sentAt) {
+		return DeaconSelfProbeVerdict{
+			Verdict: deaconSelfProbeVerdictError,
+			Message: fmt.Sprintf("deacon patrol ran ack-probes at %s and left the probe sent %s ago unacked (budget %s)",
+				ackRun.Format(time.RFC3339), elapsed.Round(time.Second), budget),
+		}
+	}
+	if elapsed <= budget*deaconSelfProbeMissedCycleFactor {
+		return DeaconSelfProbeVerdict{
+			Verdict: deaconSelfProbeVerdictPending,
+			Message: fmt.Sprintf("deacon patrol has not run ack-probes since the probe was sent %s ago; no ack opportunity has passed yet (budget %s)",
+				elapsed.Round(time.Second), budget),
+		}
+	}
+	return DeaconSelfProbeVerdict{
+		Verdict: deaconSelfProbeVerdictError,
+		Message: fmt.Sprintf("deacon patrol has not run ack-probes since the probe was sent %s ago — %d budgets with no ack step (budget %s)",
+			elapsed.Round(time.Second), deaconSelfProbeMissedCycleFactor, budget),
 	}
 }
 
