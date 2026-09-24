@@ -139,6 +139,66 @@ func TestBdInitRetriesTheAutoApplyRefusal(t *testing.T) {
 	}
 }
 
+// TestBdInitRetryClearsTheWorkspaceTheFailedAttemptLeft is gt-o8i9f: attempt 1
+// dies on the catalog race after writing .beads/dolt, and bd reads that
+// half-written workspace as a legacy one on every attempt after it. Without a
+// reset one transient race spends the whole attempt budget on a refusal no
+// attempt can clear.
+func TestBdInitRetryClearsTheWorkspaceTheFailedAttemptLeft(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installHalfWrittenBdInitStub(t)
+	zeroRetryBackoff(t)
+
+	b := NewIsolatedWithPort(t.TempDir(), 55069)
+	if err := b.Init("pt13dd3b6a"); err != nil {
+		t.Fatalf("Init after a failed attempt left a half-written .beads: %v", err)
+	}
+	if got := stub.calls(t); got != 2 {
+		t.Errorf("bd invocations = %d, want 2 (the race, then the attempt the reset made possible)", got)
+	}
+	invocations := stub.invocations(t)
+	if len(invocations) != 2 {
+		t.Fatalf("recorded argv = %d, want 2", len(invocations))
+	}
+	if first, second := databaseFlag(t, invocations[0]), databaseFlag(t, invocations[1]); first == second {
+		t.Errorf("both attempts ran against --database %s, want a fresh name for the one after the failure", first)
+	}
+}
+
+// TestBdInitRetryLeavesAPreexistingWorkspaceAlone is that reset's safety
+// property: only a .beads the loop watched appear is ever cleared. A workspace
+// that was already there is its owner's, so Init keeps the behavior of retrying
+// a directory no retry can fix rather than deleting it (gt-o8i9f).
+func TestBdInitRetryLeavesAPreexistingWorkspaceAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	stub := installFlakyBdStub(t, 99, observedLegacyWorkspaceStderr)
+	zeroRetryBackoff(t)
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, ".beads", "keep-me")
+	if err := os.MkdirAll(filepath.Dir(marker), 0755); err != nil {
+		t.Fatalf("create the caller's workspace: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("here first\n"), 0644); err != nil {
+		t.Fatalf("write into the caller's workspace: %v", err)
+	}
+
+	b := NewIsolatedWithPort(workDir, 55352)
+	if err := b.Init("pt13dd3b6a"); err == nil {
+		t.Fatal("Init should fail: the stub refuses every attempt")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the retry cleared a workspace that was there before the first attempt: %v", err)
+	}
+	if got := stub.calls(t); got != bdContainerRetryAttempts {
+		t.Errorf("bd invocations = %d, want %d (the retry is unchanged when the workspace is not ours)", got, bdContainerRetryAttempts)
+	}
+}
+
 // TestBdInitSchemaRaceRetryLeavesOtherCommandsAlone: the era class is the only
 // one scoped to the command, so the same stderr from anything but an init of a
 // testdb_ name is an answer and costs one bd process (gt-w4sxk).
@@ -444,6 +504,45 @@ func TestBdInitOnTestDatabase(t *testing.T) {
 	}
 }
 
+// TestRemintTestDatabase pins the argv rewrite the reset uses: the minted name a
+// failed attempt used is replaced in both spellings the predicate accepts, the
+// caller's own slice is left alone, and an argv with no minted name comes back
+// unchanged (gt-o8i9f).
+func TestRemintTestDatabase(t *testing.T) {
+	const original = "testdb_1a13842eb92b6edf"
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "space form", args: []string{"init", "--prefix", "pt13dd3b6a", "--database", original, "--server"}},
+		{name: "equals form", args: []string{"init", "--database=" + original, "--quiet"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := remintTestDatabase(tt.args)
+			if db := databaseFlag(t, got); db == original || !strings.HasPrefix(db, testDatabasePrefix) {
+				t.Errorf("--database = %q, want a fresh %s name", db, testDatabasePrefix)
+			}
+			// The rewrite must hand back argv of the same shape: one flag with a
+			// new value, every other argument where it was.
+			if len(got) != len(tt.args) {
+				t.Fatalf("rewritten argv = %q, want %d arguments", got, len(tt.args))
+			}
+			if want := databaseFlag(t, tt.args); want != original {
+				t.Fatalf("the caller's argv was rewritten in place: --database = %q, want %q", want, original)
+			}
+		})
+	}
+
+	// No minted name to replace: the reset never reaches this shape, and the
+	// rewrite must not invent a database for it.
+	untouched := []string{"init", "--prefix", "gt", "--quiet", "--server"}
+	if got := remintTestDatabase(untouched); strings.Join(got, " ") != strings.Join(untouched, " ") {
+		t.Errorf("remintTestDatabase(%q) = %q, want it unchanged", untouched, got)
+	}
+}
+
 // TestCatalogRaceIsNotAContainerGoneSkip picks the wider of the two verdicts a
 // caller can reach from a spent retry, and pins the narrower one for this class
 // (gt-cbtl): a catalog race says nothing about the container being gone, so
@@ -528,6 +627,7 @@ func TestBdContainerRetryBackoffBounds(t *testing.T) {
 // first failUntil of them with the connection-failure stderr gt-6uhq recorded.
 type flakyBdStub struct {
 	countFile string
+	argsFile  string
 }
 
 func (s *flakyBdStub) calls(t *testing.T) int {
@@ -544,6 +644,43 @@ func (s *flakyBdStub) calls(t *testing.T) int {
 		t.Fatalf("parse bd call count %q: %v", raw, err)
 	}
 	return n
+}
+
+// invocations returns the argv of each bd invocation, in order. Only a stub
+// whose script writes to __ARGS__ records them.
+func (s *flakyBdStub) invocations(t *testing.T) [][]string {
+	t.Helper()
+	raw, err := os.ReadFile(s.argsFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read bd argv log: %v", err)
+	}
+	var out [][]string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line != "" {
+			out = append(out, strings.Fields(line))
+		}
+	}
+	return out
+}
+
+// databaseFlag returns the --database value in one recorded argv, in either
+// spelling, or fails the test: every argv these tests record is an Init, which
+// always passes one.
+func databaseFlag(t *testing.T, args []string) string {
+	t.Helper()
+	for i, arg := range args {
+		switch {
+		case arg == "--database" && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(arg, "--database="):
+			return strings.TrimPrefix(arg, "--database=")
+		}
+	}
+	t.Fatalf("argv %q has no --database", args)
+	return ""
 }
 
 // installFlakyBdStub writes a fake bd that fails the first failUntil
@@ -586,10 +723,43 @@ func installFlakyCatalogRaceBDStub(t *testing.T, failUntil int) *flakyBdStub {
 	return installFlakyBdStub(t, failUntil, observedCatalogRaceStderr)
 }
 
+// installHalfWrittenBdInitStub writes the fake bd gt-o8i9f's sequence needs: an
+// attempt that writes .beads/dolt and dies on the catalog race, bd refusing a
+// .beads already on disk the way its legacy guard does, and an attempt that
+// succeeds against a directory with none. So an init only gets past attempt 1 if
+// the workspace that attempt left is gone by the time the next one runs — which
+// is the behavior under test, not an artifact of the stub.
+func installHalfWrittenBdInitStub(t *testing.T) *flakyBdStub {
+	t.Helper()
+	return installBdStub(t, fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+count=0
+[ -f __COUNT__ ] && count=$(cat __COUNT__)
+count=$((count + 1))
+echo "$count" > __COUNT__
+echo "$*" >> __ARGS__
+if [ -d .beads ]; then
+  echo %q >&2
+  exit 1
+fi
+if [ "$count" -le 1 ]; then
+  mkdir -p .beads/dolt
+  echo %q >&2
+  exit 1
+fi
+mkdir -p .beads
+exit 0
+`, observedLegacyWorkspaceStderr, observedCatalogRaceStderr))
+}
+
 // installBdStub writes a fake bd whose body is script, substitutes __COUNT__
-// with a per-test counter file, and puts it first on PATH. The counter file is
-// how the retry loop's tests observe how many attempts actually happened —
-// the behavior under test is the number of bd processes, not a Go-side tally.
+// with a per-test counter file and __ARGS__ with a per-test log of the argv it
+// was called with, and puts it first on PATH. The counter file is how the retry
+// loop's tests observe how many attempts actually happened — the behavior under
+// test is the number of bd processes, not a Go-side tally.
 func installBdStub(t *testing.T, script string) *flakyBdStub {
 	t.Helper()
 	// The allow-stale probe is cached per bd path for the whole process, so a
@@ -599,7 +769,9 @@ func installBdStub(t *testing.T, script string) *flakyBdStub {
 
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "bd-calls")
+	argsFile := filepath.Join(dir, "bd-args")
 	script = strings.ReplaceAll(script, "__COUNT__", countFile)
+	script = strings.ReplaceAll(script, "__ARGS__", argsFile)
 
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -609,7 +781,7 @@ func installBdStub(t *testing.T, script string) *flakyBdStub {
 		t.Fatalf("write bd stub: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return &flakyBdStub{countFile: countFile}
+	return &flakyBdStub{countFile: countFile, argsFile: argsFile}
 }
 
 // zeroRetryBackoff removes the real pause for the duration of one test, through

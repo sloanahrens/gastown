@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 const (
@@ -87,10 +90,9 @@ var bdCatalogRaceMarkers = []string{
 	"could not resolve initial root for database",
 }
 
-// bdInitSchemaRaceMarkers are the stderr fragments that mean bd judged the
-// schema era of a database it was not asked to open (gt-w4sxk) — the catalog
-// race one check later than bdCatalogRaceMarkers, where the store open resolved
-// a root and the era read off that root belonged to someone else:
+// bdInitSchemaRaceMarkers are the stderr fragments that mean bd refused the
+// schema era of the workspace it opened instead of answering the command
+// (gt-w4sxk):
 //
 //	bd init --prefix pt42ed0697 --database testdb_1a13842eb92b6edf --server ...
 //	Error: legacy Dolt workspace detected; explicit migration is required ...
@@ -99,13 +101,19 @@ var bdCatalogRaceMarkers = []string{
 //	refusing to auto-apply 11 pending schema migrations to a server-mode
 //	database (v55 -> v66)
 //
-// The name in each message is Init's own throwaway, minted with crypto/rand
-// microseconds earlier (testDatabaseName), so the era cannot be that
-// database's: a pending-migration count on a database that did not exist yet is
-// a version read off a different one, and an attempt that resolves its root
-// again can land on the right database. Both refusals fire in bd's open path,
-// before the command has any effect, which is what makes the retry safe for
-// writes as well as reads.
+// On a name Init minted microseconds earlier (testDatabaseName) a legacy
+// refusal has two sources. One is the catalog race one check past
+// bdCatalogRaceMarkers: the open resolved a root and the era read off it
+// belonged to another database, so an attempt that resolves again can land on
+// the right one. The other is the loop's own leavings — a failed attempt writes
+// <dir>/.beads with a Dolt root but no config, and that shape is exactly what
+// the legacy guard refuses — so the retry re-reads the workspace the failure
+// just wrote (gt-o8i9f). bdInitRetryReset clears the second before each
+// attempt; without it this class is bd answering a workspace the loop created,
+// which is what turned one attempt-1 catalog race into four more failures.
+//
+// Both refusals fire in bd's open path, before the command has any effect,
+// which is what makes the retry safe for writes as well as reads.
 //
 // Unlike the classes above, this one is scoped to the command and the database
 // name it may fire on, not just to the container: bd's era refusal is a real
@@ -253,9 +261,14 @@ var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 // caller's run path) and retries it while the failure looks like infrastructure
 // rather than an answer: a lost connection to the test Dolt container, its
 // catalog changing under bd's store open, or — on an init of a database it just
-// minted — a schema era read off a database it was never asked to open. Retries
+// minted — a schema era read off a workspace the attempt did not write. Retries
 // stop at the first of: a failure that is none of those, the attempt cap, or the
 // retry window.
+//
+// An init is the one command whose failure changes the directory it ran in, so
+// its retry rebuilds the argv as well as re-running it: bdInitRetryReset clears
+// the workspace the failed attempt left and re-mints the database name, and nil
+// (every other command) leaves both alone.
 //
 // Outside the container case the loop runs exactly once, so this is the same
 // single invocation callers had before it existed. The last attempt's error is
@@ -267,6 +280,7 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 		attempts = bdContainerRetryAttempts
 	}
 	deadline := time.Now().Add(bdContainerRetryWindow)
+	reset := newBdInitRetryReset(b, attempts, args)
 
 	var lastErr error
 	for attempt := 1; ; attempt++ {
@@ -289,8 +303,100 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 		// absorbed, and the next reader starts from a false premise.
 		fmt.Fprintln(os.Stderr, retryNotice(attempt, attempts, err))
 		time.Sleep(bdContainerRetryBackoffFn(attempt))
+		args = reset.next(args)
 	}
 	return nil, lastErr
+}
+
+// bdInitRetryReset repairs what a failed bd init attempt left in the caller's
+// directory, so the attempt that follows meets the directory attempt 1 did
+// (gt-o8i9f).
+//
+// bd init writes <dir>/.beads and a Dolt root inside it before it writes the
+// server-mode config that says what that root is. An attempt that dies in
+// between — on the catalog race, on a lost connection — leaves a root with no
+// config, and bd's own legacy_upgrade_guard reads that shape as a pre-migration
+// workspace:
+//
+//	Error: legacy Dolt workspace detected; explicit migration is required ...
+//
+// which is what the attempt after it then re-reads: one transient race on
+// attempt 1, a deterministic five-attempt failure on the gate.
+//
+// Between attempts this clears that workspace and re-mints the database name in
+// argv, so the attempt cannot land on the half-made database the failed one left
+// on the server either. Nothing else about the command changes.
+//
+// The snapshot is the safety property: only a .beads this reset watched appear
+// is ever removed. A workspace that was already there belongs to whoever put it
+// there, and deleting it is not this loop's business — that case keeps the
+// behavior of retrying a directory no retry can fix.
+type bdInitRetryReset struct {
+	dir string // the <workDir>/.beads this loop may clear between attempts
+}
+
+// newBdInitRetryReset returns the reset for one retry sequence, or nil when the
+// command is not the one shape it applies to: not an init of a minted testdb_
+// name, not against the test container, no retry to make, or a workspace that
+// was already there. A nil *bdInitRetryReset is the no-op state and next() is
+// safe to call on it, which is how every other command reaches this loop
+// unchanged.
+func newBdInitRetryReset(b *Beads, attempts int, args []string) *bdInitRetryReset {
+	if attempts < 2 || !bdInitOnTestDatabase(args) {
+		return nil
+	}
+	// The path bd init writes to, derived exactly as the run path derives
+	// BEADS_DIR. Anything else — a redirected workspace, a beadsDir pointed at
+	// another directory — is not this loop's to delete, and neither is one under
+	// the harness-forbidden live town.
+	dir := b.getResolvedBeadsDir()
+	if dir != filepath.Join(b.workDir, ".beads") {
+		return nil
+	}
+	if err := workspace.GuardForbiddenRoot("bd init retry workspace reset", dir); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return nil // pre-existing workspace: its owner's, not the failed attempt's
+	} else if !os.IsNotExist(err) {
+		return nil
+	}
+	return &bdInitRetryReset{dir: dir}
+}
+
+// next returns the argv for the attempt after a failure: the workspace the
+// failed attempt created is cleared and the minted database name is replaced, so
+// the next attempt starts from the state attempt 1 did.
+func (r *bdInitRetryReset) next(args []string) []string {
+	if r == nil {
+		return args
+	}
+	if err := os.RemoveAll(r.dir); err != nil {
+		// Without the removal, re-minting would only blur which workspace the
+		// failure was read from, so this attempt runs as the failed one did.
+		fmt.Fprintf(os.Stderr, "beads: could not clear the workspace a failed bd init left at %s, retrying as-is: %v\n", r.dir, err)
+		return args
+	}
+	return remintTestDatabase(args)
+}
+
+// remintTestDatabase returns args with Init's minted testdb_ name replaced by a
+// fresh one. Both flag spellings bdInitOnTestDatabase accepts are rewritten, so
+// the predicate and the rewrite cannot disagree about which argv they mean.
+func remintTestDatabase(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range args {
+		switch {
+		case arg == "--database" && i+1 < len(args):
+			out[i+1] = testDatabaseName()
+			return out
+		case strings.HasPrefix(arg, "--database="):
+			out[i] = "--database=" + testDatabaseName()
+			return out
+		}
+	}
+	return out
 }
 
 // retryNotice renders the one-line warning for a failed attempt that another
