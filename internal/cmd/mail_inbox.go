@@ -39,6 +39,13 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 		return errors.New("--all and --unread are mutually exclusive")
 	}
 
+	// Surface any nudges queued for this session (gt-dekkl). gt mail inbox is
+	// a per-cycle touch point a patrol loop hits even while it stays busy
+	// elsewhere and never reaches await-signal/await-event/patrol report.
+	if workDir, err := findMailWorkDir(); err == nil {
+		fmt.Print(nudgeInjectionOutput(workDir))
+	}
+
 	// Determine which inbox to check (priority: --identity flag, positional arg, auto-detect)
 	address := ""
 	if mailInboxIdentity != "" {

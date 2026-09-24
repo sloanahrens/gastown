@@ -14,10 +14,19 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func runMQList(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
+
+	// Surface any nudges queued for this session (gt-dekkl). A refinery that
+	// stays busy gating MRs back to back calls gt mq list every cycle without
+	// ever reaching await-signal/await-event/patrol report, so this is one of
+	// its real per-cycle touch points.
+	if townRoot, err := workspace.FindFromCwdOrError(); err == nil {
+		fmt.Print(nudgeInjectionOutput(townRoot))
+	}
 
 	_, r, _, err := getRefineryManager(rigName)
 	if err != nil {

@@ -14,3 +14,16 @@ func TestDrainSessionNudgesNoTmuxSession(t *testing.T) {
 		t.Errorf("expected nil with no tmux pane, got %v", got)
 	}
 }
+
+// TestNudgeInjectionOutputNoTmuxSession verifies the shared helper used by
+// gt mq list, gt mq next, and gt mail inbox (gt-dekkl) degrades to an empty
+// string — never a panic or shell-out — when the caller isn't inside a tmux
+// pane, same as drainSessionNudges itself.
+func TestNudgeInjectionOutputNoTmuxSession(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+
+	got := nudgeInjectionOutput(t.TempDir())
+	if got != "" {
+		t.Errorf("expected empty output with no tmux pane, got %q", got)
+	}
+}
