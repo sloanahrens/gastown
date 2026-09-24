@@ -68,6 +68,14 @@ func TestNewDashboardMux_PartitionsSubprocessPools(t *testing.T) {
 // host, not for how fast the stub usually runs.
 const userCmdExecBudget = 30 * time.Second
 
+// userSlotWaitBudget bounds the userCmdSem wait in the partition tests. Not
+// shorter: acquireCmdSlot selects over the slot send and ctx.Done(), so a
+// goroutine descheduled past the budget between context.WithTimeout and the
+// select finds both ready, and select picks at random — a spurious "command
+// slot unavailable" on a free pool. 5s still fails a cmdSem regression far
+// sooner than the 30s default.
+const userSlotWaitBudget = 5 * time.Second
+
 // TestUserCommandPoolDoesNotStarveFetcherBD is the behavioral proof of the
 // partition, driving both handlers it claims are independent: with the
 // APIHandler's cmdSem completely full — as a burst of options/mail/ready
@@ -89,8 +97,9 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 		t.Fatalf("write fake gt binary: %v", err)
 	}
 
-	// slotWaitBudget is short so a regression that draws cmdSem fails fast
-	// with "command slot unavailable". The exec budget (userCmdExecBudget) is
+	// slotWaitBudget (userSlotWaitBudget) is bounded so a regression that
+	// draws cmdSem fails with "command slot unavailable" well before the 30s
+	// default. The exec budget (userCmdExecBudget) is
 	// generous: a 1s budget timed the trivial gt stub out on a loaded gate
 	// host while the bd herd below was forking ("command timed out after
 	// 1s") — that measured the host, not the pool partition.
@@ -98,7 +107,7 @@ func TestUserCommandPoolDoesNotStarveFetcherBD(t *testing.T) {
 		gtPath:         gtPath,
 		cmdSem:         make(chan struct{}, maxConcurrentCommands),
 		userCmdSem:     make(chan struct{}, userCommandConcurrency),
-		slotWaitBudget: 50 * time.Millisecond,
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	// Fill the short-read pool completely, as a burst of API reads would.
 	for i := 0; i < maxConcurrentCommands; i++ {
@@ -170,7 +179,7 @@ func TestRunUserGtCommand_DoesNotDrawCmdSemSlot(t *testing.T) {
 		gtPath:         gtPath,
 		cmdSem:         make(chan struct{}, 1),
 		userCmdSem:     make(chan struct{}, 1),
-		slotWaitBudget: 50 * time.Millisecond,
+		slotWaitBudget: userSlotWaitBudget,
 	}
 	h.cmdSem <- struct{}{} // held for the whole test; never released
 

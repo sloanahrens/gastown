@@ -261,7 +261,9 @@ func TestAcquire_KernelReleasesOnProcessDeath(t *testing.T) {
 
 	// The kernel must release the flock the instant the process's file
 	// descriptors close, with no timeout or reclaim step required.
-	h2, err := Acquire(townRoot, "post-kill", 3*time.Second)
+	// 30s only bounds a broken run: the kernel frees the flock at once, so a
+	// healthy Acquire returns immediately however loaded the host is.
+	h2, err := Acquire(townRoot, "post-kill", 30*time.Second)
 	if err != nil {
 		t.Fatalf("slot still held after SIGKILLing the holder: %v", err)
 	}
