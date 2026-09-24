@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -131,3 +132,39 @@ const bdContainerSubprocessTimeout = 3 * time.Minute
 // hanging. It is the init budget, so a queued init waits no longer than one
 // init may run. A var so tests can collapse it.
 var testContainerInitSlotWait = bdInitSubprocessTimeout
+
+// RunTestContainerInit runs `bd <args>` — which must be a bd init — in dir
+// the way Init runs one against testutil's Dolt container, for test helpers
+// that exec bd init themselves: it takes one of this process's init slots
+// (waiting at most testContainerInitSlotWait, and never past ctx), adds
+// testContainerEnv to env (nil means os.Environ()), and bounds the subprocess
+// by the init budget. It returns bd's combined stdout and stderr. A killed
+// subprocess reports its timeout (SubprocessFailureError). It does not retry;
+// callers that want the gt-o8i9f retry use Init.
+func RunTestContainerInit(ctx context.Context, dir string, args []string, env []string) ([]byte, error) {
+	if len(args) == 0 || args[0] != "init" {
+		return nil, fmt.Errorf("RunTestContainerInit: want a bd init argv, got %q", args)
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, testContainerInitSlotWait)
+	release, err := AcquireTestContainerInitSlot(waitCtx)
+	cancelWait()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	if env == nil {
+		env = os.Environ()
+	}
+	env = append(StripEnvKey(env, allowRemoteMigrateEnv), testContainerEnv()...)
+
+	timeout := subprocessTimeoutFor(args, true)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var out bytes.Buffer
+	if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
+		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
+	}
+	return out.Bytes(), nil
+}

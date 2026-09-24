@@ -480,3 +480,116 @@ func TestInitRetriesInsideOneSlot(t *testing.T) {
 		t.Fatalf("pool holds %d tokens after Init, want 1", len(slots.tokens))
 	}
 }
+
+// waitForBdCalls polls a stub's counter until it reaches want.
+func waitForBdCalls(t *testing.T, stub *flakyBdStub, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if readBdCallCount(stub) >= want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("bd stub reached %d calls, want %d", readBdCallCount(stub), want)
+}
+
+func TestRunTestContainerInitHoldsASlotAndSetsEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	useTestContainerInitSlots(t, 1)
+	gate := filepath.Join(t.TempDir(), "open")
+	stub := installBdStub(t, `#!/bin/sh
+count=0
+[ -f __COUNT__ ] && count=$(cat __COUNT__)
+count=$((count + 1))
+echo "$count" > __COUNT__
+echo "$* BD_ALLOW_REMOTE_MIGRATE=${BD_ALLOW_REMOTE_MIGRATE:-unset}" >> __ARGS__
+while [ ! -f '`+gate+`' ]; do sleep 0.05; done
+echo "initialized"
+exit 0
+`)
+	args := []string{"init", "--quiet", "--prefix", "rt", "--server", "--server-port", "45678"}
+	type result struct {
+		out []byte
+		err error
+	}
+	run := func(env []string) chan result {
+		ch := make(chan result, 1)
+		dir := t.TempDir()
+		go func() {
+			out, err := RunTestContainerInit(context.Background(), dir, args, env)
+			ch <- result{out, err}
+		}()
+		return ch
+	}
+
+	first := run(nil)
+	waitForBdCalls(t, stub, 1)
+	// An inherited value must be replaced, not passed through.
+	second := run(append(os.Environ(), allowRemoteMigrateEnv+"=0"))
+	time.Sleep(300 * time.Millisecond)
+	if n := readBdCallCount(stub); n != 1 {
+		t.Fatalf("second init ran while the only slot was held: %d bd calls", n)
+	}
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatalf("open the gate: %v", err)
+	}
+	for i, ch := range []chan result{first, second} {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("init %d: %v\n%s", i+1, r.err, r.out)
+			}
+			if !strings.Contains(string(r.out), "initialized") {
+				t.Errorf("init %d output = %q, want bd's combined output", i+1, r.out)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("init %d did not finish after the gate opened", i+1)
+		}
+	}
+	invocations := stub.invocations(t)
+	if len(invocations) != 2 {
+		t.Fatalf("bd invocations = %d, want 2", len(invocations))
+	}
+	for i, inv := range invocations {
+		if inv[0] != "init" {
+			t.Errorf("invocation %d argv = %q, want bd init", i+1, inv)
+		}
+		if last := inv[len(inv)-1]; last != "BD_ALLOW_REMOTE_MIGRATE=1" {
+			t.Errorf("invocation %d saw %s, want BD_ALLOW_REMOTE_MIGRATE=1", i+1, last)
+		}
+	}
+}
+
+func TestRunTestContainerInitWaitIsBounded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	slots := useTestContainerInitSlots(t, 1)
+	shortenInitSlotWait(t, 100*time.Millisecond)
+	stub := installSucceedingBdStub(t)
+	release, err := slots.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("take the only slot: %v", err)
+	}
+	defer release()
+
+	_, err = RunTestContainerInit(context.Background(), t.TempDir(), []string{"init", "--quiet"}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "test Dolt init slot") {
+		t.Fatalf("RunTestContainerInit with no free slot = %v, want a slot deadline error", err)
+	}
+	if n := stub.calls(t); n != 0 {
+		t.Errorf("bd ran %d times without a slot", n)
+	}
+}
+
+func TestRunTestContainerInitRejectsNonInit(t *testing.T) {
+	useTestContainerInitSlots(t, 1)
+	for _, args := range [][]string{nil, {"list", "--json"}} {
+		if _, err := RunTestContainerInit(context.Background(), t.TempDir(), args, nil); err == nil {
+			t.Errorf("RunTestContainerInit(%q) succeeded, want a refusal", args)
+		}
+	}
+}

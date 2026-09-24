@@ -24,9 +24,7 @@ func initBeadsDBWithPrefix(t *testing.T, dir, prefix string) {
 	testutil.RequireDoltContainer(t)
 
 	args := []string{"init", "--quiet", "--prefix", prefix, "--server-port", testutil.DoltContainerPort()}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), dir, args, nil); err != nil {
 		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, output)
 	}
 

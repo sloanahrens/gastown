@@ -141,9 +141,7 @@ func initBeadsDBWithPrefix(t *testing.T, dir, prefix string) {
 	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
 		args = append(args, "--server", "--server-port", p)
 	}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), dir, args, nil); err != nil {
 		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, output)
 	}
 

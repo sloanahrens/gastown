@@ -51,10 +51,7 @@ func initBeadsDBForServer(t *testing.T, dir, prefix, homeDir string) {
 	if p := schedulerDoltPort(); p != "" {
 		args = append(args, "--server", "--external", "--server-port", p)
 	}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	cmd.Env = schedulerBDInitEnv(homeDir, filepath.Join(dir, ".beads"))
-	out, err := cmd.CombinedOutput()
+	out, err := beads.RunTestContainerInit(t.Context(), dir, args, schedulerBDInitEnv(homeDir, filepath.Join(dir, ".beads")))
 	t.Logf("bd init --prefix %s in %s: exit=%v\n%s", prefix, dir, err, out)
 	if err != nil {
 		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, out)
