@@ -19,6 +19,9 @@ import (
 func runMQList(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
+	// gt-dekkl: drain queued nudges at a per-cycle touch point.
+	printSessionNudges()
+
 	_, r, _, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
