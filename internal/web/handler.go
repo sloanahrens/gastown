@@ -185,7 +185,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fetchAndRender runs all 17 fetchers in parallel and renders the template.
+// fetchAndRender runs the fetchers in parallel and renders the template.
 // Returns the rendered HTML bytes, or nil on template error.
 func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []byte {
 	ctx, cancel := context.WithTimeout(r.Context(), h.fetchTimeout)
@@ -212,142 +212,135 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 		wg             sync.WaitGroup
 	)
 
-	// Run all fetches in parallel with error logging
-	wg.Add(17)
+	// The producer count is derived from len(producers), not hand-maintained,
+	// so two branches each adding a fetcher can never silently under-count
+	// wg.Add and panic with "negative WaitGroup counter" on merge (gt-zb8f).
+	producers := []func(){
+		func() {
+			var err error
+			locals, err = h.fetcher.FetchLocalPool()
+			if err != nil {
+				log.Printf("dashboard: FetchLocalPool failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			convoys, err = h.fetcher.FetchConvoys()
+			if err != nil {
+				log.Printf("dashboard: FetchConvoys failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			mergeQueue, err = h.fetcher.FetchMergeQueue()
+			if err != nil {
+				log.Printf("dashboard: FetchMergeQueue failed: %v", err)
+			}
+		},
+		func() {
+			// Serves a snapshot; the refresh it may start runs in the background.
+			townMergeQueue = h.fetcher.FetchTownMergeQueue()
+		},
+		func() {
+			var err error
+			workers, err = h.fetcher.FetchWorkers()
+			if err != nil {
+				log.Printf("dashboard: FetchWorkers failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			mail, err = h.fetcher.FetchMail()
+			if err != nil {
+				log.Printf("dashboard: FetchMail failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			rigs, err = h.fetcher.FetchRigs()
+			if err != nil {
+				log.Printf("dashboard: FetchRigs failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			dogs, err = h.fetcher.FetchDogs()
+			if err != nil {
+				log.Printf("dashboard: FetchDogs failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			escalations, err = h.fetcher.FetchEscalations()
+			if err != nil {
+				log.Printf("dashboard: FetchEscalations failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			health, err = h.fetcher.FetchHealth()
+			if err != nil {
+				log.Printf("dashboard: FetchHealth failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			queues, err = h.fetcher.FetchQueues()
+			if err != nil {
+				log.Printf("dashboard: FetchQueues failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			sessions, err = h.fetcher.FetchSessions()
+			if err != nil {
+				log.Printf("dashboard: FetchSessions failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			hooks, err = h.fetcher.FetchHooks()
+			if err != nil {
+				log.Printf("dashboard: FetchHooks failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			mayor, err = h.fetcher.FetchMayor()
+			if err != nil {
+				log.Printf("dashboard: FetchMayor failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			issues, err = h.fetcher.FetchIssues()
+			if err != nil {
+				log.Printf("dashboard: FetchIssues failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			activity, err = h.fetcher.FetchActivity()
+			if err != nil {
+				log.Printf("dashboard: FetchActivity failed: %v", err)
+			}
+		},
+		func() {
+			var err error
+			gate, err = h.fetcher.FetchGate()
+			if err != nil {
+				log.Printf("dashboard: FetchGate failed: %v", err)
+			}
+		},
+	}
 
-	go func() {
-		defer wg.Done()
-		var err error
-		locals, err = h.fetcher.FetchLocalPool()
-		if err != nil {
-			log.Printf("dashboard: FetchLocalPool failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		convoys, err = h.fetcher.FetchConvoys()
-		if err != nil {
-			log.Printf("dashboard: FetchConvoys failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		mergeQueue, err = h.fetcher.FetchMergeQueue()
-		if err != nil {
-			log.Printf("dashboard: FetchMergeQueue failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		// Serves a snapshot; the refresh it may start runs in the background.
-		townMergeQueue = h.fetcher.FetchTownMergeQueue()
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		workers, err = h.fetcher.FetchWorkers()
-		if err != nil {
-			log.Printf("dashboard: FetchWorkers failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		mail, err = h.fetcher.FetchMail()
-		if err != nil {
-			log.Printf("dashboard: FetchMail failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		rigs, err = h.fetcher.FetchRigs()
-		if err != nil {
-			log.Printf("dashboard: FetchRigs failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		dogs, err = h.fetcher.FetchDogs()
-		if err != nil {
-			log.Printf("dashboard: FetchDogs failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		escalations, err = h.fetcher.FetchEscalations()
-		if err != nil {
-			log.Printf("dashboard: FetchEscalations failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		health, err = h.fetcher.FetchHealth()
-		if err != nil {
-			log.Printf("dashboard: FetchHealth failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		queues, err = h.fetcher.FetchQueues()
-		if err != nil {
-			log.Printf("dashboard: FetchQueues failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		sessions, err = h.fetcher.FetchSessions()
-		if err != nil {
-			log.Printf("dashboard: FetchSessions failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		hooks, err = h.fetcher.FetchHooks()
-		if err != nil {
-			log.Printf("dashboard: FetchHooks failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		mayor, err = h.fetcher.FetchMayor()
-		if err != nil {
-			log.Printf("dashboard: FetchMayor failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		issues, err = h.fetcher.FetchIssues()
-		if err != nil {
-			log.Printf("dashboard: FetchIssues failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		activity, err = h.fetcher.FetchActivity()
-		if err != nil {
-			log.Printf("dashboard: FetchActivity failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var err error
-		gate, err = h.fetcher.FetchGate()
-		if err != nil {
-			log.Printf("dashboard: FetchGate failed: %v", err)
-		}
-	}()
+	wg.Add(len(producers))
+	for _, produce := range producers {
+		go func(produce func()) {
+			defer wg.Done()
+			produce()
+		}(produce)
+	}
 
 	// Wait for fetches or timeout
 	done := make(chan struct{})
