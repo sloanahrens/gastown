@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
 )
@@ -186,6 +187,16 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	if cfg.RoleName == "deacon" {
 		stampDeaconHeartbeatOnReport(cfg.BeadsDir, patrolReportSummary)
 	}
+
+	// Surface any nudges queued for this session (gt-saz7a). patrol report
+	// closes every patrol cycle regardless of how long the prior gate ran, so
+	// it is a step boundary a long-running patrol turn actually passes
+	// through — unlike the UserPromptSubmit hook, which only fires between
+	// turns and never reaches a session that stays in one turn for hours.
+	if drained := drainSessionNudges(roleInfo.TownRoot); len(drained) > 0 {
+		fmt.Print(nudge.FormatForInjection(drained))
+	}
+
 	return nil
 }
 
