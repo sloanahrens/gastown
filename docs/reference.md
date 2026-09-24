@@ -209,6 +209,14 @@ does not read a script the command merely executes (`bash /tmp/retry.sh`) and
 cannot see one written through `printf` or `echo`, so this rule, not the guard,
 is what binds.
 
+**Docker VM size and the Dolt data dir.** One full `-p=8` suite starts about 11 Dolt test
+containers, and the gate slot pool admits more than one suite. On Docker Desktop, give the VM at
+least 16 GiB (Settings → Resources); `gt doctor`'s `container-capacity` check warns below that.
+Test containers keep their Dolt data on tmpfs (`/var/lib/dolt`, capped at 2 GiB each) so each
+migration's commit does not fsync through to the host disk. Set `GT_TEST_DOLT_TMPFS=0` to use the VM disk
+instead, for a Docker runtime that cannot mount tmpfs there. Measurements:
+`docs/plans/2026-09-24-test-suite-concurrency-design.md`.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with
