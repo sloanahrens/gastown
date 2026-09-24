@@ -620,6 +620,9 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
 	if dryRun {
 		args = append(args, "--dry-run")
+	} else {
+		// bd purge previews by default; --force is required to actually delete.
+		args = append(args, "--force")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
