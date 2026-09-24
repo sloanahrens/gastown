@@ -100,6 +100,13 @@ func TestParseDispatchCheck_RejectsUnusableOutput(t *testing.T) {
 	}
 }
 
+// TestTriggerMayorDispatch_SingleFlight pins the mayor_dispatch guard: a tick
+// arriving while a cycle runs is skipped, not queued.
+//
+// The guard is set rather than watched for. The disabled patrol's cycle
+// returns at the door, so its goroutine clears the guard before the caller of
+// triggerMayorDispatch reads it, and no read made after that call returns
+// separates a held guard from a cleared one (gt-hvzy.9).
 func TestTriggerMayorDispatch_SingleFlight(t *testing.T) {
 	// The patrol is disabled for this daemon so runMayorDispatch returns at the
 	// door: this test is about the guard, and a cycle that reached the check
@@ -109,17 +116,17 @@ func TestTriggerMayorDispatch_SingleFlight(t *testing.T) {
 		disabledPatrols: map[string]bool{"mayor_dispatch": true},
 	}
 
-	// The first trigger claims the guard and starts the cycle; a second tick
-	// arriving while it runs is skipped, not queued.
-	if !d.triggerMayorDispatch() {
-		t.Fatal("first trigger should start a cycle")
+	d.mayorDispatchRunning.Store(true)
+	if d.triggerMayorDispatch() {
+		t.Error("expected a tick to be skipped while a cycle is running")
 	}
 	if !d.mayorDispatchRunning.Load() {
-		t.Fatal("expected the guard to be held after the first trigger")
+		t.Error("a skipped tick must leave the running guard held")
 	}
+	d.mayorDispatchRunning.Store(false)
 
-	// The cycle clears the guard when it finishes, so the patrol is not
-	// permanently single-shot.
+	// A clear guard starts a cycle, and the cycle clears the guard when it
+	// finishes, so the patrol is not permanently single-shot.
 	if !waitForMayorDispatchIdle(d, 5*time.Second) {
 		t.Fatal("cycle never cleared the running guard")
 	}
