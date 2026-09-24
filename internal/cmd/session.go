@@ -457,12 +457,17 @@ func writeDeliberateStopMarker(townRoot, rigName, polecatName string) (bool, err
 // clearParkedSession drops the pause marker that parked a polecat's session —
 // written by gt session stop or gt agent pause — because an explicit start
 // runs the polecat again, and the detectors should watch it again (gt-fojqs).
-// Reports whether a marker was cleared.
+// Reports whether a marker was cleared. A marker that cannot be removed is
+// warned about rather than silently left: it keeps the detectors away.
 func clearParkedSession(townRoot, rigName, polecatName string) bool {
 	if !polecatSessionParked(townRoot, rigName, polecatName) {
 		return false
 	}
-	return agentpause.Resume(townRoot, rigName, constants.RolePolecat, polecatName) == nil
+	if err := agentpause.Resume(townRoot, rigName, constants.RolePolecat, polecatName); err != nil {
+		style.PrintWarning("could not clear the pause marker for %s/%s: %v (the detectors will leave it alone)", rigName, polecatName, err)
+		return false
+	}
+	return true
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) error {
