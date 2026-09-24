@@ -64,12 +64,19 @@ func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 // the duration of a test, so the gate can be driven without the real
 // container-gate slot (which would contend with every other suite on a shared
 // Gas Town host) and without running `go test` over a real package tree.
+//
+// It also stands the container watch's docker listing down (gt-0ss4). The
+// watch is the gate's one `docker ps` caller, and a slot-free gate run now
+// takes a baseline listing: a stray dolt/testcontainers/ryuk container on a
+// shared host would otherwise decide a gate test's outcome. A test that drives
+// the watch overrides the listing itself, after this call.
 func stubVerifyGate(
 	t *testing.T,
 	acquire func(townRoot, role string, timeout time.Duration) (func(), error),
 	run func(ctx context.Context, worktree, script string, env []string, logFile *os.File) error,
 ) {
 	t.Helper()
+	stubNoContainers(t)
 	if acquire != nil {
 		prev := acquireVerifySlot
 		acquireVerifySlot = acquire
