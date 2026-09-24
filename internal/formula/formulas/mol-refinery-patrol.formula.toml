@@ -1068,8 +1068,10 @@ id = "merge-push"
 title = "Merge and push"
 needs = ["handle-failures"]
 description = """
-Merge and push. CRITICAL: verified post-merge cleanup comes immediately after push;
-send MERGED only after `gt mq post-merge` succeeds.
+Merge and push. CRITICAL: verified post-merge cleanup comes immediately after
+push. `gt mq post-merge` now does the MERGED / MERGE_READY / temp / attestation
+chores itself (claude-7fc, see Step 3 below) — fall back to sending MERGED or
+doing another chore by hand only for one that printed `✗`.
 
 **Config: integration_branch_refinery_enabled = {{integration_branch_refinery_enabled}}**
 **Config: target_branch = {{target_branch}}**
@@ -1390,9 +1392,9 @@ session happens only when you are this rig's refinery running in your own
 pane, `merge_queue.cycle_session_after_merge` is on (rig-root config.json),
 and the handoff cooldown is clear. When it happens, post-merge prints `🔄
 unit complete, respawning <session> for the next unit` and your session ends
-there by design — a fresh successor starts the next patrol cycle at
-loop-check. Otherwise it prints `○ session kept: <cause>`; continue to
-loop-check yourself, same as today, and keep your own patrol wisp.
+there by design — a fresh successor starts the next patrol cycle. Otherwise
+it prints `○ session kept: <cause>`; continue to loop-check yourself, same
+as today, and keep your own patrol wisp.
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
 - [x] Post-merge completed (MR closed, source issue closed, branch deleted)
