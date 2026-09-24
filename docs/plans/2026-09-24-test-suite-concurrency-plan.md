@@ -1,3 +1,5 @@
+> Status: Tasks 0-6 done; stages 1-3 measured (results in the design doc); stage 4 not needed. Design: `2026-09-24-test-suite-concurrency-design.md`. Tracked in claude-yfj.
+
 # Two Concurrent Full Test Suites — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
