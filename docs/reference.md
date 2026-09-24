@@ -145,7 +145,7 @@ Town-level role defaults live in `mayor/config.json` under:
 | `setup_command` | `string` | `""` | Setup/install command (e.g., `pnpm install`) |
 | `typecheck_command` | `string` | `""` | Type check command (e.g., `tsc --noEmit`) |
 | `lint_command` | `string` | `""` | Lint command (e.g., `eslint .`) |
-| `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and runs it with the container opt-in forced off unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
+| `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and writes the container opt-in off for the run unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
 | `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty uses the 30m floor (the gate runs the rig's full hermetic `test_command`, so there is no changed-package count to scale by). Slot wait is never counted against it. |
 | `test_verify_slot_timeout` | `string` | `"60m"` | How long `gt done`'s default test-verify gate waits for the container-gate slot. Exceeding it is reported as slot contention, not a test failure. Only applies when the gate takes a slot at all (see below). |
 | `test_verify_command` | `string` | `""` | Overrides the gate's command, replacing the rig's full hermetic `test_command`; `{packages}` is replaced with the changed-package list — the route to scoped verification. |
@@ -165,13 +165,17 @@ See [Integration Branches](concepts/integration-branches.md) for integration bra
 **Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
 tests are opt-in (`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start
 one must hold the town-wide container-gate slot. `gt done`'s default test-verify gate
-therefore runs the rig's `test_command` with the opt-in forced **off** — the whole suite
+therefore runs the rig's `test_command` with the opt-in written **off** — the whole suite
 runs, its container-backed tests skip, and the gate takes no slot, so a submission never
 queues behind the daemon's main-branch patrol or the refinery's batch gate (gt-wx53).
 The Docker suite then runs once per submission in the refinery's gate, which does hold a
 slot. A rig that wants its container suite verified at `gt done` too asks for it in its
 own command (`test_command: "GT_TEST_DOCKER=1 make test"`), and the gate honours that and
-takes a slot for it. The gate force-set value only wins if the rig's recipe reads the
+takes a slot for it. The gate applies that value to the run itself rather than leaving it
+to inheritance, so the slot decision and the environment the suite reads are one fact
+(gt-0hbm); the session's own exported value is deliberately not an input, because
+`make test` defaults the variable to 1 and reading it would queue the gate behind a slot
+its own tree already holds. The gate's value only wins if the rig's recipe reads the
 variable rather than hardcoding it — gastown's `make test` defaults it
 (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason.
 

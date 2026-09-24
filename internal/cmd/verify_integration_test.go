@@ -902,7 +902,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		}
 	})
 
-	t.Run("an inherited container opt-in is filtered out, and the slot with it", func(t *testing.T) {
+	t.Run("an inherited container opt-in is written off, and the slot with it", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -943,6 +943,12 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		}
 		if seen != 1 {
 			t.Errorf("child env carries %s %d times, want exactly once (a duplicate resolves differently per reader)", dockerTestsEnv, seen)
+		}
+		// gt-0hbm: this is the environment the run reads, so it is what the
+		// slot decision was made for — a gate that held no slot must not hand
+		// the suite a switch that says containers are on.
+		if result.slotUsed != (containsEnv(env, dockerTestsEnv+"=1")) {
+			t.Errorf("slotUsed=%v with the run's %s=%v: the decision and the environment disagree", result.slotUsed, dockerTestsEnv, containsEnv(env, dockerTestsEnv+"=1"))
 		}
 	})
 
