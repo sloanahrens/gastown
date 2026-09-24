@@ -1,6 +1,6 @@
 > Status: design approved (2026-09-23). Implementation plan: `2026-09-23-install-gt-after-merge-plan.md`. Tracked in claude-7fc.
 
-# Install gt after each refinery merge — design
+# Install gt after each refinery merge, with a fresh refinery session per unit — design
 
 Date: 2026-09-23. Tracking: claude-7fc (handoff bead); gastown rig beads filed from the plan.
 
@@ -69,6 +69,48 @@ All cited from `origin/main` at ca65b4a.
 - **`gt plugin sync` no longer clobbers edits made at runtime.** It refuses
   instead of overwriting (gt-o848l).
 
+## Measured cost
+
+Measured on 2026-09-23 in a worktree at ca65b4a. The machine was under load
+(load average 15–27) and the gastown refinery, om-review and a polecat all
+held gate slots during the runs.
+
+- **The three `go build`s:**
+  - 9.5–9.9 s with a warm cache;
+  - 11.2–13.2 s after a one-line edit in `internal/daemon` or `internal/cmd`;
+  - 14.6 s with the cache as found.
+- **The rest of the install tail:**
+  - `cp` to `gt.prev`: 0.06 s
+  - `gt version`: 0.07 s
+  - `gt stale --json`: 1.0 s
+  - formula and plugin sync, as dry runs: 1.2 s
+  - git fast-forward, `mv` and receipt: about 1–2 s
+- **Total:** about 15–20 s per runtime merge. Against a gate of about 6 min,
+  that is a 4–5% slowdown, and only on runtime merges.
+- **Not measured:** a cold build cache, for example after a `go.mod` change.
+
+**Merge history, 2026-09-21 to 09-23** (first-parent `origin/main`;
+rebuild-gt receipts; `.events.jsonl`):
+
+- **Mix:** 94% of the 225 merges touch runtime paths, so the denylist rarely
+  skips and the install cost applies to almost every merge. None of them was
+  a multi-MR batch merge; each brought in 2–11 commits.
+- **Rate:**
+  - on average 4.1 merges an hour, peaking at 11 an hour;
+  - median gap between merges 10.7 min, p90 35 min.
+- **Queue pressure:**
+  - the next MR was already waiting when at least 61% of merges landed;
+  - median time from done to merge was 23 min (p90 105 min);
+  - the refinery's gate slot was held only 18% of the time.
+
+  Most of each cycle happens outside the gate, in the agent's own steps.
+  Against that, 15–20 s of install is small. This is also the strongest
+  argument for the deterministic Go driver, which is out of scope here.
+- **Staleness today:** merge to install takes a median of 53 min (p90
+  240 min, max 489 min). Only 6% of runtime merges were installed within
+  10 min. The installed binary ran, time-weighted, 4.6 runtime merges behind
+  main.
+
 ## Decisions
 
 | # | Decision |
@@ -86,6 +128,8 @@ All cited from `origin/main` at ca65b4a.
 | 11 | A batch installs once, at the batch's final merged commit. |
 | 12 | A daemon crash loop gets escalation only, from the rebuild-gt backstop. Automatic rollback of a crash-looping daemon is a follow-up bead. |
 | 13 | The rollback path is proven by shell tests against temporary directories. There is no live drill with a broken binary. |
+| 14 | After every landed unit (one MR or one batch) the refinery hands off to a fresh session in the same tmux session (`respawn-pane`), sending no handoff mail. Idle cycles keep today's path. |
+| 15 | All work happens in the claude-7fc session and lands as two refinery MRs. Nothing is slung to polecats. |
 
 ## Architecture
 
@@ -197,6 +241,67 @@ heartbeat and startup.
   30 min, it escalates.
 - All its existing deferral rules stay.
 
+## Refinery: a fresh session per unit of work
+
+Today the refinery runs as one long patrol loop. Its formula's
+`context-check` and `burn-or-loop` steps leave the decision to hand off to
+the LLM's judgement (`mol-refinery-patrol.formula.toml:1665`, :1752; the
+thresholds are 70% context, 1 GB RSS or 8 h). In practice it rarely hands
+off: the gastown refinery ran as one turn for 144 minutes and 231 tool calls
+on 2026-09-23. A long session costs in four ways:
+
+- one-off instructions get lost in a turn full of gate output;
+- compaction loses queue context mid-flow;
+- a nudge can interrupt a gate;
+- DeepSeek context grows and cache misses cost more.
+
+**Change.** After a patrol cycle that landed a unit of work, the refinery
+always hands off. A unit is one MR, or one batch; batching stays intact
+(`batch_min_count` / `batch_min_age`). The steps are:
+
+1. `gt patrol report`, which closes the wisp and creates the next one.
+2. `gt handoff --no-mail`, which runs `tmux respawn-pane -k` in the same tmux
+   session. The fresh Claude runs `gt prime` and picks up the hooked patrol
+   wisp.
+
+Cycles that landed nothing keep today's `await-event` idle path and its
+existing health thresholds. An idle session is cheap.
+
+**Why this shape.** It changes one formula file and adds one flag. The tmux
+session name stays the singleton, the daemon keeps seeing an "already
+running" refinery, and the gt-uj9k reconcile rules are untouched. Respawning
+in place avoids the 3-minute heartbeat gap and the race over which refinery
+is the only one, both of which come with real exit-and-respawn.
+
+**`gt handoff --no-mail` (new flag).** Today every handoff mails the agent
+itself (`internal/cmd/handoff.go:303`), and each mail is a permanent bead plus
+a Dolt commit. The refinery needs nothing from that mail: queue state lives in
+MR beads, pre-existing failures are found with `bd search`, and the formula
+says "nothing has to be remembered across calls" (:434). So `--no-mail`
+skips `sendHandoffMail` and does only the respawn. Without it, one mail per MR
+would be clutter.
+
+**What it gains beyond the refinery's own problems:**
+
+- Each unit starts with the formula text most recently synced by the install
+  step, which covers the refinery's share of decision 4.
+- One-off instructions sent to the refinery reach a fresh session within one
+  MR.
+
+**Cost:**
+
+- `gt prime` takes 6.8 s and produces 31.7 KB.
+- Claude boot adds more; the estimate is about 20–40 s per unit, against a
+  roughly 6-minute gate.
+- Each fresh session starts with a cold DeepSeek prompt cache, where a long
+  session instead re-reads an ever larger context.
+
+**Scope.** The formula is shared, so this applies to every rig's refinery.
+
+**Out of scope.** A deterministic Go driver for the routine path, with the LLM
+used only for conflicts and judgement calls. It is size L and gets its own
+/super-plan. `gt mq batch run` already does most of it in Go.
+
 ## Error handling
 
 No failure in any row below changes the result of a merge.
@@ -277,6 +382,17 @@ directories, with stub `make` and `gt` on `PATH`. Cases:
 - An unknown path changed: install.
 - The installed commit can't be read: install.
 
+**Go: `gt handoff --no-mail`.**
+
+- `sendHandoffMail` is never called.
+- The respawn path still runs, checked through dry-run output or an injected
+  respawner.
+- Without the flag, behaviour is unchanged.
+
+**Formula: `mol-refinery-patrol`.** The existing tests over embedded formulas
+must still parse it. Add an assertion that `burn-or-loop` requires
+`gt handoff --no-mail` after a cycle that landed work.
+
 **Shell: rebuild-gt `run_test.sh`.**
 
 - The threshold is 1.
@@ -286,30 +402,45 @@ directories, with stub `make` and `gt` on `PATH`. Cases:
 
 ## Rollout
 
-The steps are ordered so that each piece is installed before anything
-depends on it.
+The work is implemented in the claude-7fc session on the
+`claude-7fc/install-gt-after-merge` worktree branch. Nothing is slung to
+polecats. It lands through the gastown refinery as two MRs:
 
-1. **Scripts and their tests.** Nothing references them yet.
-2. **Daemon restart-pending handling.** It does nothing until a marker exists.
-3. **The Go hook and the config fields.** Off until a rig sets
-   `post_merge_command`.
-4. **rebuild-gt switches** to `install-gt.sh` and the marker, with
-   threshold 1.
-5. **One manual bootstrap install**, once steps 1–4 are merged:
-   `make safe-install` plus `gt daemon restart`. After this the running daemon
-   understands markers.
-6. **Set `merge_queue.post_merge_command`** to `scripts/install-after-merge.sh`
+- **MR-A: install pipeline.**
+  - the scripts and their tests;
+  - daemon restart-pending handling;
+  - the Go hook and the config fields;
+  - the rebuild-gt switch.
+
+  It is safe to land as one MR because nothing turns on by itself:
+  - the hook stays off until a rig sets `post_merge_command`;
+  - the running old daemon ignores markers;
+  - rebuild-gt's new tail takes effect only after a plugin sync.
+- **MR-B: fresh refinery session per unit.** The `gt handoff --no-mail` flag
+  and the formula change. It is independent of MR-A and can land in either
+  order.
+
+The operator steps follow, in order:
+
+1. **One manual bootstrap install**, after MR-A merges: `make safe-install`,
+   then `gt formula sync`, `gt plugin sync` and `gt daemon restart`. After
+   this the running daemon understands markers.
+2. **Set `merge_queue.post_merge_command`** to `scripts/install-after-merge.sh`
    in gastown's rig config.
-7. **Acceptance.** Over the next 3 runtime merges, the receipts must show
-   `installed` and `daemon_restarted` within 10 min of `merged_at`, and
-   daemon.log must show no plugin or main-branch-test gate killed by a
-   restart. The shell tests cover the rollback path.
+3. **Acceptance.** Over the next 3 runtime merges:
+   - the receipts show `installed` and `daemon_restarted` within 10 min of
+     `merged_at`;
+   - daemon.log shows no plugin or main-branch-test gate killed by a restart;
+   - after MR-B, each merge is followed by a refinery respawn with no handoff
+     mail.
 
-Steps 1–4 are gastown rig beads, with their dependencies wired, dispatched
-through the usual convoy and sling. Steps 5–7 are operator steps.
+   The shell tests cover the rollback path.
 
 ## Out of scope (follow-up beads)
 
 - Long-lived `gt` processes (nudge-pollers, heartbeat-poller, dashboard)
   noticing a new binary and restarting themselves.
 - Automatic rollback when a crash-looping daemon was started on a new binary.
+- A deterministic Go driver for the refinery's routine path. It needs its own
+  /super-plan. The post-merge hook lives in Go post-merge, so it keeps working
+  whatever drives the refinery.
