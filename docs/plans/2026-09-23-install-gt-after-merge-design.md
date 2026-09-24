@@ -34,7 +34,7 @@ All cited from `origin/main` at ca65b4a.
 
 - **The refinery holds no slot at post-merge time.** It holds a gate slot
   only while its test command runs (`gt slot run`, released on exit,
-  `internal/cmd/slot.go:130`).
+  deferred release at `internal/cmd/slot.go:157`, `ReleaseWithExit` at :201).
 - **The single-MR merge path already ends in deterministic Go:**
   `runMQPostMerge` (`internal/cmd/mq.go:746`). That function already has a
   best-effort hook that never fails the merge, `handlePostMergeRubricChange`
@@ -51,8 +51,14 @@ All cited from `origin/main` at ca65b4a.
   keeps no backup. rebuild-gt restarts the daemon itself, with
   `gt daemon restart` (`launchctl kickstart -k`) as its last step.
 - **A daemon restart kills work in flight.** It kills every in-flight script
-  plugin, dogs included (`plugin_script.go:199-203`), and every main-branch-test
-  gate, which runs inside the daemon (`main_branch_test_runner.go:1048`).
+  plugin, dogs included: they run under `d.ctx` (`exec.CommandContext` at
+  `plugin_script.go:179`, context at :306). It also kills every
+  main-branch-test gate, which runs inside the daemon (single-flight guard at
+  `main_branch_test_runner.go:754-763`).
+- **A clean daemon shutdown exits 0.** Every shutdown path returns
+  `d.shutdown(state)`, which returns nil (`daemon.go:953`, :970), and
+  `runDaemonRun` returns `d.Run()` (`internal/cmd/daemon.go:487`). launchd
+  therefore leaves the daemon down after any shutdown it didn't cause.
   Refinery gates run in the refinery's own tmux session and survive. The
   refinery-respawn storm on restart (gt-uj9k) is fixed:
   `DecideSessionReconcile` keeps the session whenever the gate slot is busy
@@ -62,10 +68,40 @@ All cited from `origin/main` at ca65b4a.
   `~/.local/bin/gt daemon run` with `KeepAlive {Crashed: true, SuccessfulExit: false}`,
   so a daemon that exits nonzero is restarted on whatever binary is installed.
   A daemon that exits 0 is not restarted.
-- **The daemon already tracks what it has in flight:** the `scriptRunner`
-  running map (`plugin_script.go:75-104`), `mainBranchTestRunning`
-  (`daemon.go:240`), `bootTriageInFlight`, `scheduledSlingsRunning`,
-  `mayorDispatchRunning` and `patrolWatchdogRunning`.
+- **The daemon already tracks what it has in flight:**
+  - the `scriptRunner` running map (`plugin_script.go:75-104`);
+  - `mainBranchTestRunning` (`daemon.go:246`);
+  - `compactorDogRunning`, a plain bool under `compactorDogMu`
+    (`daemon.go:200`, `compactor_dog.go:168`);
+  - `bootTriageInFlight`, `scheduledSlingsRunning`, `mayorDispatchRunning`
+    and `patrolWatchdogRunning`.
+
+  `pourDoctorMolecule` (`daemon.go:1316`) and the Dolt goroutines
+  (`dolt.go:673`…) have no flag.
+
+  `mainBranchTestRunning` stays true for up to 60 min while the run waits for
+  a gate slot (`daemon.go:1043-1047`). An interrupted run is already treated as
+  no verdict (gt-59yz, `main_branch_test_runner.go:765-770`).
+- **The refinery respawns in place with `gt handoff`.** `gt handoff` calls
+  `tmux respawn-pane -k` on its own pane from inside the agent's tool call; it
+  deliberately does not kill its own processes first (`handoff.go:353-377`,
+  issue #859). Handoffs are rate-limited: `MinHandoffCooldown` is 2 min, and
+  the command sleeps until it has passed (`handoff.go:1856`,
+  `constants.go:117`).
+- **The refinery's per-MR chores after post-merge are LLM steps.** In the
+  single-MR path, after `gt mq post-merge` the formula has the agent:
+  - add the attestation comment;
+  - send the MERGED mail to the witness;
+  - archive the MERGE_READY mail;
+  - delete the `temp` branch.
+
+  These are at `mol-refinery-patrol.formula.toml:1352-1420`. The batch path
+  already sends MERGED in Go (`Engineer.notifyWitnessMerged`,
+  `engineer.go:1962`).
+- **`loop-check` goes straight to the next MR while the queue has work**
+  (formula :1424-1467). `burn-or-loop` is reached only once the queue drains.
+  On 2026-09-23 the live gastown refinery went more than 2 hours without a
+  patrol report while it merged MRs.
 - **`gt plugin sync` no longer clobbers edits made at runtime.** It refuses
   instead of overwriting (gt-o848l).
 
@@ -128,17 +164,17 @@ rebuild-gt receipts; `.events.jsonl`):
 | 11 | A batch installs once, at the batch's final merged commit. |
 | 12 | A daemon crash loop gets escalation only, from the rebuild-gt backstop. Automatic rollback of a crash-looping daemon is a follow-up bead. |
 | 13 | The rollback path is proven by shell tests against temporary directories. There is no live drill with a broken binary. |
-| 14 | After every landed unit (one MR or one batch) the refinery hands off to a fresh session in the same tmux session (`respawn-pane`), sending no handoff mail. Idle cycles keep today's path. |
+| 14 | Go `gt mq post-merge` completes the whole unit (it absorbs the chores from the formula) and then respawns the refinery pane in place, with no handoff mail. The trigger lives in Go, not in the formula. The batch path does the same once per batch. Idle cycles and rejects keep today's path. |
 | 15 | All work happens in the claude-7fc session and lands as two refinery MRs. Nothing is slung to polecats. |
 
 ## Architecture
 
 ```
-refinery merge (single MR: gt mq post-merge │ batch: HandleMRInfoSuccess, once per batch)
+refinery merge (single MR: runMQPostMerge │ batch: once, after result.MergeCommit = tipSHA)
   └─▶ [Go] runPostMergeCommand(rig, mergedSHA)            shared by both paths
         reads rig config merge_queue.post_merge_command (empty = off),
               merge_queue.post_merge_timeout (default 10m)
-        runs it in the refinery worktree (so the script is the MERGED version)
+        runs it in <rig>/refinery/rig (so the script is the MERGED version)
         env: GT_MERGED_SHA, GT_RIG, GT_TOWN_ROOT, GT_MR_IDS
         nonzero / timeout → log + gt escalate; never fails the merge
   └─▶ [repo] scripts/install-after-merge.sh
@@ -152,23 +188,44 @@ refinery merge (single MR: gt mq post-merge │ batch: HandleMRInfoSuccess, once
               (fail: mv gt.prev back, escalate, exit 1)
         → gt formula sync, gt plugin sync
         → write daemon/restart-pending.json → append daemon/install-receipts.jsonl
-[Go daemon] heartbeat: marker present and daemon idle → exit(75) → launchd restarts it on the new binary
+[Go daemon] heartbeat, BEFORE dispatching plugins: marker present and daemon idle
+              → Run returns errRestartForUpgrade → runDaemonRun os.Exit(75) → launchd restarts it
             startup: marker.commit == own commit → clear marker, append "daemon_restarted" receipt
             marker older than 30m and never idle → escalate once
-[rebuild-gt] threshold 1; its install tail becomes install-gt.sh --source rebuild-gt;
-             kickstart removed; the backstop escalates if the marker is more than 30m old
-             or the daemon is not on the installed commit
+[rebuild-gt] threshold 1; after its deferral checks it delegates the WHOLE job
+             (fetch, ff, build, install) to install-gt.sh --source rebuild-gt, so every
+             build happens under the flock; kickstart removed; the backstop escalates if
+             the marker is more than 30m old or the daemon is not on the installed commit
+[Go, MR-B] end of the unit (post-merge, after the hook): the per-MR chores move from the
+             formula into Go → close the patrol wisp and pour the next one
+             → respawn-pane -k on its own pane (only when GT_ROLE=<rig>/refinery,
+               in that refinery's tmux pane, and merge_queue.cycle_session_after_merge
+               is set; skipped inside MinHandoffCooldown)
 ```
 
 ### Components
 
-**`runPostMergeCommand` (Go, new).** A single function, called from
-`runMQPostMerge` next to `handlePostMergeRubricChange`, and from the batch
-path once per batch with the final merged commit.
+**`runPostMergeCommand` (Go, new).** A single function with two call sites:
+
+- **Single MR:** called from `runMQPostMerge` next to
+  `handlePostMergeRubricChange`, with `result.MR.MergeCommit`. If that is
+  empty it falls back to `origin/<target>`. It does not use
+  `branchCleanup.SubmittedHead`, which is the polecat's head, not the merge.
+- **Batch:** called once per batch, after `result.MergeCommit = tipSHA`
+  (`internal/refinery/batch.go:786`). It is not called from
+  `HandleMRInfoSuccess`, which runs once per member (`batch.go:797`) and also
+  inside `processSingleMR` (:548). It fires whenever the push landed, even if
+  some members' cleanup failed.
+- **Resumed merges:** `resumeLandedMerge` (`resume_landed_merge.go:69`) can
+  hand it a merge commit that is already installed. `install-gt.sh` treats
+  that as a no-op.
+
+Behaviour:
 
 - If the rig config has no `post_merge_command`, it does nothing.
-- Otherwise it runs the command with `bash -c` in the refinery worktree,
-  inside its own process group, under `post_merge_timeout`.
+- Otherwise it runs the command with `bash -c` in `<rig>/refinery/rig`, inside
+  its own process group, under `post_merge_timeout`. `r.Path` is the rig
+  root, which has no `scripts/`, so it is not used.
 - It streams the output to the refinery's log.
 - If the command exits nonzero or times out, it escalates and returns nil. The
   merge result never changes.
@@ -197,7 +254,8 @@ docs-only merge can't hide an earlier runtime install that failed.
 1. Take the flock.
 2. If the installed commit is `<sha>` or a descendant of it, write a `noop`
    receipt and exit 0.
-3. Fast-forward `mayor/rig` to `<sha>`. Refuse with exit 2 if the tree is
+3. `git fetch origin`, then fast-forward `mayor/rig` to `<sha>`. With
+   `--slot-role`, build inside `gt slot run --role <role>`. Refuse with exit 2 if the tree is
    dirty, the branch is wrong or local main has diverged.
 4. Copy the current `gt` to `gt.prev`.
 5. Run `make SKIP_UPDATE_CHECK=1 safe-install`.
@@ -215,11 +273,27 @@ the tests can point them elsewhere.
 **Daemon restart-pending handling (Go, new).** This lives in the daemon's
 heartbeat and startup.
 
-- **Idle** means the `scriptRunner` map is empty and every in-flight flag
-  listed in "Facts this design rests on" is false.
-- **At each heartbeat,** if the marker is present, its commit is newer than the
-  daemon's own build commit, and the daemon is idle, the daemon shuts down
-  cleanly and exits 75. launchd starts it again on the new binary.
+- **Idle** means all of the following:
+  - the `scriptRunner` map is empty;
+  - `compactorDogRunning` is false (read under `compactorDogMu`);
+  - `bootTriageInFlight`, `scheduledSlingsRunning`, `mayorDispatchRunning`
+    and `patrolWatchdogRunning` are false;
+  - `mainBranchTestRunning` is false, or the main-branch test is still
+    waiting for a gate slot. A new `mainBranchTestWaitingSlot` atomic is set
+    around the slot wait. Killing a run that is waiting is safe, because an
+    interrupted run already counts as no verdict (gt-59yz). Without this the
+    daemon would seldom be idle while the refinery gates back to back.
+  - `pourDoctorMolecule` and the Dolt goroutines are not counted: they are
+    short or restartable.
+- **The check runs at the top of the heartbeat, before the heartbeat
+  dispatches plugins.** Otherwise each heartbeat would start a script and make
+  itself busy.
+- **When the marker is present, its commit is newer than the daemon's own
+  build commit, and the daemon is idle,** the daemon cancels its context,
+  runs the normal shutdown, and returns a sentinel error,
+  `errRestartForUpgrade`, from `Run`. `runDaemonRun`
+  (`internal/cmd/daemon.go:487`) matches the error and calls `os.Exit(75)`.
+  launchd starts it again on the new binary.
 - **At startup,** a marker whose commit equals the daemon's own commit is
   deleted and a `daemon_restarted` receipt is appended. A marker older than
   the daemon's own commit is deleted.
@@ -230,10 +304,18 @@ heartbeat and startup.
 **rebuild-gt (changed).**
 
 - `REBUILD_GT_INSTALL_THRESHOLD` defaults to 1.
-- The install tail after its build (`run.sh:689-792`) becomes
-  `install-gt.sh --sha <pinned HEAD> --source rebuild-gt`. That removes its
-  `gt daemon restart`, so it no longer kills in-flight plugins, itself
-  included. rebuild-gt maps the script's exit codes onto its own daemon
+- After its deferral checks, rebuild-gt hands the whole job to
+  `install-gt.sh --sha <origin/main> --source rebuild-gt`: fetch,
+  fast-forward, build, install and the rest. That covers its current fetch,
+  fast-forward, `gt slot run … make build` and install tail (`run.sh:120`,
+  :397-428, :664-792).
+  - Every build and every write to `mayor/rig` then happens under the flock,
+    so rebuild-gt and the hook can no longer build into one output at once.
+  - It also removes rebuild-gt's `gt daemon restart`, so it no longer kills
+    in-flight plugins, itself included.
+- `install-gt.sh` takes an optional `--slot-role <role>`. rebuild-gt passes it
+  to keep its existing rule of building inside a gate slot; the post-merge
+  hook doesn't. rebuild-gt maps the script's exit codes onto its own daemon
   contract: 0 stays 0, a refusal (2) becomes rebuild-gt's own refusal (exit 0
   with a skipped receipt), and a failure (1) stays 1.
 - New backstop check: if the marker is more than 30 min old, or the daemon's
@@ -255,31 +337,73 @@ on 2026-09-23. A long session costs in four ways:
 - a nudge can interrupt a gate;
 - DeepSeek context grows and cache misses cost more.
 
-**Change.** After a patrol cycle that landed a unit of work, the refinery
-always hands off. A unit is one MR, or one batch; batching stays intact
-(`batch_min_count` / `batch_min_age`). The steps are:
+**Why the trigger can't live in the formula.** `loop-check` goes straight to
+the next MR while the queue has work, so `burn-or-loop` is reached only when
+the queue drains. And the live refinery skipped its end-of-cycle steps for
+more than 2 hours. The only step it reliably runs per unit is
+`gt mq post-merge`, because the MERGED mail waits on it. So the unit boundary
+goes there, in Go.
 
-1. `gt patrol report`, which closes the wisp and creates the next one.
-2. `gt handoff --no-mail`, which runs `tmux respawn-pane -k` in the same tmux
-   session. The fresh Claude runs `gt prime` and picks up the hooked patrol
-   wisp.
+**Change.** A new function, `completeUnitAndCycle` (Go), runs at the end of a
+landed unit:
 
-Cycles that landed nothing keep today's `await-event` idle path and its
-existing health thresholds. An idle session is cheap.
+- **Single MR:** at the end of `runMQPostMerge`, after the install hook.
+- **Batch:** once, after the batch's post-merge work and the install hook.
 
-**Why this shape.** It changes one formula file and adds one flag. The tmux
-session name stays the singleton, the daemon keeps seeing an "already
-running" refinery, and the gt-uj9k reconcile rules are untouched. Respawning
-in place avoids the 3-minute heartbeat gap and the race over which refinery
-is the only one, both of which come with real exit-and-respawn.
+It does the following, in order:
 
-**`gt handoff --no-mail` (new flag).** Today every handoff mails the agent
-itself (`internal/cmd/handoff.go:303`), and each mail is a permanent bead plus
-a Dolt commit. The refinery needs nothing from that mail: queue state lives in
-MR beads, pre-existing failures are found with `bd search`, and the formula
-says "nothing has to be remembered across calls" (:434). So `--no-mail`
-skips `sendHandoffMail` and does only the respawn. Without it, one mail per MR
-would be clutter.
+1. **Do the per-MR chores that the formula leaves to the agent today:**
+   - the attestation comment, when `--landed-commit` was used;
+   - the MERGED mail to the witness, through the same builder as
+     `Engineer.notifyWitnessMerged`, factored out so both paths share it;
+   - archive the MR's MERGE_READY mail, found by MR bead ID or branch in the
+     refinery inbox;
+   - delete the local `temp` branch in `refinery/rig`.
+
+   Each chore is best-effort and idempotent, and a failure is logged. The
+   formula's Step 3 to Step 5 text changes to "post-merge did this; verify its
+   ✓ lines". So an agent that runs an old formula and repeats a chore does no
+   harm, except that a MERGED mail would go out twice. The witness already
+   handles duplicate MERGED mail idempotently; the plan must verify this.
+2. **Close the current patrol wisp and pour the next one,** through the same
+   code path as `gt patrol report` (`patrol_report.go:48`). The summary is
+   mechanical: MR IDs, merge commit, gate result.
+3. **Respawn the pane** with the respawn part of `gt handoff`, factored out of
+   `handoff.go:340-377`. That code sets remain-on-exit, then runs
+   `respawn-pane -k` on its own pane. It sends no handoff mail; the refinery
+   needs nothing from it, because queue state lives in MR beads and the
+   formula says "nothing has to be remembered across calls" (:434). The fresh
+   Claude runs `gt prime` and picks up the new patrol wisp.
+
+**Guards.** Step 3 runs only when all of these hold:
+
+- `GT_ROLE` is `<rig>/refinery`;
+- the process is inside that refinery's tmux session (`TMUX_PANE` resolves
+  to the refinery session);
+- the rig config sets `merge_queue.cycle_session_after_merge: true`.
+
+A human or crew member running `gt mq post-merge` by hand therefore never
+kills their own pane. Within `MinHandoffCooldown` (2 min) of the last handoff,
+step 3 is **skipped**, not slept on: the next unit cycles instead. Steps 1–2
+always run.
+
+**Batch path.** `gt mq batch run` runs in the background under the agent's
+tool. Respawning the pane at its end kills the agent that is waiting on it,
+but only after the batch's JSON result is written, and the successor needs
+nothing from that result.
+
+**What stays the same.** Rejected MRs and cycles that landed nothing keep
+today's path, including the `await-event` idle loop and its context
+thresholds. An idle session is cheap.
+
+**Why this shape.**
+
+- The tmux session name stays the singleton.
+- The daemon keeps seeing an "already running" refinery, and the gt-uj9k
+  reconcile rules are untouched.
+- Respawning in place avoids the 3-minute heartbeat gap and the race over which
+  refinery is the only one, both of which come with a real exit and respawn.
+- The per-MR chores become deterministic as a side effect.
 
 **What it gains beyond the refinery's own problems:**
 
@@ -296,7 +420,9 @@ would be clutter.
 - Each fresh session starts with a cold DeepSeek prompt cache, where a long
   session instead re-reads an ever larger context.
 
-**Scope.** The formula is shared, so this applies to every rig's refinery.
+**Scope.** The formula is shared, but the respawn is opt-in per rig through
+`merge_queue.cycle_session_after_merge`, starting with gastown. The chores
+moving into Go apply to every rig.
 
 **Out of scope.** A deterministic Go driver for the routine path, with the LLM
 used only for conflicts and judgement calls. It is size L and gets its own
@@ -318,6 +444,10 @@ No failure in any row below changes the result of a merge.
 | install-gt | the rollback itself fails | exit 1 | `install-gt:rollback-failed`, CRITICAL |
 | daemon | marker can't be read, or is older than the daemon's own commit | logs it, deletes the marker | none |
 | daemon | marker present but the daemon not idle for 30 min | keeps waiting, escalates once | `daemon:restart-pending-stuck`, MEDIUM |
+| completeUnitAndCycle | one chore fails (mail, archive, comment, temp branch) | logs it, runs the rest; the merge stands | `refinery-unit-chore:<rig>`, MEDIUM, only for a failed MERGED send (worktrees would pile up) |
+| completeUnitAndCycle | closing or pouring the patrol wisp fails | logs it; still respawns, and the successor finds the old wisp as today | none (the patrol watchdog already covers stuck wisps) |
+| completeUnitAndCycle | a guard fails, or inside the cooldown | no respawn; steps 1–2 done | none |
+| completeUnitAndCycle | `respawn-pane` fails | logs it; the agent continues in the old session, as today | `refinery-respawn-failed:<rig>`, MEDIUM |
 | rebuild-gt | daemon not on the installed commit 30 min after install (for example, a crash loop) | escalates | `rebuild-gt:daemon-not-in-force`, HIGH |
 
 ## Data
@@ -382,16 +512,27 @@ directories, with stub `make` and `gt` on `PATH`. Cases:
 - An unknown path changed: install.
 - The installed commit can't be read: install.
 
-**Go: `gt handoff --no-mail`.**
+**Go: `completeUnitAndCycle`.** Tests inject a fake mailer, a fake patrol
+closer and a fake respawner.
 
-- `sendHandoffMail` is never called.
-- The respawn path still runs, checked through dry-run output or an injected
-  respawner.
-- Without the flag, behaviour is unchanged.
+- **The chores:**
+  - MERGED is sent once, with the same body as the batch path;
+  - the MERGE_READY mail is archived;
+  - the attestation comment is added only when `--landed-commit` was used;
+  - a failure in one chore doesn't stop the others.
+- **The patrol step** closes the current wisp and pours the next one.
+- **The respawn guards:** no respawn when the role is wrong, when not inside
+  the refinery pane, when the config flag is off, or within the cooldown. In
+  every one of those cases steps 1–2 still run.
+- **The call sites:** the batch path calls it once per batch, not once per
+  member; the single-MR path calls it after the install hook.
+- **The respawn helper factored out of `handoff.go`:** existing handoff tests
+  stay green, and plain `gt handoff` still sends its mail.
 
 **Formula: `mol-refinery-patrol`.** The existing tests over embedded formulas
-must still parse it. Add an assertion that `burn-or-loop` requires
-`gt handoff --no-mail` after a cycle that landed work.
+must still parse it. The merge-push Step 3 to Step 5 text now says to verify
+post-merge's ✓ lines instead of doing the chores. Assert that it no longer
+tells the agent to send MERGED itself.
 
 **Shell: rebuild-gt `run_test.sh`.**
 
@@ -416,9 +557,15 @@ polecats. It lands through the gastown refinery as two MRs:
   - the hook stays off until a rig sets `post_merge_command`;
   - the running old daemon ignores markers;
   - rebuild-gt's new tail takes effect only after a plugin sync.
-- **MR-B: fresh refinery session per unit.** The `gt handoff --no-mail` flag
-  and the formula change. It is independent of MR-A and can land in either
-  order.
+- **MR-B: fresh refinery session per unit.**
+  - `completeUnitAndCycle`;
+  - the shared MERGED builder and the respawn helper, factored out;
+  - the `merge_queue.cycle_session_after_merge` config field;
+  - the formula text change.
+
+  It lands after MR-A, because it builds on MR-A's post-merge call sites. It
+  is off until the config flag is set. Its formula change can go live before
+  the flag, because post-merge does the chores in both cases.
 
 The operator steps follow, in order:
 
@@ -427,7 +574,10 @@ The operator steps follow, in order:
    this the running daemon understands markers.
 2. **Set `merge_queue.post_merge_command`** to `scripts/install-after-merge.sh`
    in gastown's rig config.
-3. **Acceptance.** Over the next 3 runtime merges:
+3. **After MR-B is installed** (automatically, by then), set
+   `merge_queue.cycle_session_after_merge: true` for gastown. Watch the first
+   respawn live. Other rigs opt in later.
+4. **Acceptance.** Over the next 3 runtime merges:
    - the receipts show `installed` and `daemon_restarted` within 10 min of
      `merged_at`;
    - daemon.log shows no plugin or main-branch-test gate killed by a restart;
