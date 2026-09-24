@@ -293,6 +293,31 @@ type mqPostMergeBranchCleanup struct {
 	AlreadyGone   bool
 	RemoteDeleted bool
 	LocalDeleted  bool
+
+	// LeftForOwner reports a branch the refinery may not push to (anything
+	// but polecat/* and integration/*), so its remote delete was never
+	// attempted: the branch belongs to its owner (gt-qyf1t).
+	LeftForOwner bool
+
+	// Err is a branch-cleanup failure that happened after the merge landed
+	// and the MR closed. It is reported and escalated, never a reason to skip
+	// the rest of post-merge (gt-qyf1t).
+	Err error
+}
+
+// mqPostMergeRemoteBranchDeletable reports whether post-merge may delete
+// branch on the remote. The refinery clone's .githooks/pre-push allows the
+// refinery to push — deletes included — only main, beads-sync, polecat/* and
+// integration/*; of those only the work-branch prefixes are ever cleaned up.
+// Every other branch (crew/*, a contributor's feature branch) belongs to its
+// owner, and a delete attempt would only fail at the hook (gt-qyf1t).
+func mqPostMergeRemoteBranchDeletable(branch string) bool {
+	for _, prefix := range []string{constants.BranchPolecatPrefix, constants.BranchIntegrationPrefix} {
+		if strings.HasPrefix(branch, prefix) && len(branch) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 var mqConflictCmd = &cobra.Command{
@@ -805,44 +830,90 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, orphan, err := resolveMQPostMerge(mgr, r.Path, rigGit, ref, mqPostMergeSkipBranchDelete, mqPostMergeLandedCommit)
+	townRoot := filepath.Dir(r.Path)
+	mqCfg := rig.ResolveMergeQueueConfig(townRoot, r.Name)
+	return runMQPostMergeWith(r.Name, mqPostMergeRunDeps{
+		Resolve: func() (*refinery.PostMergeResult, mqPostMergeBranchCleanup, bool, error) {
+			return resolveMQPostMerge(mgr, r.Path, rigGit, ref, mqPostMergeSkipBranchDelete, mqPostMergeLandedCommit)
+		},
+		RubricCheck: func(result *refinery.PostMergeResult, cleanup mqPostMergeBranchCleanup) {
+			handlePostMergeRubricChange(r.Path, r.Name, rigGit, result.MR, cleanup.SubmittedHead)
+		},
+		PostMergeCommand: func(mr *refinery.MergeRequest) {
+			runMRPostMergeCommand(townRoot, r.Name, r.Path, mqCfg, mr, os.Stdout)
+		},
+		UnitCycle: func(result *refinery.PostMergeResult) unitCycleReport {
+			sess := refinerySessionFor(r.Name)
+			workDir := refineryWorkDir(r.Path)
+			return completeUnitAndCycle(unitCycleParams{
+				Rig:             r.Name,
+				Mode:            unitSingle,
+				RefinerySession: sess,
+				WorkDir:         workDir,
+				MRs: []unitMR{{
+					ID: result.MR.ID, Branch: result.MR.Branch, Worker: result.MR.Worker,
+					SourceIssue: result.SourceIssueID, Target: result.MR.TargetBranch,
+				}},
+				MergeCommit:          resolvePostMergeSHA(workDir, result.MR.MergeCommit, result.MR.TargetBranch),
+				LandedCommitAttested: mqPostMergeLandedCommit != "",
+				CycleEnabled:         mqCfg != nil && mqCfg.CycleSessionAfterMerge,
+				CycleSuppressed:      mqPostMergeNoCycle,
+			}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, os.Stdout))
+		},
+		Escalate: func(fingerprint, severity, msg string) {
+			runBoundedEscalate("post-merge-branch-cleanup", "refinery:post-merge", fingerprint, severity, msg)
+		},
+		Out: os.Stdout,
+	})
+}
+
+// mqPostMergeRunDeps holds every side effect runMQPostMergeWith has, so tests
+// drive the whole post-merge sequence without a rig, beads, git remotes,
+// tmux or mail.
+type mqPostMergeRunDeps struct {
+	Resolve          func() (*refinery.PostMergeResult, mqPostMergeBranchCleanup, bool, error)
+	RubricCheck      func(result *refinery.PostMergeResult, cleanup mqPostMergeBranchCleanup)
+	PostMergeCommand func(mr *refinery.MergeRequest)
+	UnitCycle        func(result *refinery.PostMergeResult) unitCycleReport
+	Escalate         func(fingerprint, severity, msg string)
+	Out              io.Writer
+}
+
+// runMQPostMergeWith is gt mq post-merge after its rig and git are resolved.
+// An error from Resolve means the landing was not confirmed (no MR, merge not
+// proven, MR close refused) and stops here: nothing after it may run for a
+// merge that is not known to have landed. Once it has landed, everything runs
+// — a branch-cleanup failure is reported ✗ and escalated, but the post-merge
+// command and the unit cycle still run and the command exits 0, because a
+// non-zero exit makes the refinery retry post-merge and duplicate its chores
+// (gt-qyf1t).
+func runMQPostMergeWith(rigName string, d mqPostMergeRunDeps) error {
+	result, branchCleanup, orphan, err := d.Resolve()
 	if err != nil {
 		return err
 	}
 	if orphan {
-		printMQPostMergeOrphan(branchCleanup)
+		printMQPostMergeOrphan(d.Out, branchCleanup)
 		return nil
 	}
 
-	handlePostMergeRubricChange(r.Path, r.Name, rigGit, result.MR, branchCleanup.SubmittedHead)
+	d.RubricCheck(result, branchCleanup)
 
-	printMQPostMergeResult(result, branchCleanup)
+	printMQPostMergeResult(d.Out, result, branchCleanup)
+	if branchCleanup.Err != nil {
+		d.Escalate("post-merge-branch-cleanup:"+rigName, "medium",
+			fmt.Sprintf("post-merge on %s: %s (branch %s) landed and closed, but its remote branch cleanup failed: %v; delete the branch by hand if it should go",
+				rigName, result.MR.ID, result.MR.Branch, branchCleanup.Err))
+	}
 
-	townRoot := filepath.Dir(r.Path)
-	mqCfg := rig.ResolveMergeQueueConfig(townRoot, r.Name)
-	runMRPostMergeCommand(townRoot, r.Name, r.Path, mqCfg, result.MR, os.Stdout)
+	d.PostMergeCommand(result.MR)
 
 	// Last: the respawn it may do replaces this process, so everything the
 	// post-merge command owes its caller (closes, ✓ lines, the install hook)
 	// has already happened.
-	sess := refinerySessionFor(r.Name)
-	workDir := refineryWorkDir(r.Path)
-	rep := completeUnitAndCycle(unitCycleParams{
-		Rig:             r.Name,
-		Mode:            unitSingle,
-		RefinerySession: sess,
-		WorkDir:         workDir,
-		MRs: []unitMR{{
-			ID: result.MR.ID, Branch: result.MR.Branch, Worker: result.MR.Worker,
-			SourceIssue: result.SourceIssueID, Target: result.MR.TargetBranch,
-		}},
-		MergeCommit:          resolvePostMergeSHA(workDir, result.MR.MergeCommit, result.MR.TargetBranch),
-		LandedCommitAttested: mqPostMergeLandedCommit != "",
-		CycleEnabled:         mqCfg != nil && mqCfg.CycleSessionAfterMerge,
-		CycleSuppressed:      mqPostMergeNoCycle,
-	}, defaultUnitCycleDeps(townRoot, r.BeadsPath(), workDir, sess, os.Stdout))
+	rep := d.UnitCycle(result)
 	if rep.SkipCause != "" {
-		fmt.Printf("  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)
+		fmt.Fprintf(d.Out, "  %s session kept: %s\n", style.Dim.Render("○"), rep.SkipCause)
 	}
 	return nil
 }
@@ -918,10 +989,19 @@ func escalateRubricChange(rigName, target, rubricPath, sha, mrID string) {
 // resolveMQPostMerge runs the MR-driven cleanup and, when ref resolves to no MR
 // bead, cleans the branch it names on its own (gt-qjp2). Only a missing MR bead
 // takes the orphan path: every other failure is a refusal to act on a real MR
-// and stays one.
+// and stays one — except a branch-cleanup failure after the MR closed, which
+// is returned on cleanup.Err with a nil error (gt-qyf1t).
 func resolveMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, ref string, skipBranchDelete bool, landedCommit string) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, bool, error) {
 	result, cleanup, err := runVerifiedMQPostMerge(mgr, rigPath, rigGit, ref, skipBranchDelete, landedCommit)
 	if err == nil {
+		return result, cleanup, false, nil
+	}
+	// The merge landed and the MR closed; only its branch cleanup failed.
+	// That rides on the cleanup for the caller to report and escalate, so the
+	// post-merge command and the unit cycle still run (gt-qyf1t).
+	var cleanupErr *mqPostMergeBranchCleanupError
+	if errors.As(err, &cleanupErr) && result != nil && result.MR != nil {
+		cleanup.Err = cleanupErr.err
 		return result, cleanup, false, nil
 	}
 	if !errors.Is(err, refinery.ErrMRNotFound) {
@@ -935,61 +1015,66 @@ func resolveMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMer
 	return nil, orphanCleanup, true, nil
 }
 
-func printMQPostMergeResult(result *refinery.PostMergeResult, branchCleanup mqPostMergeBranchCleanup) {
+func printMQPostMergeResult(w io.Writer, result *refinery.PostMergeResult, branchCleanup mqPostMergeBranchCleanup) {
 	mr := result.MR
-	fmt.Printf("%s Post-merge: %s\n", style.Bold.Render("✓"), mr.ID)
-	fmt.Printf("  Branch: %s\n", mr.Branch)
-	fmt.Printf("  Worker: %s\n", mr.Worker)
+	fmt.Fprintf(w, "%s Post-merge: %s\n", style.Bold.Render("✓"), mr.ID)
+	fmt.Fprintf(w, "  Branch: %s\n", mr.Branch)
+	fmt.Fprintf(w, "  Worker: %s\n", mr.Worker)
 	if branchCleanup.SubmittedHeadInferred {
-		fmt.Printf("  %s Submitted head %s inferred from the branch (the MR bead records no commit_sha); proven against %s like a submitted head\n",
+		fmt.Fprintf(w, "  %s Submitted head %s inferred from the branch (the MR bead records no commit_sha); proven against %s like a submitted head\n",
 			style.Dim.Render("○"), branchCleanup.SubmittedHead, mr.TargetBranch)
 	}
 
 	if result.MRClosed {
-		fmt.Printf("  %s MR closed (merged)\n", style.Success.Render("✓"))
+		fmt.Fprintf(w, "  %s MR closed (merged)\n", style.Success.Render("✓"))
 	}
 	if result.SourceIssueClosed {
-		fmt.Printf("  %s Source issue closed: %s\n", style.Success.Render("✓"), result.SourceIssueID)
+		fmt.Fprintf(w, "  %s Source issue closed: %s\n", style.Success.Render("✓"), result.SourceIssueID)
 	} else if result.SourceIssueNotFound {
-		fmt.Printf("  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(already closed or not found)"))
+		fmt.Fprintf(w, "  %s Source issue: %s %s\n", style.Dim.Render("○"), result.SourceIssueID, style.Dim.Render("(already closed or not found)"))
 	}
 
 	if branchCleanup.NoBranch {
-		fmt.Printf("  %s No branch name in MR (skipping branch delete)\n", style.Dim.Render("○"))
+		fmt.Fprintf(w, "  %s No branch name in MR (skipping branch delete)\n", style.Dim.Render("○"))
 	} else if branchCleanup.Skipped {
-		fmt.Printf("  %s Branch delete skipped (--skip-branch-delete)\n", style.Dim.Render("○"))
+		fmt.Fprintf(w, "  %s Branch delete skipped (--skip-branch-delete)\n", style.Dim.Render("○"))
 	} else if branchCleanup.Disabled {
-		fmt.Printf("  %s Branch delete disabled by config\n", style.Dim.Render("○"))
+		fmt.Fprintf(w, "  %s Branch delete disabled by config\n", style.Dim.Render("○"))
 	} else if branchCleanup.OpenPR {
-		fmt.Printf("  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), mr.Branch)
+		fmt.Fprintf(w, "  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), mr.Branch)
 	} else if branchCleanup.AlreadyGone {
-		fmt.Printf("  %s Remote branch already absent: %s\n", style.Dim.Render("○"), mr.Branch)
+		fmt.Fprintf(w, "  %s Remote branch already absent: %s\n", style.Dim.Render("○"), mr.Branch)
+	} else if branchCleanup.LeftForOwner {
+		fmt.Fprintf(w, "  %s remote branch %s left for its owner (not a polecat/integration branch)\n", style.Dim.Render("○"), mr.Branch)
 	} else if branchCleanup.RemoteDeleted {
-		fmt.Printf("  %s Deleted remote branch: %s\n", style.Success.Render("✓"), mr.Branch)
+		fmt.Fprintf(w, "  %s Deleted remote branch: %s\n", style.Success.Render("✓"), mr.Branch)
+	}
+	if branchCleanup.Err != nil {
+		fmt.Fprintf(w, "  %s remote branch cleanup failed: %v\n", style.Error.Render("✗"), branchCleanup.Err)
 	}
 
 	if branchCleanup.LocalDeleted {
-		fmt.Printf("  %s Deleted local branch: %s\n", style.Success.Render("✓"), mr.Branch)
+		fmt.Fprintf(w, "  %s Deleted local branch: %s\n", style.Success.Render("✓"), mr.Branch)
 	}
 }
 
-func printMQPostMergeOrphan(cleanup mqPostMergeBranchCleanup) {
-	fmt.Printf("%s Orphaned branch cleanup: %s\n", style.Bold.Render("✓"), cleanup.Branch)
-	fmt.Printf("  %s\n", style.Dim.Render("(no MR bead; branch-only cleanup)"))
+func printMQPostMergeOrphan(w io.Writer, cleanup mqPostMergeBranchCleanup) {
+	fmt.Fprintf(w, "%s Orphaned branch cleanup: %s\n", style.Bold.Render("✓"), cleanup.Branch)
+	fmt.Fprintf(w, "  %s\n", style.Dim.Render("(no MR bead; branch-only cleanup)"))
 
 	switch {
 	case cleanup.Disabled:
-		fmt.Printf("  %s Branch delete disabled by config\n", style.Dim.Render("○"))
+		fmt.Fprintf(w, "  %s Branch delete disabled by config\n", style.Dim.Render("○"))
 	case cleanup.AlreadyGone:
-		fmt.Printf("  %s Remote branch already absent\n", style.Dim.Render("○"))
+		fmt.Fprintf(w, "  %s Remote branch already absent\n", style.Dim.Render("○"))
 	case cleanup.OpenPR:
-		fmt.Printf("  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), cleanup.Branch)
+		fmt.Fprintf(w, "  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), cleanup.Branch)
 	case cleanup.RemoteDeleted:
-		fmt.Printf("  %s Deleted remote branch: %s (preserved on %s)\n", style.Success.Render("✓"), cleanup.Branch, cleanup.Target)
+		fmt.Fprintf(w, "  %s Deleted remote branch: %s (preserved on %s)\n", style.Success.Render("✓"), cleanup.Branch, cleanup.Target)
 	}
 
 	if cleanup.LocalDeleted {
-		fmt.Printf("  %s Deleted local branch: %s\n", style.Success.Render("✓"), cleanup.Branch)
+		fmt.Fprintf(w, "  %s Deleted local branch: %s\n", style.Success.Render("✓"), cleanup.Branch)
 	}
 }
 
@@ -1189,8 +1274,20 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 	branchCleanup, err := cleanupMQPostMergeBranch(rigPath, rigGit, result.MR, skipBranchDelete)
 	branchCleanup.SubmittedHead = head
 	branchCleanup.SubmittedHeadInferred = inferredHead != ""
+	if err != nil {
+		err = &mqPostMergeBranchCleanupError{err: err}
+	}
 	return result, branchCleanup, err
 }
+
+// mqPostMergeBranchCleanupError marks a failure of the branch cleanup that
+// runs after the merge proof passed and the MR closed, so resolveMQPostMerge
+// can tell it from a failure that happened before the landing was confirmed
+// (gt-qyf1t). Its message is the underlying error's.
+type mqPostMergeBranchCleanupError struct{ err error }
+
+func (e *mqPostMergeBranchCleanupError) Error() string { return e.err.Error() }
+func (e *mqPostMergeBranchCleanupError) Unwrap() error { return e.err }
 
 // verifyMQPostMergeProof proves that mr's work actually landed on its target
 // branch. The default proof requires the submitted commit_sha to be reachable
@@ -1485,6 +1582,13 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 	}
 	if !mqDeleteMergedBranchesEnabled(rigPath) {
 		cleanup.Disabled = true
+		return cleanup, nil
+	}
+	// A crew (or any non-work) branch belongs to its owner, and the refinery
+	// clone's pre-push hook refuses to delete it anyway: attempting it only
+	// turned every crew MR's post-merge into a failure (gt-qyf1t).
+	if !mqPostMergeRemoteBranchDeletable(cleanup.Branch) {
+		cleanup.LeftForOwner = true
 		return cleanup, nil
 	}
 
