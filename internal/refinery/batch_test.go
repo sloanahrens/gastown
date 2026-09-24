@@ -552,6 +552,64 @@ func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
 	}
 }
 
+// TestProcessBatch_MultipleMRs_NotifiesWitnessMergedPerMR is the gt-9gjl
+// regression: gt mq batch run's multi-MR fast-forward path must emit the
+// documented MERGED notification (mail-protocol.md: Refinery -> Witness)
+// once per MR in the batch, not zero times for the whole batch. Without it
+// the witness never completes each polecat's cleanup wisp, so batched
+// polecat worktrees are never reaped.
+func TestProcessBatch_MultipleMRs_NotifiesWitnessMergedPerMR(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "polecat/a/gt-a", "a.txt", "hello a\n")
+	createFeatureBranch(t, workDir, "polecat/b/gt-b", "b.txt", "hello b\n")
+	createFeatureBranch(t, workDir, "polecat/c/gt-c", "c.txt", "hello c\n")
+
+	e := newTestEngineer(t, workDir, g)
+	var notified []string
+	e.notifyMergedFn = func(mr *MRInfo, mergeCommit string) {
+		notified = append(notified, mr.ID)
+		if mergeCommit == "" {
+			t.Errorf("notify for %s got an empty merge commit", mr.ID)
+		}
+	}
+
+	// IDs keep the "mr-" prefix and SourceIssue stays empty so
+	// isSyntheticMergeMechanicsMR recognizes these as test MRs and skips the
+	// real bd close, matching the sibling tests in this file (this workDir
+	// has no .beads database).
+	batch := []*MRInfo{
+		{ID: "mr-a", Branch: "polecat/a/gt-a", Target: "main", Worker: "polecats/a", CreatedAt: time.Now()},
+		{ID: "mr-b", Branch: "polecat/b/gt-b", Target: "main", Worker: "polecats/b", CreatedAt: time.Now()},
+		{ID: "mr-c", Branch: "polecat/c/gt-c", Target: "main", Worker: "polecats/c", CreatedAt: time.Now()},
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if len(result.Merged) != 3 {
+		t.Fatalf("expected 3 merged, got %d", len(result.Merged))
+	}
+
+	if len(notified) != 3 {
+		t.Fatalf("expected 3 witness MERGED notifications (one per batched MR), got %d: %v", len(notified), notified)
+	}
+	for _, id := range []string{"mr-a", "mr-b", "mr-c"} {
+		found := false
+		for _, n := range notified {
+			if n == id {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected MR %s to be notified, notified=%v", id, notified)
+		}
+	}
+}
+
 func TestProcessBatch_MergeStrategyPR_RefusesMultiMRBatch(t *testing.T) {
 	t.Parallel()
 	workDir, g, cleanup := testGitRepo(t)

@@ -351,6 +351,11 @@ type Engineer struct {
 	// in production, where the nudge is the real one; a test that leaves it
 	// nil would reach a live witness.
 	escalateFn func(string)
+
+	// notifyMergedFn replaces the witness MERGED mail (notifyWitnessMerged) in
+	// tests. Nil in production, where the real mail send runs; a test that
+	// leaves it nil would reach a live witness.
+	notifyMergedFn func(mr *MRInfo, mergeCommit string)
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -1929,9 +1934,52 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about merge: %v\n", err)
 	}
 
+	// 4.5. Tell the witness the branch landed, so it can complete the polecat's
+	// cleanup wisp and reap the worktree (mail-protocol.md: MERGED,
+	// Refinery -> Witness). This runs once per MR here, so both the single-MR
+	// path (processSingleMR) and the multi-MR batch path (fastForwardBatch)
+	// send it identically — they both funnel through this function (gt-9gjl).
+	// Scoped to polecat branches: isPolecat is already computed above for the
+	// branch-delete step, and a non-polecat worker (e.g. crew) has no
+	// worktree for the witness to reap.
+	if isPolecat {
+		e.notifyWitnessMerged(mr, result.MergeCommit)
+	}
+
 	// 5. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
 	return true
+}
+
+// notifyWitnessMerged sends the documented MERGED message (mail-protocol.md:
+// Refinery -> Witness) so the witness can complete the polecat's cleanup wisp
+// and reap its worktree. notifyMergedFn overrides this in tests; nil in
+// production, where the real mail send runs (mirrors escalateToWitness).
+//
+// Built with mail.NewMessage rather than protocol.NewMergedMessage to avoid
+// an import cycle: refinery -> protocol -> witness -> refinery
+// (witness/state_collapse.go imports refinery).
+func (e *Engineer) notifyWitnessMerged(mr *MRInfo, mergeCommit string) {
+	if e.notifyMergedFn != nil {
+		e.notifyMergedFn(mr, mergeCommit)
+		return
+	}
+	if e.router == nil {
+		return
+	}
+	polecatName := strings.TrimPrefix(mr.Worker, "polecats/")
+	body := fmt.Sprintf("Branch: %s\nIssue: %s\nPolecat: %s\nRig: %s\nTarget: %s\nMerged-At: %s\nMerge-Commit: %s\n",
+		mr.Branch, mr.SourceIssue, polecatName, e.rig.Name, mr.Target, time.Now().Format(time.RFC3339), mergeCommit)
+	mergedMsg := mail.NewMessage(
+		fmt.Sprintf("%s/refinery", e.rig.Name),
+		fmt.Sprintf("%s/witness", e.rig.Name),
+		fmt.Sprintf("MERGED %s", polecatName),
+		body,
+	)
+	mergedMsg.Priority = mail.PriorityHigh
+	if err := e.router.Send(mergedMsg); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to send MERGED to witness for %s: %v\n", polecatName, err)
+	}
 }
 
 // checkAndEscalateRubricChange detects whether the merge just landed by mr

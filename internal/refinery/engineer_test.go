@@ -1311,6 +1311,62 @@ func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) 
 	}
 }
 
+// TestHandleMRInfoSuccess_NotifiesWitnessMerged locks in the gt-9gjl fix on
+// the single-MR side: a successful merge must send the documented MERGED
+// notification (mail-protocol.md: Refinery -> Witness) exactly once, with
+// the merged commit and the polecat's own MR/branch, so the witness can
+// complete the cleanup wisp and reap the worktree. processSingleMR and the
+// batch fast-forward path both call HandleMRInfoSuccess, so this and
+// TestProcessBatch_MultipleMRs_NotifiesWitnessMergedPerMR together prove the
+// two paths behave identically.
+func TestHandleMRInfoSuccess_NotifiesWitnessMerged(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/nux/gt-notify"
+	createFeatureBranch(t, workDir, branch, "notify.txt", "hi\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	var notified []*MRInfo
+	var notifiedCommits []string
+	e.notifyMergedFn = func(mr *MRInfo, mergeCommit string) {
+		notified = append(notified, mr)
+		notifiedCommits = append(notifiedCommits, mergeCommit)
+	}
+
+	// ID keeps the "mr-" prefix and SourceIssue stays empty so
+	// isSyntheticMergeMechanicsMR recognizes this as a test MR and skips the
+	// real bd close, matching the sibling tests in this file (this workDir
+	// has no .beads database).
+	if ok := e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-notify",
+		Branch:    branch,
+		Target:    "main",
+		Worker:    "polecats/nux",
+		CommitSHA: commit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit}); !ok {
+		buf, _ := e.output.(*bytes.Buffer)
+		t.Fatalf("HandleMRInfoSuccess returned false; output:\n%s", buf)
+	}
+
+	if len(notified) != 1 {
+		t.Fatalf("expected exactly 1 witness MERGED notification, got %d", len(notified))
+	}
+	if notified[0].Branch != branch || notified[0].Worker != "polecats/nux" {
+		t.Fatalf("unexpected MR passed to notify: %+v", notified[0])
+	}
+	if notifiedCommits[0] != mergeCommit {
+		t.Fatalf("expected merge commit %s, got %s", mergeCommit, notifiedCommits[0])
+	}
+}
+
 func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
 	// HandleMRInfoSuccess below nudges mayor (gt-i0ld) — fake gt on PATH so
 	// the test never shells out to the real binary.
