@@ -25,6 +25,14 @@ import (
 // → beadsdk.Open failure. Non-Dolt tests (e.g. boot_spawn_frequency_test.go)
 // still run. (fixes gt-kw4449)
 func TestMain(m *testing.M) {
+	// Signal-target helper (pid_identity_test.go): this binary re-executed
+	// under a chosen argv0/argv so a test owns a process that looks like
+	// `gt daemon run` or `dolt sql-server`, and can prove the stop paths
+	// signal it — without any test ever pointing a stop path at a host PID.
+	if os.Getenv(signalTargetHelperEnv) == "1" {
+		runSignalTargetHelper()
+	}
+
 	h, err := testutil.StartHermetic(testutil.WithDolt())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon TestMain: %v\n", err)

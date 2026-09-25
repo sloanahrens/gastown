@@ -698,6 +698,7 @@ func newTestManager(t *testing.T) *DoltServerManager {
 		stopFn:           func() {},
 		unhealthyAlertFn: func(error) {},
 		crashAlertFn:     func(int) {},
+		killImpostersFn:  func() error { return nil },
 	}
 }
 

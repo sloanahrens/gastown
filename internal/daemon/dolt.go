@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -162,6 +163,19 @@ type DoltServerManager struct {
 	readOnlyAlertFn   func(error)
 	crashAlertFn      func(int)
 	listDatabasesFn   func() ([]string, error)
+	// killImpostersFn replaces doltserver.KillImposters, which signals
+	// whatever holds the configured port. A test whose identity check fails
+	// must not reach it: under the hermetic harness that port is a Docker
+	// container's, held on the host by Docker Desktop (gt-p7zy0).
+	killImpostersFn func() error
+}
+
+// killImposters evicts a non-town Dolt server from the configured port.
+func (m *DoltServerManager) killImposters() error {
+	if m.killImpostersFn != nil {
+		return m.killImpostersFn()
+	}
+	return doltserver.KillImposters(m.townRoot)
 }
 
 // NewDoltServerManager creates a new Dolt server manager.
@@ -485,7 +499,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 				}
 				m.stopLocked()
 				// Also kill any imposters before restarting
-				if killErr := doltserver.KillImposters(m.townRoot); killErr != nil {
+				if killErr := m.killImposters(); killErr != nil {
 					m.logger("Warning: failed to kill imposters: %v", killErr)
 				}
 				time.Sleep(500 * time.Millisecond)
@@ -1019,6 +1033,21 @@ func (m *DoltServerManager) stopLocked() {
 		return
 	}
 
+	// isRunning trusts the pid file plus "something answers on the port" —
+	// neither says what the PID is. Prove it is a dolt sql-server before
+	// signaling it (gt-p7zy0).
+	if err := verifyDoltSQLServerFn(pid); err != nil {
+		m.logger("Not stopping PID %d: %v", pid, err)
+		m.process = nil
+		// A pid file naming a process that is provably not dolt is stale by
+		// definition; left in place it makes every tick see a "running"
+		// server it can never stop. Keep it when ps could not read the argv.
+		if errors.Is(err, doltserver.ErrNotDoltSQLServer) {
+			_ = os.Remove(m.pidFile())
+		}
+		return
+	}
+
 	m.logger("Stopping Dolt SQL server (PID %d)...", pid)
 
 	process, err := os.FindProcess(pid)
@@ -1051,7 +1080,12 @@ func (m *DoltServerManager) stopLocked() {
 		// under load. A SIGKILL mid-journal-write causes corruption requiring
 		// dolt fsck to recover.
 		m.logger("Dolt SQL server did not stop gracefully after %s, forcing termination", doltServerStopBudget)
-		_ = sendKillSignal(process)
+		// Re-verify: the PID may have exited and been reused during the wait.
+		if err := verifyDoltSQLServerFn(pid); err != nil {
+			m.logger("Not force-killing PID %d: %v", pid, err)
+		} else {
+			_ = sendKillSignal(process)
+		}
 	}
 
 	// Clean up
