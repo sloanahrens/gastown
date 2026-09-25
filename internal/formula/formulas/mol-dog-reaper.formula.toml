@@ -43,8 +43,11 @@ guard rails. It only targets issues that are not P0/P1, not an infrastructure
 type (epic, convoy, molecule, rig, agent, event), not an agent or infrastructure
 bead by label or id pattern, and have no active dependencies. On top of that:
 
-- `gt reaper auto-close` REFUSES a stale-age below 7d. Never work around a
-  refusal — a refusal IS the designed stop.
+- `gt reaper auto-close` REFUSES a stale-age below 7d as a SOFT error (gt-ecpj):
+  the sweep runs at the floor, reports that set, and the command exits 0 — the
+  notice is the refusal, not a stop, so the cycle completes. Never pass
+  `--force` to get past a notice: a mis-set threshold is a report to fix, not
+  a wall to climb.
 - It REFUSES a run whose candidate count exceeds `--max-closes` (default 20 per
   database). Nothing is closed on a refusal.
 - daemon.json `patrols.wisp_reaper.auto_close=false` disarms the step. Do not
@@ -90,7 +93,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 5
+version = 6
 
 # Enforced command allowlist (gt-9iv): dog sessions executing this formula may
 # only run these commands, plus the built-in dog lifecycle baseline
@@ -243,8 +246,11 @@ run rather than reaching for `--force`.
 - Review the count of closed issues against the dry-run count — they should match
 - Verify exclusions held: P0/P1, epics, convoys, molecules, agent beads, and
   dependency-linked issues must never appear as candidates
-- A "REFUSED" line means the run was blocked and nothing was closed. That is a
-  designed stop, not a bug to work around.
+- A "REFUSED" line (per-run cap, preview) means the run was blocked and nothing
+  was closed. That is a designed stop, not a bug to work around.
+- A "below the floor" notice (gt-ecpj) is a soft error: the command reported the
+  set at the floor, closed nothing, and exited 0. Report it in the dog report —
+  a threshold that mis-sat below 7d is a config fix, and the cycle continues.
 
 {{#if dry_run}}**Dry run is set** — step 2 performs no writes.{{/if}}
 

@@ -283,30 +283,77 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 	}
 }
 
-// TestAutoCloseRejectsStaleAgeBelowFloor covers the second brake from gt-2qzr:
-// the incident run's 7d threshold was short enough to catch eight-day-old agent
-// beads, so anything below a week is refused outright.
-func TestAutoCloseRejectsStaleAgeBelowFloor(t *testing.T) {
-	// db is nil on purpose: the floor is checked before any query runs, so a
-	// non-refusing implementation would panic here rather than pass.
+// TestAutoCloseSoftRefusalBelowFloor covers the second brake from gt-2qzr and
+// its gt-ecpj softening: the incident run's 7d threshold was short enough to
+// catch eight-day-old agent beads, so a below-floor stale-age refuses — but as
+// a soft error, not a stop. The sweep runs at the floor, reports that set in
+// the result with ErrStaleAgeTooLow wrapping the refusal, and the command
+// exits 0.
+func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
 	for _, age := range []time.Duration{time.Hour, 24 * time.Hour, 6 * 24 * time.Hour} {
-		_, err := AutoClose(nil, "hq", AutoCloseOptions{StaleAge: age})
+		// A below-floor threshold sweeps at the floor with the same two
+		// candidates, so this preview is what the live run carries.
+		preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, DryRun: true})
+		if err != nil {
+			t.Fatalf("dry run at %s: %v", age, err)
+		}
+		result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, PreviewHash: preview.PreviewHash})
 		if !errors.Is(err, ErrStaleAgeTooLow) {
 			t.Errorf("AutoClose(StaleAge=%s) error = %v, want ErrStaleAgeTooLow", age, err)
+		}
+		if result == nil {
+			t.Fatalf("AutoClose(StaleAge=%s) returned no result; a soft refusal must report the set at the floor", age)
+		}
+		if result.FlooredAt != age {
+			t.Errorf("AutoClose(StaleAge=%s).FlooredAt = %s, want the asked-for threshold", age, result.FlooredAt)
+		}
+		if result.Closed != 0 {
+			t.Errorf("refused sweep reported Closed = %d, want 0: the floor never closes", result.Closed)
+		}
+		if len(result.ClosedEntries) != 2 {
+			t.Errorf("soft refusal carried %d candidate entries, want 2: the operator has to see what the floor set is",
+				len(result.ClosedEntries))
+		}
+	}
+
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a soft refusal, want open", id, status)
 		}
 	}
 
 	// The floor itself is allowed — it is the explicit lower bound — and Force
-	// lifts it. Both get past validation and reach the query, so any error they
-	// return is the fake driver's, never the floor's.
-	db := openFakeReaperDB(t, &fakeReaperState{wisps: map[string]*fakeWisp{}, ops: map[int][]string{}})
+	// lifts it. Neither carries a floor refusal.
+	_, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run at the floor: %v", err)
+	}
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("forced dry run: %v", err)
+	}
+	if errors.Is(err, ErrStaleAgeTooLow) || result.FlooredAt != 0 {
+		t.Errorf("forced run carries a floor refusal: FlooredAt = %s, want none", result.FlooredAt)
+	}
+}
+
+// TestAutoCloseForceLiftsTheFloor is the lift side of the same brake: --force
+// lets a below-floor threshold sweep at the value asked for, with no refusal.
+func TestAutoCloseForceLiftsTheFloor(t *testing.T) {
+	state := newStaleIssueState("hq-a")
+	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge}); errors.Is(err, ErrStaleAgeTooLow) {
-		t.Errorf("AutoClose(StaleAge=MinStaleIssueAge) should not be refused by the floor")
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("forced below-floor dry run: %v", err)
 	}
-	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true}); errors.Is(err, ErrStaleAgeTooLow) {
-		t.Errorf("AutoClose(StaleAge=1h, Force) should not be refused by the floor")
+	if result.FlooredAt != 0 {
+		t.Errorf("forced run reported FlooredAt = %s, want none", result.FlooredAt)
 	}
 }
 

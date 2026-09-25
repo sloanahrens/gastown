@@ -103,15 +103,20 @@ func DiscoverDatabases(host string, port int) []string {
 
 // ScanResult holds the results of scanning a database for reaper candidates.
 type ScanResult struct {
-	Database               string    `json:"database"`
-	ReapCandidates         int       `json:"reap_candidates"`
-	MoleculeStepCandidates int       `json:"molecule_step_candidates,omitempty"`
-	PurgeCandidates        int       `json:"purge_candidates"`
-	MailCandidates         int       `json:"mail_candidates"`
-	StaleCandidates        int       `json:"stale_candidates"`
-	AbsentParentCandidates int       `json:"absent_parent_candidates,omitempty"`
-	OpenWisps              int       `json:"open_wisps"`
-	Anomalies              []Anomaly `json:"anomalies,omitempty"`
+	Database               string `json:"database"`
+	ReapCandidates         int    `json:"reap_candidates"`
+	MoleculeStepCandidates int    `json:"molecule_step_candidates,omitempty"`
+	PurgeCandidates        int    `json:"purge_candidates"`
+	MailCandidates         int    `json:"mail_candidates"`
+	StaleCandidates        int    `json:"stale_candidates"`
+	// StaleAgeFlooredAt is set when the --stale-age flag sat below
+	// MinStaleIssueAge: the stale count is then the count at the floor
+	// (the set AutoClose would report on its soft refusal, gt-ecpj), and this
+	// records the threshold that was asked for.
+	StaleAgeFlooredAt      time.Duration `json:"stale_age_floored_at,omitempty"`
+	AbsentParentCandidates int           `json:"absent_parent_candidates,omitempty"`
+	OpenWisps              int           `json:"open_wisps"`
+	Anomalies              []Anomaly     `json:"anomalies,omitempty"`
 }
 
 // ReapResult holds the results of a reap operation.
@@ -154,14 +159,21 @@ type AutoCloseResult struct {
 	// run returns it so the caller can hand it back to the live run
 	// (AutoCloseOptions.PreviewHash) — the preview authorizes the write, and
 	// this is the token that carries the authorization (gt-39bu).
-	PreviewHash string    `json:"preview_hash,omitempty"`
-	Anomalies   []Anomaly `json:"anomalies,omitempty"`
+	PreviewHash string `json:"preview_hash,omitempty"`
+	// FlooredAt is the stale-age the caller asked for when AutoClose ran the
+	// sweep at the MinStaleIssueAge floor instead (a below-floor threshold
+	// refused, gt-ecpj): the result reports the set at the floor, and this
+	// records what was asked for.
+	FlooredAt time.Duration `json:"floored_at,omitempty"`
+	Anomalies []Anomaly     `json:"anomalies,omitempty"`
 }
 
 // AutoCloseOptions parameterizes an AutoClose sweep.
 type AutoCloseOptions struct {
 	// StaleAge is how long an issue may sit untouched before it is stale.
-	// Values below MinStaleIssueAge are rejected unless Force is set.
+	// Values below MinStaleIssueAge are refused as a soft error — the sweep
+	// runs at the floor and reports that set with the refusal — unless Force
+	// is set.
 	StaleAge time.Duration
 	// DryRun reports candidates without writing.
 	DryRun bool
@@ -219,8 +231,11 @@ const (
 )
 
 var (
-	// ErrStaleAgeTooLow is returned when a sweep is requested below
-	// MinStaleIssueAge without Force.
+	// ErrStaleAgeTooLow is a soft error: AutoClose is asked below
+	// MinStaleIssueAge without Force, so it sweeps at the floor and reports
+	// that set with this error. The refusal and the candidates ride along in
+	// the same call, so the command reports and exits 0 rather than stopping
+	// the cycle (gt-ecpj). Force lifts the floor.
 	ErrStaleAgeTooLow = errors.New("stale-age below minimum")
 	// ErrTooManyCloses is returned when a sweep would exceed its per-run cap
 	// without Force. No issues are closed when this is returned.
@@ -565,6 +580,13 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// AutoClose (gt-2qzr). Scan is the dog's preview of the sweep; if the two
 	// diverge the count cannot be used to gate the write.
 	// Same caveat: issues/dependencies tables may live on a separate Dolt instance.
+	if staleIssueAge < MinStaleIssueAge {
+		// Same soft floor AutoClose applies (gt-ecpj): the count reports the
+		// set at the floor — the set the sweep would refuse-and-report — and
+		// the notice names the threshold that was asked for.
+		result.StaleAgeFlooredAt = staleIssueAge
+		staleIssueAge = MinStaleIssueAge
+	}
 	staleQuery := "SELECT COUNT(*) FROM issues i WHERE " + staleIssueEligibilityClause("")
 	if err := db.QueryRowContext(ctx, staleQuery, now.Add(-staleIssueAge)).Scan(&result.StaleCandidates); err != nil {
 		if !isTableNotFound(err) {
@@ -1033,13 +1055,25 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 //
 // Three brakes guard against a mis-parameterized sweep (gt-2qzr, where a
 // hardcoded 7d threshold closed 102 beads, including every agent bead in the
-// town): opts.StaleAge must be at least MinStaleIssueAge, one run may not close
-// more than opts.MaxCloses issues, and a live run must carry the preview hash
-// of the set a dry run produced. All three are lifted by opts.Force.
+// town): a live run may not close more than opts.MaxCloses issues and must
+// carry the preview hash of the set a dry run produced, both hard refusals —
+// nothing is closed when they trip. A below-floor stale-age is a soft refusal
+// (gt-ecpj): the sweep runs at the MinStaleIssueAge floor and reports that
+// set with the refusal, so the caller gets the operator notice without the
+// cycle halting on exit status. All three are lifted by opts.Force.
 func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
+	flooredAt := opts.StaleAge
 	if opts.StaleAge < MinStaleIssueAge && !opts.Force {
-		return nil, fmt.Errorf("%w: %s (minimum %s, pass --force to override)",
-			ErrStaleAgeTooLow, opts.StaleAge, MinStaleIssueAge)
+		// The floor is a soft error, not a stop. Nothing below it would have
+		// been closed, so the sweep runs at the floor — the tightest bound the
+		// town can actually act on — and reports that set with the refusal.
+		// The refusal rides along in the error, and the candidates in the
+		// result (the same refuse-and-report shape as the per-run cap and the
+		// preview guard), so the operator sees what the mis-set threshold
+		// would have taken and the notice cannot be mistaken for a pass.
+		// A cycle that passes on exit status still runs, and a caller that
+		// wants to halt on a mis-set threshold checks ErrStaleAgeTooLow.
+		opts.StaleAge = MinStaleIssueAge
 	}
 	maxCloses := opts.MaxCloses
 	if maxCloses <= 0 {
@@ -1051,6 +1085,13 @@ func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResu
 
 	staleCutoff := time.Now().UTC().Add(-opts.StaleAge)
 	result := &AutoCloseResult{Database: dbName, DryRun: opts.DryRun, MaxCloses: maxCloses}
+	if flooredAt > 0 && flooredAt != opts.StaleAge {
+		// The sweep is a refusal, not a write: it reports the set at the
+		// floor and closes nothing (gt-ecpj). The floor is a brake, not an
+		// authorization, so the preview dance must not stand in its way.
+		result.FlooredAt = flooredAt
+		result.PreviewHash = PreviewHash(dbName, MinStaleIssueAge, nil)
+	}
 
 	whereClause := staleIssueEligibilityClause("`" + dbName + "`.")
 
@@ -1103,6 +1144,14 @@ func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResu
 	if len(ids) == 0 {
 		// Nothing to close, so there is no write for a preview to authorize.
 		return result, nil
+	}
+
+	if result.FlooredAt > 0 {
+		// A below-floor sweep reports and stops; nothing is closed by the
+		// floor (gt-ecpj), so there is no write for a preview to authorize.
+		return result, fmt.Errorf(
+			"%w: %s (minimum %s, pass --force to override); reporting the %d candidates at the floor without closing",
+			ErrStaleAgeTooLow, flooredAt, MinStaleIssueAge, len(ids))
 	}
 
 	// Counting has to precede closing however the caller ordered its commands:

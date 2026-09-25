@@ -479,6 +479,13 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				db.Close()
 				continue
 			}
+			if staleIssueAge < reaper.MinStaleIssueAge {
+				// Soft floor (gt-ecpj): the sweep's own notice is the
+				// refusal, and the cycle continues — log what the mis-set
+				// threshold asked for so the operator can see it.
+				d.logger.Printf("wisp_reaper: %s: stale-age %s is below the %s floor (pass --force to override); reporting the set at the floor without closing",
+					dbName, staleIssueAge, reaper.MinStaleIssueAge)
+			}
 			// Preview before writing: AutoClose refuses a live run with no
 			// preview hash (gt-39bu), and this path has no formula prose to
 			// order the two passes for it.
