@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -57,12 +56,59 @@ func TestSplitEnvPrefix_ChildSeesVariable(t *testing.T) {
 	t.Parallel()
 	envAssigns, cmdArgs := splitEnvPrefix([]string{"GT_SLOT_RUN_PROBE=bar", "sh", "-c", "printf %s \"$GT_SLOT_RUN_PROBE\""})
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: fixed test args
-	cmd.Env = append(os.Environ(), envAssigns...)
+	cmd.Env = slotRunEnv(envAssigns)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("child: %v", err)
 	}
 	if string(out) != "bar" {
 		t.Fatalf("child saw %q, want %q", out, "bar")
+	}
+}
+
+// envValues returns every value the slice carries for key, so a test sees a
+// duplicate the way a reader walking the environment would.
+func envValues(env []string, key string) []string {
+	var values []string
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			values = append(values, v)
+		}
+	}
+	return values
+}
+
+// TestSlotRunEnv_AlreadySetKeyIsOverriddenNotDuplicated drives the branch
+// gt-g7ym is about: an assignment for a key this process already carries.
+//
+// Asserting on the child's own environment would not catch it — os/exec dedups
+// a Cmd.Env on the way to execve, so the child reads the operator's value from
+// either construction. The duplicate is visible in the slice, which is also
+// where it would matter to a reader that takes the first match of a repeated
+// key rather than the last (gt-g7ym), so the assertions are on the slice.
+func TestSlotRunEnv_AlreadySetKeyIsOverriddenNotDuplicated(t *testing.T) {
+	// Not parallel: t.Setenv, and the case turns on the ambient value.
+	t.Setenv("GT_SLOT_RUN_PROBE", "inherited")
+	t.Setenv("GT_SLOT_RUN_KEEP", "kept")
+
+	env := slotRunEnv([]string{"GT_SLOT_RUN_PROBE=bar"})
+	if got := envValues(env, "GT_SLOT_RUN_PROBE"); len(got) != 1 || got[0] != "bar" {
+		t.Errorf("child env carries GT_SLOT_RUN_PROBE %v, want exactly [bar]: a second entry leaves the override to the reader's rule (gt-g7ym)", got)
+	}
+	if got := envValues(env, "GT_SLOT_RUN_KEEP"); len(got) != 1 || got[0] != "kept" {
+		t.Errorf("child env carries GT_SLOT_RUN_KEEP %v, want the inherited [kept]: the replacement is per assigned key, not a fresh environment", got)
+	}
+
+	// PATH is the key the program is resolved against, so a child searching an
+	// ambient PATH would run a different binary than the one validated.
+	env = slotRunEnv([]string{"PATH=/slot/bin"})
+	if got := envValues(env, "PATH"); len(got) != 1 || got[0] != "/slot/bin" {
+		t.Errorf("child env carries PATH %v, want exactly [/slot/bin]", got)
+	}
+
+	// A key assigned twice settles on the last assignment, as env(1) leaves it.
+	env = slotRunEnv([]string{"GT_SLOT_RUN_PROBE=bar", "GT_SLOT_RUN_PROBE=baz"})
+	if got := envValues(env, "GT_SLOT_RUN_PROBE"); len(got) != 1 || got[0] != "baz" {
+		t.Errorf("child env carries GT_SLOT_RUN_PROBE %v, want exactly [baz]", got)
 	}
 }

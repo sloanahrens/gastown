@@ -191,7 +191,7 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	}
 	sub := slotChildCommand(program, cmdArgs, niceWrapper(niceness))
 	if len(envAssigns) > 0 {
-		sub.Env = append(os.Environ(), envAssigns...)
+		sub.Env = slotRunEnv(envAssigns)
 	}
 	sub.Stdin = os.Stdin
 	sub.Stdout = os.Stdout
@@ -597,9 +597,9 @@ func resolveSlotCommand(envAssigns, cmdArgs []string) (string, error) {
 
 // slotChildPath is the PATH the child is run with, and so the one its program
 // is resolved against: the assigned PATH= when the leading assignments set one,
-// the ambient PATH otherwise. os/exec keeps the last value of a duplicate key
-// and these assignments are appended after os.Environ(), so the last wins here
-// too.
+// the ambient PATH otherwise. slotRunEnv builds the child's environment out of
+// those same assignments, so this is the PATH the child — and the nice(1)
+// wrapper resolving the program inside it — searches.
 func slotChildPath(envAssigns []string) string {
 	for i := len(envAssigns) - 1; i >= 0; i-- {
 		if path, ok := strings.CutPrefix(envAssigns[i], "PATH="); ok {
@@ -684,4 +684,25 @@ func slotChildCommand(program string, cmdArgs, wrapper []string) *exec.Cmd {
 	// With a wrapper, nice(1) is argv[0] and resolves the program in the
 	// child, under the PATH that resolveSlotCommand validated against.
 	return exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
+}
+
+// slotRunEnv is the environment for the slot's child: this process's own, with
+// the operator's leading VAR=value assignments applied over it.
+//
+// An assigned key's inherited entry is removed rather than left beside the
+// assignment, so the child reads the operator's value by construction instead
+// of because os/exec dedups the slice it is handed and keeps the last entry.
+// That dedup is a rule of the exec path, not of the environment, and this repo
+// does not otherwise lean on it: filterEnvKey and verifyGateEnv strip the
+// inherited key before appending their own value for theirs (gt-g7ym).
+//
+// A repeated assignment settles on the last one, as env(1) leaves it.
+func slotRunEnv(envAssigns []string) []string {
+	env := os.Environ()
+	for _, kv := range envAssigns {
+		key, _, _ := strings.Cut(kv, "=")
+		env = filterEnvKey(env, key)
+		env = append(env, kv)
+	}
+	return env
 }
