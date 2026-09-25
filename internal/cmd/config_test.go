@@ -988,7 +988,7 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 	t.Run("set maintenance.mode validates the mode list", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		for _, mode := range []string{"monitor", "flatten"} {
+		for _, mode := range []string{"monitor", "flatten", "gc"} {
 			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err != nil {
 				t.Errorf("setMaintenanceConfig(mode=%q) unexpected error: %v", mode, err)
 			}
@@ -1000,6 +1000,50 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		for _, mode := range []string{"", "Monitor", "compact", "flaten"} {
 			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err == nil {
 				t.Errorf("setMaintenanceConfig(mode=%q) expected error", mode)
+			}
+		}
+	})
+
+	t.Run("set and get maintenance gc trigger keys", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+
+		read := func(key string) string {
+			return strings.TrimSpace(captureStdout(t, func() {
+				if err := getMaintenanceConfig(townRoot, key); err != nil {
+					t.Errorf("getMaintenanceConfig(%s) failed: %v", key, err)
+				}
+			}))
+		}
+
+		// Unset keys read as the daemon's defaults.
+		if got := read("maintenance.gc_min_bytes"); got != "268435456" {
+			t.Errorf("unset gc_min_bytes reads %q, want 268435456", got)
+		}
+		if got := read("maintenance.gc_growth_ratio"); got != "2" {
+			t.Errorf("unset gc_growth_ratio reads %q, want 2", got)
+		}
+
+		if err := setMaintenanceConfig(townRoot, "maintenance.gc_min_bytes", "134217728"); err != nil {
+			t.Fatalf("set gc_min_bytes: %v", err)
+		}
+		if err := setMaintenanceConfig(townRoot, "maintenance.gc_growth_ratio", "1.5"); err != nil {
+			t.Fatalf("set gc_growth_ratio: %v", err)
+		}
+		if got := read("maintenance.gc_min_bytes"); got != "134217728" {
+			t.Errorf("gc_min_bytes reads %q after set", got)
+		}
+		if got := read("maintenance.gc_growth_ratio"); got != "1.5" {
+			t.Errorf("gc_growth_ratio reads %q after set", got)
+		}
+
+		for _, bad := range []string{"0", "-1", "abc", "1.5"} {
+			if err := setMaintenanceConfig(townRoot, "maintenance.gc_min_bytes", bad); err == nil {
+				t.Errorf("gc_min_bytes=%q accepted", bad)
+			}
+		}
+		for _, bad := range []string{"0.5", "0", "abc", "NaN", "+Inf"} {
+			if err := setMaintenanceConfig(townRoot, "maintenance.gc_growth_ratio", bad); err == nil {
+				t.Errorf("gc_growth_ratio=%q accepted", bad)
 			}
 		}
 	})

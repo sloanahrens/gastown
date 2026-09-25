@@ -68,6 +68,11 @@ destroys the history the backup existed to keep.
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
 
+This command flattens history. For history-preserving reclamation, the
+daemon's scheduled_maintenance patrol has a gc mode (gt config set
+maintenance.mode gc): it runs CALL dolt_gc('--full') per database on a size
+trigger, only while the town is quiet, and never flattens or pushes.
+
 Examples:
   gt maintain                # Interactive (shows plan, asks confirmation)
   gt maintain --force        # Non-interactive (daemon/cron use)

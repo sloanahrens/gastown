@@ -25,6 +25,14 @@ const (
 	// escalations, re-triggering the patrol forever. The 2000 default is the
 	// buffer against that loop. Configurable via daemon.json
 	// (patrols.compactor_dog.threshold).
+	//
+	// Commit count is not the disk cost: the 2026-09-24 measurement found a
+	// 5k-commit database 80% unreferenced chunk data that gc alone reclaims,
+	// with the history itself a few MB. With scheduled_maintenance mode gc
+	// handling disk by size, this threshold is only a history-length tripwire
+	// — history-walking queries (bd history, dolt_history_*) cost ~44us per
+	// commit, ~1s per query near 23k commits — and a town running gc mode
+	// sets it near 20000 (docs/plans/2026-09-25-dolt-gc-maintenance-design.md).
 	defaultCompactorCommitThreshold = 2000
 	// compactorQueryTimeout is the timeout for individual SQL queries.
 	compactorQueryTimeout = 30 * time.Second
