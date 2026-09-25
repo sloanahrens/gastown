@@ -54,8 +54,9 @@ the gt-xb27 stall rule for you: the first observation of a polecat is saved
 as sample 1 in <rig>/witness/stall_samples.json, and every later scan compares
 against it. Only when a full --stall-window has passed with the transcript not
 advancing AND the pane signature byte-identical does an item report
-stalled=true. Sample 1 survives witness restarts. Work since sample 1
-re-records it, and samples of polecats with no live session are pruned.
+stalled=true. Sample 1 survives witness restarts. Work since sample 1, a
+new session, or a gap of more than 15m between scans (host asleep) re-records
+it, and samples of polecats with no live session are pruned.
 A polecat deep inside one long turn looks busy on every other signal and must
 be left alone.
 

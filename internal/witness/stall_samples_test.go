@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // stallTestWindow is the gt-xb27 comparison window used throughout.
@@ -39,6 +41,16 @@ func checkFor(t *testing.T, checks []StallCheck, polecat string) StallCheck {
 	return StallCheck{}
 }
 
+// scanFrozen scans a unchanged every 5 minutes over [from, to), as a witness
+// at its 5m backoff cap would, so the scan-gap guard never fires.
+func scanFrozen(t *testing.T, town string, a RealActivity, from, to time.Time) {
+	t.Helper()
+	for ts := from; ts.Before(to); ts = ts.Add(5 * time.Minute) {
+		a.ObservedAt = ts
+		mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{a}, ts)
+	}
+}
+
 func mustTrack(t *testing.T, store *StallSampleStore, observed []RealActivity, now time.Time) []StallCheck {
 	t.Helper()
 	checks, err := TrackStalls(store, observed, stallTestWindow, now)
@@ -68,9 +80,13 @@ func TestTrackStalls_Sample1SurvivesRespawn(t *testing.T) {
 		t.Fatalf("sample 1 not persisted: %v", err)
 	}
 
+	// The witness keeps scanning at its cap; every scan is a fresh store, as
+	// every scan is a fresh gt process whatever session runs it.
+	t1 := t0.Add(31 * time.Minute)
+	scanFrozen(t, town, stagedActivity("opal", t0, mtime, 4096, "sig-frozen"), t0.Add(5*time.Minute), t1)
+
 	// Witness session 2 (fresh store, fresh process) takes sample 2 a full
 	// window later: nothing changed, so this is a positive stall signal.
-	t1 := t0.Add(31 * time.Minute)
 	second := mustTrack(t, NewStallSampleStore(town, "gastown"),
 		[]RealActivity{stagedActivity("opal", t1, mtime, 4096, "sig-frozen")}, t1)
 	c = checkFor(t, second, "opal")
@@ -129,12 +145,14 @@ func TestTrackStalls_WorkResetsSample1(t *testing.T) {
 	for name, cur := range cases {
 		t.Run(name, func(t *testing.T) {
 			town := t.TempDir()
-			mustTrack(t, NewStallSampleStore(town, "gastown"),
-				[]RealActivity{stagedActivity("opal", t0, mtime, 4096, "sig")}, t0)
+			scanFrozen(t, town, stagedActivity("opal", t0, mtime, 4096, "sig"), t0, t1)
 
 			c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{cur}, t1), "opal")
 			if c.Stalled {
 				t.Fatalf("a working polecat is never stalled: %+v", c)
+			}
+			if !strings.Contains(c.Reason, "agent is working") {
+				t.Fatalf("sample 1 must be re-recorded because of work, got %q", c.Reason)
 			}
 			if !c.Recorded {
 				t.Fatalf("work since sample 1 must re-record it: %+v", c)
@@ -166,8 +184,7 @@ func TestTrackStalls_NewSessionStartsOver(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			town := t.TempDir()
-			mustTrack(t, NewStallSampleStore(town, "gastown"),
-				[]RealActivity{stagedActivity("opal", t0, mtime, 4096, "sig")}, t0)
+			scanFrozen(t, town, stagedActivity("opal", t0, mtime, 4096, "sig"), t0, t1)
 			cur := stagedActivity("opal", t1, mtime, 4096, "sig")
 			mutate(&cur)
 			c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{cur}, t1), "opal")
@@ -192,8 +209,7 @@ func TestTrackStalls_InsufficientEvidenceNeverStalls(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			town := t.TempDir()
-			mustTrack(t, NewStallSampleStore(town, "gastown"),
-				[]RealActivity{stagedActivity("opal", t0, mtime, 4096, "sig")}, t0)
+			scanFrozen(t, town, stagedActivity("opal", t0, mtime, 4096, "sig"), t0, t1)
 			cur := stagedActivity("opal", t1, mtime, 4096, "sig")
 			mutate(&cur)
 			c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{cur}, t1), "opal")
@@ -214,9 +230,9 @@ func TestTrackStalls_UndatedFirstSampleIsReplaced(t *testing.T) {
 	t0 := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
 	undated := stagedActivity("opal", t0, time.Time{}, 0, "sig")
 	undated.ActivitySource = ActivitySourceNone
-	mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{undated}, t0)
-
 	t1 := t0.Add(45 * time.Minute)
+	scanFrozen(t, town, undated, t0, t1)
+
 	c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"),
 		[]RealActivity{stagedActivity("opal", t1, t0.Add(-time.Hour), 4096, "sig")}, t1), "opal")
 	if c.Stalled || !c.Recorded {
@@ -326,5 +342,157 @@ func TestStallSampleStore_MissingFileIsEmpty(t *testing.T) {
 	samples, err := NewStallSampleStore(t.TempDir(), "gastown").Load()
 	if err != nil || len(samples) != 0 {
 		t.Fatalf("missing file: samples=%v err=%v", samples, err)
+	}
+}
+
+// writeSamplesFile writes a hand-made samples file, as a partial write or a
+// hand edit would leave it.
+func writeSamplesFile(t *testing.T, town, contents string) {
+	t.Helper()
+	dir := WitnessStateDir(town, "gastown")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stallSamplesFileName), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTrackStalls_BadSampledAtIsReRecorded: a sample 1 with no sampled_at, or
+// one in the future, cannot anchor a window. Without the guard a missing
+// sampled_at reads as 0001-01-01 and the first scan reports a stall.
+func TestTrackStalls_BadSampledAtIsReRecorded(t *testing.T) {
+	now := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	for name, sampledAt := range map[string]string{
+		"missing": ``,
+		"future":  `"sampled_at": "2026-09-25T15:00:00Z",`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			town := t.TempDir()
+			writeSamplesFile(t, town, `{"version": 1, "samples": {"opal": {
+				"polecat": "opal", "session": "gt-opal", `+sampledAt+`
+				"last_observed_at": "2026-09-25T13:58:00Z",
+				"transcript_path": "/transcripts/opal.jsonl",
+				"transcript_mtime": "2026-09-25T13:00:00Z", "transcript_bytes": 4096,
+				"pane_signature": "sig"}}}`)
+			c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"),
+				[]RealActivity{stagedActivity("opal", now, now.Add(-time.Hour), 4096, "sig")}, now), "opal")
+			if c.Stalled || !c.Recorded {
+				t.Fatalf("a %s sampled_at must re-record sample 1, never judge: %+v", name, c)
+			}
+		})
+	}
+}
+
+// TestTrackStalls_UnsignedSampleIsReRecorded: one pane-capture error on the
+// scan that took sample 1 must not disable stall detection for the rest of the
+// session — a later signed observation replaces it, and the window runs from
+// there.
+func TestTrackStalls_UnsignedSampleIsReRecorded(t *testing.T) {
+	town := t.TempDir()
+	t0 := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	mtime := t0.Add(-time.Hour)
+	mustTrack(t, NewStallSampleStore(town, "gastown"),
+		[]RealActivity{stagedActivity("opal", t0, mtime, 4096, "")}, t0)
+
+	t1 := t0.Add(5 * time.Minute)
+	c := checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"),
+		[]RealActivity{stagedActivity("opal", t1, mtime, 4096, "sig")}, t1), "opal")
+	if c.Stalled || !c.Recorded || c.Baseline.PaneSignature != "sig" {
+		t.Fatalf("an unsigned sample 1 must be replaced by a signed one: %+v", c)
+	}
+
+	t2 := t1.Add(30 * time.Minute)
+	scanFrozen(t, town, stagedActivity("opal", t1, mtime, 4096, "sig"), t1.Add(5*time.Minute), t2)
+	c = checkFor(t, mustTrack(t, NewStallSampleStore(town, "gastown"),
+		[]RealActivity{stagedActivity("opal", t2, mtime, 4096, "sig")}, t2), "opal")
+	if !c.Stalled {
+		t.Fatalf("detection must work from the signed sample 1: %+v", c)
+	}
+}
+
+// TestTrackStalls_ScanGapReRecords: when no scan saw the polecat for longer than
+// stallSampleMaxScanGap (host asleep, witness down), nobody watched the window,
+// so the next scan starts over instead of calling every polecat stalled.
+func TestTrackStalls_ScanGapReRecords(t *testing.T) {
+	town := t.TempDir()
+	t0 := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	mtime := t0.Add(-time.Hour)
+	mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{
+		stagedActivity("opal", t0, mtime, 4096, "sig"),
+		stagedActivity("lapis", t0, mtime, 10, "sig2"),
+	}, t0)
+
+	wake := t0.Add(stallSampleMaxScanGap + 31*time.Minute)
+	checks := mustTrack(t, NewStallSampleStore(town, "gastown"), []RealActivity{
+		stagedActivity("opal", wake, mtime, 4096, "sig"),
+		stagedActivity("lapis", wake, mtime, 10, "sig2"),
+	}, wake)
+	for _, c := range checks {
+		if c.Stalled || !c.Recorded || !strings.Contains(c.Reason, "no scan") {
+			t.Fatalf("after a scan gap every sample 1 must be re-recorded: %+v", c)
+		}
+	}
+}
+
+// TestTrackStalls_KeptSampleRecordsLastObservation: keeping sample 1 still
+// advances last_observed_at, which is what the scan-gap guard reads.
+func TestTrackStalls_KeptSampleRecordsLastObservation(t *testing.T) {
+	town := t.TempDir()
+	t0 := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	scanFrozen(t, town, stagedActivity("opal", t0, t0.Add(-time.Hour), 1, "sig"), t0, t0.Add(10*time.Minute))
+	samples, err := NewStallSampleStore(town, "gastown").Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := samples["opal"]
+	if !s.SampledAt.Equal(t0) || !s.LastObservedAt.Equal(t0.Add(5*time.Minute)) {
+		t.Fatalf("sampled_at must stay at %v and last_observed_at advance to +5m: %+v", t0, s)
+	}
+}
+
+// TestStallSampleStore_UnknownVersionIsCorrupt: a file written by another
+// schema is not interpreted; the scan starts over and says why.
+func TestStallSampleStore_UnknownVersionIsCorrupt(t *testing.T) {
+	town := t.TempDir()
+	writeSamplesFile(t, town, `{"version": 99, "samples": {"opal": {"polecat": "opal"}}}`)
+	samples, err := NewStallSampleStore(town, "gastown").Load()
+	if err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("unknown version must be reported, got %v", err)
+	}
+	if len(samples) != 0 {
+		t.Fatalf("unknown version must load as empty, got %+v", samples)
+	}
+}
+
+// TestTrackStalls_LockHeldSkipsSave: when another scan holds the lock past the
+// timeout, this scan still reports its checks but writes nothing, so it cannot
+// clobber the holder's samples.
+func TestTrackStalls_LockHeldSkipsSave(t *testing.T) {
+	town := t.TempDir()
+	old := stallSamplesLockTimeout
+	stallSamplesLockTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { stallSamplesLockTimeout = old })
+
+	store := NewStallSampleStore(town, "gastown")
+	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	holder := flock.New(store.Path() + ".lock")
+	if err := holder.Lock(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Unlock() }()
+
+	t0 := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	checks, err := TrackStalls(store, []RealActivity{stagedActivity("opal", t0, t0.Add(-time.Hour), 1, "sig")}, stallTestWindow, t0)
+	if err == nil || !strings.Contains(err.Error(), "lock") {
+		t.Fatalf("a held lock must be reported, got %v", err)
+	}
+	if len(checks) != 1 || checks[0].Stalled {
+		t.Fatalf("checks must still be returned and never stalled: %+v", checks)
+	}
+	if _, statErr := os.Stat(store.Path()); !os.IsNotExist(statErr) {
+		t.Fatalf("no samples file may be written without the lock (stat err %v)", statErr)
 	}
 }

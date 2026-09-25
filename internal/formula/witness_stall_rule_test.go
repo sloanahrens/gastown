@@ -27,6 +27,10 @@ func TestWitnessPatrolReadsPersistedStallVerdict(t *testing.T) {
 			t.Errorf("witness formula still asks the agent to hold sample 1 in context (%q)", gone)
 		}
 	}
+	// The window is the scan's, never a hand-applied local-model shortcut.
+	if !strings.Contains(text, "Do NOT apply a\\n   shorter 10-minute local-model window by hand") {
+		t.Error("witness formula must forbid applying the 10m local-model window by hand")
+	}
 	// The policy on a stall is unchanged: escalate, never restart unilaterally.
 	if !strings.Contains(text, "rather than restarting") {
 		t.Error("witness formula must keep the escalate-not-restart stall policy")
