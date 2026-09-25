@@ -161,9 +161,13 @@ func parseDockerCreatedAt(s string) time.Time {
 }
 
 // parseDockerLabels splits docker's comma-joined "k=v,k=v" label string. A
-// comma inside a label value splits wrong; the gate reads session ids out of
-// this map and nothing else, and a session id is a UUID, so the loss cannot
-// turn a container the gate could judge into one it cannot.
+// comma inside a label value splits wrong. The gate reads two kinds of label
+// out of this map: testcontainers session ids (UUIDs) and gastown's owner
+// labels (a pid, a hostname and a start time, see owner_labels.go), none of
+// which contains a comma. A value that did split would leave its label
+// malformed or missing, which makes the owner labels decline to decide and
+// the age/reaper rules apply instead, so the loss can never make a container
+// look owner-gone.
 func parseDockerLabels(s string) map[string]string {
 	if s == "" {
 		return nil

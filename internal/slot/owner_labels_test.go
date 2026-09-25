@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -219,6 +220,9 @@ func TestProcessStartToken(t *testing.T) {
 // root, so EPERM for an ordinary user), and a child that has exited and been
 // reaped (gone).
 func TestProcessGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("processGone has no certain probe on windows and always answers false by design (owner_process_windows.go)")
+	}
 	if processGone(os.Getpid()) {
 		t.Error("processGone(self) = true")
 	}
