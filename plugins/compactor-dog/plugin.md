@@ -45,10 +45,13 @@ outcome list under Record Result has the detail). The 30-minute cooldown gate
 deduplicates: a steady over-threshold DB re-warns once per 30 minutes, not
 per daemon heartbeat.
 The daemon's `compactor_dog` patrol (`internal/daemon/compactor_dog.go`,
-threshold 2000, chosen to stay clear of the escalation-commit loop described
-there) owns the hard line, so the plugin's per-DB warnings are the <2000 band
-without a double alert at its top. A dog reads the judgment steps below only
-when `run.sh` exits nonzero (Dolt unreachable, no databases).
+threshold 2000 by default) owns the hard line. `run.sh` reads that same
+threshold from `mayor/daemon.json`'s `patrols.compactor_dog.threshold`
+(falling back to 2000) and defers — logs, doesn't escalate — any candidate at
+or above it, since the daemon raises it on its own cadence; the script's
+warnings cover only the band below, no double alert at the top. A dog reads
+the judgment steps below only when `run.sh` exits nonzero (Dolt unreachable,
+no databases).
 
 **First, check the maintenance mode.** The judgment table in Step 6 depends
 on it:
@@ -337,11 +340,13 @@ echo "=== $SUMMARY ==="
 Receipt outcomes, with who records them:
 
 - `run.sh` check-only, no candidates: records `check-only` itself.
-- `run.sh` check-only, one or more candidates: raises the per-DB
-  `gt escalate` calls itself (see "How this runs") and records `warning`, or
-  `failure` when every one of those calls failed. The script exits 0 either
-  way, so this `failure` means the checks found work and could not report it,
-  not that the script crashed.
+- `run.sh` check-only, every candidate deferred to the daemon (see "How this
+  runs"): the script raises nothing and records `check-only`, but the
+  description still names the deferred count — not "nothing found".
+- `run.sh` check-only, one or more candidates below the daemon threshold:
+  raises the per-DB `gt escalate` calls itself and records `warning`, or
+  `failure` when every call failed. The script exits 0 either way, so
+  `failure` means the checks found work and could not report it, not a crash.
 - `run.sh --compact`: records `success` or `warning` (the compaction-error
   escalation) itself.
 - `run.sh` exits nonzero: the daemon records `failure` and dispatches a dog

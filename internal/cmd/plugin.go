@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -711,15 +712,7 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Execution history for %s (%d runs)\n\n", style.Success.Render("●"), name, len(runs))
 
 	for _, run := range runs {
-		resultStyle := style.Success
-		resultIcon := "✓"
-		if run.Result == plugin.ResultFailure {
-			resultStyle = style.Error
-			resultIcon = "✗"
-		} else if run.Result == plugin.ResultSkipped {
-			resultStyle = style.Dim
-			resultIcon = "○"
-		}
+		resultStyle, resultIcon := pluginHistoryGlyph(run.Result)
 
 		fmt.Printf("  %s %s  %s\n",
 			resultStyle.Render(resultIcon),
@@ -728,6 +721,23 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// pluginHistoryGlyph picks the icon and style `gt plugin history` renders for
+// a run result. Warning gets its own glyph — it is what a run recorded when it
+// found something and reported it, and folding it into the success checkmark
+// would make it indistinguishable from a quiet, nothing-to-report run.
+func pluginHistoryGlyph(result plugin.RunResult) (lipgloss.Style, string) {
+	switch result {
+	case plugin.ResultFailure:
+		return style.Error, "✗"
+	case plugin.ResultSkipped:
+		return style.Dim, "○"
+	case plugin.ResultWarning:
+		return style.Warning, "!"
+	default:
+		return style.Success, "✓"
+	}
 }
 
 func runPluginRecordRun(cmd *cobra.Command, args []string) error {

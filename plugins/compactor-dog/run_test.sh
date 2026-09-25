@@ -371,6 +371,139 @@ if [[ "$CANDIDATE_ESC" != "0" ]]; then
   FAILURES=$((FAILURES + 1))
 fi
 
+# --- Daemon threshold coordination (gt-hrt9 attempt 3) ---
+#
+# The daemon's own compactor_dog patrol escalates independently once a DB
+# crosses its configured threshold (default 2000). Without a matching upper
+# bound here, run.sh would escalate the same DB again on every check-only
+# cycle between the plugin's threshold and the daemon's — a double alert.
+# COMPACTOR_DAEMON_THRESHOLD lets these tests set that line without depending
+# on mayor/daemon.json or jq's real output.
+echo ""
+echo "=== daemon threshold coordination tests ==="
+
+write_fake_dolt_counts() {
+  local dir="$1" hq_count="$2" beads_count="$3"
+  cat > "$dir/dolt" <<FAKE_DOLT
+#!/usr/bin/env bash
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -q) q="\${2:-}"; shift ;;
+    --use-db) db="\${2:-}"; shift ;;
+    sql) sub="sql" ;;
+    *) : ;;
+  esac
+  shift
+done
+if [[ "\${sub:-}" == "sql" ]]; then
+  if [[ "\$q" == "SHOW DATABASES" ]]; then
+    printf 'Database\nhq\nbeads\n'
+  elif [[ "\$q" == *"dolt_log"* ]]; then
+    if [[ "\$db" == "hq" ]]; then
+      printf 'cnt\n$hq_count\n'
+    else
+      printf 'cnt\n$beads_count\n'
+    fi
+  fi
+fi
+exit 0
+FAKE_DOLT
+  cat > "$dir/gt" <<'FAKE_GT'
+#!/usr/bin/env bash
+LOG="${RUN_LOG:-/dev/null}"
+case "${1:-}" in
+escalate)
+  printf 'ESCALATE %s\n' "$*" >> "$LOG"
+  exit 0
+  ;;
+plugin)
+  printf 'RECORD-RUN %s\n' "$*" >> "$LOG"
+  exit 0
+  ;;
+*)
+  exit 0
+  ;;
+esac
+FAKE_GT
+  chmod +x "$dir/dolt" "$dir/gt"
+}
+
+run_with_daemon_threshold() {
+  local dir="$1" threshold="$2" d
+  shift 2
+  d=$(run_log_dir)
+  RUN_LOG_DIR="$d"
+  RUN_LOG_DIRS="$RUN_LOG_DIRS $d"
+  if (
+    export PATH="$dir:$PATH"
+    export RUN_LOG="$d/ops"
+    export COMPACTOR_DAEMON_THRESHOLD="$threshold"
+    bash "$SCRIPT_DIR/run.sh" "$@"
+  ) >/dev/null 2>&1; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+  if [[ $RUN_RC -ne 0 ]]; then
+    echo "HARNESS: run.sh exited $RUN_RC (see ops in $d)" >&2
+  fi
+  return 0
+}
+
+# (d) One candidate below the daemon threshold, one at/above it: the script
+# escalates only the sub-threshold candidate, defers the other to the
+# daemon's own patrol, and still records a warning (one real signal was
+# raised).
+FAKE_DIR_DEFER=$(mktemp -d)
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1" "$FAKE_DIR_DEFER"' EXIT
+write_fake_dolt_counts "$FAKE_DIR_DEFER" 600 3000
+
+run_with_daemon_threshold "$FAKE_DIR_DEFER" 2000
+LOG="$RUN_LOG_DIR"
+if [[ "$RUN_RC" -ne 0 ]]; then
+  echo "FAIL: check-only with a deferred candidate exited $RUN_RC, want 0"
+  FAILURES=$((FAILURES + 1))
+fi
+if grep -q 'ESCALATE .*beads' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: candidate at/above the daemon threshold (beads, 3000) was escalated — the daemon already owns this band"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q 'ESCALATE .*hq' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: candidate below the daemon threshold (hq, 600) was not escalated"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '--result warning' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: one escalatable plus one deferred candidate must still record a warning receipt"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# (e) Every candidate at/above the daemon threshold: nothing is escalated by
+# the script (all deferred), so the receipt is check-only, not warning or
+# failure — but the description still names the deferred count so this
+# doesn't read as "nothing found".
+FAKE_DIR_ALL_DEFER=$(mktemp -d)
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1" "$FAKE_DIR_DEFER" "$FAKE_DIR_ALL_DEFER"' EXIT
+write_fake_dolt_counts "$FAKE_DIR_ALL_DEFER" 2500 3000
+
+run_with_daemon_threshold "$FAKE_DIR_ALL_DEFER" 2000
+LOG="$RUN_LOG_DIR"
+if [[ "$RUN_RC" -ne 0 ]]; then
+  echo "FAIL: check-only with all candidates deferred exited $RUN_RC, want 0"
+  FAILURES=$((FAILURES + 1))
+fi
+if grep -q '^ESCALATE ' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: no per-DB escalation should fire when every candidate is at/above the daemon threshold"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '--result check-only' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: a run with every candidate deferred to the daemon must record check-only, not warning or failure"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q 'deferred to its own patrol' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: the check-only receipt must say candidates were deferred, not silently drop them"
+  FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 if [[ $FAILURES -gt 0 ]]; then
   echo "FAILED: $FAILURES test(s) failed"
