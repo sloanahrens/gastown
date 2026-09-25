@@ -220,7 +220,14 @@ Subject format: `RECOVERED_BEAD <bead-id>`
 gt mail read <id>
 # Extract bead ID from subject
 gt deacon redispatch <bead-id>
-gt mail archive <message-id>
+rc=$?
+# Exit 2 (cooldown or deferred): leave the message in the inbox; the next
+# patrol retries it. Any other exit: archive it.
+if [ "$rc" -eq 2 ]; then
+  echo "redispatch <bead-id>: cooldown/deferred, leaving <message-id> for the next patrol"
+else
+  gt mail archive <message-id>
+fi
 ```
 
 The `redispatch` command handles:
@@ -236,8 +243,13 @@ The `redispatch` command handles:
   editorial convergence gate instead of the attempt count: when the resubmit
   stops converging it stops, gets `needs_human`, and escalates to the Mayor
 
-Exit codes: 0=dispatched, 2=cooldown, 3=skipped. Non-zero non-error codes are
-informational - archive the message regardless.
+Exit codes: 0=dispatched or escalated, 2=try again later, 3=skipped, 1=error.
+Exit 2 is either the per-bead cooldown or a deferral: the operator's dispatch
+hold (`$GT_ROOT/seat-refill.hold`, a town `ESTOP`, or the target rig's
+`ESTOP.<rig>`) is in place, or the polecat pool is full. Neither counts as an
+attempt. Leave an exit-2 message unarchived so the next patrol retries it, and
+archive on every other exit. A retry of a bead that has since been claimed or
+closed exits 3, so the message cannot loop forever.
 
 **DEACON_SELF_PROBE messages** (from doctor-dog): these are acked in the
 `ack-probes` step above, not here. They never appear in `gt mail inbox`, so
@@ -489,6 +501,17 @@ This returns molecules where:
 - No polecat currently has it hooked
 
 **Step 2: For each ready molecule, dispatch to the appropriate rig**
+
+First check the operator's dispatch hold. While it is in place, automatic
+dispatch is parked town-wide (gt-ifijm). Dispatch nothing and leave the
+molecules for a later patrol:
+```bash
+if [ -e "${GT_SEAT_REFILL_HOLD:-$GT_ROOT/seat-refill.hold}" ] || [ -e "$GT_ROOT/ESTOP" ]; then
+  echo "dispatch hold active; not dispatching gated molecules"
+fi
+```
+Skip any molecule whose target rig has `$GT_ROOT/ESTOP.<rig>`.
+
 ```bash
 # Determine target rig from molecule metadata
 bd mol show <mol-id> --json
@@ -508,7 +531,8 @@ Note which molecules were dispatched for observability:
 Skip - nothing to dispatch. Gates haven't closed yet or molecules
 already have active polecats working on them.
 
-**Exit criteria:** All gate-ready molecules dispatched to polecats."""
+**Exit criteria:** All gate-ready molecules dispatched to polecats, or none
+dispatched because the dispatch hold is active."""
 
 [[steps]]
 id = "check-convoy-completion"

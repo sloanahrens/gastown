@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -141,6 +142,10 @@ type ConvoyManager struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	logger       func(format string, args ...interface{})
+
+	// holdLatch remembers the operator dispatch hold the feeder last saw, so a
+	// hold is logged once per state change rather than on every scan.
+	holdLatch dispatch.HoldLatch
 
 	// stores maps store names to beads stores for event polling.
 	// Key "hq" is the town-level store (used for convoy lookups).
@@ -913,6 +918,21 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		return
 	}
 
+	// The operator's town-wide hold parks every automatic dispatcher
+	// (gt-ifijm). The convoy stays stranded and ready, so the first scan after
+	// the hold lifts feeds it.
+	reason := dispatch.OperatorHold(m.townRoot)
+	if m.holdLatch.Changed(reason) {
+		if reason != "" {
+			m.logger("Convoy feed: not feeding stranded convoys (first held: %s): %s", c.ID, reason)
+		} else {
+			m.logger("Convoy feed: operator dispatch hold lifted; feeding resumes")
+		}
+	}
+	if reason != "" {
+		return
+	}
+
 	for _, issueID := range c.ReadyIssues {
 		prefix := beads.ExtractPrefix(issueID)
 		if prefix == "" {
@@ -928,6 +948,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		if m.isRigParked(rig) {
 			m.logger("Convoy %s: rig %s is parked, skipping %s", c.ID, rig, issueID)
+			continue
+		}
+
+		// A per-rig ESTOP holds this rig's issues; the town hold was
+		// answered above (gt-ifijm).
+		if reason := dispatch.RigHold(m.townRoot, rig); reason != "" {
+			m.logger("Convoy %s: not feeding %s: %s", c.ID, issueID, reason)
 			continue
 		}
 

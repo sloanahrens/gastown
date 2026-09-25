@@ -15,6 +15,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -285,6 +286,15 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 // next close event triggers another feed cycle.
 // gtPath is the resolved path to the gt binary.
 func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, convoyID, caller string, logger func(format string, args ...interface{}), gtPath string, isRigParked func(string) bool, resolver *StoreResolver) {
+	// The operator's town-wide hold parks every automatic dispatcher
+	// (gt-ifijm). Checked before the store is read: nothing below matters
+	// while the town is held, and the next close event after the hold lifts
+	// feeds the convoy.
+	if reason := dispatch.OperatorHold(townRoot); reason != "" {
+		logger("%s: convoy %s: not feeding: %s", caller, convoyID, reason)
+		return
+	}
+
 	tracked := getConvoyTrackedIssues(ctx, store, convoyID, townRoot, resolver)
 	if len(tracked) == 0 {
 		return
@@ -338,6 +348,13 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 
 		if isRigParked(rig) {
 			logger("%s: convoy %s: rig %s is parked, skipping %s", caller, convoyID, rig, issue.ID)
+			continue
+		}
+
+		// A per-rig ESTOP holds this rig's issues; the town hold was
+		// answered at the top (gt-ifijm).
+		if reason := dispatch.RigHold(townRoot, rig); reason != "" {
+			logger("%s: convoy %s: not feeding %s: %s", caller, convoyID, issue.ID, reason)
 			continue
 		}
 

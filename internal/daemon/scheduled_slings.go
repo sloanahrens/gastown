@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -309,6 +310,21 @@ func (d *Daemon) runScheduledSlings() {
 	if !d.isPatrolActive("scheduled_slings") {
 		return
 	}
+	// The operator's town-wide hold parks this patrol like every other
+	// automatic dispatcher (gt-ifijm). It is not a failure: no run bead is
+	// created, the failure counters are untouched, and the first tick after
+	// the hold lifts dispatches whatever is due.
+	holdReason := dispatch.OperatorHold(d.config.TownRoot)
+	if d.scheduledSlingsHold.Changed(holdReason) {
+		if holdReason != "" {
+			d.logger.Printf("scheduled_slings: not dispatching: %s", holdReason)
+		} else {
+			d.logger.Printf("scheduled_slings: operator dispatch hold lifted; resuming")
+		}
+	}
+	if holdReason != "" {
+		return
+	}
 	cfg := d.patrolConfig.Patrols.ScheduledSlings
 	if d.scheduledSlingFailures == nil {
 		d.scheduledSlingFailures = map[string]int{}
@@ -320,6 +336,12 @@ func (d *Daemon) runScheduledSlings() {
 	for _, e := range cfg.Entries {
 		if err := e.validate(); err != nil {
 			d.logger.Printf("scheduled_slings: %v (entry skipped)", err)
+			continue
+		}
+		// A per-rig ESTOP holds this entry's rig only; like the town hold it
+		// is not a failure and does not count toward escalation.
+		if reason := dispatch.RigHold(d.config.TownRoot, e.Rig); reason != "" {
+			d.logger.Printf("scheduled_slings: %s: not dispatching: %s", e.Name, reason)
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), scheduledSlingCommandTimeout)

@@ -2,8 +2,10 @@
 package deacon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -170,7 +173,7 @@ const ModelEscalationConfigPath = ".gastown/model-escalation.json"
 // RedispatchResult describes the outcome of a re-dispatch attempt.
 type RedispatchResult struct {
 	BeadID    string `json:"bead_id"`
-	Action    string `json:"action"` // "redispatched", "cooldown", "escalated", "already-escalated", "skipped", "error"
+	Action    string `json:"action"` // "redispatched", "cooldown", "deferred", "escalated", "already-escalated", "skipped", "error"
 	TargetRig string `json:"target_rig,omitempty"`
 	Attempts  int    `json:"attempts"`
 	Message   string `json:"message,omitempty"`
@@ -441,6 +444,19 @@ func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, max
 func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, state *RedispatchState, beadState *BeadRedispatchState, onDispatched func()) *RedispatchResult {
 	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
 
+	// The operator's town-wide hold outranks the re-sling: this path passes
+	// --force, so nothing downstream would stop it (gt-ifijm, where gt-elvf4
+	// was force-slung during a hold). It is checked here, at the one tail both
+	// engines share, so an escalation the attempt count already earned still
+	// reaches the mayor — escalating is not dispatching. No attempt is
+	// recorded: the bead did not fail, the town is paused, and it stays open
+	// for whoever dispatches after the hold lifts.
+	if reason := dispatch.OperatorHold(townRoot); reason != "" {
+		result.Action = "deferred"
+		result.Message = "not re-dispatched: " + reason
+		return result
+	}
+
 	// Determine target rig
 	targetRig := sourceRig
 	if targetRig == "" {
@@ -452,6 +468,14 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 		return result
 	}
 	result.TargetRig = targetRig
+
+	// A per-rig ESTOP on the target rig defers the same way the town hold
+	// does: no attempt, no cooldown (gt-ifijm).
+	if reason := dispatch.RigHold(townRoot, targetRig); reason != "" {
+		result.Action = "deferred"
+		result.Message = "not re-dispatched: " + reason
+		return result
+	}
 
 	// Verify bead is still open (not already claimed or closed).
 	// Only proceed when status is explicitly "open". Empty status (query
@@ -472,7 +496,16 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
 
 	// Re-dispatch via gt sling
-	if err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
+	if refusal, err := slingBead(townRoot, beadID, targetRig, escalationAgent); err != nil {
+		// A capacity refusal (full polecat pool) is the town queueing, not
+		// the bead failing: no attempt is recorded and no cooldown starts, so
+		// the retry budget and the REDISPATCH_FAILED escalation stay reserved
+		// for real failures. The bead is left open and ready (gt-xdaq).
+		if refusal != "" {
+			result.Action = "deferred"
+			result.Message = "not re-dispatched, retry later: " + refusal
+			return result
+		}
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
 
@@ -802,7 +835,12 @@ func resolveAgentForRedispatch(townRoot, targetRig string, beadState *BeadRedisp
 
 // slingBead dispatches a bead to a rig via gt sling.
 // If agent is non-empty, passes --agent <agent> to override the rig's default.
-func slingBead(townRoot, beadID, rig, agent string) error {
+//
+// When the sling fails with a capacity refusal (dispatch.SlingRefusalMarker),
+// refusal carries the guard's sentence so the caller can defer rather than
+// count a failure; it is "" for every other outcome. Stderr is still streamed
+// to the deacon's own stderr as before.
+func slingBead(townRoot, beadID, rig, agent string) (refusal string, err error) {
 	args := []string{"sling", beadID, rig, "--force", "--no-convoy"}
 	if agent != "" {
 		args = append(args, "--agent", agent)
@@ -812,8 +850,13 @@ func slingBead(townRoot, beadID, rig, agent string) error {
 	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	if err := cmd.Run(); err != nil {
+		reason, _ := dispatch.SlingRefusalReason(stderr.String())
+		return reason, err
+	}
+	return "", nil
 }
 
 // escalateToMayor sends an escalation mail to the Mayor about a repeatedly-failing bead.

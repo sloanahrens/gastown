@@ -298,7 +298,10 @@ handles the re-dispatch:
 Exit codes:
   0 - Bead successfully re-dispatched or escalated
   1 - Error occurred
-  2 - Bead in cooldown (try again later)
+  2 - Try again later: the bead is in cooldown, or deferred by the operator's
+      dispatch hold (<town>/seat-refill.hold, ESTOP, ESTOP.<rig>) or a full
+      polecat pool (no attempt is counted). Keep the RECOVERED_BEAD message
+      and retry it next patrol.
   3 - Bead skipped (already claimed or non-open status)
 
 Examples:
@@ -1699,7 +1702,7 @@ func runDeaconRedispatch(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s %s\n", style.Dim.Render("○"), result.Message)
 		return nil
 
-	case "cooldown":
+	case "cooldown", "deferred":
 		fmt.Printf("%s %s\n", style.Dim.Render("○"), result.Message)
 		return NewSilentExit(2)
 
@@ -1794,7 +1797,7 @@ func runDeaconFeedStranded(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s %s: %s\n", style.Bold.Render("✓"), d.ConvoyID, d.Message)
 		case "needs_attention":
 			fmt.Printf("  %s %s: %s\n", style.Warning.Render("?"), d.ConvoyID, d.Message)
-		case "cooldown":
+		case "cooldown", "held":
 			fmt.Printf("  %s %s: %s\n", style.Dim.Render("○"), d.ConvoyID, d.Message)
 		case "limit":
 			fmt.Printf("  %s %s: %s\n", style.Dim.Render("○"), d.ConvoyID, d.Message)

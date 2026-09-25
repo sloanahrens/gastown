@@ -371,14 +371,28 @@ log "nudging $MAYOR_TARGET: $seat_n empty seat(s) with work"
 
 # Default (wait-idle) delivery, the same path the daemon's own mayor_dispatch
 # patrol uses: it hands the message to an idle mayor directly, queues if the
-# mayor is mid-turn rather than interrupting it, and honors DND. The bound
-# keeps a wedged nudge inside this plugin's own timeout.
+# mayor is mid-turn rather than interrupting it, and honors DND.
+#
+# The bound keeps a wedged nudge inside this plugin's own 3m timeout, and it
+# must outlast gt nudge's own budget: wait-idle polls 15s for idle, queues, then
+# watches up to 60s more (internal/cmd/nudge.go waitIdleTimeout,
+# idleWatcherTimeout). At 60s it killed every nudge to a mayor busy for more
+# than ~45s — a normal nudge, already queued — and reported it lost (gt-hen4o).
+# 90s covers 15s+60s with slack; pre-nudge work plus 90s stays under 3m.
 #
 # State is written only after the nudge lands. Persisting the episode first
 # would record a nudge that never arrived and buy the seat 15 minutes of
 # silence — the one outcome this plugin exists to prevent.
-if ! timeout 60 gt nudge "$MAYOR_TARGET" "$message" 2>&1; then
-  fail "gt nudge $MAYOR_TARGET failed; the empty seat was not reported"
+NUDGE_BOUND=90
+nudge_rc=0
+timeout "$NUDGE_BOUND" gt nudge "$MAYOR_TARGET" "$message" 2>&1 || nudge_rc=$?
+if [ "$nudge_rc" -eq 124 ]; then
+  # Past its whole budget gt nudge is wedged. Wait-idle queues before it
+  # watches, so the message may still be delivered on the mayor's next drain;
+  # say that rather than claiming it was lost.
+  fail "gt nudge $MAYOR_TARGET timed out after ${NUDGE_BOUND}s; delivery unconfirmed (it may be queued for the mayor's next turn)"
+elif [ "$nudge_rc" -ne 0 ]; then
+  fail "gt nudge $MAYOR_TARGET failed (exit $nudge_rc); the empty seat was not reported"
 fi
 
 write_state

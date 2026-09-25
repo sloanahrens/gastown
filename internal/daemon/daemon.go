@@ -30,6 +30,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
@@ -286,6 +287,12 @@ type Daemon struct {
 
 	// scheduledSlingEscalate defaults to d.escalate; tests capture it.
 	scheduledSlingEscalate func(source, message string)
+
+	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
+	// hold each dispatcher last saw, so a hold is logged once when it appears,
+	// changes, or lifts rather than on every tick (gt-ifijm).
+	scheduledSlingsHold dispatch.HoldLatch
+	queuedWorkHold      dispatch.HoldLatch
 
 	// mayorDispatchRunning is the single-flight guard for the mayor_dispatch
 	// patrol, on its own goroutine: the cycle shells out to `gt daemon
@@ -3738,6 +3745,21 @@ func (d *Daemon) pruneStaleBranches() {
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
 func (d *Daemon) dispatchQueuedWork() {
+	// `gt scheduler run` slings queued beads (executeSling); the operator's
+	// town-wide hold parks it like every other automatic dispatcher
+	// (gt-ifijm). ESTOP already stops the heartbeat before this step; the
+	// hold file does not, so it is checked here.
+	reason := dispatch.OperatorHold(d.config.TownRoot)
+	if d.queuedWorkHold.Changed(reason) {
+		if reason != "" {
+			d.logger.Printf("Deferring scheduler dispatch: %s", reason)
+		} else {
+			d.logger.Printf("Resuming scheduler dispatch: operator dispatch hold lifted")
+		}
+	}
+	if reason != "" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")

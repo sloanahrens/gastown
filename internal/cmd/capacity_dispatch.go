@@ -14,6 +14,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -162,6 +163,18 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		return 0, nil
 	}
 
+	// The operator's town-wide dispatch hold parks the scheduler (gt-ifijm).
+	// Every caller — the daemon heartbeat, the witness on SLOT_OPEN, and a
+	// hand-typed `gt scheduler run` — passes through here, so this is the one
+	// gate for all of them. Queued contexts stay open and dispatch after the
+	// hold lifts. A dry run above is read-only and stays available.
+	if reason := dispatch.OperatorHold(townRoot); reason != "" {
+		if !isDaemonDispatch() {
+			fmt.Printf("%s Scheduler dispatch held: %s\n", style.Dim.Render("⏸"), reason)
+		}
+		return 0, nil
+	}
+
 	// Acquire exclusive lock to prevent concurrent dispatch
 	runtimeDir := filepath.Join(townRoot, ".runtime")
 	_ = os.MkdirAll(runtimeDir, 0755)
@@ -271,6 +284,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		SpawnDelay: dispatchPlan.SpawnDelay,
 	}
 
+	dispatchPlan.Plan = dropRigHeldBeads(townRoot, dispatchPlan.Plan)
 	report, err := cycle.RunPlan(dispatchPlan.Plan)
 	if err != nil {
 		return 0, fmt.Errorf("dispatch cycle failed: %w", err)
@@ -1050,4 +1064,23 @@ func listUnmergedBlockedWorkBeadIDsWithLookup(townRoot string, workBeadIDs []str
 		held[id] = mrID
 	}
 	return held
+}
+
+// dropRigHeldBeads removes from the plan every bead whose target rig is held
+// by its own ESTOP.<rig> (dispatch.RigHold), counting each as skipped rather
+// than failed: the bead's sling context stays open and queued, so the first
+// run after the rig is released dispatches it (gt-ifijm).
+func dropRigHeldBeads(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {
+	kept := plan.ToDispatch[:0:0]
+	for _, b := range plan.ToDispatch {
+		if reason := dispatch.RigHold(townRoot, b.TargetRig); reason != "" {
+			fmt.Fprintf(os.Stderr, "%s Not dispatching %s → %s: %s\n",
+				style.Dim.Render("○"), b.WorkBeadID, b.TargetRig, reason)
+			plan.Skipped++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	plan.ToDispatch = kept
+	return plan
 }
