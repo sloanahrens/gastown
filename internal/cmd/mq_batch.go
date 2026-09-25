@@ -64,6 +64,11 @@ var mqBatchCandidatesCmd = &cobra.Command{
 	Long: `List ready, non-P0 MRs old enough to be batch-eligible, sorted by
 priority score (highest first) and capped at --max.
 
+MRs a previous batch isolated as culprits are excluded while their branch
+still carries the head that batch judged — the mark is the batch-culprit:<sha>
+label 'gt mq batch run' writes on the MR bead, and a rework that moves the
+branch head clears it. Those MRs stay ready and take the single-MR path.
+
 Read-only — makes no git or bead changes. Use this to decide whether enough
 MRs have queued up to be worth batching, and to get the MR list to review
 in parallel before calling 'gt mq batch run'.`,
@@ -103,7 +108,7 @@ func init() {
 	mqBatchRunCmd.Flags().StringVar(&mqBatchRunMinAge, "min-age", "", "Minimum queue age to be batch-eligible (e.g. 1h, 30m). Default: rig's merge_queue.batch_min_age, or 1h")
 	mqBatchRunCmd.Flags().IntVar(&mqBatchRunMax, "max", 0, "Maximum batch size. Default: rig's merge_queue.batch_max, or 12")
 	mqBatchRunCmd.Flags().IntVar(&mqBatchRunMinCount, "min-count", 0, "Minimum number of eligible MRs required to batch at all; below it the run exits without batching. Default: rig's merge_queue.batch_min_count, or 4")
-	mqBatchRunCmd.Flags().StringSliceVar(&mqBatchRunOnly, "only", nil, "Restrict the batch to these MR IDs (comma-separated)")
+	mqBatchRunCmd.Flags().StringSliceVar(&mqBatchRunOnly, "only", nil, "Restrict the batch to these MR IDs (comma-separated); an MR held back as a batch culprit is not batch-eligible, so process it singly instead")
 	mqBatchRunCmd.Flags().BoolVar(&mqBatchRunJSON, "json", false, "Output as JSON")
 
 	mqBatchCmd.AddCommand(mqBatchCandidatesCmd)
@@ -170,28 +175,53 @@ func belowBatchMinCount(w io.Writer, candidates, minCount int) bool {
 	return true
 }
 
-// selectBatchCandidates returns ready MRs eligible for batching: P0 MRs are
-// excluded (they always process individually, first), MRs younger than minAge
-// are excluded, and the result is sorted by priority score, highest first.
-// No size cap is applied here — use Engineer.AssembleBatch for that, since it
-// also knows how to skip MRs blocked by something not in the batch.
-func selectBatchCandidates(eng *refinery.Engineer, minAge time.Duration) ([]*refinery.MRInfo, error) {
+// selectBatchCandidates returns ready MRs eligible for batching, plus the
+// ready MRs a current batch-culprit mark excluded. P0 MRs are excluded (they
+// always process individually, first), MRs younger than minAge are excluded,
+// and the result is sorted by priority score, highest first. No size cap is
+// applied here — use Engineer.AssembleBatch for that, since it also knows how
+// to skip MRs blocked by something not in the batch.
+//
+// The marked MRs are returned too, so a caller that decides not to batch can
+// say why the queue looked shorter than 'gt mq list' reports.
+func selectBatchCandidates(eng *refinery.Engineer, minAge time.Duration) ([]*refinery.MRInfo, []*refinery.MRInfo, error) {
 	ready, err := eng.ListReadyMRs()
 	if err != nil {
-		return nil, fmt.Errorf("listing ready MRs: %w", err)
+		return nil, nil, fmt.Errorf("listing ready MRs: %w", err)
 	}
-	return filterAndSortBatchCandidates(ready, minAge, time.Now()), nil
+	eligible, marked := partitionBatchCandidates(ready, minAge, time.Now())
+	return eligible, marked, nil
 }
 
 // filterAndSortBatchCandidates is the pure selection/sort logic behind
 // selectBatchCandidates, split out so it's testable without a live Engineer.
 func filterAndSortBatchCandidates(ready []*refinery.MRInfo, minAge time.Duration, now time.Time) []*refinery.MRInfo {
-	eligible := make([]*refinery.MRInfo, 0, len(ready))
+	eligible, _ := partitionBatchCandidates(ready, minAge, now)
+	return eligible
+}
+
+// partitionBatchCandidates splits ready MRs into batch-eligible and
+// batch-culprit-marked, and sorts the eligible ones by priority score.
+//
+// An MR a previous batch isolated as a culprit, at a head its branch still
+// carries, is not eligible (gt-gz8l, refinery.MRMarkedBatchCulprit): stacking
+// it again re-runs the full gate, the flaky retry, and the bisection to
+// re-derive the same answer, while the batch's good MRs wait behind it. It
+// takes the single-MR path instead. This is candidate selection only —
+// ListReadyMRs still returns it, so 'gt mq next' and process-branch see it.
+func partitionBatchCandidates(ready []*refinery.MRInfo, minAge time.Duration, now time.Time) (eligible, marked []*refinery.MRInfo) {
+	eligible = make([]*refinery.MRInfo, 0, len(ready))
 	for _, mr := range ready {
 		if mr.Priority == 0 { // P0: always single-MR; P1 batches since 2026-09-19
 			continue
 		}
 		if mr.CreatedAt.IsZero() || now.Sub(mr.CreatedAt) < minAge {
+			continue
+		}
+		// Checked after the age gate so the returned bucket counts only the
+		// MRs the mark alone kept out of the batch.
+		if refinery.MRMarkedBatchCulprit(mr) {
+			marked = append(marked, mr)
 			continue
 		}
 		eligible = append(eligible, mr)
@@ -210,7 +240,7 @@ func filterAndSortBatchCandidates(ready []*refinery.MRInfo, minAge time.Duration
 		return scoreOf(eligible[i]) > scoreOf(eligible[j])
 	})
 
-	return eligible
+	return eligible, marked
 }
 
 // newBatchConfig builds a BatchConfig from refinery.DefaultBatchConfig with
@@ -286,7 +316,7 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 	max := resolveBatchMax(mqBatchCandidatesMax, mq)
 
 	eng := refinery.NewEngineer(r)
-	eligible, err := selectBatchCandidates(eng, minAge)
+	eligible, markedCulprits, err := selectBatchCandidates(eng, minAge)
 	if err != nil {
 		return err
 	}
@@ -294,22 +324,24 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 
 	if mqBatchCandidatesJSON {
 		// eligible_total is the pre-filter count (age + priority only, no cap,
-		// no blocker-awareness) — the right number for a "has enough queued up
-		// to be worth batching" threshold check. batch_total is len(batch): the
-		// post-filter count after applying --max and excluding MRs blocked by
-		// something outside the batch. The two can differ; callers that want
-		// "how many will actually be batched" should use batch_total or
-		// `.batch | length`, not eligible_total.
+		// no blocker-awareness, minus MRs marked as batch culprits) — the right
+		// number for a "has enough queued up to be worth batching" threshold
+		// check. batch_total is len(batch): the post-filter count after applying
+		// --max and excluding MRs blocked by something outside the batch. The
+		// two can differ; callers that want "how many will actually be batched"
+		// should use batch_total or `.batch | length`, not eligible_total.
 		return outputJSON(struct {
-			Eligible   int                `json:"eligible_total"`
-			BatchTotal int                `json:"batch_total"`
-			Batch      []*refinery.MRInfo `json:"batch"`
-		}{Eligible: len(eligible), BatchTotal: len(batch), Batch: batch})
+			Eligible       int                `json:"eligible_total"`
+			CulpritSkipped int                `json:"batch_culprit_skipped"`
+			BatchTotal     int                `json:"batch_total"`
+			Batch          []*refinery.MRInfo `json:"batch"`
+		}{Eligible: len(eligible), CulpritSkipped: len(markedCulprits), BatchTotal: len(batch), Batch: batch})
 	}
 
 	fmt.Printf("%s Batch candidates for '%s' (min-age=%s, max=%d):\n\n", style.Bold.Render("📦"), rigName, minAge, max)
 	if len(batch) == 0 {
 		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(none — %d ready MR(s) eligible by age/priority, 0 after blocker filtering)", len(eligible))))
+		printBatchCulpritSkipped(markedCulprits)
 		return nil
 	}
 	for i, mr := range batch {
@@ -318,7 +350,23 @@ func runMQBatchCandidates(cmd *cobra.Command, args []string) error {
 	if len(eligible) > len(batch) {
 		fmt.Printf("\n  %s\n", style.Dim.Render(fmt.Sprintf("(%d more eligible beyond --max=%d)", len(eligible)-len(batch), max)))
 	}
+	printBatchCulpritSkipped(markedCulprits)
 	return nil
+}
+
+// printBatchCulpritSkipped says which ready MRs the batch-culprit marks kept
+// out of this list, so a shrunken batch is never read as an empty queue — the
+// MRs are still ready and still visible to 'gt mq next' and process-branch.
+func printBatchCulpritSkipped(marked []*refinery.MRInfo) {
+	if len(marked) == 0 {
+		return
+	}
+	ids := make([]string, len(marked))
+	for i, mr := range marked {
+		ids[i] = mr.ID
+	}
+	fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%d held back as batch culprits at their current head: %s — process-branch handles them alone)",
+		len(marked), strings.Join(ids, ", "))))
 }
 
 // acquireBatchGateSlot acquires the container-gate slot for the whole batch
@@ -383,7 +431,7 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		eng.Config().RetryFlakyTests = mq.RetryFlakyTests
 	}
 
-	eligible, err := selectBatchCandidates(eng, minAge)
+	eligible, markedCulprits, err := selectBatchCandidates(eng, minAge)
 	if err != nil {
 		return err
 	}
@@ -401,6 +449,12 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 		}
 		eligible = filtered
 	}
+
+	// Say which MRs the marks held back before anything is decided on the
+	// shortened list, so a batch that declines to assemble names the reason.
+	// --only does not re-admit them: it filters this same list, which is what
+	// its help says.
+	printBatchCulpritSkipped(markedCulprits)
 
 	// Too few candidates to be worth batching: exit before assembling or
 	// touching the gate slot, so the single-MR path (which runs right after

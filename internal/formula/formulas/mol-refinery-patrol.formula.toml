@@ -393,8 +393,12 @@ filed at P1, so excluding them meant batching never engaged at all.
 gt mq batch candidates <rig> --json
 ```
 
-This excludes P0 MRs and anything younger than the rig's `merge_queue.batch_min_age`,
-sorts by priority score, and caps at `merge_queue.batch_max`. Read `.eligible_total` from the output.
+This excludes P0 MRs, anything younger than the rig's `merge_queue.batch_min_age`,
+and any MR a previous batch isolated as a culprit at the head it still carries
+(see Step 5), sorts by priority score, and caps at `merge_queue.batch_max`.
+Read `.eligible_total` from the output; `.batch_culprit_skipped` counts the
+MRs the last of those exclusions held back, so a short list is never read as
+an empty queue.
 
 **If `.eligible_total` is 0: SKIP the rest of this step, proceed to
 process-branch.** Otherwise run Step 2: `gt mq batch run` enforces the
@@ -527,6 +531,14 @@ conflicts) are intentionally left untouched here — no bead was closed, no
 branch deleted. Do not duplicate conflict/failure bookkeeping in this step;
 they remain open/ready and are picked up by process-branch next, same as any
 other ready MR (see Step 6).
+
+Each culprit additionally carries a `batch-culprit:<head>` label, written by
+the run at the head bisection judged. `gt mq batch candidates` skips an MR
+whose mark still names its submitted head, so the next cycle does not stack it
+again — a re-run re-derives the failure the bisection already paid for while
+the batch's good MRs wait behind it. The mark is keyed to the head, so a
+rework that moves the branch head makes the MR batch-eligible again; no step
+writes or clears it.
 
 **Step 6: Continue to the single-MR path — do NOT skip it**
 
