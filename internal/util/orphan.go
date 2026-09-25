@@ -470,10 +470,16 @@ func parseProcessTable(out string) []processEntry {
 
 // hasLiveParent reports whether the parent is still around to own this
 // process. ppid 1 means reparented to launchd/init and ppid 0 means the
-// kernel — neither is an owner. Any other ppid missing from the table has
-// exited, which is exactly the orphan case the daemon exists to clean up.
-func (e processEntry) hasLiveParent(live map[int]bool) bool {
-	return e.PPID > 1 && live[e.PPID]
+// kernel — neither is an owner. The tmux server is not an owner either: a
+// pane's process forks directly under the server, so once its session is
+// killed a survivor that ignored the resulting SIGHUP keeps the
+// (still-running, unrelated-sessions-hosting) server as its ppid forever —
+// "live parent" would hide that stranded process from zombie cleanup
+// indefinitely. Any other ppid missing from the table has exited, which is
+// exactly the orphan case the daemon exists to clean up.
+func (e processEntry) hasLiveParent(live map[int]string) bool {
+	comm, ok := live[e.PPID]
+	return e.PPID > 1 && ok && comm != "tmux"
 }
 
 // unownedCandidate is a process table row that passed the cheap filters, with
@@ -500,9 +506,9 @@ type unownedCandidate struct {
 // The expensive per-PID probes (cwd → town root, IDE detection) stay with the
 // callers — they spawn processes and must not run for rows already ruled out.
 func unownedCandidates(entries []processEntry, protected map[int]bool) []unownedCandidate {
-	live := make(map[int]bool, len(entries))
+	live := make(map[int]string, len(entries))
 	for _, e := range entries {
-		live[e.PID] = true
+		live[e.PID] = e.Comm
 	}
 
 	var candidates []unownedCandidate
