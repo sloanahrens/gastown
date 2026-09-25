@@ -47,6 +47,22 @@ func TestParseWindowTime(t *testing.T) {
 	}
 }
 
+// maintenanceWindowEnd is the first instant isInMaintenanceWindow reports
+// false: the deferral streak and the window share one length.
+func TestMaintenanceWindowEndMatchesWindow(t *testing.T) {
+	now := time.Date(2026, 2, 28, 3, 20, 0, 0, time.Local)
+	end := maintenanceWindowEnd(now, "03:00")
+	if want := time.Date(2026, 2, 28, 3, 0, 0, 0, time.Local).Add(maintenanceWindowLength); !end.Equal(want) {
+		t.Fatalf("maintenanceWindowEnd = %v, want %v", end, want)
+	}
+	if !isInMaintenanceWindow(end.Add(-time.Nanosecond), "03:00") {
+		t.Error("isInMaintenanceWindow is false just before maintenanceWindowEnd")
+	}
+	if isInMaintenanceWindow(end, "03:00") {
+		t.Error("isInMaintenanceWindow is true at maintenanceWindowEnd")
+	}
+}
+
 func TestIsInMaintenanceWindow(t *testing.T) {
 	loc := time.Local
 

@@ -25,6 +25,11 @@ const (
 	// escalations, re-triggering the patrol forever. The 2000 default is the
 	// buffer against that loop. Configurable via daemon.json
 	// (patrols.compactor_dog.threshold).
+	//
+	// Commit count is not the disk cost. With scheduled_maintenance mode gc
+	// handling disk by size, this threshold only guards history-query
+	// latency, and a town running gc mode sets it near 20000 (measurements:
+	// docs/plans/2026-09-25-dolt-gc-maintenance-design.md, Problem).
 	defaultCompactorCommitThreshold = 2000
 	// compactorQueryTimeout is the timeout for individual SQL queries.
 	compactorQueryTimeout = 30 * time.Second
@@ -172,6 +177,14 @@ func (d *Daemon) triggerCompactorDog() {
 			d.compactorDogRunning = false
 			d.compactorDogMu.Unlock()
 		}()
+		// The cycle's SQL phase shares the read side of doltMaintMu; a gc in
+		// flight skips the cycle without recording it, so the next 15-minute
+		// check runs it.
+		release, ok := d.tryDoltTask("compactor_dog")
+		if !ok {
+			return
+		}
+		defer release()
 		compactorDogCycleFn(d)
 		d.recordCompactorDogRun()
 	}()

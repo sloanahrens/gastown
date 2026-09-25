@@ -15,9 +15,20 @@ import (
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
 // slings, mayor dispatch or patrol watchdog run, no main_branch_test past its
-// slot wait, and no install holding install-gt.lock. pourDoctorMolecule and
-// the Dolt goroutines are not counted: they are short or restartable.
+// slot wait, no scheduled_maintenance gc cycle, and no install holding
+// install-gt.lock. pourDoctorMolecule and the Dolt goroutines are not
+// counted: they are short or restartable.
 func (d *Daemon) isIdleForUpgrade() bool {
+	if d.maintenanceGCRunning.Load() {
+		return false
+	}
+	return d.daemonWorkIdle()
+}
+
+// daemonWorkIdle is isIdleForUpgrade without the gc cycle's own flag, so the
+// gc cycle's quiet-window guard (maintenanceQuiet) can reuse the predicate
+// without reading itself as busy.
+func (d *Daemon) daemonWorkIdle() bool {
 	if d.scripts.runningCount() > 0 {
 		return false
 	}

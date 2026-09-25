@@ -149,6 +149,15 @@ type DoltServerManager struct {
 	// Protected by mu.
 	onRecoveryFn func()
 
+	// restartSuppressed, when set and returning true, defers a health-driven
+	// restart of a running server: EnsureRunning logs the failure and returns
+	// without stopping it. The daemon wires it to "a scheduled_maintenance
+	// dolt_gc('--full') is in flight and under its timeout" — a gc holds the
+	// server busy for its duration, and a restart mid-gc is the one thing that
+	// could turn a slow gc into a damaged store. A dead server is still
+	// started: there is nothing in flight to protect. Protected by mu.
+	restartSuppressed func() bool
+
 	// Test hooks (nil = use real implementations; set only in tests)
 	healthCheckFn     func() error
 	writeProbeCheckFn func() error
@@ -434,6 +443,24 @@ func (m *DoltServerManager) isDoltServerOnPort() bool {
 	return true
 }
 
+// SetRestartSuppressor installs the hook that defers health-driven restarts
+// (see restartSuppressed).
+func (m *DoltServerManager) SetRestartSuppressor(fn func() bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.restartSuppressed = fn
+}
+
+// restartHeldLocked reports whether a health-driven restart must be deferred,
+// logging why. Caller holds mu.
+func (m *DoltServerManager) restartHeldLocked(what string, cause error) bool {
+	if m.restartSuppressed == nil || !m.restartSuppressed() {
+		return false
+	}
+	m.logger("Dolt server %s (%v) but a scheduled_maintenance gc is in flight — deferring restart", what, cause)
+	return true
+}
+
 // EnsureRunning ensures the Dolt server is running.
 // If not running, starts it. If running but unhealthy, restarts it.
 // Uses exponential backoff and a max-restart cap to avoid crash-looping.
@@ -461,6 +488,9 @@ func (m *DoltServerManager) EnsureRunning() error {
 		// Already running, check health
 		m.lastCheck = m.now()
 		if err := m.checkHealthLocked(); err != nil {
+			if m.restartHeldLocked("unhealthy", err) {
+				return nil
+			}
 			m.logger("Dolt server unhealthy: %v, restarting...", err)
 			if m.writeUnhealthySignal("health_check_failed", err.Error()) {
 				m.sendUnhealthyAlert(err)
@@ -475,6 +505,9 @@ func (m *DoltServerManager) EnsureRunning() error {
 		// Under concurrent write load, Dolt can enter a persistent read-only
 		// state that requires a server restart to clear.
 		if err := m.checkWriteHealthLocked(); err != nil {
+			if m.restartHeldLocked("read-only", err) {
+				return nil
+			}
 			m.logger("Dolt server read-only: %v, restarting...", err)
 			if m.writeUnhealthySignal("read_only", err.Error()) {
 				m.sendReadOnlyAlert(err)
@@ -491,6 +524,9 @@ func (m *DoltServerManager) EnsureRunning() error {
 		if now.Sub(m.lastIdentityCheck) >= identityCheckInterval {
 			m.lastIdentityCheck = now
 			if err := m.checkDatabaseIdentityLocked(); err != nil {
+				if m.restartHeldLocked("identity check failed", err) {
+					return nil
+				}
 				m.logger("Dolt server identity check failed: %v, restarting...", err)
 				if m.writeUnhealthySignal("imposter_detected", err.Error()) {
 					m.sendUnhealthyAlert(fmt.Errorf("identity check: %w", err))

@@ -43,6 +43,22 @@ threshold 2000, chosen to stay clear of the escalation-commit loop described
 there), so this plugin raises nothing itself. A dog reads the judgment steps
 below only when `run.sh` exits nonzero (Dolt unreachable, no databases).
 
+**First, check the maintenance mode.** The judgment table in Step 6 depends
+on it:
+
+```bash
+MAINT_MODE=$(jq -r '.patrols.scheduled_maintenance.mode // "monitor"' "$HOME/gt/mayor/daemon.json" 2>/dev/null)
+echo "scheduled_maintenance mode: ${MAINT_MODE:-monitor}"
+```
+
+- `monitor` or `flatten`: commit count is the maintenance signal. Use the
+  Step 6 table as written.
+- `gc`: the daemon runs a history-preserving `dolt_gc('--full')` by database
+  size and never flattens. Commit count is no longer a disk signal: history
+  grows between gc runs by design, and flatten is not the fix. Use the gc-mode
+  rules in Step 6. The daemon's `compactor_dog.threshold` is raised to 20000
+  in gc mode.
+
 ## Config
 
 ```bash
@@ -261,11 +277,30 @@ The script's default threshold (500) matches the "Escalate" column above.
 The "Getting warm" band (200-500) is informational — the dog may monitor
 without escalating if context justifies it.
 
+The table above is for `monitor` and `flatten` modes. **In `gc` mode:**
+
+- Do not escalate on commit count, growth rate, or time since flatten. Commit
+  growth between daily gc runs is expected, and gc does not reduce it.
+- Escalate on commit count only above 20000 in one database (the daemon's
+  gc-mode `compactor_dog.threshold`). That is a history-query latency concern,
+  not a disk one. The daemon already escalates it, so check `gt escalate list`
+  before raising a duplicate.
+- Runaway growth (e.g. >300/hr with no swarm) is still worth escalating, as a
+  runaway writer, not as a compaction request.
+- gc failures and skipped windows are escalated by the daemon's
+  scheduled_maintenance patrol, not by this dog.
+- In the escalation, report what you saw (the database, its commit count
+  or growth rate, and whether a swarm explains it) and leave the remedy to
+  the operator. Do not recommend compaction or flatten in gc mode: the daemon's
+  gc already handles disk, and rewriting history is an operator decision.
+
 **But override the table if context warrants it:**
 - 400 commits after a 10-polecat swarm = normal, will settle
 - 200 commits growing at 50/hr with no swarm = something's wrong
 
-**If you judge maintenance is needed:**
+**If you judge maintenance is needed** (monitor or flatten mode; in gc mode
+replace the Recommendation line with what you actually saw, e.g. runaway
+growth, and do not recommend compaction):
 
 ```bash
 gt escalate "Dolt compaction recommended" \

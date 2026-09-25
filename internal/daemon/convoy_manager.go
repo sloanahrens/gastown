@@ -213,6 +213,16 @@ type ConvoyManager struct {
 	// duplicate convoy checks for the same stranded convoy.
 	scanMu sync.Mutex
 
+	// pollGate lets a scheduled_maintenance gc pause this manager's Dolt
+	// reads: the event poll tick and the stranded scan take the read side
+	// through tryBeginTick and skip the tick while Pause holds the write side
+	// (a live reader racing gc; see the gc design doc, Problem).
+	pollGate sync.RWMutex
+
+	// pausing is set while Pause waits for the write side, so no new tick
+	// starts and the in-flight one can drain; see Pause.
+	pausing atomic.Bool
+
 	// lastEventIDs tracks per-store high-water marks for event polling.
 	// Key matches stores map keys ("hq", "gastown", etc.).
 	lastEventIDs sync.Map // map[string]time.Time
@@ -564,48 +574,103 @@ func (m *ConvoyManager) runEventPoll() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			// Complete the store set before deciding what to poll. A store an
-			// earlier attempt missed is retried here, with backoff, until it
-			// opens — without this the manager polls the stores it has, skips
-			// convoy lookups through the one it does not, and never asks again
-			// (gt-i36h).
-			m.retryMissingStores(time.Now())
-
-			// Take a snapshot of stores for this tick to avoid holding the
-			// lock across potentially slow network/Dolt calls.
-			m.storesMu.Lock()
-			snapshot := make(map[string]beadsdk.Storage, len(m.stores))
-			for k, v := range m.stores {
-				snapshot[k] = v
+			if !m.tryBeginTick() {
+				continue // paused for a scheduled gc; the next tick polls
 			}
-			m.storesMu.Unlock()
-
-			if len(snapshot) == 0 {
-				// Nothing open yet. The opener is the only work there is, and
-				// retryMissingStores owns its cadence.
-				continue
-			}
-
-			hadError := m.pollStoresSnapshot(snapshot)
-			// Exponential backoff on consecutive errors to avoid hammering
-			// a recovering Dolt server. Reset on success. (GH#2686)
-			if hadError {
-				newInterval := currentInterval * 2
-				if newInterval > eventPollMaxBackoff {
-					newInterval = eventPollMaxBackoff
-				}
-				if newInterval != currentInterval {
-					currentInterval = newInterval
-					ticker.Reset(currentInterval)
-					m.logger("Convoy: poll backoff → %s", currentInterval)
-				}
-			} else if currentInterval != eventPollInterval {
-				currentInterval = eventPollInterval
-				ticker.Reset(currentInterval)
-				m.logger("Convoy: poll recovered, interval reset to %s", currentInterval)
-			}
+			currentInterval = m.pollTick(currentInterval, ticker)
+			m.pollGate.RUnlock()
 		}
 	}
+}
+
+// pollTick is one event-poll tick body, run under pollGate's read side. It
+// returns the (possibly backed-off) poll interval.
+func (m *ConvoyManager) pollTick(currentInterval time.Duration, ticker *time.Ticker) time.Duration {
+	// Complete the store set before deciding what to poll. A store an
+	// earlier attempt missed is retried here, with backoff, until it
+	// opens — without this the manager polls the stores it has, skips
+	// convoy lookups through the one it does not, and never asks again
+	// (gt-i36h).
+	m.retryMissingStores(time.Now())
+
+	// Take a snapshot of stores for this tick to avoid holding the
+	// lock across potentially slow network/Dolt calls.
+	m.storesMu.Lock()
+	snapshot := make(map[string]beadsdk.Storage, len(m.stores))
+	for k, v := range m.stores {
+		snapshot[k] = v
+	}
+	m.storesMu.Unlock()
+
+	if len(snapshot) == 0 {
+		// Nothing open yet. The opener is the only work there is, and
+		// retryMissingStores owns its cadence.
+		return currentInterval
+	}
+
+	hadError := m.pollStoresSnapshot(snapshot)
+	// Exponential backoff on consecutive errors to avoid hammering
+	// a recovering Dolt server. Reset on success. (GH#2686)
+	if hadError {
+		newInterval := currentInterval * 2
+		if newInterval > eventPollMaxBackoff {
+			newInterval = eventPollMaxBackoff
+		}
+		if newInterval != currentInterval {
+			currentInterval = newInterval
+			ticker.Reset(currentInterval)
+			m.logger("Convoy: poll backoff → %s", currentInterval)
+		}
+	} else if currentInterval != eventPollInterval {
+		currentInterval = eventPollInterval
+		ticker.Reset(currentInterval)
+		m.logger("Convoy: poll recovered, interval reset to %s", currentInterval)
+	}
+	return currentInterval
+}
+
+// tryBeginTick takes pollGate's read side for one poll or scan tick. It
+// fails, and the tick is skipped, while Pause holds or is waiting for the
+// write side. A successful call must be followed by pollGate.RUnlock.
+func (m *ConvoyManager) tryBeginTick() bool {
+	if m.pausing.Load() {
+		return false
+	}
+	return m.pollGate.TryRLock()
+}
+
+// Pause stops the event poll and stranded scan from starting a new tick, and
+// waits up to timeout for one already running to finish. It reports false
+// (and holds nothing) when the in-flight tick outlasts timeout. A successful
+// Pause must be followed by Resume. Used by scheduled_maintenance gc around
+// each database's dolt_gc('--full').
+//
+// It polls TryLock rather than blocking in Lock: an abandoned Lock cannot be
+// canceled, and behind a hung tick it would leave a pending writer that
+// blocks every later tick and a goroutine per attempt. Polling alone could
+// starve, since a tick that runs longer than its interval re-takes the read
+// side right after releasing it; the pausing flag closes that by making
+// tryBeginTick refuse new ticks while Pause waits, so only the ticks already
+// in flight have to drain. Pause assumes a single caller (the gc cycle,
+// serialized by maintenanceGCRunning).
+func (m *ConvoyManager) Pause(timeout time.Duration) bool {
+	m.pausing.Store(true)
+	defer m.pausing.Store(false)
+	deadline := time.Now().Add(timeout)
+	for {
+		if m.pollGate.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Resume undoes a successful Pause.
+func (m *ConvoyManager) Resume() {
+	m.pollGate.Unlock()
 }
 
 // pollStoresSnapshot polls events from all non-parked stores in the snapshot.
@@ -832,6 +897,12 @@ func (m *ConvoyManager) runStrandedScan() {
 // scan runs one stranded scan cycle: find stranded convoys, feed or close each.
 // Serialized by scanMu to prevent concurrent scans from spawning duplicate checks.
 func (m *ConvoyManager) scan() {
+	if !m.tryBeginTick() {
+		m.logger("Convoy: stranded scan skipped: paused for scheduled gc")
+		return
+	}
+	defer m.pollGate.RUnlock()
+
 	m.scanMu.Lock()
 	defer m.scanMu.Unlock()
 

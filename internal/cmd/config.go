@@ -4,6 +4,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -634,10 +635,17 @@ Supported keys:
   maintenance.window          Maintenance window start time in HH:MM (e.g., "03:00")
   maintenance.interval        How often: "daily", "weekly", "monthly", or duration
   maintenance.threshold       Commit count threshold (default: 1000)
-  maintenance.mode            What to do over threshold: "monitor" (default) escalates
-                              with the commit counts and rewrites nothing;
+  maintenance.mode            What to do in the window: "monitor" (default) escalates
+                              over-threshold commit counts and rewrites nothing;
+                              "gc" runs CALL dolt_gc('--full') on each database
+                              whose on-disk size crossed the gc trigger, keeping
+                              all history, and only while the town is quiet;
                               "flatten" runs gt maintain --force, which squashes
                               the commit history of every database over threshold
+  maintenance.gc_min_bytes    gc mode: never gc a database smaller than this
+                              (bytes, default: 268435456 = 256MiB)
+  maintenance.gc_growth_ratio gc mode: gc when size >= ratio x the size recorded
+                              after its last gc (default: 2.0; >= 1)
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Enable/disable wisp reaper (true/false)
@@ -645,7 +653,10 @@ Supported keys:
   lifecycle.reaper.delete_age  Delete closed wisps after this duration (default: 168h / 7d)
   lifecycle.compactor.enabled  Enable/disable compactor dog (true/false)
   lifecycle.compactor.interval Compactor check interval (default: 24h)
-  lifecycle.compactor.threshold Commit count before compaction (default: 500)
+  lifecycle.compactor.threshold Commit count at which the compactor dog escalates
+                              (default: 2000). It never compacts; with
+                              maintenance.mode gc the disk cost is handled by
+                              size, so this is a history-length tripwire only
   lifecycle.doctor.enabled     Enable/disable doctor dog (true/false)
   lifecycle.doctor.interval    Doctor check interval (default: 5m)
   lifecycle.backup.enabled     Enable/disable JSONL + Dolt backups (true/false)
@@ -684,7 +695,10 @@ Supported keys:
   maintenance.window          Maintenance window start time (HH:MM)
   maintenance.interval        How often: daily, weekly, monthly, or duration
   maintenance.threshold       Commit count threshold
-  maintenance.mode            monitor (escalate only) or flatten (rewrite history)
+  maintenance.mode            monitor (escalate only), gc (dolt_gc --full, history
+                              kept) or flatten (rewrite history)
+  maintenance.gc_min_bytes    gc mode size floor in bytes
+  maintenance.gc_growth_ratio gc mode growth trigger since the last gc
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Wisp reaper enabled (true/false)
@@ -692,7 +706,7 @@ Supported keys:
   lifecycle.reaper.delete_age  Duration before closed wisps are deleted
   lifecycle.compactor.enabled  Compactor dog enabled (true/false)
   lifecycle.compactor.interval Compactor check interval
-  lifecycle.compactor.threshold Commit count threshold for compaction
+  lifecycle.compactor.threshold Commit count at which the compactor dog escalates
   lifecycle.doctor.enabled     Doctor dog enabled (true/false)
   lifecycle.doctor.interval    Doctor check interval
   lifecycle.backup.enabled     JSONL + Dolt backups enabled (true/false)
@@ -790,7 +804,8 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 		townSettings.Polecat.TargetCleanPolicy = parsed.String()
 
-	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode":
+	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode",
+		"maintenance.gc_min_bytes", "maintenance.gc_growth_ratio":
 		return setMaintenanceConfig(townRoot, key, value)
 
 	case "dolt.port":
@@ -817,7 +832,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  maintenance.gc_min_bytes\n  maintenance.gc_growth_ratio\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -891,7 +906,8 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 			value = polecat.DefaultTargetCleanPolicy().String()
 		}
 
-	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode":
+	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode",
+		"maintenance.gc_min_bytes", "maintenance.gc_growth_ratio":
 		return getMaintenanceConfig(townRoot, key)
 
 	case "dolt.port":
@@ -909,7 +925,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  maintenance.gc_min_bytes\n  maintenance.gc_growth_ratio\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	fmt.Println(value)
@@ -973,16 +989,31 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 
 	case "maintenance.mode":
 		// Validated here so a typo is refused at the point of entry. The
-		// daemon treats anything but an exact "flatten" as monitor
-		// (maintenanceMode), so an invalid value that reached daemon.json by
-		// hand would be safe but silent — better to never write one.
+		// daemon (maintenanceMode) recognizes "flatten" and "gc", trimmed and
+		// case-insensitive, and treats anything else as "monitor", which only
+		// reports. An invalid value that reached daemon.json by hand would be
+		// safe but silent, so it is never written.
 		switch value {
-		case daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten:
+		case daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten, daemon.MaintenanceModeGC:
 			mc.Mode = value
 		default:
-			return fmt.Errorf("invalid mode %q: expected %s or %s",
-				value, daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten)
+			return fmt.Errorf("invalid mode %q: expected %s, %s or %s",
+				value, daemon.MaintenanceModeMonitor, daemon.MaintenanceModeGC, daemon.MaintenanceModeFlatten)
 		}
+
+	case "maintenance.gc_min_bytes":
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 1 {
+			return fmt.Errorf("invalid gc_min_bytes %q: expected a positive integer byte count", value)
+		}
+		mc.GCMinBytes = &n
+
+	case "maintenance.gc_growth_ratio":
+		r, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(r) || math.IsInf(r, 0) || r < 1 {
+			return fmt.Errorf("invalid gc_growth_ratio %q: expected a finite number >= 1 (e.g., 2.0)", value)
+		}
+		mc.GCGrowthRatio = &r
 	}
 
 	if err := daemon.SavePatrolConfig(townRoot, patrolConfig); err != nil {
@@ -1041,6 +1072,22 @@ func getMaintenanceConfig(townRoot, key string) error {
 				value = m
 			}
 		}
+
+	case "maintenance.gc_min_bytes":
+		n := daemon.DefaultGCMinBytes
+		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.ScheduledMaintenance != nil &&
+			patrolConfig.Patrols.ScheduledMaintenance.GCMinBytes != nil {
+			n = *patrolConfig.Patrols.ScheduledMaintenance.GCMinBytes
+		}
+		value = strconv.FormatInt(n, 10)
+
+	case "maintenance.gc_growth_ratio":
+		r := daemon.DefaultGCGrowthRatio
+		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.ScheduledMaintenance != nil &&
+			patrolConfig.Patrols.ScheduledMaintenance.GCGrowthRatio != nil {
+			r = *patrolConfig.Patrols.ScheduledMaintenance.GCGrowthRatio
+		}
+		value = strconv.FormatFloat(r, 'g', -1, 64)
 	}
 
 	fmt.Println(value)

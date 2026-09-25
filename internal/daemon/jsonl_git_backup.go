@@ -129,6 +129,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if !d.isPatrolActive("jsonl_git_backup") {
 		return
 	}
+	release, ok := d.tryDoltTask("jsonl_git_backup")
+	if !ok {
+		return
+	}
+	defer release()
 
 	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
 	mol := d.pourDogMolecule(constants.MolDogJSONL, nil)
