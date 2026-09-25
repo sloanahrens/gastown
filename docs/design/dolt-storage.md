@@ -343,6 +343,55 @@ with `gt config set maintenance.mode flatten`; any value other than the exact
 word `flatten` — including a typo — is treated as `monitor`, so a misspelling
 cannot arm the destructive path.
 
+`gc` is the history-preserving mode (claude-05o; design in
+`docs/plans/2026-09-25-dolt-gc-maintenance-design.md`). It ignores commit
+counts. In the window it measures each database's on-disk size under the
+Dolt data dir and runs `CALL dolt_gc('--full')` on a database when both hold:
+
+- size >= `gc_min_bytes` (default 268435456, 256MiB), and
+- size >= `gc_growth_ratio` (default 2.0) x the size recorded right after its
+  last patrol gc, or no such record exists yet.
+
+The post-gc sizes live in `daemon/maintenance_state.json` (atomic write).
+Eligible databases run smallest first, one at a time, each bounded by 10
+minutes. Before each database the patrol re-checks a quiet-window guard: the
+daemon's upgrade-idle predicate, no `main_branch_test` (even one waiting for a
+slot), no container-gate slot or in-flight marker held by anyone, and no
+polecat with a fresh `working` heartbeat. If the town is busy it logs why and
+stops; the next 5-minute tick in the window retries, and databases already
+gc'd have fresh baselines so they drop out. A gc error stops the run, logs,
+and escalates once; the patrol does not retry until the next interval. gc mode
+never flattens, never force-pushes and never restarts Dolt.
+
+`--full` matters: Dolt's gc is generational, and auto-gc and plain
+`dolt_gc()` only collect the new generation. Chunks promoted to the old
+generation (including pre-flatten history) stay until a `--full` pass.
+
+Settings (`patrols.scheduled_maintenance` in `mayor/daemon.json`):
+
+```json
+"scheduled_maintenance": {
+  "enabled": true, "window": "03:00", "interval": "daily", "threshold": 1000,
+  "mode": "gc", "gc_min_bytes": 268435456, "gc_growth_ratio": 2.0
+}
+```
+
+Or with `gt config set maintenance.mode gc`, `maintenance.gc_min_bytes`,
+`maintenance.gc_growth_ratio`. An invalid `gc_min_bytes` (<= 0) or
+`gc_growth_ratio` (< 1, NaN, Inf) in the file is replaced by its default with
+a logged warning; `gt config set` refuses them.
+
+Compatibility: a `gt` built before gc mode reads `mode: gc` as `monitor`
+(escalate only) and ignores the `gc_*` keys, so a rollback never flattens.
+An older `gt config set maintenance.*` rewrites daemon.json without the
+`gc_*` keys; the defaults then apply.
+
+`patrols.compactor_dog.threshold` is an escalation line only; the compactor
+dog never compacts. Under gc mode, disk is handled by size, so the commit
+threshold only guards history-walking query latency (~44us per commit,
+about 1s per `dolt_history_*` query near 23k commits). Towns running gc mode
+set it to 20000 rather than the 2000 default.
+
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):
 https://www.dolthub.com/blog/2023-10-02-scheduled-events/
