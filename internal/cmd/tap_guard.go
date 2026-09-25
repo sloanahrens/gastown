@@ -394,11 +394,19 @@ func isRefineryRole() bool {
 // stale GT_POLECAT in its environment from having spawned polecats, so
 // GT_ROLE decides whenever it is set and GT_POLECAT is only the fallback.
 func isPolecatSession() bool {
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		parsed, _, _ := parseRoleString(role)
-		return parsed == RolePolecat
+	if role := strings.TrimSpace(os.Getenv("GT_ROLE")); role != "" {
+		return isPolecatRole(role)
 	}
 	return os.Getenv("GT_POLECAT") != ""
+}
+
+// isPolecatRole reports whether a GT_ROLE value names a polecat — the one
+// place the polecat check is written down, so the guards that each carry
+// their own fallback marker (isPolecatSession above, inPolecatSession in
+// tap_guard_dangerous.go) cannot drift on what the role itself means.
+func isPolecatRole(role string) bool {
+	parsed, _, _ := parseRoleString(role)
+	return parsed == RolePolecat
 }
 
 // isInOwnPolecatWorktree reports whether the hook payload's session cwd sits

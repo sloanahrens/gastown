@@ -560,29 +560,93 @@ func TestMatchesPolecatMainPush(t *testing.T) {
 	}
 }
 
+// TestInPolecatSession pins which signals make a session a polecat one for
+// this guard (gt-c38o): GT_ROLE decides whenever it is set, and
+// GT_POLECAT_PATH is the fallback for a run with no role in its environment.
+// Reading the path marker alone made the answer turn on which markers a
+// session's environment happened to carry rather than on the role the town
+// assigned it.
+func TestInPolecatSession(t *testing.T) {
+	const worktree = "/town/rig/polecats/flint/rig"
+	tests := []struct {
+		name          string
+		gtRole        string
+		gtPolecatPath string
+		want          bool
+	}{
+		{"GT_ROLE names a polecat", "gastown/polecats/flint", "", true},
+		{"GT_ROLE polecat and path marker agree", "gastown/polecats/flint", worktree, true},
+		{"GT_ROLE bare polecat", "polecat", "", true},
+		{"GT_ROLE crew beats a stale path marker", "gastown/crew/alice", worktree, false},
+		{"GT_ROLE refinery beats a stale path marker", "gastown/refinery", worktree, false},
+		{"GT_ROLE mayor beats a stale path marker", "mayor", worktree, false},
+		{"GT_ROLE witness beats a stale path marker", "gastown/witness", worktree, false},
+		{"no GT_ROLE falls back to the path marker", "", worktree, true},
+		{"neither signal", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GT_ROLE", tt.gtRole)
+			t.Setenv("GT_POLECAT_PATH", tt.gtPolecatPath)
+			if got := inPolecatSession(); got != tt.want {
+				t.Errorf("inPolecatSession() with GT_ROLE=%q GT_POLECAT_PATH=%q = %v, want %v",
+					tt.gtRole, tt.gtPolecatPath, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestPolecatMainPushReachesGuard checks the wiring rather than the matcher:
-// GT_POLECAT_PATH is what makes a session a polecat one, and the full
-// evaluateDangerousCommand path must block the incident command (a
-// HEAD:main push, which is how granite landed on origin/main) when it is set
-// and allow it when it is not.
+// the full evaluateDangerousCommand path must block the incident command (a
+// HEAD:main push, which is how granite landed on origin/main) whenever the
+// session is a polecat's, and allow it for any other role.
+//
+// Which signal settles that is the gt-c38o fix — GT_ROLE decides and
+// GT_POLECAT_PATH is the fallback (TestInPolecatSession pins the precedence)
+// — so the role alone reaches the block, and a coordinator that carries a
+// stale path marker keeps its direct default-branch push path.
 func TestPolecatMainPushReachesGuard(t *testing.T) {
 	const incident = "git push origin HEAD:main"
+	const worktree = "/town/rig/polecats/flint/rig"
 
-	t.Setenv("GT_POLECAT_PATH", "/town/rig/polecats/flint/rig")
-	if reason, _ := evaluateDangerousCommand(incident, 0, ""); reason == "" {
-		t.Fatalf("evaluateDangerousCommand(%q) allowed with GT_POLECAT_PATH set, want blocked", incident)
+	tests := []struct {
+		name          string
+		gtRole        string
+		gtPolecatPath string
+		blocked       bool
+	}{
+		{"GT_ROLE polecat", "gastown/polecats/flint", "", true},
+		{"GT_ROLE polecat and path marker agree", "gastown/polecats/flint", worktree, true},
+		{"path marker alone, no GT_ROLE", "", worktree, true},
+		{"refinery with a stale path marker", "gastown/refinery", worktree, false},
+		{"crew with a stale path marker", "gastown/crew/alice", worktree, false},
+		{"neither signal", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GT_ROLE", tt.gtRole)
+			t.Setenv("GT_POLECAT_PATH", tt.gtPolecatPath)
+			reason, _ := evaluateDangerousCommand(incident, 0, "")
+			if (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) with GT_ROLE=%q GT_POLECAT_PATH=%q blocked=%v, want %v",
+					incident, tt.gtRole, tt.gtPolecatPath, reason != "", tt.blocked)
+			}
+			if tt.blocked && reason != polecatMainPushReason {
+				t.Errorf("evaluateDangerousCommand(%q) blocked by %q, want the polecat main-push rule %q",
+					incident, reason, polecatMainPushReason)
+			}
+		})
 	}
 
 	// Nested payloads (bash -c) must be judged the same way.
-	nested := `bash -c "git push origin HEAD:main"`
-	if reason, _ := evaluateDangerousCommand(nested, 0, ""); reason == "" {
-		t.Fatalf("evaluateDangerousCommand(%q) allowed with GT_POLECAT_PATH set, want blocked", nested)
-	}
-
-	t.Setenv("GT_POLECAT_PATH", "")
-	if reason, _ := evaluateDangerousCommand(incident, 0, ""); reason != "" {
-		t.Fatalf("evaluateDangerousCommand(%q) blocked without GT_POLECAT_PATH (reason=%q), want allowed", incident, reason)
-	}
+	t.Run("nested payload", func(t *testing.T) {
+		t.Setenv("GT_ROLE", "gastown/polecats/flint")
+		t.Setenv("GT_POLECAT_PATH", "")
+		nested := `bash -c "git push origin HEAD:main"`
+		if reason, _ := evaluateDangerousCommand(nested, 0, ""); reason == "" {
+			t.Fatalf("evaluateDangerousCommand(%q) allowed for a polecat session, want blocked", nested)
+		}
+	})
 }
 
 // TestGtMkrjRegressions pins the five exact command texts that false-fired
