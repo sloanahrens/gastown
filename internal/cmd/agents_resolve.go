@@ -95,10 +95,7 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if match == nil {
-		message := fmt.Sprintf("no agent bead found for role %q", role)
-		if rig != "" {
-			message += fmt.Sprintf(" in rig %q", rig)
-		}
+		message := agentBeadNotFoundMessage(role, rig, closedAgentBeads(matches))
 		if agentsResolveJSON {
 			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"error": message})
 			return NewSilentExit(1)
@@ -123,6 +120,42 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintln(cmd.OutOrStdout(), match.ID)
 	return nil
+}
+
+// agentBeadNotFoundMessage explains a no-open-match failure. Naming the closed
+// candidates matters because a closed agent bead is one reopen away from
+// working, while the bare "no agent bead found" sends the caller hunting for a
+// bead that exists (gt-2gj6).
+func agentBeadNotFoundMessage(role, rig string, closed []agentBeadCandidate) string {
+	message := fmt.Sprintf("no agent bead found for role %q", role)
+	if rig != "" {
+		message += fmt.Sprintf(" in rig %q", rig)
+	}
+	if len(closed) == 0 {
+		return message
+	}
+	described := make([]string, 0, len(closed))
+	for _, candidate := range closed {
+		described = append(described, fmt.Sprintf("%s (%s)", candidate.ID, candidate.Source))
+	}
+	if len(closed) == 1 {
+		return fmt.Sprintf("%s; closed bead %s also matches — reopen it to reuse", message, described[0])
+	}
+	return fmt.Sprintf("%s; %d closed beads also match: %s — reopen the intended one to reuse",
+		message, len(closed), strings.Join(described, ", "))
+}
+
+// closedAgentBeads returns the closed candidates ordered by id, so the
+// diagnostic does not depend on listing order.
+func closedAgentBeads(candidates []agentBeadCandidate) []agentBeadCandidate {
+	var closed []agentBeadCandidate
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate.Status, "closed") {
+			closed = append(closed, candidate)
+		}
+	}
+	sort.Slice(closed, func(i, j int) bool { return closed[i].ID < closed[j].ID })
+	return closed
 }
 
 func findAgentBeadCandidates(cwd, currentBeadsDir string) ([]agentBeadCandidate, error) {
@@ -223,7 +256,9 @@ func agentBeadMatches(issue *beads.Issue, role, rig string) bool {
 }
 
 func pickBestAgentBead(candidates []agentBeadCandidate) (*agentBeadCandidate, error) {
-	open := candidates[:0]
+	// A fresh slice, not candidates[:0]: callers still read their own
+	// candidates afterwards to report the closed ones (gt-2gj6).
+	var open []agentBeadCandidate
 	for _, candidate := range candidates {
 		if strings.EqualFold(candidate.Status, "closed") {
 			continue

@@ -127,6 +127,83 @@ func TestPickBestAgentBeadRejectsSameRankDuplicates(t *testing.T) {
 	}
 }
 
+func TestAgentBeadNotFoundMessageNamesClosedMatches(t *testing.T) {
+	t.Parallel()
+	// Role-matched candidates, as runAgentsResolve passes them.
+	candidates := []agentBeadCandidate{
+		candidate("gt-gastown-refinery", agentSourceRigIssues, "closed"),
+		candidate("gt-town-refinery", agentSourceTownIssues, "closed"),
+	}
+
+	got := agentBeadNotFoundMessage("refinery", "gastown", closedAgentBeads(candidates))
+
+	if !strings.Contains(got, `no agent bead found for role "refinery" in rig "gastown"`) {
+		t.Fatalf("message = %q, want the base no-match diagnostic", got)
+	}
+	if !strings.Contains(got, "2 closed beads also match") {
+		t.Fatalf("message = %q, want a closed-match count", got)
+	}
+	if !strings.Contains(got, "gt-gastown-refinery (rig-issues), gt-town-refinery (town-issues)") {
+		t.Fatalf("message = %q, want both closed matches with provenance", got)
+	}
+}
+
+func TestAgentBeadNotFoundMessageNamesASingleClosedMatch(t *testing.T) {
+	t.Parallel()
+	candidates := []agentBeadCandidate{candidate("gt-gastown-refinery", agentSourceRigIssues, "closed")}
+
+	got := agentBeadNotFoundMessage("refinery", "gastown", closedAgentBeads(candidates))
+
+	if !strings.Contains(got, "; closed bead gt-gastown-refinery (rig-issues) also matches") {
+		t.Fatalf("message = %q, want the singular closed-match form", got)
+	}
+}
+
+func TestClosedAgentBeadsSelectsClosedSortedByID(t *testing.T) {
+	t.Parallel()
+	candidates := []agentBeadCandidate{
+		candidate("rig-issue", agentSourceRigIssues, "open"),
+		candidate("zeta", agentSourceRigWisps, "closed"),
+		candidate("alpha", agentSourceTownIssues, "CLOSED"),
+	}
+
+	got := closedAgentBeads(candidates)
+
+	if len(got) != 2 || got[0].ID != "alpha" || got[1].ID != "zeta" {
+		t.Fatalf("closedAgentBeads() = %+v, want the two closed candidates ordered alpha, zeta", got)
+	}
+}
+
+func TestAgentBeadNotFoundMessageWithoutClosedMatches(t *testing.T) {
+	t.Parallel()
+	got := agentBeadNotFoundMessage("refinery", "gastown", nil)
+
+	if got != `no agent bead found for role "refinery" in rig "gastown"` {
+		t.Fatalf("message = %q, want the bare diagnostic", got)
+	}
+}
+
+func TestAgentBeadNotFoundMessageWithoutRig(t *testing.T) {
+	t.Parallel()
+	got := agentBeadNotFoundMessage("mayor", "", nil)
+
+	if got != `no agent bead found for role "mayor"` {
+		t.Fatalf("message = %q, want no rig clause", got)
+	}
+}
+
+func TestPickBestAgentBeadDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+	candidates := []agentBeadCandidate{candidate("rig-wisp", agentSourceRigWisps, "closed")}
+
+	if _, err := pickBestAgentBead(candidates); err != nil {
+		t.Fatalf("pickBestAgentBead returned error: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != "rig-wisp" || candidates[0].Status != "closed" {
+		t.Fatalf("candidates = %+v, want the closed candidate left intact for reporting", candidates)
+	}
+}
+
 func candidate(id string, source agentBeadSource, status string) agentBeadCandidate {
 	return agentBeadCandidate{
 		ID:     id,
