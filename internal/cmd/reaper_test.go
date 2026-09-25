@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/reaper"
 )
 
 func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
@@ -96,5 +101,95 @@ func TestDefaultReaperEndpointUsesTownConfig(t *testing.T) {
 	host, port := defaultReaperEndpoint()
 	if host != "127.0.0.2" || port != 5507 {
 		t.Fatalf("defaultReaperEndpoint() = %s:%d, want 127.0.0.2:5507", host, port)
+	}
+}
+
+// TestWriteAutoCloseReportPrintsTheFloorRefusal covers the reporting gap the
+// below-floor refusal opened. The refusal arrives with the candidate set in the
+// result, and that set is the whole report — nothing was closed, so the set the
+// mis-set threshold would take is the only thing there is to act on. A report
+// gated on the error instead would drop it and print "auto-closed 0" alone,
+// which reads as a clean run rather than as the threshold to go fix (gt-ecpj).
+func TestWriteAutoCloseReportPrintsTheFloorRefusal(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
+		Database:  "hq",
+		Floored:   true,
+		FlooredAt: time.Hour,
+		ClosedEntries: []reaper.ClosedEntry{
+			{ID: "hq-a", Title: "abandoned hq-a", AgeDays: 60, Database: "hq"},
+			{ID: "hq-b", Title: "abandoned hq-b", AgeDays: 60, Database: "hq"},
+		},
+	})
+
+	if closed != 0 {
+		t.Errorf("writeAutoCloseReport returned %d closed, want 0: a below-floor sweep closes nothing", closed)
+	}
+	if want := reaper.FloorNotice(time.Hour, 2); !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want the below-floor notice %q", stderr.String(), want)
+	}
+	for _, id := range []string{"hq-a", "hq-b"} {
+		if !strings.Contains(stdout.String(), id) {
+			t.Errorf("stdout = %q, want the refused candidate %s listed: the set is the refusal's report",
+				stdout.String(), id)
+		}
+	}
+	if strings.Contains(stdout.String(), "auto-closed") {
+		t.Errorf("stdout = %q, want no close count for a refused sweep: nothing was closed", stdout.String())
+	}
+}
+
+// TestWriteAutoCloseReportHintsNoPreviewForARefusal keeps the refusal from
+// reading as a pass in dry-run mode. A below-floor dry run still has a candidate
+// count and a preview hash, so the ordinary "[DRY RUN] would auto-closed N —
+// live run: --preview=H" line would both claim a close and hand over a hash the
+// live run refuses (gt-ecpj).
+func TestWriteAutoCloseReportHintsNoPreviewForARefusal(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
+		Database:    "hq",
+		DryRun:      true,
+		Floored:     true,
+		FlooredAt:   time.Hour,
+		PreviewHash: "abc123",
+		ClosedEntries: []reaper.ClosedEntry{
+			{ID: "hq-a", Title: "abandoned hq-a", AgeDays: 60, Database: "hq"},
+		},
+	})
+
+	if closed != 0 {
+		t.Errorf("writeAutoCloseReport returned %d closed, want 0: a refused dry run closes nothing", closed)
+	}
+	for _, unwanted := range []string{"would auto-closed", "--preview="} {
+		if strings.Contains(stdout.String(), unwanted) {
+			t.Errorf("stdout = %q, want no %q: the live run refuses this threshold", stdout.String(), unwanted)
+		}
+	}
+	if !strings.Contains(stdout.String(), "hq-a") {
+		t.Errorf("stdout = %q, want the candidate listed", stdout.String())
+	}
+}
+
+// TestWriteAutoCloseReportCountsWhatAClosedSweepClosed is the other side: an
+// ordinary sweep totals its closes, so the below-floor refusal's zero cannot be
+// mistaken for a reporting path that never counts anything.
+func TestWriteAutoCloseReportCountsWhatAClosedSweepClosed(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
+		Database: "hq",
+		Closed:   3,
+		ClosedEntries: []reaper.ClosedEntry{
+			{ID: "hq-a", Title: "abandoned hq-a", AgeDays: 90, Database: "hq"},
+		},
+	})
+
+	if closed != 3 {
+		t.Errorf("writeAutoCloseReport returned %d closed, want 3", closed)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing: a sweep at the floor has no refusal to report", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "auto-closed 3 stale issues") {
+		t.Errorf("stdout = %q, want the close count", stdout.String())
 	}
 }

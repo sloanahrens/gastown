@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -479,35 +481,14 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				db.Close()
 				continue
 			}
-			// Preview before writing: AutoClose refuses a live run with no
-			// preview hash (gt-39bu), and this path has no formula prose to
-			// order the two passes for it.
-			preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
-				StaleAge: staleIssueAge,
-				DryRun:   true,
-			})
-			if err != nil {
-				d.logger.Printf("wisp_reaper: %s: auto-close preview error: %v", dbName, err)
-				autoCloseErrors++
-				db.Close()
-				continue
-			}
-			if preview.Closed > 0 {
-				d.logger.Printf("wisp_reaper: %s: auto-close preview: %d candidate(s)", dbName, preview.Closed)
-			}
-
-			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
-				StaleAge:    staleIssueAge,
-				DryRun:      dryRun,
-				PreviewHash: preview.PreviewHash,
-			})
+			closed, err := d.autoCloseDB(db, dbName, staleIssueAge, dryRun)
 			db.Close()
 			if err != nil {
 				d.logger.Printf("wisp_reaper: %s: auto-close error: %v", dbName, err)
 				autoCloseErrors++
 				continue
 			}
-			totalAutoClosed += result.Closed
+			totalAutoClosed += closed
 		}
 		if autoCloseErrors > 0 {
 			mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
@@ -529,6 +510,54 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
 	d.logger.Printf("%s", summary)
 	mol.closeStep("report")
+}
+
+// autoCloseDB runs the auto-close sweep against one open database and returns
+// how many issues it closed. It previews before writing, because this path has
+// no formula prose to order the two passes for it (gt-39bu).
+//
+// A below-floor stale-age is a soft refusal, not an error (gt-ecpj): AutoClose
+// returns the set the mis-set threshold would take alongside ErrStaleAgeTooLow,
+// so this logs the notice and reports zero closed. Failing the step instead
+// would stop a patrol over a config value, which is the stop the soft refusal
+// exists to remove.
+func (d *Daemon) autoCloseDB(db *sql.DB, dbName string, staleIssueAge time.Duration, dryRun bool) (int, error) {
+	preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+		StaleAge: staleIssueAge,
+		DryRun:   true,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("preview: %w", err)
+	}
+
+	result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+		StaleAge:    staleIssueAge,
+		DryRun:      dryRun,
+		PreviewHash: preview.PreviewHash,
+	})
+	if errors.Is(err, reaper.ErrStaleAgeTooLow) {
+		candidates := 0
+		if result != nil {
+			candidates = len(result.ClosedEntries)
+		}
+		d.logger.Printf("wisp_reaper: %s: %s", dbName, reaper.FloorNotice(staleIssueAge, candidates))
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	// A dry-run cycle gets no error to carry the refusal, so the flag on the
+	// result is what reports it here — and a refused sweep closed nothing, so
+	// it counts as nothing closed rather than as the set it reported.
+	if result.Floored {
+		d.logger.Printf("wisp_reaper: %s: %s", dbName, reaper.FloorNotice(result.FlooredAt, len(result.ClosedEntries)))
+		return 0, nil
+	}
+	if preview.Closed > 0 {
+		d.logger.Printf("wisp_reaper: %s: auto-close preview: %d candidate(s)", dbName, preview.Closed)
+	}
+	return result.Closed, nil
 }
 
 // doltServerPort returns the configured Dolt server port.

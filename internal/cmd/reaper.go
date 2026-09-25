@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -55,19 +56,62 @@ func reaperAutoCloseDisarmed() (bool, string) {
 		daemon.PatrolConfigFile(townRoot)
 }
 
-// printAutoCloseCandidates lists the issues a sweep selected. Printed on a
-// refusal as well as a dry run: the refusal is the designed stop, and it is
-// only actionable if it shows what tripped it. toStderr keeps --json output
-// parseable.
-func printAutoCloseCandidates(result *reaper.AutoCloseResult, toStderr bool) {
-	out := os.Stdout
-	if toStderr {
-		out = os.Stderr
-	}
+// printAutoCloseCandidates lists the issues a sweep selected. Printed on every
+// refusal as well as a dry run: a refusal is only actionable if it shows what
+// tripped it, and for the below-floor one (gt-ecpj) the set is the whole report
+// — nothing was closed, so the count and the list are what the operator has to
+// read before deciding whether to pass --force.
+func printAutoCloseCandidates(out io.Writer, result *reaper.AutoCloseResult) {
 	for _, entry := range result.ClosedEntries {
 		fmt.Fprintf(out, "  %s %s (%dd stale, db:%s)\n",
 			entry.ID, entry.Title, entry.AgeDays, entry.Database)
 	}
+}
+
+// writeAutoCloseReport prints one database's auto-close outcome — the floor
+// notice when the sweep was refused for a mis-set threshold (gt-ecpj), the
+// candidate list, and the summary line — and returns the number closed so the
+// caller can total across databases.
+//
+// It reads the result, never the error: a below-floor refusal arrives as both,
+// so a report that keyed off the error would drop the refused set — the only
+// part of a refusal there is to act on — and print nothing at all.
+func writeAutoCloseReport(stdout, stderr io.Writer, r *reaper.AutoCloseResult) int {
+	if r.Floored {
+		// The sweep refused, so it reports the set the threshold would take
+		// and counts as nothing closed. A close count here would claim a write
+		// the live run refuses, and on a dry run the --preview hint beside it
+		// would hand over a hash no live run will accept.
+		fmt.Fprintf(stderr, "%s: %s\n", r.Database,
+			reaper.FloorNotice(r.FlooredAt, len(r.ClosedEntries)))
+		printAutoCloseCandidates(stdout, r)
+		return 0
+	}
+
+	prefix := ""
+	if r.DryRun {
+		prefix = "[DRY RUN] would "
+	}
+	printAutoCloseCandidates(stdout, r)
+	line := fmt.Sprintf("%s: %sauto-closed %d stale issues", r.Database, prefix, r.Closed)
+	if r.DryRun {
+		// A dry run's job is to hand the live run its authorization, so print
+		// the flag to paste verbatim — the pair reads as one instruction
+		// instead of two commands a caller might reorder.
+		line += fmt.Sprintf(" — live run: --preview=%s", r.PreviewHash)
+	}
+	fmt.Fprintln(stdout, line)
+	return r.Closed
+}
+
+// autoCloseCandidatesWriter routes a hard refusal's candidate list: stderr
+// under --json, where the list is the one thing on it that is not the JSON
+// document, and stdout otherwise, where it reads with the rest of the report.
+func autoCloseCandidatesWriter() io.Writer {
+	if reaperJSON {
+		return os.Stderr
+	}
+	return os.Stdout
 }
 
 func reaperDatabaseNames() []string {
@@ -229,6 +273,15 @@ The Dog uses this to understand the state before deciding what to reap.`,
 			var totalReap, totalMoleculeSteps, totalPurge, totalMail, totalStale, totalOpen int
 			for _, r := range results {
 				fmt.Printf("Database: %s\n", r.Database)
+				if r.Floored {
+					// Soft floor (gt-ecpj): the stale count is at the threshold
+					// that was asked for — the same set auto-close's refusal
+					// reports — so name the threshold the count belongs to.
+					// Counting at the floor would show a smaller set than the
+					// refusal does, and the two could not be compared.
+					fmt.Printf("  NOTE: --stale-age %s is below the %s floor; stale count is at the threshold asked for, which auto-close refuses (pass --force to override)\n",
+						r.FlooredAt, reaper.MinStaleIssueAge)
+				}
 				fmt.Printf("  Reap candidates:  %d\n", r.ReapCandidates)
 				if r.MoleculeStepCandidates > 0 {
 					fmt.Printf("  Molecule steps:   %d\n", r.MoleculeStepCandidates)
@@ -453,12 +506,17 @@ var reaperAutoCloseCmd = &cobra.Command{
 Eligibility excludes P0/P1, epics, convoys, molecules and other infrastructure
 issue types, agent beads (every mayor, deacon, dog, witness, refinery, crew and
 polecat bead carries gt:agent), plugin receipts, and issues with active
-dependencies. Scan and auto-close share one eligibility clause, so 'gt reaper
-scan' is a faithful preview of this command.
+dependencies. Scan and auto-close share one eligibility clause and one
+stale-age floor rule, so 'gt reaper scan' is a faithful preview of this
+command — including below the floor, where both report the set the threshold
+asked for and this command closes nothing.
 
 Four guards apply, the first three answering the 2026-09-16 mis-close that swept
 102 durable beads (gt-2qzr):
-  - --stale-age below 7d is refused unless --force.
+  - --stale-age below 7d refuses as a soft error (gt-ecpj): nothing is closed,
+    the command reports the set that threshold would take — the blast radius,
+    which the floor's smaller set would hide — and it exits 0, because the
+    notice is the refusal rather than a stop. --force lifts the floor.
   - more than --max-closes candidates in one database refuses the whole run
     (nothing is closed) unless --force.
   - auto-close disarmed in daemon.json (patrols.wisp_reaper.auto_close=false)
@@ -520,17 +578,29 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 			})
 			db.Close()
 			if err != nil {
-				// Every refusal leaves the database untouched, so it is a stop
-				// to read rather than a partial sweep to retry. Keep the detail
-				// so the operator sees what the sweep wanted to take and what it
-				// was missing. Candidates go to stderr under --json so the
-				// stream stays parseable.
+				// A below-floor stale-age is a soft error (gt-ecpj): the sweep
+				// closed nothing, and its result carries the set the mis-set
+				// threshold would take. The command exits 0 so a cycle passing
+				// on status still completes — the notice is the refusal, not
+				// the stop — which makes the result, not the error, the thing
+				// to report.
+				if errors.Is(err, reaper.ErrStaleAgeTooLow) {
+					if result != nil {
+						results = append(results, result)
+					}
+					continue
+				}
+				// Every other refusal leaves the database untouched, so it is a
+				// stop to read rather than a partial sweep to retry. Keep the
+				// detail so the operator sees what the sweep wanted to take and
+				// what it was missing. Candidates go to stderr under --json so
+				// the stream stays parseable.
 				if errors.Is(err, reaper.ErrTooManyCloses) ||
 					errors.Is(err, reaper.ErrPreviewRequired) ||
 					errors.Is(err, reaper.ErrPreviewMismatch) {
 					fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
 					if result != nil {
-						printAutoCloseCandidates(result, reaperJSON)
+						printAutoCloseCandidates(autoCloseCandidatesWriter(), result)
 					}
 					refusals = append(refusals, fmt.Sprintf("%s: %v", dbName, err))
 					continue
@@ -546,21 +616,7 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 		} else {
 			var totalClosed int
 			for _, r := range results {
-				prefix := ""
-				if r.DryRun {
-					prefix = "[DRY RUN] would "
-				}
-				printAutoCloseCandidates(r, false)
-				line := fmt.Sprintf("%s: %sauto-closed %d stale issues",
-					r.Database, prefix, r.Closed)
-				if r.DryRun {
-					// A dry run's job is to hand the live run its authorization,
-					// so print the flag to paste verbatim — the pair reads as one
-					// instruction instead of two commands a caller might reorder.
-					line += fmt.Sprintf(" — live run: --preview=%s", r.PreviewHash)
-				}
-				fmt.Println(line)
-				totalClosed += r.Closed
+				totalClosed += writeAutoCloseReport(os.Stdout, os.Stderr, r)
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -683,7 +739,16 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 					db.Close()
 					continue
 				}
-				fmt.Printf("%s: auto-close preview: %d candidate(s)\n", dbName, preview.Closed)
+				if preview.Floored {
+					// A below-floor threshold is refused (gt-ecpj), and the
+					// refusal is a notice rather than a stop: report the set
+					// that threshold would take — its blast radius, which is
+					// the number the refusal is for — and carry on.
+					fmt.Fprintf(os.Stderr, "%s: %s\n", dbName,
+						reaper.FloorNotice(preview.FlooredAt, len(preview.ClosedEntries)))
+				} else {
+					fmt.Printf("%s: auto-close preview: %d candidate(s)\n", dbName, preview.Closed)
+				}
 
 				closeResult, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
 					StaleAge:    staleAge,
@@ -692,16 +757,21 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 					PreviewHash: preview.PreviewHash,
 					Force:       reaperForce,
 				})
-				if err != nil {
-					// A refusal is a stop, not a partial sweep: report it and
-					// leave the database untouched.
+				if err != nil && !errors.Is(err, reaper.ErrStaleAgeTooLow) {
+					// Any refusal but the below-floor one is a stop, not a
+					// partial sweep: report it and leave the database untouched.
 					fmt.Printf("%s: auto-close refused: %v\n", dbName, err)
-					if closeResult != nil {
-						printAutoCloseCandidates(closeResult, false)
+				}
+				if closeResult != nil {
+					// A below-floor refusal (gt-ecpj) is soft and reports the
+					// set the mis-set threshold would take: it closes nothing,
+					// so it counts as nothing closed, and it arrives with a
+					// non-nil error, so neither the error nor its Close count
+					// may decide what prints.
+					printAutoCloseCandidates(os.Stdout, closeResult)
+					if !closeResult.Floored {
+						totalClosed += closeResult.Closed
 					}
-				} else {
-					printAutoCloseCandidates(closeResult, false)
-					totalClosed += closeResult.Closed
 				}
 			}
 
@@ -759,7 +829,7 @@ func init() {
 		cmd.Flags().StringVar(&reaperMailAge, "mail-age", "168h", "Max closed mail age before purging (7d)")
 	}
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperAutoCloseCmd, reaperRunCmd} {
-		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d; below 7d requires --force)")
+		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d; below 7d is a soft refusal that reports the set and closes nothing; --force lifts it)")
 	}
 	// Guardrails on the auto-close write (gt-2qzr). --force is deliberately
 	// absent from scan: a preview should never need overriding.
