@@ -143,12 +143,16 @@ gt reaper databases --json                          # List databases to scan
 gt reaper scan --db=<name> --json                   # Count candidates
 gt reaper reap --db=<name> --json                   # Close stale wisps
 gt reaper purge --db=<name> --json                  # Delete old closed wisps + mail
-gt reaper auto-close --db=<name> --json             # Close stale issues
+gt reaper auto-close --db=<name> --dry-run --json   # Preview stale issues (prints the preview hash)
+gt reaper auto-close --db=<name> --preview=<hash> --json  # Close exactly that previewed set
 ```
 
 `gt reaper` inherits `GT_DOLT_HOST` / `GT_DOLT_PORT` from the daemon environment.
 
 Steps: scan → reap → purge → auto-close → report
+
+The two auto-close lines are one instruction: a live run with no preview hash
+refuses, so the counting cannot end up behind the writing (gt-39bu).
 
 ### mol-dog-backup — Dolt database backups
 

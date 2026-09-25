@@ -414,6 +414,35 @@ func TestRenderRole_Dog(t *testing.T) {
 	}
 }
 
+// TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair guards the instruction
+// half of gt-39bu. A dog reads two sources: the formula's step text, and this
+// role reference. The reference used to advertise the bare live command
+// (`gt reaper auto-close --db=<name> --json`) while the formula asked for a dry
+// run first — the 2026-09-20 reaper followed the unguarded one and closed before
+// it counted. The reference must show the pair, dry run first, and must not
+// offer the live command on its own.
+func TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := tmpl.RenderRole("dog", RoleData{Role: "dog", DogName: "reaper", TownRoot: "/test/town", TownName: "town"})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	if !strings.Contains(output, "gt reaper auto-close --db=<name> --dry-run --json") {
+		t.Error("dog reaper reference must show the dry run")
+	}
+	if !strings.Contains(output, "gt reaper auto-close --db=<name> --preview=<hash> --json") {
+		t.Error("dog reaper reference must show the live run carrying the dry run's preview hash")
+	}
+	if strings.Contains(output, "gt reaper auto-close --db=<name> --json") {
+		t.Error("dog reaper reference offers the live auto-close with no preview: that is the unguarded form gt-39bu came from")
+	}
+}
+
 // TestRenderRole_Dog_NoHardcodedGtPath verifies the dog template uses {{ .TownRoot }}
 // and does not contain hardcoded ~/gt paths.
 func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {

@@ -19,6 +19,23 @@ func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
 	}
 }
 
+// TestReaperAutoClosePreviewFlag pins the flag that carries the dry run's
+// authorization (gt-39bu). `gt reaper run` composes its own preview in-process,
+// so the flag belongs to auto-close alone; a bare `gt reaper auto-close` has to
+// be able to refuse for want of it.
+func TestReaperAutoClosePreviewFlag(t *testing.T) {
+	flag := reaperAutoCloseCmd.Flags().Lookup("preview")
+	if flag == nil {
+		t.Fatal("gt reaper auto-close has no --preview flag: a live run could not be bound to a dry run")
+	}
+	if flag.DefValue != "" {
+		t.Errorf("--preview default = %q, want empty: a default would authorize every live run", flag.DefValue)
+	}
+	if runFlag := reaperRunCmd.Flags().Lookup("preview"); runFlag != nil {
+		t.Error("gt reaper run takes --preview, but it previews in-process before writing and should not accept a caller's hash")
+	}
+}
+
 func TestWaitBeforeReaperDatabase(t *testing.T) {
 	oldDelay := reaperDBDelay
 	t.Cleanup(func() { reaperDBDelay = oldDelay })

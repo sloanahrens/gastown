@@ -12,8 +12,9 @@ This is infrastructure cleanup work:
 2. Reap (close) wisps past max_age whose parent is closed/missing, plus step-wisps whose parent molecule is already closed
 3. Purge (delete) closed wisps past purge_age + old closed mail
 4. Auto-close stale issues (>stale_issue_age, not P0/P1, not infrastructure
-   types/agent beads, no active deps) — dry-run and echo the count first, and
-   skip entirely when auto_close=false
+   types/agent beads, no active deps) — dry-run and echo the count first, hand
+   the dry run's preview hash to the live run, and skip entirely when
+   auto_close=false
 5. Close completed convoys via `gt convoy check` (tracked-bead status, never staleness)
 6. Report findings and flag anomalies
 
@@ -48,6 +49,10 @@ bead by label or id pattern, and have no active dependencies. On top of that:
   database). Nothing is closed on a refusal.
 - daemon.json `patrols.wisp_reaper.auto_close=false` disarms the step. Do not
   pass `--force`.
+- It REFUSES a live run that does not carry the preview hash of the set it is
+  about to close (`--preview=<hash>`, gt-39bu). The live command refuses on its
+  own, so the writing stays behind the counting whatever order the two commands
+  were run in. Do not pass `--force` to get past it — re-run the dry run.
 - **Dry run first, every run.** Run `gt reaper auto-close --dry-run` and report
   the candidate count before running it for real. If the count is a surprise,
   stop and escalate — do not run it live "to see".
@@ -218,13 +223,21 @@ a filter is wrong while nothing has been written. If the count is larger than
 you can account for, or exceeds --max-closes (default 20), STOP and escalate —
 do not run live, and do not reach for --force.
 
-**2. Live run, only after the count has been echoed:**
+The dry run prints this set's preview hash (`--preview=<hash>` in the text
+output, `preview_hash` under `--json`). Keep it for step 2.
+
+**2. Live run, carrying the preview hash from step 1:**
 ```bash
 gt reaper auto-close --db=<name> \\
   --stale-age={{stale_issue_age}} \\
   --db-delay={{db_delay}} \\
+  --preview=<hash printed by step 1> \\
   {{#if dry_run}}--dry-run{{/if}} --json
 ```
+
+A live run with no preview hash, or with one naming a different set (an issue
+was updated or closed in between), refuses and closes nothing: re-run the dry
+run rather than reaching for `--force`.
 
 **3. Inspect results:**
 - Review the count of closed issues against the dry-run count — they should match
@@ -235,8 +248,9 @@ gt reaper auto-close --db=<name> \\
 
 {{#if dry_run}}**Dry run is set** — step 2 performs no writes.{{/if}}
 
-**Exit criteria:** Dry-run count echoed; all eligible stale issues auto-closed,
-or the step reported as disarmed."""
+**Exit criteria:** Dry-run count echoed and its preview hash carried into the
+live run; all eligible stale issues auto-closed, or the run refused for want of
+a matching preview, or the step reported as disarmed."""
 
 [[steps]]
 id = "convoy-check"
