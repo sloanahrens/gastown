@@ -175,6 +175,49 @@ func TestScanRootPath(t *testing.T) {
 	}
 }
 
+// TestScanPatternPath pins how a scan tool's pattern argument resolves: a bare
+// relative name is not read as the directory that shares its spelling
+// (gt-yts7), while a token that spells a path resolves as any other scan root
+// does, so the denylist, home-directory and town-tree rules still see it.
+func TestScanPatternPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := t.TempDir()
+	t.Chdir(work)
+	if err := os.MkdirAll(filepath.Join(work, "src", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, ".hidden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{"bare name that exists is a pattern, not a path", "src", ""},
+		{"bare name that does not exist", "TODO", ""},
+		{"dot-prefixed name is a pattern", ".hidden", ""},
+		{"dot segment", ".", work},
+		{"dot slash", "./src", filepath.Join(work, "src")},
+		{"relative path below cwd", "src/nested", filepath.Join(work, "src", "nested")},
+		{"absolute path", "/Users/me/gt", "/Users/me/gt"},
+		{"tilde path", "~/gt", filepath.Join(home, "gt")},
+		{"glob", "*/x", filepath.Join(work, "*/x")},
+		{"unresolvable variable", "$GT_SOMETHING", ""},
+		{"flag", "-name", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scanPatternPath(tt.token); got != tt.want {
+				t.Errorf("scanPatternPath(%q) = %q, want %q", tt.token, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestTownScanHazardHomeOverride pins that a town reached through ~ or $HOME
 // is classified the same as the town reached by its absolute path. The
 // denylist's existing ~/$HOME entries name the *home* directory, so the
@@ -247,6 +290,153 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 		{"find in an unrelated temp dir", `find ` + other + ` -name x`, false},
 		{"grep for a pattern that collides with a town directory name", `grep -rn logs ` + other, false},
 		{"scan of a sibling of the town", `grep -rn TODO ` + filepath.Join(home, "elsewhere"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
+// TestMatchesUnboundedScanPatternNotRoot pins the gt-yts7 false positive on
+// the guard's real entry point: a scan tool's search pattern is not a scan
+// root, so a pattern spelled like a directory at cwd is searched for, not
+// walked. cwd is the rig root, where polecats/, crew/, refinery/, witness/,
+// mayor/ and the rig's bare repo are each one bare word away.
+//
+// The boundary cases carry equal weight. The pattern slot is read that way
+// only when another argument names the path the walk starts from; a bare word
+// anywhere else is still a path; the tools that take no pattern keep every
+// argument a path; and an option that supplies the pattern leaves every
+// positional argument a path, so a pattern-consuming flag cannot smear a root
+// into the pattern slot (gt-yts7's rejection).
+func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	t.Chdir(rig)
+
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Allowed — the reported false positive, and the same shape for a
+		// pattern colliding with any other directory at the rig root.
+		{"grep for a pattern colliding with polecats/", "grep -rn polecats ./settings", false},
+		{"grep for a pattern colliding with crew/", "grep -rn crew ./settings", false},
+		{"grep for a pattern colliding with the bare repo name", "grep -rn .repo.git ./settings", false},
+		{"the reported shape", "grep -rn polecats ./docs", false},
+		{"rg for a colliding pattern", "rg polecats ./settings", false},
+		{"ag for a colliding pattern", "ag polecats ./settings", false},
+		{"fd for a colliding pattern", "fd polecats ./settings", false},
+
+		// Allowed — the pattern is behind the tool's own flag grammar, which
+		// must not shift the slot onto the pattern's neighbour.
+		{"grep -e supplies the pattern", "grep -rn -e polecats ./settings", false},
+		{"a short bundle carrying -e", "grep -rne polecats ./settings", false},
+		{"a context flag's value is not the pattern", "grep -rn -A 3 polecats ./settings", false},
+		{"rg's context flag", "rg -A 3 polecats ./settings", false},
+		{"rg's count flag with an inline value", "rg -A3 polecats ./settings", false},
+		{"ag's count flag, which takes only a number", "ag -A 3 polecats ./settings", false},
+		{"rg's type filter", "rg -t go polecats ./settings", false},
+		{"rg's glob filter", "rg -g *.md polecats ./settings", false},
+		{"rg's inline long value", "rg --iglob=*.md polecats ./settings", false},
+		{"rg's command-valued option", "rg --pre cat polecats ./settings", false},
+		{"fd's extension filter", "fd -e go polecats ./settings", false},
+		{"fd's path option names the path", "fd --search-path ./settings polecats", false},
+		{"a dash-led pattern escaped with --", "grep -rn -- --recursive ./settings", false},
+		{"a pattern above a bounded path", "grep -rn polecats ./mayor/rig", false},
+
+		// Blocked — the pattern slot is the only place a name is read that
+		// way. A bare word after the pattern, a pattern that spells a path,
+		// and an invocation naming no path at all all stay roots.
+		{"a bare word after the pattern is a path", "grep -rn TODO polecats ./settings", true},
+		{"a bare word with no path argument", "grep -rn TODO polecats", true},
+		{"a bare word under a non-pattern tool", "find polecats -name x", true},
+		{"du over an aggregate directory", "du -sh polecats", true},
+		{"ls -R over an aggregate directory", "ls -R polecats", true},
+		{"a path spelling at the pattern slot", "grep -rn polecats .", true},
+		{"a path below the aggregate directory", "grep -rn TODO ./polecats", true},
+		{"--files leaves the tool no pattern", "rg --files polecats ./settings", true},
+
+		// Blocked — an option's argument is judged like any other argument,
+		// so a bare word there stays a path. That is the direction a wrong
+		// grammar errs in, and it keeps a value-reading from sparing a root:
+		// `fd --exclude polecats` excludes a directory, but the guard cannot
+		// tell that from a path it was about to walk.
+		{"an option's argument that collides with a directory is still a path", "fd --exclude polecats ./settings", true},
+		{"a glob filter's argument that collides", "rg -g polecats ./settings", true},
+		{"a path option's bare-name value is a path", "fd --search-path polecats ./settings", true},
+
+		// Blocked — a flag that supplies the pattern makes every positional
+		// argument a path, wherever the flag sits (the gt-yts7 rejection:
+		// these must not slip through as the pattern).
+		{"-e before a relative path", "rg -e TODO polecats ./settings", true},
+		{"-e before an absolute root", "rg -e TODO " + rig, true},
+		{"-e before the town root", "rg -e TODO " + town, true},
+		{"-e after a path", "rg polecats -e TODO ./settings", true},
+		{"-f supplies the pattern from a file", "rg -f pats polecats ./settings", true},
+
+		// Blocked — an option no grammar covers takes no value, so its
+		// argument is the pattern and the pattern it displaces is a path.
+		{"an unrecognized option re-blocks the pattern it displaces", "rg --no-such-option TODO polecats ./settings", true},
+
+		// Blocked — the spelling rules still judge the pattern slot, which is
+		// what keeps a misread root reachable.
+		{"a pattern spelled as the filesystem root", "rg / ./settings", true},
+		{"a pattern spelled as the town root", "rg " + town + " ./settings", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
+// TestMatchesUnboundedScanPatternNotRootFromTownRoot is the same rule one
+// level up, where the names a pattern can collide with are the town's own
+// children: every rig directory, and the town's logs/ and .dolt-data/.
+func TestMatchesUnboundedScanPatternNotRootFromTownRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	bounded := filepath.Join(rig, "settings")
+	t.Chdir(town)
+
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"grep for the rig name", "grep -rn " + fakeRigName + " " + bounded, false},
+		{"grep for the town's log directory name", "grep -rn logs " + bounded, false},
+		{"grep for the dolt data directory name", "grep -rn .dolt-data " + bounded, false},
+		{"rg for the rig name", "rg " + fakeRigName + " " + bounded, false},
+		{"fd for the rig name", "fd " + fakeRigName + " " + bounded, false},
+
+		{"a rig directory is a root wherever it sits", "grep -rn TODO " + fakeRigName + " " + bounded, true},
+		{"a rig directory with no path argument", "grep -rn TODO " + fakeRigName, true},
+		{"a rig directory under a pattern flag", "rg -e TODO " + fakeRigName, true},
+		{"du over a rig directory", "du -sh " + fakeRigName, true},
+		{"ls -R over a rig directory", "ls -R " + fakeRigName, true},
+		{"--files leaves the tool no pattern", "rg --files " + fakeRigName + " " + bounded, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

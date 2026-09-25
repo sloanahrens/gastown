@@ -492,6 +492,54 @@ func TestMatchesUnboundedScan(t *testing.T) {
 	}
 }
 
+// TestScanPatternSlot pins the per-tool grammar that locates a scan tool's
+// pattern argument: the value of -e/-f, else the first positional argument,
+// with a value-taking option's separate argument counting as neither
+// (gt-yts7).
+func TestScanPatternSlot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		tool    string
+		args    []string
+		pattern int
+		hasRoot bool
+	}{
+		{"grep pattern is the first positional", "grep", []string{"-rn", "TODO", "./docs"}, 1, true},
+		{"grep pattern with no path argument", "grep", []string{"-rn", "polecats"}, 1, false},
+		{"grep context flag's value is not the pattern", "grep", []string{"-rn", "-A", "3", "polecats", "./docs"}, 3, true},
+		{"grep -A with an inline value", "grep", []string{"-rnA3", "polecats", "./docs"}, 1, true},
+		{"grep -e supplies the pattern", "grep", []string{"-rn", "-e", "TODO", "./docs"}, 2, true},
+		{"grep -e after a path leaves the path positional", "grep", []string{"-rn", "polecats", "-e", "TODO", "./docs"}, 3, true},
+		{"grep bundle carrying -e", "grep", []string{"-rne", "polecats", "./docs"}, 1, true},
+		{"a bare -- ends option parsing", "grep", []string{"-rn", "--", "--recursive", "./docs"}, 2, true},
+		{"rg --files takes no pattern", "rg", []string{"--files", "polecats", "./docs"}, -1, true},
+		{"rg type filter's value is not the pattern", "rg", []string{"-t", "go", "polecats", "./docs"}, 2, true},
+		{"rg inline long value", "rg", []string{"--iglob=*.md", "polecats", "./docs"}, 1, true},
+		{"ag count flag keeps a non-number for the pattern", "ag", []string{"-A", "polecats", "./docs"}, 1, true},
+		{"ag count flag takes a number", "ag", []string{"-A", "3", "polecats", "./docs"}, 2, true},
+		{"fd pattern then path", "fd", []string{"polecats", "./docs"}, 0, true},
+		{"fd extension filter's value is not the pattern", "fd", []string{"-e", "go", "polecats", "./docs"}, 2, true},
+		{"fd search-path names the path", "fd", []string{"--search-path", "./docs", "polecats"}, 2, true},
+		{"fd pattern with no path argument", "fd", []string{"polecats"}, 0, false},
+		{"no arguments", "rg", nil, -1, false},
+		{"flags only", "grep", []string{"-rn"}, -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gram, ok := scanGrammars[tt.tool]
+			if !ok {
+				t.Fatalf("no grammar for %q", tt.tool)
+			}
+			pattern, hasRoot := scanPatternSlot(gram, tt.args)
+			if pattern != tt.pattern || hasRoot != tt.hasRoot {
+				t.Errorf("scanPatternSlot(%s, %q) = (%d, %v), want (%d, %v)",
+					tt.tool, tt.args, pattern, hasRoot, tt.pattern, tt.hasRoot)
+			}
+		})
+	}
+}
+
 // lowerTokens is the test-only equivalent of runTapGuardDangerous's
 // shellTokenize-then-lowercase step.
 func lowerTokens(command string) []string {
