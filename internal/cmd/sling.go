@@ -800,14 +800,27 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// failure before that never burns molecules or releases a hook this sling
 	// did not create. With no polecat spawned, the guard has nothing to own once
 	// the hook has landed (a delayed dog keeps its own failure handling).
+	//
+	// The auto-convoy stays open on a rollback so the convoy feeder can
+	// re-dispatch the bead with the recorded agent (gt-yg24) — except when raw
+	// metadata could not be stored, where the sling never got as far as a
+	// dispatchable bead and the convoy is closed with the spawn.
 	slingCommitted := false
 	hooked := false
 	rollbackBeadID := ""
 	rollbackReason := ""
+	var convoyID string
 	rollbackSpawnedPolecat := func(reason string) {
 		if newPolecatInfo != nil {
+			rollbackConvoyID := ""
+			if reason == rawSlingMetadataRollbackReason {
+				rollbackConvoyID = convoyID
+			}
 			fmt.Printf("%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
-			rollbackSlingArtifactsFn(newPolecatInfo, rollbackBeadID, hookWorkDir, "")
+			rollbackSlingArtifactsFn(newPolecatInfo, rollbackBeadID, hookWorkDir, rollbackConvoyID)
+		}
+		if rollbackBeadID == "" {
+			return // this sling has not written to the bead: nothing to restore
 		}
 		restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir, info)
 		// Under --force, rollback's unhook can clear a pinned bead's original state.
@@ -927,7 +940,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Auto-convoy: check if issue is already tracked by a convoy
 	// If not, create one for dashboard visibility (unless --no-convoy is set)
-	var convoyID string
 	if !slingNoConvoy && formulaName == "" {
 		if slingDryRun {
 			fmt.Printf("Would create convoy 'Work: %s' if needed\n", info.Title)
@@ -943,7 +955,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				// fails after the convoy exists, the convoy feeder re-dispatches
 				// the bead and must re-use this agent rather than the rig default
 				// (gt-yg24).
-				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch, slingAgent)
+				convoyID, err = createAutoConvoyFn(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch, slingAgent)
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
@@ -1118,7 +1130,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	defer assigneeUnlock()
 	if attachedMoleculeID == "" && (slingNoMerge || slingReviewOnly) {
 		if err := storeRawSlingMetadataFn(townRoot, beadID, fieldUpdates); err != nil {
-			rollbackReason = "Raw sling metadata failed"
+			rollbackReason = rawSlingMetadataRollbackReason
 			return fmt.Errorf("storing raw sling metadata before hook: %w", err)
 		}
 	}
@@ -1302,6 +1314,13 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 
 	return nil
 }
+
+// rawSlingMetadataRollbackReason marks the one rollback that also closes the
+// auto-convoy (see the runSling rollback guard).
+const rawSlingMetadataRollbackReason = "Raw sling metadata failed"
+
+// createAutoConvoyFn is a seam for tests.
+var createAutoConvoyFn = createAutoConvoy
 
 // rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.
 var rollbackSlingArtifactsFn = rollbackSlingArtifacts

@@ -227,6 +227,15 @@ func setupRollbackGuardTown(t *testing.T) string {
 		hookBeadWithRetryFn, findHookedFormulaSingletonFn, acquirePolecatAdmissionFn = prev.hook, prev.findFormula, prev.admission
 	})
 
+	prevBurnWisp, prevConvoy, prevResolveAgent := burnSlingWispFn, createAutoConvoyFn, resolveTargetAgentFn
+	t.Cleanup(func() {
+		burnSlingWispFn, createAutoConvoyFn, resolveTargetAgentFn = prevBurnWisp, prevConvoy, prevResolveAgent
+	})
+	burnSlingWispFn = func(string, string) error { return nil }
+	createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) {
+		return "", errors.New("unexpected convoy create")
+	}
+
 	slingNoConvoy, slingNoBoot, slingDryRun, slingHookRawBead = true, true, false, false
 	slingNoMerge, slingReviewOnly, slingForce, slingRalph = false, false, false, false
 	slingFormula, slingResumeBranch, slingBaseBranch, slingOnTarget, slingVars = "", "", "", "", nil
@@ -255,16 +264,16 @@ func setupRollbackGuardTown(t *testing.T) string {
 	return townRoot
 }
 
-type rollbackCall struct{ beadID string }
+type rollbackCall struct{ beadID, convoyID string }
 
 func recordRollbacks(t *testing.T) *[]rollbackCall {
 	t.Helper()
 	calls := &[]rollbackCall{}
-	rollbackSlingArtifactsFn = func(spawnInfo *SpawnedPolecatInfo, beadID, _, _ string) {
+	rollbackSlingArtifactsFn = func(spawnInfo *SpawnedPolecatInfo, beadID, _, convoyID string) {
 		if spawnInfo == nil || spawnInfo.PolecatName != "Toast" {
 			t.Errorf("rollback got spawnInfo %+v", spawnInfo)
 		}
-		*calls = append(*calls, rollbackCall{beadID: beadID})
+		*calls = append(*calls, rollbackCall{beadID: beadID, convoyID: convoyID})
 	}
 	return calls
 }
@@ -280,6 +289,7 @@ func TestRunSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 		wantRollback bool
 		wantBeadID   string // "" = the failure came before the sling touched the bead
 		wantErrSub   string // proves the run failed at the injected step, not earlier
+		wantConvoy   string // the auto-convoy the rollback closes ("" = kept open, gt-yg24)
 	}{
 		{name: "molecule bond read fails", wantErrSub: "checking existing molecule bonds", wantErr: true, wantRollback: true, inject: func() {
 			collectExistingMoleculesForBeadFn = func(*beadInfo, string, string) ([]string, error) { return nil, errInjected }
@@ -300,9 +310,17 @@ func TestRunSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 		{name: "assignee lock fails", wantErrSub: "serializing hook write", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
 			tryAcquireSlingAssigneeLockFn = func(string, string) (func(), error) { return nil, errInjected }
 		}},
-		{name: "raw metadata store fails", wantErrSub: "storing raw sling metadata", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
+		{name: "raw metadata store fails", wantErrSub: "storing raw sling metadata", wantErr: true, wantRollback: true, wantBeadID: bead, wantConvoy: "hq-cv-auto", inject: func() {
 			slingHookRawBead, slingNoMerge = true, true
 			storeRawSlingMetadataFn = func(string, string, beadFieldUpdates) error { return errInjected }
+			slingNoConvoy = false
+			createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) { return "hq-cv-auto", nil }
+		}},
+		{name: "hook fails with an auto-convoy keeps the convoy", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
+			slingHookRawBead = true
+			slingNoConvoy = false
+			createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) { return "hq-cv-auto", nil }
+			hookBeadWithRetryFn = func(string, string, string) error { return errInjected }
 		}},
 		{name: "hook fails", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
 			hookBeadWithRetryFn = func(string, string, string) error { return errInjected }
@@ -336,6 +354,9 @@ func TestRunSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}
 			if got := (*calls)[0].beadID; got != tc.wantBeadID {
 				t.Fatalf("rollback bead = %q, want %q", got, tc.wantBeadID)
+			}
+			if got := (*calls)[0].convoyID; got != tc.wantConvoy {
+				t.Fatalf("rollback convoy = %q, want %q", got, tc.wantConvoy)
 			}
 		})
 	}
@@ -408,25 +429,35 @@ func TestRunSlingFormulaRollsBackOnEveryPostSpawnExit(t *testing.T) {
 		wantRollback bool
 		wantBeadID   string
 		wantErrSub   string
+		wantBurned   []string // wisps the sling burned
+		target       string   // default "gastown" (rig target)
 	}{
 		{name: "hooked-formula lookup fails", wantErrSub: "checking existing hooked formulas", wantErr: true, wantRollback: true, inject: func() {
 			findHookedFormulaSingletonFn = func(string, string, string) (*beads.Issue, error) { return nil, errInjected }
 		}},
-		{name: "existing formula mode update fails", wantErrSub: "updating existing formula mode", wantErr: true, wantRollback: true, inject: func() {
+		// A wisp still hooked to a just-spawned polecat's identity is stale:
+		// it is burned and the sling dispatches fresh, instead of a "no-op"
+		// that leaves it hooked to a polecat nobody starts.
+		{name: "stale formula wisp is burned, then dispatch succeeds", wantBurned: []string{"gt-wisp-existing"}, inject: func() {
 			findHookedFormulaSingletonFn = existing
-			slingRalph = true
-			storeRawSlingMetadataFn = func(string, string, beadFieldUpdates) error { return errInjected }
 		}},
-		{name: "existing formula no-op returns nil", wantRollback: true, inject: func() {
+		{name: "stale formula wisp burn fails", wantErrSub: "burning stale formula wisp", wantErr: true, wantRollback: true, inject: func() {
 			findHookedFormulaSingletonFn = existing
+			burnSlingWispFn = func(string, string) error { return errInjected }
+		}},
+		{name: "formula admission fails", target: "gastown/polecats/toast", wantErrSub: "injected failure", wantErr: true, wantRollback: true, inject: func() {
+			resolveTargetAgentFn = func(string) (string, string, string, error) { return "", "", "", errors.New("no session") }
+			acquirePolecatAdmissionFn = func(string, string, string, string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
+				return nil, polecatCapacitySnapshot{}, errInjected
+			}
 		}},
 		{name: "cook fails", wantErrSub: "cooking formula", wantErr: true, wantRollback: true, inject: func() { _ = os.Setenv("BD_FAIL", "cook") }},
 		{name: "wisp create fails", wantErrSub: "creating wisp", wantErr: true, wantRollback: true, inject: func() { _ = os.Setenv("BD_FAIL", "mol") }},
 		{name: "wisp output unparseable", wantErrSub: "parsing wisp", wantErr: true, wantRollback: true, inject: func() { _ = os.Setenv("BD_WISP_OUT", "not json") }},
-		{name: "hook fails", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: "gt-wisp-new", inject: func() {
+		{name: "hook fails", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: "gt-wisp-new", wantBurned: []string{"gt-wisp-new"}, inject: func() {
 			hookBeadWithRetryFn = func(string, string, string) error { return errInjected }
 		}},
-		{name: "session start fails", wantErrSub: "starting polecat session", wantErr: true, wantRollback: true, wantBeadID: "gt-wisp-new", inject: func() {
+		{name: "session start fails", wantErrSub: "starting polecat session", wantErr: true, wantRollback: true, wantBeadID: "gt-wisp-new", wantBurned: []string{"gt-wisp-new"}, inject: func() {
 			startSpawnedPolecatSessionFn = func(*SpawnedPolecatInfo) (string, error) { return "", errInjected }
 		}},
 		{name: "success commits", inject: func() {}},
@@ -435,9 +466,15 @@ func TestRunSlingFormulaRollsBackOnEveryPostSpawnExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setupRollbackGuardTown(t)
 			calls := recordRollbacks(t)
+			var burned []string
+			burnSlingWispFn = func(id, _ string) error { burned = append(burned, id); return nil }
 			tc.inject()
 
-			err := runSlingFormula(context.Background(), []string{"mol-test", "gastown"})
+			target := tc.target
+			if target == "" {
+				target = "gastown"
+			}
+			err := runSlingFormula(context.Background(), []string{"mol-test", target})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("runSlingFormula err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -453,6 +490,9 @@ func TestRunSlingFormulaRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}
 			if want == 1 && (*calls)[0].beadID != tc.wantBeadID {
 				t.Fatalf("rollback bead = %q, want %q", (*calls)[0].beadID, tc.wantBeadID)
+			}
+			if strings.Join(burned, ",") != strings.Join(tc.wantBurned, ",") {
+				t.Fatalf("burned wisps = %v, want %v", burned, tc.wantBurned)
 			}
 		})
 	}
