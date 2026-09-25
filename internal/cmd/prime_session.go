@@ -400,6 +400,19 @@ func formatSessionMetadataLine(actor, sessionID string) string {
 	return fmt.Sprintf("[GAS TOWN] role:%s pid:%d session:%s", actor, os.Getpid(), sessionID)
 }
 
+// formatPrimeStatusLine applies the same convention as
+// formatSessionMetadataLine to prime's other bracketed status lines (e.g. the
+// deacon patrol-counter reset, gt-wdv9): the "[prime]" prefix is for normal
+// human-facing output only. Structured SessionStart output drops the leading
+// bracket so a runtime that sniffs a line's first character for JSON (Codex)
+// does not misparse it.
+func formatPrimeStatusLine(msg string) string {
+	if primeStructuredSessionStartOutput {
+		return "prime: " + msg
+	}
+	return "[prime] " + msg
+}
+
 // --- Session state detection (merged from prime_state.go) ---
 
 // SessionState represents the detected session state for observability.
