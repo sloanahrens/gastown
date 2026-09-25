@@ -245,7 +245,7 @@ it every cycle — so a large value means a stale reading, not a reason to hand 
 **At the loop-or-exit step — every cycle, no exceptions:**
 
 1. Use `await-signal` to sleep until activity (30s base, exponential backoff to
-   15m max). The backoff is the crash-loop guard; it is not permission to skip
+   5m max). The backoff is the crash-loop guard; it is not permission to skip
    the step.
 2. After waking, report and loop:
    `{{ cmd }} patrol report --summary "<summary>"`

@@ -1800,7 +1800,8 @@ This command:
 - `MQ_SUBMIT` — from polecat via `gt mq submit`
 
 **On event received** (refinery-specific activity):
-Reset the idle counter and start next patrol cycle:
+await-event has already reset the idle counter to 0. Start the next patrol
+cycle. The manual reset below is only a fallback and is harmless to repeat:
 ```bash
 gt agents state "$YOUR_AGENT_BEAD" --set idle=0
 ```

@@ -101,11 +101,14 @@ This command:
    - Second timeout: 60s
    - Third timeout: 120s
    - ...capped at 5 minutes max
-5. Tracks `idle:N` label on your agent bead for backoff state
+5. Tracks `idle:N` label on your agent bead for backoff state: a timeout
+   increments it, a signal resets it to 0
 6. Outputs `EFFORT: reduced` or `EFFORT: full` directive for next cycle
 
 **On signal received** (activity detected):
-Reset the idle counter and start next patrol cycle:
+await-signal has already reset the idle counter to 0. Start the next patrol
+cycle. Only if its output shows `Failed to reset agent bead idle count`, reset
+it by hand:
 ```bash
 gt agents state "$YOUR_AGENT_BEAD" --set idle=0
 ```

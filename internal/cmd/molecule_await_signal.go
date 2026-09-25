@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,8 +66,11 @@ When backoff parameters are provided, the effective timeout is calculated as:
   min(base * multiplier^idle_cycles, max)
 
 The idle_cycles value is read from the agent bead's "idle" label, enabling
-exponential backoff that persists across invocations. When a signal is
-received, the caller should reset idle:0 on the agent bead.
+exponential backoff that persists across invocations. A timeout increments
+idle:N; a signal resets it to idle:0 (the caller does not need to).
+
+A single backoff wait never exceeds 9m, whatever --backoff-max says, so it fits
+inside a 10-minute agent tool call.
 
 EXIT CODES:
   0 - Signal received or timeout (check output for which)
@@ -84,7 +85,7 @@ EXAMPLES:
 
   # Backoff mode with agent bead tracking:
   gt mol await-signal --agent-bead gt-gastown-witness \
-    --backoff-base 30s --backoff-mult 2 --backoff-max 15m
+    --backoff-base 30s --backoff-mult 2 --backoff-max 5m
 
   # Explicit rig scope (default: GT_RIG, else the rig containing cwd)
   gt mol await-signal --rig om --agent-bead om-witness --backoff-base 30s
@@ -93,7 +94,7 @@ EXAMPLES:
   gt mol await-signal --rig town --agent-bead hq-deacon --backoff-base 30s
 
   # On timeout, the agent bead's idle:N label is auto-incremented
-  # On signal, caller should reset: gt agents state gt-gastown-witness --set idle=0
+  # On signal, it is reset to idle:0 automatically
 
   # Quiet mode (no output, for scripting)
   gt mol await-signal --timeout 30s --quiet`,
@@ -134,7 +135,7 @@ func init() {
 	moleculeAwaitSignalCmd.Flags().IntVar(&awaitSignalBackoffMult, "backoff-mult", 2,
 		"Multiplier for exponential backoff (default: 2)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalBackoffMax, "backoff-max", "",
-		"Maximum interval cap for backoff (e.g., 10m)")
+		"Maximum interval cap for backoff (e.g., 5m; never above 9m)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
@@ -154,7 +155,7 @@ func init() {
 	moleculeAwaitSignalShortcutCmd.Flags().IntVar(&awaitSignalBackoffMult, "backoff-mult", 2,
 		"Multiplier for exponential backoff (default: 2)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalBackoffMax, "backoff-max", "",
-		"Maximum interval cap for backoff (e.g., 10m)")
+		"Maximum interval cap for backoff (e.g., 5m; never above 9m)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
@@ -183,6 +184,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 
 	// Read current idle cycles and backoff window from agent bead (if specified)
 	var idleCycles int
+	idleKnown := false         // false when the agent bead could not be read
 	var backoffUntil time.Time // zero value means no active window
 	if awaitSignalAgentBead != "" {
 		labels, err := getAgentLabels(awaitSignalAgentBead, beadsDir)
@@ -193,6 +195,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 					style.Dim.Render("⚠"), err)
 			}
 		} else {
+			idleKnown = true
 			if idleStr, ok := labels["idle"]; ok {
 				if n, err := parseIntSimple(idleStr); err == nil {
 					idleCycles = n
@@ -306,8 +309,24 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 					style.Dim.Render("⚠"), err)
 			}
 		}
-		// Report current idle cycles (caller should reset)
+		// Woken by real activity: reset the idle counter here so the next
+		// wait starts at the base interval. This used to be left to the
+		// agent, which skipped it (0 of 20 in one deacon session), so every
+		// wait sat at the backoff cap (claude-9jq).
+		//
+		// When the idle read failed the counter is unknown (and may be high),
+		// so the reset is attempted anyway. A failed reset is reported on
+		// stderr even under --quiet or --json: the patrol formulas tell the
+		// agent to reset by hand only when it sees this warning.
 		result.IdleCycles = idleCycles
+		if idleCycles > 0 || !idleKnown {
+			if err := setAgentIdleCycles(awaitSignalAgentBead, beadsDir, 0); err != nil {
+				fmt.Fprintf(os.Stderr, "%s Failed to reset agent bead idle count: %v\n",
+					style.Dim.Render("⚠"), err)
+			} else {
+				result.IdleCycles = 0
+			}
+		}
 		// Clear the backoff window — woken by real activity
 		_ = clearAgentBackoffUntil(awaitSignalAgentBead, beadsDir)
 	}
@@ -376,13 +395,34 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// awaitSignalMaxWait caps a single backoff-mode wait, whatever --backoff-max
+// says. Patrol agents run await-signal as one Bash tool call, and Claude Code
+// caps a tool call at 10 minutes: a longer wait is moved to the background and
+// the agent falls back to sleep-polling it. The deacon formula's 15m cap did
+// exactly that on every idle cycle (claude-9jq). Nine minutes leaves a minute
+// for the bd reads and writes around the wait.
+const awaitSignalMaxWait = 9 * time.Minute
+
 // calculateEffectiveTimeout determines the timeout based on flags.
 // If backoff parameters are provided, uses exponential backoff formula:
 //
-//	min(base * multiplier^idleCycles, max)
+//	min(base * multiplier^idleCycles, max, awaitSignalMaxWait)
 //
-// Otherwise uses the simple --timeout value.
+// Otherwise uses the simple --timeout value, which is not clamped: an explicit
+// timeout is the caller's choice.
 func calculateEffectiveTimeout(idleCycles int) (time.Duration, error) {
+	timeout, err := backoffTimeout(idleCycles)
+	if err != nil || awaitSignalBackoffBase == "" {
+		return timeout, err
+	}
+	if timeout > awaitSignalMaxWait {
+		return awaitSignalMaxWait, nil
+	}
+	return timeout, nil
+}
+
+// backoffTimeout is calculateEffectiveTimeout before the single-wait clamp.
+func backoffTimeout(idleCycles int) (time.Duration, error) {
 	// If backoff base is set, use backoff mode
 	if awaitSignalBackoffBase != "" {
 		base, err := time.ParseDuration(awaitSignalBackoffBase)
@@ -433,29 +473,21 @@ func waitForActivitySignal(ctx context.Context, townRoot, rig string) (*AwaitSig
 // Lines belonging to other rigs are consumed and discarded so the wait
 // continues; only a relevant line ends it. This replaces the former
 // bd activity --follow subprocess approach.
+//
+// The tail follows the path, not the descriptor: the daemon's KRC pruner
+// replaces the file (tmp + rename) on start and hourly, and a waiter still
+// reading the old inode used to sleep through every event to its timeout
+// (claude-9jq). events.Tail reopens the new file and resumes after the last
+// line already seen, so retained history is not replayed.
 func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSignalResult, error) {
-
-	f, err := os.OpenFile(eventsPath, os.O_RDONLY|os.O_CREATE, 0644)
+	tail, err := events.OpenTail(eventsPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening events file %s: %w", eventsPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = tail.Close() }()
 
-	// Seek to end — we only want new events, not historical ones
-	if _, err := f.Seek(0, 2); err != nil {
-		return nil, fmt.Errorf("seeking to end of events file: %w", err)
-	}
-
-	// Poll for new lines using bufio.Reader (not Scanner, which doesn't
-	// resume after EOF). Reader.ReadString properly retries the underlying
-	// file reader, picking up appended data between polls.
-	reader := bufio.NewReader(f)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
-
-	// A line can be observed mid-write. Hold the prefix until its newline
-	// arrives, so the match below never runs on a truncated event.
-	var partial string
 
 	for {
 		select {
@@ -464,30 +496,21 @@ func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSigna
 				Reason: "timeout",
 			}, nil
 		case <-ticker.C:
-			// Drain every complete line appended so far. Reading one line per
-			// tick would let a busy town outrun the reader, delaying a signal
-			// for this rig indefinitely — cross-rig lines are now skipped
-			// rather than returned, so the backlog that used to end the wait
-			// no longer drains itself.
-			for {
-				chunk, err := reader.ReadString('\n')
-				if err != nil && err != io.EOF {
-					return nil, fmt.Errorf("reading events file: %w", err)
+			// Poll drains every complete line appended so far (partial lines
+			// are held until their newline arrives). Reading one line per tick
+			// would let a busy town outrun the reader, delaying a signal for
+			// this rig indefinitely, since cross-rig lines are skipped.
+			lines, err := tail.Poll()
+			for _, line := range lines {
+				if eventRelevantToRig(line, rig) {
+					return &AwaitSignalResult{
+						Reason: "signal",
+						Signal: line,
+					}, nil
 				}
-				partial += chunk
-				if strings.HasSuffix(partial, "\n") {
-					line := strings.TrimSuffix(partial, "\n")
-					partial = ""
-					if line != "" && eventRelevantToRig(line, rig) {
-						return &AwaitSignalResult{
-							Reason: "signal",
-							Signal: line,
-						}, nil
-					}
-				}
-				if err != nil {
-					break // io.EOF: nothing more buffered this tick.
-				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading events file: %w", err)
 			}
 		}
 	}

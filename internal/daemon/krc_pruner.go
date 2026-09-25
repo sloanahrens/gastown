@@ -37,15 +37,12 @@ func NewKRCPruner(townRoot string, logger func(format string, args ...interface{
 	}, nil
 }
 
-// Start begins the pruner goroutine.
+// Start begins the pruner goroutine. The startup prune runs in that
+// goroutine, not inline: a prune waits up to 30s for a file's writer lock,
+// and a wedged writer must not stall daemon startup.
 func (p *KRCPruner) Start() error {
-	// Run initial prune on startup
-	p.prune()
-
-	// Start periodic pruning
 	p.wg.Add(1)
 	go p.run()
-
 	return nil
 }
 
@@ -58,6 +55,9 @@ func (p *KRCPruner) Stop() {
 // run is the main pruner loop.
 func (p *KRCPruner) run() {
 	defer p.wg.Done()
+
+	// Initial prune on startup.
+	p.prune()
 
 	ticker := time.NewTicker(p.config.PruneInterval)
 	defer ticker.Stop()
@@ -75,8 +75,11 @@ func (p *KRCPruner) run() {
 // prune runs a single prune operation.
 func (p *KRCPruner) prune() {
 	pruner := krc.NewPruner(p.townRoot, p.config)
-	result, err := pruner.Prune()
+	result, err := pruner.PruneContext(p.ctx)
 	if err != nil {
+		if p.ctx.Err() != nil {
+			return // stopping; the lock wait was abandoned
+		}
 		p.logger("KRC prune error: %v", err)
 		return
 	}
